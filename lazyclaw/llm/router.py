@@ -11,41 +11,59 @@ class LLMRouter:
         self._config = config
         self._providers: dict[str, BaseLLMProvider] = {}
 
-    def _get_provider(self, model: str) -> BaseLLMProvider:
+    def _infer_provider_name(self, model: str) -> str:
         if model.startswith(("gpt-", "o1-", "o3-", "o4-")):
-            provider_name = "openai"
+            return "openai"
         elif model.startswith("claude-"):
-            provider_name = "anthropic"
-        else:
-            raise ValueError(f"Cannot infer provider for model: {model}")
+            return "anthropic"
+        raise ValueError(f"Cannot infer provider for model: {model}")
 
-        if provider_name in self._providers:
-            return self._providers[provider_name]
-
+    def _get_api_key(self, provider_name: str) -> str | None:
         if provider_name == "openai":
-            if not self._config.openai_api_key:
-                raise ValueError("OpenAI API key not configured")
-            provider = OpenAIProvider(self._config.openai_api_key)
+            return self._config.openai_api_key
         elif provider_name == "anthropic":
-            if not self._config.anthropic_api_key:
-                raise ValueError("Anthropic API key not configured")
-            provider = AnthropicProvider(self._config.anthropic_api_key)
-        else:
-            raise ValueError(f"Unknown provider: {provider_name}")
+            return self._config.anthropic_api_key
+        return None
 
-        self._providers[provider_name] = provider
-        return provider
+    async def _resolve_api_key(self, provider_name: str, user_id: str | None) -> str | None:
+        """Get API key from config first, then vault fallback."""
+        key = self._get_api_key(provider_name)
+        if key:
+            return key
+        if not user_id:
+            return None
+        # Try vault
+        from lazyclaw.crypto.vault import get_credential
+        vault_key = f"{provider_name}_api_key"
+        return await get_credential(self._config, user_id, vault_key)
 
-    async def chat(self, messages: list[LLMMessage], model: str | None = None, **kwargs) -> LLMResponse:
+    def _create_provider(self, provider_name: str, api_key: str) -> BaseLLMProvider:
+        if provider_name == "openai":
+            return OpenAIProvider(api_key)
+        elif provider_name == "anthropic":
+            return AnthropicProvider(api_key)
+        raise ValueError(f"Unknown provider: {provider_name}")
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        model: str | None = None,
+        user_id: str | None = None,
+        **kwargs,
+    ) -> LLMResponse:
         model = model or self._config.default_model
-        provider = self._get_provider(model)
+        provider_name = self._infer_provider_name(model)
+
+        # Check cache first
+        if provider_name not in self._providers:
+            api_key = await self._resolve_api_key(provider_name, user_id)
+            if not api_key:
+                raise ValueError(f"{provider_name.capitalize()} API key not configured. Set it in .env or use vault_set.")
+            self._providers[provider_name] = self._create_provider(provider_name, api_key)
+
+        provider = self._providers[provider_name]
         return await provider.chat(messages, model, **kwargs)
 
     async def verify_provider(self, provider: str, api_key: str) -> bool:
-        if provider == "openai":
-            instance = OpenAIProvider(api_key)
-        elif provider == "anthropic":
-            instance = AnthropicProvider(api_key)
-        else:
-            raise ValueError(f"Unknown provider: {provider}")
+        instance = self._create_provider(provider, api_key)
         return await instance.verify_key()

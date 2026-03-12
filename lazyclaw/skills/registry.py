@@ -30,3 +30,9 @@ class SkillRegistry:
         self.register(CalculateSkill())
         self.register(MemorySaveSkill(config=config))
         self.register(MemoryRecallSkill(config=config))
+
+        from lazyclaw.skills.builtin.vault import VaultSetSkill, VaultListSkill, VaultDeleteSkill
+
+        self.register(VaultSetSkill(config=config))
+        self.register(VaultListSkill(config=config))
+        self.register(VaultDeleteSkill(config=config))

@@ -74,7 +74,7 @@ class Agent:
             if tools:
                 kwargs["tools"] = tools
 
-            response = await self.router.chat(messages, **kwargs)
+            response = await self.router.chat(messages, user_id=user_id, **kwargs)
 
             if not response.tool_calls:
                 # Final text response

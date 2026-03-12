@@ -30,11 +30,11 @@
 ## Phase 3: Queue + Memory + Personality
 - [ ] **3.1 Lane Queue** — `lazyclaw/queue/lane.py`: FIFO per-user serial queue.
 - [ ] **3.2 Worker Pool** — `lazyclaw/queue/worker.py`: Async workers, concurrency limits.
-- [ ] **3.3 Personal Memory** — `lazyclaw/memory/personal.py`: Extract from LazyTasker. Encrypted facts/prefs.
+- [x] **3.3 Personal Memory** — `lazyclaw/memory/personal.py`: Extract from LazyTasker. Encrypted facts/prefs.
 - [x] **3.4 SOUL.md** — `lazyclaw/runtime/personality.py`: Load personality file, inject into system prompt.
-- [ ] **3.5 Context Builder** — `lazyclaw/runtime/context_builder.py`: Assemble personality + memory + skills.
+- [x] **3.5 Context Builder** — `lazyclaw/runtime/context_builder.py`: Assemble personality + memory + skills.
 - [ ] **3.6 Daily Logs** — `lazyclaw/memory/daily_log.py`: Auto-summarize sessions.
-- [ ] **3.7 Credential Vault** — `lazyclaw/crypto/vault.py`: Encrypted API key storage.
+- [x] **3.7 Credential Vault** — `lazyclaw/crypto/vault.py`: Encrypted API key storage.
 - [ ] **3.8 Memory API** — `lazyclaw/gateway/routes/memory.py` + `vault.py`: Endpoints.
 
 **Verification**: Messages queue serially. Memory persists across sessions. SOUL.md customization works.
@@ -108,3 +108,5 @@
 - Phase 2 (Skills + Tools): BaseSkill, registry, 3 built-in skills, tool executor, agentic loop
 - Phase 6 (Channels): Telegram polling adapter, channel base abstractions
 - SOUL.md personality system (from Phase 3)
+- Personal memory + context builder (from Phase 3)
+- Encrypted credential vault with vault skills + LLM router fallback (from Phase 3)

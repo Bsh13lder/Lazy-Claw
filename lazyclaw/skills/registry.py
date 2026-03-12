@@ -17,12 +17,16 @@ class SkillRegistry:
         """Return all skills in OpenAI function-calling format."""
         return [skill.to_openai_tool() for skill in self._skills.values()]
 
-    def register_defaults(self) -> None:
+    def register_defaults(self, config=None) -> None:
         """Register all built-in skills."""
         from lazyclaw.skills.builtin.web_search import WebSearchSkill
         from lazyclaw.skills.builtin.get_time import GetTimeSkill
         from lazyclaw.skills.builtin.calculate import CalculateSkill
+        from lazyclaw.skills.builtin.memory_save import MemorySaveSkill
+        from lazyclaw.skills.builtin.memory_recall import MemoryRecallSkill
 
         self.register(WebSearchSkill())
         self.register(GetTimeSkill())
         self.register(CalculateSkill())
+        self.register(MemorySaveSkill(config=config))
+        self.register(MemoryRecallSkill(config=config))

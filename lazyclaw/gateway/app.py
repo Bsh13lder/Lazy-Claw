@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _config = load_config()
 _registry = SkillRegistry()
-_registry.register_defaults()
+_registry.register_defaults(config=_config)
 
 
 @asynccontextmanager

@@ -9,7 +9,7 @@ from lazyclaw.llm.router import LLMRouter
 from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
-from lazyclaw.runtime.personality import load_personality, build_system_prompt
+
 from lazyclaw.runtime.tool_executor import ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -50,9 +50,9 @@ class Agent:
             decrypted = decrypt(content, key) if content.startswith("enc:") else content
             history.append(LLMMessage(role=role, content=decrypted))
 
-        # Build prompt
-        personality = load_personality()
-        system_prompt = build_system_prompt(personality)
+        # Build prompt with memories
+        from lazyclaw.runtime.context_builder import build_context
+        system_prompt = await build_context(self.config, user_id)
 
         # Get tools
         tools = self.registry.list_tools() if self.registry else []

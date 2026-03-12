@@ -60,3 +60,13 @@ CREATE TABLE IF NOT EXISTS channel_configs (
     config TEXT NOT NULL,
     enabled INTEGER DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS personal_memory (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    memory_type TEXT NOT NULL DEFAULT 'fact',
+    content TEXT NOT NULL,
+    importance INTEGER DEFAULT 5,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);

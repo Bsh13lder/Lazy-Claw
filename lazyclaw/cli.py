@@ -80,7 +80,7 @@ async def run_agent(config: Config) -> None:
 
     router = LLMRouter(config)
     registry = SkillRegistry()
-    registry.register_defaults()
+    registry.register_defaults(config=config)
     agent = Agent(config, router, registry)
 
     tasks: list = []

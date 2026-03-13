@@ -36,3 +36,9 @@ class SkillRegistry:
         self.register(VaultSetSkill(config=config))
         self.register(VaultListSkill(config=config))
         self.register(VaultDeleteSkill(config=config))
+
+        from lazyclaw.skills.builtin.skill_crud import CreateSkillSkill, ListSkillsSkill, DeleteSkillSkill
+
+        self.register(CreateSkillSkill(config=config))
+        self.register(ListSkillsSkill(config=config))
+        self.register(DeleteSkillSkill(config=config))

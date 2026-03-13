@@ -50,6 +50,10 @@ class Agent:
             decrypted = decrypt(content, key) if content.startswith("enc:") else content
             history.append(LLMMessage(role=role, content=decrypted))
 
+        # Load user's custom instruction skills into registry
+        from lazyclaw.skills.manager import load_user_skills
+        await load_user_skills(self.config, user_id, self.registry)
+
         # Build prompt with memories
         from lazyclaw.runtime.context_builder import build_context
         system_prompt = await build_context(self.config, user_id)

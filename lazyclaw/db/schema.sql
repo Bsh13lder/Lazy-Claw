@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS channel_configs (
     enabled INTEGER DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    skill_type TEXT NOT NULL DEFAULT 'instruction',
+    name TEXT NOT NULL,
+    description TEXT,
+    instruction TEXT,
+    code TEXT,
+    parameters_schema TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS personal_memory (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),

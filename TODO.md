@@ -18,7 +18,7 @@
 ## Phase 2: Skills + Tools
 - [x] **2.1 BaseSkill ABC** — `lazyclaw/skills/base.py`: Abstract skill class with to_openai_tool() conversion.
 - [x] **2.2 Skill Registry** — `lazyclaw/skills/registry.py`: Unified registry with register_defaults().
-- [ ] **2.3 Instruction Skills** — `lazyclaw/skills/manager.py`: NL template CRUD.
+- [x] **2.3 Instruction Skills** — `lazyclaw/skills/manager.py`: NL template CRUD.
 - [ ] **2.4 Code Skills** — `lazyclaw/skills/sandbox.py`: AST validation + restricted exec.
 - [ ] **2.5 Skill Writer** — `lazyclaw/skills/writer.py`: AI-generated code skills.
 - [x] **2.6 Built-in Skills** — `lazyclaw/skills/builtin/`: web_search (DuckDuckGo), get_time, calculate.

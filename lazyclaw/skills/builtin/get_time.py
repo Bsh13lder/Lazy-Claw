@@ -8,6 +8,10 @@ from lazyclaw.skills.base import BaseSkill
 
 class GetTimeSkill(BaseSkill):
     @property
+    def category(self) -> str:
+        return "utility"
+
+    @property
     def name(self) -> str:
         return "get_current_time"
 

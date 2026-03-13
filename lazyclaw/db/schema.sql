@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS skills (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
     skill_type TEXT NOT NULL DEFAULT 'instruction',
+    category TEXT NOT NULL DEFAULT 'custom',
     name TEXT NOT NULL,
     description TEXT,
     instruction TEXT,

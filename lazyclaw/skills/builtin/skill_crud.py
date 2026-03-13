@@ -10,6 +10,10 @@ class CreateSkillSkill(BaseSkill):
         self._config = config
 
     @property
+    def category(self) -> str:
+        return "skills"
+
+    @property
     def name(self) -> str:
         return "create_skill"
 
@@ -60,6 +64,10 @@ class ListSkillsSkill(BaseSkill):
         self._config = config
 
     @property
+    def category(self) -> str:
+        return "skills"
+
+    @property
     def name(self) -> str:
         return "list_skills"
 
@@ -91,6 +99,10 @@ class DeleteSkillSkill(BaseSkill):
 
     def __init__(self, config=None):
         self._config = config
+
+    @property
+    def category(self) -> str:
+        return "skills"
 
     @property
     def name(self) -> str:

@@ -7,6 +7,10 @@ class MemorySaveSkill(BaseSkill):
         self._config = config
 
     @property
+    def category(self) -> str:
+        return "memory"
+
+    @property
     def name(self) -> str:
         return "save_memory"
 

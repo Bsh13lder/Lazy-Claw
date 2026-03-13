@@ -7,6 +7,10 @@ class MemoryRecallSkill(BaseSkill):
         self._config = config
 
     @property
+    def category(self) -> str:
+        return "memory"
+
+    @property
     def name(self) -> str:
         return "recall_memories"
 

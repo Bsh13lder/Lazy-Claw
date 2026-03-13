@@ -15,6 +15,11 @@ class BaseSkill(ABC):
     def description(self) -> str: ...
 
     @property
+    def category(self) -> str:
+        """Skill category for organization. Override in subclasses."""
+        return "general"
+
+    @property
     @abstractmethod
     def parameters_schema(self) -> dict:
         """JSON Schema for the skill's parameters."""

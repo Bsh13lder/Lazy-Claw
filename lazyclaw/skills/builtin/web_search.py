@@ -5,6 +5,10 @@ from lazyclaw.skills.base import BaseSkill
 
 class WebSearchSkill(BaseSkill):
     @property
+    def category(self) -> str:
+        return "research"
+
+    @property
     def name(self) -> str:
         return "web_search"
 

@@ -9,6 +9,10 @@ from lazyclaw.skills.base import BaseSkill
 
 class CalculateSkill(BaseSkill):
     @property
+    def category(self) -> str:
+        return "utility"
+
+    @property
     def name(self) -> str:
         return "calculate"
 

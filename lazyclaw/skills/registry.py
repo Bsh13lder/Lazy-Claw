@@ -17,6 +17,14 @@ class SkillRegistry:
         """Return all skills in OpenAI function-calling format."""
         return [skill.to_openai_tool() for skill in self._skills.values()]
 
+    def list_by_category(self) -> dict[str, list[str]]:
+        """Return skill names grouped by category."""
+        categories: dict[str, list[str]] = {}
+        for skill in self._skills.values():
+            cat = skill.category
+            categories.setdefault(cat, []).append(skill.name)
+        return categories
+
     def register_defaults(self, config=None) -> None:
         """Register all built-in skills."""
         from lazyclaw.skills.builtin.web_search import WebSearchSkill

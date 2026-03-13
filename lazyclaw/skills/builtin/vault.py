@@ -7,6 +7,10 @@ class VaultSetSkill(BaseSkill):
         self._config = config
 
     @property
+    def category(self) -> str:
+        return "security"
+
+    @property
     def name(self) -> str:
         return "vault_set"
 
@@ -48,6 +52,10 @@ class VaultListSkill(BaseSkill):
         self._config = config
 
     @property
+    def category(self) -> str:
+        return "security"
+
+    @property
     def name(self) -> str:
         return "vault_list"
 
@@ -76,6 +84,10 @@ class VaultListSkill(BaseSkill):
 class VaultDeleteSkill(BaseSkill):
     def __init__(self, config=None):
         self._config = config
+
+    @property
+    def category(self) -> str:
+        return "security"
 
     @property
     def name(self) -> str:

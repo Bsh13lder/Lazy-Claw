@@ -32,6 +32,10 @@ class InstructionSkill(BaseSkill):
         }
 
     @property
+    def category(self) -> str:
+        return "custom"
+
+    @property
     def name(self) -> str:
         return self._name
 

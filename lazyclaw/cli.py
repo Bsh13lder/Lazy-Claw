@@ -83,6 +83,18 @@ async def run_agent(config: Config) -> None:
     registry.register_defaults(config=config)
     agent = Agent(config, router, registry)
 
+    # Lane Queue — serial per-user execution
+    from lazyclaw.queue.lane import LaneQueue
+
+    lane_queue = LaneQueue()
+    lane_queue.set_handler(agent.process_message)
+    await lane_queue.start()
+    console.print("[green]\u2713[/green] Lane queue started")
+
+    # Inject queue into gateway
+    from lazyclaw.gateway.app import set_lane_queue
+    set_lane_queue(lane_queue)
+
     tasks: list = []
 
     # FastAPI via uvicorn
@@ -102,7 +114,7 @@ async def run_agent(config: Config) -> None:
     if config.telegram_bot_token:
         from lazyclaw.channels.telegram import TelegramAdapter
 
-        telegram = TelegramAdapter(config.telegram_bot_token, agent, config)
+        telegram = TelegramAdapter(config.telegram_bot_token, agent, config, lane_queue=lane_queue)
         await telegram.start()
         console.print("[green]\u2713[/green] Telegram bot running")
 
@@ -117,6 +129,7 @@ async def run_agent(config: Config) -> None:
         console.print("\n[yellow]Shutting down...[/yellow]")
         if telegram:
             await telegram.stop()
+        await lane_queue.stop()
 
 
 # ---------------------------------------------------------------------------

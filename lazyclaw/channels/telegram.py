@@ -19,10 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramAdapter(ChannelAdapter):
-    def __init__(self, token: str, agent: Agent, config: Config) -> None:
+    def __init__(self, token: str, agent: Agent, config: Config, lane_queue=None) -> None:
         self._token = token
         self._agent = agent
         self._config = config
+        self._lane_queue = lane_queue
         self._app = None
 
     async def start(self) -> None:
@@ -53,7 +54,10 @@ class TelegramAdapter(ChannelAdapter):
         # MVP: all Telegram messages routed to "default" user
         user_id = "default"
         logger.debug("Telegram message from chat %s: %s", chat_id, text[:80])
-        response = await self._agent.process_message(user_id, text)
+        if self._lane_queue:
+            response = await self._lane_queue.enqueue(user_id, text)
+        else:
+            response = await self._agent.process_message(user_id, text)
         await update.message.reply_text(response)
 
     async def _handle_start(

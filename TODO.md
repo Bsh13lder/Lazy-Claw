@@ -28,8 +28,8 @@
 **Verification**: ✅ Agent calls tools during chat (web_search, get_time, calculate). Multi-turn agentic loop works.
 
 ## Phase 3: Queue + Memory + Personality
-- [ ] **3.1 Lane Queue** — `lazyclaw/queue/lane.py`: FIFO per-user serial queue.
-- [ ] **3.2 Worker Pool** — `lazyclaw/queue/worker.py`: Async workers, concurrency limits.
+- [x] **3.1 Lane Queue** — `lazyclaw/queue/lane.py`: FIFO per-user serial queue.
+- [x] **3.2 Worker Pool** — Integrated into LaneQueue (per-user processor tasks).
 - [x] **3.3 Personal Memory** — `lazyclaw/memory/personal.py`: Extract from LazyTasker. Encrypted facts/prefs.
 - [x] **3.4 SOUL.md** — `lazyclaw/runtime/personality.py`: Load personality file, inject into system prompt.
 - [x] **3.5 Context Builder** — `lazyclaw/runtime/context_builder.py`: Assemble personality + memory + skills.
@@ -110,3 +110,6 @@
 - SOUL.md personality system (from Phase 3)
 - Personal memory + context builder (from Phase 3)
 - Encrypted credential vault with vault skills + LLM router fallback (from Phase 3)
+- Instruction skills with encrypted NL templates (from Phase 2)
+- Skill categories (research, utility, memory, security, skills, custom)
+- Lane queue for per-user serial execution (from Phase 3)

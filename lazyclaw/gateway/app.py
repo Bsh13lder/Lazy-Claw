@@ -9,15 +9,19 @@ from pydantic import BaseModel
 
 from lazyclaw.config import load_config
 from lazyclaw.db.connection import init_db
-from lazyclaw.llm.router import LLMRouter
-from lazyclaw.runtime.agent import Agent
-from lazyclaw.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
 _config = load_config()
-_registry = SkillRegistry()
-_registry.register_defaults(config=_config)
+
+# Lane queue reference — set by cli.py at startup
+_lane_queue = None
+
+
+def set_lane_queue(queue) -> None:
+    """Called by cli.py to inject the shared LaneQueue."""
+    global _lane_queue
+    _lane_queue = queue
 
 
 @asynccontextmanager
@@ -53,7 +57,17 @@ async def health():
 
 @app.post("/api/agent/chat", response_model=ChatResponse)
 async def agent_chat(body: ChatRequest):
-    router = LLMRouter(_config)
-    agent = Agent(_config, router, _registry)
-    result = await agent.process_message("default", body.message)
+    if _lane_queue:
+        result = await _lane_queue.enqueue("default", body.message)
+    else:
+        # Fallback for standalone gateway (no queue)
+        from lazyclaw.llm.router import LLMRouter
+        from lazyclaw.runtime.agent import Agent
+        from lazyclaw.skills.registry import SkillRegistry
+
+        registry = SkillRegistry()
+        registry.register_defaults(config=_config)
+        router = LLMRouter(_config)
+        agent = Agent(_config, router, registry)
+        result = await agent.process_message("default", body.message)
     return ChatResponse(response=result)

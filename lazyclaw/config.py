@@ -26,6 +26,8 @@ class Config:
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     telegram_bot_token: str | None = None
+    browser_model: str = "gpt-4o-mini"
+    browser_timeout: int = 300
 
 
 def load_config() -> Config:
@@ -42,6 +44,8 @@ def load_config() -> Config:
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
+        browser_model=os.getenv("BROWSER_MODEL", "gpt-4o-mini"),
+        browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
     )
 
 

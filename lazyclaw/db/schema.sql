@@ -94,6 +94,45 @@ CREATE TABLE IF NOT EXISTS daily_logs (
     UNIQUE(user_id, date)
 );
 
+CREATE TABLE IF NOT EXISTS site_memory (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    domain TEXT NOT NULL,
+    memory_type TEXT NOT NULL,
+    title TEXT,
+    content TEXT,
+    success_count INTEGER DEFAULT 0,
+    fail_count INTEGER DEFAULT 0,
+    last_used TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS browser_tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    instruction TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result TEXT,
+    help_question TEXT,
+    error TEXT,
+    steps_completed INTEGER DEFAULT 0,
+    max_steps INTEGER DEFAULT 20,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS browser_task_logs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES browser_tasks(id),
+    step_number INTEGER NOT NULL,
+    action TEXT,
+    thinking TEXT,
+    url TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS ai_models (
     model_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,

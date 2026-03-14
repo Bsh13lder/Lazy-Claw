@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-browser = ["playwright>=1.41.0"]
+browser = ["playwright>=1.41.0", "browser-use>=0.1.0", "langchain-openai>=0.1.0"]
 telegram = []
 discord = ["discord.py>=2.3.0"]
 mcp = ["mcp>=1.0.0"]

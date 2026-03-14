@@ -50,3 +50,9 @@ class SkillRegistry:
         self.register(CreateSkillSkill(config=config))
         self.register(ListSkillsSkill(config=config))
         self.register(DeleteSkillSkill(config=config))
+
+        from lazyclaw.skills.builtin.browser import BrowseWebSkill, ReadPageSkill, SaveSiteLoginSkill
+
+        self.register(BrowseWebSkill(config=config))
+        self.register(ReadPageSkill(config=config))
+        self.register(SaveSiteLoginSkill(config=config))

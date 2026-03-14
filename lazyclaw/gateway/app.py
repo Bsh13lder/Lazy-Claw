@@ -13,6 +13,7 @@ from lazyclaw.gateway.auth import User, auth_router, get_current_user
 from lazyclaw.gateway.routes.memory import router as memory_router
 from lazyclaw.gateway.routes.skills import router as skills_router
 from lazyclaw.gateway.routes.vault import router as vault_router
+from lazyclaw.gateway.routes.browser import router as browser_router
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ app.include_router(auth_router)
 app.include_router(skills_router)
 app.include_router(memory_router)
 app.include_router(vault_router)
+app.include_router(browser_router)
 
 
 class ChatRequest(BaseModel):

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code when working with code in this repository.
 
+## Documentation
+
+- **[DOCS.md](DOCS.md)** — Complete function & class reference for the entire codebase. Lists all modules, classes, functions with signatures and descriptions. Keep updated when adding new modules.
+
 ## Workflow Orchestration
 
 ### 1. Plan Mode Default
@@ -105,7 +109,7 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/cli.py` | CLI entry point: `lazyclaw setup` wizard + `lazyclaw start` |
 | `lazyclaw/config.py` | Environment variable loading via python-dotenv, Config dataclass |
 | `lazyclaw/crypto/encryption.py` | AES-256-GCM encrypt/decrypt, PBKDF2 key derivation, enc:v1: format |
-| `lazyclaw/db/schema.sql` | Core database schema (7 tables) |
+| `lazyclaw/db/schema.sql` | Core database schema (22 tables) |
 | `lazyclaw/db/connection.py` | aiosqlite connection, WAL mode, init_db, db_session context manager |
 | `lazyclaw/llm/providers/base.py` | LLMMessage, LLMResponse, ToolCall dataclasses, BaseLLMProvider ABC |
 | `lazyclaw/llm/providers/openai_provider.py` | OpenAI provider with tool calling support |
@@ -124,21 +128,34 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/gateway/app.py` | Minimal FastAPI: health check + agent chat endpoint |
 | `lazyclaw/main.py` | Module entry point (python -m lazyclaw) |
 
+| `lazyclaw/gateway/auth.py` | Session auth, user management, bcrypt passwords |
+| `lazyclaw/gateway/routes/memory.py` | Memory + daily log REST endpoints |
+| `lazyclaw/gateway/routes/skills.py` | Skill CRUD + AI generation endpoints |
+| `lazyclaw/gateway/routes/vault.py` | Credential vault REST endpoints |
+| `lazyclaw/gateway/routes/browser.py` | Browser task CRUD, takeover, live view, site memory (15 endpoints) |
+| `lazyclaw/runtime/context_builder.py` | Assembles system prompt from personality + memory + skills |
+| `lazyclaw/queue/lane.py` | FIFO per-user lane queue |
+| `lazyclaw/skills/sandbox.py` | AST-validated restricted Python execution |
+| `lazyclaw/skills/manager.py` | User skill CRUD (DB-backed, encrypted) |
+| `lazyclaw/skills/writer.py` | LLM-powered code skill generation |
+| `lazyclaw/skills/instruction.py` | Natural language template skills |
+| `lazyclaw/skills/builtin/browser.py` | BrowseWebSkill, ReadPageSkill, SaveSiteLoginSkill |
+| `lazyclaw/memory/personal.py` | Encrypted personal facts + keyword search |
+| `lazyclaw/memory/daily_log.py` | Encrypted daily summaries + LLM generation |
+| `lazyclaw/llm/model_manager.py` | Model catalog, per-user feature assignments |
+| `lazyclaw/crypto/vault.py` | Encrypted credential store |
+| `lazyclaw/browser/manager.py` | Persistent browser sessions per user, stealth, profiles |
+| `lazyclaw/browser/agent.py` | Browser agent: agentic loop, human-in-the-loop, takeover |
+| `lazyclaw/browser/page_reader.py` | Lightweight JS page extraction (5 extractors) + LLM analysis |
+| `lazyclaw/browser/dom_optimizer.py` | DOM analysis, actionable elements, page summary |
+| `lazyclaw/browser/site_memory.py` | Encrypted per-domain learning with auto-cleanup |
+
 **Planned** (not yet implemented):
 | File | Purpose |
 |------|---------|
-| `lazyclaw/gateway/auth.py` | Session auth, user management, invite codes |
-| `lazyclaw/gateway/routes/*.py` | REST endpoints by domain |
-| `lazyclaw/runtime/context_builder.py` | Assembles system prompt from personality + memory + skills |
-| `lazyclaw/queue/lane.py` | FIFO per-user lane queue |
-| `lazyclaw/queue/worker.py` | Async worker pool, concurrency limits |
-| `lazyclaw/skills/sandbox.py` | AST-validated restricted Python execution |
 | `lazyclaw/channels/router.py` | Inbound message -> queue routing |
-| `lazyclaw/browser/semantic.py` | Accessibility tree -> text snapshots |
-| `lazyclaw/browser/manager.py` | Browser session lifecycle, profiles |
 | `lazyclaw/mcp/client.py` | MCP client (stdio/SSE/WebSocket transports) |
 | `lazyclaw/mcp/server.py` | Expose LazyClaw tools as MCP server |
-| `lazyclaw/crypto/vault.py` | Encrypted credential store |
 
 ## Build & Run
 
@@ -199,6 +216,8 @@ All user content encrypted before storage. Server never sees plaintext.
 - **SOUL.md personality**: Each user has a customizable personality file that defines the agent's name, tone, and instructions. Loaded on every interaction.
 - **Channel normalization**: All channels convert to unified `InboundMessage` dataclass before entering the queue. Agent doesn't know which channel the message came from.
 - **MCP bridge**: External MCP tools registered as first-class skills in the registry. No separate tool path needed.
+- **Browser auto-login**: Cookies persist in `browser_profiles/{user_id}/cookies.json`. When cookies expire, PageReader detects login form and pulls credentials from vault (`site:{domain}` key). Expensive Agent only needed for first login or CAPTCHA.
+- **Browser cost tiers**: PageReader (JS extraction, ~$0.001/page) for reading. Full browser Agent (~$0.30/page) for interaction. Agent learns, PageReader reuses.
 
 ## Database
 
@@ -233,7 +252,8 @@ Key variables (see `.env.example`):
 - `CORS_ORIGIN` — CORS origin for web clients
 - `DATABASE_DIR` — Directory for SQLite DB and browser profiles (default: `./data`)
 - `DEFAULT_MODEL` — Default LLM model (default: `gpt-4o-mini`)
-- `BROWSER_MODEL` — Default browser agent model (default: `gpt-4.1-mini`)
+- `BROWSER_MODEL` — Default browser agent model (default: `gpt-4o-mini`)
+- `BROWSER_TIMEOUT` — Browser task timeout in seconds (default: `300`)
 - `PORT` — Gateway port (default: `18789`)
 
 ## Skill System
@@ -282,7 +302,20 @@ All types unified in the skill registry and converted to OpenAI function-calling
 
 ### Browser
 - `POST /api/browser/tasks` — Start browser task
-- `GET /api/browser/tasks/{id}` + `/logs`, `/live`, `/help`, `/cancel`, `/continue`, `/takeover`
+- `GET /api/browser/tasks` — List tasks
+- `GET /api/browser/tasks/{id}` — Task details
+- `GET /api/browser/tasks/{id}/logs` — Step-by-step logs
+- `GET /api/browser/tasks/{id}/live` — Live screenshot (PNG)
+- `POST /api/browser/tasks/{id}/help` — Provide help response
+- `POST /api/browser/tasks/{id}/continue` — Continue completed/failed task
+- `POST /api/browser/tasks/{id}/cancel` — Cancel running task
+- `POST /api/browser/tasks/{id}/takeover` — Take manual control
+- `POST /api/browser/tasks/{id}/release` — Release control to agent
+- `POST /api/browser/tasks/{id}/action` — Execute user action (click/type/scroll/key)
+- `POST /api/browser/sessions/close` — Close browser session
+- `GET /api/browser/site-memory` — List site memories
+- `DELETE /api/browser/site-memory/{id}` — Delete site memory
+- `DELETE /api/browser/site-memory/domain/{domain}` — Delete domain memories
 
 ### Channels
 - `GET /api/channels`, `POST /api/channels/{name}/config`, `POST/DELETE /api/channels/{name}/bind`
@@ -319,12 +352,12 @@ These modules are adapted from the proven LazyTasker codebase:
 ## Development Workflow
 
 ### Phase Plan
-1. ~~Foundation~~ — **DONE**: Crypto, DB, config, LLM router (OpenAI+Anthropic), basic agent, CLI wizard, gateway
-2. ~~Skills + Tools~~ — **DONE**: BaseSkill ABC, registry, built-in skills (web_search, get_time, calculate), tool executor, agentic loop
-3. Queue + Memory — Lane queue, personal memory, SOUL.md customization, vault
-4. Browser — Playwright CDP, semantic snapshots, page reader
+1. ~~Foundation~~ — **DONE**: Crypto, DB, config, LLM router, auth, model manager, agent, CLI wizard, gateway
+2. ~~Skills + Tools~~ — **DONE**: BaseSkill ABC, registry, 14 built-in skills, instruction/code skills, skill writer, tool executor
+3. ~~Queue + Memory~~ — **DONE**: Lane queue, personal memory, daily logs, SOUL.md, context builder, vault
+4. ~~Browser~~ — **DONE**: Playwright manager, browser agent (human-in-the-loop, takeover), page reader (5 JS extractors), DOM optimizer, site memory, auto-login with vault credentials, 15 API endpoints
 5. Computer Control — Native + connector dual mode
-6. ~~Channels (partial)~~ — **DONE**: Telegram polling. TODO: webhook mode, Discord, WhatsApp, Signal, SimpleX
+6. ~~Channels (partial)~~ — **DONE**: Telegram polling. TODO: Discord, WhatsApp, Signal, SimpleX
 7. MCP + Heartbeat — Native MCP, proactive daemon, cron
 8. LazyTasker Plugin + Docker — Optional integration, deployment
 9. Flutter App — Mobile client

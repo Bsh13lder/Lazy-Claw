@@ -39,14 +39,15 @@
 
 **Verification**: Messages queue serially. Memory persists across sessions. SOUL.md customization works.
 
-## Phase 4: Browser Automation
-- [ ] **4.1 Browser Manager** — `lazyclaw/browser/manager.py`: Extract session management from LazyTasker.
-- [ ] **4.2 Browser Agent** — `lazyclaw/browser/agent.py`: Extract LLM-driven browser from LazyTasker.
-- [ ] **4.3 Semantic Snapshots** — `lazyclaw/browser/semantic.py`: NEW. Accessibility tree -> text (50KB vs 5MB).
-- [ ] **4.4 Page Reader** — `lazyclaw/browser/page_reader.py`: Extract from LazyTasker. Lightweight extraction.
-- [ ] **4.5 DOM Optimizer** — `lazyclaw/browser/dom_optimizer.py`: Extract from LazyTasker. Actionable elements.
-- [ ] **4.6 Site Memory** — `lazyclaw/browser/site_memory.py`: Extract from LazyTasker. Encrypted per-domain.
-- [ ] **4.7 Browser API** — `lazyclaw/gateway/routes/browser.py`: Task CRUD, live view, takeover.
+## Phase 4: Browser Automation ✅ COMPLETE
+- [x] **4.1 Browser Manager** — `lazyclaw/browser/manager.py`: PersistentBrowserManager + BrowserSessionPool.
+- [x] **4.2 Browser Agent** — `lazyclaw/browser/agent.py`: BrowserAgentManager with human-in-the-loop + takeover.
+- [x] **4.3 Semantic Snapshots** — Handled by DOM optimizer (`extract_actionable`) + page reader JS extractors.
+- [x] **4.4 Page Reader** — `lazyclaw/browser/page_reader.py`: 5 JS extractors + LLM analysis + extractor generation.
+- [x] **4.5 DOM Optimizer** — `lazyclaw/browser/dom_optimizer.py`: Actionable elements, page summary, change detection.
+- [x] **4.6 Site Memory** — `lazyclaw/browser/site_memory.py`: Encrypted per-domain learning with auto-cleanup.
+- [x] **4.7 Browser API** — `lazyclaw/gateway/routes/browser.py`: 15 endpoints (tasks, takeover, sessions, site-memory).
+- [x] **4.8 Browser Skills** — `lazyclaw/skills/builtin/browser.py`: BrowseWebSkill + ReadPageSkill.
 
 **Verification**: Agent browses a website, reads pages, takes actions.
 

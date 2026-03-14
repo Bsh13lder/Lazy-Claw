@@ -166,6 +166,18 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/gateway/routes/mcp.py` | MCP server management REST API (7 endpoints) |
 | `lazyclaw/gateway/routes/jobs.py` | Job management REST API (7 endpoints) |
 
+**Standalone: mcp-freeride** (free AI router MCP server):
+| File | Purpose |
+|------|---------|
+| `mcp-freeride/pyproject.toml` | Standalone package, deps: mcp, httpx |
+| `mcp-freeride/mcp_freeride/config.py` | FreeRideConfig: 7 API key env vars |
+| `mcp-freeride/mcp_freeride/providers/base.py` | OpenAICompatibleProvider: httpx /v1/chat/completions |
+| `mcp-freeride/mcp_freeride/providers/` | groq, gemini, openrouter, together, mistral, huggingface, ollama |
+| `mcp-freeride/mcp_freeride/health.py` | HealthChecker: latency tracking, ranked fallback |
+| `mcp-freeride/mcp_freeride/router.py` | FreeRideRouter: provider-hint parsing, fallback chain |
+| `mcp-freeride/mcp_freeride/server.py` | MCP tools: freeride_chat, freeride_models, freeride_status |
+| `mcp-freeride/mcp_freeride/main.py` | Entry point: stdio MCP server |
+
 **Planned** (not yet implemented):
 | File | Purpose |
 |------|---------|
@@ -194,6 +206,23 @@ docker compose up --build
 ```
 
 Default port: **18789** (same as OpenClaw for familiarity).
+
+### mcp-freeride (standalone)
+
+```bash
+# Set API keys (any combination)
+export GROQ_API_KEY=gsk_...
+export GEMINI_API_KEY=...
+export OPENROUTER_API_KEY=...
+
+# Run as MCP server
+uv run mcp-freeride
+# or
+python -m mcp_freeride
+
+# MCP inspector
+npx @modelcontextprotocol/inspector python -m mcp_freeride
+```
 
 ### CLI Commands
 - `lazyclaw setup` — Interactive wizard: generates SERVER_SECRET, configures AI provider (OpenAI/Anthropic), sets up Telegram bot, initializes DB

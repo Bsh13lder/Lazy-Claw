@@ -115,6 +115,25 @@
   - `user_types` — Agent navigates to login, pauses, user types password, agent continues
   - `session_only` — Real Chrome mode, already logged in, no password needed
 
+## Future: MCP Ecosystem (Zero-Cost AI)
+
+Standalone MCP servers that plug into LazyClaw (or any MCP-compatible client).
+
+- [ ] **mcp-freeride** — Free AI router. Fallback chain across free API sources (Groq free tier, Mistral free, HuggingFace Inference, Ollama local, Cloudflare Workers AI, etc). Auto-detects which is alive, fast, and not rate-limited. Plug in as MCP and LazyClaw never pays for basic tasks.
+- [ ] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. LazyClaw pulls latest registry automatically. Crowdsourced free AI registry.
+- [ ] **mcp-healthcheck** — Background pinger for all configured AI sources. Scores by speed/uptime/model quality, serves live leaderboard. mcp-freeride uses this for intelligent routing.
+- [ ] **mcp-taskai** — Task intelligence via free AI. Auto-categorize tasks, suggest deadlines, detect duplicates, summarize overdue pile. Uses mcp-freeride so it costs $0.
+- [ ] **mcp-vaultwhisper** — Privacy-safe AI proxy. Strips identifiable data before sending to any free API, re-injects context after response. E2E encryption + free AI = rare combo.
+
+Dependency chain:
+```
+LazyClaw Core
+    └── mcp-taskai         (smart task features)
+         └── mcp-freeride  (routes to best free AI)
+              ├── mcp-apihunter   (finds new sources)
+              └── mcp-healthcheck (monitors them)
+```
+
 ## Phase 10: Post-Quantum Cryptography (Future)
 - [ ] **10.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).
 - [ ] **10.2 PQC Signatures** — ML-DSA (Dilithium) for message signing if needed (FIPS 204).

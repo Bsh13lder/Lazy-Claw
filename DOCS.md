@@ -728,18 +728,83 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 ---
 
+## mcp-freeride (`mcp-freeride/mcp_freeride/`)
+
+Standalone MCP server that routes across free AI APIs with automatic fallback.
+
+### `config.py` — Configuration from env vars
+
+| Class | Fields | Description |
+|-------|--------|-------------|
+| `FreeRideConfig` | `groq_api_key, gemini_api_key, openrouter_api_key, together_api_key, mistral_api_key, hf_api_key, ollama_url, preferred_order` | All provider API keys + routing order |
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `load_config` | `() -> FreeRideConfig` | Load config from env vars |
+| `get_configured_providers` | `(config) -> list[str]` | List providers that have API keys set |
+
+### `providers/base.py` — Base provider + OpenAI-compatible
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `RateLimitError` | Exception | Raised on HTTP 429 |
+| `ProviderError` | Exception | Raised on provider errors |
+| `BaseProvider` | ABC: `name`, `default_model`, `models`, `chat(messages, model)`, `is_alive()` | Abstract provider |
+| `OpenAICompatibleProvider(BaseProvider)` | `__init__(base_url, api_key, provider_name, default_model, models)`, `chat(messages, model)`, `is_alive()` | httpx POST to `/v1/chat/completions` |
+
+### Providers (`providers/`)
+
+| File | Class | Base URL | Default Model |
+|------|-------|----------|---------------|
+| `groq.py` | `GroqProvider` | `api.groq.com/openai` | `llama-3.3-70b-versatile` |
+| `gemini.py` | `GeminiProvider` | `generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.5-flash-preview-05-20` |
+| `openrouter.py` | `OpenRouterProvider` | `openrouter.ai/api/v1` | `meta-llama/llama-3.3-70b-instruct:free` |
+| `together.py` | `TogetherProvider` | `api.together.xyz` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
+| `mistral.py` | `MistralProvider` | `api.mistral.ai` | `mistral-small-latest` |
+| `huggingface.py` | `HuggingFaceProvider` | `api-inference.huggingface.co/models/{model}/v1` | `meta-llama/Llama-3.3-70B-Instruct` |
+| `ollama.py` | `OllamaProvider` | `localhost:11434` | `llama3.2` |
+
+### `health.py` — Provider health tracking
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `ProviderStats` | dataclass: `successes, failures, total_latency_ms, consecutive_failures, last_failure` | Per-provider stats |
+| `HealthChecker` | `record_success(name, latency_ms)`, `record_failure(name)`, `get_ranked_providers(names)`, `get_status()` | Tracks latency, ranks providers (healthy first) |
+
+### `router.py` — Fallback chain router
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `AllProvidersFailedError` | Exception | All providers exhausted |
+| `FreeRideRouter` | `__init__(config)`, `chat(messages, model)`, `list_models()`, `get_status()` | Ranked fallback with provider-hint parsing (`groq/model`) |
+
+### `server.py` — MCP server (3 tools)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `create_server` | `(router: FreeRideRouter) -> Server` | MCP server with freeride_chat, freeride_models, freeride_status |
+
+### `main.py` — Entry point
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `main` | `() -> None` | Create server, run stdio transport |
+
+---
+
 ## Statistics
 
 | Metric | Count |
 |--------|-------|
-| **Classes** | 57+ |
-| **Async functions** | 85+ |
-| **Sync functions** | 40+ |
-| **Properties** | 85+ |
+| **Classes** | 60+ |
+| **Async functions** | 90+ |
+| **Sync functions** | 45+ |
+| **Properties** | 90+ |
 | **Built-in skills** | 19 |
 | **API routes** | 55+ |
 | **DB tables** | 23 (incl. mcp_connections, agent_jobs, job_queue) |
+| **Free AI providers** | 7 (mcp-freeride) |
 
 ---
 
-*Last updated: 2026-03-14*
+*Last updated: 2026-03-15*

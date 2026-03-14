@@ -118,6 +118,13 @@ async def run_agent(config: Config) -> None:
         await telegram.start()
         console.print("[green]\u2713[/green] Telegram bot running")
 
+    # Heartbeat daemon — proactive checks + cron jobs
+    from lazyclaw.heartbeat.daemon import HeartbeatDaemon
+
+    heartbeat = HeartbeatDaemon(config, lane_queue)
+    await heartbeat.start()
+    console.print("[green]\u2713[/green] Heartbeat daemon started")
+
     console.print(f"[green]\u2713[/green] API running at http://localhost:{config.port}")
     console.print()
     console.print("[bold]LazyClaw is live![/bold] Send a message to your Telegram bot.")
@@ -127,6 +134,7 @@ async def run_agent(config: Config) -> None:
         await asyncio.gather(*tasks)
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
+        await heartbeat.stop()
         if telegram:
             await telegram.stop()
         await lane_queue.stop()

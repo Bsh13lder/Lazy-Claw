@@ -29,6 +29,7 @@ class Config:
     browser_model: str = "gpt-4o-mini"
     browser_timeout: int = 300
     computer_timeout: int = 30
+    heartbeat_interval: int = 1800
 
 
 def load_config() -> Config:
@@ -48,6 +49,7 @@ def load_config() -> Config:
         browser_model=os.getenv("BROWSER_MODEL", "gpt-4o-mini"),
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
         computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),
+        heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "1800")),
     )
 
 

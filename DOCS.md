@@ -602,17 +602,143 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 ---
 
+## MCP (`lazyclaw/mcp/`)
+
+### `client.py` — MCP client: stdio/SSE/streamable_http connections
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `MCPClient` | see below | Connects to external MCP servers and discovers/calls tools |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `__init__` | `(server_id, name, transport, config)` | Initialize with server details and transport config |
+| `connect` | `async () -> None` | Establish connection via configured transport |
+| `disconnect` | `async () -> None` | Clean shutdown of session and transport |
+| `list_tools` | `async () -> list[dict]` | Discover tools (name, description, inputSchema) |
+| `call_tool` | `async (name, arguments) -> str` | Invoke tool and return result as string |
+
+**Properties:** `server_id: str`, `name: str`, `is_connected: bool`
+
+### `bridge.py` — MCP tools ↔ BaseSkill conversion
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `MCPToolSkill(BaseSkill)` | `__init__(client, tool_name, tool_description, tool_schema)`, `execute(user_id, params)` | Wraps a single MCP tool as a LazyClaw BaseSkill |
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `register_mcp_tools` | `async (client: MCPClient, registry: SkillRegistry) -> int` | Discover and register all tools from an MCP client |
+| `unregister_mcp_tools` | `(server_id: str, registry: SkillRegistry) -> int` | Remove all MCP skills for a server from registry |
+
+**Constants:** `_MCP_PREFIX = "mcp_"`
+
+### `manager.py` — MCP connection CRUD + lifecycle (encrypted)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `add_server` | `async (config, user_id, name, transport, server_config) -> str` | Add MCP server, return ID |
+| `remove_server` | `async (config, user_id, server_id) -> bool` | Remove server (disconnects if active) |
+| `list_servers` | `async (config, user_id) -> list[dict]` | List servers with decrypted configs |
+| `get_server` | `async (config, user_id, server_id) -> dict \| None` | Get single server (decrypted) |
+| `connect_server` | `async (config, user_id, server_id) -> MCPClient` | Connect to server, return active client |
+| `disconnect_server` | `async (user_id, server_id) -> None` | Disconnect active client |
+| `reconnect_server` | `async (config, user_id, server_id) -> MCPClient` | Disconnect + reconnect |
+| `get_active_client` | `(server_id) -> MCPClient \| None` | Get active client by server ID |
+| `disconnect_all` | `async () -> None` | Disconnect all active clients |
+
+### `server.py` — Expose skill registry as MCP server via SSE
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `create_mcp_server` | `(registry: SkillRegistry, config: Config) -> Server` | Create MCP Server exposing all skills as tools |
+| `create_sse_app` | `(server: Server) -> Starlette` | Create Starlette SSE app for the MCP server |
+
+**Constants:** `MCP_SERVER_USER_ID = "mcp-client"`
+
+---
+
+## Heartbeat (`lazyclaw/heartbeat/`)
+
+### `cron.py` — Cron expression parser using croniter
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `parse_cron` | `(expression: str) -> croniter` | Validate and parse cron expression |
+| `get_next_run` | `(expression: str, after: datetime \| None) -> datetime` | Next run time after given datetime |
+| `is_due` | `(expression: str, last_run: str \| None) -> bool` | Check if cron job should run now |
+| `calculate_next_run` | `(expression: str) -> str` | Next run time as ISO format string |
+
+### `orchestrator.py` — Job CRUD for agent_jobs table (encrypted)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `create_job` | `async (config, user_id, name, instruction, job_type, cron_expression, context) -> str` | Create job, return ID |
+| `update_job` | `async (config, user_id, job_id, **fields) -> bool` | Update job fields (auto-encrypts) |
+| `delete_job` | `async (config, user_id, job_id) -> bool` | Delete job |
+| `list_jobs` | `async (config, user_id) -> list[dict]` | List all jobs (decrypted) |
+| `get_job` | `async (config, user_id, job_id) -> dict \| None` | Get single job (decrypted) |
+| `pause_job` | `async (config, user_id, job_id) -> bool` | Pause active job |
+| `resume_job` | `async (config, user_id, job_id) -> bool` | Resume paused job (recalculates next_run) |
+| `mark_run` | `async (config, job_id, next_run) -> None` | Update last_run to now, set next_run |
+
+**Constants:** `ENCRYPTED_FIELDS`, `JOB_COLUMNS`, `JOB_SELECT`
+
+### `daemon.py` — Background heartbeat daemon
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `HeartbeatDaemon` | see below | Periodically checks for due cron jobs and enqueues them |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `__init__` | `(config: Config, lane_queue)` | Initialize with config and queue reference |
+| `start` | `async () -> None` | Launch heartbeat loop as background task |
+| `stop` | `async () -> None` | Cancel loop and wait for clean shutdown |
+
+---
+
+## MCP Routes (`lazyclaw/gateway/routes/mcp.py`)
+
+| Route | Handler | Description |
+|-------|---------|-------------|
+| `GET /servers` | `list_servers` | List MCP server connections |
+| `POST /servers` | `add_server` | Add new MCP server |
+| `GET /servers/{server_id}` | `get_server` | Get server details |
+| `DELETE /servers/{server_id}` | `remove_server` | Remove server |
+| `POST /servers/{server_id}/connect` | `connect_server` | Connect to server |
+| `POST /servers/{server_id}/disconnect` | `disconnect_server` | Disconnect from server |
+| `POST /servers/{server_id}/reconnect` | `reconnect_server` | Reconnect to server |
+
+**Models:** `AddServerRequest`
+
+## Jobs Routes (`lazyclaw/gateway/routes/jobs.py`)
+
+| Route | Handler | Description |
+|-------|---------|-------------|
+| `GET /` | `list_jobs` | List user's jobs |
+| `POST /` | `create_job` | Create new job |
+| `GET /{job_id}` | `get_job` | Get job details |
+| `PATCH /{job_id}` | `update_job` | Update job fields |
+| `DELETE /{job_id}` | `delete_job` | Delete job |
+| `POST /{job_id}/pause` | `pause_job` | Pause active job |
+| `POST /{job_id}/resume` | `resume_job` | Resume paused job |
+
+**Models:** `CreateJobRequest`, `UpdateJobRequest`
+
+---
+
 ## Statistics
 
 | Metric | Count |
 |--------|-------|
-| **Classes** | 55+ |
-| **Async functions** | 70+ |
+| **Classes** | 57+ |
+| **Async functions** | 85+ |
 | **Sync functions** | 40+ |
 | **Properties** | 85+ |
 | **Built-in skills** | 19 |
-| **API routes** | 40+ |
-| **DB tables** | 23 |
+| **API routes** | 55+ |
+| **DB tables** | 23 (incl. mcp_connections, agent_jobs, job_queue) |
 
 ---
 

@@ -156,13 +156,20 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/skills/builtin/computer.py` | RunCommand, ReadFile, WriteFile, ListDirectory, TakeScreenshot |
 | `lazyclaw/gateway/routes/connector.py` | Connector REST API + WebSocket endpoint |
 | `connector/` | Standalone desktop connector program (auto-reconnect, 6 handlers) |
+| `lazyclaw/mcp/client.py` | MCP client: stdio/SSE/streamable_http transport connections |
+| `lazyclaw/mcp/bridge.py` | MCP tools ↔ BaseSkill conversion, registry integration |
+| `lazyclaw/mcp/manager.py` | MCP connection CRUD + lifecycle (encrypted configs) |
+| `lazyclaw/mcp/server.py` | Expose skill registry as MCP server via SSE |
+| `lazyclaw/heartbeat/cron.py` | Cron expression parser using croniter |
+| `lazyclaw/heartbeat/orchestrator.py` | Job CRUD for agent_jobs table (encrypted) |
+| `lazyclaw/heartbeat/daemon.py` | Background heartbeat daemon, cron job executor |
+| `lazyclaw/gateway/routes/mcp.py` | MCP server management REST API (7 endpoints) |
+| `lazyclaw/gateway/routes/jobs.py` | Job management REST API (7 endpoints) |
 
 **Planned** (not yet implemented):
 | File | Purpose |
 |------|---------|
 | `lazyclaw/channels/router.py` | Inbound message -> queue routing |
-| `lazyclaw/mcp/client.py` | MCP client (stdio/SSE/WebSocket transports) |
-| `lazyclaw/mcp/server.py` | Expose LazyClaw tools as MCP server |
 
 ## Build & Run
 
@@ -262,6 +269,7 @@ Key variables (see `.env.example`):
 - `BROWSER_MODEL` — Default browser agent model (default: `gpt-4o-mini`)
 - `BROWSER_TIMEOUT` — Browser task timeout in seconds (default: `300`)
 - `COMPUTER_TIMEOUT` — Computer command timeout in seconds (default: `30`)
+- `HEARTBEAT_INTERVAL` — Heartbeat daemon check interval in seconds (default: `60`)
 - `PORT` — Gateway port (default: `18789`)
 
 ## Skill System
@@ -329,14 +337,16 @@ All types unified in the skill registry and converted to OpenAI function-calling
 - `GET /api/channels`, `POST /api/channels/{name}/config`, `POST/DELETE /api/channels/{name}/bind`
 
 ### MCP
-- `GET/POST/DELETE /api/mcp/servers`, `POST /api/mcp/servers/{id}/reconnect`
+- `GET /api/mcp/servers`, `POST /api/mcp/servers`, `GET /api/mcp/servers/{id}`, `DELETE /api/mcp/servers/{id}`
+- `POST /api/mcp/servers/{id}/connect`, `POST /api/mcp/servers/{id}/disconnect`, `POST /api/mcp/servers/{id}/reconnect`
 
 ### Models & Vault
 - `GET/PATCH /api/models/assignments`, `PUT /api/models/keys/{provider}`
 - `GET/PUT/DELETE /api/vault/{key}`
 
 ### Jobs
-- `GET/POST/PATCH/DELETE /api/jobs`, `POST /api/jobs/{id}/pause`, `/resume`
+- `GET /api/jobs`, `POST /api/jobs`, `GET /api/jobs/{id}`, `PATCH /api/jobs/{id}`, `DELETE /api/jobs/{id}`
+- `POST /api/jobs/{id}/pause`, `POST /api/jobs/{id}/resume`
 
 ### Connector
 - `POST /api/connector/token`, `GET /api/connector/status`, `DELETE /api/connector/token`
@@ -367,7 +377,7 @@ These modules are adapted from the proven LazyTasker codebase:
 4. ~~Browser~~ — **DONE**: Playwright manager, browser agent (human-in-the-loop, takeover), page reader (5 JS extractors), DOM optimizer, site memory, auto-login with vault credentials, 15 API endpoints
 5. ~~Computer Control~~ — **DONE**: Security manager, native executor, connector server, standalone connector, REST+WS API, 5 agent skills
 6. ~~Channels (partial)~~ — **DONE**: Telegram polling. TODO: Discord, WhatsApp, Signal, SimpleX
-7. MCP + Heartbeat — Native MCP, proactive daemon, cron
+7. ~~MCP + Heartbeat~~ — **DONE**: MCP client/server/bridge, heartbeat daemon, cron jobs, orchestrator, 14 API endpoints
 8. LazyTasker Plugin + Docker — Optional integration, deployment
 9. Flutter App — Mobile client
 

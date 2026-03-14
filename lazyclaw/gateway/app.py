@@ -16,6 +16,8 @@ from lazyclaw.gateway.routes.vault import router as vault_router
 from lazyclaw.gateway.routes.browser import router as browser_router
 from lazyclaw.gateway.routes.connector import router as connector_router
 from lazyclaw.gateway.routes.connector import ws_router as connector_ws_router
+from lazyclaw.gateway.routes.mcp import router as mcp_router
+from lazyclaw.gateway.routes.jobs import router as jobs_router
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,8 @@ app.include_router(vault_router)
 app.include_router(browser_router)
 app.include_router(connector_router)
 app.include_router(connector_ws_router)
+app.include_router(mcp_router)
+app.include_router(jobs_router)
 
 
 class ChatRequest(BaseModel):

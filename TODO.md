@@ -72,16 +72,18 @@
 
 **Verification**: ✅ Send Telegram message, get AI response back (with tool calling).
 
-## Phase 7: MCP + Heartbeat
-- [ ] **7.1 MCP Client** — `lazyclaw/mcp/client.py`: NEW. Connect to external MCP servers (stdio/SSE/WS).
-- [ ] **7.2 MCP Bridge** — `lazyclaw/mcp/bridge.py`: NEW. MCP tools <-> OpenAI function format.
-- [ ] **7.3 MCP Server** — `lazyclaw/mcp/server.py`: NEW. Expose LazyClaw tools as MCP server.
-- [ ] **7.4 Heartbeat Daemon** — `lazyclaw/heartbeat/daemon.py`: NEW. Proactive checks (HEARTBEAT.md).
-- [ ] **7.5 Cron Jobs** — `lazyclaw/heartbeat/cron.py`: Extract from LazyTasker.
-- [ ] **7.6 Orchestrator** — `lazyclaw/heartbeat/orchestrator.py`: Extract from LazyTasker. Monitor/worker.
-- [ ] **7.7 MCP + Jobs API** — `lazyclaw/gateway/routes/mcp.py` + `jobs.py`.
+## Phase 7: MCP + Heartbeat ✅ COMPLETE
+- [x] **7.1 MCP Client** — `lazyclaw/mcp/client.py`: Connect to external MCP servers (stdio/SSE/streamable_http).
+- [x] **7.2 MCP Bridge** — `lazyclaw/mcp/bridge.py`: MCP tools ↔ BaseSkill conversion + registry integration.
+- [x] **7.3 MCP Server** — `lazyclaw/mcp/server.py`: Expose LazyClaw tools as MCP server via SSE.
+- [x] **7.4 MCP Manager** — `lazyclaw/mcp/manager.py`: CRUD + lifecycle for MCP connections (encrypted).
+- [x] **7.5 Cron Jobs** — `lazyclaw/heartbeat/cron.py`: croniter-based cron parser and scheduler.
+- [x] **7.6 Orchestrator** — `lazyclaw/heartbeat/orchestrator.py`: Job CRUD with encrypted fields.
+- [x] **7.7 Heartbeat Daemon** — `lazyclaw/heartbeat/daemon.py`: Background async daemon for cron jobs.
+- [x] **7.8 MCP API** — `lazyclaw/gateway/routes/mcp.py`: 7 REST endpoints.
+- [x] **7.9 Jobs API** — `lazyclaw/gateway/routes/jobs.py`: 7 REST endpoints.
 
-**Verification**: Connect external MCP server, agent uses its tools. Heartbeat acts proactively.
+**Verification**: ✅ Connect external MCP server, agent uses its tools. Heartbeat daemon checks cron jobs and enqueues due tasks.
 
 ## Phase 8: LazyTasker Plugin + Docker
 - [ ] **8.1 LazyTasker Plugin** — `plugins/lazytasker/`: Optional integration (tasks, projects, expenses).
@@ -104,6 +106,15 @@
 
 **Verification**: Full mobile experience matching API capabilities.
 
+## Future: Browser Enhancements
+- [ ] **Real Chrome Mode** — Connect to user's actual Chrome via CDP (Chrome DevTools Protocol) instead of headless Playwright. Uses existing connector WebSocket pattern. Benefits: already logged in everywhere, real browser fingerprint, no bot detection, no CAPTCHAs.
+- [ ] **Human-like Click Delays** — Add configurable random delays between automated actions (0.3-1.5s range) to mimic human interaction patterns. Especially important for real Chrome mode where there's no natural LLM thinking gap.
+- [ ] **Credential Trust Levels** — Per-site trust config so AI never sees passwords:
+  - `full` — Agent reads vault, types password (current behavior)
+  - `browser_only` — Server injects password directly into input field via JS/CDP, never in LLM context
+  - `user_types` — Agent navigates to login, pauses, user types password, agent continues
+  - `session_only` — Real Chrome mode, already logged in, no password needed
+
 ## Phase 10: Post-Quantum Cryptography (Future)
 - [ ] **10.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).
 - [ ] **10.2 PQC Signatures** — ML-DSA (Dilithium) for message signing if needed (FIPS 204).
@@ -119,3 +130,4 @@
 - Phase 3 (Queue + Memory + Personality): ✅ COMPLETE — Lane queue, personal memory, SOUL.md, context builder, credential vault, daily logs, memory/vault API
 - Phase 5 (Computer Control): ✅ COMPLETE — Security manager, native executor, connector server, standalone connector, REST + WS API, 5 agent skills
 - Phase 6 (Channels): Telegram polling adapter, channel base abstractions (partial)
+- Phase 7 (MCP + Heartbeat): ✅ COMPLETE — MCP client/server/bridge, manager, heartbeat daemon, cron jobs, orchestrator, 14 API endpoints

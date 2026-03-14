@@ -154,3 +154,37 @@ CREATE TABLE IF NOT EXISTS connector_tokens (
     created_at TEXT DEFAULT (datetime('now')),
     last_used TEXT
 );
+
+CREATE TABLE IF NOT EXISTS mcp_connections (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    config TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_jobs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    job_type TEXT NOT NULL DEFAULT 'cron',
+    instruction TEXT NOT NULL,
+    cron_expression TEXT,
+    context TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    last_run TEXT,
+    next_run TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS job_queue (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    source TEXT NOT NULL DEFAULT 'heartbeat',
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT (datetime('now')),
+    processed_at TEXT
+);

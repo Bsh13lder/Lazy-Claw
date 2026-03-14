@@ -51,12 +51,12 @@
 
 **Verification**: Agent browses a website, reads pages, takes actions.
 
-## Phase 5: Computer Control
-- [ ] **5.1 Security** — `lazyclaw/computer/security.py`: Extract from LazyTasker connector. Blocklists.
-- [ ] **5.2 Native Executor** — `lazyclaw/computer/native.py`: NEW. Local subprocess execution.
-- [ ] **5.3 Connector Server** — `lazyclaw/computer/connector_server.py`: Extract WS manager from LazyTasker.
-- [ ] **5.4 Standalone Connector** — `connector/`: Adapt from LazyTasker. Desktop program.
-- [ ] **5.5 Connector API** — `lazyclaw/gateway/routes/connector.py` + WS endpoint.
+## Phase 5: Computer Control ✅ COMPLETE
+- [x] **5.1 Security** — `lazyclaw/computer/security.py`: Command/path blocklists, regex validation.
+- [x] **5.2 Native Executor** — `lazyclaw/computer/native.py`: Local subprocess, file I/O, screenshots.
+- [x] **5.3 Connector Server** — `lazyclaw/computer/connector_server.py`: Server-side WS relay + token mgmt.
+- [x] **5.4 Standalone Connector** — `connector/`: Desktop program with auto-reconnect, 6 handlers.
+- [x] **5.5 Connector API** — `lazyclaw/gateway/routes/connector.py` + WS endpoint + 5 agent skills.
 
 **Verification**: Agent runs shell commands, reads files, takes screenshots.
 
@@ -117,4 +117,5 @@
 - Phase 1 (Foundation): ✅ COMPLETE — Crypto, DB, config, LLM router, agent, gateway, CLI wizard, auth, model manager
 - Phase 2 (Skills + Tools): ✅ COMPLETE — BaseSkill, registry, built-in skills, tool executor, agentic loop, code sandbox, skill writer, skills API
 - Phase 3 (Queue + Memory + Personality): ✅ COMPLETE — Lane queue, personal memory, SOUL.md, context builder, credential vault, daily logs, memory/vault API
+- Phase 5 (Computer Control): ✅ COMPLETE — Security manager, native executor, connector server, standalone connector, REST + WS API, 5 agent skills
 - Phase 6 (Channels): Telegram polling adapter, channel base abstractions (partial)

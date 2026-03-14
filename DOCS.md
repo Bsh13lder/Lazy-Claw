@@ -514,17 +514,105 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 ---
 
+## Computer (`lazyclaw/computer/`)
+
+### `security.py` — Command/path blocklist validation
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `SecurityManager` | `is_command_allowed(cmd)`, `is_path_allowed(path, write)` | Regex-based command blocklist + path blocklist for read/write |
+
+**Constants:** `BLOCKED_COMMANDS`, `BLOCKED_WRITE_PATHS`, `BLOCKED_READ_PATHS`, `BLOCKED_HOME_PATTERNS`
+
+### `native.py` — Local subprocess execution
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `NativeExecutor` | see below | Execute commands locally via subprocess |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `exec_command` | `async (cmd, timeout=30) -> dict` | Run shell command, capture stdout/stderr |
+| `read_file` | `async (path) -> dict` | Read file (100KB max, UTF-8/base64) |
+| `write_file` | `async (path, content) -> dict` | Write text to file |
+| `list_dir` | `async (path=None) -> dict` | List directory (200 entries max) |
+| `screenshot` | `async () -> dict` | Capture screen (mss+Pillow, JPEG base64) |
+
+**Constants:** `MAX_FILE_READ`, `MAX_OUTPUT`, `COMMAND_TIMEOUT`, `MAX_DIR_ENTRIES`
+
+### `connector_server.py` — Server-side WebSocket relay
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `ConnectorServer` | see below | Manages WebSocket connections from remote connectors |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `create_token` | `async (user_id) -> str` | Generate connector auth token |
+| `validate_token` | `async (token) -> str \| None` | Validate token, return user_id |
+| `delete_token` | `async (user_id) -> bool` | Revoke token |
+| `register` | `(user_id, ws, device_info)` | Register WebSocket connection |
+| `unregister` | `(user_id)` | Remove connection + cleanup pending commands |
+| `is_connected` | `(user_id) -> bool` | Check connector status |
+| `get_device_info` | `(user_id) -> dict \| None` | Get connected device info |
+| `send_command` | `async (user_id, command, args) -> str` | Send command, return cmd_id |
+| `wait_for_result` | `async (cmd_id, timeout=35) -> dict \| None` | Wait for result |
+| `report_result` | `(cmd_id, result)` | Receive result from connector |
+
+### `manager.py` — Unified execution facade
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `ComputerManager` | see below | Routes to local or remote execution |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `exec_command` | `async (user_id, cmd, timeout=30) -> dict` | Execute shell command |
+| `read_file` | `async (user_id, path) -> dict` | Read file |
+| `write_file` | `async (user_id, path, content) -> dict` | Write file |
+| `list_dir` | `async (user_id, path=None) -> dict` | List directory |
+| `screenshot` | `async (user_id) -> dict` | Capture screenshot |
+
+### Computer Skills (`lazyclaw/skills/builtin/computer.py`)
+
+| Class | Category | Description |
+|-------|----------|-------------|
+| `RunCommandSkill` | computer | Execute shell command |
+| `ReadFileSkill` | computer | Read file contents |
+| `WriteFileSkill` | computer | Write content to file |
+| `ListDirectorySkill` | computer | List directory entries |
+| `TakeScreenshotSkill` | computer | Capture screen screenshot |
+
+### Connector Routes (`lazyclaw/gateway/routes/connector.py`)
+
+| Route | Description |
+|-------|-------------|
+| `POST /api/connector/token` | Generate connector token (username/password auth) |
+| `GET /api/connector/status` | Check connector connection status |
+| `DELETE /api/connector/token` | Revoke connector token |
+| `WS /ws/connector` | WebSocket endpoint for remote connectors |
+
+### Standalone Connector (`connector/`)
+
+| File | Description |
+|------|-------------|
+| `connector/security.py` | SecurityManager with interactive approval prompts |
+| `connector/connector.py` | WebSocket client with 6 handlers + auto-reconnect |
+| `connector/main.py` | CLI entry point with setup wizard |
+
+---
+
 ## Statistics
 
 | Metric | Count |
 |--------|-------|
-| **Classes** | 50+ |
-| **Async functions** | 60+ |
-| **Sync functions** | 35+ |
-| **Properties** | 60+ |
-| **Built-in skills** | 14 |
-| **API routes** | 35+ |
-| **DB tables** | 22 |
+| **Classes** | 55+ |
+| **Async functions** | 70+ |
+| **Sync functions** | 40+ |
+| **Properties** | 85+ |
+| **Built-in skills** | 19 |
+| **API routes** | 40+ |
+| **DB tables** | 23 |
 
 ---
 

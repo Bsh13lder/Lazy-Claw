@@ -56,3 +56,14 @@ class SkillRegistry:
         self.register(BrowseWebSkill(config=config))
         self.register(ReadPageSkill(config=config))
         self.register(SaveSiteLoginSkill(config=config))
+
+        from lazyclaw.skills.builtin.computer import (
+            RunCommandSkill, ReadFileSkill, WriteFileSkill,
+            ListDirectorySkill, TakeScreenshotSkill,
+        )
+
+        self.register(RunCommandSkill(config=config))
+        self.register(ReadFileSkill(config=config))
+        self.register(WriteFileSkill(config=config))
+        self.register(ListDirectorySkill(config=config))
+        self.register(TakeScreenshotSkill(config=config))

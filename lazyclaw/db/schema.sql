@@ -146,3 +146,11 @@ CREATE TABLE IF NOT EXISTS user_model_assignments (
     model_id TEXT NOT NULL REFERENCES ai_models(model_id),
     PRIMARY KEY (user_id, feature)
 );
+
+CREATE TABLE IF NOT EXISTS connector_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    token TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_used TEXT
+);

@@ -149,6 +149,13 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/browser/page_reader.py` | Lightweight JS page extraction (5 extractors) + LLM analysis |
 | `lazyclaw/browser/dom_optimizer.py` | DOM analysis, actionable elements, page summary |
 | `lazyclaw/browser/site_memory.py` | Encrypted per-domain learning with auto-cleanup |
+| `lazyclaw/computer/security.py` | Command/path blocklist validation |
+| `lazyclaw/computer/native.py` | Local subprocess execution (exec, read/write, list, screenshot) |
+| `lazyclaw/computer/connector_server.py` | Server-side WebSocket relay for remote connectors |
+| `lazyclaw/computer/manager.py` | Unified facade: routes to local or remote execution |
+| `lazyclaw/skills/builtin/computer.py` | RunCommand, ReadFile, WriteFile, ListDirectory, TakeScreenshot |
+| `lazyclaw/gateway/routes/connector.py` | Connector REST API + WebSocket endpoint |
+| `connector/` | Standalone desktop connector program (auto-reconnect, 6 handlers) |
 
 **Planned** (not yet implemented):
 | File | Purpose |
@@ -254,6 +261,7 @@ Key variables (see `.env.example`):
 - `DEFAULT_MODEL` — Default LLM model (default: `gpt-4o-mini`)
 - `BROWSER_MODEL` — Default browser agent model (default: `gpt-4o-mini`)
 - `BROWSER_TIMEOUT` — Browser task timeout in seconds (default: `300`)
+- `COMPUTER_TIMEOUT` — Computer command timeout in seconds (default: `30`)
 - `PORT` — Gateway port (default: `18789`)
 
 ## Skill System
@@ -331,7 +339,8 @@ All types unified in the skill registry and converted to OpenAI function-calling
 - `GET/POST/PATCH/DELETE /api/jobs`, `POST /api/jobs/{id}/pause`, `/resume`
 
 ### Connector
-- `POST /api/connector/token`, `GET /api/connector/status`, `WS /ws/connector`
+- `POST /api/connector/token`, `GET /api/connector/status`, `DELETE /api/connector/token`
+- `WS /ws/connector` — WebSocket for remote desktop connectors
 
 ## Extracted from LazyTasker
 
@@ -356,7 +365,7 @@ These modules are adapted from the proven LazyTasker codebase:
 2. ~~Skills + Tools~~ — **DONE**: BaseSkill ABC, registry, 14 built-in skills, instruction/code skills, skill writer, tool executor
 3. ~~Queue + Memory~~ — **DONE**: Lane queue, personal memory, daily logs, SOUL.md, context builder, vault
 4. ~~Browser~~ — **DONE**: Playwright manager, browser agent (human-in-the-loop, takeover), page reader (5 JS extractors), DOM optimizer, site memory, auto-login with vault credentials, 15 API endpoints
-5. Computer Control — Native + connector dual mode
+5. ~~Computer Control~~ — **DONE**: Security manager, native executor, connector server, standalone connector, REST+WS API, 5 agent skills
 6. ~~Channels (partial)~~ — **DONE**: Telegram polling. TODO: Discord, WhatsApp, Signal, SimpleX
 7. MCP + Heartbeat — Native MCP, proactive daemon, cron
 8. LazyTasker Plugin + Docker — Optional integration, deployment

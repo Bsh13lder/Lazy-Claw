@@ -28,6 +28,7 @@ class Config:
     telegram_bot_token: str | None = None
     browser_model: str = "gpt-4o-mini"
     browser_timeout: int = 300
+    computer_timeout: int = 30
 
 
 def load_config() -> Config:
@@ -46,6 +47,7 @@ def load_config() -> Config:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
         browser_model=os.getenv("BROWSER_MODEL", "gpt-4o-mini"),
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
+        computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),
     )
 
 

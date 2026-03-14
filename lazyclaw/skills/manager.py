@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -8,6 +9,9 @@ from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.skills.instruction import InstructionSkill
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.skills.sandbox import CodeSkill
+
+logger = logging.getLogger(__name__)
 
 
 async def create_instruction_skill(
@@ -31,6 +35,109 @@ async def create_instruction_skill(
         )
         await db.commit()
     return skill_id
+
+
+async def create_code_skill(
+    config: Config,
+    user_id: str,
+    name: str,
+    description: str,
+    code: str,
+    parameters_schema: dict | None = None,
+) -> str:
+    """Create a new code skill and store it encrypted in the DB."""
+    key = derive_server_key(config.server_secret, user_id)
+    skill_id = str(uuid4())
+    encrypted_name = encrypt(name, key)
+    encrypted_code = encrypt(code, key)
+    schema_json = json.dumps(parameters_schema) if parameters_schema else None
+
+    async with db_session(config) as db:
+        await db.execute(
+            "INSERT INTO skills (id, user_id, skill_type, name, description, code, parameters_schema) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (skill_id, user_id, "code", encrypted_name, description, encrypted_code, schema_json),
+        )
+        await db.commit()
+    return skill_id
+
+
+async def get_skill_by_id(config: Config, user_id: str, skill_id: str) -> dict | None:
+    """Get a skill by ID, scoped to user."""
+    key = derive_server_key(config.server_secret, user_id)
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT id, name, description, skill_type, instruction, code, parameters_schema "
+            "FROM skills WHERE id = ? AND user_id = ?",
+            (skill_id, user_id),
+        )
+        result = await row.fetchone()
+
+    if not result:
+        return None
+
+    enc_name = result[1]
+    name = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
+
+    enc_instruction = result[4]
+    instruction = decrypt(enc_instruction, key) if enc_instruction and enc_instruction.startswith("enc:") else enc_instruction
+
+    enc_code = result[5]
+    code = decrypt(enc_code, key) if enc_code and enc_code.startswith("enc:") else enc_code
+
+    return {
+        "id": result[0],
+        "name": name,
+        "description": result[2],
+        "type": result[3],
+        "instruction": instruction,
+        "code": code,
+        "parameters_schema": json.loads(result[6]) if result[6] else None,
+    }
+
+
+async def update_skill(config: Config, user_id: str, skill_id: str, **fields) -> bool:
+    """Update skill fields. Encrypts name, instruction, and code."""
+    key = derive_server_key(config.server_secret, user_id)
+
+    # Map field names to encrypted values
+    updates = {}
+    for field, value in fields.items():
+        if field == "name":
+            updates["name"] = encrypt(value, key)
+        elif field == "instruction":
+            updates["instruction"] = encrypt(value, key)
+        elif field == "code":
+            updates["code"] = encrypt(value, key)
+        elif field == "description":
+            updates["description"] = value
+        elif field == "parameters_schema":
+            updates["parameters_schema"] = json.dumps(value) if isinstance(value, dict) else value
+
+    if not updates:
+        return False
+
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [skill_id, user_id]
+
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?",
+            values,
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def delete_user_skill_by_id(config: Config, user_id: str, skill_id: str) -> bool:
+    """Delete a user skill by ID."""
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            "DELETE FROM skills WHERE id = ? AND user_id = ?",
+            (skill_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def list_user_skills(config: Config, user_id: str) -> list[dict]:
@@ -90,27 +197,43 @@ async def load_user_skills(
     user_id: str,
     registry: SkillRegistry,
 ) -> int:
-    """Load all user instruction skills from DB into the registry. Returns count loaded."""
+    """Load all user skills (instruction + code) from DB into the registry. Returns count loaded."""
     key = derive_server_key(config.server_secret, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT name, description, instruction FROM skills "
-            "WHERE user_id = ? AND skill_type = 'instruction'",
+            "SELECT name, description, instruction, skill_type, code, parameters_schema "
+            "FROM skills WHERE user_id = ?",
             (user_id,),
         )
         results = await rows.fetchall()
 
     count = 0
     for row in results:
-        enc_name, description, enc_instruction = row[0], row[1], row[2]
-        name = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
-        instruction = decrypt(enc_instruction, key) if enc_instruction.startswith("enc:") else enc_instruction
-
-        skill = InstructionSkill(
-            skill_name=name,
-            skill_description=description,
-            instruction=instruction,
+        enc_name, description, enc_instruction, skill_type, enc_code, params_schema = (
+            row[0], row[1], row[2], row[3], row[4], row[5],
         )
+        name = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
+
+        if skill_type == "instruction" and enc_instruction:
+            instruction = decrypt(enc_instruction, key) if enc_instruction.startswith("enc:") else enc_instruction
+            skill = InstructionSkill(
+                skill_name=name,
+                skill_description=description,
+                instruction=instruction,
+            )
+        elif skill_type == "code" and enc_code:
+            code = decrypt(enc_code, key) if enc_code.startswith("enc:") else enc_code
+            schema = json.loads(params_schema) if params_schema else None
+            skill = CodeSkill(
+                skill_name=name,
+                skill_description=description,
+                code=code,
+                params_schema=schema,
+            )
+        else:
+            logger.warning("Skipping skill '%s' with unknown type '%s'", name, skill_type)
+            continue
+
         registry.register(skill)
         count += 1
     return count

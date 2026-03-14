@@ -3,12 +3,17 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from lazyclaw.config import load_config
 from lazyclaw.db.connection import init_db
+from lazyclaw.gateway.auth import User, auth_router, get_current_user
+from lazyclaw.gateway.routes.memory import router as memory_router
+from lazyclaw.gateway.routes.skills import router as skills_router
+from lazyclaw.gateway.routes.vault import router as vault_router
+from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,8 @@ def set_lane_queue(queue) -> None:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     await init_db(_config)
-    logger.info("Database initialized")
+    await seed_default_models(_config)
+    logger.info("Database initialized, models seeded")
     yield
 
 
@@ -40,6 +46,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register routers
+app.include_router(auth_router)
+app.include_router(skills_router)
+app.include_router(memory_router)
+app.include_router(vault_router)
 
 
 class ChatRequest(BaseModel):
@@ -56,9 +68,9 @@ async def health():
 
 
 @app.post("/api/agent/chat", response_model=ChatResponse)
-async def agent_chat(body: ChatRequest):
+async def agent_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     if _lane_queue:
-        result = await _lane_queue.enqueue("default", body.message)
+        result = await _lane_queue.enqueue(user.id, body.message)
     else:
         # Fallback for standalone gateway (no queue)
         from lazyclaw.llm.router import LLMRouter
@@ -69,5 +81,5 @@ async def agent_chat(body: ChatRequest):
         registry.register_defaults(config=_config)
         router = LLMRouter(_config)
         agent = Agent(_config, router, registry)
-        result = await agent.process_message("default", body.message)
+        result = await agent.process_message(user.id, body.message)
     return ChatResponse(response=result)

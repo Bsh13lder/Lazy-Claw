@@ -83,3 +83,27 @@ CREATE TABLE IF NOT EXISTS personal_memory (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS daily_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    date TEXT NOT NULL,
+    summary TEXT,
+    key_events TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, date)
+);
+
+CREATE TABLE IF NOT EXISTS ai_models (
+    model_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    is_default INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS user_model_assignments (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    feature TEXT NOT NULL,
+    model_id TEXT NOT NULL REFERENCES ai_models(model_id),
+    PRIMARY KEY (user_id, feature)
+);

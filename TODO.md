@@ -5,9 +5,9 @@
 - [x] **1.2 Crypto fields** — encrypt_field, decrypt_field, is_encrypted (in encryption.py).
 - [x] **1.3 Database** — `lazyclaw/db/`: aiosqlite connection pool, schema.sql (7 tables), WAL mode.
 - [x] **1.4 Config** — `lazyclaw/config.py`: Env var loading via python-dotenv, Config dataclass, save_env().
-- [ ] **1.5 Auth** — `lazyclaw/gateway/auth.py`: Registration, login, sessions, encryption_salt. (MVP uses default user)
+- [x] **1.5 Auth** — `lazyclaw/gateway/auth.py`: Registration, login, sessions, encryption_salt. bcrypt hashing, HTTP-only cookies, FastAPI dependency.
 - [x] **1.6 LLM Router** — `lazyclaw/llm/router.py` + `providers/`: OpenAI + Anthropic with tool calling support.
-- [ ] **1.7 Model Manager** — `lazyclaw/llm/model_manager.py`: Model catalog, per-user assignments.
+- [x] **1.7 Model Manager** — `lazyclaw/llm/model_manager.py`: Model catalog, per-user assignments, auto-seeding.
 - [x] **1.8 Basic Agent** — `lazyclaw/runtime/agent.py`: Multi-turn agentic loop with tool calling.
 - [x] **1.9 Conversation Memory** — Messages stored encrypted in agent_messages, last 20 loaded as context.
 - [x] **1.10 Gateway** — `lazyclaw/gateway/app.py`: FastAPI with health check + `/api/agent/chat`.
@@ -19,11 +19,11 @@
 - [x] **2.1 BaseSkill ABC** — `lazyclaw/skills/base.py`: Abstract skill class with to_openai_tool() conversion.
 - [x] **2.2 Skill Registry** — `lazyclaw/skills/registry.py`: Unified registry with register_defaults().
 - [x] **2.3 Instruction Skills** — `lazyclaw/skills/manager.py`: NL template CRUD.
-- [ ] **2.4 Code Skills** — `lazyclaw/skills/sandbox.py`: AST validation + restricted exec.
-- [ ] **2.5 Skill Writer** — `lazyclaw/skills/writer.py`: AI-generated code skills.
+- [x] **2.4 Code Skills** — `lazyclaw/skills/sandbox.py`: AST validation + restricted exec. CodeSkill class.
+- [x] **2.5 Skill Writer** — `lazyclaw/skills/writer.py`: AI-generated code skills with validation retry.
 - [x] **2.6 Built-in Skills** — `lazyclaw/skills/builtin/`: web_search (DuckDuckGo), get_time, calculate.
 - [x] **2.7 Tool Executor** — `lazyclaw/runtime/tool_executor.py`: Dispatch tool calls to skill registry.
-- [ ] **2.8 Skills API** — `lazyclaw/gateway/routes/skills.py`: CRUD endpoints.
+- [x] **2.8 Skills API** — `lazyclaw/gateway/routes/skills.py`: CRUD + AI generation endpoints.
 
 **Verification**: ✅ Agent calls tools during chat (web_search, get_time, calculate). Multi-turn agentic loop works.
 
@@ -33,9 +33,9 @@
 - [x] **3.3 Personal Memory** — `lazyclaw/memory/personal.py`: Extract from LazyTasker. Encrypted facts/prefs.
 - [x] **3.4 SOUL.md** — `lazyclaw/runtime/personality.py`: Load personality file, inject into system prompt.
 - [x] **3.5 Context Builder** — `lazyclaw/runtime/context_builder.py`: Assemble personality + memory + skills.
-- [ ] **3.6 Daily Logs** — `lazyclaw/memory/daily_log.py`: Auto-summarize sessions.
+- [x] **3.6 Daily Logs** — `lazyclaw/memory/daily_log.py`: Auto-summarize sessions via LLM, encrypted storage.
 - [x] **3.7 Credential Vault** — `lazyclaw/crypto/vault.py`: Encrypted API key storage.
-- [ ] **3.8 Memory API** — `lazyclaw/gateway/routes/memory.py` + `vault.py`: Endpoints.
+- [x] **3.8 Memory API** — `lazyclaw/gateway/routes/memory.py` + `vault.py`: Full REST endpoints.
 
 **Verification**: Messages queue serially. Memory persists across sessions. SOUL.md customization works.
 
@@ -103,13 +103,17 @@
 
 **Verification**: Full mobile experience matching API capabilities.
 
+## Phase 10: Post-Quantum Cryptography (Future)
+- [ ] **10.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).
+- [ ] **10.2 PQC Signatures** — ML-DSA (Dilithium) for message signing if needed (FIPS 204).
+- [ ] **10.3 Encryption Format v2** — `enc:v2:` format with PQC key encapsulation for client-side E2E encryption.
+
+**Context**: Current stack (AES-256-GCM + PBKDF2-HMAC-SHA256 + bcrypt) is already quantum-resistant — symmetric/hash-based crypto only faces Grover's quadratic speedup (256→128-bit, still infeasible). PQC is only needed for key exchange when the Flutter app establishes encrypted channels. CRQC timeline: ~2031-2035. NIST standards finalized Aug 2024.
+
+**Verification**: Flutter app uses hybrid PQC key exchange. Data-at-rest encryption remains AES-256-GCM (already quantum-safe).
+
 ## Done
-- Phase 1 (Foundation): Crypto, DB, config, LLM router, agent, gateway, CLI wizard
-- Phase 2 (Skills + Tools): BaseSkill, registry, 3 built-in skills, tool executor, agentic loop
-- Phase 6 (Channels): Telegram polling adapter, channel base abstractions
-- SOUL.md personality system (from Phase 3)
-- Personal memory + context builder (from Phase 3)
-- Encrypted credential vault with vault skills + LLM router fallback (from Phase 3)
-- Instruction skills with encrypted NL templates (from Phase 2)
-- Skill categories (research, utility, memory, security, skills, custom)
-- Lane queue for per-user serial execution (from Phase 3)
+- Phase 1 (Foundation): ✅ COMPLETE — Crypto, DB, config, LLM router, agent, gateway, CLI wizard, auth, model manager
+- Phase 2 (Skills + Tools): ✅ COMPLETE — BaseSkill, registry, built-in skills, tool executor, agentic loop, code sandbox, skill writer, skills API
+- Phase 3 (Queue + Memory + Personality): ✅ COMPLETE — Lane queue, personal memory, SOUL.md, context builder, credential vault, daily logs, memory/vault API
+- Phase 6 (Channels): Telegram polling adapter, channel base abstractions (partial)

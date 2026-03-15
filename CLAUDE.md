@@ -165,6 +165,10 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/heartbeat/daemon.py` | Background heartbeat daemon, cron job executor |
 | `lazyclaw/gateway/routes/mcp.py` | MCP server management REST API (7 endpoints) |
 | `lazyclaw/gateway/routes/jobs.py` | Job management REST API (7 endpoints) |
+| `lazyclaw/llm/eco_router.py` | ECO mode: routes between free (mcp-freeride) and paid AI |
+| `lazyclaw/llm/eco_settings.py` | ECO settings CRUD (stored in users.settings JSON) |
+| `lazyclaw/llm/rate_limiter.py` | Per-provider sliding window rate limit tracker |
+| `lazyclaw/gateway/routes/eco.py` | ECO mode REST API (settings, usage, rate limits, providers) |
 
 **Standalone: mcp-freeride** (free AI router MCP server):
 | File | Purpose |
@@ -376,6 +380,12 @@ All types unified in the skill registry and converted to OpenAI function-calling
 ### Jobs
 - `GET /api/jobs`, `POST /api/jobs`, `GET /api/jobs/{id}`, `PATCH /api/jobs/{id}`, `DELETE /api/jobs/{id}`
 - `POST /api/jobs/{id}/pause`, `POST /api/jobs/{id}/resume`
+
+### ECO Mode
+- `GET/PATCH /api/eco/settings` — ECO mode config (eco/hybrid/full, provider locks, badges)
+- `GET /api/eco/usage` — Free vs paid usage stats
+- `GET /api/eco/rate-limits` — Known rate limits for all free providers
+- `GET /api/eco/providers` — List configured/available free AI providers
 
 ### Connector
 - `POST /api/connector/token`, `GET /api/connector/status`, `DELETE /api/connector/token`

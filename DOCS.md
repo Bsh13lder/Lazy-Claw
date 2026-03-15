@@ -103,6 +103,55 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 **Constants:** `FEATURE_CHAT`, `FEATURE_BROWSER`, `FEATURE_SKILL_WRITER`, `FEATURE_SUMMARY`, `DEFAULT_MODELS`
 
+### `eco_router.py` — ECO mode: smart free/paid routing
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `EcoRouter` | see below | Routes between free (mcp-freeride) and paid (LLMRouter) |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `__init__` | `(config, paid_router: LLMRouter)` | Initialize with config and paid router |
+| `chat` | `async (messages, user_id, model, **kwargs) -> LLMResponse` | Route based on user's ECO mode |
+| `get_usage` | `(user_id) -> dict` | Get free vs paid usage stats |
+| `get_rate_limit_status` | `() -> dict` | Current rate limits for all providers |
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `classify_task` | `(message, has_tools) -> str` | Heuristic: "free" or "paid" based on message patterns |
+
+**Constants:** `TASK_FREE`, `TASK_PAID`, `_FREE_PATTERNS`, `_PAID_PATTERNS`
+
+**Dataclass:** `EcoSettings` — `mode`, `show_badges`, `monthly_paid_budget`, `locked_provider`, `allowed_providers`, `task_overrides`
+
+### `eco_settings.py` — ECO settings CRUD
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `get_eco_settings` | `async (config, user_id) -> dict` | Get user's ECO settings (from users.settings JSON) |
+| `update_eco_settings` | `async (config, user_id, updates) -> dict` | Update ECO settings, validates mode/providers |
+
+**Constants:** `VALID_MODES = {"eco", "hybrid", "full"}`, `DEFAULT_ECO`
+
+### `rate_limiter.py` — Per-provider sliding window rate limits
+
+| Class | Methods | Description |
+|-------|---------|-------------|
+| `RateLimiter` | see below | Tracks request counts per provider per time window |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `has_capacity` | `(provider) -> bool` | Check if provider has rate limit capacity |
+| `record_request` | `(provider) -> None` | Record a request was made |
+| `wait_seconds` | `(provider) -> float` | Seconds until capacity available |
+| `get_available_providers` | `(providers) -> list[str]` | Filter to providers with capacity |
+| `record_rate_limit_hit` | `(provider) -> None` | Mark provider as rate-limited (fills window) |
+| `get_status` | `() -> dict` | Current status for all providers |
+
+**Dataclass:** `ProviderLimits` — `requests_per_minute`, `requests_per_day`, `tokens_per_minute`
+
+**Constants:** `KNOWN_LIMITS` — Conservative free tier limits for all 7 providers
+
 ---
 
 ## Runtime (`lazyclaw/runtime/`)
@@ -726,6 +775,18 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 **Models:** `CreateJobRequest`, `UpdateJobRequest`
 
+## ECO Routes (`lazyclaw/gateway/routes/eco.py`)
+
+| Route | Handler | Description |
+|-------|---------|-------------|
+| `GET /api/eco/settings` | `get_settings` | Get user's ECO mode settings |
+| `PATCH /api/eco/settings` | `update_settings` | Update ECO settings (mode, providers, badges) |
+| `GET /api/eco/usage` | `get_usage` | Token usage stats (free vs paid counts) |
+| `GET /api/eco/rate-limits` | `get_rate_limits` | Known rate limits for all free providers |
+| `GET /api/eco/providers` | `list_providers` | List configured/available free providers |
+
+**Models:** `UpdateEcoRequest`
+
 ---
 
 ## mcp-freeride (`mcp-freeride/mcp_freeride/`)
@@ -796,12 +857,12 @@ Standalone MCP server that routes across free AI APIs with automatic fallback.
 
 | Metric | Count |
 |--------|-------|
-| **Classes** | 60+ |
-| **Async functions** | 90+ |
-| **Sync functions** | 45+ |
-| **Properties** | 90+ |
+| **Classes** | 63+ |
+| **Async functions** | 95+ |
+| **Sync functions** | 50+ |
+| **Properties** | 95+ |
 | **Built-in skills** | 19 |
-| **API routes** | 55+ |
+| **API routes** | 60+ |
 | **DB tables** | 23 (incl. mcp_connections, agent_jobs, job_queue) |
 | **Free AI providers** | 7 (mcp-freeride) |
 

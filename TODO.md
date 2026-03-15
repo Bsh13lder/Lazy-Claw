@@ -119,7 +119,7 @@
 
 Standalone MCP servers that plug into LazyClaw (or any MCP-compatible client).
 
-- [ ] **mcp-freeride** — Free AI router. Fallback chain across free API sources (Groq free tier, Mistral free, HuggingFace Inference, Ollama local, Cloudflare Workers AI, etc). Auto-detects which is alive, fast, and not rate-limited. Plug in as MCP and LazyClaw never pays for basic tasks.
+- [x] **mcp-freeride** — Free AI router. 7 providers (Groq, Gemini, OpenRouter, Together, Mistral, HuggingFace, Ollama). Health tracking, latency ranking, auto-fallback. Standalone in `mcp-freeride/`.
 - [ ] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. LazyClaw pulls latest registry automatically. Crowdsourced free AI registry.
 - [ ] **mcp-healthcheck** — Background pinger for all configured AI sources. Scores by speed/uptime/model quality, serves live leaderboard. mcp-freeride uses this for intelligent routing.
 - [ ] **mcp-taskai** — Task intelligence via free AI. Auto-categorize tasks, suggest deadlines, detect duplicates, summarize overdue pile. Uses mcp-freeride so it costs $0.
@@ -129,10 +129,106 @@ Dependency chain:
 ```
 LazyClaw Core
     └── mcp-taskai         (smart task features)
-         └── mcp-freeride  (routes to best free AI)
+         └── mcp-freeride  ✅ (routes to best free AI)
               ├── mcp-apihunter   (finds new sources)
               └── mcp-healthcheck (monitors them)
 ```
+
+## Future: ECO Mode — Smart Token Routing (Needs Planning)
+
+Three-tier cost mode for the agent. Needs detailed planning before implementation.
+
+### The 3 Modes
+
+| Mode | Rule | Cost |
+|------|------|------|
+| **ECO** | Free only. Never touches paid. If rate-limited → wait. If too complex → tell user. $0 always. | $0 |
+| **HYBRID** | Agent brain auto-decides per task. Simple → free, complex → paid. Seamless. | Low |
+| **FULL** | Always paid. Maximum quality, no routing. | Normal |
+
+### ECO Mode Behavior (strict $0)
+- Rate-limited? → Wait for free slot (queue with countdown)
+- Still limited? → Try smaller free model (8b instead of 70b)
+- All providers down? → "All free APIs busy, retrying in 30s..."
+- Task too complex for free? → "This needs paid model. Switch to HYBRID or simplify your request?"
+- **Never** sneaks in a paid call. ECO means ECO.
+
+### HYBRID Mode — Agent Brain Decides
+
+| Signal | Routes to |
+|--------|-----------|
+| Summarize / translate / classify | Free |
+| Single-turn, no history needed | Free |
+| Short reply expected (<200 tokens) | Free |
+| Cron job / background task | Free |
+| Browser page reading | Free |
+| Code generation | Paid |
+| Multi-step reasoning / planning | Paid |
+| Tool calling chains | Paid |
+| Follow-up needing context | Paid |
+| Browser complex navigation | Paid |
+
+Simple heuristic first (pattern matching on task type), no LLM classifier needed.
+
+### User Control Over Routing
+
+Users have full control over which AIs handle which tasks:
+
+**Provider Selection:**
+- "Use only Groq" → locks all ECO tasks to Groq, waits if rate-limited
+- "Use Groq + Gemini" → custom mix, user picks which providers are in their pool
+- "Use all free" → default, mcp-freeride picks the fastest available
+- Per-provider toggle: enable/disable any provider from the UI
+
+**Per-Task AI Assignment:**
+- User assigns specific AI per task type from the UI:
+  ```
+  Customer service bot  → groq/llama-3.3-70b (fast responses)
+  Price monitoring       → gemini/flash (good at structured data)
+  Blog post drafting     → openrouter/deepseek (good at writing)
+  Translation            → mistral/small (EU-based, multilingual)
+  Background cron jobs   → ollama/llama3.2 (local, unlimited)
+  ```
+- Different tasks executed by different AIs simultaneously
+- Each response tagged with which AI handled it: `[🌿 groq/llama3]`
+
+**Post-Execution Feedback:**
+- User sees which AI handled each task after the fact
+- Don't like a provider's quality? → disable it for that task type
+- See response quality per provider over time → adjust assignments
+- One-click "never use this AI again" per provider
+
+**Zero-Cost Use Cases (all ECO mode):**
+- Free customer service chatbot (Groq for speed)
+- Free price/stock monitoring (cron job → Gemini for data extraction)
+- Free blog post drafting (OpenRouter/DeepSeek for writing)
+- Free email classification/summarization
+- Free social media content generation
+- Free document translation (Mistral for multilingual)
+- Free code review assistant (local Ollama for privacy)
+
+### Implementation Items
+
+- [x] **ECO Router** — `lazyclaw/llm/eco_router.py`: Sits between agent and LLM router. 3 modes (eco/hybrid/full), task classifier, provider locking, badge tagging.
+- [x] **Rate Limit Tracker** — `lazyclaw/llm/rate_limiter.py`: Per-provider sliding window counters. Pre-emptive switching. Known limits for all 7 providers.
+- [x] **Provider Pool Manager** — User-configurable provider pools via ECO settings. Lock to specific provider, custom mixes, allowed_providers list.
+- [ ] **Task → AI Assignment Table** — New DB table `eco_task_assignments`: maps task_type → provider/model per user. UI lets user drag-and-drop assign AIs to task types.
+- [ ] **Per-Role Rate Budgets** — Isolated rate limits per role so roles don't starve each other.
+- [x] **Task Classifier** — Heuristic regex patterns in eco_router: free/paid keyword matching + message length.
+- [x] **Response Attribution** — Responses tagged with `[ECO provider/model]` or `[PAID model]` badges when show_badges enabled.
+- [ ] **Provider Feedback Loop** — Track user satisfaction per provider (thumbs up/down, disable actions). Auto-deprioritize providers user doesn't like.
+- [ ] **Context Handoff** — When HYBRID switches free→paid: send compressed summary, not full history. When paid→free: include only conclusion, not reasoning chain. Saves tokens on both sides.
+- [x] **Token Budget Dashboard** — In-memory usage tracking (free vs paid counts per user). Basic stats via eco_router.get_usage().
+- [x] **ECO Settings** — `lazyclaw/llm/eco_settings.py`: Stored in users.settings JSON under "eco" key:
+  ```
+  eco_mode: eco | hybrid | full
+  eco_show_badges: true               # show [ECO groq/llama3] tags
+  eco_monthly_paid_budget: 5.00       # max paid spend then force ECO
+  eco_allowed_providers: [groq, gemini, openrouter]  # user's active pool
+  eco_locked_provider: null            # "groq" = use only groq
+  eco_task_overrides: {}               # per-task-type provider assignments
+  ```
+- [x] **ECO API** — `lazyclaw/gateway/routes/eco.py`: 5 endpoints — settings CRUD, usage stats, rate limits, provider list.
 
 ## Phase 10: Post-Quantum Cryptography (Future)
 - [ ] **10.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).
@@ -150,3 +246,5 @@ LazyClaw Core
 - Phase 5 (Computer Control): ✅ COMPLETE — Security manager, native executor, connector server, standalone connector, REST + WS API, 5 agent skills
 - Phase 6 (Channels): Telegram polling adapter, channel base abstractions (partial)
 - Phase 7 (MCP + Heartbeat): ✅ COMPLETE — MCP client/server/bridge, manager, heartbeat daemon, cron jobs, orchestrator, 14 API endpoints
+- mcp-freeride: ✅ COMPLETE — 7 free AI providers, health tracking, latency ranking, auto-fallback, model selector
+- ECO Mode (core): ✅ COMPLETE — eco_router, rate_limiter, eco_settings, task classifier, response badges, 5 API endpoints

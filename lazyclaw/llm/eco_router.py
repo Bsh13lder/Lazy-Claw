@@ -1,0 +1,335 @@
+"""ECO Router — Smart token routing between free and paid AI.
+
+Three modes:
+- ECO:    Free only, $0 always. Waits if rate-limited. No tool calling.
+- HYBRID: Agent auto-decides per task. Simple → free, complex → paid.
+- FULL:   Always paid. Current behavior, maximum quality.
+
+Sits between agent.py and llm/router.py. For free calls, uses
+mcp-freeride's FreeRideRouter directly (as library, not MCP protocol).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from dataclasses import dataclass
+
+from lazyclaw.config import Config
+from lazyclaw.crypto.encryption import derive_server_key, decrypt_field
+from lazyclaw.db.connection import db_session
+from lazyclaw.llm.providers.base import LLMMessage, LLMResponse
+from lazyclaw.llm.rate_limiter import RateLimiter
+from lazyclaw.llm.router import LLMRouter
+
+logger = logging.getLogger(__name__)
+
+# Task types for classification
+TASK_FREE = "free"
+TASK_PAID = "paid"
+
+# Keywords that suggest simple tasks (free-routable)
+_FREE_PATTERNS = re.compile(
+    r"\b(summarize|summary|translate|translation|explain|what is|what are|"
+    r"define|classify|categorize|list|describe|compare|paraphrase|"
+    r"rewrite|simplify|hello|hi|hey|thanks|thank you|good morning|"
+    r"good night|how are you)\b",
+    re.IGNORECASE,
+)
+
+# Keywords that suggest complex tasks (need paid / tools)
+_PAID_PATTERNS = re.compile(
+    r"\b(search|browse|find online|look up|web search|remember|"
+    r"save.*memory|create.*skill|write.*code|generate.*code|"
+    r"run.*command|execute|take.*screenshot|check.*file|read.*file|"
+    r"write.*file|schedule|set.*reminder|cron|browser|open.*page|"
+    r"click|navigate|vault|credential|api.*key)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class EcoSettings:
+    """User's ECO mode configuration."""
+
+    mode: str = "full"  # eco, hybrid, full
+    show_badges: bool = True
+    monthly_paid_budget: float = 0.0  # 0 = unlimited
+    locked_provider: str | None = None  # Lock to specific free provider
+    allowed_providers: list[str] | None = None  # Custom provider pool
+    task_overrides: dict[str, str] | None = None  # task_type → provider/model
+
+
+def _parse_eco_settings(raw: str | None) -> EcoSettings:
+    """Parse eco settings from user's settings JSON."""
+    if not raw:
+        return EcoSettings()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return EcoSettings()
+
+    eco = data.get("eco", {})
+    if not isinstance(eco, dict):
+        return EcoSettings()
+
+    allowed = eco.get("allowed_providers")
+    if allowed and not isinstance(allowed, list):
+        allowed = None
+
+    task_overrides = eco.get("task_overrides")
+    if task_overrides and not isinstance(task_overrides, dict):
+        task_overrides = None
+
+    return EcoSettings(
+        mode=eco.get("mode", "full"),
+        show_badges=eco.get("show_badges", True),
+        monthly_paid_budget=float(eco.get("monthly_paid_budget", 0)),
+        locked_provider=eco.get("locked_provider"),
+        allowed_providers=allowed,
+        task_overrides=task_overrides,
+    )
+
+
+async def _load_eco_settings(config: Config, user_id: str) -> EcoSettings:
+    """Load ECO settings from user's settings column."""
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT settings FROM users WHERE id = ?", (user_id,)
+        )
+        result = await row.fetchone()
+    if not result or not result[0]:
+        return EcoSettings()
+    return _parse_eco_settings(result[0])
+
+
+def classify_task(message: str, has_tools: bool) -> str:
+    """Classify whether a message needs free or paid AI.
+
+    Simple heuristic — no LLM needed:
+    1. If message matches paid patterns (tool-needing) → paid
+    2. If message matches free patterns (simple text) → free
+    3. Short messages (<50 chars) without paid signals → free
+    4. Default → paid (safer fallback)
+    """
+    if _PAID_PATTERNS.search(message):
+        return TASK_PAID
+    if _FREE_PATTERNS.search(message):
+        return TASK_FREE
+    if len(message) < 50:
+        return TASK_FREE
+    return TASK_PAID
+
+
+class EcoRouter:
+    """Routes requests between free (mcp-freeride) and paid (LLM router).
+
+    Usage:
+        eco = EcoRouter(config, paid_router)
+        response = await eco.chat(messages, user_id, tools=[...])
+    """
+
+    def __init__(self, config: Config, paid_router: LLMRouter) -> None:
+        self._config = config
+        self._paid_router = paid_router
+        self._free_router = None  # Lazy init
+        self._rate_limiter = RateLimiter()
+        self._usage: dict[str, dict] = {}  # user_id → {"free": count, "paid": count}
+
+    def _get_free_router(self):
+        """Lazy-init the free router from mcp-freeride."""
+        if self._free_router is not None:
+            return self._free_router
+        try:
+            from mcp_freeride.config import load_config as load_freeride_config
+            from mcp_freeride.router import FreeRideRouter
+
+            freeride_config = load_freeride_config()
+            self._free_router = FreeRideRouter(freeride_config)
+            return self._free_router
+        except ImportError:
+            logger.warning("mcp-freeride not installed, ECO mode unavailable")
+            return None
+
+    def _convert_to_dicts(self, messages: list[LLMMessage]) -> list[dict]:
+        """Convert LLMMessage list to OpenAI-format dicts for free router."""
+        result = []
+        for msg in messages:
+            if msg.role == "tool":
+                continue  # Free APIs don't understand tool results
+            if msg.tool_calls:
+                continue  # Skip assistant messages with tool calls
+            result.append({"role": msg.role, "content": msg.content})
+        return result
+
+    def _record_usage(self, user_id: str, route: str) -> None:
+        """Track usage stats per user."""
+        if user_id not in self._usage:
+            self._usage[user_id] = {"free": 0, "paid": 0}
+        self._usage[user_id][route] += 1
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        model: str | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """Route chat to free or paid based on ECO mode settings."""
+        settings = await _load_eco_settings(self._config, user_id)
+        has_tools = bool(kwargs.get("tools"))
+
+        if settings.mode == "full":
+            self._record_usage(user_id, "paid")
+            return await self._paid_router.chat(messages, model=model, user_id=user_id, **kwargs)
+
+        if settings.mode == "eco":
+            return await self._route_eco(messages, user_id, settings, has_tools, **kwargs)
+
+        if settings.mode == "hybrid":
+            return await self._route_hybrid(messages, user_id, settings, model, has_tools, **kwargs)
+
+        # Unknown mode, fall back to paid
+        self._record_usage(user_id, "paid")
+        return await self._paid_router.chat(messages, model=model, user_id=user_id, **kwargs)
+
+    async def _route_eco(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        has_tools: bool,
+        **kwargs,
+    ) -> LLMResponse:
+        """ECO mode: free only, wait if rate-limited, never paid."""
+        free_router = self._get_free_router()
+        if not free_router:
+            return LLMResponse(
+                content="ECO mode is enabled but no free AI providers are configured. "
+                "Install mcp-freeride and set API keys (GROQ_API_KEY, GEMINI_API_KEY, etc).",
+                model="none",
+            )
+
+        # Build model hint from locked_provider or task override
+        model_hint = None
+        if settings.locked_provider:
+            model_hint = settings.locked_provider + "/"
+
+        # Wait for rate limit capacity (ECO = patient, never paid)
+        max_wait_rounds = 6  # Max ~3 minutes total
+        for attempt in range(max_wait_rounds):
+            try:
+                dict_messages = self._convert_to_dicts(messages)
+                result = await free_router.chat(dict_messages, model_hint)
+                provider = result.get("provider", "free")
+                self._rate_limiter.record_request(provider)
+                self._record_usage(user_id, "free")
+
+                content = result["content"]
+                if settings.show_badges:
+                    badge = f"[ECO {result.get('provider', '?')}/{result.get('model', '?')}] "
+                    content = badge + content
+
+                return LLMResponse(
+                    content=content,
+                    model=result.get("model", "free"),
+                    usage={"provider": provider, "eco_mode": "eco"},
+                )
+            except Exception as exc:
+                if "All" in str(exc) and attempt < max_wait_rounds - 1:
+                    wait = 30
+                    logger.info("ECO: All providers busy, waiting %ds (attempt %d)", wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+        return LLMResponse(
+            content="All free AI providers are currently rate-limited. "
+            "Please try again in a few minutes, or switch to HYBRID mode.",
+            model="none",
+        )
+
+    async def _route_hybrid(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        model: str | None,
+        has_tools: bool,
+        **kwargs,
+    ) -> LLMResponse:
+        """HYBRID mode: auto-decide free vs paid per task."""
+        # Get the user's latest message for classification
+        user_message = ""
+        for msg in reversed(messages):
+            if msg.role == "user":
+                user_message = msg.content
+                break
+
+        task_type = classify_task(user_message, has_tools)
+
+        # Check task overrides from user settings
+        if settings.task_overrides:
+            for pattern, override_provider in settings.task_overrides.items():
+                if pattern.lower() in user_message.lower():
+                    task_type = TASK_FREE
+                    break
+
+        # If task needs tools and we classified as paid → use paid
+        # If task is simple → try free first
+        if task_type == TASK_FREE:
+            free_router = self._get_free_router()
+            if free_router:
+                model_hint = None
+                if settings.locked_provider:
+                    model_hint = settings.locked_provider + "/"
+
+                try:
+                    dict_messages = self._convert_to_dicts(messages)
+                    result = await free_router.chat(dict_messages, model_hint)
+                    provider = result.get("provider", "free")
+                    self._rate_limiter.record_request(provider)
+                    self._record_usage(user_id, "free")
+
+                    content = result["content"]
+                    if settings.show_badges:
+                        badge = f"[ECO {result.get('provider', '?')}/{result.get('model', '?')}] "
+                        content = badge + content
+
+                    return LLMResponse(
+                        content=content,
+                        model=result.get("model", "free"),
+                        usage={"provider": provider, "eco_mode": "hybrid_free"},
+                    )
+                except Exception:
+                    logger.info("HYBRID: Free failed, falling back to paid")
+
+        # Paid path (with full tool support)
+        self._record_usage(user_id, "paid")
+        response = await self._paid_router.chat(messages, model=model, user_id=user_id, **kwargs)
+
+        if settings.show_badges and response.content:
+            response = LLMResponse(
+                content=f"[PAID {response.model}] {response.content}",
+                model=response.model,
+                usage=response.usage,
+                tool_calls=response.tool_calls,
+            )
+        return response
+
+    def get_usage(self, user_id: str) -> dict:
+        """Get usage stats for a user."""
+        stats = self._usage.get(user_id, {"free": 0, "paid": 0})
+        total = stats["free"] + stats["paid"]
+        return {
+            "free_count": stats["free"],
+            "paid_count": stats["paid"],
+            "total": total,
+            "free_percentage": round(stats["free"] / total * 100, 1) if total > 0 else 0,
+        }
+
+    def get_rate_limit_status(self) -> dict:
+        """Get current rate limit status for all providers."""
+        return self._rate_limiter.get_status()

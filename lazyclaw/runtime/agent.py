@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from lazyclaw.config import Config
 from lazyclaw.llm.router import LLMRouter
+from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
@@ -22,9 +23,11 @@ class Agent:
         config: Config,
         router: LLMRouter,
         registry: SkillRegistry | None = None,
+        eco_router: EcoRouter | None = None,
     ) -> None:
         self.config = config
         self.router = router
+        self.eco_router = eco_router or EcoRouter(config, router)
         self.registry = registry
         self.executor = ToolExecutor(registry) if registry else None
 
@@ -78,7 +81,7 @@ class Agent:
             if tools:
                 kwargs["tools"] = tools
 
-            response = await self.router.chat(messages, user_id=user_id, **kwargs)
+            response = await self.eco_router.chat(messages, user_id=user_id, **kwargs)
 
             if not response.tool_calls:
                 # Final text response

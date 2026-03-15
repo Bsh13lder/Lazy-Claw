@@ -1,14 +1,19 @@
-"""LazyClaw CLI — Setup wizard and agent launcher."""
+"""LazyClaw CLI — Unified chat REPL with built-in slash commands."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import secrets
 import uuid
 
+# Suppress httpx async cleanup warnings (Python 3.11 + httpx issue)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
 import click
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
@@ -27,9 +32,33 @@ LOGO = r"""
 |______\        |___/ \_____|_|\__,_| \_/\_/
 """
 
+HELP_TEXT = """\
+[bold]Chat:[/bold] Just type your message and press Enter.
+
+[bold]Info:[/bold]
+  /status      System dashboard (config, stats, modes)
+  /users       List all users
+  /skills      List skills with permissions
+  /traces      Show recent session traces
+  /teams       Team config and specialists
+  /compression Context compression stats
+  /history     Recent conversation messages
+
+[bold]Settings:[/bold]
+  /critic off|on|auto    Set critic mode
+  /team off|on|auto      Set team mode
+  /eco eco|hybrid|full   Set ECO mode
+  /model <name>          Change default model
+
+[bold]Session:[/bold]
+  /clear       Start fresh chat session
+  /wipe        Clear all conversation history
+  /help        Show this help
+  /exit        Quit"""
+
 
 # ---------------------------------------------------------------------------
-# Async helpers
+# Async helpers (setup wizard)
 # ---------------------------------------------------------------------------
 
 async def verify_provider_async(provider: str, key: str) -> bool:
@@ -86,7 +115,7 @@ async def run_agent(config: Config) -> None:
     permission_checker = PermissionChecker(config, registry)
     agent = Agent(config, router, registry, permission_checker=permission_checker)
 
-    # Lane Queue — serial per-user execution
+    # Lane Queue
     from lazyclaw.queue.lane import LaneQueue
 
     lane_queue = LaneQueue()
@@ -94,13 +123,11 @@ async def run_agent(config: Config) -> None:
     await lane_queue.start()
     console.print("[green]\u2713[/green] Lane queue started")
 
-    # Inject queue into gateway
     from lazyclaw.gateway.app import set_lane_queue
     set_lane_queue(lane_queue)
 
     tasks: list = []
 
-    # FastAPI via uvicorn
     import uvicorn
 
     uvi_config = uvicorn.Config(
@@ -112,7 +139,6 @@ async def run_agent(config: Config) -> None:
     server = uvicorn.Server(uvi_config)
     tasks.append(server.serve())
 
-    # Telegram (if configured)
     telegram = None
     if config.telegram_bot_token:
         from lazyclaw.channels.telegram import TelegramAdapter
@@ -121,7 +147,6 @@ async def run_agent(config: Config) -> None:
         await telegram.start()
         console.print("[green]\u2713[/green] Telegram bot running")
 
-    # Heartbeat daemon — proactive checks + cron jobs
     from lazyclaw.heartbeat.daemon import HeartbeatDaemon
 
     heartbeat = HeartbeatDaemon(config, lane_queue)
@@ -144,7 +169,209 @@ async def run_agent(config: Config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Click CLI
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+async def _get_default_user(config: Config) -> str:
+    """Get the default user ID, creating one if needed."""
+    from lazyclaw.db.connection import db_session
+
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT id FROM users WHERE username = ?", ("default",)
+        )
+        result = await row.fetchone()
+        if result:
+            return result[0]
+
+    await setup_database(config)
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT id FROM users WHERE username = ?", ("default",)
+        )
+        result = await row.fetchone()
+        return result[0]
+
+
+# ---------------------------------------------------------------------------
+# Chat REPL — the main experience
+# ---------------------------------------------------------------------------
+
+async def _handle_slash_command(
+    cmd: str, config: Config, user_id: str,
+) -> bool:
+    """Handle a slash command. Returns True if handled, False if not."""
+    from lazyclaw.cli_admin import (
+        clear_history,
+        set_critic_mode,
+        set_eco_mode,
+        set_model,
+        set_team_mode,
+        show_compression,
+        show_skills,
+        show_status,
+        show_teams,
+        show_traces,
+        show_users,
+    )
+
+    parts = cmd.strip().split()
+    command = parts[0].lower()
+    arg = parts[1] if len(parts) > 1 else None
+
+    # Info commands
+    handlers = {
+        "/status": lambda: show_status(config, user_id),
+        "/users": lambda: show_users(config),
+        "/skills": lambda: show_skills(config, user_id),
+        "/traces": lambda: show_traces(config, user_id),
+        "/teams": lambda: show_teams(config, user_id),
+        "/compression": lambda: show_compression(config, user_id),
+        "/wipe": lambda: clear_history(config, user_id),
+        "/history": lambda: _show_chat_history(config, user_id),
+    }
+
+    if command in ("/help", "/"):
+        console.print(Panel(HELP_TEXT, title="Help", border_style="cyan"))
+        return True
+
+    if command in handlers:
+        await handlers[command]()
+        return True
+
+    # Settings commands (require an argument)
+    settings_commands = {
+        "/critic": lambda a: set_critic_mode(config, user_id, a),
+        "/team": lambda a: set_team_mode(config, user_id, a),
+        "/eco": lambda a: set_eco_mode(config, user_id, a),
+        "/model": lambda a: set_model(config, a),
+    }
+
+    if command in settings_commands:
+        if not arg:
+            console.print(f"[yellow]Usage: {command} <value>. Try /help[/yellow]")
+        else:
+            # For /model, preserve original case
+            actual_arg = parts[1] if command == "/model" else arg
+            await settings_commands[command](actual_arg)
+        return True
+
+    return False
+
+
+async def _show_chat_history(config: Config, user_id: str) -> None:
+    """Show recent messages for the current user."""
+    from lazyclaw.crypto.encryption import decrypt, derive_server_key
+    from lazyclaw.db.connection import db_session
+
+    key = derive_server_key(config.server_secret, user_id)
+
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT role, content, created_at FROM agent_messages "
+            "WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            (user_id,),
+        )
+        messages = await rows.fetchall()
+
+    if not messages:
+        console.print("[dim]No conversation history.[/dim]")
+        return
+
+    table = Table(title="Recent Messages", style="cyan")
+    table.add_column("Time", style="dim", width=19)
+    table.add_column("Role", style="bold", width=10)
+    table.add_column("Content", max_width=60)
+
+    for row in reversed(messages):
+        role, content_enc, created_at = row[0], row[1], row[2]
+        try:
+            content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
+        except Exception:
+            content = "[encrypted]"
+        display = content[:80] + "..." if len(content) > 80 else content
+        role_style = "cyan" if role == "user" else "green" if role == "assistant" else "dim"
+        table.add_row(created_at or "", f"[{role_style}]{role}[/{role_style}]", display)
+
+    console.print(table)
+
+
+async def _chat_loop() -> None:
+    from lazyclaw.db.connection import init_db
+    from lazyclaw.llm.router import LLMRouter
+    from lazyclaw.permissions.checker import PermissionChecker
+    from lazyclaw.runtime.agent import Agent
+    from lazyclaw.skills.registry import SkillRegistry
+
+    config = load_config()
+
+    if not config.server_secret or not (config.openai_api_key or config.anthropic_api_key):
+        console.print("[red]Not configured. Run 'lazyclaw setup' first.[/red]")
+        raise SystemExit(1)
+
+    await init_db(config)
+
+    router = LLMRouter(config)
+    registry = SkillRegistry()
+    registry.register_defaults(config=config)
+    checker = PermissionChecker(config, registry)
+    agent = Agent(config, router, registry, permission_checker=checker)
+    user_id = await _get_default_user(config)
+
+    console.print(Panel(LOGO, subtitle=f"v{__version__}", style="cyan"))
+    console.print("[dim]Type a message to chat. /help for commands. Ctrl+C to quit.[/dim]")
+    console.print()
+
+    chat_session_id: str | None = None
+
+    while True:
+        try:
+            user_input = console.input("[bold cyan]> [/bold cyan]")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]Goodbye![/yellow]")
+            break
+
+        stripped = user_input.strip()
+        if not stripped:
+            continue
+
+        # Exit
+        if stripped.lower() in ("/exit", "/quit", "/q"):
+            console.print("[yellow]Goodbye![/yellow]")
+            break
+
+        # Clear session
+        if stripped.lower() == "/clear":
+            chat_session_id = None
+            console.print("[green]Chat session cleared.[/green]")
+            continue
+
+        # Slash commands
+        if stripped.startswith("/"):
+            handled = await _handle_slash_command(stripped, config, user_id)
+            if handled:
+                console.print()
+                continue
+            console.print(f"[yellow]Unknown command: {stripped.split()[0]}. Try /help[/yellow]")
+            continue
+
+        # Chat with agent
+        with console.status("[dim]Thinking...[/dim]"):
+            try:
+                response = await agent.process_message(
+                    user_id, stripped, chat_session_id=chat_session_id,
+                )
+            except Exception as e:
+                console.print(f"[red]Error: {e}[/red]")
+                continue
+
+        console.print()
+        console.print(Panel(Markdown(response), title="LazyClaw", border_style="green"))
+        console.print()
+
+
+# ---------------------------------------------------------------------------
+# Click CLI — minimal, chat-first
 # ---------------------------------------------------------------------------
 
 @click.group(invoke_without_command=True)
@@ -152,22 +379,17 @@ async def run_agent(config: Config) -> None:
 def main(ctx: click.Context) -> None:
     """LazyClaw - E2E Encrypted AI Agent Platform."""
     if ctx.invoked_subcommand is None:
-        console.print(
-            Panel(
-                LOGO,
-                subtitle=f"v{__version__}",
-                style="cyan",
-            )
-        )
-        console.print("Run [bold cyan]lazyclaw setup[/bold cyan] to get started.")
-        console.print("Run [bold cyan]lazyclaw start[/bold cyan] to launch the agent.")
+        # Default: drop into chat
+        try:
+            asyncio.run(_chat_loop())
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Goodbye![/yellow]")
 
 
 @main.command()
 def setup() -> None:
     """Interactive setup wizard for LazyClaw."""
 
-    # ── 1. Welcome ─────────────────────────────────────────────────────
     console.print(
         Panel(
             LOGO,
@@ -177,7 +399,7 @@ def setup() -> None:
     )
     console.print()
 
-    # ── 2. SERVER_SECRET ───────────────────────────────────────────────
+    # SERVER_SECRET
     root = get_project_root()
     env_path = root / ".env"
 
@@ -198,7 +420,7 @@ def setup() -> None:
 
     console.print()
 
-    # ── 3. AI Provider ─────────────────────────────────────────────────
+    # AI Provider
     provider = Prompt.ask(
         "[bold cyan]Choose your AI provider[/bold cyan]",
         choices=["openai", "anthropic"],
@@ -240,7 +462,7 @@ def setup() -> None:
 
     console.print()
 
-    # ── 4. Telegram ────────────────────────────────────────────────────
+    # Telegram
     telegram_username: str | None = None
 
     if Confirm.ask("[bold cyan]Set up Telegram bot?[/bold cyan]", default=True):
@@ -292,7 +514,7 @@ def setup() -> None:
 
     console.print()
 
-    # ── 5. Database ────────────────────────────────────────────────────
+    # Database
     config = load_config()
     with console.status("[bold cyan]Initializing database..."):
         try:
@@ -304,8 +526,8 @@ def setup() -> None:
     console.print("[green]\u2713[/green] Database initialized")
     console.print()
 
-    # ── 6. Summary ─────────────────────────────────────────────────────
-    config = load_config()  # reload after all saves
+    # Summary
+    config = load_config()
 
     table = Table(title="Configuration Summary", style="cyan")
     table.add_column("Setting", style="bold")
@@ -330,19 +552,12 @@ def setup() -> None:
     console.print(table)
     console.print()
 
-    # ── 7. Auto-start offer ────────────────────────────────────────────
-    if Confirm.ask("[bold cyan]Start LazyClaw now?[/bold cyan]", default=True):
-        _do_start()
+    console.print("[bold green]Setup complete![/bold green] Run [bold cyan]lazyclaw[/bold cyan] to start chatting.")
 
 
 @main.command()
 def start() -> None:
-    """Start the LazyClaw agent."""
-    _do_start()
-
-
-def _do_start() -> None:
-    """Shared start logic for both the setup wizard and the start command."""
+    """Start the full agent (API + Telegram + Heartbeat)."""
     config = load_config()
 
     if not config.server_secret:

@@ -53,13 +53,13 @@ async def compress_history(
     decrypted = []
     for msg_id, role, content, tool_name, metadata in raw_messages:
         text = decrypt(content, key) if content.startswith("enc:") else content
-        has_tool_calls = bool(metadata)
         decrypted.append({
             "id": msg_id,
             "role": role,
             "content": text,
             "tool_name": tool_name,
-            "has_tool_calls": has_tool_calls,
+            "metadata": metadata,
+            "has_tool_calls": bool(metadata),
         })
 
     # If within window, no compression needed
@@ -112,13 +112,33 @@ async def compress_history(
 
 
 def _to_llm_messages(messages: list[dict]) -> list[LLMMessage]:
-    """Convert message dicts to LLMMessage objects."""
+    """Convert message dicts to LLMMessage objects.
+
+    Reconstructs tool_calls on assistant messages from stored metadata,
+    so OpenAI sees the required assistant(tool_calls) -> tool(result) sequence.
+    """
+    import json
+    from lazyclaw.llm.providers.base import ToolCall
+
     result = []
     for m in messages:
+        tool_calls = None
+        metadata_raw = m.get("metadata")
+        if m["role"] == "assistant" and metadata_raw:
+            try:
+                tc_list = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw
+                tool_calls = [
+                    ToolCall(id=tc["id"], name=tc["name"], arguments=tc["arguments"])
+                    for tc in tc_list
+                ]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
         result.append(LLMMessage(
             role=m["role"],
             content=m["content"],
             tool_call_id=m.get("tool_name"),
+            tool_calls=tool_calls,
         ))
     return result
 

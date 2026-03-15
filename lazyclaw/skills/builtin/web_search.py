@@ -32,14 +32,19 @@ class WebSearchSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from duckduckgo_search import AsyncDDGS
+        import asyncio
+        from duckduckgo_search import DDGS
 
         query = params["query"]
         max_results = params.get("max_results", 5)
 
         try:
-            async with AsyncDDGS() as ddgs:
-                results = await ddgs.atext(query, max_results=max_results)
+            # DDGS v8+ is sync-only, run in thread to avoid blocking
+            def _search():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=max_results))
+
+            results = await asyncio.get_event_loop().run_in_executor(None, _search)
 
             if not results:
                 return f"No results found for: {query}"

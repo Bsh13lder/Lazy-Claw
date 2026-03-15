@@ -21,6 +21,21 @@ async def init_db(config: Config) -> None:
     db_path = get_db_path(config)
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(schema_sql)
+
+        # Migrations — add columns that may not exist in older DBs
+        migrations = [
+            ("users", "role", "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"),
+            ("users", "settings", "ALTER TABLE users ADD COLUMN settings TEXT DEFAULT '{}'"),
+        ]
+        for table, column, sql in migrations:
+            try:
+                row = await db.execute(f"PRAGMA table_info({table})")
+                columns = [r[1] for r in await row.fetchall()]
+                if column not in columns:
+                    await db.execute(sql)
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+
         await db.commit()
 
 

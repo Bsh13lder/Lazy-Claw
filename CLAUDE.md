@@ -108,7 +108,8 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 **Implemented** (working):
 | File | Purpose |
 |------|---------|
-| `lazyclaw/cli.py` | CLI entry point: `lazyclaw setup` wizard + `lazyclaw start` |
+| `lazyclaw/cli.py` | CLI entry point: chat REPL (default), setup wizard, full server start |
+| `lazyclaw/cli_admin.py` | Async admin functions called by chat REPL slash commands |
 | `lazyclaw/config.py` | Environment variable loading via python-dotenv, Config dataclass |
 | `lazyclaw/crypto/encryption.py` | AES-256-GCM encrypt/decrypt, PBKDF2 key derivation, enc:v1: format |
 | `lazyclaw/db/schema.sql` | Core database schema (22 tables) |
@@ -348,8 +349,27 @@ npx @modelcontextprotocol/inspector python -m mcp_taskai
 ```
 
 ### CLI Commands
+- `lazyclaw` — Drops straight into interactive chat REPL (the main experience)
 - `lazyclaw setup` — Interactive wizard: generates SERVER_SECRET, configures AI provider (OpenAI/Anthropic), sets up Telegram bot, initializes DB
-- `lazyclaw start` — Starts FastAPI gateway + Telegram polling concurrently
+- `lazyclaw start` — Starts full server (FastAPI gateway + Telegram polling + Heartbeat)
+
+### Chat REPL Slash Commands
+Inside the chat REPL (`lazyclaw`), all admin/monitoring is available as slash commands:
+- `/status` — System dashboard (config, DB stats, agent modes)
+- `/users` — List all users with role and message count
+- `/skills` — List all skills with permission levels
+- `/traces` — Show recent session traces
+- `/teams` — Team config and specialist list
+- `/compression` — Context compression stats
+- `/history` — Recent conversation messages
+- `/clear` — Start fresh chat session
+- `/wipe` — Clear all conversation history (with confirmation)
+- `/critic off|on|auto` — Set critic mode
+- `/team off|on|auto` — Set team mode
+- `/eco eco|hybrid|full` — Set ECO mode
+- `/model <name>` — Change default model
+- `/help` — Show all available commands
+- `/exit` — Quit
 
 ## E2E Encryption
 

@@ -20,6 +20,9 @@ from lazyclaw.gateway.routes.mcp import router as mcp_router
 from lazyclaw.gateway.routes.jobs import router as jobs_router
 from lazyclaw.gateway.routes.eco import router as eco_router
 from lazyclaw.gateway.routes.permissions import router as permissions_router
+from lazyclaw.gateway.routes.teams import router as teams_router
+from lazyclaw.gateway.routes.compression import router as compression_router
+from lazyclaw.gateway.routes.replay import router as replay_router
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -66,6 +69,9 @@ app.include_router(mcp_router)
 app.include_router(jobs_router)
 app.include_router(eco_router)
 app.include_router(permissions_router)
+app.include_router(teams_router)
+app.include_router(compression_router)
+app.include_router(replay_router)
 
 
 class ChatRequest(BaseModel):

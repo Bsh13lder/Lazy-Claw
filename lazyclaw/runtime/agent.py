@@ -44,19 +44,25 @@ class Agent:
     ) -> str:
         key = derive_server_key(self.config.server_secret, user_id)
 
-        # Load conversation history
+        # Initialize trace recorder
+        from lazyclaw.replay.recorder import TraceRecorder
+        recorder = TraceRecorder(self.config, user_id)
+        await recorder.record_user_message(message)
+
+        # Load conversation history with compression
         async with db_session(self.config) as db:
             rows = await db.execute(
-                "SELECT role, content FROM agent_messages "
-                "WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+                "SELECT id, role, content, tool_name, metadata FROM agent_messages "
+                "WHERE user_id = ? ORDER BY created_at ASC",
                 (user_id,),
             )
             history_rows = await rows.fetchall()
 
-        history: list[LLMMessage] = []
-        for role, content in reversed(history_rows):
-            decrypted = decrypt(content, key) if content.startswith("enc:") else content
-            history.append(LLMMessage(role=role, content=decrypted))
+        from lazyclaw.memory.compressor import compress_history
+        history = await compress_history(
+            self.config, self.eco_router, user_id, chat_session_id,
+            raw_messages=history_rows,
+        )
 
         # Load user's custom instruction skills into registry
         from lazyclaw.skills.manager import load_user_skills
@@ -65,6 +71,57 @@ class Agent:
         # Build prompt with memories
         from lazyclaw.runtime.context_builder import build_context
         system_prompt = await build_context(self.config, user_id)
+
+        # Check team mode — delegate to specialists if complex
+        from lazyclaw.teams.settings import get_team_settings
+        from lazyclaw.teams.specialist import load_specialists
+        from lazyclaw.teams.lead import TeamLead
+
+        team_settings = await get_team_settings(self.config, user_id)
+        if team_settings.get("mode", "auto") != "never":
+            specialists = await load_specialists(self.config, user_id)
+            team_lead = TeamLead(self.config, self.eco_router)
+            team_result = await team_lead.process(
+                user_id=user_id,
+                message=message,
+                settings=team_settings,
+                specialists=specialists,
+                registry=self.registry,
+                permission_checker=self.executor._checker if self.executor else None,
+            )
+            if team_result is not None:
+                await recorder.record_team_delegation("team_lead", message)
+                await recorder.record_final_response(team_result)
+                # Store user message + team response encrypted
+                async with db_session(self.config) as db:
+                    if not chat_session_id:
+                        row = await db.execute(
+                            "SELECT id FROM agent_chat_sessions "
+                            "WHERE user_id = ? AND archived_at IS NULL "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (user_id,),
+                        )
+                        existing = await row.fetchone()
+                        if existing:
+                            chat_session_id = existing[0]
+                        else:
+                            chat_session_id = str(uuid4())
+                            await db.execute(
+                                "INSERT INTO agent_chat_sessions (id, user_id) VALUES (?, ?)",
+                                (chat_session_id, user_id),
+                            )
+
+                    for role, content in [("user", message), ("assistant", team_result)]:
+                        msg_id = str(uuid4())
+                        await db.execute(
+                            "INSERT INTO agent_messages "
+                            "(id, user_id, chat_session_id, role, content) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (msg_id, user_id, chat_session_id, role, encrypt(content, key)),
+                        )
+                    await db.commit()
+
+                return team_result
 
         # Get tools
         tools = self.registry.list_tools() if self.registry else []
@@ -86,7 +143,15 @@ class Agent:
             if tools:
                 kwargs["tools"] = tools
 
+            await recorder.record_llm_call(
+                model=None, message_count=len(messages), has_tools=bool(tools),
+            )
             response = await self.eco_router.chat(messages, user_id=user_id, **kwargs)
+            await recorder.record_llm_response(
+                content=response.content or "",
+                model=response.model,
+                has_tool_calls=bool(response.tool_calls),
+            )
 
             if not response.tool_calls:
                 # Final text response
@@ -106,7 +171,9 @@ class Agent:
 
             # Execute each tool call
             for tc in response.tool_calls:
+                await recorder.record_tool_call(tc.name, tc.arguments)
                 result = await self.executor.execute(tc, user_id)
+                await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
 
                 # Handle approval-required responses
                 if isinstance(result, str) and result.startswith(APPROVAL_PREFIX):
@@ -201,6 +268,7 @@ class Agent:
                 )
             await db.commit()
 
-        # Return the final assistant message content
+        # Record and return the final assistant message content
         final = all_new_messages[-1]
+        await recorder.record_final_response(final.content)
         return final.content

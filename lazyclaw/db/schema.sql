@@ -224,3 +224,72 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_user_created
 ON audit_log(user_id, created_at);
+
+-- Multi-Agent Teams
+
+CREATE TABLE IF NOT EXISTS specialists (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    system_prompt TEXT NOT NULL,
+    allowed_skills TEXT NOT NULL,
+    preferred_model TEXT,
+    is_builtin INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_team_messages (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    team_session_id TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_messages_session
+ON agent_team_messages(team_session_id);
+
+-- Context Compression
+
+CREATE TABLE IF NOT EXISTS message_summaries (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    chat_session_id TEXT,
+    from_message_id TEXT NOT NULL,
+    to_message_id TEXT NOT NULL,
+    message_count INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_summaries_user_session
+ON message_summaries(user_id, chat_session_id);
+
+-- Session Replay
+
+CREATE TABLE IF NOT EXISTS agent_traces (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    trace_session_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    entry_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_traces_session
+ON agent_traces(trace_session_id, sequence);
+
+CREATE TABLE IF NOT EXISTS trace_shares (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    trace_session_id TEXT NOT NULL,
+    share_token TEXT NOT NULL UNIQUE,
+    expires_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);

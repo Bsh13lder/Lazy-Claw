@@ -60,17 +60,11 @@
 
 **Verification**: Agent runs shell commands, reads files, takes screenshots.
 
-## Phase 6: Channels
+## Phase 6: Channels (Telegram — partial)
 - [x] **6.1 Channel Base** — `lazyclaw/channels/base.py`: ChannelAdapter ABC, InboundMessage/OutboundMessage.
-- [ ] **6.2 Channel Router** — `lazyclaw/channels/router.py`: Message -> queue routing.
-- [x] **6.3 Telegram** — `lazyclaw/channels/telegram.py`: python-telegram-bot polling adapter. TODO: webhook mode.
-- [ ] **6.4 Discord** — `lazyclaw/channels/discord.py`: discord.py adapter.
-- [ ] **6.5 WhatsApp** — `lazyclaw/channels/whatsapp.py`: whatsapp-web.js sidecar adapter.
-- [ ] **6.6 Signal** — `lazyclaw/channels/signal.py`: signal-cli adapter.
-- [ ] **6.7 SimpleX** — `lazyclaw/channels/simplex.py`: WebSocket CLI adapter.
-- [ ] **6.8 Channels API** — `lazyclaw/gateway/routes/channels.py`: Config, bind/unbind.
+- [x] **6.2 Telegram** — `lazyclaw/channels/telegram.py`: python-telegram-bot polling adapter.
 
-**Verification**: ✅ Send Telegram message, get AI response back (with tool calling).
+**Verification**: ✅ Send Telegram message, get AI response back (with tool calling). Remaining channels moved to Phase 11.
 
 ## Phase 7: MCP + Heartbeat ✅ COMPLETE
 - [x] **7.1 MCP Client** — `lazyclaw/mcp/client.py`: Connect to external MCP servers (stdio/SSE/streamable_http).
@@ -99,26 +93,12 @@
 
 **Verification**: Permission checker resolves all skills. Deny blocks execution. Ask triggers inline approval flow. Admin role assigned to first user. Audit log records all actions.
 
-## Phase 8: LazyTasker Plugin + Docker
-- [ ] **8.1 LazyTasker Plugin** — `plugins/lazytasker/`: Optional integration (tasks, projects, expenses).
-- [ ] **8.2 Plugin Loader** — `lazyclaw/skills/loader.py`: Load plugin packages from filesystem.
-- [ ] **8.3 Docker** — `Dockerfile`, `docker-compose.yml`: Containerized deployment.
-- [ ] **8.4 Documentation** — `README.md`: Setup guide, architecture, plugin development guide.
-- [ ] **8.5 Example Plugin** — `plugins/example/`: Template for community plugin development.
-
-**Verification**: `docker compose up` boots everything. LazyTasker plugin works.
-
-## Phase 9: Flutter App
-- [ ] **9.1 Project Setup** — Flutter project, theme, navigation.
-- [ ] **9.2 Auth** — Login, registration, E2E key derivation (client-side PBKDF2).
-- [ ] **9.3 Chat UI** — Agent chat, message history, archives.
-- [ ] **9.4 Skills UI** — Browse, create, manage skills.
-- [ ] **9.5 Browser UI** — Live view, takeover, checkpoints.
-- [ ] **9.6 Memory UI** — View/delete memories, daily logs.
-- [ ] **9.7 Channels UI** — Configure and bind messaging channels.
-- [ ] **9.8 Settings** — Model assignments, API keys, SOUL.md editor.
-
-**Verification**: Full mobile experience matching API capabilities.
+## Future: LazyTasker Plugin + Docker
+- [ ] **LazyTasker Plugin** — `plugins/lazytasker/`: Optional integration (tasks, projects, expenses).
+- [ ] **Plugin Loader** — `lazyclaw/skills/loader.py`: Load plugin packages from filesystem.
+- [ ] **Docker** — `Dockerfile`, `docker-compose.yml`: Containerized deployment.
+- [ ] **Documentation** — `README.md`: Setup guide, architecture, plugin development guide.
+- [ ] **Example Plugin** — `plugins/example/`: Template for community plugin development.
 
 ## Future: Browser Enhancements
 - [ ] **Real Chrome Mode** — Connect to user's actual Chrome via CDP (Chrome DevTools Protocol) instead of headless Playwright. Uses existing connector WebSocket pattern. Benefits: already logged in everywhere, real browser fingerprint, no bot detection, no CAPTCHAs.
@@ -244,39 +224,97 @@ Users have full control over which AIs handle which tasks:
   ```
 - [x] **ECO API** — `lazyclaw/gateway/routes/eco.py`: 5 endpoints — settings CRUD, usage stats, rate limits, provider list.
 
-## Future: Multi-Agent Teams (Inspired by CAMEL)
+## Phase 8: Multi-Agent Teams (Inspired by CAMEL)
 
 Internal agent-to-agent collaboration. A **team lead** (stronger AI) manages **specialist workers** — each with their own system prompt, tools, and expertise. Not about cost — about better results through specialization. Inspired by [CAMEL](https://github.com/camel-ai/camel) role-playing concept.
 
-- [ ] **Team Lead Agent** — The "brain" that receives the user request, breaks it into sub-tasks, delegates to specialists, reviews results, and assembles the final answer. Uses the strongest available model.
-- [ ] **Specialist Agents** — Domain-specific workers the team lead delegates to:
+- [x] **8.1 Specialist Definition** — `lazyclaw/teams/specialist.py`: SpecialistConfig frozen dataclass (name, system_prompt, allowed_skills, model). Registry of built-in specialists.
+- [x] **8.2 Specialist Runner** — `lazyclaw/teams/runner.py`: Run a specialist as an independent agent loop with its own tool subset. Returns structured result.
+- [x] **8.3 Team Lead Agent** — `lazyclaw/teams/lead.py`: Receives user request, analyzes complexity, breaks into sub-tasks, delegates to specialists, merges results into final answer.
+- [x] **8.4 Parallel Execution** — `lazyclaw/teams/executor.py`: Run multiple specialists concurrently via asyncio.gather(). Results collected and fed back to team lead.
+- [x] **8.5 Critic Agent** — Integrated into team lead merge step (single LLM call for merge + critic when 2+ specialists). Auto-activates based on critic_mode setting.
+- [x] **8.6 Agent Conversations** — `lazyclaw/teams/conversation.py`: Internal message queue between agents (not user-visible). Stored encrypted in `agent_team_messages` table for debugging.
+- [x] **8.7 Dynamic Team Composition** — Team lead decides which specialists to involve based on the task. Simple question → no team, answer directly. Complex task → assemble the right team.
+- [x] **8.8 Built-in Specialists** — 4 default specialists:
   - `browser_specialist` — Web browsing, page reading, form filling. Has browser tools only.
   - `code_specialist` — Code generation, skill writing, debugging. Has code sandbox.
   - `research_specialist` — Web search, data gathering, summarization. Has search tools.
   - `memory_specialist` — Context recall, fact checking against stored memories.
-  - Each specialist has its own system prompt, tool subset, and personality.
-- [ ] **Critic Agent** — Reviews team output before sending to user. Catches mistakes, validates facts, suggests improvements. Independent quality gate.
-- [ ] **Agent Conversations** — Internal message queue between agents (not user-visible). Team lead sends instructions, specialists report back. Stored encrypted for debugging.
-- [ ] **Dynamic Team Composition** — Team lead decides which specialists to involve based on the task. Simple question → no team, answer directly. Complex task → assemble the right team.
+- [x] **8.9 Teams API** — `lazyclaw/gateway/routes/teams.py`: 8 REST endpoints (settings, specialists, sessions).
+- [x] **8.10 Agent Integration** — Wire team mode into main agent loop. Agent detects complex tasks and activates team mode automatically.
+- [ ] **8.11 Exclusive Skills** — Specialist-only skills not available to solo agent or other specialists. (Future)
 
-## Future: Borrowed Ideas (from Eigent)
+**Verification**: User sends complex request → team lead splits into sub-tasks → specialists run in parallel → critic reviews → merged answer returned. Simple requests bypass team mode.
 
-Ideas discovered while researching [Eigent](https://github.com/eigent-ai/eigent) — an open-source multi-agent desktop platform built on CAMEL-AI.
+## Phase 9: Context Compression
 
-- [ ] **Parallel Sub-Agent Execution** — Let the agent spawn parallel sub-agents within a single task. Example: browser research + memory lookup + web search all run simultaneously, results merged. Current agent loop is sequential (max 10 iterations). Sub-agents would each get their own tool subset and run as independent async tasks, feeding results back to the main agent.
+Smart context window management for long conversations. Compress older messages into summaries instead of dropping them.
 
-- [ ] **Workflow Builder UI** — Visual drag-and-drop editor (React Flow style) for composing multi-step agent workflows. Users connect skill blocks into a graph: trigger → search → summarize → save to memory. Each node is a skill or agent action. The graph compiles to an executable workflow stored in DB. Eliminates need to write instruction skills for multi-step automations. Requires web frontend (Phase 9+ or standalone web UI).
+- [x] **9.1 Message Classifier** — `lazyclaw/memory/classifier.py`: Heuristic priority classification (high/medium/low). Tool results + code = high, greetings = low.
+- [x] **9.2 Rolling Summarizer** — `lazyclaw/memory/summarizer.py`: LLM-powered summarization with priority guidance. Keeps high items verbatim, compresses medium, drops low.
+- [x] **9.3 Compression Engine** — `lazyclaw/memory/compressor.py`: Sliding window (last 15 full, older summarized). Persistent summaries in `message_summaries` table.
+- [x] **9.4 Agent Integration** — Updated `agent.py`: loads all messages, compresses via compressor, passes to agent loop.
+- [ ] **9.5 Team Context Handoff** — When multi-agent teams hand off between specialists: send compressed summary, not full history. Saves tokens. (Future)
+- [x] **9.6 Compression API** — `lazyclaw/gateway/routes/compression.py`: Stats + force re-summarize (2 endpoints).
 
-- [ ] **Session Replay** — Record full agent sessions (every LLM call, tool invocation, result) as replayable traces. Shareable via token — anyone with the link can watch the agent's decision process step-by-step. Useful for debugging ("why did the agent do that?"), demos, and building trust. Foundation already exists: `browser_task_logs` stores step-by-step browser actions. Extend to all agent interactions with a unified `agent_trace` table.
+**Verification**: Long conversation stays coherent past 50+ messages. Agent recalls facts from compressed history. Token usage drops significantly vs raw loading.
 
-- [ ] **Context Compression** — Smart context window management for long conversations. When context grows large, compress older messages into summaries instead of dropping them. Techniques: rolling summarization, importance-based pruning (keep tool results, drop chitchat), prompt caching for repeated system prompt + personality. Currently `context_builder.py` loads everything raw — no compression or caching.
+## Phase 10: Session Replay
 
-- [ ] **Skill Benchmarks** — Eval-driven skill development. Define standard tasks per skill (e.g., "search for X and return Y", "browse site and extract Z") with expected outcomes. Run benchmarks after changes to measure agent quality. Catch regressions before they ship. Start with browser and computer skills since they're the most complex.
+Record full agent sessions as replayable traces. Every LLM call, tool invocation, result = recorded step-by-step.
 
-## Phase 10: Post-Quantum Cryptography (Future)
-- [ ] **10.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).
-- [ ] **10.2 PQC Signatures** — ML-DSA (Dilithium) for message signing if needed (FIPS 204).
-- [ ] **10.3 Encryption Format v2** — `enc:v2:` format with PQC key encapsulation for client-side E2E encryption.
+- [x] **10.1 Trace Recorder** — `lazyclaw/replay/recorder.py`: Fire-and-forget recorder capturing every agent action (LLM call, tool call, tool result, team delegation, final response) into `agent_traces` table. Encrypted.
+- [x] **10.2 Trace Models** — `lazyclaw/replay/models.py`: TraceEntry, TraceSession frozen dataclasses. 9 entry types.
+- [x] **10.3 Trace Storage** — DB schema: `agent_traces` table (session_id, sequence, entry_type, content encrypted, metadata) + `trace_shares` table.
+- [x] **10.4 Replay Engine** — `lazyclaw/replay/engine.py`: Load trace by session or share token, step through entries as timeline. Delete traces.
+- [x] **10.5 Share Tokens** — `lazyclaw/replay/sharing.py`: Generate shareable URL-safe tokens with optional expiration. Revoke shares.
+- [x] **10.6 Replay API** — `lazyclaw/gateway/routes/replay.py`: 7 REST endpoints (traces CRUD, share CRUD, public view).
+- [x] **10.7 Agent Integration** — Recorder wired into agent loop: records user message, LLM calls, LLM responses, tool calls, tool results, team delegations, final response.
+
+**Verification**: Run agent task → view full replay step-by-step → share via token → recipient sees the same trace. Team conversations visible in replay.
+
+## Future: Workflow Builder UI
+
+Visual drag-and-drop editor (React Flow style) for composing multi-step agent workflows. Requires web frontend — deferred until web UI exists.
+
+- [ ] **Workflow Graph Editor** — React Flow canvas, skill blocks as nodes, data flow as edges.
+- [ ] **Workflow Compiler** — Graph → executable workflow stored in DB.
+- [ ] **Workflow Runner** — Execute compiled workflows via agent runtime.
+
+## Future: Skill Benchmarks
+
+Eval-driven skill development. Define standard tasks per skill with expected outcomes. Run benchmarks after changes to measure agent quality.
+
+- [ ] **Benchmark Definitions** — Standard test cases per skill with expected results.
+- [ ] **Benchmark Runner** — Execute benchmarks, compare actual vs expected.
+- [ ] **Regression Detection** — Flag quality drops after code changes.
+
+## Phase 11: Channels (Remaining)
+- [ ] **11.1 Channel Router** — `lazyclaw/channels/router.py`: Message -> queue routing.
+- [ ] **11.2 Discord** — `lazyclaw/channels/discord.py`: discord.py adapter.
+- [ ] **11.3 WhatsApp** — `lazyclaw/channels/whatsapp.py`: whatsapp-web.js sidecar adapter.
+- [ ] **11.4 Signal** — `lazyclaw/channels/signal.py`: signal-cli adapter.
+- [ ] **11.5 SimpleX** — `lazyclaw/channels/simplex.py`: WebSocket CLI adapter.
+- [ ] **11.6 Channels API** — `lazyclaw/gateway/routes/channels.py`: Config, bind/unbind.
+
+**Verification**: Messages from Discord/WhatsApp/Signal/SimpleX route through queue and get AI responses.
+
+## Phase 12: Flutter App
+- [ ] **12.1 Project Setup** — Flutter project, theme, navigation.
+- [ ] **12.2 Auth** — Login, registration, E2E key derivation (client-side PBKDF2).
+- [ ] **12.3 Chat UI** — Agent chat, message history, archives.
+- [ ] **12.4 Skills UI** — Browse, create, manage skills.
+- [ ] **12.5 Browser UI** — Live view, takeover, checkpoints.
+- [ ] **12.6 Memory UI** — View/delete memories, daily logs.
+- [ ] **12.7 Channels UI** — Configure and bind messaging channels.
+- [ ] **12.8 Settings** — Model assignments, API keys, SOUL.md editor.
+
+**Verification**: Full mobile experience matching API capabilities.
+
+## Phase 13: Post-Quantum Cryptography (Future)
+- [ ] **13.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).
+- [ ] **13.2 PQC Signatures** — ML-DSA (Dilithium) for message signing if needed (FIPS 204).
+- [ ] **13.3 Encryption Format v2** — `enc:v2:` format with PQC key encapsulation for client-side E2E encryption.
 
 **Context**: Current stack (AES-256-GCM + PBKDF2-HMAC-SHA256 + bcrypt) is already quantum-resistant — symmetric/hash-based crypto only faces Grover's quadratic speedup (256→128-bit, still infeasible). PQC is only needed for key exchange when the Flutter app establishes encrypted channels. CRQC timeline: ~2031-2035. NIST standards finalized Aug 2024.
 
@@ -286,9 +324,13 @@ Ideas discovered while researching [Eigent](https://github.com/eigent-ai/eigent)
 - Phase 1 (Foundation): ✅ COMPLETE — Crypto, DB, config, LLM router, agent, gateway, CLI wizard, auth, model manager
 - Phase 2 (Skills + Tools): ✅ COMPLETE — BaseSkill, registry, built-in skills, tool executor, agentic loop, code sandbox, skill writer, skills API
 - Phase 3 (Queue + Memory + Personality): ✅ COMPLETE — Lane queue, personal memory, SOUL.md, context builder, credential vault, daily logs, memory/vault API
+- Phase 4 (Browser Automation): ✅ COMPLETE — Playwright manager, browser agent, page reader, DOM optimizer, site memory, 15 API endpoints
 - Phase 5 (Computer Control): ✅ COMPLETE — Security manager, native executor, connector server, standalone connector, REST + WS API, 5 agent skills
-- Phase 6 (Channels): Telegram polling adapter, channel base abstractions (partial)
+- Phase 6 (Channels — partial): ✅ Telegram polling adapter, channel base abstractions
 - Phase 7 (MCP + Heartbeat): ✅ COMPLETE — MCP client/server/bridge, manager, heartbeat daemon, cron jobs, orchestrator, 14 API endpoints
-- mcp-freeride: ✅ COMPLETE — 7 free AI providers, health tracking, latency ranking, auto-fallback, model selector
+- MCP Ecosystem: ✅ COMPLETE — mcp-freeride, mcp-healthcheck, mcp-apihunter, mcp-vaultwhisper, mcp-taskai
 - ECO Mode (core): ✅ COMPLETE — eco_router, rate_limiter, eco_settings, task classifier, response badges, 5 API endpoints
 - Permissions & Approval System: ✅ COMPLETE — Permission checker (allow/ask/deny), inline approval flow, admin role, audit log, 8 API endpoints
+- Phase 8 (Multi-Agent Teams): ✅ COMPLETE — Team lead, 4 built-in specialists, parallel executor, specialist runner, critic (merged), team conversations, settings, 8 API endpoints
+- Phase 9 (Context Compression): ✅ COMPLETE — Message classifier, LLM summarizer, sliding window compressor, persistent summaries, agent integration, 2 API endpoints
+- Phase 10 (Session Replay): ✅ COMPLETE — Trace recorder, models, engine, share tokens, agent integration, 7 API endpoints

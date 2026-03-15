@@ -98,6 +98,8 @@ LazyClaw extracts and generalizes proven components from [LazyTasker](https://gi
 | **Memory** | `memory/` | Encrypted personal facts, conversation history, daily logs. Phase 2: vector search |
 | **MCP** | `mcp/` | Native client (connect to MCP servers) + server (expose tools as MCP) |
 | **Crypto** | `crypto/` | AES-256-GCM, PBKDF2, encrypted credential vault, DB field helpers |
+| **Teams** | `teams/` | Multi-agent teams: team lead, specialists, parallel execution, critic review |
+| **Replay** | `replay/` | Session replay: trace recording, playback, shareable tokens |
 
 Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daemon + cron), `voice/` (STT/TTS), `db/` (aiosqlite + migrations).
 
@@ -175,6 +177,22 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/permissions/approvals.py` | Approval request CRUD + auto-expiration (encrypted args) |
 | `lazyclaw/permissions/audit.py` | Fire-and-forget audit logger + query + cleanup |
 | `lazyclaw/gateway/routes/permissions.py` | Permissions REST API (settings, skills, approvals, audit) |
+| `lazyclaw/teams/specialist.py` | SpecialistConfig dataclass, built-in specialists, DB CRUD |
+| `lazyclaw/teams/runner.py` | Run single specialist as mini agent loop with filtered tools |
+| `lazyclaw/teams/executor.py` | Parallel specialist execution via asyncio.gather + semaphore |
+| `lazyclaw/teams/lead.py` | Team lead: analyze complexity, delegate, merge + critic |
+| `lazyclaw/teams/conversation.py` | Encrypted team message storage (agent_team_messages table) |
+| `lazyclaw/teams/settings.py` | Team settings CRUD from users.settings JSON |
+| `lazyclaw/gateway/routes/teams.py` | Teams REST API (settings, specialists, sessions — 8 endpoints) |
+| `lazyclaw/memory/classifier.py` | Heuristic message priority classification (high/medium/low) |
+| `lazyclaw/memory/summarizer.py` | LLM-powered conversation chunk summarization |
+| `lazyclaw/memory/compressor.py` | Sliding window + persistent summary compression engine |
+| `lazyclaw/gateway/routes/compression.py` | Compression stats + force re-summarize API (2 endpoints) |
+| `lazyclaw/replay/models.py` | TraceEntry, TraceSession frozen dataclasses, 9 entry types |
+| `lazyclaw/replay/recorder.py` | Fire-and-forget trace recorder, captures all agent actions encrypted |
+| `lazyclaw/replay/engine.py` | Load/list/delete traces, view by session or share token |
+| `lazyclaw/replay/sharing.py` | Shareable URL-safe tokens with expiration, revoke |
+| `lazyclaw/gateway/routes/replay.py` | Replay REST API (traces, shares, public view — 7 endpoints) |
 
 **Standalone: mcp-freeride** (free AI router MCP server):
 | File | Purpose |
@@ -496,6 +514,27 @@ All types unified in the skill registry and converted to OpenAI function-calling
 - `POST /api/permissions/approvals/{id}/approve` — Approve pending request
 - `POST /api/permissions/approvals/{id}/deny` — Deny pending request
 - `GET /api/permissions/audit` — Query audit log entries
+
+### Replay
+- `GET /api/replay/traces` — List recent trace sessions
+- `GET /api/replay/traces/{id}` — View full trace timeline (decrypted)
+- `DELETE /api/replay/traces/{id}` — Delete a trace and its shares
+- `POST /api/replay/share` — Generate shareable token for a trace
+- `GET /api/replay/share/{token}` — View trace via share token (no auth)
+- `GET /api/replay/shares` — List user's share tokens
+- `DELETE /api/replay/shares/{id}` — Revoke a share token
+
+### Compression
+- `GET /api/compression/stats` — Summary count, compression ratio, window size
+- `POST /api/compression/force` — Delete summaries (regenerate on next chat)
+
+### Teams
+- `GET/PATCH /api/teams/settings` — Team mode config (auto/always/never, critic, parallel, timeout)
+- `GET /api/teams/specialists` — List all specialists (built-in + custom)
+- `POST /api/teams/specialists` — Create custom specialist
+- `PATCH/DELETE /api/teams/specialists/{name}` — Update or delete custom specialist
+- `GET /api/teams/sessions` — List team sessions
+- `GET /api/teams/sessions/{id}` — View team conversation (decrypted)
 
 ### Connector
 - `POST /api/connector/token`, `GET /api/connector/status`, `DELETE /api/connector/token`

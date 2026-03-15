@@ -169,6 +169,12 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/llm/eco_settings.py` | ECO settings CRUD (stored in users.settings JSON) |
 | `lazyclaw/llm/rate_limiter.py` | Per-provider sliding window rate limit tracker |
 | `lazyclaw/gateway/routes/eco.py` | ECO mode REST API (settings, usage, rate limits, providers) |
+| `lazyclaw/permissions/models.py` | Frozen dataclasses: ResolvedPermission, ApprovalRequest, AuditEntry |
+| `lazyclaw/permissions/settings.py` | Permission settings CRUD from users.settings JSON |
+| `lazyclaw/permissions/checker.py` | PermissionChecker: resolve skill → allow/ask/deny |
+| `lazyclaw/permissions/approvals.py` | Approval request CRUD + auto-expiration (encrypted args) |
+| `lazyclaw/permissions/audit.py` | Fire-and-forget audit logger + query + cleanup |
+| `lazyclaw/gateway/routes/permissions.py` | Permissions REST API (settings, skills, approvals, audit) |
 
 **Standalone: mcp-freeride** (free AI router MCP server):
 | File | Purpose |
@@ -232,6 +238,7 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | File | Purpose |
 |------|---------|
 | `lazyclaw/channels/router.py` | Inbound message -> queue routing |
+| `lazyclaw/voice/` | STT/TTS voice processing |
 
 ## Build & Run
 
@@ -480,6 +487,15 @@ All types unified in the skill registry and converted to OpenAI function-calling
 - `GET /api/eco/usage` — Free vs paid usage stats
 - `GET /api/eco/rate-limits` — Known rate limits for all free providers
 - `GET /api/eco/providers` — List configured/available free AI providers
+
+### Permissions
+- `GET/PATCH /api/permissions/settings` — Permission config (category defaults, skill overrides)
+- `GET /api/permissions/skills` — All skills with resolved permission level
+- `PATCH/DELETE /api/permissions/skills/{name}` — Set or remove skill permission override
+- `GET /api/permissions/approvals` — List pending approval requests
+- `POST /api/permissions/approvals/{id}/approve` — Approve pending request
+- `POST /api/permissions/approvals/{id}/deny` — Deny pending request
+- `GET /api/permissions/audit` — Query audit log entries
 
 ### Connector
 - `POST /api/connector/token`, `GET /api/connector/status`, `DELETE /api/connector/token`

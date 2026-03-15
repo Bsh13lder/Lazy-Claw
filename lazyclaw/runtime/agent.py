@@ -11,7 +11,7 @@ from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
-from lazyclaw.runtime.tool_executor import ToolExecutor
+from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
@@ -24,12 +24,17 @@ class Agent:
         router: LLMRouter,
         registry: SkillRegistry | None = None,
         eco_router: EcoRouter | None = None,
+        permission_checker=None,
     ) -> None:
         self.config = config
         self.router = router
         self.eco_router = eco_router or EcoRouter(config, router)
         self.registry = registry
-        self.executor = ToolExecutor(registry) if registry else None
+        self.executor = (
+            ToolExecutor(registry, permission_checker=permission_checker)
+            if registry
+            else None
+        )
 
     async def process_message(
         self,
@@ -102,6 +107,38 @@ class Agent:
             # Execute each tool call
             for tc in response.tool_calls:
                 result = await self.executor.execute(tc, user_id)
+
+                # Handle approval-required responses
+                if isinstance(result, str) and result.startswith(APPROVAL_PREFIX):
+                    parts = result[len(APPROVAL_PREFIX):]
+                    colon_idx = parts.index(":")
+                    skill_name = parts[:colon_idx]
+                    args_json = parts[colon_idx + 1:]
+
+                    # Create approval request in DB
+                    from lazyclaw.permissions.approvals import create_approval
+                    from lazyclaw.permissions.settings import get_permission_settings
+
+                    settings = await get_permission_settings(self.config, user_id)
+                    timeout = settings.get("auto_approve_timeout", 300)
+
+                    approval = await create_approval(
+                        self.config,
+                        user_id,
+                        skill_name,
+                        json.loads(args_json) if args_json != "{}" else None,
+                        source="agent",
+                        timeout_seconds=timeout,
+                    )
+
+                    # Tell the LLM the action needs approval
+                    result = (
+                        f"Action '{skill_name}' requires user approval. "
+                        f"Approval ID: {approval.id}. "
+                        f"Tell the user what you want to do and ask them to approve or deny. "
+                        f"Do NOT proceed until approved."
+                    )
+
                 tool_msg = LLMMessage(
                     role="tool",
                     content=result,

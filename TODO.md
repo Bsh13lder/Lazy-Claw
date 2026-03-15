@@ -85,6 +85,20 @@
 
 **Verification**: ✅ Connect external MCP server, agent uses its tools. Heartbeat daemon checks cron jobs and enqueues due tasks.
 
+## Permissions & Approval System ✅ COMPLETE
+- [x] **P.1 Permission Models** — `lazyclaw/permissions/models.py`: ResolvedPermission, ApprovalRequest, AuditEntry frozen dataclasses.
+- [x] **P.2 Permission Settings** — `lazyclaw/permissions/settings.py`: CRUD from users.settings JSON (follows eco_settings pattern).
+- [x] **P.3 Permission Checker** — `lazyclaw/permissions/checker.py`: Resolves skill → allow/ask/deny (overrides → category → hint → fallback).
+- [x] **P.4 Approval System** — `lazyclaw/permissions/approvals.py`: Create/approve/deny/expire requests, encrypted arguments.
+- [x] **P.5 Audit Log** — `lazyclaw/permissions/audit.py`: Fire-and-forget logger, query, cleanup (90-day retention).
+- [x] **P.6 Permissions API** — `lazyclaw/gateway/routes/permissions.py`: 8 REST endpoints (settings, skills, approvals, audit).
+- [x] **P.7 DB Schema** — Added `role` column to users, `approval_requests` + `audit_log` tables.
+- [x] **P.8 Admin Role** — First registered user = admin. `require_admin()` dependency.
+- [x] **P.9 Inline Approval Flow** — Agent loop detects APPROVAL_REQUIRED marker, creates DB request, asks user.
+- [x] **P.10 Tool Executor Integration** — Permission check before execution (deny blocks, ask requires approval, allow passes).
+
+**Verification**: Permission checker resolves all skills. Deny blocks execution. Ask triggers inline approval flow. Admin role assigned to first user. Audit log records all actions.
+
 ## Phase 8: LazyTasker Plugin + Docker
 - [ ] **8.1 LazyTasker Plugin** — `plugins/lazytasker/`: Optional integration (tasks, projects, expenses).
 - [ ] **8.2 Plugin Loader** — `lazyclaw/skills/loader.py`: Load plugin packages from filesystem.
@@ -277,3 +291,4 @@ Ideas discovered while researching [Eigent](https://github.com/eigent-ai/eigent)
 - Phase 7 (MCP + Heartbeat): ✅ COMPLETE — MCP client/server/bridge, manager, heartbeat daemon, cron jobs, orchestrator, 14 API endpoints
 - mcp-freeride: ✅ COMPLETE — 7 free AI providers, health tracking, latency ranking, auto-fallback, model selector
 - ECO Mode (core): ✅ COMPLETE — eco_router, rate_limiter, eco_settings, task classifier, response badges, 5 API endpoints
+- Permissions & Approval System: ✅ COMPLETE — Permission checker (allow/ask/deny), inline approval flow, admin role, audit log, 8 API endpoints

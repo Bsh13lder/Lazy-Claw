@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT,
     personality_file TEXT DEFAULT 'personality/SOUL.md',
     settings TEXT DEFAULT '{}',
+    role TEXT NOT NULL DEFAULT 'user',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -188,3 +189,38 @@ CREATE TABLE IF NOT EXISTS job_queue (
     created_at TEXT DEFAULT (datetime('now')),
     processed_at TEXT
 );
+
+-- Permissions system
+
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    skill_name TEXT NOT NULL,
+    arguments TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    chat_session_id TEXT,
+    source TEXT NOT NULL DEFAULT 'agent',
+    decided_by TEXT,
+    decided_at TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_user_status
+ON approval_requests(user_id, status);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL,
+    skill_name TEXT,
+    arguments_hash TEXT,
+    result_summary TEXT,
+    approval_id TEXT,
+    source TEXT NOT NULL DEFAULT 'agent',
+    ip_address TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_user_created
+ON audit_log(user_id, created_at);

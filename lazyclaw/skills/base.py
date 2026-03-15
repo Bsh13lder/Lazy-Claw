@@ -20,6 +20,12 @@ class BaseSkill(ABC):
         return "general"
 
     @property
+    def permission_hint(self) -> str:
+        """Suggested default permission: 'allow', 'ask', or 'deny'.
+        Used when no user override or category default exists."""
+        return "allow"
+
+    @property
     @abstractmethod
     def parameters_schema(self) -> dict:
         """JSON Schema for the skill's parameters."""

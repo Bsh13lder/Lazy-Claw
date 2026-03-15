@@ -19,6 +19,7 @@ from lazyclaw.gateway.routes.connector import ws_router as connector_ws_router
 from lazyclaw.gateway.routes.mcp import router as mcp_router
 from lazyclaw.gateway.routes.jobs import router as jobs_router
 from lazyclaw.gateway.routes.eco import router as eco_router
+from lazyclaw.gateway.routes.permissions import router as permissions_router
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ app.include_router(connector_ws_router)
 app.include_router(mcp_router)
 app.include_router(jobs_router)
 app.include_router(eco_router)
+app.include_router(permissions_router)
 
 
 class ChatRequest(BaseModel):
@@ -89,9 +91,12 @@ async def agent_chat(body: ChatRequest, user: User = Depends(get_current_user)):
         from lazyclaw.runtime.agent import Agent
         from lazyclaw.skills.registry import SkillRegistry
 
+        from lazyclaw.permissions.checker import PermissionChecker
+
         registry = SkillRegistry()
         registry.register_defaults(config=_config)
         router = LLMRouter(_config)
-        agent = Agent(_config, router, registry)
+        permission_checker = PermissionChecker(_config, registry)
+        agent = Agent(_config, router, registry, permission_checker=permission_checker)
         result = await agent.process_message(user.id, body.message)
     return ChatResponse(response=result)

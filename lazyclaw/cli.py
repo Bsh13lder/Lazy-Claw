@@ -64,8 +64,8 @@ async def setup_database(config: Config) -> None:
             salt = secrets.token_urlsafe(16)
             pw_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
             await db.execute(
-                "INSERT INTO users (id, username, password_hash, encryption_salt) VALUES (?, ?, ?, ?)",
-                (user_id, "default", pw_hash, salt),
+                "INSERT INTO users (id, username, password_hash, encryption_salt, role) VALUES (?, ?, ?, ?, ?)",
+                (user_id, "default", pw_hash, salt, "admin"),
             )
             await db.commit()
 
@@ -78,10 +78,13 @@ async def run_agent(config: Config) -> None:
 
     await init_db(config)
 
+    from lazyclaw.permissions.checker import PermissionChecker
+
     router = LLMRouter(config)
     registry = SkillRegistry()
     registry.register_defaults(config=config)
-    agent = Agent(config, router, registry)
+    permission_checker = PermissionChecker(config, registry)
+    agent = Agent(config, router, registry, permission_checker=permission_checker)
 
     # Lane Queue — serial per-user execution
     from lazyclaw.queue.lane import LaneQueue

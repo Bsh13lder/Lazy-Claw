@@ -30,6 +30,7 @@ class User:
     username: str
     display_name: str | None
     encryption_salt: str
+    role: str = "user"
 
 
 # ---------------------------------------------------------------------------
@@ -72,22 +73,27 @@ async def register_user(
         if await existing.fetchone():
             raise ValueError(f"Username '{username}' already taken")
 
+        # First user gets admin role
+        count_row = await db.execute("SELECT COUNT(*) FROM users")
+        count_result = await count_row.fetchone()
+        role = "admin" if count_result and count_result[0] == 0 else "user"
+
         await db.execute(
-            "INSERT INTO users (id, username, password_hash, encryption_salt, display_name) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (user_id, username, pw_hash, salt, display_name),
+            "INSERT INTO users (id, username, password_hash, encryption_salt, display_name, role) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, username, pw_hash, salt, display_name, role),
         )
         await db.commit()
 
-    logger.info("Registered user %s (%s)", username, user_id)
-    return User(id=user_id, username=username, display_name=display_name, encryption_salt=salt)
+    logger.info("Registered user %s (%s) with role %s", username, user_id, role)
+    return User(id=user_id, username=username, display_name=display_name, encryption_salt=salt, role=role)
 
 
 async def authenticate_user(config: Config, username: str, password: str) -> User | None:
     """Verify credentials. Returns User or None."""
     async with db_session(config) as db:
         row = await db.execute(
-            "SELECT id, username, password_hash, encryption_salt, display_name "
+            "SELECT id, username, password_hash, encryption_salt, display_name, role "
             "FROM users WHERE username = ?",
             (username,),
         )
@@ -104,6 +110,7 @@ async def authenticate_user(config: Config, username: str, password: str) -> Use
         username=result[1],
         display_name=result[4],
         encryption_salt=result[3],
+        role=result[5],
     )
 
 
@@ -130,7 +137,7 @@ async def get_session_user(config: Config, session_id: str) -> User | None:
     """Look up session, check expiry, return User or None."""
     async with db_session(config) as db:
         row = await db.execute(
-            "SELECT s.user_id, s.expires_at, u.username, u.display_name, u.encryption_salt "
+            "SELECT s.user_id, s.expires_at, u.username, u.display_name, u.encryption_salt, u.role "
             "FROM sessions s JOIN users u ON s.user_id = u.id "
             "WHERE s.id = ?",
             (session_id,),
@@ -152,6 +159,7 @@ async def get_session_user(config: Config, session_id: str) -> User | None:
         username=result[2],
         display_name=result[3],
         encryption_salt=result[4],
+        role=result[5],
     )
 
 
@@ -176,6 +184,13 @@ async def get_current_user(request: Request) -> User:
     if not user:
         raise HTTPException(status_code=401, detail="Session expired or invalid")
 
+    return user
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """FastAPI dependency that requires admin role."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
 
@@ -215,7 +230,7 @@ async def register(body: RegisterRequest, response: Response):
         samesite="lax",
         max_age=720 * 3600,
     )
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    return {"id": user.id, "username": user.username, "display_name": user.display_name, "role": user.role}
 
 
 @auth_router.post("/login")
@@ -233,7 +248,7 @@ async def login(body: LoginRequest, response: Response):
         samesite="lax",
         max_age=720 * 3600,
     )
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    return {"id": user.id, "username": user.username, "display_name": user.display_name, "role": user.role}
 
 
 @auth_router.post("/logout")
@@ -247,4 +262,4 @@ async def logout(request: Request, response: Response):
 
 @auth_router.get("/me")
 async def me(user: User = Depends(get_current_user)):
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    return {"id": user.id, "username": user.username, "display_name": user.display_name, "role": user.role}

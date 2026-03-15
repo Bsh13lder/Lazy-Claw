@@ -182,6 +182,52 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `mcp-freeride/mcp_freeride/server.py` | MCP tools: freeride_chat, freeride_models, freeride_status |
 | `mcp-freeride/mcp_freeride/main.py` | Entry point: stdio MCP server |
 
+**Standalone: mcp-healthcheck** (AI source monitor MCP server):
+| File | Purpose |
+|------|---------|
+| `mcp-healthcheck/pyproject.toml` | Standalone package, deps: mcp, httpx |
+| `mcp-healthcheck/mcp_healthcheck/config.py` | HealthCheckConfig: 7 API keys + interval/weights |
+| `mcp-healthcheck/mcp_healthcheck/providers.py` | ProviderEndpoint, KNOWN_PROVIDERS, ping_provider() |
+| `mcp-healthcheck/mcp_healthcheck/history.py` | CheckHistory: per-provider deque of PingResults, summaries |
+| `mcp-healthcheck/mcp_healthcheck/scorer.py` | Composite scoring: speed/uptime/quality, leaderboard |
+| `mcp-healthcheck/mcp_healthcheck/monitor.py` | Background ping loop, facade for status/leaderboard |
+| `mcp-healthcheck/mcp_healthcheck/server.py` | MCP tools: healthcheck_status, leaderboard, ping, history |
+| `mcp-healthcheck/mcp_healthcheck/main.py` | Entry point: stdio MCP server with background pinger |
+
+**Standalone: mcp-apihunter** (free API discovery MCP server):
+| File | Purpose |
+|------|---------|
+| `mcp-apihunter/pyproject.toml` | Standalone package, deps: mcp, httpx, aiosqlite |
+| `mcp-apihunter/mcp_apihunter/config.py` | ApiHunterConfig: db_path, validation_timeout |
+| `mcp-apihunter/mcp_apihunter/models.py` | RegistryEntry, ValidationResult frozen dataclasses |
+| `mcp-apihunter/mcp_apihunter/registry.py` | SQLite CRUD for endpoints table |
+| `mcp-apihunter/mcp_apihunter/validator.py` | Endpoint validation via /v1/chat/completions |
+| `mcp-apihunter/mcp_apihunter/server.py` | MCP tools: submit, validate, list, search, remove |
+| `mcp-apihunter/mcp_apihunter/main.py` | Entry point: stdio MCP server |
+
+**Standalone: mcp-vaultwhisper** (privacy-safe AI proxy MCP server):
+| File | Purpose |
+|------|---------|
+| `mcp-vaultwhisper/pyproject.toml` | Standalone package, deps: mcp, httpx |
+| `mcp-vaultwhisper/mcp_vaultwhisper/config.py` | VaultWhisperConfig: mode (strict/relaxed), 7 API keys |
+| `mcp-vaultwhisper/mcp_vaultwhisper/patterns.py` | PIIType enum, 7 default regex patterns |
+| `mcp-vaultwhisper/mcp_vaultwhisper/detector.py` | detect_pii(): regex scanning with sequential placeholders |
+| `mcp-vaultwhisper/mcp_vaultwhisper/scrubber.py` | scrub(): PII replacement → ScrubResult with mapping |
+| `mcp-vaultwhisper/mcp_vaultwhisper/restorer.py` | restore(): re-inject original values from mapping |
+| `mcp-vaultwhisper/mcp_vaultwhisper/server.py` | MCP tools: scrub, restore, chat (proxy), detect, patterns |
+| `mcp-vaultwhisper/mcp_vaultwhisper/main.py` | Entry point: stdio MCP server |
+
+**Standalone: mcp-taskai** (task intelligence MCP server):
+| File | Purpose |
+|------|---------|
+| `mcp-taskai/pyproject.toml` | Standalone package, deps: mcp, httpx |
+| `mcp-taskai/mcp_taskai/config.py` | TaskAIConfig: 7 API keys + preferred_provider |
+| `mcp-taskai/mcp_taskai/ai_client.py` | Lightweight free AI caller with provider fallback |
+| `mcp-taskai/mcp_taskai/prompts.py` | Prompt templates for categorize, deadline, dedup, summarize, prioritize |
+| `mcp-taskai/mcp_taskai/intelligence.py` | TaskIntelligence: 5 AI-powered task analysis methods |
+| `mcp-taskai/mcp_taskai/server.py` | MCP tools: categorize, suggest_deadline, detect_duplicates, summarize, prioritize |
+| `mcp-taskai/mcp_taskai/main.py` | Entry point: stdio MCP server |
+
 **Planned** (not yet implemented):
 | File | Purpose |
 |------|---------|
@@ -226,6 +272,54 @@ python -m mcp_freeride
 
 # MCP inspector
 npx @modelcontextprotocol/inspector python -m mcp_freeride
+```
+
+### mcp-healthcheck (standalone)
+
+```bash
+# Set same API keys as mcp-freeride
+export GROQ_API_KEY=gsk_...
+export HEALTHCHECK_INTERVAL=60  # seconds between pings
+
+# Run as MCP server
+python -m mcp_healthcheck
+npx @modelcontextprotocol/inspector python -m mcp_healthcheck
+```
+
+### mcp-apihunter (standalone)
+
+```bash
+# Optional config
+export APIHUNTER_DB_PATH=./apihunter.db
+export APIHUNTER_VALIDATION_TIMEOUT=15
+
+# Run as MCP server
+python -m mcp_apihunter
+npx @modelcontextprotocol/inspector python -m mcp_apihunter
+```
+
+### mcp-vaultwhisper (standalone)
+
+```bash
+# Set API keys + mode
+export GROQ_API_KEY=gsk_...
+export VAULTWHISPER_MODE=strict  # or relaxed
+
+# Run as MCP server
+python -m mcp_vaultwhisper
+npx @modelcontextprotocol/inspector python -m mcp_vaultwhisper
+```
+
+### mcp-taskai (standalone)
+
+```bash
+# Set API keys
+export GROQ_API_KEY=gsk_...
+export TASKAI_PROVIDER=groq  # optional: lock to specific provider
+
+# Run as MCP server
+python -m mcp_taskai
+npx @modelcontextprotocol/inspector python -m mcp_taskai
 ```
 
 ### CLI Commands

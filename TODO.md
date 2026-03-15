@@ -120,10 +120,10 @@
 Standalone MCP servers that plug into LazyClaw (or any MCP-compatible client).
 
 - [x] **mcp-freeride** — Free AI router. 7 providers (Groq, Gemini, OpenRouter, Together, Mistral, HuggingFace, Ollama). Health tracking, latency ranking, auto-fallback. Standalone in `mcp-freeride/`.
-- [ ] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. LazyClaw pulls latest registry automatically. Crowdsourced free AI registry.
-- [ ] **mcp-healthcheck** — Background pinger for all configured AI sources. Scores by speed/uptime/model quality, serves live leaderboard. mcp-freeride uses this for intelligent routing.
-- [ ] **mcp-taskai** — Task intelligence via free AI. Auto-categorize tasks, suggest deadlines, detect duplicates, summarize overdue pile. Uses mcp-freeride so it costs $0.
-- [ ] **mcp-vaultwhisper** — Privacy-safe AI proxy. Strips identifiable data before sending to any free API, re-injects context after response. E2E encryption + free AI = rare combo.
+- [x] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. LazyClaw pulls latest registry automatically. Crowdsourced free AI registry. Standalone in `mcp-apihunter/`.
+- [x] **mcp-healthcheck** — Background pinger for all configured AI sources. Scores by speed/uptime/model quality, serves live leaderboard. mcp-freeride uses this for intelligent routing. Standalone in `mcp-healthcheck/`.
+- [x] **mcp-taskai** — Task intelligence via free AI. Auto-categorize tasks, suggest deadlines, detect duplicates, summarize overdue pile. Uses free AI directly ($0). Standalone in `mcp-taskai/`.
+- [x] **mcp-vaultwhisper** — Privacy-safe AI proxy. Strips identifiable data before sending to any free API, re-injects context after response. E2E encryption + free AI = rare combo. Standalone in `mcp-vaultwhisper/`.
 
 Dependency chain:
 ```
@@ -229,6 +229,35 @@ Users have full control over which AIs handle which tasks:
   eco_task_overrides: {}               # per-task-type provider assignments
   ```
 - [x] **ECO API** — `lazyclaw/gateway/routes/eco.py`: 5 endpoints — settings CRUD, usage stats, rate limits, provider list.
+
+## Future: Multi-Agent Teams (Inspired by CAMEL)
+
+Internal agent-to-agent collaboration. A **team lead** (stronger AI) manages **specialist workers** — each with their own system prompt, tools, and expertise. Not about cost — about better results through specialization. Inspired by [CAMEL](https://github.com/camel-ai/camel) role-playing concept.
+
+- [ ] **Team Lead Agent** — The "brain" that receives the user request, breaks it into sub-tasks, delegates to specialists, reviews results, and assembles the final answer. Uses the strongest available model.
+- [ ] **Specialist Agents** — Domain-specific workers the team lead delegates to:
+  - `browser_specialist` — Web browsing, page reading, form filling. Has browser tools only.
+  - `code_specialist` — Code generation, skill writing, debugging. Has code sandbox.
+  - `research_specialist` — Web search, data gathering, summarization. Has search tools.
+  - `memory_specialist` — Context recall, fact checking against stored memories.
+  - Each specialist has its own system prompt, tool subset, and personality.
+- [ ] **Critic Agent** — Reviews team output before sending to user. Catches mistakes, validates facts, suggests improvements. Independent quality gate.
+- [ ] **Agent Conversations** — Internal message queue between agents (not user-visible). Team lead sends instructions, specialists report back. Stored encrypted for debugging.
+- [ ] **Dynamic Team Composition** — Team lead decides which specialists to involve based on the task. Simple question → no team, answer directly. Complex task → assemble the right team.
+
+## Future: Borrowed Ideas (from Eigent)
+
+Ideas discovered while researching [Eigent](https://github.com/eigent-ai/eigent) — an open-source multi-agent desktop platform built on CAMEL-AI.
+
+- [ ] **Parallel Sub-Agent Execution** — Let the agent spawn parallel sub-agents within a single task. Example: browser research + memory lookup + web search all run simultaneously, results merged. Current agent loop is sequential (max 10 iterations). Sub-agents would each get their own tool subset and run as independent async tasks, feeding results back to the main agent.
+
+- [ ] **Workflow Builder UI** — Visual drag-and-drop editor (React Flow style) for composing multi-step agent workflows. Users connect skill blocks into a graph: trigger → search → summarize → save to memory. Each node is a skill or agent action. The graph compiles to an executable workflow stored in DB. Eliminates need to write instruction skills for multi-step automations. Requires web frontend (Phase 9+ or standalone web UI).
+
+- [ ] **Session Replay** — Record full agent sessions (every LLM call, tool invocation, result) as replayable traces. Shareable via token — anyone with the link can watch the agent's decision process step-by-step. Useful for debugging ("why did the agent do that?"), demos, and building trust. Foundation already exists: `browser_task_logs` stores step-by-step browser actions. Extend to all agent interactions with a unified `agent_trace` table.
+
+- [ ] **Context Compression** — Smart context window management for long conversations. When context grows large, compress older messages into summaries instead of dropping them. Techniques: rolling summarization, importance-based pruning (keep tool results, drop chitchat), prompt caching for repeated system prompt + personality. Currently `context_builder.py` loads everything raw — no compression or caching.
+
+- [ ] **Skill Benchmarks** — Eval-driven skill development. Define standard tasks per skill (e.g., "search for X and return Y", "browse site and extract Z") with expected outcomes. Run benchmarks after changes to measure agent quality. Catch regressions before they ship. Start with browser and computer skills since they're the most complex.
 
 ## Phase 10: Post-Quantum Cryptography (Future)
 - [ ] **10.1 Hybrid Key Exchange** — Add ML-KEM (Kyber) + X25519 hybrid key exchange for Flutter app ↔ server communication. Use `liboqs-python` (FIPS 203).

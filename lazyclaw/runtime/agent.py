@@ -17,6 +17,20 @@ from lazyclaw.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
+# Keywords that suggest MCP tools are needed
+_MCP_KEYWORDS = (
+    "claude code", "health check", "healthcheck", "api hunter", "apihunter",
+    "free api", "free provider", "vault whisper", "vaultwhisper", "privacy",
+    "pii", "scrub", "task ai", "taskai", "categorize", "prioritize",
+    "deduplicate", "freeride", "mcp", "provider status", "leaderboard",
+)
+
+
+def _wants_mcp_tools(message: str) -> bool:
+    """Check if the user's message suggests MCP tools are needed."""
+    lower = message.lower()
+    return any(kw in lower for kw in _MCP_KEYWORDS)
+
 
 class Agent:
     def __init__(
@@ -32,7 +46,11 @@ class Agent:
         self.eco_router = eco_router or EcoRouter(config, router)
         self.registry = registry
         self.executor = (
-            ToolExecutor(registry, permission_checker=permission_checker)
+            ToolExecutor(
+                registry,
+                permission_checker=permission_checker,
+                timeout=config.tool_timeout,
+            )
             if registry
             else None
         )
@@ -61,11 +79,18 @@ class Agent:
 
         async def _load_history():
             async with db_session(self.config) as db:
-                rows = await db.execute(
-                    "SELECT id, role, content, tool_name, metadata FROM agent_messages "
-                    "WHERE user_id = ? ORDER BY created_at ASC",
-                    (user_id,),
-                )
+                if chat_session_id:
+                    rows = await db.execute(
+                        "SELECT id, role, content, tool_name, metadata FROM agent_messages "
+                        "WHERE user_id = ? AND chat_session_id = ? ORDER BY created_at ASC",
+                        (user_id, chat_session_id),
+                    )
+                else:
+                    rows = await db.execute(
+                        "SELECT id, role, content, tool_name, metadata FROM agent_messages "
+                        "WHERE user_id = ? ORDER BY created_at ASC",
+                        (user_id,),
+                    )
                 return await rows.fetchall()
 
         history_rows, _, system_prompt = await _aio.gather(
@@ -131,8 +156,14 @@ class Agent:
 
                 return team_result
 
-        # Get tools
-        tools = self.registry.list_tools() if self.registry else []
+        # Get tools — core tools always, MCP tools only when relevant
+        if self.registry:
+            tools = self.registry.list_core_tools()
+            mcp_tools = self.registry.list_mcp_tools()
+            if mcp_tools and _wants_mcp_tools(message):
+                tools = tools + mcp_tools
+        else:
+            tools = []
 
         # Build initial messages
         messages: list[LLMMessage] = (
@@ -142,7 +173,7 @@ class Agent:
         )
 
         # Agentic loop
-        max_iterations = 10
+        max_iterations = self.config.max_tool_iterations
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
 
         response = None

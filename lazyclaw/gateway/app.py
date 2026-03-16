@@ -29,14 +29,21 @@ logger = logging.getLogger(__name__)
 
 _config = load_config()
 
-# Lane queue reference — set by cli.py at startup
+# Shared state — set by cli.py at startup
 _lane_queue = None
+_shared_registry = None
 
 
 def set_lane_queue(queue) -> None:
     """Called by cli.py to inject the shared LaneQueue."""
     global _lane_queue
     _lane_queue = queue
+
+
+def set_registry(registry) -> None:
+    """Called by cli.py to inject the shared SkillRegistry (with MCP tools)."""
+    global _shared_registry
+    _shared_registry = registry
 
 
 @asynccontextmanager
@@ -99,8 +106,9 @@ async def agent_chat(body: ChatRequest, user: User = Depends(get_current_user)):
 
         from lazyclaw.permissions.checker import PermissionChecker
 
-        registry = SkillRegistry()
-        registry.register_defaults(config=_config)
+        registry = _shared_registry or SkillRegistry()
+        if not _shared_registry:
+            registry.register_defaults(config=_config)
         router = LLMRouter(_config)
         permission_checker = PermissionChecker(_config, registry)
         agent = Agent(_config, router, registry, permission_checker=permission_checker)

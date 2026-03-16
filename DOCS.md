@@ -113,6 +113,7 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 |--------|-----------|-------------|
 | `__init__` | `(config, paid_router: LLMRouter)` | Initialize with config and paid router |
 | `chat` | `async (messages, user_id, model, **kwargs) -> LLMResponse` | Route based on user's ECO mode |
+| `stream_chat` | `async (messages, user_id, model, **kwargs) -> AsyncGenerator[StreamChunk]` | Streaming route: free falls back to single chunk, paid streams |
 | `get_usage` | `(user_id) -> dict` | Get free vs paid usage stats |
 | `get_rate_limit_status` | `() -> dict` | Current rate limits for all providers |
 
@@ -160,13 +161,13 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 | Class | Methods | Description |
 |-------|---------|-------------|
-| `Agent` | `__init__(config, router, registry)`, `process_message(user_id, message, chat_session_id)` | Multi-turn agent with tool calling (max 10 iterations) |
+| `Agent` | `__init__(config, router, registry, eco_router, permission_checker)`, `process_message(user_id, message, chat_session_id, callback)` | Multi-turn agent with tool calling, smart tool selection, streaming |
 
 ### `tool_executor.py` — Tool dispatch
 
 | Class | Methods | Description |
 |-------|---------|-------------|
-| `ToolExecutor` | `__init__(registry)`, `execute(tool_call, user_id) -> str` | Dispatches ToolCall to skill registry |
+| `ToolExecutor` | `__init__(registry, permission_checker, timeout)`, `execute(tool_call, user_id) -> str`, `execute_allowed(tool_call, user_id) -> str` | Dispatches ToolCall to skill registry with timeout protection |
 
 ### `personality.py` — SOUL.md & system prompt
 
@@ -214,6 +215,8 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 | `register` | `(skill: BaseSkill) -> None` | Add skill to registry |
 | `get` | `(name: str) -> BaseSkill \| None` | Look up skill by name |
 | `list_tools` | `() -> list[dict]` | All skills as OpenAI tool definitions |
+| `list_core_tools` | `() -> list[dict]` | Non-MCP skills only (built-in + user) |
+| `list_mcp_tools` | `() -> list[dict]` | MCP-bridged skills only (category == "mcp") |
 | `list_by_category` | `() -> dict[str, list[str]]` | Skills grouped by category |
 | `register_defaults` | `(config=None) -> None` | Register all built-in skills |
 
@@ -426,10 +429,16 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 | Item | Signature | Description |
 |------|-----------|-------------|
-| `Config` | dataclass | `server_secret, database_dir, port, default_model, cors_origin, openai_api_key, anthropic_api_key, telegram_bot_token` |
+| `Config` | dataclass | `server_secret, database_dir, port, default_model, cors_origin, openai_api_key, anthropic_api_key, telegram_bot_token, log_level, tool_timeout` |
 | `get_project_root` | `() -> Path` | Find project root (where .env lives) |
 | `load_config` | `() -> Config` | Load config from environment variables |
 | `save_env` | `(key, value) -> None` | Write/update key in .env file |
+
+### `logging_config.py` — Centralized logging setup
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `configure_logging` | `(log_level: str = "WARNING", log_file: str \| None = None) -> None` | Suppress noisy libs (httpx, httpcore, asyncio), rotating file handler, configurable stderr level |
 
 ### `cli.py` — Click CLI commands
 
@@ -829,8 +838,8 @@ Standalone MCP server that routes across free AI APIs with automatic fallback.
 
 | Class | Methods | Description |
 |-------|---------|-------------|
-| `ProviderStats` | dataclass: `successes, failures, total_latency_ms, consecutive_failures, last_failure` | Per-provider stats |
-| `HealthChecker` | `record_success(name, latency_ms)`, `record_failure(name)`, `get_ranked_providers(names)`, `get_status()` | Tracks latency, ranks providers (healthy first) |
+| `ProviderStats` | dataclass: `successes, failures, recent_latencies(deque), consecutive_failures, last_failure` | Per-provider stats with sliding window |
+| `HealthChecker` | `record_success(name, latency_ms)`, `record_failure(name)`, `get_ranked_providers(names)`, `get_status()` | Tracks latency (50-entry sliding window), ranks providers (healthy first) |
 
 ### `router.py` — Fallback chain router
 

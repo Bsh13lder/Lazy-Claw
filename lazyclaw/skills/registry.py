@@ -17,6 +17,22 @@ class SkillRegistry:
         """Return all skills in OpenAI function-calling format."""
         return [skill.to_openai_tool() for skill in self._skills.values()]
 
+    def list_core_tools(self) -> list[dict]:
+        """Return only built-in/user skills (no MCP tools) in OpenAI format."""
+        return [
+            skill.to_openai_tool()
+            for skill in self._skills.values()
+            if skill.category != "mcp"
+        ]
+
+    def list_mcp_tools(self) -> list[dict]:
+        """Return only MCP-bridged skills in OpenAI format."""
+        return [
+            skill.to_openai_tool()
+            for skill in self._skills.values()
+            if skill.category == "mcp"
+        ]
+
     def list_by_category(self) -> dict[str, list[str]]:
         """Return skill names grouped by category."""
         categories: dict[str, list[str]] = {}

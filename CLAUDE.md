@@ -111,7 +111,7 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 |------|---------|
 | `lazyclaw/cli.py` | CLI entry point: chat REPL (default), setup wizard, full server start |
 | `lazyclaw/cli_admin.py` | Async admin functions called by chat REPL slash commands |
-| `lazyclaw/config.py` | Environment variable loading via python-dotenv, Config dataclass |
+| `lazyclaw/config.py` | Environment variable loading via python-dotenv, Config dataclass (log_level, tool_timeout) |
 | `lazyclaw/crypto/encryption.py` | AES-256-GCM encrypt/decrypt, PBKDF2 key derivation, enc:v1: format |
 | `lazyclaw/db/schema.sql` | Core database schema (22 tables) |
 | `lazyclaw/db/connection.py` | aiosqlite connection, WAL mode, init_db, db_session context manager |
@@ -119,13 +119,14 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/llm/providers/openai_provider.py` | OpenAI provider with tool calling + streaming support |
 | `lazyclaw/llm/providers/anthropic_provider.py` | Anthropic provider with tool_use/tool_result + streaming support |
 | `lazyclaw/llm/router.py` | Model-prefix-based provider routing |
-| `lazyclaw/runtime/agent.py` | Core agent: multi-turn agentic loop with tool calling (max 10 iterations) |
+| `lazyclaw/logging_config.py` | Logging setup: suppress noisy libs, rotating file handler, configurable level |
+| `lazyclaw/runtime/agent.py` | Core agent: multi-turn agentic loop with tool calling, smart tool selection |
 | `lazyclaw/runtime/callbacks.py` | AgentEvent + AgentCallback protocol (on_event, on_approval_request) |
 | `lazyclaw/runtime/personality.py` | SOUL.md loader, system prompt builder |
-| `lazyclaw/runtime/tool_executor.py` | Dispatches ToolCall to skill registry, execute_allowed for approved tools |
+| `lazyclaw/runtime/tool_executor.py` | Dispatches ToolCall to skill registry, execute_allowed, timeout protection |
 | `lazyclaw/skills/base.py` | BaseSkill ABC with to_openai_tool() conversion |
-| `lazyclaw/skills/registry.py` | Unified skill registry, register_defaults() |
-| `lazyclaw/skills/builtin/web_search.py` | DuckDuckGo web search (no API key needed) |
+| `lazyclaw/skills/registry.py` | Unified skill registry, register_defaults(), core/MCP tool filtering |
+| `lazyclaw/skills/builtin/web_search.py` | DuckDuckGo web search via ddgs (no API key needed) |
 | `lazyclaw/skills/builtin/get_time.py` | Timezone-aware current time |
 | `lazyclaw/skills/builtin/calculate.py` | Safe AST-based math calculator |
 | `lazyclaw/channels/base.py` | ChannelAdapter ABC, InboundMessage/OutboundMessage |
@@ -163,7 +164,7 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `connector/` | Standalone desktop connector program (auto-reconnect, 6 handlers) |
 | `lazyclaw/mcp/client.py` | MCP client: stdio/SSE/streamable_http transport connections |
 | `lazyclaw/mcp/bridge.py` | MCP tools ↔ BaseSkill conversion, registry integration |
-| `lazyclaw/mcp/manager.py` | MCP connection CRUD + lifecycle (encrypted configs) |
+| `lazyclaw/mcp/manager.py` | MCP connection CRUD + lifecycle (encrypted configs), bundled MCP auto-register |
 | `lazyclaw/mcp/server.py` | Expose skill registry as MCP server via SSE |
 | `lazyclaw/heartbeat/cron.py` | Cron expression parser using croniter |
 | `lazyclaw/heartbeat/orchestrator.py` | Job CRUD for agent_jobs table (encrypted) |
@@ -183,7 +184,7 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/teams/specialist.py` | SpecialistConfig dataclass, built-in specialists, DB CRUD |
 | `lazyclaw/teams/runner.py` | Run single specialist as mini agent loop with filtered tools |
 | `lazyclaw/teams/executor.py` | Parallel specialist execution via asyncio.gather + semaphore |
-| `lazyclaw/teams/lead.py` | Team lead: analyze complexity, delegate, merge + critic |
+| `lazyclaw/teams/lead.py` | Team lead: analyze complexity, delegate, merge + critic, simple-message pre-filter |
 | `lazyclaw/teams/conversation.py` | Encrypted team message storage (agent_team_messages table) |
 | `lazyclaw/teams/settings.py` | Team settings CRUD from users.settings JSON |
 | `lazyclaw/gateway/routes/teams.py` | Teams REST API (settings, specialists, sessions — 8 endpoints) |

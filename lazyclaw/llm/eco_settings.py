@@ -111,3 +111,34 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         await db.commit()
 
     return eco
+
+
+async def auto_detect_eco_mode(config: Config, user_id: str) -> str | None:
+    """If mcp-freeride is available and has providers, auto-enable hybrid mode.
+
+    Only activates if the user hasn't explicitly set a mode yet (still on default 'full').
+    Returns the new mode if changed, or None if no change.
+    """
+    current = await get_eco_settings(config, user_id)
+    if current.get("mode") != "full":
+        return None  # User already chose a mode, respect it
+
+    try:
+        from mcp_freeride.config import load_config as load_freeride_config
+        from mcp_freeride.config import get_configured_providers
+
+        freeride_config = load_freeride_config()
+        providers = get_configured_providers(freeride_config)
+        if providers:
+            await update_eco_settings(config, user_id, {"mode": "hybrid"})
+            logger.info(
+                "Auto-enabled hybrid ECO mode (%d free providers: %s)",
+                len(providers), ", ".join(providers),
+            )
+            return "hybrid"
+    except ImportError:
+        pass
+    except Exception:
+        logger.debug("ECO auto-detect failed", exc_info=True)
+
+    return None

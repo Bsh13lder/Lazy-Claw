@@ -33,7 +33,7 @@ class WebSearchSkill(BaseSkill):
 
     async def execute(self, user_id: str, params: dict) -> str:
         import asyncio
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
 
         query = params["query"]
         max_results = params.get("max_results", 5)

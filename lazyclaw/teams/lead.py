@@ -123,6 +123,30 @@ def _parse_analysis(content: str) -> dict | None:
     return None
 
 
+import re as _re
+
+# Fast pre-filter: patterns that suggest action (need team analysis)
+_ACTION_KEYWORDS = _re.compile(
+    r"\b(search|browse|find|create|write|run|schedule|compare|analyze|"
+    r"build|deploy|generate|compute|calculate|check|review|debug|fix|"
+    r"refactor|test|monitor|scrub|scan)\b",
+    _re.IGNORECASE,
+)
+
+
+def _is_obviously_simple(message: str) -> bool:
+    """Return True if the message is clearly too simple for team delegation.
+
+    Avoids a full LLM analysis call for greetings, thanks, short questions.
+    """
+    if len(message) > 80:
+        return False
+    if _ACTION_KEYWORDS.search(message):
+        return False
+    # Short messages without action keywords → simple
+    return True
+
+
 class TeamLead:
     """Orchestrates multi-agent team execution."""
 
@@ -152,6 +176,11 @@ class TeamLead:
             return await self._force_team(
                 user_id, message, settings, specialists, registry, permission_checker
             )
+
+        # Fast pre-filter: skip LLM analysis for obviously simple messages
+        if _is_obviously_simple(message):
+            logger.debug("Team lead: skipped analysis (obviously simple)")
+            return None
 
         # Analyze complexity
         analysis = await self._analyze(user_id, message, specialists)

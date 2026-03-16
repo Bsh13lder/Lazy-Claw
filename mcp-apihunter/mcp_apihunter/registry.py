@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 
 import aiosqlite
@@ -161,3 +162,87 @@ class Registry:
         if row is None:
             return None
         return _row_to_entry(row)
+
+    async def seed_known_providers(self) -> int:
+        """Pre-seed the registry with well-known free LLM API providers.
+
+        Only adds entries that don't already exist (by name). Returns count added.
+        """
+        known = [
+            {
+                "name": "groq",
+                "base_url": "https://api.groq.com/openai",
+                "api_key_env": "GROQ_API_KEY",
+                "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
+            },
+            {
+                "name": "gemini",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "api_key_env": "GEMINI_API_KEY",
+                "models": ["gemini-2.0-flash", "gemini-1.5-flash"],
+            },
+            {
+                "name": "openrouter-free",
+                "base_url": "https://openrouter.ai/api",
+                "api_key_env": "OPENROUTER_API_KEY",
+                "models": [
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "google/gemma-3-27b-it:free",
+                    "deepseek/deepseek-r1-0528:free",
+                ],
+            },
+            {
+                "name": "together",
+                "base_url": "https://api.together.xyz",
+                "api_key_env": "TOGETHER_API_KEY",
+                "models": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
+            },
+            {
+                "name": "mistral",
+                "base_url": "https://api.mistral.ai",
+                "api_key_env": "MISTRAL_API_KEY",
+                "models": ["mistral-small-latest", "open-mistral-nemo"],
+            },
+            {
+                "name": "huggingface",
+                "base_url": "https://router.huggingface.co/hf-inference",
+                "api_key_env": "HF_API_KEY",
+                "models": ["meta-llama/Llama-3.3-70B-Instruct"],
+            },
+        ]
+
+        db = await self._get_db()
+        added = 0
+        for entry in known:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM endpoints WHERE name = ?",
+                (entry["name"],),
+            )
+            count = (await cursor.fetchone())[0]
+            if count > 0:
+                continue
+
+            # Check if API key is available — mark as active if so, pending if not
+            api_key = os.getenv(entry["api_key_env"]) if entry["api_key_env"] else None
+            status = "active" if api_key else "pending"
+
+            now = time.time()
+            await db.execute(
+                "INSERT INTO endpoints (name, base_url, api_key_env, models_json, status, added_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry["name"],
+                    entry["base_url"],
+                    entry["api_key_env"],
+                    json.dumps(entry["models"]),
+                    status,
+                    "lazyclaw-seed",
+                    now,
+                ),
+            )
+            added += 1
+            logger.info("Seeded provider: %s (status=%s)", entry["name"], status)
+
+        if added > 0:
+            await db.commit()
+        return added

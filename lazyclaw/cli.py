@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import secrets
 import uuid
 
-# Suppress httpx async cleanup warnings (Python 3.11 + httpx issue)
-logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+# Early logging setup — suppress noisy libraries before any imports trigger them
+from lazyclaw.logging_config import configure_logging as _configure_logging
+_configure_logging()  # Defaults to WARNING, no file yet — reconfigured after config load
 
 import click
 from rich.console import Console
@@ -35,6 +37,8 @@ LOGO = r"""
 
 HELP_TEXT = """\
 [bold]Chat:[/bold] Just type your message and press Enter.
+  You can type while the agent works — messages get queued.
+  Type [bold]/?[/bold] or "what's happening" to see live agent status.
 
 [bold]Info:[/bold]
   /status      System dashboard (config, stats, modes)
@@ -59,8 +63,9 @@ HELP_TEXT = """\
   /deny <name>           Deny a category or skill (e.g. /deny vault)
 
 [bold]System:[/bold]
-  /update      Pull latest code + reinstall deps
-  /version     Show current version
+  /install-mcps  Install all bundled MCP servers
+  /update        Pull latest code + reinstall deps
+  /version       Show current version
 
 [bold]Session:[/bold]
   /clear       Start fresh chat session
@@ -117,6 +122,10 @@ async def run_agent(config: Config) -> None:
     from lazyclaw.runtime.agent import Agent
     from lazyclaw.skills.registry import SkillRegistry
 
+    # Configure logging with file output for server mode
+    log_file = str(config.database_dir / "lazyclaw.log")
+    _configure_logging(config.log_level, log_file)
+
     await init_db(config)
 
     from lazyclaw.permissions.checker import PermissionChecker
@@ -124,8 +133,48 @@ async def run_agent(config: Config) -> None:
     router = LLMRouter(config)
     registry = SkillRegistry()
     registry.register_defaults(config=config)
+
+    # Get default user for MCP/ECO init
+    user_id = await _get_default_user(config)
+
+    # Seed apihunter with known free providers
+    try:
+        from mcp_apihunter.config import ApiHunterConfig
+        from mcp_apihunter.registry import Registry as ApiHunterRegistry
+        ah_config = ApiHunterConfig()
+        ah_registry = ApiHunterRegistry(ah_config.db_path)
+        await ah_registry.init_db()
+        seeded = await ah_registry.seed_known_providers()
+        if seeded:
+            console.print(f"[green]\u2713[/green] Seeded {seeded} providers into apihunter")
+    except Exception:
+        pass
+
+    # Auto-register + connect bundled MCP servers
+    from lazyclaw.mcp.manager import connect_and_register_bundled_mcps
+    mcp_tool_count = 0
+    try:
+        mcp_tool_count = await connect_and_register_bundled_mcps(config, user_id, registry)
+        if mcp_tool_count > 0:
+            console.print(f"[green]\u2713[/green] Loaded {mcp_tool_count} MCP tools")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("MCP auto-connect failed: %s", exc)
+
+    # Auto-detect ECO mode
+    from lazyclaw.llm.eco_settings import auto_detect_eco_mode
+    try:
+        eco_mode = await auto_detect_eco_mode(config, user_id)
+        if eco_mode:
+            console.print(f"[green]\u2713[/green] ECO mode: {eco_mode}")
+    except Exception:
+        pass
+
     permission_checker = PermissionChecker(config, registry)
     agent = Agent(config, router, registry, permission_checker=permission_checker)
+
+    # Share registry with gateway
+    from lazyclaw.gateway.app import set_registry
+    set_registry(registry)
 
     # Lane Queue
     from lazyclaw.queue.lane import LaneQueue
@@ -246,6 +295,8 @@ async def _handle_slash_command(
         "/logs": lambda: show_logs(config, user_id),
         "/usage": lambda: _show_usage(config),
         "/doctor": lambda: run_doctor(config, user_id),
+        "/install-mcps": lambda: _install_mcps(),
+        "/installmcps": lambda: _install_mcps(),
         "/update": lambda: _run_update(),
         "/version": lambda: _show_version(),
         "/wipe": lambda: clear_history(config, user_id),
@@ -345,6 +396,85 @@ async def _show_version() -> None:
     console.print(f"  [dim]Code changes take effect immediately — no reinstall needed.[/dim]")
 
 
+async def _install_mcps() -> None:
+    """Install all bundled MCP servers — local first, GitHub fallback."""
+    import subprocess
+    import sys
+
+    root = get_project_root()
+    github_repo = "https://github.com/Bsh13lder/Lazy-Claw.git"
+    mcp_packages = {
+        "mcp-freeride": "mcp_freeride",
+        "mcp-healthcheck": "mcp_healthcheck",
+        "mcp-apihunter": "mcp_apihunter",
+        "mcp-vaultwhisper": "mcp_vaultwhisper",
+        "mcp-taskai": "mcp_taskai",
+    }
+
+    console.print("[bold cyan]Installing bundled MCP servers...[/bold cyan]")
+    console.print()
+
+    pip_cmd = [sys.executable, "-m", "pip"]
+    installed = 0
+    skipped = 0
+    need_github: list[str] = []
+
+    for pkg_dir, module_name in mcp_packages.items():
+        # Already installed?
+        try:
+            __import__(module_name)
+            console.print(f"  [green]{pkg_dir}[/green] — already installed")
+            skipped += 1
+            continue
+        except ImportError:
+            pass
+
+        # Try local directory first
+        pkg_path = root / pkg_dir
+        if pkg_path.exists():
+            console.print(f"  [dim]Installing {pkg_dir} (local)...[/dim]", end="")
+            try:
+                result = subprocess.run(
+                    [*pip_cmd, "install", "-e", str(pkg_path), "-q"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode == 0:
+                    console.print(f"\r  [green]{pkg_dir}[/green] — installed (local)       ")
+                    installed += 1
+                    continue
+                else:
+                    console.print(f"\r  [yellow]{pkg_dir}[/yellow] — local failed, trying GitHub...")
+            except subprocess.TimeoutExpired:
+                console.print(f"\r  [yellow]{pkg_dir}[/yellow] — local timed out, trying GitHub...")
+
+            need_github.append(pkg_dir)
+        else:
+            need_github.append(pkg_dir)
+
+    # GitHub fallback for packages not found locally
+    if need_github:
+        console.print()
+        console.print(f"  [dim]Fetching {len(need_github)} package(s) from GitHub...[/dim]")
+        for pkg_dir in need_github:
+            pip_url = f"git+{github_repo}#subdirectory={pkg_dir}"
+            console.print(f"  [dim]Installing {pkg_dir} (GitHub)...[/dim]", end="")
+            try:
+                result = subprocess.run(
+                    [*pip_cmd, "install", pip_url, "-q"],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if result.returncode == 0:
+                    console.print(f"\r  [green]{pkg_dir}[/green] — installed (GitHub)      ")
+                    installed += 1
+                else:
+                    console.print(f"\r  [red]{pkg_dir}[/red] — failed: {result.stderr.strip()[:80]}")
+            except subprocess.TimeoutExpired:
+                console.print(f"\r  [red]{pkg_dir}[/red] — timed out")
+
+    console.print()
+    console.print(f"  [bold]{installed} installed, {skipped} already present[/bold]")
+
+
 async def _run_update() -> None:
     """Pull latest code from git and reinstall dependencies."""
     import subprocess
@@ -424,7 +554,10 @@ async def _run_update() -> None:
 
 
 class _CliCallback:
-    """Shows live agent activity in the terminal with animated spinner."""
+    """Shows live agent activity in the terminal with animated spinner.
+
+    Tracks current agent state so users can ask "what's happening?" mid-run.
+    """
 
     def __init__(self, out: Console) -> None:
         self._console = out
@@ -436,9 +569,19 @@ class _CliCallback:
         self.llm_calls = 0
         self.free_calls = 0
         self.free_tokens = 0
+        # Live state tracking
+        self.busy = False
+        self.current_phase = "preparing"
+        self.current_model = ""
+        self.current_iteration = 0
+        self.current_tool = ""
+        self.tool_log: list[str] = []
+        self.specialists_active: list[str] = []
 
     def start_thinking(self) -> None:
         """Show spinner immediately when user submits a message."""
+        self.busy = True
+        self.current_phase = "preparing"
         self._spinner = self._console.status(
             "  [dim]Preparing...[/dim]", spinner="dots"
         )
@@ -448,6 +591,36 @@ class _CliCallback:
         if self._spinner is not None:
             self._spinner.stop()
             self._spinner = None
+
+    def get_status_report(self) -> str:
+        """Return a human-readable status of what the agent is doing right now."""
+        if not self.busy:
+            return "Idle — waiting for your message."
+        lines = []
+        if self.current_phase == "thinking":
+            lines.append(
+                f"Thinking (model: {self.current_model}, step {self.current_iteration})"
+            )
+        elif self.current_phase == "tool":
+            lines.append(f"Running tool: {self.current_tool}")
+        elif self.current_phase == "streaming":
+            lines.append("Streaming response...")
+        elif self.current_phase == "team":
+            lines.append("Team lead delegating work")
+        else:
+            lines.append(f"Phase: {self.current_phase}")
+
+        if self.specialists_active:
+            lines.append(f"Active specialists: {', '.join(self.specialists_active)}")
+
+        if self.tool_log:
+            recent = self.tool_log[-5:]
+            lines.append("Recent activity:")
+            for entry in recent:
+                lines.append(f"  {entry}")
+
+        lines.append(f"LLM calls so far: {self.llm_calls}")
+        return "\n".join(lines)
 
     async def on_approval_request(
         self, skill_name: str, arguments: dict
@@ -478,6 +651,9 @@ class _CliCallback:
             self._stop_spinner()
             model = event.metadata.get("model", "?")
             iteration = event.metadata.get("iteration", 1)
+            self.current_phase = "thinking"
+            self.current_model = model
+            self.current_iteration = iteration
             label = f"  [bold cyan]Thinking[/bold cyan] [dim]({model}, step {iteration})...[/dim]"
             self._spinner = self._console.status(label, spinner="dots")
             self._spinner.start()
@@ -494,17 +670,27 @@ class _CliCallback:
                 self.free_tokens += tokens
         elif kind == "tool_call":
             self._stop_spinner()
+            self.current_phase = "tool"
+            self.current_tool = event.detail
+            self.tool_log.append(f"> {event.detail}")
             self._spinner = self._console.status(
                 f"  [dim]> {event.detail}[/dim]", spinner="dots"
             )
             self._spinner.start()
         elif kind == "tool_result":
             self._stop_spinner()
+            self.tool_log.append(f"< {event.detail}")
             self._console.print(f"  [green]< {event.detail}[/green]")
         elif kind == "team_delegate":
             self._stop_spinner()
+            self.current_phase = "team"
+            # Track specialist names from the detail string
+            detail = event.detail
+            if "specialist" in detail.lower() or "delegat" in detail.lower():
+                self.specialists_active.append(detail)
+            self.tool_log.append(f"% {detail}")
             self._spinner = self._console.status(
-                f"  [cyan]% {event.detail}[/cyan]", spinner="dots"
+                f"  [cyan]% {detail}[/cyan]", spinner="dots"
             )
             self._spinner.start()
         elif kind == "token":
@@ -512,6 +698,7 @@ class _CliCallback:
                 self._stop_spinner()
                 self._console.print()  # newline before streamed content
                 self._streaming = True
+                self.current_phase = "streaming"
             self._console.print(event.detail, end="", highlight=False)
         elif kind == "stream_done":
             if self._streaming:
@@ -521,6 +708,9 @@ class _CliCallback:
             self._console.print(f"  [yellow]! {event.detail}[/yellow]")
         elif kind == "done":
             self._stop_spinner()
+            self.busy = False
+            self.current_phase = "done"
+            self.specialists_active.clear()
 
 
 async def _show_usage(config: Config) -> None:
@@ -696,6 +886,10 @@ async def _chat_loop() -> None:
 
     config = load_config()
 
+    # Reconfigure logging with file output now that we have config
+    log_file = str(config.database_dir / "lazyclaw.log")
+    _configure_logging(config.log_level, log_file)
+
     if not config.server_secret or not (config.openai_api_key or config.anthropic_api_key):
         console.print("[red]Not configured. Run 'lazyclaw setup' first.[/red]")
         raise SystemExit(1)
@@ -705,19 +899,190 @@ async def _chat_loop() -> None:
     router = LLMRouter(config)
     registry = SkillRegistry()
     registry.register_defaults(config=config)
-    checker = PermissionChecker(config, registry)
-    agent = Agent(config, router, registry, permission_checker=checker)
     user_id = await _get_default_user(config)
 
+    # Seed apihunter with known free providers
+    try:
+        from mcp_apihunter.config import ApiHunterConfig
+        from mcp_apihunter.registry import Registry as ApiHunterRegistry
+        ah_config = ApiHunterConfig()
+        ah_registry = ApiHunterRegistry(ah_config.db_path)
+        await ah_registry.init_db()
+        seeded = await ah_registry.seed_known_providers()
+        if seeded:
+            logging.getLogger(__name__).info("Seeded %d providers into apihunter", seeded)
+    except Exception:
+        pass
+
+    # Auto-register + connect bundled MCP servers
+    from lazyclaw.mcp.manager import connect_and_register_bundled_mcps
+    try:
+        mcp_tool_count = await connect_and_register_bundled_mcps(config, user_id, registry)
+    except Exception as exc:
+        mcp_tool_count = 0
+        logging.getLogger(__name__).warning("MCP auto-connect failed: %s", exc)
+
+    # Auto-detect ECO mode if free providers are available
+    from lazyclaw.llm.eco_settings import auto_detect_eco_mode
+    eco_mode = None
+    try:
+        eco_mode = await auto_detect_eco_mode(config, user_id)
+    except Exception:
+        pass
+
+    checker = PermissionChecker(config, registry)
+    agent = Agent(config, router, registry, permission_checker=checker)
+
+    # Share registry with gateway for API fallback path
+    from lazyclaw.gateway.app import set_registry
+    set_registry(registry)
+
     console.print(Panel(LOGO, subtitle=f"v{__version__}", style="cyan"))
-    console.print("[dim]Type a message to chat. /help for commands. Ctrl+C to quit.[/dim]")
+    if mcp_tool_count > 0:
+        console.print(f"[dim]Loaded {mcp_tool_count} MCP tools from bundled servers.[/dim]")
+    if eco_mode:
+        console.print(f"[dim]ECO mode auto-enabled: {eco_mode} (free providers detected)[/dim]")
+    console.print("[dim]Type a message to chat. /help for commands.[/dim]")
+    console.print("[dim]Up/Down: history  |  Esc: clear line  |  Ctrl+C: quit[/dim]")
+    console.print("[dim]Type while agent works → /? for live status[/dim]")
     console.print()
 
+    # prompt_toolkit session — up/down history, Esc clear, proper key bindings
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.formatted_text import HTML
+
+    history_path = str(get_project_root() / ".lazyclaw_history")
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    def _clear_line(event):
+        """Esc clears the current input line."""
+        event.current_buffer.reset()
+
+    pt_session: PromptSession = PromptSession(
+        history=FileHistory(history_path),
+        key_bindings=kb,
+        enable_history_search=True,
+    )
+
     chat_session_id: str | None = None
+    active_callback: _CliCallback | None = None
+    agent_task: asyncio.Task | None = None
+    pending_messages: list[str] = []
+
+    async def _get_input() -> str:
+        return await pt_session.prompt_async(HTML("<cyan><b>&gt; </b></cyan>"))
+
+    async def _run_agent(msg: str, cb: _CliCallback) -> str:
+        return await agent.process_message(
+            user_id, msg, chat_session_id=chat_session_id,
+            callback=cb,
+        )
+
+    def _show_agent_result(response: str, cb: _CliCallback) -> None:
+        console.print()
+        if cb._streaming:
+            console.print("[dim]───[/dim]")
+        else:
+            console.print(Panel(Markdown(response), title="LazyClaw", border_style="green"))
+        console.print()
+        # Accumulate session usage
+        _session_usage["total_tokens"] += cb.total_tokens
+        _session_usage["prompt_tokens"] += cb.prompt_tokens
+        _session_usage["completion_tokens"] += cb.completion_tokens
+        _session_usage["llm_calls"] += cb.llm_calls
+        _session_usage["messages"] += 1
+        _session_usage["free_calls"] += cb.free_calls
+        _session_usage["free_tokens"] += cb.free_tokens
+
+    # Status query keywords — if user types these while agent is busy, show status
+    _STATUS_TRIGGERS = {
+        "/?", "/status-agent", "/what", "/whats",
+        "what's happening", "whats happening", "what are you doing",
+        "status", "what's going on", "whats going on",
+    }
+
+    def _is_status_query(text: str) -> bool:
+        lower = text.lower().strip()
+        return lower in _STATUS_TRIGGERS or lower.startswith("/?")
 
     while True:
+        # If agent is running, wait for EITHER agent to finish OR user input
+        if agent_task is not None and not agent_task.done():
+            input_task = asyncio.ensure_future(_get_input())
+            done, _ = await asyncio.wait(
+                {agent_task, input_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if agent_task in done:
+                # Agent finished — show result
+                input_task.cancel()
+                try:
+                    response = agent_task.result()
+                    _show_agent_result(response, active_callback)
+                except Exception as e:
+                    active_callback._stop_spinner()
+                    console.print(f"[red]Error: {e}[/red]")
+                agent_task = None
+                active_callback = None
+
+                # Process any pending messages queued while agent was busy
+                for queued_msg in pending_messages:
+                    cb = _CliCallback(console)
+                    cb.start_thinking()
+                    try:
+                        resp = await _run_agent(queued_msg, cb)
+                        _show_agent_result(resp, cb)
+                    except Exception as e:
+                        cb._stop_spinner()
+                        console.print(f"[red]Error: {e}[/red]")
+                pending_messages.clear()
+                continue
+
+            if input_task in done:
+                # User typed while agent works
+                try:
+                    user_input = input_task.result()
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[yellow]Goodbye![/yellow]")
+                    if agent_task and not agent_task.done():
+                        agent_task.cancel()
+                    break
+
+                stripped = user_input.strip()
+                if not stripped:
+                    continue
+
+                if stripped.lower() in ("/exit", "/quit", "/q"):
+                    console.print("[yellow]Goodbye![/yellow]")
+                    if agent_task and not agent_task.done():
+                        agent_task.cancel()
+                    break
+
+                # Status query — show what agent is doing
+                if _is_status_query(stripped):
+                    if active_callback:
+                        console.print()
+                        console.print(
+                            Panel(
+                                active_callback.get_status_report(),
+                                title="[cyan]Agent Status[/cyan]",
+                                border_style="cyan",
+                            )
+                        )
+                    continue
+
+                # Queue the message for after agent finishes
+                pending_messages.append(stripped)
+                console.print(f"[dim]  (queued — will send after current task)[/dim]")
+                continue
+
+        # Normal input (no agent running)
         try:
-            user_input = console.input("[bold cyan]> [/bold cyan]")
+            user_input = await _get_input()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[yellow]Goodbye![/yellow]")
             break
@@ -748,35 +1113,11 @@ async def _chat_loop() -> None:
             console.print(f"[yellow]Unknown command: {stripped.split()[0]}. Try /help[/yellow]")
             continue
 
-        # Chat with agent — live process display
+        # Chat with agent — run in background so user can type during execution
         callback = _CliCallback(console)
         callback.start_thinking()
-        try:
-            response = await agent.process_message(
-                user_id, stripped, chat_session_id=chat_session_id,
-                callback=callback,
-            )
-        except Exception as e:
-            callback._stop_spinner()
-            console.print(f"[red]Error: {e}[/red]")
-            continue
-
-        console.print()
-        if callback._streaming:
-            # Content was already streamed to terminal — show a separator
-            console.print("[dim]───[/dim]")
-        else:
-            console.print(Panel(Markdown(response), title="LazyClaw", border_style="green"))
-        console.print()
-
-        # Accumulate session usage
-        _session_usage["total_tokens"] += callback.total_tokens
-        _session_usage["prompt_tokens"] += callback.prompt_tokens
-        _session_usage["completion_tokens"] += callback.completion_tokens
-        _session_usage["llm_calls"] += callback.llm_calls
-        _session_usage["messages"] += 1
-        _session_usage["free_calls"] += callback.free_calls
-        _session_usage["free_tokens"] += callback.free_tokens
+        active_callback = callback
+        agent_task = asyncio.create_task(_run_agent(stripped, callback))
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +1303,12 @@ def setup() -> None:
     console.print()
 
     console.print("[bold green]Setup complete![/bold green] Run [bold cyan]lazyclaw[/bold cyan] to start chatting.")
+
+
+@main.command(name="install-mcps")
+def install_mcps_cmd() -> None:
+    """Install all bundled MCP servers."""
+    asyncio.run(_install_mcps())
 
 
 @main.command()

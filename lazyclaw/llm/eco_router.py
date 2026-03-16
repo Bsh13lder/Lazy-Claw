@@ -158,14 +158,30 @@ class EcoRouter:
             return None
 
     def _convert_to_dicts(self, messages: list[LLMMessage]) -> list[dict]:
-        """Convert LLMMessage list to OpenAI-format dicts for free router."""
+        """Convert LLMMessage list to OpenAI-format dicts for free router.
+
+        Free APIs don't support tool roles, so we convert tool context
+        into plain user/assistant messages to preserve conversation flow.
+        """
         result = []
         for msg in messages:
             if msg.role == "tool":
-                continue  # Free APIs don't understand tool results
-            if msg.tool_calls:
-                continue  # Skip assistant messages with tool calls
-            result.append({"role": msg.role, "content": msg.content})
+                # Preserve tool results as user context
+                result.append({
+                    "role": "user",
+                    "content": f"[Tool result: {msg.content}]",
+                })
+            elif msg.tool_calls:
+                # Convert tool-calling assistant message to plain text
+                parts = []
+                if msg.content:
+                    parts.append(msg.content)
+                for tc in msg.tool_calls:
+                    parts.append(f"[Used tool: {tc.name}]")
+                if parts:
+                    result.append({"role": "assistant", "content": " ".join(parts)})
+            else:
+                result.append({"role": msg.role, "content": msg.content})
         return result
 
     def _record_usage(self, user_id: str, route: str) -> None:
@@ -211,8 +227,15 @@ class EcoRouter:
         free_router = self._get_free_router()
         if not free_router:
             return LLMResponse(
-                content="ECO mode is enabled but no free AI providers are configured. "
-                "Install mcp-freeride and set API keys (GROQ_API_KEY, GEMINI_API_KEY, etc).",
+                content=(
+                    "ECO mode is enabled but no free AI providers are configured.\n\n"
+                    "Quick setup (pick any — all are free):\n"
+                    "• Groq (fastest): https://console.groq.com → Get API Key → add GROQ_API_KEY to .env\n"
+                    "• Gemini: https://aistudio.google.com/apikey → add GEMINI_API_KEY to .env\n"
+                    "• OpenRouter: https://openrouter.ai/keys → add OPENROUTER_API_KEY to .env\n"
+                    "• HuggingFace: https://huggingface.co/settings/tokens → add HF_API_KEY to .env\n\n"
+                    "Then restart LazyClaw. Or switch to paid mode: /eco full"
+                ),
                 model="none",
             )
 

@@ -67,8 +67,15 @@ async def compress_history(
         return _to_llm_messages(decrypted)
 
     # Split: older messages (to compress) + recent (keep full)
-    older = decrypted[:-WINDOW_SIZE]
-    recent = decrypted[-WINDOW_SIZE:]
+    # Adjust split point so we never break a tool-call sequence
+    split_idx = len(decrypted) - WINDOW_SIZE
+    while split_idx > 0 and decrypted[split_idx]["role"] == "tool":
+        split_idx -= 1
+    # If we landed on the assistant message that owns the tool calls, keep it in recent
+    if split_idx > 0 and decrypted[split_idx].get("has_tool_calls"):
+        pass  # split_idx is correct — assistant stays in recent
+    older = decrypted[:split_idx]
+    recent = decrypted[split_idx:]
 
     # Try to load existing summary for this chunk
     summary_text = await _load_existing_summary(
@@ -140,7 +147,24 @@ def _to_llm_messages(messages: list[dict]) -> list[LLMMessage]:
             tool_call_id=m.get("tool_name"),
             tool_calls=tool_calls,
         ))
-    return result
+
+    # Strip orphaned tool messages (no preceding assistant with matching tool_calls)
+    validated: list[LLMMessage] = []
+    active_tc_ids: set[str] = set()
+    for msg in result:
+        if msg.role == "assistant" and msg.tool_calls:
+            active_tc_ids = {tc.id for tc in msg.tool_calls}
+            validated.append(msg)
+        elif msg.role == "tool":
+            if msg.tool_call_id and msg.tool_call_id in active_tc_ids:
+                validated.append(msg)
+                active_tc_ids.discard(msg.tool_call_id)
+            else:
+                logger.debug("Dropping orphaned tool message: %s", msg.tool_call_id)
+        else:
+            active_tc_ids = set()
+            validated.append(msg)
+    return validated
 
 
 async def _load_existing_summary(

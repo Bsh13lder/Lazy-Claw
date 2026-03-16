@@ -16,18 +16,18 @@ HF_MODELS = [
 
 
 class HuggingFaceProvider(OpenAICompatibleProvider):
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         super().__init__(
             provider_name="huggingface",
-            base_url="https://api-inference.huggingface.co",
+            base_url="https://router.huggingface.co/hf-inference",
             api_key=api_key,
             default_model="meta-llama/Llama-3.3-70B-Instruct",
             available_models=HF_MODELS,
         )
 
     def _build_url(self, model: str) -> str:
-        """HuggingFace uses model-specific URLs."""
-        return f"https://api-inference.huggingface.co/models/{model}/v1/chat/completions"
+        """HuggingFace uses the router API."""
+        return f"https://router.huggingface.co/hf-inference/v1/chat/completions"
 
     async def chat(
         self,
@@ -44,10 +44,9 @@ class HuggingFaceProvider(OpenAICompatibleProvider):
             )
 
         url = self._build_url(used_model)
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
         payload = {
             "model": used_model,
             "messages": messages,
@@ -66,4 +65,5 @@ class HuggingFaceProvider(OpenAICompatibleProvider):
             )
 
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        return {"content": content, "model": used_model, "provider": self.name}

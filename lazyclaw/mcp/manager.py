@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -12,6 +13,36 @@ logger = logging.getLogger(__name__)
 
 # Active MCP client connections keyed by server_id
 _active_clients: dict = {}
+
+# Bundled MCP servers that ship with LazyClaw
+# "module" = Python module (run via sys.executable -m <module>)
+# "npx" = npm package (run via npx <package>)
+BUNDLED_MCPS = {
+    "mcp-freeride": {
+        "module": "mcp_freeride",
+        "description": "Free AI router (ECO mode)",
+    },
+    "mcp-healthcheck": {
+        "module": "mcp_healthcheck",
+        "description": "AI provider health monitor",
+    },
+    "mcp-apihunter": {
+        "module": "mcp_apihunter",
+        "description": "Free API endpoint discovery",
+    },
+    "mcp-vaultwhisper": {
+        "module": "mcp_vaultwhisper",
+        "description": "Privacy-safe AI proxy (PII scrubbing)",
+    },
+    "mcp-taskai": {
+        "module": "mcp_taskai",
+        "description": "Task intelligence (categorize, prioritize, deduplicate)",
+    },
+    "claude-code": {
+        "npx": "@steipete/claude-code-mcp",
+        "description": "Control Claude Code CLI from LazyClaw",
+    },
+}
 
 
 async def add_server(
@@ -162,3 +193,115 @@ async def disconnect_all() -> None:
             except Exception:
                 logger.warning("Error disconnecting MCP server %s", server_id, exc_info=True)
     logger.info("Disconnected all MCP clients (%d total)", len(server_ids))
+
+
+async def auto_register_bundled_mcps(
+    config: Config,
+    user_id: str,
+) -> list[str]:
+    """Auto-register bundled MCP servers that are installed but not yet in DB.
+
+    Checks each bundled MCP module — if importable and not already registered
+    for this user, adds a stdio connection entry to the database.
+
+    Returns list of newly registered server names.
+    """
+    key = derive_server_key(config.server_secret, user_id)
+    registered: list[str] = []
+
+    # Get existing server names for this user
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT name FROM mcp_connections WHERE user_id = ?",
+            (user_id,),
+        )
+        existing_names = {row[0] for row in await rows.fetchall()}
+
+    for name, info in BUNDLED_MCPS.items():
+        # Skip if already registered
+        if name in existing_names:
+            continue
+
+        # Determine if this is a Python module or npx package
+        if "module" in info:
+            # Python module — check if importable
+            try:
+                __import__(info["module"])
+            except ImportError:
+                continue
+            server_config = {
+                "command": sys.executable,
+                "args": ["-m", info["module"]],
+            }
+        elif "npx" in info:
+            # npm package — check if npx is available
+            import shutil
+            if not shutil.which("npx"):
+                continue
+            server_config = {
+                "command": "npx",
+                "args": [info["npx"]],
+                "env": info.get("env", {}),
+            }
+        else:
+            continue
+        server_id = str(uuid4())
+        encrypted_config = encrypt(json.dumps(server_config), key)
+
+        async with db_session(config) as db:
+            await db.execute(
+                "INSERT INTO mcp_connections (id, user_id, name, transport, config) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (server_id, user_id, name, "stdio", encrypted_config),
+            )
+            await db.commit()
+
+        logger.info("Auto-registered bundled MCP: %s (id=%s)", name, server_id)
+        registered.append(name)
+
+    if registered:
+        logger.info("Auto-registered %d bundled MCP servers", len(registered))
+    return registered
+
+
+async def connect_and_register_bundled_mcps(
+    config: Config,
+    user_id: str,
+    registry,
+) -> int:
+    """Auto-register, connect, and register tools from all bundled MCPs.
+
+    This is the all-in-one startup function: ensures bundled MCPs are in DB,
+    connects to each enabled one, and registers their tools in the skill registry.
+
+    Returns total number of tools registered.
+    """
+    from lazyclaw.mcp.bridge import register_mcp_tools
+
+    # Step 1: ensure DB entries exist
+    await auto_register_bundled_mcps(config, user_id)
+
+    # Step 2: connect + register tools for all enabled bundled MCPs
+    total_tools = 0
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT id, name FROM mcp_connections "
+            "WHERE user_id = ? AND enabled = 1 AND name IN ({})".format(
+                ",".join("?" for _ in BUNDLED_MCPS)
+            ),
+            (user_id, *BUNDLED_MCPS.keys()),
+        )
+        servers = await rows.fetchall()
+
+    for server_id, name in servers:
+        if server_id in _active_clients:
+            continue  # already connected
+        try:
+            client = await connect_server(config, user_id, server_id)
+            count = await register_mcp_tools(client, registry)
+            total_tools += count
+            logger.info("Connected bundled MCP %s: %d tools", name, count)
+        except Exception:
+            logger.warning("Failed to connect bundled MCP %s", name, exc_info=True)
+
+    return total_tools

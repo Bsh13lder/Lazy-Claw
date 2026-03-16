@@ -481,12 +481,36 @@ async def run_doctor(config: Config, user_id: str) -> None:
     except Exception:
         checks.append(("MCP Servers", "[yellow]WARN[/yellow]", "Table not found"))
 
-    # 6. mcp-freeride (ECO mode)
+    # 6. Bundled MCP servers
+    _mcp_packages = {
+        "mcp-freeride": ("mcp_freeride", "Free AI router (ECO mode)"),
+        "mcp-healthcheck": ("mcp_healthcheck", "AI provider health monitor"),
+        "mcp-apihunter": ("mcp_apihunter", "Free API endpoint discovery"),
+        "mcp-vaultwhisper": ("mcp_vaultwhisper", "Privacy-safe AI proxy"),
+        "mcp-taskai": ("mcp_taskai", "Task intelligence"),
+    }
+    missing_mcps = []
+    for pkg_name, (module_name, description) in _mcp_packages.items():
+        try:
+            __import__(module_name)
+            checks.append((pkg_name, "[green]OK[/green]", f"Installed ({description})"))
+        except ImportError:
+            checks.append((pkg_name, "[yellow]WARN[/yellow]", f"Not installed ({description})"))
+            missing_mcps.append(pkg_name)
+
+    # 6b. Free AI providers
     try:
-        import mcp_freeride  # noqa: F401
-        checks.append(("mcp-freeride", "[green]OK[/green]", "Installed (ECO mode available)"))
+        from mcp_freeride.config import load_config as load_freeride_config
+        from mcp_freeride.config import get_configured_providers
+        freeride_config = load_freeride_config()
+        free_providers = [p for p in get_configured_providers(freeride_config) if p != "ollama"]
+        if free_providers:
+            checks.append(("Free AI", "[green]OK[/green]", f"Providers: {', '.join(free_providers)}"))
+        else:
+            checks.append(("Free AI", "[yellow]WARN[/yellow]",
+                "No free API keys. Get one free: https://console.groq.com → GROQ_API_KEY"))
     except ImportError:
-        checks.append(("mcp-freeride", "[yellow]WARN[/yellow]", "Not installed (ECO mode unavailable)"))
+        checks.append(("Free AI", "[yellow]WARN[/yellow]", "mcp-freeride not installed"))
 
     # 7. Telegram
     if config.telegram_bot_token:
@@ -516,3 +540,8 @@ async def run_doctor(config: Config, user_id: str) -> None:
     fail_count = sum(1 for _, s, _ in checks if "red" in s)
     console.print()
     console.print(f"  [green]{ok_count} passed[/green]  [yellow]{warn_count} warnings[/yellow]  [red]{fail_count} failed[/red]")
+
+    if missing_mcps:
+        console.print()
+        console.print("[yellow]Missing MCP servers can be installed with:[/yellow]")
+        console.print(f"  [bold]lazyclaw install-mcps[/bold]")

@@ -1,9 +1,11 @@
 from __future__ import annotations
 import time
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ProviderStats:
@@ -11,20 +13,21 @@ class ProviderStats:
     total_successes: int = 0
     total_failures: int = 0
     consecutive_failures: int = 0
-    total_latency_ms: float = 0.0
+    recent_latencies: deque = field(default_factory=lambda: deque(maxlen=50))
     last_success: float | None = None
     last_failure: float | None = None
 
     @property
     def avg_latency_ms(self) -> float:
-        if self.total_successes == 0:
+        if not self.recent_latencies:
             return 0.0
-        return self.total_latency_ms / self.total_successes
+        return sum(self.recent_latencies) / len(self.recent_latencies)
 
     @property
     def is_healthy(self) -> bool:
         # Unhealthy if 3+ consecutive failures
         return self.consecutive_failures < 3
+
 
 class HealthChecker:
     def __init__(self) -> None:
@@ -40,7 +43,7 @@ class HealthChecker:
         stats.total_requests += 1
         stats.total_successes += 1
         stats.consecutive_failures = 0
-        stats.total_latency_ms += latency_ms
+        stats.recent_latencies.append(latency_ms)
         stats.last_success = time.time()
 
     def record_failure(self, provider: str) -> None:

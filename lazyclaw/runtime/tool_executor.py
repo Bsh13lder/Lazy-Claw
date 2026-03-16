@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -12,11 +13,17 @@ logger = logging.getLogger(__name__)
 # Prefix returned when a tool call requires user approval
 APPROVAL_PREFIX = "APPROVAL_REQUIRED:"
 
+# Default timeout for tool execution (seconds)
+DEFAULT_TOOL_TIMEOUT = 60
+
 
 class ToolExecutor:
-    def __init__(self, registry: SkillRegistry, permission_checker=None) -> None:
+    def __init__(
+        self, registry: SkillRegistry, permission_checker=None, timeout: int = DEFAULT_TOOL_TIMEOUT,
+    ) -> None:
         self._registry = registry
         self._checker = permission_checker
+        self._timeout = timeout
 
     async def execute(self, tool_call: ToolCall, user_id: str) -> str:
         """Execute a tool call, checking permissions first.
@@ -41,9 +48,15 @@ class ToolExecutor:
                 return f"{APPROVAL_PREFIX}{tool_call.name}:{args_json}"
 
         try:
-            result = await skill.execute(user_id, tool_call.arguments)
+            result = await asyncio.wait_for(
+                skill.execute(user_id, tool_call.arguments),
+                timeout=self._timeout,
+            )
             logger.debug("Tool %s executed successfully", tool_call.name)
             return result
+        except asyncio.TimeoutError:
+            logger.error("Tool %s timed out after %ds", tool_call.name, self._timeout)
+            return f"Error: Tool '{tool_call.name}' timed out after {self._timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"
@@ -58,9 +71,15 @@ class ToolExecutor:
             return f"Error: Unknown tool '{tool_call.name}'"
 
         try:
-            result = await skill.execute(user_id, tool_call.arguments)
+            result = await asyncio.wait_for(
+                skill.execute(user_id, tool_call.arguments),
+                timeout=self._timeout,
+            )
             logger.debug("Tool %s executed (approved)", tool_call.name)
             return result
+        except asyncio.TimeoutError:
+            logger.error("Tool %s timed out after %ds", tool_call.name, self._timeout)
+            return f"Error: Tool '{tool_call.name}' timed out after {self._timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"

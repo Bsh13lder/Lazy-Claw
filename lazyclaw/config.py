@@ -21,12 +21,13 @@ class Config:
     server_secret: str = ""
     database_dir: Path = field(default_factory=lambda: Path("./data"))
     port: int = 18789
-    default_model: str = "gpt-4o-mini"
+    default_model: str = "gpt-5"
+    worker_model: str = "gpt-5-mini"
     cors_origin: str = "http://localhost:3000"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     telegram_bot_token: str | None = None
-    browser_model: str = "gpt-4o-mini"
+    browser_model: str = "gpt-5-mini"
     browser_timeout: int = 300
     computer_timeout: int = 30
     heartbeat_interval: int = 1800
@@ -47,21 +48,30 @@ def load_config() -> Config:
     elif anthropic_key and not openai_key:
         default_model = "claude-sonnet-4-20250514"
     else:
-        default_model = "gpt-4o-mini"
+        default_model = "gpt-5"
+
+    explicit_worker = os.getenv("WORKER_MODEL")
+    if explicit_worker:
+        worker_model = explicit_worker
+    elif anthropic_key and not openai_key:
+        worker_model = "claude-haiku-4-5-20251001"
+    else:
+        worker_model = "gpt-5-mini"
 
     explicit_browser = os.getenv("BROWSER_MODEL")
     if explicit_browser:
         browser_model = explicit_browser
     elif anthropic_key and not openai_key:
-        browser_model = "claude-sonnet-4-20250514"
+        browser_model = "claude-haiku-4-5-20251001"
     else:
-        browser_model = "gpt-4o-mini"
+        browser_model = "gpt-5-mini"
 
     return Config(
         server_secret=os.getenv("SERVER_SECRET", ""),
         database_dir=Path(os.getenv("DATABASE_DIR", "./data")),
         port=int(os.getenv("PORT", "18789")),
         default_model=default_model,
+        worker_model=worker_model,
         cors_origin=os.getenv("CORS_ORIGIN", "http://localhost:3000"),
         openai_api_key=openai_key,
         anthropic_api_key=anthropic_key,

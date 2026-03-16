@@ -47,3 +47,20 @@ class ToolExecutor:
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"
+
+    async def execute_allowed(self, tool_call: ToolCall, user_id: str) -> str:
+        """Execute a tool call WITHOUT permission checks.
+
+        Only call this after the user has explicitly approved the action.
+        """
+        skill = self._registry.get(tool_call.name)
+        if not skill:
+            return f"Error: Unknown tool '{tool_call.name}'"
+
+        try:
+            result = await skill.execute(user_id, tool_call.arguments)
+            logger.debug("Tool %s executed (approved)", tool_call.name)
+            return result
+        except Exception as e:
+            logger.error("Tool %s failed: %s", tool_call.name, e)
+            return f"Error executing {tool_call.name}: {e}"

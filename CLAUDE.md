@@ -62,6 +62,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 - **Encrypt Everything**: User content is always encrypted at rest. No exceptions.
 - **Extract, Don't Rewrite**: Proven LazyTasker code is adapted, not rewritten from scratch.
 - **Test Each Phase**: Each phase has a clear verification step before moving on.
+- **Never Guess Data**: NEVER fabricate prices, stats, version numbers, or any factual data. Always look up real values from official sources (docs, APIs, web search). If you can't find it, say so — don't make it up.
 
 ---
 
@@ -114,13 +115,14 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/crypto/encryption.py` | AES-256-GCM encrypt/decrypt, PBKDF2 key derivation, enc:v1: format |
 | `lazyclaw/db/schema.sql` | Core database schema (22 tables) |
 | `lazyclaw/db/connection.py` | aiosqlite connection, WAL mode, init_db, db_session context manager |
-| `lazyclaw/llm/providers/base.py` | LLMMessage, LLMResponse, ToolCall dataclasses, BaseLLMProvider ABC |
-| `lazyclaw/llm/providers/openai_provider.py` | OpenAI provider with tool calling support |
-| `lazyclaw/llm/providers/anthropic_provider.py` | Anthropic provider with tool_use/tool_result support |
+| `lazyclaw/llm/providers/base.py` | LLMMessage, LLMResponse, ToolCall, StreamChunk dataclasses, BaseLLMProvider ABC |
+| `lazyclaw/llm/providers/openai_provider.py` | OpenAI provider with tool calling + streaming support |
+| `lazyclaw/llm/providers/anthropic_provider.py` | Anthropic provider with tool_use/tool_result + streaming support |
 | `lazyclaw/llm/router.py` | Model-prefix-based provider routing |
 | `lazyclaw/runtime/agent.py` | Core agent: multi-turn agentic loop with tool calling (max 10 iterations) |
+| `lazyclaw/runtime/callbacks.py` | AgentEvent + AgentCallback protocol (on_event, on_approval_request) |
 | `lazyclaw/runtime/personality.py` | SOUL.md loader, system prompt builder |
-| `lazyclaw/runtime/tool_executor.py` | Dispatches ToolCall to skill registry, error handling |
+| `lazyclaw/runtime/tool_executor.py` | Dispatches ToolCall to skill registry, execute_allowed for approved tools |
 | `lazyclaw/skills/base.py` | BaseSkill ABC with to_openai_tool() conversion |
 | `lazyclaw/skills/registry.py` | Unified skill registry, register_defaults() |
 | `lazyclaw/skills/builtin/web_search.py` | DuckDuckGo web search (no API key needed) |
@@ -360,16 +362,25 @@ Inside the chat REPL (`lazyclaw`), all admin/monitoring is available as slash co
 - `/skills` — List all skills with permission levels
 - `/traces` — Show recent session traces
 - `/teams` — Team config and specialist list
+- `/mcp` — MCP server connections and status
 - `/compression` — Context compression stats
 - `/history` — Recent conversation messages
+- `/logs` — Recent agent activity (tool calls, LLM calls from traces)
+- `/usage` — Session token usage + cost estimate in EUR
+- `/doctor` — Health check (DB, AI, MCP, encryption, Telegram)
 - `/clear` — Start fresh chat session
 - `/wipe` — Clear all conversation history (with confirmation)
 - `/critic off|on|auto` — Set critic mode
-- `/team off|on|auto` — Set team mode
+- `/team off|on|auto` — Set team mode (default: never, opt-in with on/auto)
 - `/eco eco|hybrid|full` — Set ECO mode
 - `/model <name>` — Change default model
+- `/permissions` — Show permission levels for all categories and skills
+- `/allow <name>` — Allow a category or skill (e.g. `/allow computer`)
+- `/deny <name>` — Deny a category or skill (e.g. `/deny vault`)
+- `/update` — Pull latest code from git + reinstall deps
+- `/version` — Show current version
 - `/help` — Show all available commands
-- `/exit` — Quit
+- `/exit` — Quit (also `/quit`, `/q`)
 
 ## E2E Encryption
 
@@ -404,6 +415,9 @@ All user content encrypted before storage. Server never sees plaintext.
 - **MCP bridge**: External MCP tools registered as first-class skills in the registry. No separate tool path needed.
 - **Browser auto-login**: Cookies persist in `browser_profiles/{user_id}/cookies.json`. When cookies expire, PageReader detects login form and pulls credentials from vault (`site:{domain}` key). Expensive Agent only needed for first login or CAPTCHA.
 - **Browser cost tiers**: PageReader (JS extraction, ~$0.001/page) for reading. Full browser Agent (~$0.30/page) for interaction. Agent learns, PageReader reuses.
+- **Streaming responses**: LLM responses stream token-by-token to the CLI via `StreamChunk` async generators through provider → router → eco_router → agent → callback chain.
+- **Inline CLI approval**: When a tool needs approval (computer/vault), the CLI prompts y/n inline instead of creating DB approval records. The `on_approval_request` callback handles this.
+- **Parallel initialization**: Agent loads history, skills, and context concurrently via `asyncio.gather()` to reduce latency before the first LLM call.
 
 ## Database
 
@@ -437,8 +451,9 @@ Key variables (see `.env.example`):
 - `OPENAI_API_KEY` — Default OpenAI key (optional, users can set their own in vault)
 - `CORS_ORIGIN` — CORS origin for web clients
 - `DATABASE_DIR` — Directory for SQLite DB and browser profiles (default: `./data`)
-- `DEFAULT_MODEL` — Default LLM model (default: `gpt-4o-mini`)
-- `BROWSER_MODEL` — Default browser agent model (default: `gpt-4o-mini`)
+- `DEFAULT_MODEL` — Main LLM model (default: `gpt-5`)
+- `WORKER_MODEL` — Worker/specialist model (default: `gpt-5-mini`)
+- `BROWSER_MODEL` — Browser agent model (default: `gpt-5-mini`)
 - `BROWSER_TIMEOUT` — Browser task timeout in seconds (default: `300`)
 - `COMPUTER_TIMEOUT` — Computer command timeout in seconds (default: `30`)
 - `HEARTBEAT_INTERVAL` — Heartbeat daemon check interval in seconds (default: `60`)

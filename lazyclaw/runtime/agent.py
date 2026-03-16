@@ -11,6 +11,7 @@ from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
+from lazyclaw.runtime.callbacks import AgentEvent, NullCallback
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -41,7 +42,9 @@ class Agent:
         user_id: str,
         message: str,
         chat_session_id: str | None = None,
+        callback=None,
     ) -> str:
+        cb = callback or NullCallback()
         key = derive_server_key(self.config.server_secret, user_id)
 
         # Initialize trace recorder
@@ -49,28 +52,32 @@ class Agent:
         recorder = TraceRecorder(self.config, user_id)
         await recorder.record_user_message(message)
 
-        # Load conversation history with compression
-        async with db_session(self.config) as db:
-            rows = await db.execute(
-                "SELECT id, role, content, tool_name, metadata FROM agent_messages "
-                "WHERE user_id = ? ORDER BY created_at ASC",
-                (user_id,),
-            )
-            history_rows = await rows.fetchall()
+        import asyncio as _aio
 
+        # Parallel initialization — load independent data concurrently
         from lazyclaw.memory.compressor import compress_history
+        from lazyclaw.skills.manager import load_user_skills
+        from lazyclaw.runtime.context_builder import build_context
+
+        async def _load_history():
+            async with db_session(self.config) as db:
+                rows = await db.execute(
+                    "SELECT id, role, content, tool_name, metadata FROM agent_messages "
+                    "WHERE user_id = ? ORDER BY created_at ASC",
+                    (user_id,),
+                )
+                return await rows.fetchall()
+
+        history_rows, _, system_prompt = await _aio.gather(
+            _load_history(),
+            load_user_skills(self.config, user_id, self.registry),
+            build_context(self.config, user_id),
+        )
+
         history = await compress_history(
             self.config, self.eco_router, user_id, chat_session_id,
             raw_messages=history_rows,
         )
-
-        # Load user's custom instruction skills into registry
-        from lazyclaw.skills.manager import load_user_skills
-        await load_user_skills(self.config, user_id, self.registry)
-
-        # Build prompt with memories
-        from lazyclaw.runtime.context_builder import build_context
-        system_prompt = await build_context(self.config, user_id)
 
         # Check team mode — delegate to specialists if complex
         from lazyclaw.teams.settings import get_team_settings
@@ -78,7 +85,8 @@ class Agent:
         from lazyclaw.teams.lead import TeamLead
 
         team_settings = await get_team_settings(self.config, user_id)
-        if team_settings.get("mode", "auto") != "never":
+        if team_settings.get("mode", "never") != "never":
+            await cb.on_event(AgentEvent("team_delegate", "Evaluating team delegation...", {}))
             specialists = await load_specialists(self.config, user_id)
             team_lead = TeamLead(self.config, self.eco_router)
             team_result = await team_lead.process(
@@ -138,23 +146,70 @@ class Agent:
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
 
         response = None
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             kwargs: dict = {}
             if tools:
                 kwargs["tools"] = tools
 
+            model_name = self.config.default_model
+            await cb.on_event(AgentEvent(
+                "llm_call",
+                f"Thinking ({model_name})...",
+                {"iteration": iteration + 1, "model": model_name},
+            ))
             await recorder.record_llm_call(
                 model=None, message_count=len(messages), has_tools=bool(tools),
             )
-            response = await self.eco_router.chat(messages, user_id=user_id, **kwargs)
+
+            # Use streaming when callback is present (CLI) for real-time output
+            from lazyclaw.llm.providers.base import LLMResponse as _LLMResp
+
+            streamed_content = ""
+            response = None
+
+            async for chunk in self.eco_router.stream_chat(
+                messages, user_id=user_id, **kwargs
+            ):
+                if chunk.delta:
+                    streamed_content += chunk.delta
+                    await cb.on_event(AgentEvent(
+                        "token", chunk.delta, {"model": chunk.model},
+                    ))
+
+                if chunk.done:
+                    response = _LLMResp(
+                        content=streamed_content,
+                        model=chunk.model,
+                        usage=chunk.usage,
+                        tool_calls=chunk.tool_calls,
+                    )
+
+            if response is None:
+                response = _LLMResp(content=streamed_content, model="unknown")
+
             await recorder.record_llm_response(
                 content=response.content or "",
                 model=response.model,
                 has_tool_calls=bool(response.tool_calls),
             )
 
+            # Report token usage
+            usage = response.usage or {}
+            total_tokens = usage.get("total_tokens", 0)
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            eco_mode = usage.get("eco_mode")  # "eco", "hybrid_free", or None (paid)
+            await cb.on_event(AgentEvent(
+                "tokens",
+                f"{total_tokens} tokens ({prompt_tokens} in, {completion_tokens} out)",
+                {"total": total_tokens, "prompt": prompt_tokens,
+                 "completion": completion_tokens, "model": response.model,
+                 "eco_mode": eco_mode},
+            ))
+
             if not response.tool_calls:
-                # Final text response
+                # Final text response (already streamed to user)
+                await cb.on_event(AgentEvent("stream_done", "", {}))
                 all_new_messages.append(
                     LLMMessage(role="assistant", content=response.content)
                 )
@@ -171,9 +226,17 @@ class Agent:
 
             # Execute each tool call
             for tc in response.tool_calls:
+                await cb.on_event(AgentEvent(
+                    "tool_call", f"Using {tc.name}...",
+                    {"tool": tc.name, "args": tc.arguments},
+                ))
                 await recorder.record_tool_call(tc.name, tc.arguments)
                 result = await self.executor.execute(tc, user_id)
                 await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
+                await cb.on_event(AgentEvent(
+                    "tool_result", f"{tc.name} done",
+                    {"tool": tc.name},
+                ))
 
                 # Handle approval-required responses
                 if isinstance(result, str) and result.startswith(APPROVAL_PREFIX):
@@ -181,30 +244,32 @@ class Agent:
                     colon_idx = parts.index(":")
                     skill_name = parts[:colon_idx]
                     args_json = parts[colon_idx + 1:]
+                    parsed_args = json.loads(args_json) if args_json != "{}" else {}
 
-                    # Create approval request in DB
-                    from lazyclaw.permissions.approvals import create_approval
-                    from lazyclaw.permissions.settings import get_permission_settings
+                    # Try inline approval via callback (CLI y/n prompt)
+                    approved = await cb.on_approval_request(skill_name, parsed_args)
 
-                    settings = await get_permission_settings(self.config, user_id)
-                    timeout = settings.get("auto_approve_timeout", 300)
-
-                    approval = await create_approval(
-                        self.config,
-                        user_id,
-                        skill_name,
-                        json.loads(args_json) if args_json != "{}" else None,
-                        source="agent",
-                        timeout_seconds=timeout,
-                    )
-
-                    # Tell the LLM the action needs approval
-                    result = (
-                        f"Action '{skill_name}' requires user approval. "
-                        f"Approval ID: {approval.id}. "
-                        f"Tell the user what you want to do and ask them to approve or deny. "
-                        f"Do NOT proceed until approved."
-                    )
+                    if approved:
+                        await cb.on_event(AgentEvent(
+                            "approval", f"'{skill_name}' approved",
+                            {"skill": skill_name, "approved": True},
+                        ))
+                        result = await self.executor.execute_allowed(tc, user_id)
+                        await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
+                        await cb.on_event(AgentEvent(
+                            "tool_result", f"{tc.name} done",
+                            {"tool": tc.name},
+                        ))
+                    else:
+                        await cb.on_event(AgentEvent(
+                            "approval", f"'{skill_name}' denied",
+                            {"skill": skill_name, "approved": False},
+                        ))
+                        result = (
+                            f"The user denied the action '{skill_name}'. "
+                            f"Do not retry this action. Explain what you wanted to do "
+                            f"and ask if the user wants to try a different approach."
+                        )
 
                 tool_msg = LLMMessage(
                     role="tool",
@@ -271,4 +336,5 @@ class Agent:
         # Record and return the final assistant message content
         final = all_new_messages[-1]
         await recorder.record_final_response(final.content)
+        await cb.on_event(AgentEvent("done", "Response ready", {}))
         return final.content

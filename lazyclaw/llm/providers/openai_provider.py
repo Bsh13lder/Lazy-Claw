@@ -80,10 +80,116 @@ class OpenAIProvider(BaseLLMProvider):
             tool_calls=parsed_tool_calls,
         )
 
+    async def stream_chat(self, messages: list[LLMMessage], model: str, **kwargs):
+        """Stream chat responses from OpenAI."""
+        from lazyclaw.llm.providers.base import StreamChunk
+
+        tools = kwargs.pop("tools", None)
+        tool_choice = kwargs.pop("tool_choice", None)
+
+        create_kwargs: dict = {
+            "model": model,
+            "messages": [self._serialize_message(m) for m in messages],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            **kwargs,
+        }
+        if tools:
+            create_kwargs["tools"] = tools
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
+
+        response = await self._client.chat.completions.create(**create_kwargs)
+
+        collected_content = ""
+        collected_tool_calls: dict[int, dict] = {}
+        response_model = model
+        usage = None
+
+        async for chunk in response:
+            if not chunk.choices and hasattr(chunk, "usage") and chunk.usage:
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens,
+                    "completion_tokens": chunk.usage.completion_tokens,
+                    "total_tokens": chunk.usage.total_tokens,
+                }
+                continue
+
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+            response_model = chunk.model or model
+
+            # Text content
+            if delta.content:
+                collected_content += delta.content
+                yield StreamChunk(delta=delta.content, model=response_model)
+
+            # Tool calls
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in collected_tool_calls:
+                        collected_tool_calls[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    entry = collected_tool_calls[idx]
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            entry["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
+
+            # Check for finish
+            if chunk.choices[0].finish_reason is not None:
+                parsed_tcs = None
+                if collected_tool_calls:
+                    parsed_tcs = [
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=json.loads(tc["arguments"]) if tc["arguments"] else {},
+                        )
+                        for tc in collected_tool_calls.values()
+                    ]
+
+                yield StreamChunk(
+                    delta="",
+                    tool_calls=parsed_tcs,
+                    usage=usage,
+                    model=response_model,
+                    done=True,
+                )
+                return
+
+        # Safety: if we exit the loop without a finish_reason
+        parsed_tcs = None
+        if collected_tool_calls:
+            parsed_tcs = [
+                ToolCall(
+                    id=tc["id"],
+                    name=tc["name"],
+                    arguments=json.loads(tc["arguments"]) if tc["arguments"] else {},
+                )
+                for tc in collected_tool_calls.values()
+            ]
+        yield StreamChunk(
+            delta="",
+            tool_calls=parsed_tcs,
+            usage=usage,
+            model=response_model,
+            done=True,
+        )
+
     async def verify_key(self) -> bool:
         try:
             await self._client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[{"role": "user", "content": "hi"}],
                 max_tokens=1,
             )

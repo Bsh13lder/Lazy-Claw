@@ -184,7 +184,9 @@ class TeamLead:
             LLMMessage(role="user", content=message),
         ]
 
-        response = await self._eco_router.chat(messages, user_id=user_id)
+        response = await self._eco_router.chat(
+            messages, user_id=user_id, model=self._config.default_model,
+        )
         return _parse_analysis(response.content or "")
 
     async def _force_team(
@@ -325,7 +327,9 @@ class TeamLead:
             ),
         ]
 
-        response = await self._eco_router.chat(messages, user_id=user_id)
+        response = await self._eco_router.chat(
+            messages, user_id=user_id, model=self._config.default_model,
+        )
         merged_content = response.content or ""
 
         # Store merge/critic result

@@ -23,7 +23,9 @@ FEATURE_SUMMARY = "summary"
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODELS = [
-    {"model_id": "gpt-4o-mini", "display_name": "GPT-4o Mini", "provider": "openai", "is_default": 1},
+    {"model_id": "gpt-5", "display_name": "GPT-5", "provider": "openai", "is_default": 1},
+    {"model_id": "gpt-5-mini", "display_name": "GPT-5 Mini", "provider": "openai", "is_default": 0},
+    {"model_id": "gpt-4o-mini", "display_name": "GPT-4o Mini", "provider": "openai", "is_default": 0},
     {"model_id": "gpt-4o", "display_name": "GPT-4o", "provider": "openai", "is_default": 0},
     {"model_id": "gpt-4.1-mini", "display_name": "GPT-4.1 Mini", "provider": "openai", "is_default": 0},
     {"model_id": "gpt-4.1", "display_name": "GPT-4.1", "provider": "openai", "is_default": 0},

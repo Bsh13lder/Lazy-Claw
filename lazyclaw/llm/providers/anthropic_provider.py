@@ -109,6 +109,82 @@ class AnthropicProvider(BaseLLMProvider):
             tool_calls=parsed_tool_calls or None,
         )
 
+    async def stream_chat(self, messages: list[LLMMessage], model: str, **kwargs):
+        """Stream chat responses from Anthropic."""
+        from lazyclaw.llm.providers.base import StreamChunk
+
+        system_parts = [m.content for m in messages if m.role == "system"]
+        tools = kwargs.pop("tools", None)
+        tool_choice = kwargs.pop("tool_choice", None)
+
+        if not model:
+            model = "claude-sonnet-4-20250514"
+
+        create_kwargs: dict = {
+            "model": model,
+            "messages": self._serialize_messages(messages),
+            "max_tokens": kwargs.pop("max_tokens", 4096),
+            **kwargs,
+        }
+        if system_parts:
+            create_kwargs["system"] = "\n\n".join(system_parts)
+        if tools:
+            create_kwargs["tools"] = self._convert_tools(tools)
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
+
+        async with self._client.messages.stream(**create_kwargs) as stream:
+            collected_text = ""
+            collected_tool_calls: list[ToolCall] = []
+            current_tool: dict | None = None
+
+            async for event in stream:
+                if event.type == "content_block_start":
+                    block = event.content_block
+                    if block.type == "tool_use":
+                        current_tool = {
+                            "id": block.id,
+                            "name": block.name,
+                            "arguments": "",
+                        }
+
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        collected_text += delta.text
+                        yield StreamChunk(delta=delta.text, model=model)
+                    elif delta.type == "input_json_delta" and current_tool:
+                        current_tool["arguments"] += delta.partial_json
+
+                elif event.type == "content_block_stop":
+                    if current_tool:
+                        import json as _json
+                        collected_tool_calls.append(
+                            ToolCall(
+                                id=current_tool["id"],
+                                name=current_tool["name"],
+                                arguments=_json.loads(current_tool["arguments"])
+                                if current_tool["arguments"]
+                                else {},
+                            )
+                        )
+                        current_tool = None
+
+                elif event.type == "message_delta":
+                    usage = None
+                    if hasattr(event, "usage") and event.usage:
+                        usage = {
+                            "input_tokens": getattr(event.usage, "input_tokens", 0),
+                            "output_tokens": getattr(event.usage, "output_tokens", 0),
+                        }
+                    yield StreamChunk(
+                        delta="",
+                        tool_calls=collected_tool_calls or None,
+                        usage=usage,
+                        model=model,
+                        done=True,
+                    )
+
     async def verify_key(self) -> bool:
         try:
             await self._client.messages.create(

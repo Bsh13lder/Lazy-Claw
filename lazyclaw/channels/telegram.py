@@ -49,16 +49,38 @@ class TelegramAdapter(ChannelAdapter):
     async def _handle_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        text = update.message.text
+        if not update.message or not update.message.text:
+            return
+
         chat_id = str(update.effective_chat.id)
+        text = update.message.text.strip()
+        if not text:
+            return
+
         # MVP: all Telegram messages routed to "default" user
         user_id = "default"
-        logger.debug("Telegram message from chat %s: %s", chat_id, text[:80])
-        if self._lane_queue:
-            response = await self._lane_queue.enqueue(user_id, text)
-        else:
-            response = await self._agent.process_message(user_id, text)
-        await update.message.reply_text(response)
+        logger.info("Telegram message from chat %s: %s", chat_id, text[:100])
+
+        try:
+            if self._lane_queue:
+                response = await self._lane_queue.enqueue(user_id, text)
+            else:
+                response = await self._agent.process_message(user_id, text)
+
+            logger.info("Telegram response to chat %s: %s", chat_id, response[:100])
+
+            # Split long messages for Telegram's 4096 char limit
+            if len(response) <= 4096:
+                await update.message.reply_text(response)
+            else:
+                for i in range(0, len(response), 4096):
+                    await update.message.reply_text(response[i:i + 4096])
+        except Exception as e:
+            logger.error("Telegram handler error for chat %s: %s", chat_id, e, exc_info=True)
+            try:
+                await update.message.reply_text("Sorry, something went wrong. Please try again.")
+            except Exception:
+                logger.error("Failed to send error reply to chat %s", chat_id)
 
     async def _handle_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

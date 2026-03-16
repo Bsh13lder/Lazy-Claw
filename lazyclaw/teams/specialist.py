@@ -43,6 +43,7 @@ BROWSER_SPECIALIST = SpecialistConfig(
         "and concisely. If a page requires login, use saved site credentials."
     ),
     allowed_skills=("browse_web", "read_page", "save_site_login"),
+    preferred_model="gpt-5-mini",
     is_builtin=True,
 )
 
@@ -55,6 +56,7 @@ CODE_SPECIALIST = SpecialistConfig(
         "clean, working code. Explain your approach briefly, then deliver the implementation."
     ),
     allowed_skills=("calculate", "create_skill", "list_skills", "delete_skill"),
+    preferred_model="gpt-5-mini",
     is_builtin=True,
 )
 
@@ -67,6 +69,7 @@ RESEARCH_SPECIALIST = SpecialistConfig(
         "Be thorough but concise. Cite sources when possible. Focus on factual accuracy."
     ),
     allowed_skills=("web_search", "read_page"),
+    preferred_model="gpt-5-mini",
     is_builtin=True,
 )
 
@@ -80,6 +83,7 @@ MEMORY_SPECIALIST = SpecialistConfig(
         "inferences. Report what is and isn't in memory."
     ),
     allowed_skills=("memory_save", "memory_recall", "vault_list"),
+    preferred_model="gpt-5-mini",
     is_builtin=True,
 )
 

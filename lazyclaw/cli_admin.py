@@ -88,6 +88,33 @@ async def show_status(config: Config, user_id: str) -> None:
     mode_table.add_row("Critic Mode", teams.get("critic_mode", "auto"))
     mode_table.add_row("Max Parallel", str(teams.get("max_parallel", 3)))
     console.print(mode_table)
+    console.print()
+
+    # MCP servers
+    async with db_session(config) as db:
+        try:
+            mcp_rows = await db.execute(
+                "SELECT name, transport, enabled FROM mcp_connections WHERE user_id = ?",
+                (user_id,),
+            )
+            mcp_servers = await mcp_rows.fetchall()
+        except Exception:
+            mcp_servers = []
+
+    mcp_table = Table(title="MCP Servers", style="cyan")
+    mcp_table.add_column("Name", style="bold")
+    mcp_table.add_column("Transport")
+    mcp_table.add_column("Status")
+
+    if mcp_servers:
+        for row in mcp_servers:
+            name, transport, enabled = row[0], row[1], row[2]
+            status = "[green]enabled[/green]" if enabled else "[dim]disabled[/dim]"
+            mcp_table.add_row(name, transport or "stdio", status)
+    else:
+        mcp_table.add_row("[dim]none configured[/dim]", "", "")
+
+    console.print(mcp_table)
 
 
 async def show_users(config: Config) -> None:
@@ -221,6 +248,41 @@ async def show_compression(config: Config, user_id: str) -> None:
     console.print(table)
 
 
+async def show_mcp(config: Config, user_id: str) -> None:
+    """Show configured MCP servers with details."""
+    from lazyclaw.crypto.encryption import decrypt, derive_server_key
+    from lazyclaw.db.connection import db_session
+
+    async with db_session(config) as db:
+        try:
+            rows = await db.execute(
+                "SELECT id, name, transport, config, enabled "
+                "FROM mcp_connections WHERE user_id = ? ORDER BY name",
+                (user_id,),
+            )
+            servers = await rows.fetchall()
+        except Exception:
+            servers = []
+
+    if not servers:
+        console.print("[dim]No MCP servers configured.[/dim]")
+        console.print("[dim]Use the API (POST /api/mcp/servers) or lazyclaw start to manage MCP servers.[/dim]")
+        return
+
+    table = Table(title="MCP Servers", style="cyan")
+    table.add_column("ID", style="dim", max_width=12)
+    table.add_column("Name", style="bold")
+    table.add_column("Transport")
+    table.add_column("Status")
+
+    for row in servers:
+        sid, name, transport, _config_enc, enabled = row[0], row[1], row[2], row[3], row[4]
+        status = "[green]enabled[/green]" if enabled else "[dim]disabled[/dim]"
+        table.add_row(sid[:12] + "..." if sid else "", name, transport or "stdio", status)
+
+    console.print(table)
+
+
 async def clear_history(config: Config, user_id: str) -> None:
     """Clear conversation history for the current user."""
     from lazyclaw.db.connection import db_session
@@ -300,3 +362,157 @@ async def set_model(config: Config, model_name: str) -> None:
     save_env("DEFAULT_MODEL", model_name)
     console.print(f"[green]Default model set to {model_name}[/green]")
     console.print("[dim]Restart chat for changes to take effect.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics commands
+# ---------------------------------------------------------------------------
+
+
+async def show_logs(config: Config, user_id: str, limit: int = 20) -> None:
+    """Show recent agent activity from traces."""
+    from lazyclaw.crypto.encryption import decrypt, derive_server_key
+    from lazyclaw.db.connection import db_session
+
+    key = derive_server_key(config.server_secret, user_id)
+
+    async with db_session(config) as db:
+        try:
+            rows = await db.execute(
+                "SELECT entry_type, content, created_at FROM agent_traces "
+                "WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            )
+            entries = await rows.fetchall()
+        except Exception:
+            entries = []
+
+    if not entries:
+        console.print("[dim]No agent activity recorded yet.[/dim]")
+        return
+
+    table = Table(title="Recent Agent Activity", style="cyan")
+    table.add_column("Time", style="dim", width=19)
+    table.add_column("Type", style="bold", width=14)
+    table.add_column("Detail", max_width=55)
+
+    type_styles = {
+        "user_message": "cyan",
+        "llm_call": "blue",
+        "llm_response": "green",
+        "tool_call": "yellow",
+        "tool_result": "green",
+        "team_delegation": "magenta",
+        "final_response": "bold green",
+    }
+
+    for row in reversed(entries):
+        entry_type, content_enc, created_at = row[0], row[1], row[2]
+        try:
+            content = decrypt(content_enc, key) if content_enc and content_enc.startswith("enc:") else (content_enc or "")
+        except Exception:
+            content = "[encrypted]"
+        display = content[:70] + "..." if len(content) > 70 else content
+        style = type_styles.get(entry_type, "white")
+        table.add_row(
+            created_at or "",
+            f"[{style}]{entry_type}[/{style}]",
+            display,
+        )
+
+    console.print(table)
+
+
+async def run_doctor(config: Config, user_id: str) -> None:
+    """Run health checks on the LazyClaw system."""
+    from lazyclaw.db.connection import db_session
+
+    checks: list[tuple[str, str, str]] = []  # (name, status_icon, detail)
+
+    # 1. Database
+    try:
+        async with db_session(config) as db:
+            row = await db.execute("SELECT COUNT(*) FROM users")
+            count = (await row.fetchone())[0]
+        checks.append(("Database", "[green]OK[/green]", f"{count} user(s)"))
+    except Exception as e:
+        checks.append(("Database", "[red]FAIL[/red]", str(e)[:60]))
+
+    # 2. AI Provider
+    providers = []
+    if config.openai_api_key:
+        providers.append("openai")
+    if config.anthropic_api_key:
+        providers.append("anthropic")
+    if providers:
+        checks.append(("AI Provider", "[green]OK[/green]", ", ".join(providers)))
+    else:
+        checks.append(("AI Provider", "[red]FAIL[/red]", "No API key configured"))
+
+    # 3. Default Model
+    checks.append(("Default Model", "[green]OK[/green]", config.default_model))
+
+    # 4. Encryption
+    try:
+        from lazyclaw.crypto.encryption import decrypt, derive_server_key, encrypt
+
+        test_key = derive_server_key(config.server_secret, "doctor-test")
+        encrypted = encrypt("health-check", test_key)
+        decrypted = decrypt(encrypted, test_key)
+        if decrypted == "health-check":
+            checks.append(("Encryption", "[green]OK[/green]", "AES-256-GCM roundtrip passed"))
+        else:
+            checks.append(("Encryption", "[red]FAIL[/red]", "Roundtrip mismatch"))
+    except Exception as e:
+        checks.append(("Encryption", "[red]FAIL[/red]", str(e)[:60]))
+
+    # 5. MCP Servers
+    try:
+        async with db_session(config) as db:
+            row = await db.execute(
+                "SELECT COUNT(*) FROM mcp_connections WHERE user_id = ?",
+                (user_id,),
+            )
+            mcp_count = (await row.fetchone())[0]
+        if mcp_count > 0:
+            checks.append(("MCP Servers", "[green]OK[/green]", f"{mcp_count} configured"))
+        else:
+            checks.append(("MCP Servers", "[yellow]WARN[/yellow]", "None configured"))
+    except Exception:
+        checks.append(("MCP Servers", "[yellow]WARN[/yellow]", "Table not found"))
+
+    # 6. mcp-freeride (ECO mode)
+    try:
+        import mcp_freeride  # noqa: F401
+        checks.append(("mcp-freeride", "[green]OK[/green]", "Installed (ECO mode available)"))
+    except ImportError:
+        checks.append(("mcp-freeride", "[yellow]WARN[/yellow]", "Not installed (ECO mode unavailable)"))
+
+    # 7. Telegram
+    if config.telegram_bot_token:
+        checks.append(("Telegram", "[green]OK[/green]", "Bot token configured"))
+    else:
+        checks.append(("Telegram", "[yellow]WARN[/yellow]", "Not configured"))
+
+    # 8. Server Secret
+    if config.server_secret and config.server_secret != "change-me-to-a-random-string":
+        checks.append(("Server Secret", "[green]OK[/green]", "Set"))
+    else:
+        checks.append(("Server Secret", "[red]FAIL[/red]", "Not set or using default"))
+
+    # Display
+    table = Table(title="LazyClaw Health Check", style="cyan")
+    table.add_column("Check", style="bold")
+    table.add_column("Status", width=8)
+    table.add_column("Detail")
+
+    for name, status, detail in checks:
+        table.add_row(name, status, detail)
+
+    console.print(table)
+
+    ok_count = sum(1 for _, s, _ in checks if "green" in s)
+    warn_count = sum(1 for _, s, _ in checks if "yellow" in s)
+    fail_count = sum(1 for _, s, _ in checks if "red" in s)
+    console.print()
+    console.print(f"  [green]{ok_count} passed[/green]  [yellow]{warn_count} warnings[/yellow]  [red]{fail_count} failed[/red]")

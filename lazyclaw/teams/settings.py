@@ -20,7 +20,7 @@ VALID_CRITIC_MODES = {"auto", "always", "never"}
 
 # Default team settings
 DEFAULT_TEAMS = {
-    "mode": "auto",
+    "mode": "never",
     "critic_mode": "auto",
     "max_parallel": 3,
     "specialist_timeout": 120,

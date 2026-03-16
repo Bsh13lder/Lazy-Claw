@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
+from rich.status import Status
 from rich.table import Table
 
 from lazyclaw import __version__
@@ -41,20 +42,31 @@ HELP_TEXT = """\
   /skills      List skills with permissions
   /traces      Show recent session traces
   /teams       Team config and specialists
+  /mcp         MCP server connections
   /compression Context compression stats
   /history     Recent conversation messages
+  /logs        Recent agent activity (tool calls, LLM)
+  /usage       Token usage + cost estimate (EUR)
+  /doctor      Health check (DB, AI, MCP, encryption)
 
 [bold]Settings:[/bold]
   /critic off|on|auto    Set critic mode
   /team off|on|auto      Set team mode
   /eco eco|hybrid|full   Set ECO mode
   /model <name>          Change default model
+  /permissions           Show permission levels for all categories
+  /allow <name>          Allow a category or skill (e.g. /allow computer)
+  /deny <name>           Deny a category or skill (e.g. /deny vault)
+
+[bold]System:[/bold]
+  /update      Pull latest code + reinstall deps
+  /version     Show current version
 
 [bold]Session:[/bold]
   /clear       Start fresh chat session
   /wipe        Clear all conversation history
   /help        Show this help
-  /exit        Quit"""
+  /exit        Quit (also /quit, /q)"""
 
 
 # ---------------------------------------------------------------------------
@@ -203,11 +215,14 @@ async def _handle_slash_command(
     """Handle a slash command. Returns True if handled, False if not."""
     from lazyclaw.cli_admin import (
         clear_history,
+        run_doctor,
         set_critic_mode,
         set_eco_mode,
         set_model,
         set_team_mode,
         show_compression,
+        show_logs,
+        show_mcp,
         show_skills,
         show_status,
         show_teams,
@@ -226,7 +241,13 @@ async def _handle_slash_command(
         "/skills": lambda: show_skills(config, user_id),
         "/traces": lambda: show_traces(config, user_id),
         "/teams": lambda: show_teams(config, user_id),
+        "/mcp": lambda: show_mcp(config, user_id),
         "/compression": lambda: show_compression(config, user_id),
+        "/logs": lambda: show_logs(config, user_id),
+        "/usage": lambda: _show_usage(config),
+        "/doctor": lambda: run_doctor(config, user_id),
+        "/update": lambda: _run_update(),
+        "/version": lambda: _show_version(),
         "/wipe": lambda: clear_history(config, user_id),
         "/history": lambda: _show_chat_history(config, user_id),
     }
@@ -254,6 +275,27 @@ async def _handle_slash_command(
             # For /model, preserve original case
             actual_arg = parts[1] if command == "/model" else arg
             await settings_commands[command](actual_arg)
+        return True
+
+    # Permission commands
+    if command == "/permissions":
+        await show_permissions(config, user_id)
+        return True
+
+    if cmd.startswith("/allow "):
+        target = cmd[7:].strip()
+        if target:
+            await set_permission(config, user_id, target, "allow")
+        else:
+            console.print("[yellow]Usage: /allow <category|skill>[/yellow]")
+        return True
+
+    if cmd.startswith("/deny "):
+        target = cmd[6:].strip()
+        if target:
+            await set_permission(config, user_id, target, "deny")
+        else:
+            console.print("[yellow]Usage: /deny <category|skill>[/yellow]")
         return True
 
     return False
@@ -294,6 +336,355 @@ async def _show_chat_history(config: Config, user_id: str) -> None:
         table.add_row(created_at or "", f"[{role_style}]{role}[/{role_style}]", display)
 
     console.print(table)
+
+
+async def _show_version() -> None:
+    """Show current version and install info."""
+    console.print(f"  [bold cyan]LazyClaw[/bold cyan] v{__version__}")
+    console.print(f"  [dim]Install: pip install -e . (editable mode)[/dim]")
+    console.print(f"  [dim]Code changes take effect immediately — no reinstall needed.[/dim]")
+
+
+async def _run_update() -> None:
+    """Pull latest code from git and reinstall dependencies."""
+    import subprocess
+
+    root = get_project_root()
+
+    console.print("[bold cyan]Updating LazyClaw...[/bold cyan]")
+    console.print()
+
+    # 1. Git pull
+    console.print("  [dim]Pulling latest code...[/dim]")
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=root, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if "Already up to date" in output:
+                console.print("  [green]Already up to date.[/green]")
+            else:
+                console.print(f"  [green]Pulled:[/green] {output.splitlines()[-1]}")
+        else:
+            console.print(f"  [red]Git pull failed:[/red] {result.stderr.strip()}")
+            return
+    except FileNotFoundError:
+        console.print("  [red]git not found. Update manually.[/red]")
+        return
+    except subprocess.TimeoutExpired:
+        console.print("  [red]Git pull timed out.[/red]")
+        return
+
+    # 2. Reinstall deps
+    console.print("  [dim]Reinstalling dependencies...[/dim]")
+    try:
+        result = subprocess.run(
+            ["pip", "install", "-e", ".", "-q"],
+            cwd=root, capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            console.print("  [green]Dependencies updated.[/green]")
+        else:
+            console.print(f"  [yellow]pip install warning:[/yellow] {result.stderr.strip()[:100]}")
+    except FileNotFoundError:
+        # Try pip3
+        try:
+            result = subprocess.run(
+                ["pip3", "install", "-e", ".", "-q"],
+                cwd=root, capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                console.print("  [green]Dependencies updated.[/green]")
+            else:
+                console.print(f"  [yellow]pip3 warning:[/yellow] {result.stderr.strip()[:100]}")
+        except FileNotFoundError:
+            console.print("  [red]pip/pip3 not found.[/red]")
+    except subprocess.TimeoutExpired:
+        console.print("  [yellow]pip install timed out (deps may still be installing).[/yellow]")
+
+    # 3. Show new version
+    console.print()
+
+    # Re-read version from file (may have changed after git pull)
+    init_path = root / "lazyclaw" / "__init__.py"
+    new_version = __version__
+    if init_path.exists():
+        for line in init_path.read_text().splitlines():
+            if line.startswith("__version__"):
+                new_version = line.split("=")[1].strip().strip('"').strip("'")
+                break
+
+    console.print(f"  [bold green]LazyClaw v{new_version}[/bold green]")
+    if new_version != __version__:
+        console.print(f"  [yellow]Restart the CLI to use the new version.[/yellow]")
+    else:
+        console.print("  [dim]No version change. Code updates are live (editable install).[/dim]")
+
+
+class _CliCallback:
+    """Shows live agent activity in the terminal with animated spinner."""
+
+    def __init__(self, out: Console) -> None:
+        self._console = out
+        self._spinner: Status | None = None
+        self._streaming = False
+        self.total_tokens = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.llm_calls = 0
+        self.free_calls = 0
+        self.free_tokens = 0
+
+    def start_thinking(self) -> None:
+        """Show spinner immediately when user submits a message."""
+        self._spinner = self._console.status(
+            "  [dim]Preparing...[/dim]", spinner="dots"
+        )
+        self._spinner.start()
+
+    def _stop_spinner(self) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+
+    async def on_approval_request(
+        self, skill_name: str, arguments: dict
+    ) -> bool:
+        """Prompt the CLI user for inline y/n approval."""
+        self._stop_spinner()
+        import json as _json
+        args_display = _json.dumps(arguments, indent=2) if arguments else "{}"
+        self._console.print()
+        self._console.print(
+            Panel(
+                f"[bold]{skill_name}[/bold]\n[dim]{args_display}[/dim]",
+                title="[yellow]Approval Required[/yellow]",
+                border_style="yellow",
+            )
+        )
+        result = Confirm.ask("  Allow this action?", default=True)
+        if result:
+            self._spinner = self._console.status(
+                f"  [dim]> Running {skill_name}...[/dim]", spinner="dots"
+            )
+            self._spinner.start()
+        return result
+
+    async def on_event(self, event) -> None:
+        kind = event.kind
+        if kind == "llm_call":
+            self._stop_spinner()
+            model = event.metadata.get("model", "?")
+            iteration = event.metadata.get("iteration", 1)
+            label = f"  [bold cyan]Thinking[/bold cyan] [dim]({model}, step {iteration})...[/dim]"
+            self._spinner = self._console.status(label, spinner="dots")
+            self._spinner.start()
+            self.llm_calls += 1
+        elif kind == "tokens":
+            self._stop_spinner()
+            tokens = event.metadata.get("total", 0)
+            self.total_tokens += tokens
+            self.prompt_tokens += event.metadata.get("prompt", 0)
+            self.completion_tokens += event.metadata.get("completion", 0)
+            eco_mode = event.metadata.get("eco_mode")
+            if eco_mode in ("eco", "hybrid_free"):
+                self.free_calls += 1
+                self.free_tokens += tokens
+        elif kind == "tool_call":
+            self._stop_spinner()
+            self._spinner = self._console.status(
+                f"  [dim]> {event.detail}[/dim]", spinner="dots"
+            )
+            self._spinner.start()
+        elif kind == "tool_result":
+            self._stop_spinner()
+            self._console.print(f"  [green]< {event.detail}[/green]")
+        elif kind == "team_delegate":
+            self._stop_spinner()
+            self._spinner = self._console.status(
+                f"  [cyan]% {event.detail}[/cyan]", spinner="dots"
+            )
+            self._spinner.start()
+        elif kind == "token":
+            if not self._streaming:
+                self._stop_spinner()
+                self._console.print()  # newline before streamed content
+                self._streaming = True
+            self._console.print(event.detail, end="", highlight=False)
+        elif kind == "stream_done":
+            if self._streaming:
+                self._console.print()  # newline after streamed content
+        elif kind == "approval":
+            self._stop_spinner()
+            self._console.print(f"  [yellow]! {event.detail}[/yellow]")
+        elif kind == "done":
+            self._stop_spinner()
+
+
+async def _show_usage(config: Config) -> None:
+    """Show session token usage with EUR cost estimate and ECO savings."""
+    total_calls = _session_usage["llm_calls"]
+    free_calls = _session_usage["free_calls"]
+    paid_calls = total_calls - free_calls
+    free_tokens = _session_usage["free_tokens"]
+    paid_tokens = _session_usage["total_tokens"] - free_tokens
+
+    table = Table(title="Session Token Usage", style="cyan")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+
+    table.add_row("Messages", str(_session_usage["messages"]))
+    table.add_row("LLM Calls", f"{total_calls} ({paid_calls} paid, {free_calls} free)")
+    table.add_row("Prompt Tokens", f"{_session_usage['prompt_tokens']:,}")
+    table.add_row("Completion Tokens", f"{_session_usage['completion_tokens']:,}")
+    table.add_row("Total Tokens", f"{_session_usage['total_tokens']:,}")
+    if free_tokens > 0:
+        table.add_row("[green]Free Tokens (ECO)[/green]", f"[green]{free_tokens:,}[/green]")
+        table.add_row("Paid Tokens", f"{paid_tokens:,}")
+    console.print(table)
+    console.print()
+
+    # Cost estimate — only paid tokens cost money
+    model = config.default_model
+    pricing = _MODEL_PRICING.get(model, (5.0, 15.0))
+
+    # Actual cost (only paid tokens)
+    paid_input = _session_usage["prompt_tokens"] - (free_tokens // 2)  # rough split
+    paid_output = _session_usage["completion_tokens"] - (free_tokens - free_tokens // 2)
+    paid_input = max(paid_input, 0)
+    paid_output = max(paid_output, 0)
+
+    actual_input_usd = (paid_input / 1_000_000) * pricing[0]
+    actual_output_usd = (paid_output / 1_000_000) * pricing[1]
+    actual_usd = actual_input_usd + actual_output_usd
+    actual_eur = actual_usd * _EUR_PER_USD
+
+    # What it would have cost without ECO (all tokens at paid rate)
+    full_input_usd = (_session_usage["prompt_tokens"] / 1_000_000) * pricing[0]
+    full_output_usd = (_session_usage["completion_tokens"] / 1_000_000) * pricing[1]
+    full_usd = full_input_usd + full_output_usd
+    full_eur = full_usd * _EUR_PER_USD
+
+    saved_usd = full_usd - actual_usd
+    saved_eur = full_eur - actual_eur
+
+    cost_table = Table(title=f"Cost Estimate ({model})", style="cyan")
+    cost_table.add_column("", style="bold")
+    cost_table.add_column("USD", justify="right")
+    cost_table.add_column("EUR", justify="right")
+
+    cost_table.add_row(
+        "Input (paid)", f"${actual_input_usd:.4f}", f"\u20ac{actual_input_usd * _EUR_PER_USD:.4f}",
+    )
+    cost_table.add_row(
+        "Output (paid)", f"${actual_output_usd:.4f}", f"\u20ac{actual_output_usd * _EUR_PER_USD:.4f}",
+    )
+    cost_table.add_row(
+        "[bold]Actual Cost[/bold]", f"[bold]${actual_usd:.4f}[/bold]", f"[bold]\u20ac{actual_eur:.4f}[/bold]",
+    )
+
+    if saved_usd > 0:
+        cost_table.add_row("", "", "")
+        cost_table.add_row(
+            "[dim]Without ECO[/dim]", f"[dim]${full_usd:.4f}[/dim]", f"[dim]\u20ac{full_eur:.4f}[/dim]",
+        )
+        cost_table.add_row(
+            "[green]ECO Savings[/green]",
+            f"[green]-${saved_usd:.4f}[/green]",
+            f"[green]-\u20ac{saved_eur:.4f}[/green]",
+        )
+        pct = (saved_usd / full_usd * 100) if full_usd > 0 else 0
+        cost_table.add_row(
+            "[green]Saved[/green]", f"[green]{pct:.0f}%[/green]", "",
+        )
+
+    console.print(cost_table)
+
+    console.print()
+    console.print(f"  [dim]Pricing: ${pricing[0]}/M input, ${pricing[1]}/M output | 1 USD = {_EUR_PER_USD} EUR[/dim]")
+
+
+# Session-level token usage accumulator (reset on /clear)
+_session_usage: dict = {
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "llm_calls": 0,
+    "messages": 0,
+    "free_calls": 0,
+    "free_tokens": 0,
+}
+
+# Approximate pricing per 1M tokens (USD) — update as models change
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    # (input_per_1M, output_per_1M) — real prices from official sources
+    "gpt-5": (1.25, 10.0),
+    "gpt-5-mini": (0.25, 2.0),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.0),
+    "gpt-4.1": (3.00, 12.0),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "claude-sonnet-4-20250514": (3.00, 15.0),
+    "claude-sonnet-4-6-20250627": (3.00, 15.0),
+    "claude-haiku-4-5-20251001": (1.00, 5.0),
+    "claude-opus-4-5-20250410": (5.00, 25.0),
+    "claude-opus-4-6-20250625": (5.00, 25.0),
+}
+
+# EUR/USD exchange rate (approximate)
+_EUR_PER_USD = 0.92
+
+
+async def show_permissions(config: Config, user_id: str) -> None:
+    """Show current permission levels."""
+    from lazyclaw.permissions.settings import get_permission_settings
+    from lazyclaw.permissions.models import DEFAULT_CATEGORY_PERMISSIONS
+
+    settings = await get_permission_settings(config, user_id)
+    cat_defaults = settings.get("category_defaults", {})
+    skill_overrides = settings.get("skill_overrides", {})
+
+    table = Table(title="Permission Levels", style="cyan")
+    table.add_column("Category / Skill", style="bold")
+    table.add_column("Level", justify="center")
+
+    for cat in sorted(DEFAULT_CATEGORY_PERMISSIONS.keys()):
+        level = cat_defaults.get(cat, DEFAULT_CATEGORY_PERMISSIONS[cat])
+        color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
+        table.add_row(f"[dim]category:[/dim] {cat}", f"[{color}]{level}[/{color}]")
+
+    if skill_overrides:
+        table.add_section()
+        for skill, level in sorted(skill_overrides.items()):
+            color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
+            table.add_row(f"[dim]skill:[/dim] {skill}", f"[{color}]{level}[/{color}]")
+
+    console.print(table)
+
+
+async def set_permission(config: Config, user_id: str, target: str, level: str) -> None:
+    """Set a category or skill permission level."""
+    from lazyclaw.permissions.settings import get_permission_settings, update_permission_settings
+    from lazyclaw.permissions.models import DEFAULT_CATEGORY_PERMISSIONS
+
+    settings = await get_permission_settings(config, user_id)
+
+    # Check if target is a category
+    if target in DEFAULT_CATEGORY_PERMISSIONS:
+        cat_defaults = dict(settings.get("category_defaults", {}))
+        cat_defaults[target] = level
+        await update_permission_settings(config, user_id, {"category_defaults": cat_defaults})
+        color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
+        console.print(f"  [{color}]Category '{target}' set to {level}[/{color}]")
+    else:
+        # Treat as skill override
+        overrides = dict(settings.get("skill_overrides", {}))
+        overrides[target] = level
+        await update_permission_settings(config, user_id, {"skill_overrides": overrides})
+        color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
+        console.print(f"  [{color}]Skill '{target}' set to {level}[/{color}]")
 
 
 async def _chat_loop() -> None:
@@ -343,6 +734,8 @@ async def _chat_loop() -> None:
         # Clear session
         if stripped.lower() == "/clear":
             chat_session_id = None
+            for k in _session_usage:
+                _session_usage[k] = 0
             console.print("[green]Chat session cleared.[/green]")
             continue
 
@@ -355,19 +748,35 @@ async def _chat_loop() -> None:
             console.print(f"[yellow]Unknown command: {stripped.split()[0]}. Try /help[/yellow]")
             continue
 
-        # Chat with agent
-        with console.status("[dim]Thinking...[/dim]"):
-            try:
-                response = await agent.process_message(
-                    user_id, stripped, chat_session_id=chat_session_id,
-                )
-            except Exception as e:
-                console.print(f"[red]Error: {e}[/red]")
-                continue
+        # Chat with agent — live process display
+        callback = _CliCallback(console)
+        callback.start_thinking()
+        try:
+            response = await agent.process_message(
+                user_id, stripped, chat_session_id=chat_session_id,
+                callback=callback,
+            )
+        except Exception as e:
+            callback._stop_spinner()
+            console.print(f"[red]Error: {e}[/red]")
+            continue
 
         console.print()
-        console.print(Panel(Markdown(response), title="LazyClaw", border_style="green"))
+        if callback._streaming:
+            # Content was already streamed to terminal — show a separator
+            console.print("[dim]───[/dim]")
+        else:
+            console.print(Panel(Markdown(response), title="LazyClaw", border_style="green"))
         console.print()
+
+        # Accumulate session usage
+        _session_usage["total_tokens"] += callback.total_tokens
+        _session_usage["prompt_tokens"] += callback.prompt_tokens
+        _session_usage["completion_tokens"] += callback.completion_tokens
+        _session_usage["llm_calls"] += callback.llm_calls
+        _session_usage["messages"] += 1
+        _session_usage["free_calls"] += callback.free_calls
+        _session_usage["free_tokens"] += callback.free_tokens
 
 
 # ---------------------------------------------------------------------------

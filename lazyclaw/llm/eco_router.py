@@ -135,6 +135,7 @@ class EcoRouter:
         self._config = config
         self._paid_router = paid_router
         self._free_router = None  # Lazy init
+        self._free_router_unavailable = False  # Cache import failure
         self._rate_limiter = RateLimiter()
         self._usage: dict[str, dict] = {}  # user_id → {"free": count, "paid": count}
 
@@ -142,6 +143,8 @@ class EcoRouter:
         """Lazy-init the free router from mcp-freeride."""
         if self._free_router is not None:
             return self._free_router
+        if self._free_router_unavailable:
+            return None
         try:
             from mcp_freeride.config import load_config as load_freeride_config
             from mcp_freeride.router import FreeRideRouter
@@ -150,6 +153,7 @@ class EcoRouter:
             self._free_router = FreeRideRouter(freeride_config)
             return self._free_router
         except ImportError:
+            self._free_router_unavailable = True
             logger.warning("mcp-freeride not installed, ECO mode unavailable")
             return None
 
@@ -318,6 +322,95 @@ class EcoRouter:
                 tool_calls=response.tool_calls,
             )
         return response
+
+    async def stream_chat(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        model: str | None = None,
+        **kwargs,
+    ):
+        """Stream chat responses. Only paid path supports streaming.
+
+        ECO/hybrid free path falls back to non-streaming and yields a single chunk.
+        """
+        from lazyclaw.llm.providers.base import StreamChunk
+
+        settings = await _load_eco_settings(self._config, user_id)
+
+        if settings.mode == "full":
+            self._record_usage(user_id, "paid")
+            async for chunk in self._paid_router.stream_chat(
+                messages, model=model, user_id=user_id, **kwargs
+            ):
+                yield chunk
+            return
+
+        # For eco/hybrid, try free first (non-streaming), fall back to paid streaming
+        if settings.mode in ("eco", "hybrid"):
+            has_tools = bool(kwargs.get("tools"))
+            user_message = ""
+            for msg in reversed(messages):
+                if msg.role == "user":
+                    user_message = msg.content
+                    break
+
+            use_free = settings.mode == "eco" or classify_task(user_message, has_tools) == TASK_FREE
+
+            if use_free:
+                free_router = self._get_free_router()
+                if free_router:
+                    try:
+                        dict_messages = self._convert_to_dicts(messages)
+                        result = await free_router.chat(dict_messages, None)
+                        provider = result.get("provider", "free")
+                        self._rate_limiter.record_request(provider)
+                        self._record_usage(user_id, "free")
+
+                        content = result["content"]
+                        if settings.show_badges:
+                            eco_label = "ECO" if settings.mode == "eco" else "ECO"
+                            badge = f"[{eco_label} {provider}/{result.get('model', '?')}] "
+                            content = badge + content
+
+                        yield StreamChunk(
+                            delta=content,
+                            model=result.get("model", "free"),
+                            usage={"provider": provider, "eco_mode": settings.mode},
+                            done=True,
+                        )
+                        return
+                    except Exception:
+                        if settings.mode == "eco":
+                            yield StreamChunk(
+                                delta="All free AI providers are currently unavailable.",
+                                model="none",
+                                done=True,
+                            )
+                            return
+                        logger.info("HYBRID: Free failed, falling back to paid streaming")
+
+        # Paid streaming fallback
+        self._record_usage(user_id, "paid")
+        badge_prefix = ""
+        if settings.show_badges and settings.mode == "hybrid":
+            badge_prefix = "[PAID] "
+
+        first_chunk = True
+        async for chunk in self._paid_router.stream_chat(
+            messages, model=model, user_id=user_id, **kwargs
+        ):
+            if first_chunk and badge_prefix and chunk.delta:
+                yield StreamChunk(
+                    delta=badge_prefix + chunk.delta,
+                    tool_calls=chunk.tool_calls,
+                    usage=chunk.usage,
+                    model=chunk.model,
+                    done=chunk.done,
+                )
+                first_chunk = False
+            else:
+                yield chunk
 
     def get_usage(self, user_id: str) -> dict:
         """Get usage stats for a user."""

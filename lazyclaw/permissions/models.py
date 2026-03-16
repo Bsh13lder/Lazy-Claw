@@ -13,15 +13,21 @@ DENY = "deny"
 VALID_LEVELS = frozenset({ALLOW, ASK, DENY})
 
 # Default category -> permission level mapping
+# Safe read-only categories default to ALLOW so the agent can act without
+# asking "would you like me to proceed?" on every tool call.
+# Only truly sensitive categories (vault, computer) require approval.
 DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "general": ALLOW,
+    "utility": ALLOW,
     "search": ALLOW,
+    "research": ALLOW,
     "memory": ALLOW,
     "vault": ASK,
-    "browser": ASK,
+    "browser": ALLOW,
     "computer": ASK,
     "skills": ALLOW,
-    "custom": ASK,
+    "custom": ALLOW,
+    "security": ASK,
 }
 
 

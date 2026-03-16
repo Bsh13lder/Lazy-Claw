@@ -15,6 +15,7 @@ class Job:
     """A single queued message to process."""
     user_id: str
     message: str
+    kwargs: dict = field(default_factory=dict)
     result_future: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
 
 
@@ -32,12 +33,12 @@ class LaneQueue:
         """Set the message handler (typically agent.process_message)."""
         self._handler = handler
 
-    async def enqueue(self, user_id: str, message: str) -> str:
+    async def enqueue(self, user_id: str, message: str, **kwargs) -> str:
         """Enqueue a message and wait for the result. Returns the agent response."""
         if not self._running:
             raise RuntimeError("LaneQueue not started")
 
-        job = Job(user_id=user_id, message=message)
+        job = Job(user_id=user_id, message=message, kwargs=kwargs)
         lane = self._get_lane(user_id)
         await lane.put(job)
         logger.debug("Enqueued job for user %s (queue size: %d)", user_id, lane.qsize())
@@ -69,10 +70,10 @@ class LaneQueue:
                 continue
 
             try:
-                result = await self._handler(job.user_id, job.message)
+                result = await self._handler(job.user_id, job.message, **job.kwargs)
                 job.result_future.set_result(result)
             except Exception as e:
-                logger.error("Job failed for user %s: %s", user_id, e)
+                logger.error("Job failed for user %s: %s", user_id, e, exc_info=True)
                 if not job.result_future.done():
                     job.result_future.set_result(f"Error processing message: {e}")
             finally:

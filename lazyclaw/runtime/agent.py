@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -24,6 +25,10 @@ _MCP_KEYWORDS = (
     "free api", "free provider", "vault whisper", "vaultwhisper", "privacy",
     "pii", "scrub", "task ai", "taskai", "categorize", "prioritize",
     "deduplicate", "freeride", "mcp", "provider status", "leaderboard",
+    "doctor", "lazydoctor", "checkup", "lint", "linter", "fix bugs",
+    "auto-fix", "autofix", "self-heal", "heal", "diagnose", "diagnostic",
+    "code quality", "type check", "typecheck", "mypy", "ruff", "pytest",
+    "run tests", "format code", "code issues", "fix issues",
 )
 
 # Keywords that suggest any tools are needed (search, browse, compute, file ops, etc.)
@@ -37,7 +42,14 @@ _TOOL_KEYWORDS = (
     "skill", "create skill", "delete skill",
     "time", "date", "what time", "what day",
     "web", "website", "url", "http", "page",
-    "schedule", "cron", "remind",
+    "schedule", "cron", "remind", "reminder", "every hour",
+    "every day", "every morning", "every week", "recurring",
+    "job", "jobs", "stop job", "delete job", "pause job",
+    "browser", "tab", "tabs", "what am i looking", "my screen",
+    "my browser", "what's on my", "see browser", "switch tab",
+    "mcp", "mcps", "how many", "what tools", "what skills",
+    "terminal", "tty", "process", "pid", "what's running",
+    "what is running", "check", "capabilities", "what can you",
 )
 
 
@@ -122,6 +134,9 @@ class Agent:
         if hasattr(cb, 'cancel_token'):
             cb.cancel_token = cancel_token
         key = derive_server_key(self.config.server_secret, user_id)
+        _start_time = time.monotonic()
+        _all_tools_used: list[str] = []
+        _session_tokens = 0
 
         # Initialize trace recorder
         from lazyclaw.replay.recorder import TraceRecorder
@@ -154,7 +169,7 @@ class Agent:
         history_rows, _, system_prompt = await _aio.gather(
             _load_history(),
             load_user_skills(self.config, user_id, self.registry),
-            build_context(self.config, user_id),
+            build_context(self.config, user_id, registry=self.registry),
         )
 
         history = await compress_history(
@@ -185,6 +200,23 @@ class Agent:
             if team_result is not None:
                 await recorder.record_team_delegation("team_lead", message)
                 await recorder.record_final_response(team_result)
+
+                # Fire work summary for team mode
+                from lazyclaw.runtime.summary import build_work_summary
+                _team_summary = build_work_summary(
+                    start_time=_start_time,
+                    llm_calls=0,  # team lead tracks its own calls
+                    tools_used=[],
+                    specialists=[s.name for s in specialists],
+                    total_tokens=0,
+                    user_message=message,
+                    response=team_result,
+                )
+                await cb.on_event(AgentEvent(
+                    "work_summary", "Team task complete",
+                    {"summary": _team_summary},
+                ))
+
                 # Store user message + team response encrypted
                 async with db_session(self.config) as db:
                     if not chat_session_id:
@@ -253,6 +285,7 @@ class Agent:
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
 
         response = None
+        iteration = 0
         try:
             for iteration in range(max_iterations):
                 if cancel_token.is_cancelled:
@@ -328,6 +361,7 @@ class Agent:
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
                 eco_mode = usage.get("eco_mode")  # "eco", "hybrid_free", or None (paid)
+                _session_tokens += total_tokens
                 await cb.on_event(AgentEvent(
                     "tokens",
                     f"{total_tokens} tokens ({prompt_tokens} in, {completion_tokens} out)",
@@ -369,16 +403,18 @@ class Agent:
 
                 # Execute each tool call
                 for tc in response.tool_calls:
+                    _display = self.registry.get_display_name(tc.name) if self.registry else tc.name
+                    _all_tools_used.append(_display)
                     await cb.on_event(AgentEvent(
-                        "tool_call", f"Using {tc.name}...",
-                        {"tool": tc.name, "args": tc.arguments},
+                        "tool_call", _display,
+                        {"tool": tc.name, "display_name": _display, "args": tc.arguments},
                     ))
                     await recorder.record_tool_call(tc.name, tc.arguments)
                     result = await self.executor.execute(tc, user_id)
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                     await cb.on_event(AgentEvent(
-                        "tool_result", f"{tc.name} done",
-                        {"tool": tc.name},
+                        "tool_result", _display,
+                        {"tool": tc.name, "display_name": _display},
                     ))
 
                     # Handle approval-required responses
@@ -402,23 +438,26 @@ class Agent:
                             continue
 
                         # Try inline approval via callback (CLI y/n prompt)
+                        # Pass display name so the UI shows friendly names
+                        if hasattr(cb, '_pending_display_name'):
+                            cb._pending_display_name = _display
                         approved = await cb.on_approval_request(skill_name, parsed_args)
 
                         if approved:
                             await cb.on_event(AgentEvent(
-                                "approval", f"'{skill_name}' approved",
-                                {"skill": skill_name, "approved": True},
+                                "approval", f"{_display} approved",
+                                {"skill": skill_name, "display_name": _display, "approved": True},
                             ))
                             result = await self.executor.execute_allowed(tc, user_id)
                             await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                             await cb.on_event(AgentEvent(
-                                "tool_result", f"{tc.name} done",
-                                {"tool": tc.name},
+                                "tool_result", _display,
+                                {"tool": tc.name, "display_name": _display},
                             ))
                         else:
                             await cb.on_event(AgentEvent(
-                                "approval", f"'{skill_name}' denied",
-                                {"skill": skill_name, "approved": False},
+                                "approval", f"{_display} denied",
+                                {"skill": skill_name, "display_name": _display, "approved": False},
                             ))
                             result = (
                                 f"The user denied the action '{skill_name}'. "
@@ -497,5 +536,22 @@ class Agent:
         if not content.strip():
             content = "I wasn't able to generate a response. Please try again."
         await recorder.record_final_response(content)
+
+        # Fire work summary for direct mode
+        from lazyclaw.runtime.summary import build_work_summary
+        _direct_summary = build_work_summary(
+            start_time=_start_time,
+            llm_calls=iteration + 1,
+            tools_used=_all_tools_used,
+            specialists=[],
+            total_tokens=_session_tokens,
+            user_message=message,
+            response=content,
+        )
+        await cb.on_event(AgentEvent(
+            "work_summary", "Task complete",
+            {"summary": _direct_summary},
+        ))
+
         await cb.on_event(AgentEvent("done", "Response ready", {}))
         return content

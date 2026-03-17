@@ -256,6 +256,18 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `mcp-taskai/mcp_taskai/server.py` | MCP tools: categorize, suggest_deadline, detect_duplicates, summarize, prioritize |
 | `mcp-taskai/mcp_taskai/main.py` | Entry point: stdio MCP server |
 
+**Standalone: mcp-lazydoctor** (self-healing doctor MCP server):
+| File | Purpose |
+|------|---------|
+| `mcp-lazydoctor/pyproject.toml` | Standalone package, deps: mcp |
+| `mcp-lazydoctor/mcp_lazydoctor/config.py` | DoctorConfig: project root, tool paths, safety limits, git settings |
+| `mcp-lazydoctor/mcp_lazydoctor/runner.py` | Safe subprocess runner with command allowlist and timeout |
+| `mcp-lazydoctor/mcp_lazydoctor/diagnostics.py` | Diagnostic engine: ruff lint, pytest, mypy, ruff format parsers |
+| `mcp-lazydoctor/mcp_lazydoctor/git_ops.py` | Git operations: status, branch, commit, diff for safe auto-fix |
+| `mcp-lazydoctor/mcp_lazydoctor/fixer.py` | Auto-fix engine: apply safe fixes, verify improvement, optionally commit |
+| `mcp-lazydoctor/mcp_lazydoctor/server.py` | MCP tools: doctor_checkup, doctor_lint, doctor_test, doctor_typecheck, doctor_fix, doctor_format, doctor_git_status, doctor_heal |
+| `mcp-lazydoctor/mcp_lazydoctor/main.py` | Entry point: stdio MCP server |
+
 **Planned** (not yet implemented):
 | File | Purpose |
 |------|---------|
@@ -351,6 +363,23 @@ python -m mcp_taskai
 npx @modelcontextprotocol/inspector python -m mcp_taskai
 ```
 
+### mcp-lazydoctor (standalone)
+
+```bash
+# Point at project root (defaults to cwd)
+export LAZYDOCTOR_PROJECT_ROOT=/path/to/lazyclaw
+
+# Optional: safety settings
+export LAZYDOCTOR_AUTO_FIX=true       # enable ruff --fix (default: true)
+export LAZYDOCTOR_DRY_RUN=false       # report only, no changes (default: false)
+export LAZYDOCTOR_REQUIRE_CLEAN_GIT=true  # refuse fixes on dirty worktree (default: true)
+export LAZYDOCTOR_AUTO_COMMIT=false   # auto-commit fixes (default: false)
+
+# Run as MCP server
+python -m mcp_lazydoctor
+npx @modelcontextprotocol/inspector python -m mcp_lazydoctor
+```
+
 ### CLI Commands
 - `lazyclaw` — Drops straight into interactive chat REPL (the main experience)
 - `lazyclaw setup` — Interactive wizard: generates SERVER_SECRET, configures AI provider (OpenAI/Anthropic), sets up Telegram bot, initializes DB
@@ -426,6 +455,7 @@ All user content encrypted before storage. Server never sees plaintext.
 - **CancellationToken**: Cooperative cancellation flows from CLI (Ctrl+C) → agent → team lead → specialists. Signal handler sets flag, polling loop checks it.
 - **Team event propagation**: Specialist events (`specialist_start`, `specialist_tool`, `specialist_done`, `team_start`, `team_merge`) flow from teams/runner → teams/executor → teams/lead → agent → CLI callback for real-time dashboard.
 - **Claude Code MCP OAuth**: The claude-code MCP server launches with `ANTHROPIC_API_KEY=""` so the CLI uses Max subscription (OAuth) instead of the API key which may have no credits. Configured via `strip_env` in BUNDLED_MCPS.
+- **Agent self-awareness**: System prompt includes available skills list, connected MCP servers with descriptions/tool counts, and current config (model, ECO, team). Built dynamically by `context_builder.py` on every message so the agent knows what it can do.
 
 ## Database
 

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-lazydoctor"
+version = "0.1.0"
+description = "Self-healing doctor for LazyClaw — lint, test, diagnose, and auto-fix Python code via MCP"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+mcp-server-lazydoctor = "mcp_lazydoctor.main:main"
+
+[tool.setuptools.packages.find]
+include = ["mcp_lazydoctor*"]

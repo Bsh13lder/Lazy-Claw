@@ -38,6 +38,10 @@ BUNDLED_MCPS = {
         "module": "mcp_taskai",
         "description": "Task intelligence (categorize, prioritize, deduplicate)",
     },
+    "mcp-lazydoctor": {
+        "module": "mcp_lazydoctor",
+        "description": "Self-healing doctor (lint, test, diagnose, auto-fix)",
+    },
     "claude-code": {
         "npx": "@steipete/claude-code-mcp",
         "description": "Control Claude Code CLI from LazyClaw",

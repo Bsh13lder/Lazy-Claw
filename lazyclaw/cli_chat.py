@@ -25,6 +25,15 @@ from lazyclaw.cli_dashboard import render_dashboard
 logger = logging.getLogger(__name__)
 
 
+def _read_line_raw() -> str:
+    """Read a line from stdin in a thread. Safe alongside Rich output."""
+    import sys
+    try:
+        return sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Chat context
 # ---------------------------------------------------------------------------
@@ -112,6 +121,8 @@ class CliCallback:
         self._pending_display_name: str = ""
         self._approval_event: asyncio.Event | None = None
         self._approval_result: bool = False
+        # Side channel — messages typed while agent/team works
+        self.side_messages: list[str] = []
 
     def start_thinking(self) -> None:
         """Show spinner for initial loading phase."""
@@ -436,6 +447,9 @@ async def run_chat_loop(
             except (NotImplementedError, OSError, AttributeError):
                 pass
 
+            _input_future: asyncio.Future | None = None
+            _input_hint_shown = False
+
             try:
                 while not agent_task.done():
                     # Check Ctrl+C
@@ -450,6 +464,8 @@ async def run_chat_loop(
 
                     # Check for pending approval — compact format
                     if active_callback and active_callback._pending_approval:
+                        # Cancel input thread if active
+                        _input_future = None
                         active_callback._stop_spinner()
                         skill_name, args = active_callback._pending_approval
                         display = (
@@ -476,7 +492,59 @@ async def run_chat_loop(
                         active_callback._approval_event.set()
                         continue
 
-                    # Poll with short timeout
+                    # Start threaded input reader (non-blocking)
+                    if _input_future is None:
+                        if not _input_hint_shown:
+                            con.print(
+                                "  [dim]\u2500\u2500\u2500 type to "
+                                "add context (Enter to send) "
+                                "\u2500\u2500\u2500[/dim]"
+                            )
+                            _input_hint_shown = True
+                        _input_future = loop.run_in_executor(
+                            None, _read_line_raw,
+                        )
+
+                    # Check if user typed something
+                    if _input_future is not None and _input_future.done():
+                        try:
+                            user_text = _input_future.result()
+                        except (EOFError, KeyboardInterrupt, Exception):
+                            user_text = ""
+                        _input_future = None
+
+                        stripped = user_text.strip()
+                        if stripped:
+                            if stripped.lower() in ("/cancel", "/stop"):
+                                if active_callback and active_callback.cancel_token:
+                                    active_callback.cancel_token.cancel()
+                                agent_task.cancel()
+                                if active_callback:
+                                    active_callback._stop_spinner()
+                                con.print(
+                                    "\n  [yellow]Cancelled.[/yellow]"
+                                )
+                                break
+                            elif is_status_query(stripped):
+                                if active_callback:
+                                    active_callback._stop_spinner()
+                                con.print(render_dashboard(active_callback))
+                                if active_callback:
+                                    active_callback._start_spinner(
+                                        "  [dim]\u25cf Working...[/dim]"
+                                    )
+                            else:
+                                # Side channel — add to merge context
+                                if active_callback:
+                                    active_callback.side_messages.append(
+                                        stripped
+                                    )
+                                con.print(
+                                    f"  [dim]\u2192 Noted: "
+                                    f"{stripped[:60]}[/dim]"
+                                )
+
+                    # Poll agent
                     done_set, _ = await asyncio.wait(
                         {agent_task}, timeout=0.3,
                     )

@@ -371,8 +371,25 @@ class TeamLead:
             critic_instruction=critic_text,
         )
 
+        # Inject side messages from user (typed while specialists worked)
+        side_messages: list[str] = []
+        if callback and hasattr(callback, "side_messages"):
+            side_messages = list(callback.side_messages)
+            callback.side_messages.clear()
+
+        if side_messages:
+            side_text = "\n".join(f"- {m}" for m in side_messages)
+            prompt += (
+                f"\n\nIMPORTANT: The user added these notes while "
+                f"specialists were working:\n{side_text}\n"
+                f"Incorporate this feedback into your merged response."
+            )
+
+        merge_detail = "Merging specialist results"
+        if side_messages:
+            merge_detail += f" (+ {len(side_messages)} user notes)"
         if callback:
-            await callback.on_event(AgentEvent("team_merge", "Merging specialist results", {}))
+            await callback.on_event(AgentEvent("team_merge", merge_detail, {}))
 
         messages = [
             LLMMessage(role="system", content=prompt),

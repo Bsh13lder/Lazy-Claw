@@ -41,6 +41,7 @@ def get_configured_providers(config: FreeRideConfig) -> list[str]:
         available.append("mistral")
     if config.hf_api_key:
         available.append("huggingface")
-    # Ollama is always available (local, no key needed)
-    available.append("ollama")
+    # Ollama only if explicitly configured via env var (not the default URL)
+    if os.getenv("OLLAMA_URL"):
+        available.append("ollama")
     return available

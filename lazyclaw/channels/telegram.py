@@ -214,7 +214,8 @@ class TelegramAdapter(ChannelAdapter):
                 response = await self._agent.process_message(
                     user_id, text, callback=callback,
                 )
-            response = response or "Done (no text response)."
+            if not response or not response.strip():
+                response = "Sorry, I couldn't process that. Please try again."
             logger.info("Telegram response to chat %s: %s", chat_id, response[:100])
 
             # Clean up status message

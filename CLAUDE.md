@@ -419,6 +419,13 @@ All user content encrypted before storage. Server never sees plaintext.
 - **Streaming responses**: LLM responses stream token-by-token to the CLI via `StreamChunk` async generators through provider → router → eco_router → agent → callback chain.
 - **Inline CLI approval**: When a tool needs approval (computer/vault), the CLI prompts y/n inline instead of creating DB approval records. The `on_approval_request` callback handles this.
 - **Parallel initialization**: Agent loads history, skills, and context concurrently via `asyncio.gather()` to reduce latency before the first LLM call.
+- **Smart tool routing**: Agent only sends tools to LLM when the message suggests tool usage (`_wants_any_tools()`). Simple chat (hello, questions) gets zero tools → fast direct response. Prevents GPT-5 from running random `run_command` calls on greetings.
+- **Tool-free history stripping**: When no tools are needed, `_strip_tool_messages()` converts tool-call history to plain text so the LLM doesn't hallucinate tool calls from seeing old patterns.
+- **Fast chat path**: Simple messages get only last 6 history messages (no full summary). Complex tool requests get full compressed history. Reduces GPT-5 response time from ~60s to ~5s for chat.
+- **Flexible summary cache**: `compress_history()` reuses existing summaries that cover 80%+ of older messages, avoiding expensive LLM re-summarization on every message.
+- **CancellationToken**: Cooperative cancellation flows from CLI (Ctrl+C) → agent → team lead → specialists. Signal handler sets flag, polling loop checks it.
+- **Team event propagation**: Specialist events (`specialist_start`, `specialist_tool`, `specialist_done`, `team_start`, `team_merge`) flow from teams/runner → teams/executor → teams/lead → agent → CLI callback for real-time dashboard.
+- **Claude Code MCP OAuth**: The claude-code MCP server launches with `ANTHROPIC_API_KEY=""` so the CLI uses Max subscription (OAuth) instead of the API key which may have no credits. Configured via `strip_env` in BUNDLED_MCPS.
 
 ## Database
 

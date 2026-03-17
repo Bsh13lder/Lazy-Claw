@@ -21,8 +21,10 @@ def configure_logging(log_level: str = "WARNING", log_file: str | None = None) -
     for name in ("httpx", "httpcore", "urllib3", "hpack", "asyncio", "watchfiles"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    # Suppress RuntimeWarnings from asyncio (Python 3.11 cleanup noise)
+    # Suppress asyncio cleanup noise (Python 3.11+ subprocess watcher warnings)
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="asyncio")
+    warnings.filterwarnings("ignore", message=".*that handles pid.*")
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
     # Root lazyclaw logger
     root = logging.getLogger("lazyclaw")

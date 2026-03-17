@@ -30,16 +30,15 @@ logger = logging.getLogger(__name__)
 TASK_FREE = "free"
 TASK_PAID = "paid"
 
-# Keywords that suggest simple tasks (free-routable)
+# Keywords that suggest tasks suitable for free providers (low-quality OK)
+# Only truly disposable tasks — NOT conversations, NOT user-facing responses
 _FREE_PATTERNS = re.compile(
-    r"\b(summarize|summary|translate|translation|explain|what is|what are|"
-    r"define|classify|categorize|list|describe|compare|paraphrase|"
-    r"rewrite|simplify|hello|hi|hey|thanks|thank you|good morning|"
-    r"good night|how are you)\b",
+    r"\b(categorize this|classify this|detect duplicates|"
+    r"suggest deadline|prioritize these)\b",
     re.IGNORECASE,
 )
 
-# Keywords that suggest complex tasks (need paid / tools)
+# Keywords that MUST use paid (tools, complex, user-facing conversation)
 _PAID_PATTERNS = re.compile(
     r"\b(search|browse|find online|look up|web search|remember|"
     r"save.*memory|create.*skill|write.*code|generate.*code|"
@@ -108,18 +107,16 @@ async def _load_eco_settings(config: Config, user_id: str) -> EcoSettings:
 def classify_task(message: str, has_tools: bool) -> str:
     """Classify whether a message needs free or paid AI.
 
-    Simple heuristic — no LLM needed:
-    1. If message matches paid patterns (tool-needing) → paid
-    2. If message matches free patterns (simple text) → free
-    3. Short messages (<50 chars) without paid signals → free
-    4. Default → paid (safer fallback)
+    Conservative — GPT-5 is the default for everything user-facing.
+    Free providers only for specific low-quality-OK tasks (categorize, dedup, etc).
     """
+    if has_tools:
+        return TASK_PAID
     if _PAID_PATTERNS.search(message):
         return TASK_PAID
     if _FREE_PATTERNS.search(message):
         return TASK_FREE
-    if len(message) < 50:
-        return TASK_FREE
+    # Default: GPT-5 for all conversations, greetings, questions, everything
     return TASK_PAID
 
 
@@ -249,7 +246,10 @@ class EcoRouter:
         for attempt in range(max_wait_rounds):
             try:
                 dict_messages = self._convert_to_dicts(messages)
-                result = await free_router.chat(dict_messages, model_hint)
+                result = await asyncio.wait_for(
+                    free_router.chat(dict_messages, model_hint),
+                    timeout=15,
+                )
                 provider = result.get("provider", "free")
                 self._rate_limiter.record_request(provider)
                 self._record_usage(user_id, "free")
@@ -265,6 +265,7 @@ class EcoRouter:
                     usage={"provider": provider, "eco_mode": "eco"},
                 )
             except Exception as exc:
+                logger.warning("ECO provider error: %s", exc)
                 if "All" in str(exc) and attempt < max_wait_rounds - 1:
                     wait = 30
                     logger.info("ECO: All providers busy, waiting %ds (attempt %d)", wait, attempt + 1)
@@ -385,7 +386,10 @@ class EcoRouter:
                 if free_router:
                     try:
                         dict_messages = self._convert_to_dicts(messages)
-                        result = await free_router.chat(dict_messages, None)
+                        result = await asyncio.wait_for(
+                            free_router.chat(dict_messages, None),
+                            timeout=15,
+                        )
                         provider = result.get("provider", "free")
                         self._rate_limiter.record_request(provider)
                         self._record_usage(user_id, "free")
@@ -403,10 +407,11 @@ class EcoRouter:
                             done=True,
                         )
                         return
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning("ECO streaming failed: %s", exc, exc_info=True)
                         if settings.mode == "eco":
                             yield StreamChunk(
-                                delta="All free AI providers are currently unavailable.",
+                                delta="Free AI providers unavailable. Try /eco hybrid for fallback.",
                                 model="none",
                                 done=True,
                             )

@@ -16,6 +16,7 @@ from uuid import uuid4
 from lazyclaw.config import Config
 from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.llm.providers.base import LLMMessage
+from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.skills.registry import SkillRegistry
 from lazyclaw.teams.conversation import store_message
 from lazyclaw.teams.executor import TeamTask, execute_team
@@ -162,6 +163,8 @@ class TeamLead:
         specialists: list[SpecialistConfig],
         registry: SkillRegistry,
         permission_checker,
+        callback=None,
+        cancel_token=None,
     ) -> str | None:
         """Analyze message and optionally delegate to specialists.
 
@@ -174,7 +177,8 @@ class TeamLead:
         # If mode is "always", skip analysis and force team mode
         if mode == "always":
             return await self._force_team(
-                user_id, message, settings, specialists, registry, permission_checker
+                user_id, message, settings, specialists, registry, permission_checker,
+                callback=callback, cancel_token=cancel_token,
             )
 
         # Fast pre-filter: skip LLM analysis for obviously simple messages
@@ -196,6 +200,7 @@ class TeamLead:
         return await self._execute_team(
             user_id, message, tasks_data, settings, specialists,
             registry, permission_checker,
+            callback=callback, cancel_token=cancel_token,
         )
 
     async def _analyze(
@@ -226,6 +231,8 @@ class TeamLead:
         specialists: list[SpecialistConfig],
         registry: SkillRegistry,
         permission_checker,
+        callback=None,
+        cancel_token=None,
     ) -> str | None:
         """Force team mode: always delegate, even for simple messages."""
         analysis = await self._analyze(user_id, message, specialists)
@@ -239,6 +246,7 @@ class TeamLead:
         return await self._execute_team(
             user_id, message, tasks_data, settings, specialists,
             registry, permission_checker,
+            callback=callback, cancel_token=cancel_token,
         )
 
     async def _execute_team(
@@ -250,6 +258,8 @@ class TeamLead:
         specialists: list[SpecialistConfig],
         registry: SkillRegistry,
         permission_checker,
+        callback=None,
+        cancel_token=None,
     ) -> str:
         """Build tasks, execute in parallel, merge results."""
         team_session_id = str(uuid4())
@@ -287,6 +297,13 @@ class TeamLead:
         max_parallel = settings.get("max_parallel", 3)
         timeout = settings.get("specialist_timeout", 120)
 
+        if callback:
+            names = [t.specialist.name for t in team_tasks]
+            await callback.on_event(AgentEvent(
+                "team_start", f"Delegating to {len(team_tasks)} specialists",
+                {"specialist_count": len(team_tasks), "specialists": names},
+            ))
+
         results = await execute_team(
             tasks=team_tasks,
             user_id=user_id,
@@ -295,6 +312,8 @@ class TeamLead:
             permission_checker=permission_checker,
             max_parallel=max_parallel,
             timeout=timeout,
+            callback=callback,
+            cancel_token=cancel_token,
         )
 
         # Store specialist results
@@ -317,7 +336,8 @@ class TeamLead:
 
         # Merge results (with critic if 2+ specialists)
         merged = await self._merge_results(
-            user_id, message, successful, settings, team_session_id
+            user_id, message, successful, settings, team_session_id,
+            callback=callback,
         )
 
         return merged
@@ -329,6 +349,7 @@ class TeamLead:
         results: list[SpecialistResult],
         settings: dict,
         team_session_id: str,
+        callback=None,
     ) -> str:
         """Merge specialist results via LLM, with optional critic review."""
         critic_mode = settings.get("critic_mode", "auto")
@@ -347,6 +368,9 @@ class TeamLead:
             results_text=results_text,
             critic_instruction=critic_text,
         )
+
+        if callback:
+            await callback.on_event(AgentEvent("team_merge", "Merging specialist results", {}))
 
         messages = [
             LLMMessage(role="system", content=prompt),

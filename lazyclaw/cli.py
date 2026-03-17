@@ -563,6 +563,7 @@ class _CliCallback:
         self._console = out
         self._spinner: Status | None = None
         self._streaming = False
+        self._paused = False  # True when prompt_toolkit has terminal control
         self.total_tokens = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -577,13 +578,23 @@ class _CliCallback:
         self.current_tool = ""
         self.tool_log: list[str] = []
         self.specialists_active: list[str] = []
+        # Team tracking
+        self._is_team = False
+        self._team_specialists: dict[str, dict] = {}  # name → {status, start_time, ...}
+        # Cancellation token (set by agent.py)
+        self.cancel_token = None
+        # Approval coordination — agent sets pending, main loop handles prompt
+        self._pending_approval: tuple[str, dict] | None = None
+        self._approval_event: asyncio.Event | None = None
+        self._approval_result: bool = False
 
     def start_thinking(self) -> None:
         """Show spinner immediately when user submits a message."""
         self.busy = True
         self.current_phase = "preparing"
+        self._console.print("  [dim]Loading context...[/dim]")
         self._spinner = self._console.status(
-            "  [dim]Preparing...[/dim]", spinner="dots"
+            "  [bold cyan]● Preparing...[/bold cyan]", spinner="dots"
         )
         self._spinner.start()
 
@@ -592,6 +603,34 @@ class _CliCallback:
             self._spinner.stop()
             self._spinner = None
 
+    def pause_for_input(self) -> None:
+        """Pause spinner so prompt_toolkit can control the terminal."""
+        self._paused = True
+        self._stop_spinner()
+
+    def resume_from_input(self) -> None:
+        """Resume spinner after prompt_toolkit releases the terminal."""
+        self._paused = False
+        if not self.busy or self._spinner is not None:
+            return
+        if self.current_phase == "thinking":
+            label = f"  [bold cyan]Thinking[/bold cyan] [dim]({self.current_model}, step {self.current_iteration})...[/dim]"
+        elif self.current_phase == "tool":
+            label = f"  [dim]> {self.current_tool}[/dim]"
+        elif self.current_phase == "team":
+            label = f"  [cyan]% team delegation...[/cyan]"
+        else:
+            label = f"  [dim]{self.current_phase.title()}...[/dim]"
+        self._spinner = self._console.status(label, spinner="dots")
+        self._spinner.start()
+
+    def _start_spinner(self, label: str) -> None:
+        """Start spinner only if not paused for prompt_toolkit input."""
+        if self._paused:
+            return
+        self._spinner = self._console.status(label, spinner="dots")
+        self._spinner.start()
+
     def get_status_report(self) -> str:
         """Return a human-readable status of what the agent is doing right now."""
         if not self.busy:
@@ -599,19 +638,33 @@ class _CliCallback:
         lines = []
         if self.current_phase == "thinking":
             lines.append(
-                f"Thinking (model: {self.current_model}, step {self.current_iteration})"
+                f"● Thinking (model: {self.current_model}, step {self.current_iteration})"
             )
         elif self.current_phase == "tool":
-            lines.append(f"Running tool: {self.current_tool}")
+            lines.append(f"◆ Running tool: {self.current_tool}")
         elif self.current_phase == "streaming":
-            lines.append("Streaming response...")
+            lines.append("● Streaming response...")
         elif self.current_phase == "team":
-            lines.append("Team lead delegating work")
+            lines.append("● Team mode active")
         else:
-            lines.append(f"Phase: {self.current_phase}")
+            lines.append(f"○ Phase: {self.current_phase}")
 
-        if self.specialists_active:
-            lines.append(f"Active specialists: {', '.join(self.specialists_active)}")
+        # Team specialist details
+        if self._is_team and self._team_specialists:
+            lines.append("")
+            for name, state in self._team_specialists.items():
+                status = state.get("status", "queued")
+                icon = {"queued": "○", "running": "●", "done": "✓", "error": "✗"}.get(status, "○")
+                elapsed = ""
+                if status == "running" and state.get("start_time"):
+                    import time as _t
+                    elapsed = f"  {_t.monotonic() - state['start_time']:.1f}s"
+                elif state.get("duration_ms"):
+                    elapsed = f"  {state['duration_ms'] / 1000:.1f}s"
+                tools = state.get("tools_used", [])
+                tools_str = f"  [{', '.join(tools[-3:])}]" if tools else ""
+                lines.append(f"  {icon} {name}  {status}{elapsed}{tools_str}")
+            lines.append("")
 
         if self.tool_log:
             recent = self.tool_log[-5:]
@@ -619,31 +672,38 @@ class _CliCallback:
             for entry in recent:
                 lines.append(f"  {entry}")
 
-        lines.append(f"LLM calls so far: {self.llm_calls}")
+        lines.append(f"LLM calls: {self.llm_calls}")
         return "\n".join(lines)
 
     async def on_approval_request(
         self, skill_name: str, arguments: dict
     ) -> bool:
-        """Prompt the CLI user for inline y/n approval."""
+        """Request approval via main loop (avoids stdin conflict with prompt_toolkit)."""
         self._stop_spinner()
-        import json as _json
-        args_display = _json.dumps(arguments, indent=2) if arguments else "{}"
-        self._console.print()
+        self._pending_approval = (skill_name, arguments)
+        self._approval_event = asyncio.Event()
+        self._approval_result = False
+        # Wait for main loop to handle the prompt
+        await self._approval_event.wait()
+        self._pending_approval = None
+        self._approval_event = None
+        if self._approval_result:
+            self._start_spinner(f"  [dim]> Running {skill_name}...[/dim]")
+        return self._approval_result
+
+    def _print_team_panel(self) -> None:
+        """Print a static snapshot of team specialist assignments."""
+        lines = []
+        for name in self._team_specialists:
+            lines.append(f"  [dim]○ {name}[/dim]")
         self._console.print(
             Panel(
-                f"[bold]{skill_name}[/bold]\n[dim]{args_display}[/dim]",
-                title="[yellow]Approval Required[/yellow]",
-                border_style="yellow",
+                "\n".join(lines),
+                title="[bold cyan]Team[/bold cyan]",
+                border_style="cyan",
+                width=55,
             )
         )
-        result = Confirm.ask("  Allow this action?", default=True)
-        if result:
-            self._spinner = self._console.status(
-                f"  [dim]> Running {skill_name}...[/dim]", spinner="dots"
-            )
-            self._spinner.start()
-        return result
 
     async def on_event(self, event) -> None:
         kind = event.kind
@@ -654,9 +714,9 @@ class _CliCallback:
             self.current_phase = "thinking"
             self.current_model = model
             self.current_iteration = iteration
-            label = f"  [bold cyan]Thinking[/bold cyan] [dim]({model}, step {iteration})...[/dim]"
-            self._spinner = self._console.status(label, spinner="dots")
-            self._spinner.start()
+            self._start_spinner(
+                f"  [bold cyan]● Thinking[/bold cyan] [dim]({model}, step {iteration})...[/dim]"
+            )
             self.llm_calls += 1
         elif kind == "tokens":
             self._stop_spinner()
@@ -672,31 +732,76 @@ class _CliCallback:
             self._stop_spinner()
             self.current_phase = "tool"
             self.current_tool = event.detail
-            self.tool_log.append(f"> {event.detail}")
-            self._spinner = self._console.status(
-                f"  [dim]> {event.detail}[/dim]", spinner="dots"
-            )
-            self._spinner.start()
+            self.tool_log.append(f"◆ {event.detail}")
+            self._start_spinner(f"  [yellow]◆ {event.detail}[/yellow]")
         elif kind == "tool_result":
             self._stop_spinner()
-            self.tool_log.append(f"< {event.detail}")
-            self._console.print(f"  [green]< {event.detail}[/green]")
+            self.tool_log.append(f"✓ {event.detail}")
+            self._console.print(f"  [green]✓ {event.detail}[/green]")
         elif kind == "team_delegate":
             self._stop_spinner()
             self.current_phase = "team"
-            # Track specialist names from the detail string
             detail = event.detail
             if "specialist" in detail.lower() or "delegat" in detail.lower():
                 self.specialists_active.append(detail)
             self.tool_log.append(f"% {detail}")
-            self._spinner = self._console.status(
-                f"  [cyan]% {detail}[/cyan]", spinner="dots"
-            )
-            self._spinner.start()
+            self._start_spinner(f"  [cyan]% {detail}[/cyan]")
+        elif kind == "team_start":
+            self._stop_spinner()
+            self._is_team = True
+            self.current_phase = "team"
+            specialists = event.metadata.get("specialists", [])
+            self._team_specialists = {
+                name: {"status": "queued", "start_time": None, "duration_ms": 0, "tools_used": [], "error": None}
+                for name in specialists
+            }
+            self._print_team_panel()
+            self._start_spinner("  [cyan]● Team working...[/cyan]")
+        elif kind == "specialist_start":
+            self._stop_spinner()
+            name = event.metadata.get("specialist", "?")
+            if name in self._team_specialists:
+                import time as _t
+                self._team_specialists[name]["status"] = "running"
+                self._team_specialists[name]["start_time"] = _t.monotonic()
+            self._console.print(f"  [cyan]● {name}[/cyan] [dim]running...[/dim]")
+            self._start_spinner("  [cyan]● Team working...[/cyan]")
+        elif kind == "specialist_tool":
+            name = event.metadata.get("specialist", "?")
+            tool = event.metadata.get("tool", "?")
+            if name in self._team_specialists:
+                self._team_specialists[name].setdefault("tools_used", []).append(tool)
+            self.tool_log.append(f"  {name} → {tool}")
+        elif kind == "specialist_done":
+            self._stop_spinner()
+            name = event.metadata.get("specialist", "?")
+            duration_ms = event.metadata.get("duration_ms", 0)
+            success = event.metadata.get("success", True)
+            tools = event.metadata.get("tools_used", [])
+            error = event.metadata.get("error")
+            if name in self._team_specialists:
+                self._team_specialists[name]["status"] = "done" if success else "error"
+                self._team_specialists[name]["duration_ms"] = duration_ms
+                self._team_specialists[name]["tools_used"] = tools
+                self._team_specialists[name]["error"] = error
+            if success:
+                tools_str = f", {len(tools)} tools" if tools else ""
+                self._console.print(
+                    f"  [green]✓ {name}[/green] [dim]({duration_ms / 1000:.1f}s{tools_str})[/dim]"
+                )
+            else:
+                err_str = f": {error}" if error else ""
+                self._console.print(f"  [red]✗ {name}[/red] [dim]({err_str})[/dim]")
+            self._start_spinner("  [cyan]● Team working...[/cyan]")
+        elif kind == "team_merge":
+            self._stop_spinner()
+            self._console.print(f"  [cyan]● Merging results...[/cyan]")
+            self._start_spinner("  [cyan]● Merging...[/cyan]")
         elif kind == "token":
             if not self._streaming:
                 self._stop_spinner()
-                self._console.print()  # newline before streamed content
+                self._console.print()
+                self._console.print("[green]╭─ LazyClaw[/green]")
                 self._streaming = True
                 self.current_phase = "streaming"
             self._console.print(event.detail, end="", highlight=False)
@@ -709,7 +814,10 @@ class _CliCallback:
         elif kind == "done":
             self._stop_spinner()
             self.busy = False
+            self._paused = False
             self.current_phase = "done"
+            self._is_team = False
+            self._team_specialists.clear()
             self.specialists_active.clear()
 
 
@@ -943,8 +1051,7 @@ async def _chat_loop() -> None:
     if eco_mode:
         console.print(f"[dim]ECO mode auto-enabled: {eco_mode} (free providers detected)[/dim]")
     console.print("[dim]Type a message to chat. /help for commands.[/dim]")
-    console.print("[dim]Up/Down: history  |  Esc: clear line  |  Ctrl+C: quit[/dim]")
-    console.print("[dim]Type while agent works → /? for live status[/dim]")
+    console.print("[dim]Up/Down: history  |  Esc: clear line  |  Ctrl+C: cancel agent / quit[/dim]")
     console.print()
 
     # prompt_toolkit session — up/down history, Esc clear, proper key bindings
@@ -972,8 +1079,12 @@ async def _chat_loop() -> None:
     agent_task: asyncio.Task | None = None
     pending_messages: list[str] = []
 
-    async def _get_input() -> str:
-        return await pt_session.prompt_async(HTML("<cyan><b>&gt; </b></cyan>"))
+    async def _get_input(busy: bool = False) -> str:
+        if busy:
+            prompt = HTML("<ansiyellow><b>⟩ </b></ansiyellow>")
+        else:
+            prompt = HTML("<cyan><b>&gt; </b></cyan>")
+        return await pt_session.prompt_async(prompt)
 
     async def _run_agent(msg: str, cb: _CliCallback) -> str:
         return await agent.process_message(
@@ -981,12 +1092,30 @@ async def _chat_loop() -> None:
             callback=cb,
         )
 
+    def _show_user_message(msg: str) -> None:
+        """Display user message — minimal, like Claude Code."""
+        console.print()
+        console.print(f"  [bold cyan]❯[/bold cyan] [bold]{msg}[/bold]")
+
     def _show_agent_result(response: str, cb: _CliCallback) -> None:
+        cb._stop_spinner()  # Ensure spinner is gone before printing result
         console.print()
         if cb._streaming:
-            console.print("[dim]───[/dim]")
+            # Streaming already printed tokens inline — just add a closing border
+            console.print("[green]╰─[/green]")
         else:
-            console.print(Panel(Markdown(response), title="LazyClaw", border_style="green"))
+            # Non-streaming response (fallback) — show in panel
+            if response and response.strip():
+                console.print(
+                    Panel(
+                        Markdown(response),
+                        title="[bold green]LazyClaw[/bold green]",
+                        border_style="green",
+                        padding=(0, 1),
+                    )
+                )
+            else:
+                console.print("  [dim]No response.[/dim]")
         console.print()
         # Accumulate session usage
         _session_usage["total_tokens"] += cb.total_tokens
@@ -1008,77 +1137,102 @@ async def _chat_loop() -> None:
         lower = text.lower().strip()
         return lower in _STATUS_TRIGGERS or lower.startswith("/?")
 
+    # Ctrl+C handling — set a flag so the polling loop can cancel cleanly
+    _cancel_requested = False
+
+    def _sigint_handler():
+        nonlocal _cancel_requested
+        _cancel_requested = True
+
+    loop = asyncio.get_event_loop()
+
     while True:
-        # If agent is running, wait for EITHER agent to finish OR user input
+        # If agent is running, wait for it to finish
+        # Rich Status spinner runs in its own thread — just poll for completion + approvals
         if agent_task is not None and not agent_task.done():
-            input_task = asyncio.ensure_future(_get_input())
-            done, _ = await asyncio.wait(
-                {agent_task, input_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            _cancel_requested = False
+            # Install Ctrl+C handler while agent runs
+            _signal_installed = False
+            try:
+                import signal as _sig
+                loop.add_signal_handler(_sig.SIGINT, _sigint_handler)
+                _signal_installed = True
+            except (NotImplementedError, OSError, AttributeError):
+                pass  # Some event loops don't support signal handlers
 
-            if agent_task in done:
-                # Agent finished — show result
-                input_task.cancel()
-                try:
-                    response = agent_task.result()
-                    _show_agent_result(response, active_callback)
-                except Exception as e:
-                    active_callback._stop_spinner()
-                    console.print(f"[red]Error: {e}[/red]")
-                agent_task = None
-                active_callback = None
-
-                # Process any pending messages queued while agent was busy
-                for queued_msg in pending_messages:
-                    cb = _CliCallback(console)
-                    cb.start_thinking()
-                    try:
-                        resp = await _run_agent(queued_msg, cb)
-                        _show_agent_result(resp, cb)
-                    except Exception as e:
-                        cb._stop_spinner()
-                        console.print(f"[red]Error: {e}[/red]")
-                pending_messages.clear()
-                continue
-
-            if input_task in done:
-                # User typed while agent works
-                try:
-                    user_input = input_task.result()
-                except (EOFError, KeyboardInterrupt):
-                    console.print("\n[yellow]Goodbye![/yellow]")
-                    if agent_task and not agent_task.done():
+            try:
+                while not agent_task.done():
+                    # Check Ctrl+C
+                    if _cancel_requested:
+                        if active_callback and active_callback.cancel_token:
+                            active_callback.cancel_token.cancel()
                         agent_task.cancel()
-                    break
+                        if active_callback:
+                            active_callback._stop_spinner()
+                        console.print("\n  [yellow]Cancelled.[/yellow]")
+                        break
 
-                stripped = user_input.strip()
-                if not stripped:
-                    continue
-
-                if stripped.lower() in ("/exit", "/quit", "/q"):
-                    console.print("[yellow]Goodbye![/yellow]")
-                    if agent_task and not agent_task.done():
-                        agent_task.cancel()
-                    break
-
-                # Status query — show what agent is doing
-                if _is_status_query(stripped):
-                    if active_callback:
+                    # Check for pending approval
+                    if active_callback and active_callback._pending_approval:
+                        import json as _approval_json
+                        active_callback._stop_spinner()
+                        skill_name, args = active_callback._pending_approval
+                        args_display = _approval_json.dumps(args, indent=2) if args else "{}"
                         console.print()
                         console.print(
                             Panel(
-                                active_callback.get_status_report(),
-                                title="[cyan]Agent Status[/cyan]",
-                                border_style="cyan",
+                                f"[bold]{skill_name}[/bold]\n[dim]{args_display}[/dim]",
+                                title="[yellow]Approval Required[/yellow]",
+                                border_style="yellow",
                             )
                         )
-                    continue
+                        # Run blocking prompt in thread so event loop stays alive
+                        approved = await loop.run_in_executor(
+                            None, lambda: Confirm.ask("  Allow this action?", default=True)
+                        )
+                        active_callback._approval_result = approved
+                        active_callback._approval_event.set()
+                        continue
 
-                # Queue the message for after agent finishes
-                pending_messages.append(stripped)
-                console.print(f"[dim]  (queued — will send after current task)[/dim]")
-                continue
+                    # Wait for agent with short timeout (lets us check cancel + approval)
+                    done_set, _ = await asyncio.wait(
+                        {agent_task}, timeout=0.3
+                    )
+                    if done_set:
+                        break
+
+                # Get result if task completed normally
+                if agent_task.done() and not agent_task.cancelled():
+                    try:
+                        response = agent_task.result()
+                        _show_agent_result(response, active_callback)
+                    except Exception as e:
+                        if active_callback:
+                            active_callback._stop_spinner()
+                        console.print(f"\n  [red]Error: {e}[/red]")
+                elif agent_task.cancelled():
+                    pass  # Already printed "Cancelled"
+
+            except asyncio.CancelledError:
+                if active_callback:
+                    active_callback._stop_spinner()
+                console.print("  [yellow]Cancelled.[/yellow]")
+            except Exception as e:
+                if active_callback:
+                    active_callback._stop_spinner()
+                console.print(f"[red]Error: {e}[/red]")
+            finally:
+                # Restore default Ctrl+C handler
+                if _signal_installed:
+                    try:
+                        import signal as _sig
+                        loop.remove_signal_handler(_sig.SIGINT)
+                    except (NotImplementedError, OSError):
+                        pass
+
+            agent_task = None
+            active_callback = None
+            continue
 
         # Normal input (no agent running)
         try:
@@ -1113,11 +1267,19 @@ async def _chat_loop() -> None:
             console.print(f"[yellow]Unknown command: {stripped.split()[0]}. Try /help[/yellow]")
             continue
 
-        # Chat with agent — run in background so user can type during execution
+        # Chat with agent — run in background
+        _show_user_message(stripped)
         callback = _CliCallback(console)
         callback.start_thinking()
         active_callback = callback
         agent_task = asyncio.create_task(_run_agent(stripped, callback))
+
+    # Graceful shutdown — disconnect MCP clients
+    from lazyclaw.mcp.manager import disconnect_all
+    try:
+        await asyncio.wait_for(disconnect_all(), timeout=3)
+    except (Exception, KeyboardInterrupt, asyncio.CancelledError):
+        pass  # Don't crash on exit
 
 
 # ---------------------------------------------------------------------------
@@ -1132,8 +1294,19 @@ def main(ctx: click.Context) -> None:
         # Default: drop into chat
         try:
             asyncio.run(_chat_loop())
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Goodbye![/yellow]")
+        except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
+            pass  # Clean exit
+        except Exception:
+            pass  # Don't show tracebacks on exit
+        finally:
+            # Kill any lingering MCP subprocesses
+            try:
+                from lazyclaw.mcp.manager import disconnect_all
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(asyncio.wait_for(disconnect_all(), timeout=2))
+                loop.close()
+            except Exception:
+                pass
 
 
 @main.command()

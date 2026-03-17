@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+_null_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -33,4 +36,22 @@ class NullCallback:
     async def on_approval_request(
         self, skill_name: str, arguments: dict
     ) -> bool:
+        _null_logger.warning(
+            "Approval request for '%s' auto-denied (no callback handler configured)",
+            skill_name,
+        )
         return False
+
+
+class CancellationToken:
+    """Cooperative cancellation signal for agent operations."""
+
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled

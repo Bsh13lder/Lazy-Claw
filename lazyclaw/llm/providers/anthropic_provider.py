@@ -159,13 +159,19 @@ class AnthropicProvider(BaseLLMProvider):
                 elif event.type == "content_block_stop":
                     if current_tool:
                         import json as _json
+                        try:
+                            parsed_args = (
+                                _json.loads(current_tool["arguments"])
+                                if current_tool["arguments"]
+                                else {}
+                            )
+                        except _json.JSONDecodeError:
+                            parsed_args = {}
                         collected_tool_calls.append(
                             ToolCall(
                                 id=current_tool["id"],
                                 name=current_tool["name"],
-                                arguments=_json.loads(current_tool["arguments"])
-                                if current_tool["arguments"]
-                                else {},
+                                arguments=parsed_args,
                             )
                         )
                         current_tool = None

@@ -23,7 +23,11 @@ from lazyclaw.memory.summarizer import summarize_chunk
 logger = logging.getLogger(__name__)
 
 # Number of recent messages to keep in full detail
-WINDOW_SIZE = 15
+WINDOW_SIZE = 20
+
+# Skip expensive LLM summarization if older chunk is smaller than this
+# (just truncate instead — saves 15-20s per message)
+SUMMARIZE_THRESHOLD = 30
 
 
 async def compress_history(
@@ -83,20 +87,28 @@ async def compress_history(
     )
 
     if not summary_text:
-        # No existing summary — generate one
-        classifications = [
-            classify_message(
-                role=m["role"],
-                content=m["content"],
-                tool_name=m.get("tool_name"),
-                has_tool_calls=m.get("has_tool_calls", False),
+        if len(older) < SUMMARIZE_THRESHOLD:
+            # Small chunk — skip expensive LLM call, use simple truncation
+            summary_text = _quick_summary(older)
+            logger.info(
+                "Quick-summarized %d messages (below threshold %d)",
+                len(older), SUMMARIZE_THRESHOLD,
             )
-            for m in older
-        ]
+        else:
+            # Large chunk — generate LLM summary
+            classifications = [
+                classify_message(
+                    role=m["role"],
+                    content=m["content"],
+                    tool_name=m.get("tool_name"),
+                    has_tool_calls=m.get("has_tool_calls", False),
+                )
+                for m in older
+            ]
 
-        summary_text = await summarize_chunk(
-            eco_router, user_id, older, classifications
-        )
+            summary_text = await summarize_chunk(
+                eco_router, user_id, older, classifications
+            )
 
         # Persist the summary
         await _store_summary(
@@ -116,6 +128,24 @@ async def compress_history(
     ]
     result.extend(_to_llm_messages(recent))
     return result
+
+
+def _quick_summary(messages: list[dict]) -> str:
+    """Create a fast, no-LLM summary by extracting key user/assistant exchanges."""
+    lines = []
+    for m in messages:
+        role = m["role"]
+        content = m["content"] or ""
+        if role == "user":
+            snippet = content[:120].replace("\n", " ")
+            lines.append(f"- User: {snippet}")
+        elif role == "assistant" and content.strip():
+            snippet = content[:120].replace("\n", " ")
+            lines.append(f"- Assistant: {snippet}")
+    # Keep last 10 exchanges max
+    if len(lines) > 10:
+        lines = lines[-10:]
+    return "Previous conversation:\n" + "\n".join(lines)
 
 
 def _to_llm_messages(messages: list[dict]) -> list[LLMMessage]:
@@ -173,7 +203,11 @@ async def _load_existing_summary(
     chat_session_id: str | None,
     older_messages: list[dict],
 ) -> str | None:
-    """Check if we already have a summary covering these messages."""
+    """Check if we already have a usable summary for these messages.
+
+    Uses flexible matching: if a recent summary covers at least 80% of the
+    older messages (same start), reuse it instead of making an LLM call.
+    """
     if not older_messages:
         return None
 
@@ -182,18 +216,36 @@ async def _load_existing_summary(
     key = derive_server_key(config.server_secret, user_id)
 
     async with db_session(config) as db:
+        # Exact match first
         row = await db.execute(
             "SELECT content FROM message_summaries "
             "WHERE user_id = ? AND from_message_id = ? AND to_message_id = ?",
             (user_id, from_id, to_id),
         )
         result = await row.fetchone()
+        if result:
+            content = result[0]
+            return decrypt(content, key) if content.startswith("enc:") else content
 
-    if not result:
-        return None
+        # Flexible match: find the most recent summary starting from the same
+        # from_id, covering at least 80% of messages we need
+        threshold = int(len(older_messages) * 0.8)
+        row = await db.execute(
+            "SELECT content, message_count FROM message_summaries "
+            "WHERE user_id = ? AND from_message_id = ? AND message_count >= ? "
+            "ORDER BY message_count DESC LIMIT 1",
+            (user_id, from_id, threshold),
+        )
+        result = await row.fetchone()
+        if result:
+            logger.info(
+                "Reusing summary covering %d/%d messages (80%% threshold)",
+                result[1], len(older_messages),
+            )
+            content = result[0]
+            return decrypt(content, key) if content.startswith("enc:") else content
 
-    content = result[0]
-    return decrypt(content, key) if content.startswith("enc:") else content
+    return None
 
 
 async def _store_summary(

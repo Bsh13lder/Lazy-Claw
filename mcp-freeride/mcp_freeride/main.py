@@ -5,6 +5,9 @@ import asyncio
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
+# Suppress noisy HTTP client logs (Ollama health checks, etc.)
+for _lib in ("httpx", "httpcore", "urllib3", "hpack"):
+    logging.getLogger(_lib).setLevel(logging.WARNING)
 logger = logging.getLogger("mcp-freeride")
 
 

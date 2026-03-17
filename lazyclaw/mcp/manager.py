@@ -41,6 +41,9 @@ BUNDLED_MCPS = {
     "claude-code": {
         "npx": "@steipete/claude-code-mcp",
         "description": "Control Claude Code CLI from LazyClaw",
+        # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth),
+        # not the API key which may have no credits
+        "strip_env": ["ANTHROPIC_API_KEY"],
     },
 }
 
@@ -238,10 +241,15 @@ async def auto_register_bundled_mcps(
             import shutil
             if not shutil.which("npx"):
                 continue
+            # Build env — strip keys that should use OAuth instead of API
+            import os as _os
+            npx_env = dict(info.get("env", {}))
+            for strip_key in info.get("strip_env", []):
+                npx_env.setdefault(strip_key, "")  # Empty = unset for subprocess
             server_config = {
                 "command": "npx",
                 "args": [info["npx"]],
-                "env": info.get("env", {}),
+                "env": npx_env,
             }
         else:
             continue

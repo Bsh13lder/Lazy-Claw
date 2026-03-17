@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.llm.providers.base import LLMMessage, ToolCall
+from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.skills.registry import SkillRegistry
@@ -51,6 +52,8 @@ async def run_specialist(
     registry: SkillRegistry,
     eco_router: EcoRouter,
     permission_checker,
+    callback=None,
+    cancel_token=None,
 ) -> SpecialistResult:
     """Run a specialist agent loop for a single task.
 
@@ -87,6 +90,19 @@ async def run_specialist(
 
     try:
         for _ in range(MAX_ITERATIONS):
+            if cancel_token and cancel_token.is_cancelled:
+                duration = int((time.monotonic() - start_time) * 1000)
+                return SpecialistResult(
+                    agent_name=specialist.name,
+                    task=task,
+                    result="",
+                    tools_used=tuple(tools_used),
+                    model_used=model_used,
+                    duration_ms=duration,
+                    success=False,
+                    error="Cancelled by user",
+                )
+
             kwargs: dict = {}
             if filtered_tools:
                 kwargs["tools"] = filtered_tools
@@ -131,6 +147,13 @@ async def run_specialist(
                         )
 
                     tools_used.append(tc.name)
+
+                    if callback:
+                        await callback.on_event(AgentEvent(
+                            "specialist_tool",
+                            tc.name,
+                            {"specialist": specialist.name, "tool": tc.name},
+                        ))
 
                 messages.append(LLMMessage(
                     role="tool",

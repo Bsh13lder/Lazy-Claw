@@ -89,7 +89,7 @@ async def run_specialist(
     model_used = specialist.preferred_model or "default"
 
     try:
-        for _ in range(MAX_ITERATIONS):
+        for _iteration in range(MAX_ITERATIONS):
             if cancel_token and cancel_token.is_cancelled:
                 duration = int((time.monotonic() - start_time) * 1000)
                 return SpecialistResult(
@@ -102,6 +102,14 @@ async def run_specialist(
                     success=False,
                     error="Cancelled by user",
                 )
+
+            # Fire specialist thinking event for observability
+            if callback:
+                await callback.on_event(AgentEvent(
+                    "specialist_thinking",
+                    f"{specialist.name} thinking (step {_iteration + 1})",
+                    {"specialist": specialist.name, "iteration": _iteration + 1},
+                ))
 
             kwargs: dict = {}
             if filtered_tools:

@@ -15,6 +15,11 @@ class BaseSkill(ABC):
     def description(self) -> str: ...
 
     @property
+    def display_name(self) -> str:
+        """Human-readable name for UI display. Override in subclasses."""
+        return self.name
+
+    @property
     def category(self) -> str:
         """Skill category for organization. Override in subclasses."""
         return "general"

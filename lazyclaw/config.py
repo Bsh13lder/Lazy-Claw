@@ -34,6 +34,7 @@ class Config:
     max_tool_iterations: int = 25
     log_level: str = "WARNING"
     tool_timeout: int = 60
+    cdp_port: int = 9222
 
 
 def load_config() -> Config:
@@ -86,6 +87,7 @@ def load_config() -> Config:
         max_tool_iterations=int(os.getenv("MAX_TOOL_ITERATIONS", "25")),
         log_level=os.getenv("LOG_LEVEL", "WARNING"),
         tool_timeout=int(os.getenv("TOOL_TIMEOUT", "60")),
+        cdp_port=int(os.getenv("CDP_PORT", "9222")),
     )
 
 

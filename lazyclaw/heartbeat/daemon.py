@@ -78,6 +78,7 @@ class HeartbeatDaemon:
 
         key = derive_server_key(self._config.server_secret, user_id)
 
+        # Check cron jobs (recurring)
         async with db_session(self._config) as db:
             cursor = await db.execute(
                 "SELECT id, name, instruction, cron_expression, last_run "
@@ -85,11 +86,10 @@ class HeartbeatDaemon:
                 "WHERE user_id = ? AND status = 'active' AND cron_expression IS NOT NULL",
                 (user_id,),
             )
-            jobs = await cursor.fetchall()
+            cron_jobs = await cursor.fetchall()
 
-        for row in jobs:
+        for row in cron_jobs:
             job_id, enc_name, enc_instruction, cron_expression, last_run = row
-
             try:
                 if not is_due(cron_expression, last_run):
                     continue
@@ -106,16 +106,65 @@ class HeartbeatDaemon:
                 )
 
                 logger.info("Job '%s' (%s) is due, enqueueing", job_name, job_id)
-
                 await self._lane_queue.enqueue(
                     user_id, f"[JOB:{job_name}] {instruction}"
                 )
 
                 next_run = calculate_next_run(cron_expression)
                 await orchestrator.mark_run(self._config, job_id, next_run)
-
             except Exception:
                 logger.exception("Error processing job %s for user %s", job_id, user_id)
+
+        # Check one-time reminders
+        await self._check_due_reminders(user_id, key)
+
+    async def _check_due_reminders(self, user_id: str, key: bytes) -> None:
+        """Fire one-time reminders that are due, then auto-delete them."""
+        from datetime import datetime, timezone
+        from lazyclaw.heartbeat.orchestrator import delete_job
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute(
+                "SELECT id, name, instruction, next_run "
+                "FROM agent_jobs "
+                "WHERE user_id = ? AND status = 'active' "
+                "AND job_type = 'reminder' AND next_run IS NOT NULL "
+                "AND next_run <= ?",
+                (user_id, now),
+            )
+            reminders = await cursor.fetchall()
+
+        for row in reminders:
+            job_id, enc_name, enc_instruction, next_run = row
+            try:
+                job_name = (
+                    decrypt(enc_name, key)
+                    if enc_name and is_encrypted(enc_name)
+                    else enc_name
+                )
+                message = (
+                    decrypt(enc_instruction, key)
+                    if enc_instruction and is_encrypted(enc_instruction)
+                    else enc_instruction
+                )
+
+                logger.info("Reminder '%s' (%s) is due, firing", job_name, job_id)
+
+                # Enqueue as agent message (will reach Telegram via callback)
+                await self._lane_queue.enqueue(
+                    user_id,
+                    f"[REMINDER] {message}",
+                )
+
+                # Auto-delete — one-shot reminder, done
+                await delete_job(self._config, user_id, job_id)
+                logger.info("Reminder '%s' auto-deleted after firing", job_name)
+            except Exception:
+                logger.exception(
+                    "Error processing reminder %s for user %s", job_id, user_id,
+                )
 
     async def _load_heartbeat_md(self) -> str:
         """Load the HEARTBEAT.md personality file content."""

@@ -101,7 +101,7 @@
 - [ ] **Example Plugin** — `plugins/example/`: Template for community plugin development.
 
 ## Future: Browser Enhancements
-- [ ] **Real Chrome Mode** — Connect to user's actual Chrome via CDP (Chrome DevTools Protocol) instead of headless Playwright. Uses existing connector WebSocket pattern. Benefits: already logged in everywhere, real browser fingerprint, no bot detection, no CAPTCHAs.
+- [x] **Real Chrome Mode** — Connect to user's actual Chrome via CDP (Chrome DevTools Protocol). On-demand connection, 5 skills (see_browser, list_tabs, read_tab, switch_tab, browser_action). Coexists with Playwright headless.
 - [ ] **Human-like Click Delays** — Add configurable random delays between automated actions (0.3-1.5s range) to mimic human interaction patterns. Especially important for real Chrome mode where there's no natural LLM thinking gap.
 - [ ] **Credential Trust Levels** — Per-site trust config so AI never sees passwords:
   - `full` — Agent reads vault, types password (current behavior)
@@ -334,3 +334,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Phase 8 (Multi-Agent Teams): ✅ COMPLETE — Team lead, 4 built-in specialists, parallel executor, specialist runner, critic (merged), team conversations, settings, 8 API endpoints
 - Phase 9 (Context Compression): ✅ COMPLETE — Message classifier, LLM summarizer, sliding window compressor, persistent summaries, agent integration, 2 API endpoints
 - Phase 10 (Session Replay): ✅ COMPLETE — Trace recorder, models, engine, share tokens, agent integration, 7 API endpoints
+- Agent Observability: ✅ COMPLETE — Inline activity stream, work summaries, specialist thinking events, Rich dashboard (/? query), friendly MCP display names, compact approvals, Telegram rich notifications with specialist grid + edit throttling
+- Agent Self-Awareness: ✅ COMPLETE — Context builder injects capabilities (skills, MCP servers, config) into system prompt dynamically. SOUL.md allows proactive tool use. Smart tool routing keywords expanded.
+- Real Chrome Mode: ✅ COMPLETE — CDP client, BrowserBackend ABC (Playwright + CDP coexist), 5 real browser skills, on-demand connection, /connect-browser CLI command
+- NL Job Scheduling: ✅ COMPLETE — 4 job skills (schedule_job, set_reminder, list_jobs, manage_job), one-time reminder support in heartbeat daemon with auto-delete

@@ -1,0 +1,193 @@
+"""Thin async CDP (Chrome DevTools Protocol) client.
+
+Connects to a real Chrome browser via WebSocket. No heavy frameworks —
+direct CDP protocol over websockets + httpx for discovery.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from dataclasses import dataclass
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# Default CDP debugging port
+DEFAULT_CDP_PORT = 9222
+
+
+@dataclass(frozen=True)
+class CDPTab:
+    """Immutable info about a Chrome tab from /json endpoint."""
+
+    id: str
+    title: str
+    url: str
+    ws_url: str
+    tab_type: str  # "page", "background_page", "service_worker", etc.
+
+
+async def find_chrome_cdp(port: int = DEFAULT_CDP_PORT) -> str | None:
+    """Discover Chrome's CDP WebSocket URL.
+
+    Queries http://localhost:{port}/json/version for the browser-level
+    webSocketDebuggerUrl. Returns None if Chrome is not reachable.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"http://localhost:{port}/json/version")
+            if resp.status_code == 200:
+                data = resp.json()
+                ws_url = data.get("webSocketDebuggerUrl")
+                if ws_url:
+                    logger.info("Found Chrome CDP at %s", ws_url)
+                    return ws_url
+    except (httpx.ConnectError, httpx.TimeoutException, Exception) as exc:
+        logger.debug("Chrome CDP not available on port %d: %s", port, exc)
+    return None
+
+
+async def list_chrome_tabs(port: int = DEFAULT_CDP_PORT) -> list[CDPTab]:
+    """List all open Chrome tabs via the /json endpoint.
+
+    Returns only 'page' type targets (actual tabs, not service workers).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"http://localhost:{port}/json")
+            if resp.status_code == 200:
+                targets = resp.json()
+                tabs = []
+                for t in targets:
+                    if t.get("type") == "page":
+                        tabs.append(CDPTab(
+                            id=t.get("id", ""),
+                            title=t.get("title", ""),
+                            url=t.get("url", ""),
+                            ws_url=t.get("webSocketDebuggerUrl", ""),
+                            tab_type=t.get("type", "page"),
+                        ))
+                return tabs
+    except (httpx.ConnectError, httpx.TimeoutException, Exception) as exc:
+        logger.debug("Failed to list Chrome tabs: %s", exc)
+    return []
+
+
+class CDPConnection:
+    """Low-level CDP WebSocket protocol handler.
+
+    Sends CDP commands as JSON and awaits responses by matching request IDs.
+    """
+
+    def __init__(self) -> None:
+        self._ws = None
+        self._msg_id = 0
+        self._pending: dict[int, asyncio.Future] = {}
+        self._listener_task: asyncio.Task | None = None
+        self._connected = False
+
+    async def connect(self, ws_url: str) -> None:
+        """Connect to a CDP target via WebSocket."""
+        try:
+            import websockets
+        except ImportError:
+            raise ImportError(
+                "websockets package required for CDP. "
+                "Install with: pip install websockets"
+            )
+
+        self._ws = await websockets.connect(
+            ws_url,
+            max_size=50 * 1024 * 1024,  # 50MB for large screenshots
+            ping_interval=30,
+            ping_timeout=10,
+        )
+        self._connected = True
+        self._listener_task = asyncio.create_task(self._listen())
+        logger.info("CDP connected to %s", ws_url)
+
+    async def send(self, method: str, params: dict | None = None) -> dict:
+        """Send a CDP command and wait for the response."""
+        if not self._ws or not self._connected:
+            raise ConnectionError("CDP not connected")
+
+        self._msg_id += 1
+        msg_id = self._msg_id
+        message = {"id": msg_id, "method": method}
+        if params:
+            message["params"] = params
+
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending[msg_id] = future
+
+        await self._ws.send(json.dumps(message))
+
+        try:
+            result = await asyncio.wait_for(future, timeout=30)
+        except asyncio.TimeoutError:
+            self._pending.pop(msg_id, None)
+            raise TimeoutError(f"CDP command timed out: {method}")
+
+        if "error" in result:
+            err = result["error"]
+            raise RuntimeError(
+                f"CDP error ({err.get('code', '?')}): {err.get('message', '?')}"
+            )
+
+        return result.get("result", {})
+
+    async def close(self) -> None:
+        """Close the WebSocket connection."""
+        self._connected = False
+        if self._listener_task:
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+            self._listener_task = None
+
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+        # Resolve any pending futures with error
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("CDP disconnected"))
+        self._pending.clear()
+
+        logger.info("CDP connection closed")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and self._ws is not None
+
+    async def _listen(self) -> None:
+        """Background task: read WebSocket messages and route responses."""
+        try:
+            async for raw in self._ws:
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_id = msg.get("id")
+                if msg_id is not None and msg_id in self._pending:
+                    fut = self._pending.pop(msg_id)
+                    if not fut.done():
+                        fut.set_result(msg)
+                # Events (no id) are ignored for now — can add event
+                # handlers later if needed (e.g., Page.loadEventFired)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("CDP listener error: %s", exc)
+            self._connected = False

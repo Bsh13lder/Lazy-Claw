@@ -179,11 +179,13 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 **Constants:** `_FALLBACK_PERSONALITY`
 
-### `context_builder.py` — Memory injection into system prompt
+### `context_builder.py` — System prompt builder with self-awareness
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `build_context` | `async (config, user_id) -> str` | Fetch personal memories + daily context for prompt |
+| `build_context` | `async (config, user_id, registry=None) -> str` | Build system prompt: personality + capabilities + memories |
+| `_build_capabilities_section` | `async (config, user_id, registry) -> str` | Generate skills list, MCP servers, config for system prompt |
+| `_get_mcp_status` | `async (config, user_id) -> list[str]` | Query connected MCP servers with tool counts |
 
 ---
 

@@ -15,10 +15,8 @@ _configure_logging()  # Defaults to WARNING, no file yet — reconfigured after 
 
 import click
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
-from rich.status import Status
 from rich.table import Table
 
 from lazyclaw import __version__
@@ -63,6 +61,7 @@ HELP_TEXT = """\
   /deny <name>           Deny a category or skill (e.g. /deny vault)
 
 [bold]System:[/bold]
+  /connect-browser Connect to your real Chrome browser (CDP)
   /install-mcps  Install all bundled MCP servers
   /update        Pull latest code + reinstall deps
   /version       Show current version
@@ -301,6 +300,8 @@ async def _handle_slash_command(
         "/version": lambda: _show_version(),
         "/wipe": lambda: clear_history(config, user_id),
         "/history": lambda: _show_chat_history(config, user_id),
+        "/connect-browser": lambda: _connect_browser(config),
+        "/connectbrowser": lambda: _connect_browser(config),
     }
 
     if command in ("/help", "/"):
@@ -387,6 +388,40 @@ async def _show_chat_history(config: Config, user_id: str) -> None:
         table.add_row(created_at or "", f"[{role_style}]{role}[/{role_style}]", display)
 
     console.print(table)
+
+
+async def _connect_browser(config: Config) -> None:
+    """Check/establish CDP connection to user's real Chrome browser."""
+    from lazyclaw.browser.cdp import find_chrome_cdp, list_chrome_tabs
+
+    port = config.cdp_port
+    console.print(f"  [dim]Checking Chrome on port {port}...[/dim]")
+
+    ws_url = await find_chrome_cdp(port)
+    if not ws_url:
+        console.print(f"  [red]\u2717 Chrome not found on port {port}[/red]")
+        console.print()
+        console.print("  Launch Chrome with debugging enabled:")
+        console.print(
+            f"  [bold cyan]open -a 'Google Chrome' "
+            f"--args --remote-debugging-port={port}[/bold cyan]"
+        )
+        console.print()
+        console.print("  [dim]Then run /connect-browser again.[/dim]")
+        return
+
+    tabs = await list_chrome_tabs(port)
+    console.print(f"  [green]\u2713 Connected to Chrome[/green] ({len(tabs)} tabs)")
+    for i, tab in enumerate(tabs[:5], 1):
+        console.print(f"    {i}. [dim]{tab.title[:50]}[/dim]")
+        console.print(f"       [dim]{tab.url[:60]}[/dim]")
+    if len(tabs) > 5:
+        console.print(f"    [dim]... and {len(tabs) - 5} more[/dim]")
+    console.print()
+    console.print(
+        "  [dim]Agent can now use: see_browser, list_tabs, read_tab, "
+        "switch_tab, browser_action[/dim]"
+    )
 
 
 async def _show_version() -> None:
@@ -551,274 +586,6 @@ async def _run_update() -> None:
         console.print(f"  [yellow]Restart the CLI to use the new version.[/yellow]")
     else:
         console.print("  [dim]No version change. Code updates are live (editable install).[/dim]")
-
-
-class _CliCallback:
-    """Shows live agent activity in the terminal with animated spinner.
-
-    Tracks current agent state so users can ask "what's happening?" mid-run.
-    """
-
-    def __init__(self, out: Console) -> None:
-        self._console = out
-        self._spinner: Status | None = None
-        self._streaming = False
-        self._paused = False  # True when prompt_toolkit has terminal control
-        self.total_tokens = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-        self.llm_calls = 0
-        self.free_calls = 0
-        self.free_tokens = 0
-        # Live state tracking
-        self.busy = False
-        self.current_phase = "preparing"
-        self.current_model = ""
-        self.current_iteration = 0
-        self.current_tool = ""
-        self.tool_log: list[str] = []
-        self.specialists_active: list[str] = []
-        # Team tracking
-        self._is_team = False
-        self._team_specialists: dict[str, dict] = {}  # name → {status, start_time, ...}
-        # Cancellation token (set by agent.py)
-        self.cancel_token = None
-        # Approval coordination — agent sets pending, main loop handles prompt
-        self._pending_approval: tuple[str, dict] | None = None
-        self._approval_event: asyncio.Event | None = None
-        self._approval_result: bool = False
-
-    def start_thinking(self) -> None:
-        """Show spinner immediately when user submits a message."""
-        self.busy = True
-        self.current_phase = "preparing"
-        self._console.print("  [dim]Loading context...[/dim]")
-        self._spinner = self._console.status(
-            "  [bold cyan]● Preparing...[/bold cyan]", spinner="dots"
-        )
-        self._spinner.start()
-
-    def _stop_spinner(self) -> None:
-        if self._spinner is not None:
-            self._spinner.stop()
-            self._spinner = None
-
-    def pause_for_input(self) -> None:
-        """Pause spinner so prompt_toolkit can control the terminal."""
-        self._paused = True
-        self._stop_spinner()
-
-    def resume_from_input(self) -> None:
-        """Resume spinner after prompt_toolkit releases the terminal."""
-        self._paused = False
-        if not self.busy or self._spinner is not None:
-            return
-        if self.current_phase == "thinking":
-            label = f"  [bold cyan]Thinking[/bold cyan] [dim]({self.current_model}, step {self.current_iteration})...[/dim]"
-        elif self.current_phase == "tool":
-            label = f"  [dim]> {self.current_tool}[/dim]"
-        elif self.current_phase == "team":
-            label = f"  [cyan]% team delegation...[/cyan]"
-        else:
-            label = f"  [dim]{self.current_phase.title()}...[/dim]"
-        self._spinner = self._console.status(label, spinner="dots")
-        self._spinner.start()
-
-    def _start_spinner(self, label: str) -> None:
-        """Start spinner only if not paused for prompt_toolkit input."""
-        if self._paused:
-            return
-        self._spinner = self._console.status(label, spinner="dots")
-        self._spinner.start()
-
-    def get_status_report(self) -> str:
-        """Return a human-readable status of what the agent is doing right now."""
-        if not self.busy:
-            return "Idle — waiting for your message."
-        lines = []
-        if self.current_phase == "thinking":
-            lines.append(
-                f"● Thinking (model: {self.current_model}, step {self.current_iteration})"
-            )
-        elif self.current_phase == "tool":
-            lines.append(f"◆ Running tool: {self.current_tool}")
-        elif self.current_phase == "streaming":
-            lines.append("● Streaming response...")
-        elif self.current_phase == "team":
-            lines.append("● Team mode active")
-        else:
-            lines.append(f"○ Phase: {self.current_phase}")
-
-        # Team specialist details
-        if self._is_team and self._team_specialists:
-            lines.append("")
-            for name, state in self._team_specialists.items():
-                status = state.get("status", "queued")
-                icon = {"queued": "○", "running": "●", "done": "✓", "error": "✗"}.get(status, "○")
-                elapsed = ""
-                if status == "running" and state.get("start_time"):
-                    import time as _t
-                    elapsed = f"  {_t.monotonic() - state['start_time']:.1f}s"
-                elif state.get("duration_ms"):
-                    elapsed = f"  {state['duration_ms'] / 1000:.1f}s"
-                tools = state.get("tools_used", [])
-                tools_str = f"  [{', '.join(tools[-3:])}]" if tools else ""
-                lines.append(f"  {icon} {name}  {status}{elapsed}{tools_str}")
-            lines.append("")
-
-        if self.tool_log:
-            recent = self.tool_log[-5:]
-            lines.append("Recent activity:")
-            for entry in recent:
-                lines.append(f"  {entry}")
-
-        lines.append(f"LLM calls: {self.llm_calls}")
-        return "\n".join(lines)
-
-    async def on_approval_request(
-        self, skill_name: str, arguments: dict
-    ) -> bool:
-        """Request approval via main loop (avoids stdin conflict with prompt_toolkit)."""
-        self._stop_spinner()
-        self._pending_approval = (skill_name, arguments)
-        self._approval_event = asyncio.Event()
-        self._approval_result = False
-        # Wait for main loop to handle the prompt
-        await self._approval_event.wait()
-        self._pending_approval = None
-        self._approval_event = None
-        if self._approval_result:
-            self._start_spinner(f"  [dim]> Running {skill_name}...[/dim]")
-        return self._approval_result
-
-    def _print_team_panel(self) -> None:
-        """Print a static snapshot of team specialist assignments."""
-        lines = []
-        for name in self._team_specialists:
-            lines.append(f"  [dim]○ {name}[/dim]")
-        self._console.print(
-            Panel(
-                "\n".join(lines),
-                title="[bold cyan]Team[/bold cyan]",
-                border_style="cyan",
-                width=55,
-            )
-        )
-
-    async def on_event(self, event) -> None:
-        kind = event.kind
-        if kind == "llm_call":
-            self._stop_spinner()
-            model = event.metadata.get("model", "?")
-            iteration = event.metadata.get("iteration", 1)
-            self.current_phase = "thinking"
-            self.current_model = model
-            self.current_iteration = iteration
-            self._start_spinner(
-                f"  [bold cyan]● Thinking[/bold cyan] [dim]({model}, step {iteration})...[/dim]"
-            )
-            self.llm_calls += 1
-        elif kind == "tokens":
-            self._stop_spinner()
-            tokens = event.metadata.get("total", 0)
-            self.total_tokens += tokens
-            self.prompt_tokens += event.metadata.get("prompt", 0)
-            self.completion_tokens += event.metadata.get("completion", 0)
-            eco_mode = event.metadata.get("eco_mode")
-            if eco_mode in ("eco", "hybrid_free"):
-                self.free_calls += 1
-                self.free_tokens += tokens
-        elif kind == "tool_call":
-            self._stop_spinner()
-            self.current_phase = "tool"
-            self.current_tool = event.detail
-            self.tool_log.append(f"◆ {event.detail}")
-            self._start_spinner(f"  [yellow]◆ {event.detail}[/yellow]")
-        elif kind == "tool_result":
-            self._stop_spinner()
-            self.tool_log.append(f"✓ {event.detail}")
-            self._console.print(f"  [green]✓ {event.detail}[/green]")
-        elif kind == "team_delegate":
-            self._stop_spinner()
-            self.current_phase = "team"
-            detail = event.detail
-            if "specialist" in detail.lower() or "delegat" in detail.lower():
-                self.specialists_active.append(detail)
-            self.tool_log.append(f"% {detail}")
-            self._start_spinner(f"  [cyan]% {detail}[/cyan]")
-        elif kind == "team_start":
-            self._stop_spinner()
-            self._is_team = True
-            self.current_phase = "team"
-            specialists = event.metadata.get("specialists", [])
-            self._team_specialists = {
-                name: {"status": "queued", "start_time": None, "duration_ms": 0, "tools_used": [], "error": None}
-                for name in specialists
-            }
-            self._print_team_panel()
-            self._start_spinner("  [cyan]● Team working...[/cyan]")
-        elif kind == "specialist_start":
-            self._stop_spinner()
-            name = event.metadata.get("specialist", "?")
-            if name in self._team_specialists:
-                import time as _t
-                self._team_specialists[name]["status"] = "running"
-                self._team_specialists[name]["start_time"] = _t.monotonic()
-            self._console.print(f"  [cyan]● {name}[/cyan] [dim]running...[/dim]")
-            self._start_spinner("  [cyan]● Team working...[/cyan]")
-        elif kind == "specialist_tool":
-            name = event.metadata.get("specialist", "?")
-            tool = event.metadata.get("tool", "?")
-            if name in self._team_specialists:
-                self._team_specialists[name].setdefault("tools_used", []).append(tool)
-            self.tool_log.append(f"  {name} → {tool}")
-        elif kind == "specialist_done":
-            self._stop_spinner()
-            name = event.metadata.get("specialist", "?")
-            duration_ms = event.metadata.get("duration_ms", 0)
-            success = event.metadata.get("success", True)
-            tools = event.metadata.get("tools_used", [])
-            error = event.metadata.get("error")
-            if name in self._team_specialists:
-                self._team_specialists[name]["status"] = "done" if success else "error"
-                self._team_specialists[name]["duration_ms"] = duration_ms
-                self._team_specialists[name]["tools_used"] = tools
-                self._team_specialists[name]["error"] = error
-            if success:
-                tools_str = f", {len(tools)} tools" if tools else ""
-                self._console.print(
-                    f"  [green]✓ {name}[/green] [dim]({duration_ms / 1000:.1f}s{tools_str})[/dim]"
-                )
-            else:
-                err_str = f": {error}" if error else ""
-                self._console.print(f"  [red]✗ {name}[/red] [dim]({err_str})[/dim]")
-            self._start_spinner("  [cyan]● Team working...[/cyan]")
-        elif kind == "team_merge":
-            self._stop_spinner()
-            self._console.print(f"  [cyan]● Merging results...[/cyan]")
-            self._start_spinner("  [cyan]● Merging...[/cyan]")
-        elif kind == "token":
-            if not self._streaming:
-                self._stop_spinner()
-                self._console.print()
-                self._console.print("[green]╭─ LazyClaw[/green]")
-                self._streaming = True
-                self.current_phase = "streaming"
-            self._console.print(event.detail, end="", highlight=False)
-        elif kind == "stream_done":
-            if self._streaming:
-                self._console.print()  # newline after streamed content
-        elif kind == "approval":
-            self._stop_spinner()
-            self._console.print(f"  [yellow]! {event.detail}[/yellow]")
-        elif kind == "done":
-            self._stop_spinner()
-            self.busy = False
-            self._paused = False
-            self.current_phase = "done"
-            self._is_team = False
-            self._team_specialists.clear()
-            self.specialists_active.clear()
 
 
 async def _show_usage(config: Config) -> None:
@@ -1051,14 +818,13 @@ async def _chat_loop() -> None:
     if eco_mode:
         console.print(f"[dim]ECO mode auto-enabled: {eco_mode} (free providers detected)[/dim]")
     console.print("[dim]Type a message to chat. /help for commands.[/dim]")
-    console.print("[dim]Up/Down: history  |  Esc: clear line  |  Ctrl+C: cancel agent / quit[/dim]")
+    console.print("[dim]Up/Down: history  |  Esc: clear line  |  Ctrl+C: cancel agent  |  /?: status[/dim]")
     console.print()
 
     # prompt_toolkit session — up/down history, Esc clear, proper key bindings
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.formatted_text import HTML
 
     history_path = str(get_project_root() / ".lazyclaw_history")
     kb = KeyBindings()
@@ -1074,212 +840,19 @@ async def _chat_loop() -> None:
         enable_history_search=True,
     )
 
-    chat_session_id: str | None = None
-    active_callback: _CliCallback | None = None
-    agent_task: asyncio.Task | None = None
-    pending_messages: list[str] = []
+    # Delegate to non-blocking chat loop in cli_chat.py
+    from lazyclaw.cli_chat import ChatContext, run_chat_loop
 
-    async def _get_input(busy: bool = False) -> str:
-        if busy:
-            prompt = HTML("<ansiyellow><b>⟩ </b></ansiyellow>")
-        else:
-            prompt = HTML("<cyan><b>&gt; </b></cyan>")
-        return await pt_session.prompt_async(prompt)
+    ctx = ChatContext(
+        config=config,
+        agent=agent,
+        user_id=user_id,
+        console=console,
+        pt_session=pt_session,
+        session_usage=_session_usage,
+    )
 
-    async def _run_agent(msg: str, cb: _CliCallback) -> str:
-        return await agent.process_message(
-            user_id, msg, chat_session_id=chat_session_id,
-            callback=cb,
-        )
-
-    def _show_user_message(msg: str) -> None:
-        """Display user message — minimal, like Claude Code."""
-        console.print()
-        console.print(f"  [bold cyan]❯[/bold cyan] [bold]{msg}[/bold]")
-
-    def _show_agent_result(response: str, cb: _CliCallback) -> None:
-        cb._stop_spinner()  # Ensure spinner is gone before printing result
-        console.print()
-        if cb._streaming:
-            # Streaming already printed tokens inline — just add a closing border
-            console.print("[green]╰─[/green]")
-        else:
-            # Non-streaming response (fallback) — show in panel
-            if response and response.strip():
-                console.print(
-                    Panel(
-                        Markdown(response),
-                        title="[bold green]LazyClaw[/bold green]",
-                        border_style="green",
-                        padding=(0, 1),
-                    )
-                )
-            else:
-                console.print("  [dim]No response.[/dim]")
-        console.print()
-        # Accumulate session usage
-        _session_usage["total_tokens"] += cb.total_tokens
-        _session_usage["prompt_tokens"] += cb.prompt_tokens
-        _session_usage["completion_tokens"] += cb.completion_tokens
-        _session_usage["llm_calls"] += cb.llm_calls
-        _session_usage["messages"] += 1
-        _session_usage["free_calls"] += cb.free_calls
-        _session_usage["free_tokens"] += cb.free_tokens
-
-    # Status query keywords — if user types these while agent is busy, show status
-    _STATUS_TRIGGERS = {
-        "/?", "/status-agent", "/what", "/whats",
-        "what's happening", "whats happening", "what are you doing",
-        "status", "what's going on", "whats going on",
-    }
-
-    def _is_status_query(text: str) -> bool:
-        lower = text.lower().strip()
-        return lower in _STATUS_TRIGGERS or lower.startswith("/?")
-
-    # Ctrl+C handling — set a flag so the polling loop can cancel cleanly
-    _cancel_requested = False
-
-    def _sigint_handler():
-        nonlocal _cancel_requested
-        _cancel_requested = True
-
-    loop = asyncio.get_event_loop()
-
-    while True:
-        # If agent is running, wait for it to finish
-        # Rich Status spinner runs in its own thread — just poll for completion + approvals
-        if agent_task is not None and not agent_task.done():
-            _cancel_requested = False
-            # Install Ctrl+C handler while agent runs
-            _signal_installed = False
-            try:
-                import signal as _sig
-                loop.add_signal_handler(_sig.SIGINT, _sigint_handler)
-                _signal_installed = True
-            except (NotImplementedError, OSError, AttributeError):
-                pass  # Some event loops don't support signal handlers
-
-            try:
-                while not agent_task.done():
-                    # Check Ctrl+C
-                    if _cancel_requested:
-                        if active_callback and active_callback.cancel_token:
-                            active_callback.cancel_token.cancel()
-                        agent_task.cancel()
-                        if active_callback:
-                            active_callback._stop_spinner()
-                        console.print("\n  [yellow]Cancelled.[/yellow]")
-                        break
-
-                    # Check for pending approval
-                    if active_callback and active_callback._pending_approval:
-                        import json as _approval_json
-                        active_callback._stop_spinner()
-                        skill_name, args = active_callback._pending_approval
-                        args_display = _approval_json.dumps(args, indent=2) if args else "{}"
-                        console.print()
-                        console.print(
-                            Panel(
-                                f"[bold]{skill_name}[/bold]\n[dim]{args_display}[/dim]",
-                                title="[yellow]Approval Required[/yellow]",
-                                border_style="yellow",
-                            )
-                        )
-                        # Run blocking prompt in thread so event loop stays alive
-                        approved = await loop.run_in_executor(
-                            None, lambda: Confirm.ask("  Allow this action?", default=True)
-                        )
-                        active_callback._approval_result = approved
-                        active_callback._approval_event.set()
-                        continue
-
-                    # Wait for agent with short timeout (lets us check cancel + approval)
-                    done_set, _ = await asyncio.wait(
-                        {agent_task}, timeout=0.3
-                    )
-                    if done_set:
-                        break
-
-                # Get result if task completed normally
-                if agent_task.done() and not agent_task.cancelled():
-                    try:
-                        response = agent_task.result()
-                        _show_agent_result(response, active_callback)
-                    except Exception as e:
-                        if active_callback:
-                            active_callback._stop_spinner()
-                        console.print(f"\n  [red]Error: {e}[/red]")
-                elif agent_task.cancelled():
-                    pass  # Already printed "Cancelled"
-
-            except asyncio.CancelledError:
-                if active_callback:
-                    active_callback._stop_spinner()
-                console.print("  [yellow]Cancelled.[/yellow]")
-            except Exception as e:
-                if active_callback:
-                    active_callback._stop_spinner()
-                console.print(f"[red]Error: {e}[/red]")
-            finally:
-                # Restore default Ctrl+C handler
-                if _signal_installed:
-                    try:
-                        import signal as _sig
-                        loop.remove_signal_handler(_sig.SIGINT)
-                    except (NotImplementedError, OSError):
-                        pass
-
-            agent_task = None
-            active_callback = None
-            continue
-
-        # Normal input (no agent running)
-        try:
-            user_input = await _get_input()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[yellow]Goodbye![/yellow]")
-            break
-
-        stripped = user_input.strip()
-        if not stripped:
-            continue
-
-        # Exit
-        if stripped.lower() in ("/exit", "/quit", "/q"):
-            console.print("[yellow]Goodbye![/yellow]")
-            break
-
-        # Clear session
-        if stripped.lower() == "/clear":
-            chat_session_id = None
-            for k in _session_usage:
-                _session_usage[k] = 0
-            console.print("[green]Chat session cleared.[/green]")
-            continue
-
-        # Slash commands
-        if stripped.startswith("/"):
-            handled = await _handle_slash_command(stripped, config, user_id)
-            if handled:
-                console.print()
-                continue
-            console.print(f"[yellow]Unknown command: {stripped.split()[0]}. Try /help[/yellow]")
-            continue
-
-        # Chat with agent — run in background
-        _show_user_message(stripped)
-        callback = _CliCallback(console)
-        callback.start_thinking()
-        active_callback = callback
-        agent_task = asyncio.create_task(_run_agent(stripped, callback))
-
-    # Graceful shutdown — disconnect MCP clients
-    from lazyclaw.mcp.manager import disconnect_all
-    try:
-        await asyncio.wait_for(disconnect_all(), timeout=3)
-    except (Exception, KeyboardInterrupt, asyncio.CancelledError):
-        pass  # Don't crash on exit
+    await run_chat_loop(ctx, _handle_slash_command)
 
 
 # ---------------------------------------------------------------------------

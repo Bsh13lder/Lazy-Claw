@@ -124,13 +124,13 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/runtime/callbacks.py` | AgentEvent + AgentCallback protocol (on_event, on_approval_request) |
 | `lazyclaw/runtime/personality.py` | SOUL.md loader, system prompt builder |
 | `lazyclaw/runtime/tool_executor.py` | Dispatches ToolCall to skill registry, execute_allowed, timeout protection |
-| `lazyclaw/skills/base.py` | BaseSkill ABC with to_openai_tool() conversion |
-| `lazyclaw/skills/registry.py` | Unified skill registry, register_defaults(), core/MCP tool filtering |
+| `lazyclaw/skills/base.py` | BaseSkill ABC with to_openai_tool(), display_name property |
+| `lazyclaw/skills/registry.py` | Unified skill registry, register_defaults(), get_display_name(), core/MCP tool filtering |
 | `lazyclaw/skills/builtin/web_search.py` | DuckDuckGo web search via ddgs (no API key needed) |
 | `lazyclaw/skills/builtin/get_time.py` | Timezone-aware current time |
 | `lazyclaw/skills/builtin/calculate.py` | Safe AST-based math calculator |
 | `lazyclaw/channels/base.py` | ChannelAdapter ABC, InboundMessage/OutboundMessage |
-| `lazyclaw/channels/telegram.py` | Telegram polling adapter (python-telegram-bot v21+) |
+| `lazyclaw/channels/telegram.py` | Telegram adapter: rich specialist grid, completion summaries, edit throttling |
 | `lazyclaw/gateway/app.py` | Minimal FastAPI: health check + agent chat endpoint |
 | `lazyclaw/main.py` | Module entry point (python -m lazyclaw) |
 
@@ -139,13 +139,19 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/gateway/routes/skills.py` | Skill CRUD + AI generation endpoints |
 | `lazyclaw/gateway/routes/vault.py` | Credential vault REST endpoints |
 | `lazyclaw/gateway/routes/browser.py` | Browser task CRUD, takeover, live view, site memory (15 endpoints) |
-| `lazyclaw/runtime/context_builder.py` | Assembles system prompt from personality + memory + skills |
+| `lazyclaw/runtime/context_builder.py` | Assembles system prompt: personality + capabilities (skills, MCP, config) + memory |
+| `lazyclaw/runtime/events.py` | Event kind constants (17 types) + WorkSummary frozen dataclass |
+| `lazyclaw/runtime/summary.py` | Work summary builder + CLI/Telegram formatters |
+| `lazyclaw/cli_chat.py` | Extracted chat loop: inline events, compact approvals, spinner, polling |
+| `lazyclaw/cli_dashboard.py` | Rich dashboard panel for /? status queries during agent work |
 | `lazyclaw/queue/lane.py` | FIFO per-user lane queue |
 | `lazyclaw/skills/sandbox.py` | AST-validated restricted Python execution |
 | `lazyclaw/skills/manager.py` | User skill CRUD (DB-backed, encrypted) |
 | `lazyclaw/skills/writer.py` | LLM-powered code skill generation |
 | `lazyclaw/skills/instruction.py` | Natural language template skills |
 | `lazyclaw/skills/builtin/browser.py` | BrowseWebSkill, ReadPageSkill, SaveSiteLoginSkill |
+| `lazyclaw/skills/builtin/real_browser.py` | SeeBrowser, ListTabs, ReadTab, SwitchTab, BrowserAction (CDP real Chrome) |
+| `lazyclaw/skills/builtin/jobs.py` | ScheduleJob, SetReminder, ListJobs, ManageJob (NL scheduling) |
 | `lazyclaw/memory/personal.py` | Encrypted personal facts + keyword search |
 | `lazyclaw/memory/daily_log.py` | Encrypted daily summaries + LLM generation |
 | `lazyclaw/llm/model_manager.py` | Model catalog, per-user feature assignments |
@@ -155,6 +161,9 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/browser/page_reader.py` | Lightweight JS page extraction (5 extractors) + LLM analysis |
 | `lazyclaw/browser/dom_optimizer.py` | DOM analysis, actionable elements, page summary |
 | `lazyclaw/browser/site_memory.py` | Encrypted per-domain learning with auto-cleanup |
+| `lazyclaw/browser/backend.py` | BrowserBackend ABC: Playwright + CDP coexist |
+| `lazyclaw/browser/cdp.py` | Thin async CDP client: WebSocket protocol + Chrome discovery |
+| `lazyclaw/browser/cdp_backend.py` | CDP BrowserBackend impl: real Chrome control via DevTools Protocol |
 | `lazyclaw/computer/security.py` | Command/path blocklist validation |
 | `lazyclaw/computer/native.py` | Local subprocess execution (exec, read/write, list, screenshot) |
 | `lazyclaw/computer/connector_server.py` | Server-side WebSocket relay for remote connectors |
@@ -163,12 +172,12 @@ Supporting modules: `llm/` (multi-provider router), `heartbeat/` (proactive daem
 | `lazyclaw/gateway/routes/connector.py` | Connector REST API + WebSocket endpoint |
 | `connector/` | Standalone desktop connector program (auto-reconnect, 6 handlers) |
 | `lazyclaw/mcp/client.py` | MCP client: stdio/SSE/streamable_http transport connections |
-| `lazyclaw/mcp/bridge.py` | MCP tools ↔ BaseSkill conversion, registry integration |
+| `lazyclaw/mcp/bridge.py` | MCP tools ↔ BaseSkill conversion, display_name, registry integration |
 | `lazyclaw/mcp/manager.py` | MCP connection CRUD + lifecycle (encrypted configs), bundled MCP auto-register |
 | `lazyclaw/mcp/server.py` | Expose skill registry as MCP server via SSE |
 | `lazyclaw/heartbeat/cron.py` | Cron expression parser using croniter |
 | `lazyclaw/heartbeat/orchestrator.py` | Job CRUD for agent_jobs table (encrypted) |
-| `lazyclaw/heartbeat/daemon.py` | Background heartbeat daemon, cron job executor |
+| `lazyclaw/heartbeat/daemon.py` | Background heartbeat daemon, cron job executor, one-time reminder support |
 | `lazyclaw/gateway/routes/mcp.py` | MCP server management REST API (7 endpoints) |
 | `lazyclaw/gateway/routes/jobs.py` | Job management REST API (7 endpoints) |
 | `lazyclaw/llm/eco_router.py` | ECO mode: routes between free (mcp-freeride) and paid AI |
@@ -446,7 +455,7 @@ All user content encrypted before storage. Server never sees plaintext.
 - **Browser auto-login**: Cookies persist in `browser_profiles/{user_id}/cookies.json`. When cookies expire, PageReader detects login form and pulls credentials from vault (`site:{domain}` key). Expensive Agent only needed for first login or CAPTCHA.
 - **Browser cost tiers**: PageReader (JS extraction, ~$0.001/page) for reading. Full browser Agent (~$0.30/page) for interaction. Agent learns, PageReader reuses.
 - **Streaming responses**: LLM responses stream token-by-token to the CLI via `StreamChunk` async generators through provider → router → eco_router → agent → callback chain.
-- **Inline CLI approval**: When a tool needs approval (computer/vault), the CLI prompts y/n inline instead of creating DB approval records. The `on_approval_request` callback handles this.
+- **Compact CLI approval**: When a tool needs approval, CLI shows one-line `⚡ display_name  args` + `Allow? [Y/n]` instead of verbose panels. Display names resolve MCP UUIDs to friendly names (e.g., `claude-code:claude_code`).
 - **Parallel initialization**: Agent loads history, skills, and context concurrently via `asyncio.gather()` to reduce latency before the first LLM call.
 - **Smart tool routing**: Agent only sends tools to LLM when the message suggests tool usage (`_wants_any_tools()`). Simple chat (hello, questions) gets zero tools → fast direct response. Prevents GPT-5 from running random `run_command` calls on greetings.
 - **Tool-free history stripping**: When no tools are needed, `_strip_tool_messages()` converts tool-call history to plain text so the LLM doesn't hallucinate tool calls from seeing old patterns.
@@ -456,6 +465,11 @@ All user content encrypted before storage. Server never sees plaintext.
 - **Team event propagation**: Specialist events (`specialist_start`, `specialist_tool`, `specialist_done`, `team_start`, `team_merge`) flow from teams/runner → teams/executor → teams/lead → agent → CLI callback for real-time dashboard.
 - **Claude Code MCP OAuth**: The claude-code MCP server launches with `ANTHROPIC_API_KEY=""` so the CLI uses Max subscription (OAuth) instead of the API key which may have no credits. Configured via `strip_env` in BUNDLED_MCPS.
 - **Agent self-awareness**: System prompt includes available skills list, connected MCP servers with descriptions/tool counts, and current config (model, ECO, team). Built dynamically by `context_builder.py` on every message so the agent knows what it can do.
+- **Inline activity stream**: CLI events print as permanent log lines (not flickering spinner). Spinner only during LLM thinking waits. Each tool call shows display name + compact args + duration.
+- **Friendly MCP names**: `MCPToolSkill.display_name` returns `"server:tool"` (e.g., `claude-code:claude_code`) instead of UUID-based `mcp_8f64bc83-..._claude_code`. Used in events, approvals, summaries.
+- **Work summary**: After every agent task, a `WorkSummary` event fires with duration, LLM calls, tools used, specialist list. Displayed as Rich panel in CLI and plain text in Telegram.
+- **Real Chrome mode (CDP)**: On-demand connection to user's actual Chrome browser via Chrome DevTools Protocol. Coexists with Playwright (headless) — agent picks the right backend per task.
+- **NL job scheduling**: Agent creates cron jobs and one-time reminders through natural language. Heartbeat daemon fires cron jobs recurring and auto-deletes one-time reminders after delivery.
 
 ## Database
 

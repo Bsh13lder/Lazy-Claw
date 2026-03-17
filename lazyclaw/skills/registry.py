@@ -33,6 +33,13 @@ class SkillRegistry:
             if skill.category == "mcp"
         ]
 
+    def get_display_name(self, internal_name: str) -> str:
+        """Resolve internal tool name to human-friendly display name."""
+        skill = self._skills.get(internal_name)
+        if skill is not None:
+            return skill.display_name
+        return internal_name
+
     def list_by_category(self) -> dict[str, list[str]]:
         """Return skill names grouped by category."""
         categories: dict[str, list[str]] = {}
@@ -83,3 +90,25 @@ class SkillRegistry:
         self.register(WriteFileSkill(config=config))
         self.register(ListDirectorySkill(config=config))
         self.register(TakeScreenshotSkill(config=config))
+
+        # Job & reminder skills
+        from lazyclaw.skills.builtin.jobs import (
+            ScheduleJobSkill, SetReminderSkill, ListJobsSkill, ManageJobSkill,
+        )
+
+        self.register(ScheduleJobSkill(config=config))
+        self.register(SetReminderSkill(config=config))
+        self.register(ListJobsSkill(config=config))
+        self.register(ManageJobSkill(config=config))
+
+        # Real browser skills (CDP — control user's actual Chrome)
+        from lazyclaw.skills.builtin.real_browser import (
+            SeeBrowserSkill, ListTabsSkill, ReadTabSkill,
+            SwitchTabSkill, BrowserActionSkill,
+        )
+
+        self.register(SeeBrowserSkill(config=config))
+        self.register(ListTabsSkill(config=config))
+        self.register(ReadTabSkill(config=config))
+        self.register(SwitchTabSkill(config=config))
+        self.register(BrowserActionSkill(config=config))

@@ -32,6 +32,10 @@ class MCPToolSkill(BaseSkill):
         return f"{_MCP_PREFIX}{self._client.server_id}_{self._tool_name}"
 
     @property
+    def display_name(self) -> str:
+        return f"{self._client.name}:{self._tool_name}"
+
+    @property
     def description(self) -> str:
         return f"[MCP: {self._client.name}] {self._tool_description}"
 

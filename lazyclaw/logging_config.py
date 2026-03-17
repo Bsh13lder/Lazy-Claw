@@ -18,7 +18,10 @@ def configure_logging(log_level: str = "WARNING", log_file: str | None = None) -
     level = getattr(logging, log_level.upper(), logging.WARNING)
 
     # Suppress noisy third-party loggers on all handlers
-    for name in ("httpx", "httpcore", "urllib3", "hpack", "asyncio", "watchfiles"):
+    for name in (
+        "httpx", "httpcore", "urllib3", "hpack", "asyncio", "watchfiles",
+        "mcp.server.lowlevel.server", "mcp.server", "mcp.client",
+    ):
         logging.getLogger(name).setLevel(logging.WARNING)
 
     # Suppress asyncio cleanup noise (Python 3.11+ subprocess watcher warnings)

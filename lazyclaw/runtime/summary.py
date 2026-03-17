@@ -81,23 +81,24 @@ def format_summary_cli(summary: WorkSummary) -> str:
 def format_summary_telegram(summary: WorkSummary) -> str:
     """Format a WorkSummary for Telegram plain text with emoji.
 
-    Returns a plain text string suitable for Telegram messages.
+    Returns a clean, structured plain text message.
     """
     duration_s = summary.duration_ms / 1000
-    lines = [
-        f"\u2705 Done in {duration_s:.1f}s | "
-        f"{summary.llm_calls} LLM calls | "
-        f"{summary.total_tokens:,} tokens",
-    ]
+    lines = [f"\u2705 Done in {duration_s:.1f}s", ""]
+
+    lines.append(
+        f"\U0001f9e0 {summary.llm_calls} LLM calls | "
+        f"{summary.total_tokens:,} tokens"
+    )
 
     if summary.tools_used:
         tools_str = ", ".join(summary.tools_used)
-        lines.append(f"Tools: {tools_str}")
+        lines.append(f"\U0001f527 {tools_str}")
 
     if summary.specialists_used:
         lines.append("")
-        lines.append("Specialists:")
+        lines.append("\U0001f465 Specialists:")
         for name in summary.specialists_used:
-            lines.append(f"  \u2713 {name}")
+            lines.append(f"  \u2705 {name}")
 
     return "\n".join(lines)

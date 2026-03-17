@@ -65,14 +65,16 @@ class _TelegramCallback:
 
         if self.current_phase == "thinking":
             lines.append(
-                f"\u25cf Thinking ({self.current_model}, step {self.current_iteration})"
+                f"\U0001f9e0 Thinking ({self.current_model}, step {self.current_iteration})"
             )
         elif self.current_phase == "tool":
-            lines.append(f"\u25c6 Running: {self.current_tool}")
+            lines.append(f"\U0001f527 Running: {self.current_tool}")
         elif self.current_phase == "streaming":
-            lines.append("\u25cf Writing response...")
+            lines.append("\u270d\ufe0f Writing response...")
         elif self.current_phase == "team":
-            lines.append("\u25cf Team mode active")
+            lines.append("\U0001f916 Team mode active")
+        elif self.current_phase == "merging":
+            lines.append("\U0001f500 Merging results...")
 
         # Specialist grid
         if self._team_specialists:
@@ -83,7 +85,6 @@ class _TelegramCallback:
         if self.tool_log:
             recent = self.tool_log[-4:]
             lines.append("")
-            lines.append("Recent:")
             for entry in recent:
                 lines.append(f"  {entry}")
 
@@ -94,20 +95,22 @@ class _TelegramCallback:
         elapsed = int(time.monotonic() - self._started)
 
         if not self._team_specialists:
-            # Simple mode — single line
+            # Simple mode
             if self.current_phase == "thinking":
                 return (
-                    f"\u23f3 Thinking ({self.current_model}, "
+                    f"\U0001f9e0 Thinking ({self.current_model}, "
                     f"step {self.current_iteration})... ({elapsed}s)"
                 )
             if self.current_phase == "tool":
-                return f"\u23f3 Running: {self.current_tool} ({elapsed}s)"
+                return f"\U0001f527 Running: {self.current_tool} ({elapsed}s)"
             if self.current_phase == "streaming":
-                return f"\u23f3 Writing response... ({elapsed}s)"
+                return f"\u270d\ufe0f Writing response... ({elapsed}s)"
+            if self.current_phase == "merging":
+                return f"\U0001f500 Merging results... ({elapsed}s)"
             return f"\u23f3 Working... ({elapsed}s)"
 
         # Team mode — specialist grid
-        lines = [f"\u23f3 Team working ({elapsed}s)", ""]
+        lines = [f"\U0001f916 Team working ({elapsed}s)", ""]
         for name, state in self._team_specialists.items():
             lines.append(_format_specialist_line(name, state))
         return "\n".join(lines)
@@ -150,6 +153,7 @@ class _TelegramCallback:
 
     async def on_event(self, event: AgentEvent) -> None:
         kind = event.kind
+        display = event.metadata.get("display_name", event.detail)
 
         if kind == "llm_call":
             self.current_phase = "thinking"
@@ -159,12 +163,12 @@ class _TelegramCallback:
 
         elif kind == "tool_call":
             self.current_phase = "tool"
-            self.current_tool = event.detail
-            self.tool_log.append(event.detail)
+            self.current_tool = display
+            self.tool_log.append(f"\U0001f527 {display}")
             await self._update_status()
 
         elif kind == "tool_result":
-            self.tool_log.append(f"\u2713 {event.detail}")
+            self.tool_log.append(f"\u2705 {display}")
 
         elif kind == "team_delegate":
             self.current_phase = "team"
@@ -206,6 +210,10 @@ class _TelegramCallback:
             self.tool_log.append(f"{name} \u2192 {tool}")
             await self._update_status()
 
+        elif kind == "team_merge":
+            self.current_phase = "merging"
+            await self._update_status(force=True)
+
         elif kind == "specialist_done":
             name = event.metadata.get("specialist", "?")
             duration_ms = event.metadata.get("duration_ms", 0)
@@ -221,12 +229,9 @@ class _TelegramCallback:
                 self._team_specialists[name]["error"] = error
             await self._update_status(force=True)
 
-        elif kind == "team_merge":
-            self.current_phase = "merging"
-            await self._update_status(force=True)
-
         elif kind == "work_summary":
-            # Send structured completion summary before the response
+            # Delete status message first to avoid duplicate info
+            await self._delete_status()
             summary = event.metadata.get("summary")
             if summary:
                 text = format_summary_telegram(summary)
@@ -246,14 +251,16 @@ class _TelegramCallback:
 
 
 def _format_specialist_line(name: str, state: dict) -> str:
-    """Format a single specialist status line for Telegram."""
+    """Format a single specialist status line for Telegram with emoji."""
     status = state.get("status", "queued")
 
     icon_map = {
-        "queued": "\u25cb", "running": "\u25cf",
-        "done": "\u2713", "error": "\u2717",
+        "queued": "\u23f3",        # ⏳
+        "running": "\U0001f504",   # 🔄
+        "done": "\u2705",          # ✅
+        "error": "\u274c",         # ❌
     }
-    icon = icon_map.get(status, "\u25cb")
+    icon = icon_map.get(status, "\u23f3")
 
     # Timing
     timing = ""
@@ -262,7 +269,7 @@ def _format_specialist_line(name: str, state: dict) -> str:
         timing = f" {elapsed:.0f}s"
         iteration = state.get("iteration")
         if iteration:
-            timing += f" step {iteration}"
+            timing += f", step {iteration}"
     elif state.get("duration_ms"):
         timing = f" {state['duration_ms'] / 1000:.1f}s"
 
@@ -274,7 +281,7 @@ def _format_specialist_line(name: str, state: dict) -> str:
     error = state.get("error")
     err_str = f" ({error})" if error and status == "error" else ""
 
-    return f"  {icon} {name} ({status}{timing}){tools_str}{err_str}"
+    return f"{icon} {name} ({status}{timing}){tools_str}{err_str}"
 
 
 # Status query keywords

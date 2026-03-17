@@ -1,17 +1,27 @@
 """System prompt builder with agent self-awareness.
 
 Assembles: personality (SOUL.md) + capabilities (skills, MCP, config) + memories.
-The capabilities section gives the agent knowledge of its own tools and services.
+Capabilities are cached (60s TTL) to avoid per-message MCP RPC overhead.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 from lazyclaw.config import Config
 from lazyclaw.runtime.personality import load_personality
 
 logger = logging.getLogger(__name__)
+
+# Cache for capabilities section (60s TTL)
+_capabilities_cache: str = ""
+_capabilities_time: float = 0.0
+_CAPABILITIES_TTL = 60.0
+
+# Cache for MCP status (60s TTL)
+_mcp_cache: list[str] = []
+_mcp_cache_time: float = 0.0
 
 
 async def build_context(
@@ -22,8 +32,8 @@ async def build_context(
     """Build system prompt with personality + capabilities + memories."""
     personality = load_personality()
 
-    # 1. Capabilities — what the agent can do
-    capabilities = await _build_capabilities_section(config, user_id, registry)
+    # 1. Capabilities (cached 60s)
+    capabilities = await _build_capabilities_cached(config, user_id, registry)
 
     # 2. Personal memories
     from lazyclaw.memory.personal import get_memories
@@ -41,6 +51,33 @@ async def build_context(
         )
 
     return "\n\n---\n\n".join(sections)
+
+
+async def _build_capabilities_cached(
+    config: Config,
+    user_id: str,
+    registry=None,
+) -> str:
+    """Build capabilities section with 60s TTL cache."""
+    global _capabilities_cache, _capabilities_time
+
+    now = time.monotonic()
+    if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
+        return _capabilities_cache
+
+    result = await _build_capabilities_section(config, user_id, registry)
+    _capabilities_cache = result
+    _capabilities_time = now
+    return result
+
+
+def invalidate_capabilities_cache() -> None:
+    """Call when skills or MCP servers change to force rebuild."""
+    global _capabilities_cache, _capabilities_time, _mcp_cache, _mcp_cache_time
+    _capabilities_cache = ""
+    _capabilities_time = 0.0
+    _mcp_cache = []
+    _mcp_cache_time = 0.0
 
 
 async def _build_capabilities_section(
@@ -62,16 +99,15 @@ async def _build_capabilities_section(
         categories = registry.list_by_category()
         for cat, skill_names in sorted(categories.items()):
             if cat == "mcp":
-                continue  # MCP tools listed separately below
-            display_names = []
-            for name in skill_names:
-                display_names.append(registry.get_display_name(name))
-            cat_label = _category_label(cat)
-            lines.append(f"**{cat_label}:** {', '.join(display_names)}")
+                continue
+            display_names = [
+                registry.get_display_name(name) for name in skill_names
+            ]
+            lines.append(f"**{_category_label(cat)}:** {', '.join(display_names)}")
         lines.append("")
 
-    # Connected MCP servers
-    mcp_lines = await _get_mcp_status(config, user_id)
+    # Connected MCP servers (cached separately)
+    mcp_lines = await _get_mcp_status_cached(config, user_id)
     if mcp_lines:
         lines.append(f"**MCP Servers Connected ({len(mcp_lines)}):**")
         for mcp_line in mcp_lines:
@@ -84,26 +120,37 @@ async def _build_capabilities_section(
     try:
         from lazyclaw.llm.eco_settings import get_eco_settings
         eco = await get_eco_settings(config, user_id)
-        eco_mode = eco.get("eco_mode", "full")
-        config_parts.append(f"ECO: {eco_mode}")
+        config_parts.append(f"ECO: {eco.get('eco_mode', 'full')}")
     except Exception:
         pass
 
     try:
         from lazyclaw.teams.settings import get_team_settings
         team = await get_team_settings(config, user_id)
-        team_mode = team.get("mode", "never")
-        config_parts.append(f"Team: {team_mode}")
+        config_parts.append(f"Team: {team.get('mode', 'never')}")
     except Exception:
         pass
 
     lines.append(f"**Current Config:** {' | '.join(config_parts)}")
-
     return "\n".join(lines)
 
 
+async def _get_mcp_status_cached(config: Config, user_id: str) -> list[str]:
+    """Get MCP status with 60s TTL cache (avoids ListToolsRequest spam)."""
+    global _mcp_cache, _mcp_cache_time
+
+    now = time.monotonic()
+    if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
+        return _mcp_cache
+
+    result = await _get_mcp_status(config, user_id)
+    _mcp_cache = result
+    _mcp_cache_time = now
+    return result
+
+
 async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
-    """Get connected MCP server names and tool counts."""
+    """Query connected MCP server names and tool counts (uncached)."""
     try:
         from lazyclaw.mcp.manager import _active_clients, BUNDLED_MCPS
         from lazyclaw.db.connection import db_session
@@ -111,7 +158,6 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
         if not _active_clients:
             return []
 
-        # Get server names from DB
         async with db_session(config) as db:
             rows = await db.execute(
                 "SELECT id, name FROM mcp_connections WHERE user_id = ?",
@@ -140,7 +186,7 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
 
 def _category_label(cat: str) -> str:
     """Human-readable category label."""
-    labels = {
+    return {
         "general": "Core Skills",
         "utility": "Utilities",
         "search": "Search",
@@ -152,5 +198,4 @@ def _category_label(cat: str) -> str:
         "skills": "Skills Management",
         "custom": "Custom Skills",
         "security": "Security",
-    }
-    return labels.get(cat, cat.title())
+    }.get(cat, cat.title())

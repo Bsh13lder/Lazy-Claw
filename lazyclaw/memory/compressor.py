@@ -53,20 +53,29 @@ async def compress_history(
     """
     key = derive_server_key(config.server_secret, user_id)
 
-    # Decrypt all messages
+    # Fast path: if within window, decrypt only and return (skip summary logic)
+    if len(raw_messages) <= WINDOW_SIZE:
+        decrypted = []
+        for msg_id, role, content, tool_name, metadata in raw_messages:
+            text = decrypt(content, key) if content.startswith("enc:") else content
+            decrypted.append({
+                "id": msg_id, "role": role, "content": text,
+                "tool_name": tool_name, "metadata": metadata,
+                "has_tool_calls": bool(metadata),
+            })
+        return _to_llm_messages(decrypted)
+
+    # Full path: decrypt all messages for compression
     decrypted = []
     for msg_id, role, content, tool_name, metadata in raw_messages:
         text = decrypt(content, key) if content.startswith("enc:") else content
         decrypted.append({
-            "id": msg_id,
-            "role": role,
-            "content": text,
-            "tool_name": tool_name,
-            "metadata": metadata,
+            "id": msg_id, "role": role, "content": text,
+            "tool_name": tool_name, "metadata": metadata,
             "has_tool_calls": bool(metadata),
         })
 
-    # If within window, no compression needed
+    # Already checked above — this path only runs for >WINDOW_SIZE
     if len(decrypted) <= WINDOW_SIZE:
         return _to_llm_messages(decrypted)
 

@@ -6,32 +6,50 @@ from lazyclaw.skills.base import BaseSkill
 class SkillRegistry:
     def __init__(self) -> None:
         self._skills: dict[str, BaseSkill] = {}
+        # Cached tool lists — invalidated on register/unregister
+        self._core_cache: list[dict] | None = None
+        self._mcp_cache: list[dict] | None = None
+        self._all_cache: list[dict] | None = None
 
     def register(self, skill: BaseSkill) -> None:
         self._skills[skill.name] = skill
+        self._invalidate_cache()
+
+    def _invalidate_cache(self) -> None:
+        self._core_cache = None
+        self._mcp_cache = None
+        self._all_cache = None
 
     def get(self, name: str) -> BaseSkill | None:
         return self._skills.get(name)
 
     def list_tools(self) -> list[dict]:
-        """Return all skills in OpenAI function-calling format."""
-        return [skill.to_openai_tool() for skill in self._skills.values()]
+        """Return all skills in OpenAI function-calling format (cached)."""
+        if self._all_cache is None:
+            self._all_cache = [
+                skill.to_openai_tool() for skill in self._skills.values()
+            ]
+        return self._all_cache
 
     def list_core_tools(self) -> list[dict]:
-        """Return only built-in/user skills (no MCP tools) in OpenAI format."""
-        return [
-            skill.to_openai_tool()
-            for skill in self._skills.values()
-            if skill.category != "mcp"
-        ]
+        """Return only built-in/user skills (no MCP) in OpenAI format (cached)."""
+        if self._core_cache is None:
+            self._core_cache = [
+                skill.to_openai_tool()
+                for skill in self._skills.values()
+                if skill.category != "mcp"
+            ]
+        return self._core_cache
 
     def list_mcp_tools(self) -> list[dict]:
-        """Return only MCP-bridged skills in OpenAI format."""
-        return [
-            skill.to_openai_tool()
-            for skill in self._skills.values()
-            if skill.category == "mcp"
-        ]
+        """Return only MCP-bridged skills in OpenAI format (cached)."""
+        if self._mcp_cache is None:
+            self._mcp_cache = [
+                skill.to_openai_tool()
+                for skill in self._skills.values()
+                if skill.category == "mcp"
+            ]
+        return self._mcp_cache
 
     def get_display_name(self, internal_name: str) -> str:
         """Resolve internal tool name to human-friendly display name."""

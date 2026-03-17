@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from uuid import uuid4
 
@@ -19,44 +20,17 @@ from lazyclaw.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
-# Keywords that suggest MCP tools are needed
-_MCP_KEYWORDS = (
-    "claude code", "health check", "healthcheck", "api hunter", "apihunter",
-    "free api", "free provider", "vault whisper", "vaultwhisper", "privacy",
-    "pii", "scrub", "task ai", "taskai", "categorize", "prioritize",
-    "deduplicate", "freeride", "mcp", "provider status", "leaderboard",
-    "doctor", "lazydoctor", "checkup", "lint", "linter", "fix bugs",
-    "auto-fix", "autofix", "self-heal", "heal", "diagnose", "diagnostic",
-    "code quality", "type check", "typecheck", "mypy", "ruff", "pytest",
-    "run tests", "format code", "code issues", "fix issues",
+# Chat-only patterns — messages that NEVER need tools.
+# Everything else gets tools and the LLM decides what to use.
+_CHAT_ONLY_PATTERN = re.compile(
+    r"^(hi|hey|hello|yo|sup|thanks|thank you|thx|ok|okay|sure|"
+    r"yes|no|yep|nope|good morning|good night|good evening|"
+    r"bye|goodbye|see you|how are you|what's up|whats up|"
+    r"nice|cool|great|awesome|lol|haha|hehe|wow|omg|"
+    r"good|bad|fine|alright|sounds good|got it|understood|"
+    r"perfect|exactly|right|correct|wrong|nah|meh)[\s!?.,]*$",
+    re.IGNORECASE,
 )
-
-# Keywords that suggest any tools are needed (search, browse, compute, file ops, etc.)
-_TOOL_KEYWORDS = (
-    "search", "find", "look up", "browse", "open", "navigate", "click",
-    "run", "execute", "command", "terminal", "shell",
-    "read file", "write file", "create file", "delete file", "list dir",
-    "screenshot", "remember", "save", "recall", "memory", "memorize",
-    "calculate", "compute", "math",
-    "vault", "credential", "api key", "password", "secret",
-    "skill", "create skill", "delete skill",
-    "time", "date", "what time", "what day",
-    "web", "website", "url", "http", "page",
-    "schedule", "cron", "remind", "reminder", "every hour",
-    "every day", "every morning", "every week", "recurring",
-    "job", "jobs", "stop job", "delete job", "pause job",
-    "browser", "tab", "tabs", "what am i looking", "my screen",
-    "my browser", "what's on my", "see browser", "switch tab",
-    "mcp", "mcps", "how many", "what tools", "what skills",
-    "terminal", "tty", "process", "pid", "what's running",
-    "what is running", "check", "capabilities", "what can you",
-)
-
-
-def _wants_mcp_tools(message: str) -> bool:
-    """Check if the user's message suggests MCP tools are needed."""
-    lower = message.lower()
-    return any(kw in lower for kw in _MCP_KEYWORDS)
 
 
 def _strip_tool_messages(history: list[LLMMessage]) -> list[LLMMessage]:
@@ -87,16 +61,21 @@ def _strip_tool_messages(history: list[LLMMessage]) -> list[LLMMessage]:
 
 
 def _wants_any_tools(message: str) -> bool:
-    """Check if the user's message suggests ANY tool usage.
+    """Decide if tools should be available for this message.
 
-    Simple conversations (hello, greetings, questions, chat) → no tools.
-    This prevents GPT-5 from running commands when the user just says "hi".
+    Inverted approach: assume tools UNLESS the message is clearly just chat.
+    The LLM is smart enough to not call tools on "what's my name?" even
+    if tools are available. We only block tools for pure greetings/acks.
     """
     lower = message.lower().strip()
-    # Very short messages are almost never tool-worthy
-    if len(lower) < 10:
+    # Very short messages (under 8 chars) — greetings like "hi", "ok"
+    if len(lower) < 8:
         return False
-    return any(kw in lower for kw in _TOOL_KEYWORDS)
+    # Known chat-only patterns — no tools needed
+    if _CHAT_ONLY_PATTERN.match(lower):
+        return False
+    # Everything else: give the LLM tools and let it decide
+    return True
 
 
 class Agent:
@@ -248,16 +227,13 @@ class Agent:
 
                 return team_result
 
-        # Get tools — only when the message suggests tool usage is needed
-        # Simple chat (hello, questions, conversation) → no tools → fast direct response
+        # Get tools — all or nothing. Chat-only messages get no tools (fast path).
+        # Everything else gets ALL tools (core + MCP) and the LLM decides.
         needs_tools = self.registry is not None and _wants_any_tools(message)
         tools: list = []
         if needs_tools:
-            tools = self.registry.list_core_tools()
-            mcp_tools = self.registry.list_mcp_tools()
-            if mcp_tools and _wants_mcp_tools(message):
-                tools = tools + mcp_tools
-            logger.info("Tools enabled for message: %s", message[:50])
+            tools = self.registry.list_core_tools() + self.registry.list_mcp_tools()
+            logger.info("Tools enabled (%d) for: %s", len(tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 

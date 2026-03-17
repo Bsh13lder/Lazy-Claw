@@ -88,6 +88,8 @@ def unregister_mcp_tools(server_id: str, registry: SkillRegistry) -> int:
     for name in to_remove:
         del registry._skills[name]
         logger.info("Unregistered MCP tool: %s", name)
+    if to_remove:
+        registry._invalidate_cache()
     logger.info(
         "Unregistered %d tools for MCP server %s", len(to_remove), server_id
     )

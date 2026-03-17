@@ -130,7 +130,9 @@ import re as _re
 _ACTION_KEYWORDS = _re.compile(
     r"\b(search|browse|find|create|write|run|schedule|compare|analyze|"
     r"build|deploy|generate|compute|calculate|check|review|debug|fix|"
-    r"refactor|test|monitor|scrub|scan)\b",
+    r"refactor|test|monitor|scrub|scan|"
+    r"list|show|fetch|summarize|extract|validate|audit|query|read|"
+    r"remind|categorize|prioritize|lint|diagnose|inspect)\b",
     _re.IGNORECASE,
 )
 

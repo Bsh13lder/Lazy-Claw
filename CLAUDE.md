@@ -6,6 +6,15 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 - **[DOCS.md](DOCS.md)** — Complete function & class reference. Keep updated when adding new modules.
 - **[TODO.md](TODO.md)** — Phase plan with checkable items. All roadmap/status tracking lives here.
+- **[MEMORY.md](/.claude/projects/.../memory/MEMORY.md)** — Persistent memory index (user prefs, feedback, project status, references).
+
+## File Size Rules
+
+- **CLAUDE.md must stay under 40,000 characters.** Currently ~8K. This file is loaded every message — keep it lean.
+- **Never dump file maps, API endpoints, DB schemas, env vars, or CLI command lists here.** Those are derivable from the codebase or already in DOCS.md.
+- **Use TODO.md** for roadmap, phase plans, task tracking, and implementation status.
+- **Use MEMORY.md** for learned patterns, user corrections, project context, and references.
+- If CLAUDE.md approaches 40K chars, move content to the appropriate file before adding more.
 
 ## Workflow Orchestration
 

@@ -36,11 +36,20 @@ def _make_browser_llm_class():
         from langchain_openai import ChatOpenAI
 
         class _BrowserChatOpenAI(ChatOpenAI):
-            """ChatOpenAI that tolerates browser-use setting arbitrary attributes.
+            """ChatOpenAI compatible with browser-use 0.12+.
 
-            browser-use 0.12+ sets llm.provider and monkey-patches methods.
-            Pydantic v2 models reject unknown attrs, so we fall back to __dict__.
+            browser-use reads llm.model (but langchain stores model_name),
+            sets llm.provider, and monkey-patches methods. Pydantic v2
+            rejects all of this, so we override get/set attr.
             """
+
+            def __getattr__(self, name: str):
+                # browser-use reads llm.model; langchain calls it model_name
+                if name == "model":
+                    return self.model_name
+                if name in self.__dict__:
+                    return self.__dict__[name]
+                return super().__getattr__(name)
 
             def __setattr__(self, name: str, value) -> None:
                 try:

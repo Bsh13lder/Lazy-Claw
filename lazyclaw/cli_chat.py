@@ -512,10 +512,6 @@ async def run_chat_loop(
                                 "\u2500\u2500\u2500[/dim]"
                             )
                             _input_hint_shown = True
-                            if active_callback:
-                                active_callback._start_spinner(
-                                    "  [dim]\u25cf Working...[/dim]"
-                                )
 
                         async def _side_prompt():
                             try:

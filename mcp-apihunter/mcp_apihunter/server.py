@@ -9,6 +9,7 @@ from mcp.types import Tool, TextContent
 
 from mcp_apihunter.config import ApiHunterConfig
 from mcp_apihunter.registry import Registry
+from mcp_apihunter.scanner import run_full_scan
 from mcp_apihunter.validator import validate_entry
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,19 @@ def create_server(registry: Registry, config: ApiHunterConfig) -> Server:
                     "required": ["id"],
                 },
             ),
+            Tool(
+                name="apihunter_scan",
+                description="Auto-discover free AI providers. Scans OpenRouter for free models, detects local Ollama, and probes known free-tier APIs.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "ollama_url": {
+                            "type": "string",
+                            "description": "Ollama URL to probe (default: http://localhost:11434)",
+                        },
+                    },
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -110,6 +124,8 @@ def create_server(registry: Registry, config: ApiHunterConfig) -> Server:
             return await _handle_search(arguments)
         elif name == "apihunter_remove":
             return await _handle_remove(arguments)
+        elif name == "apihunter_scan":
+            return await _handle_scan(arguments)
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     async def _handle_submit(arguments: dict) -> list[TextContent]:
@@ -189,5 +205,28 @@ def create_server(registry: Registry, config: ApiHunterConfig) -> Server:
         if removed:
             return [TextContent(type="text", text=f"Entry {arguments['id']} marked as removed.")]
         return [TextContent(type="text", text=f"Error: Entry {arguments['id']} not found or already removed.")]
+
+    async def _handle_scan(arguments: dict) -> list[TextContent]:
+        from dataclasses import replace
+
+        ollama_url = arguments.get("ollama_url")
+        scan_config = config
+        if ollama_url:
+            scan_config = replace(config, ollama_url=ollama_url)
+
+        report = await run_full_scan(registry, scan_config)
+
+        lines = [
+            f"Scan complete at {report.timestamp:.0f}",
+            f"  Discovered: {report.discovered}",
+            f"  Added:      {report.added}",
+            f"  Updated:    {report.updated}",
+        ]
+        if report.errors:
+            lines.append(f"  Errors:     {len(report.errors)}")
+            for err in report.errors:
+                lines.append(f"    - {err}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
 
     return server

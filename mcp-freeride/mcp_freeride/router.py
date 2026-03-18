@@ -192,6 +192,13 @@ class FreeRideRouter:
                 })
         return result
 
+    async def refresh_ollama(self) -> list[str]:
+        """Refresh Ollama's model list from /api/tags."""
+        provider = self._providers.get("ollama")
+        if provider is None:
+            return []
+        return await provider.refresh_models()
+
     def get_status(self) -> dict:
         """Return health checker status."""
         return self._health.get_status()

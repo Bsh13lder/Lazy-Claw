@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 TASK_FREE = "free"
 TASK_PAID = "paid"
 
+# Complexity tiers for model routing (NanoClaw-inspired)
+COMPLEXITY_SIMPLE = "simple"
+COMPLEXITY_STANDARD = "standard"
+COMPLEXITY_COMPLEX = "complex"
+
 # Keywords that suggest tasks suitable for free providers (low-quality OK)
 # Only truly disposable tasks — NOT conversations, NOT user-facing responses
 _FREE_PATTERNS = re.compile(
@@ -104,6 +109,38 @@ async def _load_eco_settings(config: Config, user_id: str) -> EcoSettings:
     return _parse_eco_settings(result[0])
 
 
+# Keywords that suggest complex analysis tasks (worth the best model)
+_COMPLEX_PATTERNS = re.compile(
+    r"\b(analyze|compare|plan|debug|research|investigate|evaluate|"
+    r"architect|design|refactor|review|audit|benchmark|optimize|"
+    r"explain.*code|trace.*bug|root.*cause)\b",
+    re.IGNORECASE,
+)
+
+# Simple action keywords (reused from team lead's filter)
+_SIMPLE_ACTION_PATTERN = re.compile(
+    r"\b(search|browse|find|create|write|run|schedule|calculate|"
+    r"check|read|remind|list|show|fetch)\b",
+    re.IGNORECASE,
+)
+
+
+def classify_complexity(message: str, has_tools: bool) -> str:
+    """Fast heuristic for model tier routing. No LLM call needed.
+
+    Inspired by NanoClaw's select_model(text_length, item_count).
+    """
+    if _COMPLEX_PATTERNS.search(message):
+        return COMPLEXITY_COMPLEX
+
+    if not has_tools and len(message) < 100:
+        lower = message.lower().strip()
+        if len(lower) < 40 or not _SIMPLE_ACTION_PATTERN.search(lower):
+            return COMPLEXITY_SIMPLE
+
+    return COMPLEXITY_STANDARD
+
+
 def classify_task(message: str, has_tools: bool) -> str:
     """Classify whether a message needs free or paid AI.
 
@@ -154,6 +191,32 @@ class EcoRouter:
             logger.warning("mcp-freeride not installed, ECO mode unavailable")
             return None
 
+    async def _ensure_free_router(self):
+        """Lazy-init free router + load apihunter providers (async)."""
+        if self._free_router is not None:
+            return self._free_router
+
+        # Use sync init first
+        router = self._get_free_router()
+        if router is None:
+            return None
+
+        # Then async-load apihunter providers
+        try:
+            count = await router.load_apihunter_providers_async()
+            if count > 0:
+                logger.info("Loaded %d providers from apihunter", count)
+        except Exception:
+            logger.debug("Failed to load apihunter providers", exc_info=True)
+
+        # Also refresh Ollama models
+        try:
+            await router.refresh_ollama()
+        except Exception:
+            logger.debug("Failed to refresh Ollama models", exc_info=True)
+
+        return router
+
     def _convert_to_dicts(self, messages: list[LLMMessage]) -> list[dict]:
         """Convert LLMMessage list to OpenAI-format dicts for free router.
 
@@ -200,7 +263,23 @@ class EcoRouter:
 
         if settings.mode == "full":
             self._record_usage(user_id, "paid")
-            return await self._paid_router.chat(messages, model=model, user_id=user_id, **kwargs)
+            # Complexity-based model routing when no explicit model override
+            effective_model = model
+            if effective_model is None:
+                user_message = ""
+                for msg in reversed(messages):
+                    if msg.role == "user":
+                        user_message = msg.content
+                        break
+                complexity = classify_complexity(user_message, has_tools)
+                if complexity == COMPLEXITY_SIMPLE:
+                    effective_model = self._config.fast_model
+                    logger.info("Complexity: SIMPLE → %s", effective_model)
+                elif complexity == COMPLEXITY_COMPLEX:
+                    effective_model = self._config.smart_model
+                    logger.info("Complexity: COMPLEX → %s", effective_model)
+                # STANDARD: use config.default_model (None → router picks default)
+            return await self._paid_router.chat(messages, model=effective_model, user_id=user_id, **kwargs)
 
         if settings.mode == "eco":
             return await self._route_eco(messages, user_id, settings, has_tools, **kwargs)
@@ -221,7 +300,7 @@ class EcoRouter:
         **kwargs,
     ) -> LLMResponse:
         """ECO mode: free only, wait if rate-limited, never paid."""
-        free_router = self._get_free_router()
+        free_router = await self._ensure_free_router()
         if not free_router:
             return LLMResponse(
                 content=(
@@ -308,7 +387,7 @@ class EcoRouter:
         # If task needs tools and we classified as paid → use paid
         # If task is simple → try free first
         if task_type == TASK_FREE:
-            free_router = self._get_free_router()
+            free_router = await self._ensure_free_router()
             if free_router:
                 model_hint = None
                 if settings.locked_provider:
@@ -382,7 +461,7 @@ class EcoRouter:
             use_free = settings.mode == "eco" or classify_task(user_message, has_tools) == TASK_FREE
 
             if use_free:
-                free_router = self._get_free_router()
+                free_router = await self._ensure_free_router()
                 if free_router:
                     try:
                         dict_messages = self._convert_to_dicts(messages)

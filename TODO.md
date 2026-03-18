@@ -114,7 +114,7 @@
 Standalone MCP servers that plug into LazyClaw (or any MCP-compatible client).
 
 - [x] **mcp-freeride** — Free AI router. 7 providers (Groq, Gemini, OpenRouter, Together, Mistral, HuggingFace, Ollama). Health tracking, latency ranking, auto-fallback. Standalone in `mcp-freeride/`.
-- [x] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. LazyClaw pulls latest registry automatically. Crowdsourced free AI registry. Standalone in `mcp-apihunter/`.
+- [x] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. Auto-scanner discovers OpenRouter free models, local Ollama, and known free-tier APIs. LazyClaw pulls latest registry automatically. Standalone in `mcp-apihunter/`.
 - [x] **mcp-healthcheck** — Background pinger for all configured AI sources. Scores by speed/uptime/model quality, serves live leaderboard. mcp-freeride uses this for intelligent routing. Standalone in `mcp-healthcheck/`.
 - [x] **mcp-taskai** — Task intelligence via free AI. Auto-categorize tasks, suggest deadlines, detect duplicates, summarize overdue pile. Uses free AI directly ($0). Standalone in `mcp-taskai/`.
 - [x] **mcp-vaultwhisper** — Privacy-safe AI proxy. Strips identifiable data before sending to any free API, re-injects context after response. E2E encryption + free AI = rare combo. Standalone in `mcp-vaultwhisper/`.
@@ -343,3 +343,19 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Browser-Use Compat: ✅ COMPLETE — _BrowserChatOpenAI with __getattr__/__setattr__ for browser-use 0.12 + langchain-openai 1.1.9
 - Timezone Fix: ✅ COMPLETE — get_time defaults to system local timezone, deprecated utcnow() replaced
 - Research Specialist: ✅ Updated — now has read_file, list_directory, run_command for local file access
+- Free AI Auto-Discovery: ✅ COMPLETE — mcp-apihunter scanner (OpenRouter free models, Ollama local, known free tiers), startup scan, `apihunter_scan` MCP tool
+- Dynamic Ollama Models: ✅ COMPLETE — OllamaProvider.refresh_models() from /api/tags, pull/delete/show helpers, FreeRideRouter.refresh_ollama()
+- ECO NL Skills: ✅ COMPLETE — eco_set_mode, eco_show_status, eco_set_provider (3 skills)
+- Provider NL Skills: ✅ COMPLETE — provider_list, provider_add, provider_scan (3 skills)
+- Ollama NL Skills: ✅ COMPLETE — ollama_list, ollama_install, ollama_delete, ollama_show (4 skills)
+- Full NL Control: ✅ COMPLETE — 34 new skills covering ALL features via natural language:
+  - System: show_status, run_doctor, show_usage, show_logs, set_model (5 skills)
+  - Permissions: show_permissions, set_permission, list_pending_approvals, decide_approval, query_audit_log (5 skills)
+  - MCP: list_mcp_servers, add_mcp_server, remove_mcp_server, connect_mcp_server, disconnect_mcp_server (5 skills)
+  - Teams: show_team_settings, set_team_mode, set_critic_mode, list_specialists, manage_specialist (5 skills)
+  - Memory: list_memories, delete_memory, list_daily_logs, view_daily_log, delete_daily_log (5 skills)
+  - Replay: list_traces, view_trace, delete_trace, share_trace, manage_shares (5 skills)
+  - Session: clear_history, show_compression (2 skills)
+  - Browser: list_site_memories, delete_site_memory (2 skills)
+- ECO Pipeline Wiring: ✅ COMPLETE — _ensure_free_router() async loads apihunter providers + refreshes Ollama models, dynamic valid_providers in eco_settings
+- Total registered skills: 72+ (up from ~38)

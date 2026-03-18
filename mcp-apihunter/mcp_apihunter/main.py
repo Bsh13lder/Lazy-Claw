@@ -5,7 +5,7 @@ import asyncio
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
-for _lib in ("httpx", "httpcore", "urllib3", "hpack"):
+for _lib in ("httpx", "httpcore", "urllib3", "hpack", "mcp.server.lowlevel.server"):
     logging.getLogger(_lib).setLevel(logging.WARNING)
 logger = logging.getLogger("mcp-apihunter")
 
@@ -24,6 +24,17 @@ def main() -> None:
 
     async def run():
         await registry.init_db()
+        await registry.seed_known_providers()
+
+        if config.scan_on_startup:
+            from mcp_apihunter.scanner import run_full_scan
+
+            report = await run_full_scan(registry, config)
+            logger.info(
+                "Startup scan: discovered=%d added=%d updated=%d errors=%d",
+                report.discovered, report.added, report.updated, len(report.errors),
+            )
+
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
                 read_stream,

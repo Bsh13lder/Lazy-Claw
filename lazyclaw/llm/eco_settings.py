@@ -17,6 +17,37 @@ logger = logging.getLogger(__name__)
 # Valid ECO modes
 VALID_MODES = {"eco", "hybrid", "full"}
 
+# Base set of known free providers
+_BASE_PROVIDERS = {"groq", "gemini", "openrouter", "together", "mistral", "huggingface", "ollama"}
+
+
+def _get_valid_providers() -> set[str]:
+    """Return valid provider names, including any from apihunter registry."""
+    try:
+        from mcp_apihunter.config import load_config as load_ah_config
+        from mcp_apihunter.registry import Registry
+        import asyncio
+
+        config = load_ah_config()
+        registry = Registry(config.db_path)
+
+        async def _load():
+            await registry.init_db()
+            entries = await registry.list_all(status_filter="active")
+            return {e.name for e in entries}
+
+        try:
+            asyncio.get_running_loop()
+            return set(_BASE_PROVIDERS)  # Can't run sync in async context
+        except RuntimeError:
+            pass
+
+        extra = asyncio.run(_load())
+        return _BASE_PROVIDERS | extra
+    except Exception:
+        return set(_BASE_PROVIDERS)
+
+
 # Default eco settings
 DEFAULT_ECO = {
     "mode": "full",
@@ -62,7 +93,7 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
             raise ValueError(f"Invalid eco mode: {updates['mode']}. Must be one of: {VALID_MODES}")
 
     # Validate locked_provider if provided
-    valid_providers = {"groq", "gemini", "openrouter", "together", "mistral", "huggingface", "ollama"}
+    valid_providers = _get_valid_providers()
     if "locked_provider" in updates and updates["locked_provider"] is not None:
         if updates["locked_provider"] not in valid_providers:
             raise ValueError(f"Invalid provider: {updates['locked_provider']}")

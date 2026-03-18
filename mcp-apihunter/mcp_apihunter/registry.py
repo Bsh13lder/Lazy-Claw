@@ -163,6 +163,28 @@ class Registry:
             return None
         return _row_to_entry(row)
 
+    async def find_by_name(self, name: str) -> RegistryEntry | None:
+        """Find an endpoint by name, excluding removed entries."""
+        db = await self._get_db()
+        cursor = await db.execute(
+            "SELECT * FROM endpoints WHERE name = ? AND status != 'removed'",
+            (name,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_entry(row)
+
+    async def update_models(self, entry_id: int, models: list[str]) -> RegistryEntry | None:
+        """Update the model list for an entry and return the updated entry."""
+        db = await self._get_db()
+        await db.execute(
+            "UPDATE endpoints SET models_json = ? WHERE id = ?",
+            (json.dumps(models), entry_id),
+        )
+        await db.commit()
+        return await self.get(entry_id)
+
     async def seed_known_providers(self) -> int:
         """Pre-seed the registry with well-known free LLM API providers.
 

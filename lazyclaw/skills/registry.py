@@ -15,6 +15,12 @@ class SkillRegistry:
         self._skills[skill.name] = skill
         self._invalidate_cache()
 
+    def unregister(self, name: str) -> None:
+        """Remove a skill by name. No-op if not found."""
+        if name in self._skills:
+            del self._skills[name]
+            self._invalidate_cache()
+
     def _invalidate_cache(self) -> None:
         self._core_cache = None
         self._mcp_cache = None
@@ -130,3 +136,117 @@ class SkillRegistry:
         self.register(ReadTabSkill(config=config))
         self.register(SwitchTabSkill(config=config))
         self.register(BrowserActionSkill(config=config))
+
+        # AI management skills (ECO mode, providers, Ollama)
+        from lazyclaw.skills.builtin.eco_management import (
+            EcoSetModeSkill, EcoShowStatusSkill, EcoSetProviderSkill,
+        )
+
+        self.register(EcoSetModeSkill(config=config))
+        self.register(EcoShowStatusSkill(config=config))
+        self.register(EcoSetProviderSkill(config=config))
+
+        from lazyclaw.skills.builtin.provider_management import (
+            ProviderListSkill, ProviderAddSkill, ProviderScanSkill,
+        )
+
+        self.register(ProviderListSkill(config=config))
+        self.register(ProviderAddSkill(config=config))
+        self.register(ProviderScanSkill(config=config))
+
+        from lazyclaw.skills.builtin.ollama_management import (
+            OllamaListSkill, OllamaInstallSkill, OllamaDeleteSkill, OllamaShowSkill,
+        )
+
+        self.register(OllamaListSkill(config=config))
+        self.register(OllamaInstallSkill(config=config))
+        self.register(OllamaDeleteSkill(config=config))
+        self.register(OllamaShowSkill(config=config))
+
+        # System status skills
+        from lazyclaw.skills.builtin.system_status import (
+            ShowStatusSkill, RunDoctorSkill, ShowUsageSkill,
+            ShowLogsSkill, SetModelSkill,
+        )
+
+        self.register(ShowStatusSkill(config=config))
+        self.register(RunDoctorSkill(config=config))
+        self.register(ShowUsageSkill(config=config))
+        self.register(ShowLogsSkill(config=config))
+        self.register(SetModelSkill(config=config))
+
+        # Permission management skills
+        from lazyclaw.skills.builtin.permission_management import (
+            ShowPermissionsSkill, SetPermissionSkill, ListPendingApprovalsSkill,
+            DecideApprovalSkill, QueryAuditLogSkill,
+        )
+
+        self.register(ShowPermissionsSkill(config=config))
+        self.register(SetPermissionSkill(config=config))
+        self.register(ListPendingApprovalsSkill(config=config))
+        self.register(DecideApprovalSkill(config=config))
+        self.register(QueryAuditLogSkill(config=config))
+
+        # MCP management skills
+        from lazyclaw.skills.builtin.mcp_management import (
+            ListMCPServersSkill, AddMCPServerSkill, RemoveMCPServerSkill,
+            ConnectMCPServerSkill, DisconnectMCPServerSkill,
+        )
+
+        self.register(ListMCPServersSkill(config=config))
+        self.register(AddMCPServerSkill(config=config))
+        self.register(RemoveMCPServerSkill(config=config))
+        self.register(ConnectMCPServerSkill(config=config))
+        self.register(DisconnectMCPServerSkill(config=config))
+
+        # Team management skills
+        from lazyclaw.skills.builtin.team_management import (
+            ShowTeamSettingsSkill, SetTeamModeSkill, SetCriticModeSkill,
+            ListSpecialistsSkill, ManageSpecialistSkill,
+        )
+
+        self.register(ShowTeamSettingsSkill(config=config))
+        self.register(SetTeamModeSkill(config=config))
+        self.register(SetCriticModeSkill(config=config))
+        self.register(ListSpecialistsSkill(config=config))
+        self.register(ManageSpecialistSkill(config=config))
+
+        # Memory management skills (extends existing save_memory + recall_memories)
+        from lazyclaw.skills.builtin.memory_management import (
+            ListMemoriesSkill, DeleteMemorySkill, ListDailyLogsSkill,
+            ViewDailyLogSkill, DeleteDailyLogSkill,
+        )
+
+        self.register(ListMemoriesSkill(config=config))
+        self.register(DeleteMemorySkill(config=config))
+        self.register(ListDailyLogsSkill(config=config))
+        self.register(ViewDailyLogSkill(config=config))
+        self.register(DeleteDailyLogSkill(config=config))
+
+        # Replay management skills
+        from lazyclaw.skills.builtin.replay_management import (
+            ListTracesSkill, ViewTraceSkill, DeleteTraceSkill,
+            ShareTraceSkill, ManageSharesSkill,
+        )
+
+        self.register(ListTracesSkill(config=config))
+        self.register(ViewTraceSkill(config=config))
+        self.register(DeleteTraceSkill(config=config))
+        self.register(ShareTraceSkill(config=config))
+        self.register(ManageSharesSkill(config=config))
+
+        # Session management skills
+        from lazyclaw.skills.builtin.session_management import (
+            ClearHistorySkill, ShowCompressionSkill,
+        )
+
+        self.register(ClearHistorySkill(config=config))
+        self.register(ShowCompressionSkill(config=config))
+
+        # Site memory management skills
+        from lazyclaw.skills.builtin.site_memory_management import (
+            ListSiteMemoriesSkill, DeleteSiteMemorySkill,
+        )
+
+        self.register(ListSiteMemoriesSkill(config=config))
+        self.register(DeleteSiteMemorySkill(config=config))

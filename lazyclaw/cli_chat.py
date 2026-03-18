@@ -37,24 +37,7 @@ def is_status_query(text: str) -> bool:
     return lower in _STATUS_KEYWORDS or lower == "/status"
 
 
-import select
-import sys
-import threading
-
-_stop_side_input = threading.Event()
-
-
-def _read_line_raw() -> str:
-    """Read a line from stdin in a thread. Interruptible via _stop_side_input."""
-    _stop_side_input.clear()
-    while not _stop_side_input.is_set():
-        ready, _, _ = select.select([sys.stdin], [], [], 0.3)
-        if ready:
-            try:
-                return sys.stdin.readline()
-            except (EOFError, KeyboardInterrupt):
-                return ""
-    return ""
+_side_input_task: asyncio.Task | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +431,8 @@ async def run_chat_loop(
             callback=cb,
         )
 
+    global _side_input_task
+
     # Ctrl+C handling
     _cancel_requested = False
 
@@ -470,7 +455,6 @@ async def run_chat_loop(
             except (NotImplementedError, OSError, AttributeError):
                 pass
 
-            _input_future: asyncio.Future | None = None
             _input_hint_shown = False
 
             try:
@@ -487,8 +471,10 @@ async def run_chat_loop(
 
                     # Check for pending approval — compact format
                     if active_callback and active_callback._pending_approval:
-                        # Cancel input thread if active
-                        _input_future = None
+                        # Cancel side prompt if active
+                        if _side_input_task and not _side_input_task.done():
+                            _side_input_task.cancel()
+                        _side_input_task = None
                         active_callback._stop_spinner()
                         skill_name, args = active_callback._pending_approval
                         display = (
@@ -515,8 +501,8 @@ async def run_chat_loop(
                         active_callback._approval_event.set()
                         continue
 
-                    # Start threaded input reader (non-blocking)
-                    if _input_future is None:
+                    # Start async side-channel input via prompt_toolkit
+                    if _side_input_task is None or _side_input_task.done():
                         if not _input_hint_shown:
                             if active_callback:
                                 active_callback._stop_spinner()
@@ -526,17 +512,29 @@ async def run_chat_loop(
                                 "\u2500\u2500\u2500[/dim]"
                             )
                             _input_hint_shown = True
-                        _input_future = loop.run_in_executor(
-                            None, _read_line_raw,
-                        )
+                            if active_callback:
+                                active_callback._start_spinner(
+                                    "  [dim]\u25cf Working...[/dim]"
+                                )
+
+                        async def _side_prompt():
+                            try:
+                                from prompt_toolkit.formatted_text import HTML
+                                return await ctx.pt_session.prompt_async(
+                                    HTML("<dim>  &gt; </dim>"),
+                                )
+                            except (EOFError, KeyboardInterrupt):
+                                return ""
+
+                        _side_input_task = asyncio.create_task(_side_prompt())
 
                     # Check if user typed something
-                    if _input_future is not None and _input_future.done():
+                    if _side_input_task is not None and _side_input_task.done():
                         try:
-                            user_text = _input_future.result()
-                        except (EOFError, KeyboardInterrupt, Exception):
+                            user_text = _side_input_task.result()
+                        except (EOFError, KeyboardInterrupt, asyncio.CancelledError, Exception):
                             user_text = ""
-                        _input_future = None
+                        _side_input_task = None
 
                         stripped = user_text.strip()
                         if stripped:
@@ -603,20 +601,14 @@ async def run_chat_loop(
                         loop.remove_signal_handler(_sig.SIGINT)
                     except (NotImplementedError, OSError):
                         pass
-                # Signal stdin reader thread to exit so prompt_toolkit can take over
-                _stop_side_input.set()
-                if _input_future is not None and not _input_future.done():
-                    # Wait for thread to notice the stop flag (max 0.5s)
+                # Cancel side-channel prompt if still waiting
+                if _side_input_task is not None and not _side_input_task.done():
+                    _side_input_task.cancel()
                     try:
-                        await asyncio.wait_for(
-                            asyncio.wrap_future(_input_future),
-                            timeout=0.5,
-                        )
-                    except (asyncio.TimeoutError, Exception):
+                        await _side_input_task
+                    except (asyncio.CancelledError, Exception):
                         pass
-                _input_future = None
-                # Small delay to ensure thread fully releases stdin
-                await asyncio.sleep(0.1)
+                _side_input_task = None
 
             agent_task = None
             active_callback = None

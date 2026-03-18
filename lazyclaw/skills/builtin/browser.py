@@ -20,9 +20,10 @@ class BrowseWebSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Launch a browser agent to perform a web task autonomously. "
-            "Use for complex multi-step web interactions like filling forms, "
-            "navigating sites, or extracting data that requires interaction."
+            "Open a headless browser and perform a web task in the background. "
+            "Use this to visit websites, check WhatsApp Web, read pages, fill forms, "
+            "log in to sites, or any task that requires browsing the web. "
+            "Runs silently — results are returned as text."
         )
 
     @property

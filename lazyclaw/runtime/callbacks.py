@@ -43,6 +43,31 @@ class NullCallback:
         return False
 
 
+class MultiCallback:
+    """Forward events to multiple callbacks."""
+
+    def __init__(self, *callbacks: AgentCallback) -> None:
+        self._callbacks = callbacks
+
+    async def on_event(self, event: AgentEvent) -> None:
+        for cb in self._callbacks:
+            try:
+                await cb.on_event(event)
+            except Exception:
+                pass
+
+    async def on_approval_request(
+        self, skill_name: str, arguments: dict
+    ) -> bool:
+        for cb in self._callbacks:
+            try:
+                if await cb.on_approval_request(skill_name, arguments):
+                    return True
+            except Exception:
+                pass
+        return False
+
+
 class CancellationToken:
     """Cooperative cancellation signal for agent operations."""
 

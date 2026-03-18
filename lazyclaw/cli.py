@@ -199,11 +199,19 @@ async def run_agent(config: Config) -> None:
     server = uvicorn.Server(uvi_config)
     tasks.append(server.serve())
 
+    # Server dashboard for terminal visibility
+    from lazyclaw.cli_server import ServerDashboard
+
+    dashboard = ServerDashboard()
+
     telegram = None
     if config.telegram_bot_token:
         from lazyclaw.channels.telegram import TelegramAdapter
 
-        telegram = TelegramAdapter(config.telegram_bot_token, agent, config, lane_queue=lane_queue)
+        telegram = TelegramAdapter(
+            config.telegram_bot_token, agent, config,
+            lane_queue=lane_queue, server_dashboard=dashboard,
+        )
         await telegram.start()
         console.print("[green]\u2713[/green] Telegram bot running")
 
@@ -215,11 +223,21 @@ async def run_agent(config: Config) -> None:
 
     console.print(f"[green]\u2713[/green] API running at http://localhost:{config.port}")
     console.print()
-    console.print("[bold]LazyClaw is live![/bold] Send a message to your Telegram bot.")
-    console.print("[dim]Press Ctrl+C to stop[/dim]")
+
+    from rich.live import Live
+
+    async def _dashboard_loop(live: Live) -> None:
+        """Refresh the dashboard every 0.5s."""
+        while True:
+            live.update(dashboard.render())
+            await asyncio.sleep(0.5)
 
     try:
-        await asyncio.gather(*tasks)
+        with Live(
+            dashboard.render(), console=console, refresh_per_second=2,
+        ) as live:
+            tasks.append(_dashboard_loop(live))
+            await asyncio.gather(*tasks)
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
         await heartbeat.stop()

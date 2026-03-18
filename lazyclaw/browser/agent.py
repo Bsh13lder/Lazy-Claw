@@ -30,6 +30,24 @@ DEFAULT_MAX_STEPS = 20
 HUMANIZE_DELAY = 0.5  # seconds between steps
 
 
+def _make_browser_llm_class():
+    """Lazy-create ChatOpenAI subclass that allows browser-use to set extra attrs."""
+    try:
+        from langchain_openai import ChatOpenAI
+
+        class _BrowserChatOpenAI(ChatOpenAI):
+            """ChatOpenAI with extra='allow' for browser-use compatibility."""
+            model_config = {"extra": "allow"}
+            provider: str = "openai"
+
+        return _BrowserChatOpenAI
+    except ImportError:
+        return None
+
+
+_BrowserChatOpenAI = _make_browser_llm_class()
+
+
 class BrowserAgentManager:
     """Manages browser automation tasks with human-in-the-loop support."""
 
@@ -141,10 +159,13 @@ class BrowserAgentManager:
         """Core agent execution — creates browser-use Agent and runs it."""
         try:
             from browser_use import Agent, Controller
-            from langchain_openai import ChatOpenAI
         except ImportError as exc:
             logger.error("browser-use not installed: %s", exc)
             await self._fail_task(task_id, f"Missing dependency: {exc}")
+            return
+
+        if _BrowserChatOpenAI is None:
+            await self._fail_task(task_id, "Missing dependency: langchain-openai")
             return
 
         key = derive_server_key(self._config.server_secret, user_id)
@@ -319,7 +340,7 @@ class BrowserAgentManager:
             return
 
         try:
-            llm = ChatOpenAI(model=browser_model, api_key=api_key)
+            llm = _BrowserChatOpenAI(model=browser_model, api_key=api_key)
         except Exception as exc:
             await self._fail_task(task_id, f"Failed to create LLM: {exc}")
             return

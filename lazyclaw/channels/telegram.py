@@ -300,11 +300,13 @@ def _is_status_query(text: str) -> bool:
 class TelegramAdapter(ChannelAdapter):
     def __init__(
         self, token: str, agent: Agent, config: Config, lane_queue=None,
+        server_dashboard=None,
     ) -> None:
         self._token = token
         self._agent = agent
         self._config = config
         self._lane_queue = lane_queue
+        self._server_dashboard = server_dashboard
         self._app = None
         # Track active callback per chat for status queries
         self._active_callbacks: dict[str, _TelegramCallback] = {}
@@ -388,14 +390,23 @@ class TelegramAdapter(ChannelAdapter):
         callback = _TelegramCallback(self._app.bot, int(chat_id))
         self._active_callbacks[chat_id] = callback
 
+        # Wrap with server dashboard for terminal visibility
+        effective_cb = callback
+        if self._server_dashboard:
+            self._server_dashboard.register_request(chat_id, text)
+            from lazyclaw.runtime.callbacks import MultiCallback
+            effective_cb = MultiCallback(
+                callback, self._server_dashboard.make_request_cb(chat_id),
+            )
+
         try:
             if self._lane_queue:
                 response = await self._lane_queue.enqueue(
-                    user_id, text, callback=callback,
+                    user_id, text, callback=effective_cb,
                 )
             else:
                 response = await self._agent.process_message(
-                    user_id, text, callback=callback,
+                    user_id, text, callback=effective_cb,
                 )
             if not response or not response.strip():
                 response = "Sorry, I couldn't process that. Please try again."
@@ -427,6 +438,8 @@ class TelegramAdapter(ChannelAdapter):
         finally:
             callback.busy = False
             self._active_callbacks.pop(chat_id, None)
+            if self._server_dashboard:
+                self._server_dashboard.unregister_request(chat_id)
 
     async def _handle_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,

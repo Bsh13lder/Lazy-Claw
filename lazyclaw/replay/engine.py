@@ -101,10 +101,12 @@ async def get_trace_by_token(
 
     # Check expiration
     if expires_at:
-        from datetime import datetime
+        from datetime import datetime, timezone
         try:
             exp = datetime.fromisoformat(expires_at)
-            if datetime.utcnow() > exp:
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > exp:
                 return None
         except ValueError:
             pass

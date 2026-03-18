@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -46,7 +46,7 @@ async def create_share(
     token = secrets.token_urlsafe(32)
     expires_at = None
     if expires_hours is not None:
-        expires_at = (datetime.utcnow() + timedelta(hours=expires_hours)).isoformat()
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).isoformat()
 
     async with db_session(config) as db:
         await db.execute(

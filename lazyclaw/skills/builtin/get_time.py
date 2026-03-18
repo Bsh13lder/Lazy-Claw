@@ -26,19 +26,22 @@ class GetTimeSkill(BaseSkill):
             "properties": {
                 "timezone": {
                     "type": "string",
-                    "description": "IANA timezone name (e.g., 'America/New_York', 'Asia/Tokyo', 'UTC')",
-                    "default": "UTC",
+                    "description": "IANA timezone name (e.g., 'Europe/Paris', 'America/New_York', 'UTC'). Defaults to system local timezone.",
                 },
             },
             "required": [],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        tz_name = params.get("timezone", "UTC")
-        try:
-            tz = ZoneInfo(tz_name)
-        except (KeyError, Exception):
-            return f"Unknown timezone: {tz_name}. Use IANA format like 'America/New_York'."
+        tz_name = params.get("timezone") or None
+        if tz_name is None:
+            tz = datetime.now().astimezone().tzinfo
+            tz_name = str(tz)
+        else:
+            try:
+                tz = ZoneInfo(tz_name)
+            except (KeyError, Exception):
+                return f"Unknown timezone: {tz_name}. Use IANA format like 'America/New_York'."
 
         now = datetime.now(tz)
         return f"Current time in {tz_name}: {now.strftime('%A, %B %d, %Y %I:%M:%S %p %Z')}"

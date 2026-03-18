@@ -65,10 +65,13 @@ RESEARCH_SPECIALIST = SpecialistConfig(
     display_name="Research Specialist",
     system_prompt=(
         "You are a research and information gathering specialist. Your expertise is searching "
-        "the web, reading pages for data, and synthesizing findings into clear summaries. "
-        "Be thorough but concise. Cite sources when possible. Focus on factual accuracy."
+        "the web, reading local files, listing directories, and synthesizing findings into "
+        "clear summaries. For local files use read_file/list_directory, for web use web_search/"
+        "read_page. Be thorough but concise. Cite sources when possible."
     ),
-    allowed_skills=("web_search", "read_page"),
+    allowed_skills=(
+        "web_search", "read_page", "read_file", "list_directory", "run_command",
+    ),
     preferred_model="gpt-5-mini",
     is_builtin=True,
 )

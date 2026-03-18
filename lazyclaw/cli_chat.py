@@ -495,6 +495,8 @@ async def run_chat_loop(
                     # Start threaded input reader (non-blocking)
                     if _input_future is None:
                         if not _input_hint_shown:
+                            if active_callback:
+                                active_callback._stop_spinner()
                             con.print(
                                 "  [dim]\u2500\u2500\u2500 type to "
                                 "add context (Enter to send) "
@@ -515,24 +517,18 @@ async def run_chat_loop(
 
                         stripped = user_text.strip()
                         if stripped:
+                            if active_callback:
+                                active_callback._stop_spinner()
                             if stripped.lower() in ("/cancel", "/stop"):
                                 if active_callback and active_callback.cancel_token:
                                     active_callback.cancel_token.cancel()
                                 agent_task.cancel()
-                                if active_callback:
-                                    active_callback._stop_spinner()
                                 con.print(
                                     "\n  [yellow]Cancelled.[/yellow]"
                                 )
                                 break
                             elif is_status_query(stripped):
-                                if active_callback:
-                                    active_callback._stop_spinner()
                                 con.print(render_dashboard(active_callback))
-                                if active_callback:
-                                    active_callback._start_spinner(
-                                        "  [dim]\u25cf Working...[/dim]"
-                                    )
                             else:
                                 # Side channel — add to merge context
                                 if active_callback:
@@ -542,6 +538,11 @@ async def run_chat_loop(
                                 con.print(
                                     f"  [dim]\u2192 Noted: "
                                     f"{stripped[:60]}[/dim]"
+                                )
+                            # Resume spinner after handling input
+                            if active_callback:
+                                active_callback._start_spinner(
+                                    "  [dim]\u25cf Working...[/dim]"
                                 )
 
                     # Poll agent

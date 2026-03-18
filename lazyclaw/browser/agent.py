@@ -36,9 +36,17 @@ def _make_browser_llm_class():
         from langchain_openai import ChatOpenAI
 
         class _BrowserChatOpenAI(ChatOpenAI):
-            """ChatOpenAI with extra='allow' for browser-use compatibility."""
-            model_config = {"extra": "allow"}
-            provider: str = "openai"
+            """ChatOpenAI that tolerates browser-use setting arbitrary attributes.
+
+            browser-use 0.12+ sets llm.provider and monkey-patches methods.
+            Pydantic v2 models reject unknown attrs, so we fall back to __dict__.
+            """
+
+            def __setattr__(self, name: str, value) -> None:
+                try:
+                    super().__setattr__(name, value)
+                except (ValueError, AttributeError):
+                    self.__dict__[name] = value
 
         return _BrowserChatOpenAI
     except ImportError:
@@ -341,6 +349,8 @@ class BrowserAgentManager:
 
         try:
             llm = _BrowserChatOpenAI(model=browser_model, api_key=api_key)
+            # Pre-set provider so browser-use doesn't crash on attr check
+            llm.__dict__["provider"] = "openai"
         except Exception as exc:
             await self._fail_task(task_id, f"Failed to create LLM: {exc}")
             return

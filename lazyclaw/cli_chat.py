@@ -606,11 +606,17 @@ async def run_chat_loop(
                 # Signal stdin reader thread to exit so prompt_toolkit can take over
                 _stop_side_input.set()
                 if _input_future is not None and not _input_future.done():
+                    # Wait for thread to notice the stop flag (max 0.5s)
                     try:
-                        _input_future.result(timeout=1.0)
-                    except Exception:
+                        await asyncio.wait_for(
+                            asyncio.wrap_future(_input_future),
+                            timeout=0.5,
+                        )
+                    except (asyncio.TimeoutError, Exception):
                         pass
                 _input_future = None
+                # Small delay to ensure thread fully releases stdin
+                await asyncio.sleep(0.1)
 
             agent_task = None
             active_callback = None

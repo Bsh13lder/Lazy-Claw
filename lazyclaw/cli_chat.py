@@ -24,6 +24,18 @@ from lazyclaw.cli_dashboard import render_dashboard
 
 logger = logging.getLogger(__name__)
 
+_STATUS_KEYWORDS = {
+    "what's happening", "whats happening", "what are you doing",
+    "status", "what's going on", "whats going on", "?", "/?",
+    "what is happening", "are you working",
+}
+
+
+def is_status_query(text: str) -> bool:
+    """Check if user input is a status query."""
+    lower = text.lower().strip()
+    return lower in _STATUS_KEYWORDS or lower == "/status"
+
 
 def _read_line_raw() -> str:
     """Read a line from stdin in a thread. Safe alongside Rich output."""

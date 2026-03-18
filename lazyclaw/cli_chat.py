@@ -37,13 +37,24 @@ def is_status_query(text: str) -> bool:
     return lower in _STATUS_KEYWORDS or lower == "/status"
 
 
+import select
+import sys
+import threading
+
+_stop_side_input = threading.Event()
+
+
 def _read_line_raw() -> str:
-    """Read a line from stdin in a thread. Safe alongside Rich output."""
-    import sys
-    try:
-        return sys.stdin.readline()
-    except (EOFError, KeyboardInterrupt):
-        return ""
+    """Read a line from stdin in a thread. Interruptible via _stop_side_input."""
+    _stop_side_input.clear()
+    while not _stop_side_input.is_set():
+        ready, _, _ = select.select([sys.stdin], [], [], 0.3)
+        if ready:
+            try:
+                return sys.stdin.readline()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -592,9 +603,13 @@ async def run_chat_loop(
                         loop.remove_signal_handler(_sig.SIGINT)
                     except (NotImplementedError, OSError):
                         pass
-                # Drain dangling stdin reader so prompt_toolkit can take over
+                # Signal stdin reader thread to exit so prompt_toolkit can take over
+                _stop_side_input.set()
                 if _input_future is not None and not _input_future.done():
-                    _input_future.cancel()
+                    try:
+                        _input_future.result(timeout=1.0)
+                    except Exception:
+                        pass
                 _input_future = None
 
             agent_task = None

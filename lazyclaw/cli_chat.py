@@ -579,6 +579,10 @@ async def run_chat_loop(
                         loop.remove_signal_handler(_sig.SIGINT)
                     except (NotImplementedError, OSError):
                         pass
+                # Drain dangling stdin reader so prompt_toolkit can take over
+                if _input_future is not None and not _input_future.done():
+                    _input_future.cancel()
+                _input_future = None
 
             agent_task = None
             active_callback = None

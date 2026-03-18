@@ -147,6 +147,9 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Claude Code MCP OAuth**: Launches with `ANTHROPIC_API_KEY=""` to use Max subscription.
 - **CancellationToken**: Cooperative cancellation from CLI -> agent -> team lead -> specialists.
 - **ECO mode**: Three tiers (eco/hybrid/full) routing between free and paid AI providers.
+- **Server dashboard**: `lazyclaw start` shows Rich Live dashboard (active requests, activity log, uptime). Events forwarded via `MultiCallback` to both Telegram and terminal.
+- **Side-channel input**: Users can type while agents work (prompt_toolkit async). Messages injected into team lead's merge step.
+- **_BrowserChatOpenAI**: Subclass of ChatOpenAI with `__getattr__`/`__setattr__` overrides for browser-use 0.12+ compatibility (maps `model` -> `model_name`, allows arbitrary attr setting).
 
 ## Git Commit Rules
 

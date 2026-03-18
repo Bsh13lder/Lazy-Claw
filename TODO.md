@@ -338,3 +338,8 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Agent Self-Awareness: ✅ COMPLETE — Context builder injects capabilities (skills, MCP servers, config) into system prompt dynamically. SOUL.md allows proactive tool use. Smart tool routing keywords expanded.
 - Real Chrome Mode: ✅ COMPLETE — CDP client, BrowserBackend ABC (Playwright + CDP coexist), 5 real browser skills, on-demand connection, /connect-browser CLI command
 - NL Job Scheduling: ✅ COMPLETE — 4 job skills (schedule_job, set_reminder, list_jobs, manage_job), one-time reminder support in heartbeat daemon with auto-delete
+- Server Dashboard: ✅ COMPLETE — Rich Live dashboard for `lazyclaw start`, MultiCallback forwarding, activity log, active request tracking
+- CLI Side-Channel: ✅ COMPLETE — prompt_toolkit async input while agents work, side messages injected into team merge
+- Browser-Use Compat: ✅ COMPLETE — _BrowserChatOpenAI with __getattr__/__setattr__ for browser-use 0.12 + langchain-openai 1.1.9
+- Timezone Fix: ✅ COMPLETE — get_time defaults to system local timezone, deprecated utcnow() replaced
+- Research Specialist: ✅ Updated — now has read_file, list_directory, run_command for local file access

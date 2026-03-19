@@ -88,23 +88,20 @@ class CDPBackend(BrowserBackend):
         return self._conn
 
     async def _auto_launch_chrome(self) -> str | None:
-        """Launch headless Chrome with remote debugging. Returns CDP ws_url or None.
+        """Launch headless browser with remote debugging. Returns CDP ws_url or None.
 
-        Uses the shared profile directory (same as Playwright) so cookies
-        and login sessions persist and are shared between both engines.
+        Auto-detects Brave > Chrome > Chromium. Uses the shared profile
+        directory (same as Playwright) so cookies persist between both engines.
         """
         import os
-        import shutil
 
-        chrome_bin = shutil.which("google-chrome") or shutil.which("chromium")
-        if not chrome_bin:
-            # macOS: use Chrome.app
-            mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            if os.path.exists(mac_chrome):
-                chrome_bin = mac_chrome
+        from lazyclaw.config import load_config
+
+        config = load_config()
+        chrome_bin = config.browser_executable
 
         if not chrome_bin:
-            logger.warning("Chrome/Chromium not found, cannot auto-launch")
+            logger.warning("No browser found (Brave/Chrome/Chromium), cannot auto-launch")
             return None
 
         # Use shared profile dir (same as Playwright) for cookie sharing,

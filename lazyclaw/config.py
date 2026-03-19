@@ -37,6 +37,7 @@ class Config:
     cdp_port: int = 9222
     fast_model: str = ""   # Complexity routing: cheap/fast for simple messages
     smart_model: str = ""  # Complexity routing: best for complex analysis
+    browser_executable: str = ""  # Path to browser binary (Brave, Chrome, Chromium)
 
 
 def load_config() -> Config:
@@ -92,7 +93,32 @@ def load_config() -> Config:
         cdp_port=int(os.getenv("CDP_PORT", "9222")),
         fast_model=os.getenv("FAST_MODEL", "") or worker_model,
         smart_model=os.getenv("SMART_MODEL", "") or default_model,
+        browser_executable=os.getenv("BROWSER_EXECUTABLE", "") or _detect_browser(),
     )
+
+
+def _detect_browser() -> str:
+    """Auto-detect best browser: Brave > Chrome > Chromium.
+
+    Brave preferred because built-in ad/tracker blocking = cleaner pages for LLM.
+    """
+    candidates = [
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",  # macOS Brave
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS Chrome
+    ]
+    import shutil
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    # Fall back to system PATH
+    for name in ("brave-browser", "brave", "google-chrome", "chromium"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    return ""  # No browser found — Playwright will use bundled Chromium
 
 
 def save_env(key: str, value: str) -> None:

@@ -70,9 +70,8 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
     # Check if visible Chrome is already on the port
     ws_url = await find_chrome_cdp(port)
     if not ws_url:
-        # Launch visible Chrome
-        mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        chrome_bin = mac_chrome if os.path.exists(mac_chrome) else "google-chrome"
+        # Launch visible browser (Brave > Chrome)
+        chrome_bin = config.browser_executable or "google-chrome"
 
         await asyncio.create_subprocess_exec(
             chrome_bin,

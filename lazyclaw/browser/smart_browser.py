@@ -147,18 +147,24 @@ class SmartBrowser:
         )
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-        # Use system Chrome with persistent profile (cookies shared with CDP)
-        self._context = await pw.chromium.launch_persistent_context(
-            profile_dir,
-            channel="chrome",
-            headless=True,
-            args=[
+        # Use detected browser (Brave > Chrome) with persistent profile
+        launch_kwargs = {
+            "headless": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-gpu",
             ],
-            viewport={"width": 1366, "height": 768},
-            ignore_https_errors=True,
+            "viewport": {"width": 1366, "height": 768},
+            "ignore_https_errors": True,
+        }
+        if self._config.browser_executable:
+            launch_kwargs["executable_path"] = self._config.browser_executable
+        else:
+            launch_kwargs["channel"] = "chrome"
+
+        self._context = await pw.chromium.launch_persistent_context(
+            profile_dir, **launch_kwargs,
         )
         self._browser = pw
 

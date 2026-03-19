@@ -302,14 +302,20 @@ class PageReader:
             if self._config and user_id:
                 profile_dir = Path(self._config.database_dir) / "browser_profiles" / user_id
                 profile_dir.mkdir(parents=True, exist_ok=True)
-                # Use launch_persistent_context with system Chrome
-                # This shares cookies + IndexedDB + localStorage with CDP and SmartBrowser
+                # Use detected browser (Brave > Chrome) with persistent profile
+                # Shares cookies + IndexedDB + localStorage with CDP and SmartBrowser
+                launch_kwargs = {
+                    "headless": True,
+                    "args": ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+                    "ignore_https_errors": True,
+                }
+                if self._config.browser_executable:
+                    launch_kwargs["executable_path"] = self._config.browser_executable
+                else:
+                    launch_kwargs["channel"] = "chrome"
+
                 self._browser_context = await self._pw.chromium.launch_persistent_context(
-                    str(profile_dir),
-                    channel="chrome",
-                    headless=True,
-                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-                    ignore_https_errors=True,
+                    str(profile_dir), **launch_kwargs,
                 )
                 self._browser = None  # persistent context manages its own browser
                 logger.info("PageReader: launched with shared Chrome profile for user %s", user_id)

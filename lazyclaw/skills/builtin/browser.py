@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
 
 
 class BrowseWebSkill(BaseSkill):
@@ -46,8 +49,9 @@ class BrowseWebSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.browser.agent import BrowserAgentManager
-        from lazyclaw.browser.manager import BrowserSessionPool
+        from lazyclaw.browser.smart_browser import SmartBrowser
+        from lazyclaw.llm.eco_router import EcoRouter
+        from lazyclaw.llm.router import LLMRouter
 
         if not self._config:
             return "Error: config not available"
@@ -56,33 +60,22 @@ class BrowseWebSkill(BaseSkill):
         if not instruction:
             return "Error: instruction is required"
 
-        pool = BrowserSessionPool(self._config)
-        manager = BrowserAgentManager(self._config, pool)
+        # Get or create eco_router for SmartBrowser's LLM calls
+        router = LLMRouter(self._config)
+        eco_router = EcoRouter(self._config, router)
 
+        browser = SmartBrowser(self._config, eco_router, user_id)
         try:
-            task_id = await manager.create_task(user_id, instruction)
-            await manager.start_task(task_id)
-
-            # Wait for completion (with timeout)
-            import asyncio
-
-            bg_task = manager._running_tasks.get(task_id)
-            if bg_task:
-                try:
-                    await asyncio.wait_for(bg_task, timeout=300)
-                except asyncio.TimeoutError:
-                    return f"Browser task {task_id} is still running. Check status later."
-
-            task = await manager.get_task(task_id, user_id)
-            if task and task.get("result"):
-                return task["result"]
-            if task and task.get("error"):
-                return f"Browser task failed: {task['error']}"
-            return f"Browser task {task_id} completed."
-        except RuntimeError as exc:
-            return f"Error: {exc}"
+            result = await browser.run(
+                instruction=instruction,
+                max_steps=10,
+            )
+            return result or "Task completed."
+        except Exception as exc:
+            logger.error("browse_web failed: %s", exc)
+            return f"Browser task failed: {exc}"
         finally:
-            await pool.stop()
+            await browser.close()
 
 
 class ReadPageSkill(BaseSkill):

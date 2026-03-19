@@ -662,7 +662,23 @@ class PageReader:
             logger.debug("PageReader: failed to save cookies: %s", exc)
 
     async def close(self, user_id: str | None = None) -> None:
-        """Save cookies and cleanup standalone browser."""
+        """Cleanup standalone browser. Preserves existing cookies if we got fewer.
+
+        launch_persistent_context writes back on close — if the page didn't
+        fully load (e.g. WhatsApp QR), it would overwrite good cookies with
+        bad ones. We back up and restore if needed.
+        """
+        # Back up cookie DB before closing (persistent context overwrites on close)
+        cookie_backup = None
+        if self._config and user_id:
+            from pathlib import Path
+            cookie_db = Path(self._config.database_dir) / "browser_profiles" / user_id / "Default" / "Cookies"
+            if cookie_db.exists():
+                try:
+                    cookie_backup = cookie_db.read_bytes()
+                except Exception:
+                    pass
+
         await self._save_cookies(user_id)
         if self._browser_context:
             try:
@@ -679,6 +695,41 @@ class PageReader:
                 await self._pw.stop()
             except Exception:
                 pass
+
+        # Restore cookie backup if persistent context overwrote with fewer cookies
+        if cookie_backup and self._config and user_id:
+            from pathlib import Path
+            import sqlite3
+
+            cookie_db = Path(self._config.database_dir) / "browser_profiles" / user_id / "Default" / "Cookies"
+            try:
+                # Compare: if new DB has fewer cookies, restore backup
+                new_count = 0
+                if cookie_db.exists():
+                    db = sqlite3.connect(str(cookie_db))
+                    new_count = db.execute("SELECT COUNT(*) FROM cookies").fetchone()[0]
+                    db.close()
+
+                # Count backup
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                    tmp.write(cookie_backup)
+                    tmp.flush()
+                    db = sqlite3.connect(tmp.name)
+                    old_count = db.execute("SELECT COUNT(*) FROM cookies").fetchone()[0]
+                    db.close()
+                    import os
+                    os.unlink(tmp.name)
+
+                if old_count > new_count:
+                    cookie_db.write_bytes(cookie_backup)
+                    logger.info(
+                        "PageReader: restored cookie backup (%d → %d cookies preserved)",
+                        new_count, old_count,
+                    )
+            except Exception as exc:
+                logger.debug("PageReader: cookie restore failed: %s", exc)
+
         self._browser_context = None
         self._browser = None
         self._pw = None

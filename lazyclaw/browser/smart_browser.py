@@ -85,8 +85,13 @@ class SmartBrowser:
         if url:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                # Extra wait for JS-heavy apps like WhatsApp
-                await asyncio.sleep(2)
+                # Wait for JS-heavy apps to load their content
+                host = urlparse(url).hostname or ""
+                if "whatsapp" in host:
+                    # WhatsApp needs time to sync messages from phone
+                    await self._wait_for_whatsapp(page)
+                else:
+                    await asyncio.sleep(2)
             except Exception as exc:
                 logger.warning("Navigation to %s failed: %s", url, exc)
 
@@ -333,6 +338,18 @@ class SmartBrowser:
 
         # Human-like pause
         await asyncio.sleep(random.uniform(0.2, 0.8))
+
+    async def _wait_for_whatsapp(self, page, timeout: int = 30) -> None:
+        """Wait for WhatsApp Web to finish loading chat list."""
+        for i in range(timeout // 2):
+            await asyncio.sleep(2)
+            chats = await page.evaluate(
+                '() => document.querySelectorAll(\'[data-testid="cell-frame-container"]\').length'
+            )
+            if chats > 0:
+                logger.info("WhatsApp loaded: %d chats after %ds", chats, (i + 1) * 2)
+                return
+        logger.warning("WhatsApp chat list did not load within %ds", timeout)
 
     def _extract_url(self, instruction: str) -> str | None:
         """Extract first URL from instruction text."""

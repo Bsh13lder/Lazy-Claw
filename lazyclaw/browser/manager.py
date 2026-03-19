@@ -68,8 +68,11 @@ class PersistentBrowserManager:
         try:
             from browser_use import BrowserProfile
 
+            from browser_use.browser.profile import BrowserChannel
+
             profile = BrowserProfile(
                 headless=True,
+                channel=BrowserChannel.CHROME,  # Use system Chrome (same as CDP) for cookie sharing
                 window_size={"width": vp_width, "height": vp_height},
                 disable_security=True,
                 user_data_dir=str(self.profile_dir),

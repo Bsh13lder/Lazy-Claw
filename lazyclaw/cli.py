@@ -49,6 +49,7 @@ HELP_TEXT = """\
   /history     Recent conversation messages
   /logs        Recent agent activity (tool calls, LLM)
   /usage       Token usage + cost estimate (EUR)
+  /tasks       Background tasks (running + recent)
   /doctor      Health check (DB, AI, MCP, encryption)
 
 [bold]Settings:[/bold]
@@ -183,6 +184,22 @@ async def run_agent(config: Config) -> None:
     await lane_queue.start()
     console.print("[green]\u2713[/green] Lane queue started")
 
+    # Background task runner (parallel execution)
+    from lazyclaw.runtime.task_runner import TaskRunner
+
+    task_runner = TaskRunner(
+        config=config, router=router, registry=registry,
+        eco_router=agent.eco_router,
+        permission_checker=permission_checker,
+    )
+
+    # Register run_background skill
+    from lazyclaw.skills.builtin.background import RunBackgroundSkill
+
+    bg_skill = RunBackgroundSkill(config=config)
+    bg_skill._task_runner = task_runner
+    registry.register(bg_skill)
+
     from lazyclaw.gateway.app import set_lane_queue
     set_lane_queue(lane_queue)
 
@@ -240,6 +257,7 @@ async def run_agent(config: Config) -> None:
             await asyncio.gather(*tasks)
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
+        await task_runner.cancel_all()
         await heartbeat.stop()
         if telegram:
             await telegram.stop()
@@ -319,6 +337,7 @@ async def _handle_slash_command(
         "/compression": lambda: show_compression(config, user_id),
         "/logs": lambda: show_logs(config, user_id),
         "/usage": lambda: _show_usage(config),
+        "/tasks": lambda: _show_tasks(task_runner, user_id),
         "/doctor": lambda: run_doctor(config, user_id),
         "/install-mcps": lambda: _install_mcps(),
         "/installmcps": lambda: _install_mcps(),
@@ -612,6 +631,47 @@ async def _run_update() -> None:
         console.print(f"  [yellow]Restart the CLI to use the new version.[/yellow]")
     else:
         console.print("  [dim]No version change. Code updates are live (editable install).[/dim]")
+
+
+async def _show_tasks(runner, user_id: str) -> None:
+    """Show background tasks (running + recent)."""
+    from rich.table import Table
+
+    running = runner.list_running(user_id)
+    recent = await runner.list_all(user_id, limit=10)
+
+    if not running and not recent:
+        console.print("  [dim]No background tasks.[/dim]")
+        return
+
+    if running:
+        table = Table(title="Running Background Tasks", style="cyan")
+        table.add_column("ID", width=8)
+        table.add_column("Name")
+        table.add_column("Elapsed", justify="right")
+
+        for t in running:
+            table.add_row(t["id"][:8], t["name"], t["elapsed"])
+        console.print(table)
+        console.print()
+
+    if recent:
+        table = Table(title="Recent Tasks", style="dim")
+        table.add_column("ID", width=8)
+        table.add_column("Name")
+        table.add_column("Status")
+        table.add_column("Error")
+
+        for t in recent:
+            status_style = {
+                "done": "[green]done[/green]",
+                "failed": "[red]failed[/red]",
+                "cancelled": "[yellow]cancelled[/yellow]",
+                "running": "[cyan]running[/cyan]",
+            }.get(t["status"], t["status"])
+            error = (t.get("error") or "")[:40]
+            table.add_row(t["id"][:8], t["name"] or "—", status_style, error)
+        console.print(table)
 
 
 async def _show_usage(config: Config) -> None:

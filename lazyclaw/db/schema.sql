@@ -306,3 +306,21 @@ CREATE TABLE IF NOT EXISTS trace_shares (
     expires_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Background Tasks (parallel execution)
+
+CREATE TABLE IF NOT EXISTS background_tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT,
+    instruction TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    result TEXT,
+    error TEXT,
+    timeout INTEGER DEFAULT 300,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bg_tasks_user_status
+ON background_tasks(user_id, status);

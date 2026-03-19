@@ -315,6 +315,20 @@ class _TelegramCallback:
                 text = f"\u274c {name} \u2014 {str(error)[:60]}"
             asyncio.create_task(self._send_permanent(text))
 
+        elif kind == "background_done":
+            task_name = event.metadata.get("name", "")
+            result = event.metadata.get("result", "")
+            if len(result) > 3000:
+                result = result[:3000] + "\n\n[truncated]"
+            text = f"\u2705 Background task '{task_name}' done\n\n{result}"
+            asyncio.create_task(self._send_permanent(text))
+
+        elif kind == "background_failed":
+            task_name = event.metadata.get("name", "")
+            error = event.metadata.get("error", "unknown error")
+            text = f"\u274c Background task '{task_name}' failed: {error[:200]}"
+            asyncio.create_task(self._send_permanent(text))
+
         elif kind == "work_summary":
             # Delete status message first to avoid duplicate info
             await self._delete_status()

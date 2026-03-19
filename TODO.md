@@ -351,10 +351,13 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Complexity Model Routing: ✅ COMPLETE — NanoClaw-inspired tier routing (simple→fast_model, standard→default, complex→smart_model), regex classifier in eco_router, no extra LLM calls
 - Delegate Tool: ✅ COMPLETE — Replaces team lead LLM analysis call, agent calls delegate(specialist, instruction) naturally, parallel dispatch via asyncio.gather, saves 1-2 LLM calls per delegation
 - Specialists Streamlined: ✅ Updated — Dropped memory_specialist (redundant), 3 built-ins: browser, research, code
-- Browser Architecture: ✅ COMPLETE — Headless Chrome auto-launch, shared cookie profile (browser_profiles/{user_id}), visible=true for user-facing tasks, human-like random delays (0.2-1.5s), auto-tab creation, browse_web primary for interactive sites
+- Browser Architecture: ✅ COMPLETE — Brave auto-detect (Brave > Chrome > Chromium), shared profile (browser_profiles/{user_id}), headless auto-launch, visible=true for QR scans, human-like delays (0.2-1.5s)
+- SmartBrowser: ✅ COMPLETE — Own agentic loop replacing browser-use Agent. PageReader JS extractors + DOM optimizer + gpt-5-mini. Works on WhatsApp, complex React sites. Parallel-capable via Playwright.
+- Shared Browser Profiles: ✅ COMPLETE — CDP + PageReader + SmartBrowser all use launch_persistent_context with system browser. Login once → all tools see cookies + IndexedDB + localStorage.
 - Background Task Runner: ✅ COMPLETE — TaskRunner class, run_background skill, parallel agent execution (max 5 global, 2 per user), Telegram push notifications, /tasks CLI command, DB-backed state
-- Smart Tool Selection: ✅ COMPLETE — Per-message category detection (browser/computer/skills/vault/jobs/admin), 70-88% token reduction, GPT-5 responds 3-5x faster
-- Dead Code Cleanup: ✅ COMPLETE — Removed MEMORY_SPECIALIST constant, _estimate_session_cost function, deprecated TeamLead class (replaced by delegate tool)
+- Smart Tool Selection: ✅ COMPLETE — Per-message category detection (browser/computer/skills/vault/jobs/admin), 70-88% token reduction
+- Cost-Aware Routing: ✅ COMPLETE — gpt-5-mini default for ALL non-complex tasks (80% cost reduction). Only analyze/compare/debug triggers GPT-5.
+- Dead Code Cleanup: ✅ COMPLETE — Removed MEMORY_SPECIALIST constant, _estimate_session_cost function, deprecated TeamLead class
 - Telegram Security: ✅ COMPLETE — Admin chat lock (first /start claims admin), unauthorized chats blocked, channel context injected for screenshots
 - Telegram Screenshots: ✅ COMPLETE — ToolResult+Attachment dataclass, see_browser returns PNG, _TelegramCallback sends photos via send_photo, retry on network errors
 - Telegram UI: ✅ Updated — Permanent messages for tool/specialist completions, stats footer, retry logic with backoff

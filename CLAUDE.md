@@ -140,13 +140,14 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
 - **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
 - **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
-- **Complexity routing**: NanoClaw-inspired model tier selection (simple→fast_model, standard→default, complex→smart_model).
+- **Cost-aware routing**: gpt-5-mini for ALL non-complex tasks (80% cheaper). Only "analyze/compare/debug" triggers GPT-5.
+- **SmartBrowser**: Own agentic loop replacing browser-use Agent. PageReader JS extractors + DOM optimizer + gpt-5-mini decisions.
+- **Brave browser**: Auto-detected (Brave > Chrome > Chromium). Built-in ad/tracker blocking = cleaner pages for LLM.
 - **Fast chat path**: Simple messages get last 6 messages, SOUL.md only (no capabilities/memories/tools).
 - **Layered summaries**: Daily logs (auto, gpt-5-mini) + weekly + injected into agent context. Skips 90s LLM re-summarization.
-- **Shared browser profiles**: CDP Chrome + Playwright use same `browser_profiles/{user_id}/` directory. Cookies shared.
-- **Headless auto-launch**: CDP Chrome launches headless automatically. `visible=true` param for user-facing tasks (QR scans).
+- **Shared browser profiles**: CDP + PageReader + SmartBrowser all use `browser_profiles/{user_id}/` with system browser. Login once → all tools see it.
+- **Headless auto-launch**: Brave/Chrome launches headless automatically. `visible=true` param for user-facing tasks (QR scans).
 - **Human-like delays**: Random 0.2-1.5s between clicks, 0.03-0.12s typing, 0.8-1.5s navigation.
-- **Browser cost tiers**: PageReader (~$0.001/page) for reading, full Agent (~$0.30) for interaction.
 - **Semantic Snapshots**: Accessibility tree text (50KB) instead of screenshots (5MB).
 - **MCP bridge**: External MCP tools registered as first-class skills. No separate path.
 - **MCP parallel startup**: `asyncio.gather` connects all MCP servers simultaneously (~2s instead of 12s).

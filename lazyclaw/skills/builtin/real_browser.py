@@ -439,20 +439,12 @@ class BrowserActionSkill(BaseSkill):
                     "enum": ["up", "down"],
                     "description": "Scroll direction (default: down)",
                 },
-                "visible": {
-                    "type": "boolean",
-                    "description": "Set true ONLY when user asks to SEE the browser on their screen (e.g. 'show me', 'open on my screen', 'I want to scan QR'). Default false (headless).",
-                },
             },
             "required": ["action"],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        visible = params.get("visible", False)
-        if visible:
-            backend = await _get_visible_cdp_backend(user_id)
-        else:
-            backend = await _get_cdp_backend(user_id)
+        backend = await _get_cdp_backend(user_id)
         action = params.get("action", "")
 
         try:

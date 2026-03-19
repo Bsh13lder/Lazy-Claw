@@ -63,7 +63,10 @@ class MultiCallback:
             try:
                 await cb.on_event(event)
             except Exception:
-                pass
+                _null_logger.debug(
+                    "MultiCallback: %s.on_event(%s) failed",
+                    type(cb).__name__, event.kind, exc_info=True,
+                )
 
     async def on_approval_request(
         self, skill_name: str, arguments: dict

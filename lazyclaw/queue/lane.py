@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable
@@ -16,7 +17,9 @@ class Job:
     user_id: str
     message: str
     kwargs: dict = field(default_factory=dict)
-    result_future: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
+    result_future: concurrent.futures.Future = field(
+        default_factory=concurrent.futures.Future, repr=False,
+    )
 
 
 class LaneQueue:
@@ -42,7 +45,10 @@ class LaneQueue:
         lane = self._get_lane(user_id)
         await lane.put(job)
         logger.debug("Enqueued job for user %s (queue size: %d)", user_id, lane.qsize())
-        return await job.result_future
+
+        # Await thread-safe future from async context
+        loop = asyncio.get_running_loop()
+        return await asyncio.wrap_future(job.result_future, loop=loop)
 
     def _get_lane(self, user_id: str) -> asyncio.Queue[Job]:
         """Get or create a lane for a user."""
@@ -71,7 +77,9 @@ class LaneQueue:
 
             try:
                 result = await self._handler(job.user_id, job.message, **job.kwargs)
-                job.result_future.set_result(result)
+                logger.debug("Job completed for user %s (result_len=%d)", user_id, len(result or ""))
+                if not job.result_future.done():
+                    job.result_future.set_result(result)
             except Exception as e:
                 logger.error("Job failed for user %s: %s", user_id, e, exc_info=True)
                 if not job.result_future.done():

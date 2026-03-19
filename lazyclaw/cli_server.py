@@ -32,6 +32,13 @@ class _ActiveRequest:
     tools_used: list[str] = field(default_factory=list)
     specialists: dict[str, str] = field(default_factory=dict)  # name -> status
     specialist_count_done: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    step_current: int = 0
+    step_total: int = 0
+    trigger: str = "user"
+    delegate_to: str = ""
 
 
 @dataclass(frozen=True)

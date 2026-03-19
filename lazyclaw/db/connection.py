@@ -65,6 +65,7 @@ async def db_session(config: Config) -> AsyncIterator[aiosqlite.Connection]:
         db = await aiosqlite.connect(db_path)
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         _pool[db_path] = db
         logger.debug("Opened persistent DB connection: %s", db_path)
 

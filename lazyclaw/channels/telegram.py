@@ -541,11 +541,12 @@ class TelegramAdapter(ChannelAdapter):
         # and can send photos/messages to this chat
         channel_hint = (
             f"\n\n[Channel: Telegram | Chat ID: {chat_id} | "
-            f"You can send images via see_browser — screenshots are auto-forwarded to this chat.]"
+            f"You can send images via browser(action=\"screenshot\") — screenshots are auto-forwarded to this chat.]"
         )
         enriched_text = text + channel_hint
 
         try:
+            logger.debug("Telegram: awaiting agent response for chat %s", chat_id)
             if self._lane_queue:
                 response = await self._lane_queue.enqueue(
                     user_id, enriched_text, callback=effective_cb,
@@ -554,6 +555,7 @@ class TelegramAdapter(ChannelAdapter):
                 response = await self._agent.process_message(
                     user_id, enriched_text, callback=effective_cb,
                 )
+            logger.debug("Telegram: got response for chat %s (len=%d)", chat_id, len(response or ""))
             if not response or not response.strip():
                 response = "Sorry, I couldn't process that. Please try again."
             logger.info(
@@ -574,6 +576,7 @@ class TelegramAdapter(ChannelAdapter):
                     await _telegram_send_with_retry(
                         lambda c=chunk: update.message.reply_text(c)
                     )
+            logger.debug("Telegram: reply sent to chat %s", chat_id)
         except Exception as e:
             logger.error(
                 "Telegram handler error for chat %s: %s",

@@ -8,6 +8,7 @@ and admin input — all while running FastAPI + Telegram + Heartbeat.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -24,9 +25,21 @@ from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from lazyclaw.cli_server import _ActiveRequest
 from lazyclaw.config import Config
+from lazyclaw.llm.pricing import calculate_cost
 from lazyclaw.runtime.callbacks import AgentEvent
 
 logger = logging.getLogger(__name__)
+
+# ── Color palette ─────────────────────────────────────────────────
+_C_BORDER = "#6B7280"
+_C_HEADER = "#F59E0B"
+_C_ACTIVE = "#14B8A6"
+_C_SUCCESS = "#84CC16"
+_C_ERROR = "#F87171"
+_C_THINKING = "#FBBF24"
+_C_IDLE = "#9CA3AF"
+_C_COST = "#34D399"
+_C_SPECIALIST = "#A78BFA"
 
 
 # ── Data models ──────────────────────────────────────────────────────
@@ -43,6 +56,13 @@ class RequestSnapshot:
     tools_used: tuple[str, ...]
     specialists: tuple[tuple[str, str], ...]  # ((name, status), ...)
     elapsed_s: float
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    step_current: int = 0
+    step_total: int = 0
+    trigger: str = "user"
+    delegate_to: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,6 +79,46 @@ class SystemStats:
     browser_alive: bool
     mcp_count: int
     memory_mb: float
+    total_cost_today: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    cost_by_model: dict[str, float] = field(default_factory=dict)
+    browser_tabs: int = 0
+    telegram_status: str = "disconnected"
+
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+def _now() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _fmt_tokens(n: int) -> str:
+    """Format token count: 1200 → '1.2K', 800 → '800'."""
+    if n >= 1000:
+        return f"{n / 1000:.1f}K"
+    return str(n)
+
+
+def _fmt_cost(c: float) -> str:
+    """Format cost as $0.003."""
+    if c < 0.001:
+        return f"${c:.4f}"
+    return f"${c:.3f}"
+
+
+def _phase_icon(phase: str) -> tuple[str, str]:
+    """Return (icon, color) for a phase."""
+    return {
+        "thinking": ("●", _C_THINKING),
+        "tool": ("◆", "#60A5FA"),
+        "team": ("◆", _C_SPECIALIST),
+        "merging": ("◆", _C_SPECIALIST),
+        "streaming": ("●", _C_ACTIVE),
+        "queued": ("○", _C_IDLE),
+        "done": ("✓", _C_SUCCESS),
+        "error": ("✗", _C_ERROR),
+    }.get(phase, ("○", _C_IDLE))
 
 
 # ── Textual Messages ────────────────────────────────────────────────
@@ -112,6 +172,11 @@ class TuiDashboard:
         self._active: dict[str, _ActiveRequest] = {}
         self._total_processed: int = 0
         self._started: float = time.monotonic()
+        # Global token/cost accumulators
+        self._total_tokens_in: int = 0
+        self._total_tokens_out: int = 0
+        self._total_cost_today: float = 0.0
+        self._cost_by_model: dict[str, float] = {}
 
     def make_request_cb(self, chat_id: str) -> _TuiRequestCallback:
         return _TuiRequestCallback(self, chat_id)
@@ -129,9 +194,10 @@ class TuiDashboard:
         if req:
             elapsed = time.monotonic() - req.started
             tools = len(req.tools_used)
+            cost_str = _fmt_cost(req.cost_usd)
             self._app.post_message(RequestCompleted(
                 chat_id,
-                f'"{req.message[:30]}" {elapsed:.1f}s {tools} tools',
+                f'"{req.message[:30]}" {elapsed:.1f}s {tools} tools {cost_str}',
             ))
 
     def handle_event(self, chat_id: str, event: AgentEvent) -> None:
@@ -146,6 +212,37 @@ class TuiDashboard:
             req.phase = "thinking"
             req.model = event.metadata.get("model", "?")
             req.iteration = event.metadata.get("iteration", 1)
+            req.step_current = event.metadata.get("iteration", 1)
+            req.step_total = event.metadata.get("max_iterations", 0)
+            cost_usd = event.metadata.get("cost_usd", 0.0)
+            if cost_usd:
+                req.cost_usd += cost_usd
+                self._total_cost_today += cost_usd
+                model = event.metadata.get("model", "unknown")
+                self._cost_by_model[model] = self._cost_by_model.get(model, 0.0) + cost_usd
+
+        elif kind == "tokens":
+            # Token usage event from agent runtime
+            prompt = event.metadata.get("prompt", 0)
+            completion = event.metadata.get("completion", 0)
+            model = event.metadata.get("model", "unknown")
+
+            req.tokens_in += prompt
+            req.tokens_out += completion
+            self._total_tokens_in += prompt
+            self._total_tokens_out += completion
+
+            # Calculate cost
+            cost = calculate_cost(model, prompt, completion)
+            req.cost_usd += cost
+            self._total_cost_today += cost
+            self._cost_by_model[model] = self._cost_by_model.get(model, 0.0) + cost
+
+            # Log LLM call with token info
+            self._app.post_message(LogAppended(
+                _now(), "llm",
+                f"{model}  ↑{_fmt_tokens(prompt)} ↓{_fmt_tokens(completion)} = {_fmt_cost(cost)}",
+            ))
 
         elif kind == "tool_call":
             req.phase = "tool"
@@ -165,6 +262,7 @@ class TuiDashboard:
 
         elif kind == "specialist_start":
             name = event.metadata.get("specialist", "?")
+            req.delegate_to = name
             if name in req.specialists:
                 req.specialists[name] = "running"
             self._app.post_message(LogAppended(_now(), "spec", f"{name} started"))
@@ -180,6 +278,7 @@ class TuiDashboard:
             if name in req.specialists:
                 req.specialists[name] = "done" if success else "error"
             req.specialist_count_done += 1
+            req.delegate_to = ""
 
         elif kind == "team_merge":
             req.phase = "merging"
@@ -210,6 +309,13 @@ class TuiDashboard:
             tools_used=tuple(req.tools_used),
             specialists=tuple(req.specialists.items()),
             elapsed_s=time.monotonic() - req.started,
+            tokens_in=req.tokens_in,
+            tokens_out=req.tokens_out,
+            cost_usd=req.cost_usd,
+            step_current=req.step_current,
+            step_total=req.step_total,
+            trigger=req.trigger,
+            delegate_to=req.delegate_to,
         )
 
     @property
@@ -223,6 +329,22 @@ class TuiDashboard:
     @property
     def uptime_s(self) -> int:
         return int(time.monotonic() - self._started)
+
+    @property
+    def total_tokens_in(self) -> int:
+        return self._total_tokens_in
+
+    @property
+    def total_tokens_out(self) -> int:
+        return self._total_tokens_out
+
+    @property
+    def total_cost_today(self) -> float:
+        return self._total_cost_today
+
+    @property
+    def cost_by_model(self) -> dict[str, float]:
+        return dict(self._cost_by_model)
 
 
 class _TuiRequestCallback:
@@ -244,62 +366,134 @@ class _TuiRequestCallback:
 # ── Widgets ─────────────────────────────────────────────────────────
 
 class SystemBar(Static):
-    """Top bar showing system stats."""
+    """Top bar showing cost + tokens + active agents."""
 
     def update_stats(self, stats: SystemStats) -> None:
-        hours, rem = divmod(stats.uptime_s, 3600)
-        minutes, secs = divmod(rem, 60)
-        up = f"{hours}h{minutes}m" if hours else f"{minutes}m{secs}s"
-
-        browser_icon = "ok" if stats.browser_alive else "--"
-        browser = f"{stats.browser_mode}({browser_icon})"
-
-        active_style = "green" if stats.active_count == 0 else "yellow"
+        cost = _fmt_cost(stats.total_cost_today)
+        t_in = _fmt_tokens(stats.total_tokens_in)
+        t_out = _fmt_tokens(stats.total_tokens_out)
+        active_color = _C_ACTIVE if stats.active_count > 0 else _C_IDLE
 
         self.update(Text.from_markup(
-            f" Up:[bold]{up}[/bold]"
-            f"  Done:[bold]{stats.total_processed}[/bold]"
-            f"  Active:[{active_style}]{stats.active_count}[/{active_style}]"
-            f"  Q:[bold]{stats.queue_depth}[/bold]"
-            f"  Cron:[bold]{stats.cron_jobs}[/bold]"
-            f"  Watch:[bold]{stats.watchers}[/bold]"
-            f"  Browser:[bold]{browser}[/bold]"
-            f"  MCP:[bold]{stats.mcp_count}[/bold]"
-            f"  Mem:[bold]{stats.memory_mb:.0f}MB[/bold]"
+            f" [{_C_COST}]{cost} today[/{_C_COST}]"
+            f"  │  ↑{t_in} ↓{t_out} tokens"
+            f"  │  [{active_color}]{stats.active_count} active[/{active_color}]"
+            f"  │  Q:{stats.queue_depth}"
+            f"  │  Mem:{stats.memory_mb:.0f}MB"
         ))
 
 
 class RequestCard(Static):
-    """Displays a single active request's live state."""
+    """Displays a single active request's live state.
+
+    ╭─ #1 "check my whatsapp" ─────────────────╮
+    │ ● thinking  gpt-5-mini  step 2            │
+    │ ████████░░░░ 3/7 steps                    │
+    │ Tools: browser, memory                    │
+    │ ↑4.2K ↓1.1K  $0.003  24.1s               │
+    ╰──────────────────────────────────────────╯
+    """
+
+    _counter: int = 0
 
     def __init__(self, chat_id: str, message: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self._chat_id = chat_id
         self._message = message
-        self.update(Text.from_markup(f'  [bold]"{message}"[/bold]\n  [dim]queued...[/dim]'))
+        RequestCard._counter += 1
+        self._number = RequestCard._counter
+        self.update(self._render_initial())
+
+    def _render_initial(self) -> Text:
+        return Text.from_markup(
+            f"[{_C_BORDER}]╭─[/{_C_BORDER}] [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
+            f' "{self._message}"\n'
+            f"[{_C_BORDER}]│[/{_C_BORDER}] [{_C_IDLE}]○ queued...[/{_C_IDLE}]\n"
+            f"[{_C_BORDER}]╰{'─' * 44}╯[/{_C_BORDER}]"
+        )
 
     def update_snapshot(self, snap: RequestSnapshot) -> None:
+        icon, color = _phase_icon(snap.phase)
         elapsed = f"{snap.elapsed_s:.1f}s"
-        phase_text = _format_phase_markup(snap)
-        tools = ", ".join(snap.tools_used[-4:]) if snap.tools_used else ""
+        t_in = _fmt_tokens(snap.tokens_in)
+        t_out = _fmt_tokens(snap.tokens_out)
+        cost = _fmt_cost(snap.cost_usd)
 
-        lines = [f'  [bold]"{snap.message}"[/bold]']
-        lines.append(f"  {phase_text}  [dim]{elapsed}[/dim]")
+        # Header
+        lines = [
+            f"[{_C_BORDER}]╭─[/{_C_BORDER}]"
+            f" [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
+            f' "{snap.message}"'
+        ]
 
-        if tools:
-            lines.append(f"  [dim]Tools: {tools}[/dim]")
+        # Phase line
+        phase_label = snap.phase
+        model_str = f"  {snap.model}" if snap.model else ""
+        step_str = f"  step {snap.step_current}" if snap.step_current else ""
+        lines.append(
+            f"[{_C_BORDER}]│[/{_C_BORDER}]"
+            f" [{color}]{icon} {phase_label}[/{color}]{model_str}{step_str}"
+        )
+
+        # Delegate chain
+        if snap.delegate_to:
+            lines.append(
+                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f" [{_C_SPECIALIST}]● delegate → {snap.delegate_to}[/{_C_SPECIALIST}]"
+            )
+
+        # Progress bar when step_total > 0
+        if snap.step_total > 0:
+            filled = min(snap.step_current, snap.step_total)
+            bar_width = 16
+            filled_chars = int(bar_width * filled / snap.step_total)
+            empty_chars = bar_width - filled_chars
+            bar = "█" * filled_chars + "░" * empty_chars
+            lines.append(
+                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f" [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
+                f" {filled}/{snap.step_total} steps"
+            )
+
+        # Tools
+        if snap.tools_used:
+            unique_tools = list(dict.fromkeys(snap.tools_used[-6:]))
+            tools_str = ", ".join(unique_tools)
+            lines.append(
+                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f" [dim]Tools: {tools_str}[/dim]"
+            )
 
         # Specialist grid
         if snap.specialists:
             spec_parts = []
             for name, status in snap.specialists:
-                icon = {"queued": ">>", "running": "~~", "done": "ok", "error": "!!"}
-                style = {"queued": "dim", "running": "cyan", "done": "green", "error": "red"}
-                spec_parts.append(
-                    f"[{style.get(status, 'dim')}]"
-                    f"{icon.get(status, '??')} {name}[/{style.get(status, 'dim')}]"
-                )
-            lines.append("  " + "  ".join(spec_parts))
+                s_icon, s_color = {
+                    "queued": ("○", _C_IDLE),
+                    "running": ("●", _C_ACTIVE),
+                    "done": ("✓", _C_SUCCESS),
+                    "error": ("✗", _C_ERROR),
+                }.get(status, ("○", _C_IDLE))
+                spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
+            lines.append(
+                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f"  {'  '.join(spec_parts)}"
+            )
+
+        # Token/cost/time line
+        trigger_badge = ""
+        if snap.trigger != "user":
+            trigger_badge = f" [{_C_SPECIALIST}][{snap.trigger}][/{_C_SPECIALIST}]"
+        lines.append(
+            f"[{_C_BORDER}]│[/{_C_BORDER}]"
+            f" ↑{t_in} ↓{t_out}"
+            f"  [{_C_COST}]{cost}[/{_C_COST}]"
+            f"  [dim]{elapsed}[/dim]"
+            f"{trigger_badge}"
+        )
+
+        # Footer
+        lines.append(f"[{_C_BORDER}]╰{'─' * 44}╯[/{_C_BORDER}]")
 
         self.update(Text.from_markup("\n".join(lines)))
 
@@ -311,7 +505,7 @@ class ActivityPanel(VerticalScroll):
 
     def on_mount(self) -> None:
         self._empty_label = Static(
-            Text("  Waiting for messages...", style="dim italic"),
+            Text.from_markup(f"  [{_C_IDLE}]No active agents[/{_C_IDLE}]"),
             id="empty-label",
         )
         self.mount(self._empty_label)
@@ -340,14 +534,14 @@ class ActivityPanel(VerticalScroll):
         # Restore empty label if no cards left
         if not self.query(RequestCard):
             self._empty_label = Static(
-                Text("  Waiting for messages...", style="dim italic"),
+                Text.from_markup(f"  [{_C_IDLE}]No active agents[/{_C_IDLE}]"),
                 id="empty-label",
             )
             self.mount(self._empty_label)
 
 
 class LogPanel(RichLog):
-    """Scrollable system log."""
+    """Scrollable activity feed with token/cost info on LLM entries."""
 
     def append_entry(self, timestamp: str, kind: str, detail: str) -> None:
         style = _log_style(kind)
@@ -355,6 +549,76 @@ class LogPanel(RichLog):
         self.write(Text.from_markup(
             f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {detail}"
         ))
+
+
+class ServicesPanel(Static):
+    """Shows connected services status, updated every 2s."""
+
+    def render_services(
+        self,
+        telegram_status: str = "disconnected",
+        api_port: int = 18789,
+        browser_alive: bool = False,
+        browser_tabs: int = 0,
+        cron_jobs: int = 0,
+        watchers: int = 0,
+        mcp_count: int = 0,
+        mcp_tools: int = 0,
+    ) -> None:
+        def _dot(ok: bool, degraded: bool = False) -> str:
+            if ok:
+                return f"[{_C_SUCCESS}]●[/{_C_SUCCESS}]"
+            if degraded:
+                return f"[{_C_THINKING}]●[/{_C_THINKING}]"
+            return f"[{_C_ERROR}]●[/{_C_ERROR}]"
+
+        tg_ok = telegram_status == "connected"
+        lines = [
+            f"{_dot(tg_ok)} Telegram   {telegram_status}",
+            f"{_dot(True)} API        :{api_port}     ok",
+            f"{_dot(browser_alive)} Brave CDP  {browser_tabs} tabs",
+            f"{_dot(cron_jobs > 0 or watchers > 0, degraded=True)} Heartbeat  {cron_jobs} cron  {watchers} watcher",
+            f"{_dot(mcp_count > 0)} MCP        {mcp_count} ok    {mcp_tools} tools",
+        ]
+        self.update(Text.from_markup("\n".join(lines)))
+
+
+class CostBar(Static):
+    """Per-model cost breakdown with horizontal bars."""
+
+    def render_costs(
+        self,
+        cost_by_model: dict[str, float],
+        total_cost: float,
+        budget: float = 5.0,
+    ) -> None:
+        if not cost_by_model and total_cost == 0:
+            self.update(Text.from_markup(f"[{_C_IDLE}]No costs yet[/{_C_IDLE}]"))
+            return
+
+        parts: list[str] = []
+        for model, cost in sorted(cost_by_model.items(), key=lambda x: -x[1]):
+            pct = (cost / total_cost * 100) if total_cost > 0 else 0
+            bar_width = 20
+            filled = int(bar_width * pct / 100)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            parts.append(
+                f"{model} [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
+                f" [{_C_COST}]{_fmt_cost(cost)}[/{_C_COST}] ({pct:.0f}%)"
+            )
+
+        # Budget line
+        budget_pct = (total_cost / budget * 100) if budget > 0 else 0
+        bw = 20
+        bf = min(int(bw * budget_pct / 100), bw)
+        budget_bar = "█" * bf + "░" * (bw - bf)
+        budget_color = _C_SUCCESS if budget_pct < 50 else (_C_THINKING if budget_pct < 80 else _C_ERROR)
+        parts.append(
+            f"Budget: [{_C_COST}]{_fmt_cost(total_cost)}[/{_C_COST}] / {_fmt_cost(budget)}"
+            f"  [{budget_color}]{budget_bar}[/{budget_color}] {budget_pct:.1f}%"
+        )
+
+        self.update(Text.from_markup("  │  ".join(parts[:2]) + "\n" + parts[-1] if len(parts) > 1 else "\n".join(parts)))
 
 
 # ── Main App ────────────────────────────────────────────────────────
@@ -366,7 +630,7 @@ class LazyClawApp(App):
     Screen {
         layout: grid;
         grid-size: 2;
-        grid-columns: 3fr 1fr;
+        grid-columns: 3fr 2fr;
         grid-rows: 3 1fr 3;
     }
 
@@ -389,6 +653,15 @@ class LazyClawApp(App):
         border: solid $success;
     }
 
+    #cost-bar {
+        column-span: 2;
+        height: 3;
+        background: $surface;
+        border: solid $primary;
+        content-align: left middle;
+        padding: 0 1;
+    }
+
     #admin-input {
         column-span: 2;
         dock: bottom;
@@ -404,6 +677,10 @@ class LazyClawApp(App):
     TITLE = "LazyClaw Server"
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
+        Binding("slash", "focus_filter", "/Filter"),
+        Binding("tab", "focus_next", "Next Panel"),
+        Binding("1", "focus_agents", "Agents"),
+        Binding("2", "focus_logs", "Logs"),
     ]
 
     def __init__(
@@ -428,24 +705,41 @@ class LazyClawApp(App):
         self._permission_checker = permission_checker
         self._user_id = default_user_id
         self.dashboard = TuiDashboard(self)
+        self._eco_budget: float = 5.0
+        self._telegram_connected: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield SystemBar(" Starting...", id="system-bar")
         yield ActivityPanel(id="activity-panel")
         yield LogPanel(id="log-panel", highlight=True, markup=True)
+        yield CostBar("", id="cost-bar")
         yield Input(placeholder="Type message or /command...", id="admin-input")
         yield Footer()
 
     def on_mount(self) -> None:
         """Launch all services as background workers."""
-        self._post_log("info", "LazyClaw TUI starting...")
-        self._launch_services()
-        self.set_interval(2.0, self._refresh_stats)
+        try:
+            self._post_log("info", "LazyClaw TUI starting...")
+            self._launch_services()
+            self.set_interval(2.0, self._refresh_stats)
+        except Exception as exc:
+            logger.exception("on_mount FAILED: %s", exc)
+
+    @work(exclusive=True, name="eco-budget")
+    async def _load_eco_budget(self) -> None:
+        """Load ECO budget from user settings."""
+        try:
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            eco = await get_eco_settings(self._config, self._user_id)
+            self._eco_budget = eco.get("monthly_paid_budget", 5.0) or 5.0
+        except Exception:
+            pass
 
     @work(exclusive=True, name="services")
     async def _launch_services(self) -> None:
         """Start uvicorn, Telegram, heartbeat as concurrent tasks."""
+        logger.info("TUI: _launch_services worker started")
         try:
             import uvicorn
 
@@ -460,9 +754,11 @@ class LazyClawApp(App):
             )
             server = uvicorn.Server(uvi_config)
             tasks.append(server.serve())
+            logger.info("TUI: uvicorn configured on port %d", self._config.port)
 
             # Telegram
             if self._telegram_token:
+                logger.info("TUI: starting Telegram adapter...")
                 from lazyclaw.channels.telegram import TelegramAdapter
 
                 telegram = TelegramAdapter(
@@ -471,25 +767,31 @@ class LazyClawApp(App):
                     server_dashboard=self.dashboard,
                 )
                 await telegram.start()
+                self._telegram_connected = True
+                logger.info("TUI: Telegram adapter started OK")
                 self._post_log("info", "Telegram bot running")
+            else:
+                logger.warning("TUI: no telegram_token, skipping Telegram")
 
             # Heartbeat
             from lazyclaw.heartbeat.daemon import HeartbeatDaemon
 
             heartbeat = HeartbeatDaemon(self._config, self._lane_queue)
             await heartbeat.start()
+            logger.info("TUI: Heartbeat daemon started")
             self._post_log("info", "Heartbeat daemon started")
 
             # Persistent browser
             await self._init_persistent_browser()
 
+            logger.info("TUI: all services started, running uvicorn")
             self._post_log("info", f"API on http://localhost:{self._config.port}")
 
             # Run uvicorn (blocks until shutdown)
             await asyncio.gather(*tasks)
         except Exception as exc:
+            logger.exception("TUI service startup FAILED: %s", exc)
             self._post_log("error", f"Service startup failed: {exc}")
-            logger.exception("TUI service startup failed")
 
     async def _init_persistent_browser(self) -> None:
         """Launch persistent browser if mode is 'on'."""
@@ -523,7 +825,7 @@ class LazyClawApp(App):
 
             from lazyclaw.browser.browser_settings import get_browser_settings
             from lazyclaw.browser.cdp import find_chrome_cdp
-    
+
             from lazyclaw.db.connection import db_session
 
             mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
@@ -534,6 +836,7 @@ class LazyClawApp(App):
 
             # MCP count
             mcp_count = 0
+            mcp_tools = 0
             try:
                 from lazyclaw.mcp.manager import _active_clients
                 mcp_count = len(_active_clients)
@@ -543,6 +846,21 @@ class LazyClawApp(App):
             # Browser
             port = getattr(self._config, "cdp_port", 9222)
             browser_alive = bool(await find_chrome_cdp(port))
+
+            # Browser tabs count
+            browser_tabs = 0
+            if browser_alive:
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            f"http://127.0.0.1:{port}/json/list", timeout=aiohttp.ClientTimeout(total=1)
+                        ) as resp:
+                            if resp.status == 200:
+                                tabs = await resp.json()
+                                browser_tabs = len(tabs)
+                except Exception:
+                    pass
 
             user_id = self._user_id
             browser_cfg = await get_browser_settings(self._config, user_id)
@@ -561,6 +879,8 @@ class LazyClawApp(App):
                     elif row[0] == "watcher":
                         watcher_count = row[1]
 
+            telegram_status = "connected" if self._telegram_connected else "disconnected"
+
             stats = SystemStats(
                 uptime_s=self.dashboard.uptime_s,
                 total_processed=self.dashboard.total_processed,
@@ -572,8 +892,26 @@ class LazyClawApp(App):
                 browser_alive=browser_alive,
                 mcp_count=mcp_count,
                 memory_mb=mem_mb,
+                total_cost_today=self.dashboard.total_cost_today,
+                total_tokens_in=self.dashboard.total_tokens_in,
+                total_tokens_out=self.dashboard.total_tokens_out,
+                cost_by_model=self.dashboard.cost_by_model,
+                browser_tabs=browser_tabs,
+                telegram_status=telegram_status,
             )
             self.post_message(StatsRefreshed(stats))
+
+            # Update cost bar
+            try:
+                cost_bar = self.query_one("#cost-bar", CostBar)
+                cost_bar.render_costs(
+                    cost_by_model=self.dashboard.cost_by_model,
+                    total_cost=self.dashboard.total_cost_today,
+                    budget=self._eco_budget,
+                )
+            except Exception:
+                pass
+
         except Exception:
             pass
 
@@ -599,6 +937,17 @@ class LazyClawApp(App):
     def on_stats_refreshed(self, msg: StatsRefreshed) -> None:
         bar = self.query_one("#system-bar", SystemBar)
         bar.update_stats(msg.stats)
+
+    # ── Focus actions ─────────────────────────────────────────────────
+
+    def action_focus_agents(self) -> None:
+        self.query_one("#activity-panel").focus()
+
+    def action_focus_logs(self) -> None:
+        self.query_one("#log-panel").focus()
+
+    def action_focus_filter(self) -> None:
+        self.query_one("#admin-input").focus()
 
     # ── Admin input ──────────────────────────────────────────────────
 
@@ -628,14 +977,34 @@ class LazyClawApp(App):
                           f"Active:{self.dashboard.active_count}")
             return
 
-        # Enqueue as admin message
+        # Enqueue as admin message with dashboard tracking + response display
         try:
-    
             user_id = self._user_id
             self._post_log("admin", f"Sent: {text[:40]}")
-            asyncio.create_task(self._lane_queue.enqueue(user_id, text))
+            self._process_admin_message(user_id, text)
         except Exception as exc:
             self._post_log("error", f"Failed: {exc}")
+
+    @work(name="admin-msg")
+    async def _process_admin_message(self, user_id: str, text: str) -> None:
+        """Process admin input: register with dashboard, show response."""
+        chat_id = f"admin-{id(text)}"
+        cb = self.dashboard.make_request_cb(chat_id)
+        self.dashboard.register_request(chat_id, text)
+        try:
+            from lazyclaw.runtime.callbacks import MultiCallback
+            effective_cb = MultiCallback(cb)
+            response = await self._lane_queue.enqueue(
+                user_id, text, callback=effective_cb,
+            )
+            if response and response.strip():
+                # Truncate long responses for log panel
+                preview = response[:200].replace("\n", " ")
+                self._post_log("reply", preview)
+        except Exception as exc:
+            self._post_log("error", f"Agent error: {exc}")
+        finally:
+            self.dashboard.unregister_request(chat_id)
 
     async def _show_jobs(self) -> None:
         """Show active cron jobs in log panel."""
@@ -684,9 +1053,11 @@ class LazyClawApp(App):
         self.post_message(LogAppended(_now(), kind, detail))
 
     async def action_quit(self) -> None:
-        """Graceful shutdown."""
+        """Graceful shutdown with cost persistence."""
         self._post_log("info", "Shutting down...")
         try:
+            # Save today's cost to DB
+            await self._persist_daily_cost()
             await self._task_runner.cancel_all()
             await self._lane_queue.stop()
             from lazyclaw.mcp.manager import disconnect_all
@@ -697,53 +1068,70 @@ class LazyClawApp(App):
             pass
         self.exit()
 
+    async def _persist_daily_cost(self) -> None:
+        """Save today's cost total to user settings."""
+        try:
+            from lazyclaw.db.connection import db_session
+            today = datetime.now().strftime("%Y-%m-%d")
+            cost_data = json.dumps({
+                "date": today,
+                "total": self.dashboard.total_cost_today,
+                "by_model": self.dashboard.cost_by_model,
+                "tokens_in": self.dashboard.total_tokens_in,
+                "tokens_out": self.dashboard.total_tokens_out,
+            })
+            async with db_session(self._config) as db:
+                row = await db.execute(
+                    "SELECT settings FROM users WHERE id = ?",
+                    (self._user_id,),
+                )
+                result = await row.fetchone()
+                settings = {}
+                if result and result[0]:
+                    try:
+                        settings = json.loads(result[0])
+                    except (json.JSONDecodeError, TypeError):
+                        settings = {}
+                new_settings = dict(settings)
+                new_settings["cost_today"] = json.loads(cost_data)
+                await db.execute(
+                    "UPDATE users SET settings = ? WHERE id = ?",
+                    (json.dumps(new_settings), self._user_id),
+                )
+                await db.commit()
+        except Exception:
+            logger.debug("Failed to persist daily cost", exc_info=True)
 
-# ── Helpers ─────────────────────────────────────────────────────────
 
-def _now() -> str:
-    return datetime.now().strftime("%H:%M:%S")
-
-
-def _format_phase_markup(snap: RequestSnapshot) -> str:
-    if snap.phase == "thinking":
-        return f"[cyan]thinking[/cyan] ({snap.model}, step {snap.iteration})"
-    if snap.phase == "tool":
-        last = snap.tools_used[-1] if snap.tools_used else "?"
-        return f"[blue]tool[/blue] {last}"
-    if snap.phase == "team":
-        total = len(snap.specialists)
-        done = sum(1 for _, s in snap.specialists if s in ("done", "error"))
-        return f"[magenta]team[/magenta] [{done}/{total}]"
-    if snap.phase == "merging":
-        return "[magenta]merging...[/magenta]"
-    if snap.phase == "streaming":
-        return "[green]writing...[/green]"
-    return f"[dim]{snap.phase}[/dim]"
-
+# ── Log helpers ─────────────────────────────────────────────────────
 
 def _log_style(kind: str) -> str:
     return {
         "new": "bold white",
-        "tool": "blue",
-        "result": "green",
-        "start": "magenta",
-        "spec": "magenta",
-        "done": "bold green",
-        "info": "cyan",
-        "admin": "yellow",
-        "error": "red",
+        "tool": "#60A5FA",
+        "result": _C_SUCCESS,
+        "start": _C_SPECIALIST,
+        "spec": _C_SPECIALIST,
+        "llm": _C_THINKING,
+        "done": f"bold {_C_SUCCESS}",
+        "info": _C_ACTIVE,
+        "admin": _C_HEADER,
+        "reply": _C_SUCCESS,
+        "error": _C_ERROR,
     }.get(kind, "dim")
 
 
 def _log_icon(kind: str) -> str:
     return {
         "new": ">>",
-        "tool": "//",
-        "result": "ok",
+        "tool": "◆",
+        "result": "✓",
         "start": "++",
-        "spec": "->",
-        "done": "<<",
+        "spec": "→",
+        "llm": "●",
+        "done": "✓✓",
         "info": "**",
         "admin": ">>",
-        "error": "!!",
+        "reply": "←",
+        "error": "✗",
     }.get(kind, "  ")

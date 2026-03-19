@@ -85,6 +85,9 @@ class PersistentBrowserManager:
                     "--disable-dev-shm-usage",
                 ],
             )
+            # HACK: browser-use copies profile to /tmp (cookies lost on exit).
+            # Override user_data_dir back to our persistent path after __init__.
+            profile.user_data_dir = str(self.profile_dir)
             self._browser = Browser(browser_profile=profile, keep_alive=True)
             logger.info(
                 "Created stealth browser for user %s (profile: %s)",

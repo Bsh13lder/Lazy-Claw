@@ -23,12 +23,11 @@ class BrowseWebSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "PRIMARY tool for ALL web interactions. Uses an AI browser agent that sees "
-            "the full page DOM and clicks elements intelligently — no CSS selectors needed. "
-            "Use for: WhatsApp messaging, Instagram, form filling, login flows, page reading, "
-            "searching, ANY website interaction. Runs headless in background. "
-            "Only use browser_action instead if user explicitly asks to see the browser "
-            "on their screen (e.g. QR scan)."
+            "Automate a multi-step browser task (navigate, click, type, read). "
+            "Use for NEW sessions: login flows, form filling, posting content. "
+            "IMPORTANT: For sites already open in Chrome (WhatsApp, etc.), "
+            "use read_tab first — it's instant. Only use browse_web when "
+            "read_tab/see_browser can't do the job (e.g. need to click, type, navigate)."
         )
 
     @property

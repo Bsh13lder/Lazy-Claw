@@ -258,9 +258,10 @@ class ReadTabSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Read the text content of a browser tab. "
-            "Can read the current tab or switch to one by title/URL match. "
-            "Use when user asks to 'read this page' or 'what does this tab say'."
+            "FASTEST way to read a page already open in Chrome. Instant (0.1s). "
+            "Use FIRST for WhatsApp, Gmail, or any site already loaded in a tab. "
+            "Can read current tab or switch by title/URL match. "
+            "Try this before browse_web — it's 100x faster."
         )
 
     @property

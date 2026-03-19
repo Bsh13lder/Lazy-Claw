@@ -76,20 +76,6 @@ RESEARCH_SPECIALIST = SpecialistConfig(
     is_builtin=True,
 )
 
-MEMORY_SPECIALIST = SpecialistConfig(
-    name="memory_specialist",
-    display_name="Memory Specialist",
-    system_prompt=(
-        "You are a memory and knowledge management specialist. Your expertise is recalling "
-        "stored facts, saving important information, and checking credentials in the vault. "
-        "Be precise about what you find. Clearly distinguish between stored facts and "
-        "inferences. Report what is and isn't in memory."
-    ),
-    allowed_skills=("memory_save", "memory_recall", "vault_list"),
-    preferred_model="gpt-5-mini",
-    is_builtin=True,
-)
-
 BUILTIN_SPECIALISTS = (
     BROWSER_SPECIALIST,
     CODE_SPECIALIST,

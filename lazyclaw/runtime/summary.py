@@ -53,17 +53,6 @@ def build_work_summary(
     )
 
 
-def _estimate_session_cost(llm_calls: int, total_tokens: int) -> float:
-    """Rough cost estimate from call count and tokens.
-
-    Conservative default: ~$0.003 per call (between mini and full model).
-    """
-    if llm_calls <= 0:
-        return 0.0
-    avg_cost_per_call = 0.003
-    return llm_calls * avg_cost_per_call
-
-
 def format_summary_cli(summary: WorkSummary) -> str:
     """Format a WorkSummary for Rich CLI display.
 

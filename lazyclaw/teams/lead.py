@@ -1,8 +1,10 @@
-"""Team lead — analyzes requests, delegates to specialists, merges results.
+"""DEPRECATED: Team lead replaced by inline delegate tool.
 
-The team lead is the brain of the multi-agent system. It:
-1. Analyzes whether a message needs team mode or direct response
-2. Breaks complex tasks into sub-tasks for specialists
+The delegate skill (lazyclaw/skills/builtin/delegate.py) now handles
+specialist dispatch directly from the main agent loop, saving 1-2 LLM
+calls per delegation. This file is kept for reference only.
+
+Original purpose: analyzes requests, delegates to specialists, merges results.
 3. Dispatches specialists in parallel via the executor
 4. Merges results (with critic review when 2+ specialists used)
 """

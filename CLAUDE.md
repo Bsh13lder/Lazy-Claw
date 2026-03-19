@@ -99,10 +99,11 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Memory** | `memory/` | Encrypted personal facts, conversation history, compression |
 | **MCP** | `mcp/` | Native client + server + bridge to skill registry |
 | **Crypto** | `crypto/` | AES-256-GCM, PBKDF2, credential vault |
-| **Teams** | `teams/` | Multi-agent: team lead, specialists, parallel execution, critic |
+| **Teams** | `teams/` | Specialists (browser, research, code) + delegate skill + parallel execution |
 | **Replay** | `replay/` | Session trace recording, playback, shareable tokens |
+| **Task Runner** | `runtime/task_runner.py` | Background parallel task execution with Telegram push notifications |
 
-Supporting: `llm/` (multi-provider router + ECO mode), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite).
+Supporting: `llm/` (multi-provider router + ECO mode + complexity routing), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool).
 
 Standalone MCP servers: `mcp-freeride/` (free AI router), `mcp-healthcheck/` (provider monitor), `mcp-apihunter/` (API discovery), `mcp-vaultwhisper/` (PII proxy), `mcp-taskai/` (task intelligence), `mcp-lazydoctor/` (self-healing).
 
@@ -135,21 +136,28 @@ These are non-obvious architectural decisions -- read the code for implementatio
 
 - **User isolation**: ALL queries scoped by `user_id`. No cross-user data access.
 - **No hardcoded tools**: All tools from skill registry. Agent discovers dynamically.
-- **Lane Queue**: Serial per-user execution prevents race conditions.
-- **Smart tool routing**: `_wants_any_tools()` sends zero tools for simple chat -> fast path.
-- **Tool-free history stripping**: Converts tool-call history to plain text when no tools needed.
-- **Fast chat path**: Simple messages get last 6 messages only. Complex gets full compressed history.
-- **Flexible summary cache**: Reuses summaries covering 80%+ of older messages.
+- **Smart tool selection**: Per-message category detection sends only relevant tools (8-17 instead of 72). 70-88% token savings.
+- **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
+- **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
+- **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
+- **Complexity routing**: NanoClaw-inspired model tier selection (simple→fast_model, standard→default, complex→smart_model).
+- **Fast chat path**: Simple messages get last 6 messages, SOUL.md only (no capabilities/memories/tools).
+- **Layered summaries**: Daily logs (auto, gpt-5-mini) + weekly + injected into agent context. Skips 90s LLM re-summarization.
+- **Shared browser profiles**: CDP Chrome + Playwright use same `browser_profiles/{user_id}/` directory. Cookies shared.
+- **Headless auto-launch**: CDP Chrome launches headless automatically. `visible=true` param for user-facing tasks (QR scans).
+- **Human-like delays**: Random 0.2-1.5s between clicks, 0.03-0.12s typing, 0.8-1.5s navigation.
 - **Browser cost tiers**: PageReader (~$0.001/page) for reading, full Agent (~$0.30) for interaction.
-- **Browser auto-login**: Cookies persist, vault credentials used on expiry (`site:{domain}` key).
 - **Semantic Snapshots**: Accessibility tree text (50KB) instead of screenshots (5MB).
 - **MCP bridge**: External MCP tools registered as first-class skills. No separate path.
-- **Claude Code MCP OAuth**: Launches with `ANTHROPIC_API_KEY=""` to use Max subscription.
-- **CancellationToken**: Cooperative cancellation from CLI -> agent -> team lead -> specialists.
+- **MCP parallel startup**: `asyncio.gather` connects all MCP servers simultaneously (~2s instead of 12s).
+- **PBKDF2 LRU cache**: Key derivation cached (420ms→0ms per message, 4+ calls per message).
+- **DB connection pool**: Single shared aiosqlite connection (14ms→0.2ms per query).
+- **Telegram security**: Admin chat lock (first /start claims). Unauthorized chats blocked. Screenshots auto-forwarded.
+- **Telegram retry**: `_telegram_send_with_retry()` with exponential backoff on network errors.
+- **CancellationToken**: Cooperative cancellation from CLI → agent → specialists. Double Ctrl+C support.
 - **ECO mode**: Three tiers (eco/hybrid/full) routing between free and paid AI providers.
-- **Server dashboard**: `lazyclaw start` shows Rich Live dashboard (active requests, activity log, uptime). Events forwarded via `MultiCallback` to both Telegram and terminal.
-- **Side-channel input**: Users can type while agents work (prompt_toolkit async). Messages injected into team lead's merge step.
-- **_BrowserChatOpenAI**: Subclass of ChatOpenAI with `__getattr__`/`__setattr__` overrides for browser-use 0.12+ compatibility (maps `model` -> `model_name`, allows arbitrary attr setting).
+- **Token tracking**: OpenAI streaming reads usage chunk after finish_reason. Anthropic field names normalized.
+- **_BrowserChatOpenAI**: Subclass of ChatOpenAI with `__getattr__`/`__setattr__` overrides for browser-use 0.12+ compatibility.
 
 ## Git Commit Rules
 

@@ -351,7 +351,10 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Complexity Model Routing: ✅ COMPLETE — NanoClaw-inspired tier routing (simple→fast_model, standard→default, complex→smart_model), regex classifier in eco_router, no extra LLM calls
 - Delegate Tool: ✅ COMPLETE — Replaces team lead LLM analysis call, agent calls delegate(specialist, instruction) naturally, parallel dispatch via asyncio.gather, saves 1-2 LLM calls per delegation
 - Specialists Streamlined: ✅ Updated — Dropped memory_specialist (redundant), 3 built-ins: browser, research, code
-- Browser Architecture: ✅ COMPLETE — Headless Chrome auto-launch, shared cookie profile (data/browser_profiles/default), visible=true param for user-facing tasks, human-like random delays (0.2-1.5s), auto-tab creation
+- Browser Architecture: ✅ COMPLETE — Headless Chrome auto-launch, shared cookie profile (browser_profiles/{user_id}), visible=true for user-facing tasks, human-like random delays (0.2-1.5s), auto-tab creation, browse_web primary for interactive sites
+- Background Task Runner: ✅ COMPLETE — TaskRunner class, run_background skill, parallel agent execution (max 5 global, 2 per user), Telegram push notifications, /tasks CLI command, DB-backed state
+- Smart Tool Selection: ✅ COMPLETE — Per-message category detection (browser/computer/skills/vault/jobs/admin), 70-88% token reduction, GPT-5 responds 3-5x faster
+- Dead Code Cleanup: ✅ COMPLETE — Removed MEMORY_SPECIALIST constant, _estimate_session_cost function, deprecated TeamLead class (replaced by delegate tool)
 - Telegram Security: ✅ COMPLETE — Admin chat lock (first /start claims admin), unauthorized chats blocked, channel context injected for screenshots
 - Telegram Screenshots: ✅ COMPLETE — ToolResult+Attachment dataclass, see_browser returns PNG, _TelegramCallback sends photos via send_photo, retry on network errors
 - Telegram UI: ✅ Updated — Permanent messages for tool/specialist completions, stats footer, retry logic with backoff

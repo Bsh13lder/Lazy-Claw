@@ -70,6 +70,11 @@ class PersistentBrowserManager:
 
             from browser_use.browser.profile import BrowserChannel
 
+            # Prevent browser-use from copying our profile to /tmp
+            # (cookies would be lost on exit). We want persistent storage.
+            _orig_copy = BrowserProfile._copy_profile
+            BrowserProfile._copy_profile = lambda self: None  # no-op
+
             profile = BrowserProfile(
                 headless=True,
                 channel=BrowserChannel.CHROME,  # Use system Chrome (same as CDP) for cookie sharing
@@ -85,9 +90,9 @@ class PersistentBrowserManager:
                     "--disable-dev-shm-usage",
                 ],
             )
-            # HACK: browser-use copies profile to /tmp (cookies lost on exit).
-            # Override user_data_dir back to our persistent path after __init__.
-            profile.user_data_dir = str(self.profile_dir)
+
+            # Restore original method for other users of BrowserProfile
+            BrowserProfile._copy_profile = _orig_copy
             self._browser = Browser(browser_profile=profile, keep_alive=True)
             logger.info(
                 "Created stealth browser for user %s (profile: %s)",

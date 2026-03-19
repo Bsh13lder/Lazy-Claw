@@ -272,13 +272,14 @@ class EcoRouter:
                         user_message = msg.content
                         break
                 complexity = classify_complexity(user_message, has_tools)
-                if complexity == COMPLEXITY_SIMPLE:
-                    effective_model = self._config.fast_model
-                    logger.info("Complexity: SIMPLE → %s", effective_model)
-                elif complexity == COMPLEXITY_COMPLEX:
+                if complexity == COMPLEXITY_COMPLEX:
                     effective_model = self._config.smart_model
                     logger.info("Complexity: COMPLEX → %s", effective_model)
-                # STANDARD: use config.default_model (None → router picks default)
+                else:
+                    # SIMPLE + STANDARD both use fast model (5x cheaper)
+                    # GPT-5-mini handles tool selection, chat, and browser tasks fine
+                    effective_model = self._config.fast_model
+                    logger.info("Complexity: %s → %s", complexity, effective_model)
             return await self._paid_router.chat(messages, model=effective_model, user_id=user_id, **kwargs)
 
         if settings.mode == "eco":

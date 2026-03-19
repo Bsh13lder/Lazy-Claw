@@ -422,7 +422,20 @@ class PageReader:
         page, is_reused = await self._get_page(user_id)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1500)
+
+            # WhatsApp needs extra time to sync messages from phone
+            host = urlparse(url).hostname or ""
+            if "whatsapp" in host:
+                for _ in range(15):
+                    await page.wait_for_timeout(2000)
+                    chats = await page.evaluate(
+                        '() => document.querySelectorAll(\'[data-testid="cell-frame-container"]\').length'
+                    )
+                    if chats > 0:
+                        logger.info("PageReader: WhatsApp loaded %d chats", chats)
+                        break
+            else:
+                await page.wait_for_timeout(1500)
 
             # Auto-login: use provided credentials, or detect login page and pull from vault
             if credentials and not is_reused:

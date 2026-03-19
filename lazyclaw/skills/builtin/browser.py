@@ -90,9 +90,9 @@ class ReadPageSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Read and extract content from a web page. Much faster and cheaper "
-            "than browse_web. Use for reading articles, checking pages, "
-            "extracting text. Does NOT interact with the page."
+            "Read and extract content from a URL. Shares login sessions with Chrome. "
+            "For pages already open in Chrome, use read_tab instead (instant, 0.1s). "
+            "Use read_page for NEW URLs not yet open. Does NOT interact — read only."
         )
 
     @property

@@ -291,42 +291,33 @@ class PageReader:
             except Exception as exc:
                 logger.debug("PageReader: couldn't reuse agent session: %s", exc)
 
-        # 2. Launch standalone browser with user's profile (persistent cookies)
+        # 2. Launch system Chrome with persistent profile (shared with CDP + SmartBrowser)
         if not self._pw:
             from pathlib import Path
 
             from playwright.async_api import async_playwright
 
             self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-            )
 
-            # Use user's profile dir for persistent cookies/sessions
             if self._config and user_id:
                 profile_dir = Path(self._config.database_dir) / "browser_profiles" / user_id
                 profile_dir.mkdir(parents=True, exist_ok=True)
-                self._browser_context = await self._browser.new_context(
-                    storage_state=None,
-                    user_agent=(
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                    ),
+                # Use launch_persistent_context with system Chrome
+                # This shares cookies + IndexedDB + localStorage with CDP and SmartBrowser
+                self._browser_context = await self._pw.chromium.launch_persistent_context(
+                    str(profile_dir),
+                    channel="chrome",
+                    headless=True,
+                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+                    ignore_https_errors=True,
                 )
-                # Try loading saved cookies from profile
-                cookie_file = profile_dir / "cookies.json"
-                if cookie_file.exists():
-                    try:
-                        import json
-
-                        cookies = json.loads(cookie_file.read_text())
-                        await self._browser_context.add_cookies(cookies)
-                        logger.info("PageReader: loaded cookies from profile for user %s", user_id)
-                    except Exception:
-                        pass
-                logger.info("PageReader: launched browser with profile for user %s", user_id)
+                self._browser = None  # persistent context manages its own browser
+                logger.info("PageReader: launched with shared Chrome profile for user %s", user_id)
             else:
+                self._browser = await self._pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+                )
                 logger.info("PageReader: launched anonymous standalone browser")
 
         if self._browser_context:

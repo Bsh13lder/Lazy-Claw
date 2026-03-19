@@ -20,25 +20,26 @@ logger = logging.getLogger(__name__)
 _cdp_backend = None
 
 
-async def _get_cdp_backend():
-    """Get or create the shared CDP backend instance.
+async def _get_cdp_backend(user_id: str = "default"):
+    """Get or create the CDP backend for a user.
 
     Uses the same profile directory as Playwright so cookies are shared.
+    Recreates if user_id changed (different user).
     """
     global _cdp_backend
-    if _cdp_backend is None:
-        from lazyclaw.browser.cdp_backend import CDPBackend
-        from lazyclaw.config import load_config
+    from lazyclaw.browser.cdp_backend import CDPBackend
+    from lazyclaw.config import load_config
 
-        config = load_config()
-        port = getattr(config, "cdp_port", 9222)
-        # Share profile with Playwright (default user)
-        profile_dir = str(config.database_dir / "browser_profiles" / "default")
+    config = load_config()
+    port = getattr(config, "cdp_port", 9222)
+    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+
+    if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
         _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
     return _cdp_backend
 
 
-async def _get_visible_cdp_backend():
+async def _get_visible_cdp_backend(user_id: str = "default"):
     """Launch visible Chrome (user wants to see the browser).
 
     Kills any existing headless Chrome first, then launches visible.
@@ -52,7 +53,7 @@ async def _get_visible_cdp_backend():
 
     config = load_config()
     port = getattr(config, "cdp_port", 9222)
-    profile_dir = str(config.database_dir / "browser_profiles" / "default")
+    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
 
     # Kill existing headless Chrome on this port
     try:
@@ -138,7 +139,7 @@ class SeeBrowserSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str | ToolResult:
-        backend = await _get_cdp_backend()
+        backend = await _get_cdp_backend(user_id)
         try:
             url = await backend.current_url()
             title = await backend.title()
@@ -221,7 +222,7 @@ class ListTabsSkill(BaseSkill):
         return {"type": "object", "properties": {}}
 
     async def execute(self, user_id: str, params: dict) -> str:
-        backend = await _get_cdp_backend()
+        backend = await _get_cdp_backend(user_id)
         try:
             tab_list = await backend.tabs()
             if not tab_list:
@@ -282,7 +283,7 @@ class ReadTabSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        backend = await _get_cdp_backend()
+        backend = await _get_cdp_backend(user_id)
         try:
             query = params.get("tab_query", "").strip()
             if query:
@@ -357,7 +358,7 @@ class SwitchTabSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        backend = await _get_cdp_backend()
+        backend = await _get_cdp_backend(user_id)
         try:
             query = params.get("query", "").strip()
             if not query:
@@ -449,9 +450,9 @@ class BrowserActionSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         visible = params.get("visible", False)
         if visible:
-            backend = await _get_visible_cdp_backend()
+            backend = await _get_visible_cdp_backend(user_id)
         else:
-            backend = await _get_cdp_backend()
+            backend = await _get_cdp_backend(user_id)
         action = params.get("action", "")
 
         try:

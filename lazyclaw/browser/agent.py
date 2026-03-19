@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import random
 import uuid
 from typing import Any, Awaitable, Callable
 
@@ -27,7 +28,8 @@ MAX_GLOBAL_TASKS = 5
 MAX_PER_USER_TASKS = 2
 HELP_TIMEOUT_SECONDS = 600  # 10 minutes
 DEFAULT_MAX_STEPS = 20
-HUMANIZE_DELAY = 0.5  # seconds between steps
+HUMANIZE_DELAY_MIN = 0.2  # seconds between steps (randomized)
+HUMANIZE_DELAY_MAX = 1.5
 
 
 def _make_browser_llm_class():
@@ -286,7 +288,7 @@ class BrowserAgentManager:
                 await db.commit()
 
             # Human-like pacing
-            await asyncio.sleep(HUMANIZE_DELAY)
+            await asyncio.sleep(random.uniform(HUMANIZE_DELAY_MIN, HUMANIZE_DELAY_MAX))
 
             # Inject pending instructions
             pending = self._pending_instructions.pop(task_id, [])

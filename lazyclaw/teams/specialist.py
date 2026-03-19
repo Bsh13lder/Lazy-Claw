@@ -94,12 +94,11 @@ BUILTIN_SPECIALISTS = (
     BROWSER_SPECIALIST,
     CODE_SPECIALIST,
     RESEARCH_SPECIALIST,
-    MEMORY_SPECIALIST,
 )
 
 
 def get_defaults() -> list[SpecialistConfig]:
-    """Return the 4 built-in specialist configs."""
+    """Return the 3 built-in specialist configs."""
     return list(BUILTIN_SPECIALISTS)
 
 

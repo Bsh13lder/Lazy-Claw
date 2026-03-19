@@ -347,6 +347,20 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Dynamic Ollama Models: ✅ COMPLETE — OllamaProvider.refresh_models() from /api/tags, pull/delete/show helpers, FreeRideRouter.refresh_ollama()
 - ECO NL Skills: ✅ COMPLETE — eco_set_mode, eco_show_status, eco_set_provider (3 skills)
 - Provider NL Skills: ✅ COMPLETE — provider_list, provider_add, provider_scan (3 skills)
+- Performance Optimization: ✅ COMPLETE — PBKDF2 LRU cache (420ms→0ms), DB connection pool (14ms→0.2ms), SOUL.md mtime cache, batch DB inserts (executemany), fast chat path skips full context build, DB indexes on hot queries
+- Complexity Model Routing: ✅ COMPLETE — NanoClaw-inspired tier routing (simple→fast_model, standard→default, complex→smart_model), regex classifier in eco_router, no extra LLM calls
+- Delegate Tool: ✅ COMPLETE — Replaces team lead LLM analysis call, agent calls delegate(specialist, instruction) naturally, parallel dispatch via asyncio.gather, saves 1-2 LLM calls per delegation
+- Specialists Streamlined: ✅ Updated — Dropped memory_specialist (redundant), 3 built-ins: browser, research, code
+- Browser Architecture: ✅ COMPLETE — Headless Chrome auto-launch, shared cookie profile (data/browser_profiles/default), visible=true param for user-facing tasks, human-like random delays (0.2-1.5s), auto-tab creation
+- Telegram Security: ✅ COMPLETE — Admin chat lock (first /start claims admin), unauthorized chats blocked, channel context injected for screenshots
+- Telegram Screenshots: ✅ COMPLETE — ToolResult+Attachment dataclass, see_browser returns PNG, _TelegramCallback sends photos via send_photo, retry on network errors
+- Telegram UI: ✅ Updated — Permanent messages for tool/specialist completions, stats footer, retry logic with backoff
+- CLI Fixes: ✅ Updated — Ctrl+C double-press (graceful then force), handle_sigint=False for side input, 0.1s poll, tool errors shown in red
+- Token Tracking: ✅ Fixed — OpenAI streaming reads usage chunk after finish_reason, Anthropic field names normalized (prompt_tokens/completion_tokens/total_tokens)
+- MCP Log Suppression: ✅ COMPLETE — mcp.server.lowlevel.server set to WARNING in all 6 MCP servers, child env LOG_LEVEL=ERROR
+- MCP Parallel Startup: ✅ COMPLETE — connect_and_register_bundled_mcps uses asyncio.gather (12s→~2s)
+- Clean Shutdown: ✅ COMPLETE — disconnect_all() called before event loop closes in both CLI and server modes, no more BaseSubprocessTransport errors
+- Layered Summaries: ✅ COMPLETE — Daily auto-summary (gpt-5-mini, fire-and-forget on first msg of new day), weekly summary (every Sunday), daily logs injected into agent context, compressor uses daily logs to skip 90s LLM re-summarization
 - Ollama NL Skills: ✅ COMPLETE — ollama_list, ollama_install, ollama_delete, ollama_show (4 skills)
 - Full NL Control: ✅ COMPLETE — 34 new skills covering ALL features via natural language:
   - System: show_status, run_doctor, show_usage, show_logs, set_model (5 skills)

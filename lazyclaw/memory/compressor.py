@@ -37,21 +37,26 @@ async def compress_history(
     chat_session_id: str | None,
     raw_messages: list[tuple],
 ) -> list[LLMMessage]:
-    """Compress conversation history using sliding window + summaries.
+    """Compress conversation history using sliding window + daily log summaries.
 
-    Args:
-        config: App config
-        eco_router: LLM router for summarization calls
-        user_id: User scope
-        chat_session_id: Current chat session (for summary lookup)
-        raw_messages: All messages as (id, role, content, tool_name, metadata)
-                     ordered by created_at ASC
-
-    Returns:
-        List of LLMMessage ready for the agent context:
-        [summary_message (if any), ...recent_messages]
+    Uses layered summaries: daily logs → weekly logs → raw message fallback.
+    This avoids the expensive 90-second LLM re-summarization on every message.
     """
+    import asyncio
+    from datetime import date, timedelta
+
     key = derive_server_key(config.server_secret, user_id)
+
+    # Auto-trigger: summarize yesterday if not done yet (fire-and-forget)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    try:
+        from lazyclaw.memory.daily_log import get_daily_log, generate_daily_summary
+
+        existing = await get_daily_log(config, user_id, yesterday)
+        if not existing:
+            asyncio.create_task(_background_daily_summary(config, user_id, yesterday))
+    except Exception:
+        pass  # Don't block message processing
 
     # Fast path: if within window, decrypt only and return (skip summary logic)
     if len(raw_messages) <= WINDOW_SIZE:
@@ -96,6 +101,10 @@ async def compress_history(
     )
 
     if not summary_text:
+        # Try daily logs first — much faster than re-summarizing raw messages
+        summary_text = await _summary_from_daily_logs(config, user_id)
+
+    if not summary_text:
         if len(older) < SUMMARIZE_THRESHOLD:
             # Small chunk — skip expensive LLM call, use simple truncation
             summary_text = _quick_summary(older)
@@ -104,7 +113,7 @@ async def compress_history(
                 len(older), SUMMARIZE_THRESHOLD,
             )
         else:
-            # Large chunk — generate LLM summary
+            # Large chunk — generate LLM summary (expensive fallback)
             classifications = [
                 classify_message(
                     role=m["role"],
@@ -354,3 +363,62 @@ async def force_recompress(
 
     logger.info("Deleted %d summaries for user %s, will regenerate on next chat", deleted, user_id)
     return deleted
+
+
+async def _background_daily_summary(config: Config, user_id: str, date_str: str) -> None:
+    """Fire-and-forget: generate daily summary without blocking the user's message."""
+    try:
+        from lazyclaw.memory.daily_log import generate_daily_summary
+        await generate_daily_summary(config, user_id, date_str)
+    except Exception as exc:
+        logger.warning("Background daily summary failed for %s: %s", date_str, exc)
+
+    # Also check if a weekly summary is needed (every 7 days)
+    try:
+        from datetime import date, timedelta
+        from lazyclaw.memory.daily_log import generate_weekly_summary, get_daily_log
+
+        d = date.fromisoformat(date_str)
+        # Monday of this week
+        week_start = (d - timedelta(days=d.weekday())).isoformat()
+        # Check if we have 7 daily logs and no weekly summary yet
+        if d.weekday() == 6:  # Sunday — end of week
+            existing_weekly = await get_daily_log(config, user_id, f"{week_start}_week")
+            if not existing_weekly:
+                await generate_weekly_summary(config, user_id, week_start)
+    except Exception as exc:
+        logger.debug("Weekly summary check failed: %s", exc)
+
+
+async def _summary_from_daily_logs(config: Config, user_id: str) -> str | None:
+    """Try to build a summary from daily/weekly logs (no LLM call needed).
+
+    Returns a prebuilt summary string if logs exist, or None to fall back
+    to the expensive LLM summarization.
+    """
+    try:
+        from lazyclaw.memory.daily_log import list_daily_logs
+
+        logs = await list_daily_logs(config, user_id, limit=14)
+        if not logs:
+            return None
+
+        # Separate weekly and daily logs
+        weekly = [l for l in logs if l["date"].endswith("_week")]
+        daily = [l for l in logs if not l["date"].endswith("_week") and not l["date"].endswith("_month")]
+
+        if not daily and not weekly:
+            return None
+
+        lines = []
+        for w in sorted(weekly, key=lambda x: x["date"]):
+            lines.append(f"Week of {w['date'][:10]}: {w['summary'][:300]}")
+        for d in sorted(daily, key=lambda x: x["date"]):
+            lines.append(f"{d['date']}: {d['summary'][:200]}")
+
+        summary = "Previous activity:\n" + "\n".join(lines)
+        logger.info("Built summary from %d daily + %d weekly logs (skipped LLM)", len(daily), len(weekly))
+        return summary
+    except Exception as exc:
+        logger.debug("Daily log summary failed: %s", exc)
+        return None

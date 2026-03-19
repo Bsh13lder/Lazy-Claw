@@ -143,10 +143,17 @@ class MCPClient:
                 "Install it with: pip install mcp"
             ) from exc
 
+        # Build env with LOG_LEVEL=ERROR to suppress child MCP server
+        # INFO spam (e.g. "Processing request of type ListToolsRequest")
+        import os
+
+        child_env = dict(os.environ, **(self._config.get("env") or {}))
+        child_env.setdefault("LOG_LEVEL", "ERROR")
+
         params = StdioServerParameters(
             command=self._config["command"],
             args=self._config.get("args", []),
-            env=self._config.get("env"),
+            env=child_env,
         )
         self._transport_ctx = stdio_client(params)
         read_stream, write_stream = await self._transport_ctx.__aenter__()

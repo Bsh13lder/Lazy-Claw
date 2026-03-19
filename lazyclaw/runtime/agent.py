@@ -124,10 +124,13 @@ class Agent:
 
         import asyncio as _aio
 
-        # Parallel initialization — load independent data concurrently
         from lazyclaw.memory.compressor import compress_history
         from lazyclaw.skills.manager import load_user_skills
         from lazyclaw.runtime.context_builder import build_context
+        from lazyclaw.runtime.personality import load_personality
+
+        # Decide upfront: does this message need tools?
+        needs_tools_early = self.registry is not None and _wants_any_tools(message)
 
         async def _load_history():
             async with db_session(self.config) as db:
@@ -145,87 +148,38 @@ class Agent:
                     )
                 return await rows.fetchall()
 
-        history_rows, _, system_prompt = await _aio.gather(
-            _load_history(),
-            load_user_skills(self.config, user_id, self.registry),
-            build_context(self.config, user_id, registry=self.registry),
-        )
+        if needs_tools_early:
+            # Full parallel init — load history, skills, and rich context
+            history_rows, _, system_prompt = await _aio.gather(
+                _load_history(),
+                load_user_skills(self.config, user_id, self.registry),
+                build_context(self.config, user_id, registry=self.registry),
+            )
+        else:
+            # Fast chat path — minimal system prompt, skip skills + MCP + memories
+            system_prompt = load_personality()  # Cached, ~0ms
+            history_rows = await _load_history()
 
         history = await compress_history(
             self.config, self.eco_router, user_id, chat_session_id,
             raw_messages=history_rows,
         )
 
-        # Check team mode — delegate to specialists if complex
-        from lazyclaw.teams.settings import get_team_settings
-        from lazyclaw.teams.specialist import load_specialists
-        from lazyclaw.teams.lead import TeamLead
+        # Register delegate skill — lets the agent dispatch to specialists
+        # inline (NanoClaw pattern: no separate team lead LLM call)
+        _delegate_registered = False
+        if self.registry is not None:
+            from lazyclaw.skills.builtin.delegate import DelegateSkill
 
-        team_settings = await get_team_settings(self.config, user_id)
-        if team_settings.get("mode", "never") != "never":
-            await cb.on_event(AgentEvent("team_delegate", "Evaluating team delegation...", {}))
-            specialists = await load_specialists(self.config, user_id)
-            team_lead = TeamLead(self.config, self.eco_router)
-            team_result = await team_lead.process(
-                user_id=user_id,
-                message=message,
-                settings=team_settings,
-                specialists=specialists,
+            delegate_skill = DelegateSkill(
+                config=self.config,
                 registry=self.registry,
+                eco_router=self.eco_router,
                 permission_checker=self.executor._checker if self.executor else None,
                 callback=cb,
-                cancel_token=cancel_token,
             )
-            if team_result is not None:
-                await recorder.record_team_delegation("team_lead", message)
-                await recorder.record_final_response(team_result)
-
-                # Fire work summary for team mode
-                from lazyclaw.runtime.summary import build_work_summary
-                _team_summary = build_work_summary(
-                    start_time=_start_time,
-                    llm_calls=0,  # team lead tracks its own calls
-                    tools_used=[],
-                    specialists=[s.name for s in specialists],
-                    total_tokens=0,
-                    user_message=message,
-                    response=team_result,
-                )
-                await cb.on_event(AgentEvent(
-                    "work_summary", "Team task complete",
-                    {"summary": _team_summary},
-                ))
-
-                # Store user message + team response encrypted
-                async with db_session(self.config) as db:
-                    if not chat_session_id:
-                        row = await db.execute(
-                            "SELECT id FROM agent_chat_sessions "
-                            "WHERE user_id = ? AND archived_at IS NULL "
-                            "ORDER BY created_at DESC LIMIT 1",
-                            (user_id,),
-                        )
-                        existing = await row.fetchone()
-                        if existing:
-                            chat_session_id = existing[0]
-                        else:
-                            chat_session_id = str(uuid4())
-                            await db.execute(
-                                "INSERT INTO agent_chat_sessions (id, user_id) VALUES (?, ?)",
-                                (chat_session_id, user_id),
-                            )
-
-                    for role, content in [("user", message), ("assistant", team_result)]:
-                        msg_id = str(uuid4())
-                        await db.execute(
-                            "INSERT INTO agent_messages "
-                            "(id, user_id, chat_session_id, role, content) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (msg_id, user_id, chat_session_id, role, encrypt(content, key)),
-                        )
-                    await db.commit()
-
-                return team_result
+            self.registry.register(delegate_skill)
+            _delegate_registered = True
 
         # Get tools — all or nothing. Chat-only messages get no tools (fast path).
         # Everything else gets ALL tools (core + MCP) and the LLM decides.
@@ -386,7 +340,7 @@ class Agent:
                         {"tool": tc.name, "display_name": _display, "args": tc.arguments},
                     ))
                     await recorder.record_tool_call(tc.name, tc.arguments)
-                    result = await self.executor.execute(tc, user_id)
+                    result = await self.executor.execute(tc, user_id, callback=cb)
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                     await cb.on_event(AgentEvent(
                         "tool_result", _display,
@@ -424,7 +378,7 @@ class Agent:
                                 "approval", f"{_display} approved",
                                 {"skill": skill_name, "display_name": _display, "approved": True},
                             ))
-                            result = await self.executor.execute_allowed(tc, user_id)
+                            result = await self.executor.execute_allowed(tc, user_id, callback=cb)
                             await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                             await cb.on_event(AgentEvent(
                                 "tool_result", _display,
@@ -459,6 +413,8 @@ class Agent:
                 )
         except asyncio.CancelledError:
             await cb.on_event(AgentEvent("done", "Cancelled", {}))
+            if _delegate_registered and self.registry:
+                self.registry.unregister("delegate")
             return "Operation cancelled."
 
         # Resolve chat session
@@ -482,28 +438,32 @@ class Agent:
                     await db.commit()
 
         # Store ALL messages (user, assistant, tool calls, tool results) encrypted
-        async with db_session(self.config) as db:
-            for msg in all_new_messages:
-                msg_id = str(uuid4())
-                encrypted_content = encrypt(msg.content, key)
-                tool_name = None
-                metadata = None
+        # Batch insert for performance (~10-20ms savings over individual inserts)
+        rows = []
+        for msg in all_new_messages:
+            msg_id = str(uuid4())
+            encrypted_content = encrypt(msg.content, key)
+            tool_name = None
+            metadata = None
 
-                if msg.tool_calls:
-                    metadata = json.dumps(
-                        [
-                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                            for tc in msg.tool_calls
-                        ]
-                    )
-                if msg.tool_call_id:
-                    tool_name = msg.tool_call_id
-
-                await db.execute(
-                    "INSERT INTO agent_messages (id, user_id, chat_session_id, role, content, tool_name, metadata) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (msg_id, user_id, chat_session_id, msg.role, encrypted_content, tool_name, metadata),
+            if msg.tool_calls:
+                metadata = json.dumps(
+                    [
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        for tc in msg.tool_calls
+                    ]
                 )
+            if msg.tool_call_id:
+                tool_name = msg.tool_call_id
+
+            rows.append((msg_id, user_id, chat_session_id, msg.role, encrypted_content, tool_name, metadata))
+
+        async with db_session(self.config) as db:
+            await db.executemany(
+                "INSERT INTO agent_messages (id, user_id, chat_session_id, role, content, tool_name, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
             await db.commit()
 
         # Record and return the final assistant message content
@@ -530,4 +490,9 @@ class Agent:
         ))
 
         await cb.on_event(AgentEvent("done", "Response ready", {}))
+
+        # Clean up delegate skill to avoid stale callback references
+        if _delegate_registered and self.registry:
+            self.registry.unregister("delegate")
+
         return content

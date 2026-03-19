@@ -6,7 +6,7 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, derive_server_key, encrypt, is_encrypted
+from lazyclaw.crypto.encryption import decrypt, decrypt_field, derive_server_key, encrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
 
     conversation_text = "\n".join(conversation_lines[:100])  # Cap at 100 messages
 
-    # Summarize via LLM
+    # Summarize via LLM (use fast model — cheap and quick)
     router = LLMRouter(config)
     summary_prompt = (
         "Summarize this day's conversations into a brief daily log. "
@@ -161,7 +161,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
         LLMMessage(role="user", content=summary_prompt),
     ]
 
-    response = await router.chat(config.default_model, messages, user_id=user_id)
+    response = await router.chat(messages, model=config.fast_model, user_id=user_id)
     summary = response.content
 
     # Extract key events (first line or bullet points)
@@ -169,4 +169,54 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
 
     await save_daily_log(config, user_id, date, summary, key_events)
     logger.info("Generated daily summary for user %s date %s", user_id, date)
+    return summary
+
+
+async def generate_weekly_summary(
+    config: Config, user_id: str, week_start: str,
+) -> str:
+    """Compress 7 daily logs into one weekly summary. Uses fast model.
+
+    Args:
+        week_start: ISO date string for the Monday of the week (e.g. "2026-03-10")
+    """
+    from datetime import date as _date, timedelta
+
+    from lazyclaw.llm.providers.base import LLMMessage
+    from lazyclaw.llm.router import LLMRouter
+
+    # Load daily logs for this week
+    all_logs = await list_daily_logs(config, user_id, limit=30)
+    start = _date.fromisoformat(week_start)
+    end = start + timedelta(days=7)
+    week_logs = [
+        l for l in all_logs
+        if not l["date"].endswith("_week")
+        and not l["date"].endswith("_month")
+        and start.isoformat() <= l["date"] < end.isoformat()
+    ]
+
+    if len(week_logs) < 2:
+        return ""  # Not enough data for a weekly summary
+
+    # Combine daily summaries
+    text = "\n\n".join(
+        f"**{l['date']}:**\n{l['summary']}" for l in sorted(week_logs, key=lambda x: x["date"])
+    )
+
+    router = LLMRouter(config)
+    messages = [
+        LLMMessage(
+            role="system",
+            content="Compress these daily logs into a brief weekly summary (1-2 paragraphs). "
+                    "Keep key decisions, outcomes, tasks completed, and important context.",
+        ),
+        LLMMessage(role="user", content=f"Week of {week_start}:\n\n{text}"),
+    ]
+
+    response = await router.chat(messages, model=config.fast_model, user_id=user_id)
+    summary = response.content
+
+    await save_daily_log(config, user_id, f"{week_start}_week", summary, "weekly")
+    logger.info("Generated weekly summary for user %s week %s", user_id, week_start)
     return summary

@@ -244,6 +244,14 @@ async def run_agent(config: Config) -> None:
         if telegram:
             await telegram.stop()
         await lane_queue.stop()
+        # Close MCP subprocesses before event loop closes
+        from lazyclaw.mcp.manager import disconnect_all
+        try:
+            await asyncio.wait_for(disconnect_all(), timeout=3)
+        except Exception:
+            pass
+        from lazyclaw.db.connection import close_pool
+        await close_pool()
 
 
 # ---------------------------------------------------------------------------
@@ -1093,3 +1101,12 @@ def start() -> None:
         asyncio.run(run_agent(config))
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopped.[/yellow]")
+    finally:
+        # Clean up MCP subprocesses to avoid "Event loop is closed" errors
+        try:
+            from lazyclaw.mcp.manager import disconnect_all
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(asyncio.wait_for(disconnect_all(), timeout=2))
+            loop.close()
+        except Exception:
+            pass

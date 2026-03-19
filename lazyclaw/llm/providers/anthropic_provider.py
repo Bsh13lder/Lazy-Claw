@@ -97,9 +97,15 @@ class AnthropicProvider(BaseLLMProvider):
 
         usage = None
         if response.usage:
+            input_t = response.usage.input_tokens
+            output_t = response.usage.output_tokens
             usage = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
+                "prompt_tokens": input_t,
+                "completion_tokens": output_t,
+                "total_tokens": input_t + output_t,
+                # Keep Anthropic names too for backward compat
+                "input_tokens": input_t,
+                "output_tokens": output_t,
             }
 
         return LLMResponse(
@@ -179,9 +185,14 @@ class AnthropicProvider(BaseLLMProvider):
                 elif event.type == "message_delta":
                     usage = None
                     if hasattr(event, "usage") and event.usage:
+                        input_t = getattr(event.usage, "input_tokens", 0)
+                        output_t = getattr(event.usage, "output_tokens", 0)
                         usage = {
-                            "input_tokens": getattr(event.usage, "input_tokens", 0),
-                            "output_tokens": getattr(event.usage, "output_tokens", 0),
+                            "prompt_tokens": input_t,
+                            "completion_tokens": output_t,
+                            "total_tokens": input_t + output_t,
+                            "input_tokens": input_t,
+                            "output_tokens": output_t,
                         }
                     yield StreamChunk(
                         delta="",

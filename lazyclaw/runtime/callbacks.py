@@ -11,9 +11,18 @@ _null_logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AgentEvent:
-    """A single event fired during agent processing."""
+    """A single event fired during agent processing.
 
-    kind: str  # llm_call, tool_call, tool_result, team_delegate, approval, token, done
+    Kinds: llm_call, tool_call, tool_result, team_delegate, approval,
+    token, done, work_summary, specialist_*, team_*, attachment.
+
+    The ``attachment`` kind carries binary data in metadata:
+      - ``data``: raw bytes
+      - ``media_type``: MIME type (e.g. "image/png")
+      - ``filename``: optional filename
+    """
+
+    kind: str
     detail: str  # Human-readable description
     metadata: dict = field(default_factory=dict)
 

@@ -145,7 +145,8 @@ class OpenAIProvider(BaseLLMProvider):
                         if tc_delta.function.arguments:
                             entry["arguments"] += tc_delta.function.arguments
 
-            # Check for finish
+            # Check for finish — save tool calls but DON'T return yet.
+            # Usage chunk arrives AFTER finish_reason in OpenAI streaming.
             if chunk.choices[0].finish_reason is not None:
                 parsed_tcs = None
                 if collected_tool_calls:
@@ -157,6 +158,16 @@ class OpenAIProvider(BaseLLMProvider):
                         )
                         for tc in collected_tool_calls.values()
                     ]
+
+                # Continue reading to capture the usage chunk that follows
+                async for tail_chunk in response:
+                    if hasattr(tail_chunk, "usage") and tail_chunk.usage:
+                        usage = {
+                            "prompt_tokens": tail_chunk.usage.prompt_tokens,
+                            "completion_tokens": tail_chunk.usage.completion_tokens,
+                            "total_tokens": tail_chunk.usage.total_tokens,
+                        }
+                        break
 
                 yield StreamChunk(
                     delta="",

@@ -35,6 +35,8 @@ class Config:
     log_level: str = "WARNING"
     tool_timeout: int = 60
     cdp_port: int = 9222
+    fast_model: str = ""   # Complexity routing: cheap/fast for simple messages
+    smart_model: str = ""  # Complexity routing: best for complex analysis
 
 
 def load_config() -> Config:
@@ -88,6 +90,8 @@ def load_config() -> Config:
         log_level=os.getenv("LOG_LEVEL", "WARNING"),
         tool_timeout=int(os.getenv("TOOL_TIMEOUT", "60")),
         cdp_port=int(os.getenv("CDP_PORT", "9222")),
+        fast_model=os.getenv("FAST_MODEL", "") or worker_model,
+        smart_model=os.getenv("SMART_MODEL", "") or default_model,
     )
 
 

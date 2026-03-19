@@ -305,15 +305,24 @@ async def connect_and_register_bundled_mcps(
         )
         servers = await rows.fetchall()
 
-    for server_id, name in servers:
+    # Connect all MCP servers in parallel (was sequential — 12s → ~2s)
+    async def _connect_one(server_id: str, name: str) -> int:
         if server_id in _active_clients:
-            continue  # already connected
+            return 0
         try:
             client = await connect_server(config, user_id, server_id)
             count = await register_mcp_tools(client, registry)
-            total_tools += count
             logger.info("Connected bundled MCP %s: %d tools", name, count)
+            return count
         except Exception:
             logger.warning("Failed to connect bundled MCP %s", name, exc_info=True)
+            return 0
+
+    import asyncio
+    results = await asyncio.gather(
+        *(_connect_one(sid, name) for sid, name in servers),
+        return_exceptions=True,
+    )
+    total_tools = sum(r for r in results if isinstance(r, int))
 
     return total_tools

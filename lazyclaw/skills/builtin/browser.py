@@ -20,10 +20,11 @@ class BrowseWebSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Open a headless browser and perform a web task in the background. "
-            "Use this to visit websites, check WhatsApp Web, read pages, fill forms, "
-            "log in to sites, or any task that requires browsing the web. "
-            "Runs silently — results are returned as text."
+            "Run a browser task in the background using headless Playwright (less RAM). "
+            "Best for: repeated/automated tasks, reading pages, searching, form filling, "
+            "monitoring, and any task the user doesn't need to see visually. "
+            "Use browser_action/see_browser instead ONLY when the user asks to see "
+            "what's on screen or you need to interact with a specific visible page."
         )
 
     @property

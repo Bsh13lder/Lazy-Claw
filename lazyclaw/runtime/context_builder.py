@@ -40,10 +40,31 @@ async def build_context(
 
     memories = await get_memories(config, user_id, limit=10)
 
+    # 3. Recent activity (daily/weekly logs — agent's "diary")
+    activity_section = ""
+    try:
+        from lazyclaw.memory.daily_log import list_daily_logs
+
+        recent_logs = await list_daily_logs(config, user_id, limit=10)
+        if recent_logs:
+            log_lines = []
+            for log in reversed(recent_logs):  # oldest first
+                if log["date"].endswith("_week"):
+                    log_lines.append(f"**Week of {log['date'][:10]}:** {log['summary'][:250]}")
+                elif log["date"].endswith("_month"):
+                    log_lines.append(f"**Month {log['date'][:7]}:** {log['summary'][:200]}")
+                else:
+                    log_lines.append(f"**{log['date']}:** {log['summary'][:150]}")
+            activity_section = "## Recent Activity\n" + "\n".join(log_lines)
+    except Exception:
+        pass
+
     # Combine sections
     sections = [personality]
     if capabilities:
         sections.append(capabilities)
+    if activity_section:
+        sections.append(activity_section)
     if memories:
         lines = [f"- {m['content']}" for m in memories]
         sections.append(

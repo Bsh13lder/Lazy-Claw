@@ -11,6 +11,7 @@ import base64
 import logging
 from typing import Any
 
+from lazyclaw.runtime.tool_result import Attachment, ToolResult
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,10 @@ _cdp_backend = None
 
 
 async def _get_cdp_backend():
-    """Get or create the shared CDP backend instance."""
+    """Get or create the shared CDP backend instance.
+
+    Uses the same profile directory as Playwright so cookies are shared.
+    """
     global _cdp_backend
     if _cdp_backend is None:
         from lazyclaw.browser.cdp_backend import CDPBackend
@@ -28,7 +32,68 @@ async def _get_cdp_backend():
 
         config = load_config()
         port = getattr(config, "cdp_port", 9222)
-        _cdp_backend = CDPBackend(port=port)
+        # Share profile with Playwright (default user)
+        profile_dir = str(config.database_dir / "browser_profiles" / "default")
+        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+    return _cdp_backend
+
+
+async def _get_visible_cdp_backend():
+    """Launch visible Chrome (user wants to see the browser).
+
+    Kills any existing headless Chrome first, then launches visible.
+    Uses the same shared profile for cookie persistence.
+    """
+    import asyncio
+    import os
+
+    from lazyclaw.browser.cdp import find_chrome_cdp
+    from lazyclaw.config import load_config
+
+    config = load_config()
+    port = getattr(config, "cdp_port", 9222)
+    profile_dir = str(config.database_dir / "browser_profiles" / "default")
+
+    # Kill existing headless Chrome on this port
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pkill", "-f", f"--headless.*--remote-debugging-port={port}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        await asyncio.sleep(1)
+    except Exception:
+        pass
+
+    # Check if visible Chrome is already on the port
+    ws_url = await find_chrome_cdp(port)
+    if not ws_url:
+        # Launch visible Chrome
+        mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        chrome_bin = mac_chrome if os.path.exists(mac_chrome) else "google-chrome"
+
+        await asyncio.create_subprocess_exec(
+            chrome_bin,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--disable-blink-features=AutomationControlled",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        logger.info("Launched VISIBLE Chrome (port=%d, profile=%s)", port, profile_dir)
+
+        # Wait for it to start
+        for _ in range(15):
+            await asyncio.sleep(0.5)
+            if await find_chrome_cdp(port):
+                break
+
+    # Reset the shared backend so it reconnects to the new Chrome
+    global _cdp_backend
+    from lazyclaw.browser.cdp_backend import CDPBackend
+    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
     return _cdp_backend
 
 
@@ -49,9 +114,10 @@ class SeeBrowserSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Take a screenshot of the user's real browser and read the page content. "
-            "Use this when the user asks 'what am I looking at', 'what's on my screen', "
-            "'read my browser', or similar. Requires Chrome with --remote-debugging-port."
+            "Read page content from Chrome (auto-launches headless if not running). "
+            "Set include_screenshot=true ONLY when user asks to see/send the page. "
+            "NEVER use run_command to launch Chrome — this tool handles it automatically. "
+            "For simple page reading, prefer browse_web (less RAM)."
         )
 
     @property
@@ -65,13 +131,13 @@ class SeeBrowserSkill(BaseSkill):
             "properties": {
                 "include_screenshot": {
                     "type": "boolean",
-                    "description": "Include a screenshot (default true)",
+                    "description": "Include a screenshot. Only set true when user asks to SEE the page or you need to send an image. Default false.",
                     "default": True,
                 },
             },
         }
 
-    async def execute(self, user_id: str, params: dict) -> str:
+    async def execute(self, user_id: str, params: dict) -> str | ToolResult:
         backend = await _get_cdp_backend()
         try:
             url = await backend.current_url()
@@ -91,22 +157,32 @@ class SeeBrowserSkill(BaseSkill):
                 })()
             """)
 
-            include_ss = params.get("include_screenshot", True)
-            screenshot_note = ""
-            if include_ss:
-                ss_bytes = await backend.screenshot()
-                screenshot_note = (
-                    f"\n\n[Screenshot captured: {len(ss_bytes)} bytes, "
-                    f"{len(ss_bytes) // 1024}KB PNG]"
-                )
-
-            return (
+            page_info = (
                 f"Current browser tab:\n"
                 f"Title: {title}\n"
                 f"URL: {url}\n"
                 f"\nPage content:\n{text}"
-                f"{screenshot_note}"
             )
+
+            include_ss = params.get("include_screenshot", False)
+            if include_ss:
+                ss_bytes = await backend.screenshot()
+                return ToolResult(
+                    text=(
+                        f"{page_info}\n\n"
+                        f"[Screenshot captured: {len(ss_bytes)} bytes, "
+                        f"{len(ss_bytes) // 1024}KB PNG]"
+                    ),
+                    attachments=(
+                        Attachment(
+                            data=ss_bytes,
+                            media_type="image/png",
+                            filename="screenshot.png",
+                        ),
+                    ),
+                )
+
+            return page_info
         except ConnectionError as e:
             return str(e)
         except Exception as e:
@@ -324,9 +400,10 @@ class BrowserActionSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Perform an action in the user's real browser: "
-            "click an element, type text, scroll, or navigate to a URL. "
-            "Use CSS selectors for click/type targets."
+            "Perform an action in Chrome: click, type, scroll, or navigate. "
+            "Chrome auto-launches headless if not running — NEVER use run_command "
+            "to launch Chrome. Uses new tabs in existing Chrome, not new windows. "
+            "Best for: interactive tasks (WhatsApp, login flows, forms)."
         )
 
     @property
@@ -360,12 +437,20 @@ class BrowserActionSkill(BaseSkill):
                     "enum": ["up", "down"],
                     "description": "Scroll direction (default: down)",
                 },
+                "visible": {
+                    "type": "boolean",
+                    "description": "Set true ONLY when user asks to SEE the browser on their screen (e.g. 'show me', 'open on my screen', 'I want to scan QR'). Default false (headless).",
+                },
             },
             "required": ["action"],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        backend = await _get_cdp_backend()
+        visible = params.get("visible", False)
+        if visible:
+            backend = await _get_visible_cdp_backend()
+        else:
+            backend = await _get_cdp_backend()
         action = params.get("action", "")
 
         try:

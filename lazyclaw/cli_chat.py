@@ -229,17 +229,22 @@ class CliCallback:
         elif kind == "tool_result":
             self._stop_spinner()
             self.current_phase = "thinking"
-            self.tool_log.append(f"\u2713 {display}")
             tool_key = event.metadata.get("tool", display)
             start = self._tool_start_times.pop(tool_key, None)
-            if start:
-                dur = time.monotonic() - start
+            dur_str = f" ({time.monotonic() - start:.1f}s)" if start else ""
+
+            error = event.metadata.get("error")
+            if error:
+                self.tool_log.append(f"\u2717 {display}")
                 self._console.print(
-                    f"  [green]\u2713 {display}[/green] "
-                    f"[dim]({dur:.1f}s)[/dim]"
+                    f"  [red]\u2717 {display}{dur_str} \u2014 "
+                    f"{str(error)[:80]}[/red]"
                 )
             else:
-                self._console.print(f"  [green]\u2713 {display}[/green]")
+                self.tool_log.append(f"\u2713 {display}")
+                self._console.print(
+                    f"  [green]\u2713[/green] [dim]{display}{dur_str}[/dim]"
+                )
 
         elif kind == "team_delegate":
             self._stop_spinner()
@@ -433,12 +438,20 @@ async def run_chat_loop(
 
     global _side_input_task
 
-    # Ctrl+C handling
+    # Ctrl+C handling — double-press support (first graceful, second force)
     _cancel_requested = False
 
     def _sigint_handler():
         nonlocal _cancel_requested
+        if _cancel_requested:
+            # Second Ctrl+C — force cancel immediately
+            if agent_task and not agent_task.done():
+                agent_task.cancel()
+            return
         _cancel_requested = True
+        # Kill side input so prompt_toolkit releases stdin
+        if _side_input_task and not _side_input_task.done():
+            _side_input_task.cancel()
 
     loop = asyncio.get_event_loop()
 
@@ -507,8 +520,8 @@ async def run_chat_loop(
                             if active_callback:
                                 active_callback._stop_spinner()
                             con.print(
-                                "  [dim]\u2500\u2500\u2500 type to "
-                                "add context (Enter to send) "
+                                "  [dim]\u2500\u2500\u2500 type to add context "
+                                "(Enter to send) | Ctrl+C to cancel "
                                 "\u2500\u2500\u2500[/dim]"
                             )
                             _input_hint_shown = True
@@ -518,6 +531,7 @@ async def run_chat_loop(
                                 from prompt_toolkit.formatted_text import HTML
                                 return await ctx.pt_session.prompt_async(
                                     HTML("<dim>  &gt; </dim>"),
+                                    handle_sigint=False,  # We handle SIGINT, not prompt_toolkit
                                 )
                             except (EOFError, KeyboardInterrupt):
                                 return ""
@@ -562,9 +576,9 @@ async def run_chat_loop(
                                     "  [dim]\u25cf Working...[/dim]"
                                 )
 
-                    # Poll agent
+                    # Poll agent (0.1s for responsive Ctrl+C)
                     done_set, _ = await asyncio.wait(
-                        {agent_task}, timeout=0.3,
+                        {agent_task}, timeout=0.1,
                     )
                     if done_set:
                         break

@@ -53,8 +53,14 @@ class PersistentBrowserManager:
             await self._force_cleanup()
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
-        await self.cleanup_locks()
-        await self.kill_orphaned_processes()
+        # Only clean locks/kill orphans if stale locks exist
+        has_stale_locks = any(
+            (self.profile_dir / f).exists() or (self.profile_dir / f).is_symlink()
+            for f in CHROME_LOCK_FILES
+        )
+        if has_stale_locks:
+            await self.cleanup_locks()
+            await self.kill_orphaned_processes()
 
         vp_width = random.randint(1280, 1440)
         vp_height = random.randint(720, 900)
@@ -116,10 +122,16 @@ class PersistentBrowserManager:
                     pass
 
     async def kill_orphaned_processes(self) -> None:
-        """Kill any orphaned chrome processes using this profile dir."""
+        """Kill orphaned chrome processes using this profile dir.
+
+        Uses SIGTERM first for graceful shutdown (profile flush),
+        then SIGKILL only if the process survives.
+        """
         try:
+            # SIGTERM — let Chrome flush profile to disk
             proc = await asyncio.create_subprocess_exec(
                 "pkill",
+                "-TERM",
                 "-f",
                 f"--user-data-dir={self.profile_dir}",
                 stdout=asyncio.subprocess.PIPE,
@@ -127,19 +139,37 @@ class PersistentBrowserManager:
             )
             await asyncio.wait_for(proc.wait(), timeout=5)
             if proc.returncode == 0:
-                logger.info("Killed orphaned chrome for user %s", self.user_id)
-                await asyncio.sleep(2)
+                logger.info("Sent SIGTERM to orphaned chrome for user %s", self.user_id)
+                await asyncio.sleep(5)  # Wait for profile flush
+
+                # SIGKILL only if still alive
+                proc2 = await asyncio.create_subprocess_exec(
+                    "pkill",
+                    "-KILL",
+                    "-f",
+                    f"--user-data-dir={self.profile_dir}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc2.wait(), timeout=3)
+                if proc2.returncode == 0:
+                    logger.info("Force-killed chrome for user %s", self.user_id)
         except (asyncio.TimeoutError, FileNotFoundError, OSError):
             pass
 
     async def close(self) -> None:
-        """Properly close browser, kill chrome, clean lock files."""
+        """Properly close browser, kill chrome, clean lock files.
+
+        Gives Chrome time to flush its profile to disk before killing.
+        """
         if self._browser:
             try:
                 if hasattr(self._browser, "close"):
                     await self._browser.close()
                 elif hasattr(self._browser, "stop"):
                     await self._browser.stop()
+                # Give Chrome time to flush profile to disk
+                await asyncio.sleep(3)
             except Exception as exc:
                 logger.warning("Browser close error: %s", exc)
             self._browser = None

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import random
 import time
 from typing import Any
 
@@ -31,32 +32,45 @@ class CDPBackend(BrowserBackend):
 
     On-demand: connects lazily when first used, auto-disconnects on idle.
     Does NOT close the user's browser — only disconnects the WebSocket.
+    Shares profile directory with Playwright for cookie persistence.
     """
 
-    def __init__(self, port: int = 9222) -> None:
+    def __init__(self, port: int = 9222, profile_dir: str | None = None) -> None:
         self._port = port
+        self._profile_dir = profile_dir  # Shared with Playwright when set
         self._conn: CDPConnection | None = None
         self._current_tab: CDPTab | None = None
         self._last_activity: float = 0.0
 
     async def _ensure_connected(self) -> CDPConnection:
-        """Lazy connect: discover Chrome and connect to active tab."""
+        """Lazy connect: discover Chrome and connect to active tab.
+
+        If no Chrome is running, auto-launches headless Chrome.
+        If Chrome has no tabs, creates a new blank tab automatically.
+        """
         if self._conn and self._conn.is_connected:
             self._last_activity = time.monotonic()
             return self._conn
 
         ws_url = await find_chrome_cdp(self._port)
         if not ws_url:
-            raise ConnectionError(
-                f"Chrome not running with debugging port. Launch with:\n"
-                f"  open -a 'Google Chrome' --args --remote-debugging-port={self._port}"
-            )
+            # Auto-launch headless Chrome instead of asking the user
+            ws_url = await self._auto_launch_chrome()
+            if not ws_url:
+                raise ConnectionError(
+                    f"Could not launch Chrome with debugging port {self._port}."
+                )
 
         # Connect to the first (active) page tab
         tabs = await list_chrome_tabs(self._port)
         page_tabs = [t for t in tabs if t.tab_type == "page"]
+
         if not page_tabs:
-            raise ConnectionError("Chrome has no open tabs.")
+            # No tabs — create one via CDP /json/new endpoint
+            logger.info("Chrome has no tabs, creating a new one")
+            page_tabs = await self._create_tab()
+            if not page_tabs:
+                raise ConnectionError("Chrome has no open tabs and failed to create one.")
 
         self._current_tab = page_tabs[0]
         self._conn = CDPConnection()
@@ -73,11 +87,98 @@ class CDPBackend(BrowserBackend):
         )
         return self._conn
 
+    async def _auto_launch_chrome(self) -> str | None:
+        """Launch headless Chrome with remote debugging. Returns CDP ws_url or None.
+
+        Uses the shared profile directory (same as Playwright) so cookies
+        and login sessions persist and are shared between both engines.
+        """
+        import os
+        import shutil
+
+        chrome_bin = shutil.which("google-chrome") or shutil.which("chromium")
+        if not chrome_bin:
+            # macOS: use Chrome.app
+            mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            if os.path.exists(mac_chrome):
+                chrome_bin = mac_chrome
+
+        if not chrome_bin:
+            logger.warning("Chrome/Chromium not found, cannot auto-launch")
+            return None
+
+        # Use shared profile dir (same as Playwright) for cookie sharing,
+        # or fall back to a persistent temp dir
+        if self._profile_dir:
+            profile_dir = self._profile_dir
+            os.makedirs(profile_dir, exist_ok=True)
+        else:
+            import tempfile
+            profile_dir = os.path.join(tempfile.gettempdir(), "lazyclaw-cdp-profile")
+
+        cmd = [
+            chrome_bin,
+            "--headless=new",
+            f"--remote-debugging-port={self._port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            logger.info(
+                "Launched headless Chrome (pid=%d, port=%d, profile=%s)",
+                proc.pid, self._port, profile_dir,
+            )
+            # Wait for Chrome to start accepting connections
+            for _ in range(15):
+                await asyncio.sleep(0.5)
+                ws_url = await find_chrome_cdp(self._port)
+                if ws_url:
+                    return ws_url
+            logger.warning("Chrome launched but CDP not responding after 7.5s")
+        except Exception as exc:
+            logger.error("Failed to launch Chrome: %s", exc)
+
+        return None
+
+    async def _create_tab(self, url: str = "about:blank") -> list[CDPTab]:
+        """Create a new tab via Chrome's /json/new endpoint."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.put(
+                    f"http://localhost:{self._port}/json/new?{url}"
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tab = CDPTab(
+                        id=data.get("id", ""),
+                        title=data.get("title", ""),
+                        url=data.get("url", url),
+                        ws_url=data.get("webSocketDebuggerUrl", ""),
+                        tab_type=data.get("type", "page"),
+                    )
+                    if tab.ws_url:
+                        logger.info("Created new tab: %s", tab.url)
+                        return [tab]
+        except Exception as exc:
+            logger.warning("Failed to create tab: %s", exc)
+        return []
+
     async def goto(self, url: str) -> None:
         conn = await self._ensure_connected()
         await conn.send("Page.navigate", {"url": url})
-        # Wait for page to load
-        await asyncio.sleep(1)
+        # Human-like wait for page load (0.8-1.5s)
+        await asyncio.sleep(random.uniform(0.8, 1.5))
         try:
             await conn.send(
                 "Page.waitForNavigation",
@@ -166,13 +267,22 @@ class CDPBackend(BrowserBackend):
 
         x, y = coords["x"], coords["y"]
         # Dispatch mouse events
-        for event_type in ("mousePressed", "mouseReleased"):
-            await conn.send("Input.dispatchMouseEvent", {
-                "type": event_type,
-                "x": x, "y": y,
-                "button": "left",
-                "clickCount": 1,
-            })
+        # Small delay between press and release (human finger)
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mousePressed",
+            "x": x, "y": y,
+            "button": "left",
+            "clickCount": 1,
+        })
+        await asyncio.sleep(random.uniform(0.05, 0.12))
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased",
+            "x": x, "y": y,
+            "button": "left",
+            "clickCount": 1,
+        })
+        # Human pause after clicking (0.2-1.5s)
+        await asyncio.sleep(random.uniform(0.2, 1.5))
 
     async def type_text(self, selector: str, text: str) -> None:
         conn = await self._ensure_connected()
@@ -185,8 +295,8 @@ class CDPBackend(BrowserBackend):
                 ),
             },
         )
-        await asyncio.sleep(0.1)
-        # Type each character
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        # Type each character with human-like timing
         for char in text:
             await conn.send("Input.dispatchKeyEvent", {
                 "type": "keyDown",
@@ -197,7 +307,7 @@ class CDPBackend(BrowserBackend):
                 "type": "keyUp",
                 "key": char,
             })
-            await asyncio.sleep(0.02)  # Human-like delay
+            await asyncio.sleep(random.uniform(0.03, 0.12))  # Human typing speed
 
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         conn = await self._ensure_connected()

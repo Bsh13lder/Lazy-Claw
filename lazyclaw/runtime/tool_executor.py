@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import TYPE_CHECKING
 
 from lazyclaw.llm.providers.base import ToolCall
 from lazyclaw.permissions.models import ALLOW, DENY
+from lazyclaw.runtime.tool_result import ToolResult
 from lazyclaw.skills.registry import SkillRegistry
+
+if TYPE_CHECKING:
+    from lazyclaw.runtime.callbacks import AgentCallback
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +30,19 @@ class ToolExecutor:
         self._checker = permission_checker
         self._timeout = timeout
 
-    async def execute(self, tool_call: ToolCall, user_id: str) -> str:
+    async def execute(
+        self,
+        tool_call: ToolCall,
+        user_id: str,
+        callback: AgentCallback | None = None,
+    ) -> str:
         """Execute a tool call, checking permissions first.
 
         Returns APPROVAL_REQUIRED:skill_name:{args_json} if permission level is 'ask'.
         Returns an error string if permission level is 'deny'.
+
+        If the skill returns a ``ToolResult`` with attachments, fires
+        ``attachment`` events via *callback* so channels can deliver them.
         """
         skill = self._registry.get(tool_call.name)
         if not skill:
@@ -53,7 +66,7 @@ class ToolExecutor:
                 timeout=self._timeout,
             )
             logger.debug("Tool %s executed successfully", tool_call.name)
-            return result
+            return await self._process_result(result, tool_call.name, callback)
         except asyncio.TimeoutError:
             logger.error("Tool %s timed out after %ds", tool_call.name, self._timeout)
             return f"Error: Tool '{tool_call.name}' timed out after {self._timeout} seconds."
@@ -61,7 +74,12 @@ class ToolExecutor:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"
 
-    async def execute_allowed(self, tool_call: ToolCall, user_id: str) -> str:
+    async def execute_allowed(
+        self,
+        tool_call: ToolCall,
+        user_id: str,
+        callback: AgentCallback | None = None,
+    ) -> str:
         """Execute a tool call WITHOUT permission checks.
 
         Only call this after the user has explicitly approved the action.
@@ -76,10 +94,37 @@ class ToolExecutor:
                 timeout=self._timeout,
             )
             logger.debug("Tool %s executed (approved)", tool_call.name)
-            return result
+            return await self._process_result(result, tool_call.name, callback)
         except asyncio.TimeoutError:
             logger.error("Tool %s timed out after %ds", tool_call.name, self._timeout)
             return f"Error: Tool '{tool_call.name}' timed out after {self._timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"
+
+    async def _process_result(
+        self,
+        result: str | ToolResult,
+        tool_name: str,
+        callback: AgentCallback | None,
+    ) -> str:
+        """Extract text from result and fire attachment events if present."""
+        if not isinstance(result, ToolResult):
+            return str(result)
+
+        # Fire attachment events for channels to deliver
+        if callback and result.attachments:
+            from lazyclaw.runtime.callbacks import AgentEvent
+
+            for att in result.attachments:
+                await callback.on_event(AgentEvent(
+                    kind="attachment",
+                    detail=att.filename or tool_name,
+                    metadata={
+                        "data": att.data,
+                        "media_type": att.media_type,
+                        "filename": att.filename,
+                    },
+                ))
+
+        return result.text

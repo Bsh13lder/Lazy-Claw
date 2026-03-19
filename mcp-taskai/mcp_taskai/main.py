@@ -5,7 +5,7 @@ import asyncio
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
-for _lib in ("httpx", "httpcore", "urllib3", "hpack"):
+for _lib in ("httpx", "httpcore", "urllib3", "hpack", "mcp.server.lowlevel.server"):
     logging.getLogger(_lib).setLevel(logging.WARNING)
 logger = logging.getLogger("mcp-taskai")
 

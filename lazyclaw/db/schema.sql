@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS agent_messages (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Performance indexes for hot-path queries
+CREATE INDEX IF NOT EXISTS idx_agent_messages_session
+ON agent_messages(user_id, chat_session_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_user
+ON agent_messages(user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS agent_chat_sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -75,6 +82,9 @@ CREATE TABLE IF NOT EXISTS skills (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_skills_user
+ON skills(user_id);
+
 CREATE TABLE IF NOT EXISTS personal_memory (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -84,6 +94,9 @@ CREATE TABLE IF NOT EXISTS personal_memory (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_personal_memory_user
+ON personal_memory(user_id, importance DESC);
 
 CREATE TABLE IF NOT EXISTS daily_logs (
     id TEXT PRIMARY KEY,

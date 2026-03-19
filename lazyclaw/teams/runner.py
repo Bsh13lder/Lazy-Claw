@@ -145,7 +145,7 @@ async def run_specialist(
                 if tc.name not in specialist.allowed_skills:
                     tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
                 else:
-                    tool_result = await executor.execute(tc, user_id)
+                    tool_result = await executor.execute(tc, user_id, callback=callback)
 
                     # If approval required, note it but don't block
                     if isinstance(tool_result, str) and tool_result.startswith(APPROVAL_PREFIX):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import os
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -20,7 +21,13 @@ def derive_key(password: str, salt: bytes, iterations: int = 100_000) -> bytes:
     return kdf.derive(password.encode("utf-8"))
 
 
+@functools.lru_cache(maxsize=64)
 def derive_server_key(server_secret: str, user_id: str) -> bytes:
+    """Derive AES-256 key for server-side encryption.
+
+    Cached because PBKDF2 with 100K iterations takes ~80ms per call,
+    and the same (secret, user_id) pair always produces the same key.
+    """
     return derive_key(server_secret + user_id, FIXED_SALT, 100_000)
 
 

@@ -53,12 +53,25 @@ def build_work_summary(
     )
 
 
+def _estimate_session_cost(llm_calls: int, total_tokens: int) -> float:
+    """Rough cost estimate from call count and tokens.
+
+    Conservative default: ~$0.003 per call (between mini and full model).
+    """
+    if llm_calls <= 0:
+        return 0.0
+    avg_cost_per_call = 0.003
+    return llm_calls * avg_cost_per_call
+
+
 def format_summary_cli(summary: WorkSummary) -> str:
     """Format a WorkSummary for Rich CLI display.
 
     Returns a string with Rich markup for styled terminal output.
+    Cost details are in /usage only — keep summary clean.
     """
     duration_s = summary.duration_ms / 1000
+
     lines = [
         f"[bold]Done[/bold] in {duration_s:.1f}s | "
         f"{summary.llm_calls} LLM calls | "
@@ -82,8 +95,10 @@ def format_summary_telegram(summary: WorkSummary) -> str:
     """Format a WorkSummary for Telegram plain text with emoji.
 
     Returns a clean, structured plain text message.
+    Cost details are in /usage and server dashboard only.
     """
     duration_s = summary.duration_ms / 1000
+
     lines = [f"\u2705 Done in {duration_s:.1f}s", ""]
 
     lines.append(

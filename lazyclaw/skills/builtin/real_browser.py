@@ -400,10 +400,11 @@ class BrowserActionSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Perform an action in Chrome: click, type, scroll, or navigate. "
-            "Chrome auto-launches headless if not running — NEVER use run_command "
-            "to launch Chrome. Uses new tabs in existing Chrome, not new windows. "
-            "Best for: interactive tasks (WhatsApp, login flows, forms)."
+            "Low-level Chrome action by CSS selector: click, type, scroll, navigate. "
+            "ONLY use when user asks to SEE the browser on screen (visible=true) or "
+            "you need a simple one-off click with a known CSS selector. "
+            "For ALL interactive tasks (WhatsApp, Instagram, forms, logins), "
+            "use browse_web instead — it finds elements intelligently."
         )
 
     @property

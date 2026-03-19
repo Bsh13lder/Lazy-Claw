@@ -33,6 +33,34 @@ _CHAT_ONLY_PATTERN = re.compile(
 )
 
 
+# Browser task detection — use reduced tool set for speed
+_BROWSER_TASK_PATTERN = re.compile(
+    r"\b(whatsapp|instagram|facebook|twitter|linkedin|gmail|"
+    r"open.*browser|browse|visit.*site|go to.*\.com|"
+    r"login.*to|sign.*in|check.*page|post.*on|send.*message|"
+    r"read.*page|fill.*form|click|navigate)\b",
+    re.IGNORECASE,
+)
+
+# Essential tools for browser tasks (skip the other 90+ tools)
+_BROWSER_ESSENTIAL_TOOLS = {
+    "browse_web", "browser_action", "see_browser", "read_page",
+    "read_tab", "list_tabs", "switch_tab",
+    "web_search", "memory_recall", "memory_save",
+    "delegate", "get_time", "save_site_login",
+}
+
+
+def _is_browser_task(message: str) -> bool:
+    """Detect if a message is primarily a browser/web interaction task."""
+    return bool(_BROWSER_TASK_PATTERN.search(message))
+
+
+def _filter_browser_tools(tools: list[dict]) -> list[dict]:
+    """Keep only browser-essential tools to reduce context size."""
+    return [t for t in tools if t.get("function", {}).get("name") in _BROWSER_ESSENTIAL_TOOLS]
+
+
 def _strip_tool_messages(history: list[LLMMessage]) -> list[LLMMessage]:
     """Remove tool-related messages from history for tool-free conversations.
 
@@ -182,12 +210,17 @@ class Agent:
             _delegate_registered = True
 
         # Get tools — all or nothing. Chat-only messages get no tools (fast path).
-        # Everything else gets ALL tools (core + MCP) and the LLM decides.
+        # Browser tasks get filtered tool set (10 tools instead of 105 = 10x faster LLM).
         needs_tools = self.registry is not None and _wants_any_tools(message)
         tools: list = []
         if needs_tools:
             tools = self.registry.list_core_tools() + self.registry.list_mcp_tools()
-            logger.info("Tools enabled (%d) for: %s", len(tools), message[:50])
+            # For browser tasks: filter to essential tools only (huge speed gain)
+            if _is_browser_task(message):
+                tools = _filter_browser_tools(tools)
+                logger.info("Browser task — filtered to %d tools for: %s", len(tools), message[:50])
+            else:
+                logger.info("Tools enabled (%d) for: %s", len(tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 

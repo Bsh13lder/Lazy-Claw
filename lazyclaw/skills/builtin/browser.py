@@ -20,11 +20,12 @@ class BrowseWebSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Run a browser task in the background using headless Playwright (less RAM). "
-            "Best for: repeated/automated tasks, reading pages, searching, form filling, "
-            "monitoring, and any task the user doesn't need to see visually. "
-            "Use browser_action/see_browser instead ONLY when the user asks to see "
-            "what's on screen or you need to interact with a specific visible page."
+            "PRIMARY tool for ALL web interactions. Uses an AI browser agent that sees "
+            "the full page DOM and clicks elements intelligently — no CSS selectors needed. "
+            "Use for: WhatsApp messaging, Instagram, form filling, login flows, page reading, "
+            "searching, ANY website interaction. Runs headless in background. "
+            "Only use browser_action instead if user explicitly asks to see the browser "
+            "on their screen (e.g. QR scan)."
         )
 
     @property

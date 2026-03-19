@@ -79,6 +79,11 @@ class LaneQueue:
             finally:
                 lane.task_done()
 
+    @property
+    def queue_depth(self) -> int:
+        """Total pending messages across all user lanes."""
+        return sum(q.qsize() for q in self._lanes.values())
+
     async def start(self) -> None:
         """Start the queue."""
         self._running = True

@@ -137,6 +137,23 @@ class SkillRegistry:
         self.register(SwitchTabSkill(config=config))
         self.register(BrowserActionSkill(config=config))
 
+        # Browser management skills
+        from lazyclaw.skills.builtin.browser_management import (
+            BrowserSetPersistentSkill, BrowserApproveConnectSkill,
+        )
+
+        self.register(BrowserSetPersistentSkill(config=config))
+        self.register(BrowserApproveConnectSkill(config=config))
+
+        # Watcher skills (zero-token site monitoring)
+        from lazyclaw.skills.builtin.watcher_skills import (
+            WatchSiteSkill, StopWatcherSkill, ListWatchersSkill,
+        )
+
+        self.register(WatchSiteSkill(config=config))
+        self.register(StopWatcherSkill(config=config))
+        self.register(ListWatchersSkill(config=config))
+
         # AI management skills (ECO mode, providers, Ollama)
         from lazyclaw.skills.builtin.eco_management import (
             EcoSetModeSkill, EcoShowStatusSkill, EcoSetProviderSkill,

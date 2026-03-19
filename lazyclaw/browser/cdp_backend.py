@@ -92,6 +92,7 @@ class CDPBackend(BrowserBackend):
 
         Auto-detects Brave > Chrome > Chromium. Uses the shared profile
         directory (same as Playwright) so cookies persist between both engines.
+        Kills stale processes on the debugging port before launching.
         """
         import os
 
@@ -103,6 +104,18 @@ class CDPBackend(BrowserBackend):
         if not chrome_bin:
             logger.warning("No browser found (Brave/Chrome/Chromium), cannot auto-launch")
             return None
+
+        # Kill any stale headless browser hogging the debugging port
+        try:
+            kill_proc = await asyncio.create_subprocess_exec(
+                "pkill", "-f", f"--remote-debugging-port={self._port}",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await kill_proc.wait()
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
 
         # Use shared profile dir (same as Playwright) for cookie sharing,
         # or fall back to a persistent temp dir
@@ -385,6 +398,97 @@ class CDPBackend(BrowserBackend):
     @property
     def backend_type(self) -> str:
         return "cdp"
+
+
+async def restart_browser_with_cdp(
+    port: int = 9222,
+    profile_dir: str | None = None,
+    browser_bin: str | None = None,
+) -> str | None:
+    """Kill running Brave/Chrome and relaunch with CDP enabled (visible).
+
+    Same profile directory → all tabs, cookies, sessions preserved.
+    Returns CDP ws_url or None.
+    """
+    import os
+
+    if not browser_bin:
+        from lazyclaw.config import load_config
+        config = load_config()
+        browser_bin = config.browser_executable
+
+    if not browser_bin:
+        logger.warning("No browser binary found")
+        return None
+
+    # Kill ALL Brave/Chrome instances (visible + headless)
+    browser_name = os.path.basename(browser_bin).lower()
+    kill_patterns = [
+        f"--remote-debugging-port={port}",  # headless with CDP
+    ]
+    # Also kill the main browser process
+    if "brave" in browser_name:
+        kill_patterns.append("Brave Browser")
+    else:
+        kill_patterns.append("Google Chrome")
+
+    for pattern in kill_patterns:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-f", pattern,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        except Exception:
+            pass
+
+    await asyncio.sleep(1.5)  # Wait for graceful shutdown
+
+    # Clean stale profile locks
+    if profile_dir:
+        os.makedirs(profile_dir, exist_ok=True)
+        for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock_path = os.path.join(profile_dir, lock_file)
+            try:
+                if os.path.exists(lock_path) or os.path.islink(lock_path):
+                    os.unlink(lock_path)
+            except OSError:
+                pass
+
+    # Relaunch VISIBLE browser with CDP
+    cmd = [
+        browser_bin,
+        f"--remote-debugging-port={port}",
+        "--no-first-run",
+        "--disable-blink-features=AutomationControlled",
+    ]
+    if profile_dir:
+        cmd.append(f"--user-data-dir={profile_dir}")
+
+    try:
+        await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        logger.info(
+            "Relaunched browser with CDP (port=%d, profile=%s)",
+            port, profile_dir,
+        )
+
+        # Wait for CDP to respond (up to 10s)
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            ws_url = await find_chrome_cdp(port)
+            if ws_url:
+                return ws_url
+
+        logger.warning("Browser launched but CDP not responding after 10s")
+    except Exception as exc:
+        logger.error("Failed to relaunch browser: %s", exc)
+
+    return None
 
 
 def _js_str(s: str) -> str:

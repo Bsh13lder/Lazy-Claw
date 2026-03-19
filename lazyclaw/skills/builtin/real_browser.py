@@ -7,10 +7,13 @@ which are better for automated/background tasks.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any
 
+from lazyclaw.browser.browser_settings import touch_browser_activity
+from lazyclaw.browser.page_reader import JS_WHATSAPP, JS_EMAIL, _detect_page_type
 from lazyclaw.runtime.tool_result import Attachment, ToolResult
 from lazyclaw.skills.base import BaseSkill
 
@@ -114,10 +117,10 @@ class SeeBrowserSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Read page content from Chrome (auto-launches headless if not running). "
-            "Set include_screenshot=true ONLY when user asks to see/send the page. "
-            "NEVER use run_command to launch Chrome — this tool handles it automatically. "
-            "For simple page reading, prefer browse_web (less RAM)."
+            "Take a screenshot or read the user's BRAVE browser. "
+            "This controls the REAL visible Brave on the user's screen. "
+            "Set include_screenshot=true when user asks to see/show the screen. "
+            "When user says 'Brave', 'my browser', 'show me screen' — use THIS tool."
         )
 
     @property
@@ -131,13 +134,14 @@ class SeeBrowserSkill(BaseSkill):
             "properties": {
                 "include_screenshot": {
                     "type": "boolean",
-                    "description": "Include a screenshot. Only set true when user asks to SEE the page or you need to send an image. Default false.",
-                    "default": True,
+                    "description": "ONLY set true when user says 'send screenshot', 'take screenshot', or 'send me a picture'. The browser is visible on the user's screen — they can already see it. Default false.",
+                    "default": False,
                 },
             },
         }
 
     async def execute(self, user_id: str, params: dict) -> str | ToolResult:
+        touch_browser_activity()
         backend = await _get_cdp_backend(user_id)
         try:
             url = await backend.current_url()
@@ -257,10 +261,11 @@ class ReadTabSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "FASTEST way to read a page already open in Chrome. Instant (0.1s). "
-            "Use FIRST for WhatsApp, Gmail, or any site already loaded in a tab. "
-            "Can read current tab or switch by title/URL match. "
-            "Try this before browse_web — it's 100x faster."
+            "Read content from the user's BRAVE browser. Instant (0.1s). "
+            "ALWAYS use this FIRST for WhatsApp, Gmail, or any site. "
+            "If the tab isn't open, it auto-navigates Brave there. "
+            "This is the user's REAL browser — NOT a hidden Chrome. "
+            "When user says 'Brave', 'check my WhatsApp', 'read my email' — use THIS."
         )
 
     @property
@@ -283,6 +288,7 @@ class ReadTabSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        touch_browser_activity()
         backend = await _get_cdp_backend(user_id)
         try:
             query = params.get("tab_query", "").strip()
@@ -295,11 +301,57 @@ class ReadTabSkill(BaseSkill):
                     None,
                 )
                 if not match:
-                    return f"No tab found matching '{query}'."
-                await backend.switch_tab(match.id)
+                    # Auto-navigate visible browser to the requested site
+                    nav_url = self._query_to_url(query)
+                    if nav_url:
+                        import asyncio
+                        logger.info("No tab '%s', navigating to %s", query, nav_url)
+                        await backend.goto(nav_url)
+                        await asyncio.sleep(3)
+                        # WhatsApp needs extra sync time
+                        if "whatsapp" in nav_url:
+                            for _ in range(15):
+                                count = await backend.evaluate(
+                                    "(() => document.querySelectorAll("
+                                    "'[data-testid=\"cell-frame-container\"]').length)()"
+                                )
+                                if count and count > 0:
+                                    break
+                                await asyncio.sleep(2)
+                    else:
+                        return f"No tab found matching '{query}'."
+                else:
+                    await backend.switch_tab(match.id)
 
             url = await backend.current_url()
             title = await backend.title()
+            page_type = _detect_page_type(url)
+
+            if page_type == "whatsapp":
+                # Quick sync check — tab is usually already loaded
+                for _ in range(5):
+                    count = await backend.evaluate(
+                        "(() => document.querySelectorAll("
+                        "'[data-testid=\"cell-frame-container\"]').length)()"
+                    )
+                    if count and count > 0:
+                        break
+                    await asyncio.sleep(1)
+                result = await backend.evaluate(f"({JS_WHATSAPP})()")
+                if isinstance(result, dict):
+                    summary = f"Tab: {result.get('title', title)}\nURL: {url}"
+                    if result.get("unread_count"):
+                        summary += f"\nUnread: {result['unread_count']}"
+                    summary += f"\n\n{result.get('text', '')}"
+                    return summary
+                return f"Tab: {title}\nURL: {url}\n\n{result}"
+
+            if page_type == "email":
+                result = await backend.evaluate(f"({JS_EMAIL})()")
+                text = result.get("text", "") if isinstance(result, dict) else str(result)
+                return f"Tab: {title}\nURL: {url}\n\n{text}"
+
+            # Generic extractor — all other sites
             text = await backend.evaluate("""
                 (() => {
                     const sel = ['article', 'main', '[role="main"]', '.content', '#content', 'body'];
@@ -313,11 +365,81 @@ class ReadTabSkill(BaseSkill):
                 })()
             """)
             return f"Tab: {title}\nURL: {url}\n\n{text}"
-        except ConnectionError as e:
-            return str(e)
+        except ConnectionError:
+            # CDP not available — try auto-restart Brave with CDP
+            logger.info("read_tab: CDP unavailable, attempting auto-connect")
+            return await self._auto_connect_and_retry(user_id, params)
         except Exception as e:
             logger.error("read_tab failed: %s", e, exc_info=True)
             return f"Error reading tab: {e}"
+
+    @staticmethod
+    def _query_to_url(query: str) -> str:
+        """Convert a tab query like 'whatsapp' to a URL."""
+        q = query.lower().strip()
+        shortcuts = {
+            "whatsapp": "https://web.whatsapp.com",
+            "wa": "https://web.whatsapp.com",
+            "gmail": "https://mail.google.com",
+            "mail": "https://mail.google.com",
+            "email": "https://mail.google.com",
+            "instagram": "https://www.instagram.com",
+            "twitter": "https://x.com",
+            "x": "https://x.com",
+            "facebook": "https://www.facebook.com",
+            "linkedin": "https://www.linkedin.com",
+        }
+        if q in shortcuts:
+            return shortcuts[q]
+        if q.startswith("http"):
+            return q
+        if "." in q:
+            return f"https://{q}"
+        return ""
+
+    async def _auto_connect_and_retry(self, user_id: str, params: dict) -> str:
+        """Auto-restart Brave with CDP if approved, then retry read_tab."""
+        from lazyclaw.browser.browser_settings import (
+            get_browser_settings,
+            update_browser_settings,
+        )
+        from lazyclaw.config import load_config
+
+        config = load_config()
+        settings = await get_browser_settings(config, user_id)
+
+        if not settings.get("cdp_approved"):
+            # First time — ask for permission
+            return (
+                "I need to restart Brave with debugging enabled so I can "
+                "read your browser tabs (WhatsApp, Gmail, etc). All your "
+                "tabs and logins will be preserved — just a 2-3 second "
+                "restart. Say 'yes, connect browser' to allow. I'll "
+                "remember your choice for next time."
+            )
+
+        # Approved — restart Brave with CDP
+        from lazyclaw.browser.cdp_backend import restart_browser_with_cdp
+
+        port = getattr(config, "cdp_port", 9222)
+        profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+        ws_url = await restart_browser_with_cdp(
+            port=port, profile_dir=profile_dir,
+        )
+
+        if not ws_url:
+            return "Failed to restart browser with debugging. Check if Brave is installed."
+
+        # Reset CDP backend to use the new connection
+        global _cdp_backend
+        from lazyclaw.browser.cdp_backend import CDPBackend
+        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+
+        # Retry the original read_tab
+        try:
+            return await self.execute(user_id, params)
+        except Exception as e:
+            return f"Browser restarted but read failed: {e}"
 
 
 class SwitchTabSkill(BaseSkill):
@@ -358,6 +480,7 @@ class SwitchTabSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        touch_browser_activity()
         backend = await _get_cdp_backend(user_id)
         try:
             query = params.get("query", "").strip()
@@ -401,11 +524,10 @@ class BrowserActionSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Low-level Chrome action by CSS selector: click, type, scroll, navigate. "
-            "ONLY use when user asks to SEE the browser on screen (visible=true) or "
-            "you need a simple one-off click with a known CSS selector. "
-            "For ALL interactive tasks (WhatsApp, Instagram, forms, logins), "
-            "use browse_web instead — it finds elements intelligently."
+            "Perform an action in the user's BRAVE browser: click, type, scroll, goto URL. "
+            "This controls the REAL visible Brave on the user's screen. "
+            "Use for clicking buttons, typing text, navigating to URLs in Brave. "
+            "When user says 'click', 'go to', 'open in Brave' — use THIS tool."
         )
 
     @property
@@ -444,6 +566,7 @@ class BrowserActionSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        touch_browser_activity()
         backend = await _get_cdp_backend(user_id)
         action = params.get("action", "")
 
@@ -454,7 +577,7 @@ class BrowserActionSkill(BaseSkill):
                     return "URL required for goto action."
                 await backend.goto(url)
                 title = await backend.title()
-                return f"Navigated to: {title} ({url})"
+                return f"Done — {title} is now open on the user's screen in Brave. No screenshot needed — they can see it."
 
             elif action == "click":
                 selector = params.get("selector", "")

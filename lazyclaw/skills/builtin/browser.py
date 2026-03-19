@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
+from lazyclaw.browser.browser_settings import touch_browser_activity
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,12 @@ class BrowseWebSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Automate a multi-step browser task (navigate, click, type, read). "
-            "Use for NEW sessions: login flows, form filling, posting content. "
-            "IMPORTANT: For sites already open in Chrome (WhatsApp, etc.), "
-            "use read_tab first — it's instant. Only use browse_web when "
-            "read_tab/see_browser can't do the job (e.g. need to click, type, navigate)."
+            "Background headless browser for web scraping and automation. "
+            "WARNING: This is NOT the user's Brave — it's a separate hidden browser. "
+            "It has NO access to the user's logins (WhatsApp, Gmail, etc). "
+            "ONLY use for: web search results, public pages, new site visits. "
+            "For ANYTHING in the user's Brave (WhatsApp, Gmail, logged-in sites), "
+            "use read_tab or browser_action instead."
         )
 
     @property
@@ -48,6 +50,7 @@ class BrowseWebSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        touch_browser_activity()
         from lazyclaw.browser.smart_browser import SmartBrowser
         from lazyclaw.llm.eco_router import EcoRouter
         from lazyclaw.llm.router import LLMRouter

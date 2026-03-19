@@ -49,12 +49,14 @@ _CORE_TOOLS = {
 _TOOL_CATEGORIES: dict[str, tuple[set[str], re.Pattern]] = {
     "browser": (
         {"browse_web", "browser_action", "see_browser", "read_page",
-         "read_tab", "list_tabs", "switch_tab", "save_site_login"},
+         "read_tab", "list_tabs", "switch_tab", "save_site_login",
+         "watch_site", "stop_watcher", "list_watchers"},
         re.compile(
             r"\b(whatsapp|instagram|facebook|twitter|linkedin|gmail|"
             r"open.*browser|browse|visit.*site|go to.*\.com|"
             r"login.*to|sign.*in|check.*page|post.*on|send.*message|"
-            r"read.*page|fill.*form|click|navigate)\b",
+            r"read.*page|fill.*form|click|navigate|"
+            r"watch|watching|watchers?|monitor|notify.*when|alert.*when)\b",
             re.IGNORECASE,
         ),
     ),
@@ -96,10 +98,13 @@ _TOOL_CATEGORIES: dict[str, tuple[set[str], re.Pattern]] = {
          "list_mcp_servers", "add_mcp_server", "remove_mcp_server",
          "show_status", "run_doctor", "show_usage", "show_logs", "set_model",
          "show_team_settings", "set_team_mode", "list_specialists",
-         "manage_specialist"},
+         "manage_specialist", "browser_set_persistent", "approve_browser_connect"},
         re.compile(
             r"\b(eco|provider|ollama|permission|mcp.*server|doctor|"
-            r"diagnostic|status|model|admin|setting|config|team.*mode|specialist)\b",
+            r"diagnostic|status|model|admin|setting|config|team.*mode|specialist|"
+            r"persistent.*browser|browser.*persistent|keep.*browser|browser.*always|"
+            r"browser.*mode|set.*browser|browser.*auto|browser.*on|browser.*off|"
+            r"connect.*browser|approve.*browser|allow.*browser|yes.*connect)\b",
             re.IGNORECASE,
         ),
     ),
@@ -129,12 +134,29 @@ def _select_tools(message: str, all_tools: list[dict]) -> list[dict]:
         # No specific category matched — use general-purpose set.
         # Includes common tools but skips admin, replay, MCP management.
         needed.update({
-            "browse_web", "read_page", "web_search",
+            "browse_web", "read_tab", "read_page", "web_search",
             "run_command", "read_file", "write_file", "list_directory",
             "create_skill", "list_skills",
             "schedule_job", "set_reminder", "list_jobs",
             "vault_list",
         })
+
+    # ── Read-only browser demotion ────────────────────────────────────
+    # When the browser category matched but the message is clearly a
+    # passive read (no action verbs), strip heavy browser tools so the
+    # LLM prefers read_tab (instant). Keep browse_web as fallback in
+    # case read_tab can't connect (no browser running).
+    if "browse_web" in needed and "read_tab" in needed:
+        _has_action = re.search(
+            r"\b(click|type|fill|login|log\s*in|sign\s*in|submit|post|send|"
+            r"navigate|scroll|open|go\s+to|visit|upload|download|buy|order|"
+            r"book|register|sign\s*up|write|reply|compose|enter)\b",
+            lower,
+        )
+        if not _has_action:
+            # Strip browser_action (interactive) but keep browse_web as
+            # fallback — read_tab's description already says "try me first"
+            needed.discard("browser_action")
 
     filtered = [t for t in all_tools if t.get("function", {}).get("name") in needed]
     return filtered

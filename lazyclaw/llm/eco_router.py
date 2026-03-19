@@ -120,7 +120,8 @@ _COMPLEX_PATTERNS = re.compile(
 # Simple action keywords (reused from team lead's filter)
 _SIMPLE_ACTION_PATTERN = re.compile(
     r"\b(search|browse|find|create|write|run|schedule|calculate|"
-    r"check|read|remind|list|show|fetch)\b",
+    r"check|read|remind|list|show|fetch|tell|what|where|is there|"
+    r"open|look|see|get)\b",
     re.IGNORECASE,
 )
 
@@ -132,6 +133,10 @@ def classify_complexity(message: str, has_tools: bool) -> str:
     """
     if _COMPLEX_PATTERNS.search(message):
         return COMPLEXITY_COMPLEX
+
+    # Simple tool tasks (list, check, show, read) → cheap model
+    if has_tools and _SIMPLE_ACTION_PATTERN.search(message) and len(message) < 120:
+        return COMPLEXITY_SIMPLE
 
     if not has_tools and len(message) < 100:
         lower = message.lower().strip()

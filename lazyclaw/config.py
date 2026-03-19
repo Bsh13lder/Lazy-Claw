@@ -31,7 +31,7 @@ class Config:
     browser_timeout: int = 300
     computer_timeout: int = 30
     heartbeat_interval: int = 1800
-    max_tool_iterations: int = 25
+    max_tool_iterations: int = 10
     log_level: str = "WARNING"
     tool_timeout: int = 60
     cdp_port: int = 9222
@@ -87,7 +87,7 @@ def load_config() -> Config:
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
         computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),
         heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "1800")),
-        max_tool_iterations=int(os.getenv("MAX_TOOL_ITERATIONS", "25")),
+        max_tool_iterations=int(os.getenv("MAX_TOOL_ITERATIONS", "10")),
         log_level=os.getenv("LOG_LEVEL", "WARNING"),
         tool_timeout=int(os.getenv("TOOL_TIMEOUT", "60")),
         cdp_port=int(os.getenv("CDP_PORT", "9222")),

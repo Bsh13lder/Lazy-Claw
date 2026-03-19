@@ -203,73 +203,28 @@ async def run_agent(config: Config) -> None:
     from lazyclaw.gateway.app import set_lane_queue
     set_lane_queue(lane_queue)
 
-    tasks: list = []
+    # ── Textual TUI Dashboard ────────────────────────────────────────
+    # Full interactive terminal: live agent activity, system overview,
+    # scrollable logs, admin input. Replaces the old Rich Live panel.
+    # All services (uvicorn, Telegram, heartbeat) run as Textual workers.
 
-    import uvicorn
+    from lazyclaw.cli_tui import LazyClawApp
 
-    uvi_config = uvicorn.Config(
-        "lazyclaw.gateway.app:app",
-        host="0.0.0.0",
-        port=config.port,
-        log_level="warning",
+    app = LazyClawApp(
+        config=config,
+        agent=agent,
+        lane_queue=lane_queue,
+        registry=registry,
+        task_runner=task_runner,
+        telegram_token=config.telegram_bot_token,
+        permission_checker=permission_checker,
+        default_user_id=user_id,
     )
-    server = uvicorn.Server(uvi_config)
-    tasks.append(server.serve())
-
-    # Server dashboard for terminal visibility
-    from lazyclaw.cli_server import ServerDashboard
-
-    dashboard = ServerDashboard()
-
-    telegram = None
-    if config.telegram_bot_token:
-        from lazyclaw.channels.telegram import TelegramAdapter
-
-        telegram = TelegramAdapter(
-            config.telegram_bot_token, agent, config,
-            lane_queue=lane_queue, server_dashboard=dashboard,
-        )
-        await telegram.start()
-        console.print("[green]\u2713[/green] Telegram bot running")
-
-    from lazyclaw.heartbeat.daemon import HeartbeatDaemon
-
-    heartbeat = HeartbeatDaemon(config, lane_queue)
-    await heartbeat.start()
-    console.print("[green]\u2713[/green] Heartbeat daemon started")
-
-    console.print(f"[green]\u2713[/green] API running at http://localhost:{config.port}")
-    console.print()
-
-    from rich.live import Live
-
-    async def _dashboard_loop(live: Live) -> None:
-        """Refresh the dashboard every 0.5s."""
-        while True:
-            live.update(dashboard.render())
-            await asyncio.sleep(0.5)
 
     try:
-        with Live(
-            dashboard.render(), console=console, refresh_per_second=2,
-        ) as live:
-            tasks.append(_dashboard_loop(live))
-            await asyncio.gather(*tasks)
+        await app.run_async()
     except (KeyboardInterrupt, asyncio.CancelledError):
-        console.print("\n[yellow]Shutting down...[/yellow]")
-        await task_runner.cancel_all()
-        await heartbeat.stop()
-        if telegram:
-            await telegram.stop()
-        await lane_queue.stop()
-        # Close MCP subprocesses before event loop closes
-        from lazyclaw.mcp.manager import disconnect_all
-        try:
-            await asyncio.wait_for(disconnect_all(), timeout=3)
-        except Exception:
-            pass
-        from lazyclaw.db.connection import close_pool
-        await close_pool()
+        pass  # Graceful shutdown handled by app.action_quit()
 
 
 # ---------------------------------------------------------------------------
@@ -436,32 +391,51 @@ async def _show_chat_history(config: Config, user_id: str) -> None:
 
 
 async def _connect_browser(config: Config) -> None:
-    """Check/establish CDP connection to user's real Chrome browser."""
+    """Check/establish CDP connection to user's browser (Brave/Chrome)."""
     from lazyclaw.browser.cdp import find_chrome_cdp, list_chrome_tabs
 
     port = config.cdp_port
-    console.print(f"  [dim]Checking Chrome on port {port}...[/dim]")
+    browser_name = "Brave" if "brave" in (config.browser_executable or "").lower() else "Chrome"
+    console.print(f"  [dim]Checking {browser_name} on port {port}...[/dim]")
 
     ws_url = await find_chrome_cdp(port)
     if not ws_url:
-        console.print(f"  [red]\u2717 Chrome not found on port {port}[/red]")
-        console.print()
-        console.print("  Launch Chrome with debugging enabled:")
-        console.print(
-            f"  [bold cyan]open -a 'Google Chrome' "
-            f"--args --remote-debugging-port={port}[/bold cyan]"
-        )
-        console.print()
-        console.print("  [dim]Then run /connect-browser again.[/dim]")
-        return
+        console.print(f"  [yellow]{browser_name} not running with CDP, launching...[/yellow]")
+
+        # Auto-launch headless with CDP
+        from lazyclaw.browser.cdp_backend import CDPBackend
+        user_id = await _get_default_user(config)
+        profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+        backend = CDPBackend(port=port, profile_dir=profile_dir)
+        ws_url = await backend._auto_launch_chrome()
+
+        if not ws_url:
+            console.print(f"  [red]\u2717 Failed to launch {browser_name}[/red]")
+            console.print()
+            console.print(f"  Manual launch:")
+            bin_path = config.browser_executable or "brave-browser"
+            console.print(
+                f"  [bold cyan]{bin_path} "
+                f"--remote-debugging-port={port}[/bold cyan]"
+            )
+            return
 
     tabs = await list_chrome_tabs(port)
-    console.print(f"  [green]\u2713 Connected to Chrome[/green] ({len(tabs)} tabs)")
+    console.print(f"  [green]\u2713 Connected to {browser_name}[/green] ({len(tabs)} tabs)")
     for i, tab in enumerate(tabs[:5], 1):
         console.print(f"    {i}. [dim]{tab.title[:50]}[/dim]")
         console.print(f"       [dim]{tab.url[:60]}[/dim]")
     if len(tabs) > 5:
         console.print(f"    [dim]... and {len(tabs) - 5} more[/dim]")
+
+    # Also set browser persistence to auto if currently off
+    from lazyclaw.browser.browser_settings import get_browser_settings, update_browser_settings
+    user_id = await _get_default_user(config)
+    settings = await get_browser_settings(config, user_id)
+    if settings.get("persistent") == "off":
+        await update_browser_settings(config, user_id, {"persistent": "auto"})
+        console.print("  [dim]Browser mode set to auto (stays alive after use)[/dim]")
+
     console.print()
     console.print(
         "  [dim]Agent can now use: see_browser, list_tabs, read_tab, "

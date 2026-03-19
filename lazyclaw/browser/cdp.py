@@ -43,7 +43,7 @@ async def find_chrome_cdp(port: int = DEFAULT_CDP_PORT) -> str | None:
                 data = resp.json()
                 ws_url = data.get("webSocketDebuggerUrl")
                 if ws_url:
-                    logger.info("Found Chrome CDP at %s", ws_url)
+                    logger.debug("Found Chrome CDP at %s", ws_url)
                     return ws_url
     except (httpx.ConnectError, httpx.TimeoutException, Exception) as exc:
         logger.debug("Chrome CDP not available on port %d: %s", port, exc)

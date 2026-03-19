@@ -21,6 +21,7 @@ def configure_logging(log_level: str = "WARNING", log_file: str | None = None) -
     for name in (
         "httpx", "httpcore", "urllib3", "hpack", "asyncio", "watchfiles",
         "mcp.server.lowlevel.server", "mcp.server", "mcp.client",
+        "lazyclaw.browser.cdp",  # suppress CDP polling spam
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 

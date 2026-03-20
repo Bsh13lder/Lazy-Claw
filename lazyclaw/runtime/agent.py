@@ -287,6 +287,7 @@ class Agent:
         message: str,
         chat_session_id: str | None = None,
         callback=None,
+        channel_context: str | None = None,
     ) -> str:
         cb = callback or NullCallback()
         cancel_token = CancellationToken()
@@ -392,8 +393,11 @@ class Agent:
             if len(chat_history) > 6:
                 chat_history = chat_history[-6:]
 
+        system_messages = [LLMMessage(role="system", content=system_prompt)]
+        if channel_context:
+            system_messages.append(LLMMessage(role="system", content=channel_context))
         messages: list[LLMMessage] = (
-            [LLMMessage(role="system", content=system_prompt)]
+            system_messages
             + chat_history
             + [LLMMessage(role="user", content=message)]
         )

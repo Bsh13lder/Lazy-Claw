@@ -42,6 +42,12 @@ async def create_share(
     if count == 0:
         raise ValueError("Trace session not found")
 
+    if expires_hours is not None:
+        if expires_hours > 168:
+            raise ValueError("Share expiry cannot exceed 168 hours (7 days)")
+        if expires_hours < 1:
+            raise ValueError("Share expiry must be at least 1 hour")
+
     share_id = str(uuid4())
     token = secrets.token_urlsafe(32)
     expires_at = None

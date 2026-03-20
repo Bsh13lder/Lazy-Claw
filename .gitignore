@@ -11,3 +11,10 @@ data/
 *.egg
 .mypy_cache/
 .pytest_cache/
+.CLAUDE.md
+.TODO.md
+.MEMORY.md
+.DS_Store
+*.log
+.lazyclaw_history
+.env.*

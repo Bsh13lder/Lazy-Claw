@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import uuid
 from typing import Any
 
@@ -38,8 +39,8 @@ class ConnectorServer:
 
         Replaces any existing token for this user.
         """
-        token = str(uuid.uuid4())
-        token_id = str(uuid.uuid4())[:8]
+        token = secrets.token_urlsafe(32)
+        token_id = secrets.token_hex(4)
 
         async with db_session(self._config) as db:
             await db.execute(

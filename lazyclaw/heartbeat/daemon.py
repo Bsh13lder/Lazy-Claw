@@ -206,13 +206,16 @@ class HeartbeatDaemon:
         # Something IS running — check if it's headless
         is_headless = False
         try:
-            proc = await asyncio.create_subprocess_shell(
-                f"ps aux | grep 'headless' | grep 'remote-debugging-port={primary_port}' | grep -v grep",
+            proc = await asyncio.create_subprocess_exec(
+                "ps", "aux",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             stdout, _ = await proc.communicate()
-            is_headless = bool(stdout.strip())
+            is_headless = any(
+                "headless" in line and f"remote-debugging-port={primary_port}" in line
+                for line in stdout.decode("utf-8", errors="replace").splitlines()
+            )
         except Exception:
             # Can't tell — assume it's visible to be safe
             pass
@@ -422,12 +425,21 @@ class HeartbeatDaemon:
                             idle, timeout,
                         )
                         try:
-                            proc = await asyncio.create_subprocess_shell(
-                                f"ps aux | grep 'remote-debugging-port={port}' | grep -v grep | awk '{{print $2}}' | xargs kill 2>/dev/null",
-                                stdout=asyncio.subprocess.DEVNULL,
+                            proc = await asyncio.create_subprocess_exec(
+                                "ps", "aux",
+                                stdout=asyncio.subprocess.PIPE,
                                 stderr=asyncio.subprocess.DEVNULL,
                             )
-                            await proc.wait()
+                            stdout, _ = await proc.communicate()
+                            import signal
+                            for line in stdout.decode("utf-8", errors="replace").splitlines():
+                                if f"remote-debugging-port={port}" in line:
+                                    parts = line.split()
+                                    if len(parts) > 1:
+                                        try:
+                                            os.kill(int(parts[1]), signal.SIGTERM)
+                                        except (ProcessLookupError, ValueError):
+                                            pass
                         except Exception:
                             pass
                     elif not browser_alive and (idle < timeout or has_watchers):

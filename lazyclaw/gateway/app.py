@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from lazyclaw.config import load_config
 from lazyclaw.db.connection import init_db
@@ -48,14 +49,30 @@ def set_registry(registry) -> None:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    if not _config.server_secret or len(_config.server_secret) < 32:
+        raise RuntimeError(
+            "SERVER_SECRET must be set and at least 32 characters. "
+            "Run 'lazyclaw setup' or set SERVER_SECRET in .env"
+        )
     await init_db(_config)
     await seed_default_models(_config)
     logger.info("Database initialized, models seeded")
     yield
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+
 app = FastAPI(title="LazyClaw", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[_config.cors_origin],
@@ -82,7 +99,7 @@ app.include_router(replay_router)
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(max_length=50_000)
 
 
 class ChatResponse(BaseModel):

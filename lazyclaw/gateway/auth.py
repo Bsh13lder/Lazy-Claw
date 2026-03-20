@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
+import time as _time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -198,10 +201,34 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
 # Router
 # ---------------------------------------------------------------------------
 
+class _RateLimiter:
+    """Simple in-memory per-key rate limiter."""
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self._max = max_requests
+        self._window = window_seconds
+        self._requests: dict[str, list[float]] = defaultdict(list)
+
+    def check(self, key: str) -> bool:
+        """Returns True if request is allowed, False if rate-limited."""
+        now = _time.monotonic()
+        timestamps = self._requests[key]
+        self._requests[key] = [t for t in timestamps if now - t < self._window]
+        if len(self._requests[key]) >= self._max:
+            return False
+        self._requests[key].append(now)
+        return True
+
+
+_login_limiter = _RateLimiter(max_requests=5, window_seconds=60)
+_register_limiter = _RateLimiter(max_requests=3, window_seconds=3600)
+
+
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
     password: str = Field(min_length=8, max_length=128)
     display_name: str | None = Field(default=None, max_length=128)
+    invite_token: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -215,7 +242,25 @@ _is_production = "localhost" not in _config.cors_origin and "127.0.0.1" not in _
 
 
 @auth_router.post("/register")
-async def register(body: RegisterRequest, response: Response):
+async def register(body: RegisterRequest, request: Request, response: Response):
+    client_ip = request.client.host if request.client else "unknown"
+    if not _register_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many registration attempts. Try again later.")
+
+    # After first user, require invite token
+    async with db_session(_config) as db:
+        count_row = await db.execute("SELECT COUNT(*) FROM users")
+        count_result = await count_row.fetchone()
+        user_count = count_result[0] if count_result else 0
+
+    if user_count > 0:
+        expected_token = os.getenv("REGISTRATION_TOKEN")
+        if not expected_token or body.invite_token != expected_token:
+            raise HTTPException(
+                status_code=403,
+                detail="Registration is invite-only. Provide a valid invite_token.",
+            )
+
     try:
         user = await register_user(_config, body.username, body.password, body.display_name)
     except ValueError as exc:
@@ -234,7 +279,11 @@ async def register(body: RegisterRequest, response: Response):
 
 
 @auth_router.post("/login")
-async def login(body: LoginRequest, response: Response):
+async def login(body: LoginRequest, request: Request, response: Response):
+    client_ip = request.client.host if request.client else "unknown"
+    if not _login_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+
     user = await authenticate_user(_config, body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -256,7 +305,12 @@ async def logout(request: Request, response: Response):
     session_id = request.cookies.get("session_id")
     if session_id:
         await delete_session(_config, session_id)
-    response.delete_cookie("session_id")
+    response.delete_cookie(
+        "session_id",
+        httponly=True,
+        secure=_is_production,
+        samesite="lax",
+    )
     return {"status": "ok"}
 
 

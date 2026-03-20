@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_MCP_COMMANDS = frozenset({
+    "python", "python3", "node", "npx", "uvx", "docker",
+})
 
 
 class MCPClient:
@@ -150,8 +156,21 @@ class MCPClient:
         child_env = dict(os.environ, **(self._config.get("env") or {}))
         child_env.setdefault("LOG_LEVEL", "ERROR")
 
+        command = self._config["command"]
+        base_cmd = os.path.basename(command)
+        is_current_python = (
+            command == sys.executable
+            or os.path.realpath(command) == os.path.realpath(sys.executable)
+        )
+        if not is_current_python and base_cmd not in _ALLOWED_MCP_COMMANDS:
+            raise ValueError(
+                f"MCP command '{command}' is not allowed. "
+                f"Allowed: {', '.join(sorted(_ALLOWED_MCP_COMMANDS))}, "
+                f"or the current Python interpreter."
+            )
+
         params = StdioServerParameters(
-            command=self._config["command"],
+            command=command,
             args=self._config.get("args", []),
             env=child_env,
         )

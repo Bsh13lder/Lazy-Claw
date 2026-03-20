@@ -288,10 +288,20 @@ class _TelegramCallback:
 
     # ── Event handlers ────────────────────────────────────────────────
 
+    _DANGEROUS_SKILL_PREFIXES = frozenset({
+        "computer", "vault", "delete", "connector",
+    })
+
     async def on_approval_request(
         self, skill_name: str, arguments: dict
     ) -> bool:
-        return True  # Auto-approve in Telegram
+        """Auto-approve safe skills in Telegram. Deny dangerous categories."""
+        lower_name = skill_name.lower()
+        for prefix in self._DANGEROUS_SKILL_PREFIXES:
+            if lower_name.startswith(prefix):
+                logger.warning("Telegram auto-denied dangerous skill: %s", skill_name)
+                return False
+        return True
 
     async def on_event(self, event: AgentEvent) -> None:
         kind = event.kind
@@ -631,23 +641,24 @@ class TelegramAdapter(ChannelAdapter):
                 callback, self._server_dashboard.make_request_cb(request_id),
             )
 
-        # Inject channel context
-        channel_hint = (
-            f"\n\n[Channel: Telegram | Chat ID: {chat_id} | "
+        # Inject channel context as separate system message (not in user text)
+        channel_context = (
+            f"[Channel: Telegram | Chat ID: {chat_id} | "
             f"You can send images via browser(action=\"screenshot\") "
             f"\u2014 screenshots are auto-forwarded to this chat.]"
         )
-        enriched_text = text + channel_hint
 
         try:
             logger.debug("Telegram: awaiting agent response for chat %s", chat_id)
             if self._lane_queue:
                 response = await self._lane_queue.enqueue(
-                    user_id, enriched_text, callback=effective_cb,
+                    user_id, text, callback=effective_cb,
+                    channel_context=channel_context,
                 )
             else:
                 response = await self._agent.process_message(
-                    user_id, enriched_text, callback=effective_cb,
+                    user_id, text, callback=effective_cb,
+                    channel_context=channel_context,
                 )
             logger.debug("Telegram: got response for chat %s (len=%d)", chat_id, len(response or ""))
             if not response or not response.strip():

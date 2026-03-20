@@ -66,7 +66,7 @@ async def get_usage(user: User = Depends(get_current_user)):
 
 
 @router.get("/rate-limits")
-async def get_rate_limits():
+async def get_rate_limits(user: User = Depends(get_current_user)):
     """Get current rate limit status for all free providers."""
     from lazyclaw.llm.rate_limiter import KNOWN_LIMITS
 
@@ -81,7 +81,7 @@ async def get_rate_limits():
 
 
 @router.get("/providers")
-async def list_providers():
+async def list_providers(user: User = Depends(get_current_user)):
     """List available free AI providers and their status."""
     try:
         from mcp_freeride.config import load_config as load_freeride_config

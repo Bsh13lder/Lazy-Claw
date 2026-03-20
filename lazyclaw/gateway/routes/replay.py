@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.gateway.auth import User, get_current_user
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/replay", tags=["replay"])
 
 class ShareRequest(BaseModel):
     trace_session_id: str
-    expires_hours: int | None = 72
+    expires_hours: int | None = Field(default=72, ge=1, le=168)
 
 
 # ── Trace endpoints ──────────────────────────────────────────────────

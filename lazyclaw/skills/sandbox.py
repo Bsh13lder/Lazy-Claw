@@ -33,6 +33,7 @@ BLOCKED_FUNCTION_NAMES = frozenset({
     "open", "input", "breakpoint",
     "getattr", "setattr", "delattr",
     "globals", "locals", "vars", "dir",
+    "type",
 })
 
 BLOCKED_ATTRIBUTE_NAMES = frozenset({
@@ -65,7 +66,7 @@ SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
     "round": round,
     "isinstance": isinstance,
-    "print": print,
+    "print": lambda *args, **kwargs: " ".join(str(a) for a in args)[:10_000],
     "True": True,
     "False": False,
     "None": None,

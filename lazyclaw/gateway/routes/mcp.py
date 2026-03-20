@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Dict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,8 @@ from pydantic import BaseModel, field_validator
 
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
+
+logger = logging.getLogger(__name__)
 
 _config = load_config()
 
@@ -82,7 +85,11 @@ async def connect_server(server_id: str, user: User = Depends(get_current_user))
     try:
         await connect_server(_config, user.id, server_id)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.error("MCP connect failed for server %s: %s", server_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to connect to MCP server. Check server configuration.",
+        ) from exc
     return {"status": "connected"}
 
 

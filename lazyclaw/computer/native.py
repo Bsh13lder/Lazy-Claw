@@ -9,6 +9,7 @@ import asyncio
 import base64
 import io
 import os
+import shlex
 import time
 
 from lazyclaw.computer.security import SecurityManager
@@ -35,9 +36,14 @@ class NativeExecutor:
             return {"success": False, "error": reason}
 
         try:
+            args = shlex.split(cmd)
+        except ValueError as e:
+            return {"success": False, "error": f"Invalid command syntax: {e}"}
+
+        try:
             proc = await asyncio.wait_for(
-                asyncio.create_subprocess_shell(
-                    cmd,
+                asyncio.create_subprocess_exec(
+                    *args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 ),
@@ -142,6 +148,10 @@ class NativeExecutor:
             path = os.path.expanduser("~")
 
         abs_path = os.path.abspath(os.path.expanduser(path))
+
+        allowed, reason = self._security.is_path_allowed(abs_path)
+        if not allowed:
+            return {"success": False, "error": reason}
 
         if not os.path.isdir(abs_path):
             return {"success": False, "error": f"Not a directory: {path}"}

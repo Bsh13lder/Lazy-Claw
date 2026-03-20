@@ -30,15 +30,6 @@ async def list_vault_keys(user: User = Depends(get_current_user)):
     return {"keys": keys}
 
 
-@router.get("/{key}")
-async def get_vault_credential(key: str, user: User = Depends(get_current_user)):
-    """Get a decrypted credential value."""
-    value = await get_credential(_config, user.id, key)
-    if value is None:
-        raise HTTPException(status_code=404, detail=f"Credential '{key}' not found")
-    return {"key": key, "value": value}
-
-
 @router.put("/{key}")
 async def set_vault_credential(
     key: str,

@@ -391,6 +391,267 @@ class CDPBackend:
 
         logger.info("Switched to tab: %s (%s)", target.title, target.url)
 
+    # ── Accessibility tree ────────────────────────────────────────────
+
+    async def accessibility_tree(self, max_depth: int = 8) -> str:
+        """Get the page's accessibility tree as compact text.
+
+        Returns semantic roles, names, and states — works on ANY site
+        without custom JS extractors. Typically 2-5KB vs 50KB raw text.
+        """
+        conn = await self._ensure_connected()
+        await conn.send("Accessibility.enable")
+        result = await conn.send("Accessibility.getFullAXTree", {"depth": max_depth})
+        nodes = result.get("nodes", [])
+
+        lines: list[str] = []
+        node_map = {n["nodeId"]: n for n in nodes}
+
+        def _format_node(node: dict, depth: int = 0) -> None:
+            role = node.get("role", {}).get("value", "")
+            name = node.get("name", {}).get("value", "")
+            props = node.get("properties", [])
+
+            # Skip ignored/invisible nodes
+            if role in ("none", "generic", "InlineTextBox", "LineBreak"):
+                for cid in node.get("childIds", []):
+                    child = node_map.get(cid)
+                    if child:
+                        _format_node(child, depth)
+                return
+
+            # Build compact line
+            parts = [role]
+            if name:
+                parts.append(f'"{name}"')
+            for prop in props:
+                pname = prop.get("name", "")
+                pval = prop.get("value", {}).get("value", "")
+                if pname in ("checked", "selected", "disabled", "expanded",
+                             "pressed", "required") and pval:
+                    parts.append(f"{pname}={pval}")
+                elif pname == "value" and pval:
+                    parts.append(f'value="{str(pval)[:60]}"')
+
+            line = "  " * depth + " ".join(parts)
+            if line.strip():
+                lines.append(line)
+
+            for cid in node.get("childIds", []):
+                child = node_map.get(cid)
+                if child:
+                    _format_node(child, depth + 1)
+
+        # Start from root
+        if nodes:
+            _format_node(nodes[0], 0)
+
+        return "\n".join(lines)
+
+    async def find_element_by_role(self, description: str) -> dict | None:
+        """Find an element by role/label description and return its coordinates.
+
+        Accepts natural descriptions like "Search input", "Submit button",
+        "Send message". Returns {"x": float, "y": float, "nodeId": str} or None.
+        """
+        conn = await self._ensure_connected()
+        await conn.send("Accessibility.enable")
+        result = await conn.send("Accessibility.getFullAXTree", {"depth": 6})
+        nodes = result.get("nodes", [])
+
+        desc_lower = description.lower()
+        best_match = None
+        best_score = 0
+
+        for node in nodes:
+            role = node.get("role", {}).get("value", "").lower()
+            name = node.get("name", {}).get("value", "").lower()
+            backend_id = node.get("backendDOMNodeId")
+            if not backend_id:
+                continue
+
+            # Score how well this node matches the description
+            score = 0
+            for word in desc_lower.split():
+                if word in role:
+                    score += 2
+                if word in name:
+                    score += 3
+
+            if score > best_score:
+                best_score = score
+                best_match = (node, backend_id)
+
+        if not best_match or best_score < 2:
+            return None
+
+        node, backend_id = best_match
+
+        # Resolve to DOM node and get coordinates
+        try:
+            dom_result = await conn.send(
+                "DOM.describeNode", {"backendNodeId": backend_id}
+            )
+            node_id_result = await conn.send(
+                "DOM.requestNode", {"backendNodeId": backend_id}
+            )
+            dom_node_id = node_id_result.get("nodeId")
+            if not dom_node_id:
+                return None
+
+            box = await conn.send(
+                "DOM.getBoxModel", {"nodeId": dom_node_id}
+            )
+            content = box.get("model", {}).get("content", [])
+            if len(content) >= 4:
+                # content is [x1,y1, x2,y2, x3,y3, x4,y4] — use center
+                x = (content[0] + content[2]) / 2
+                y = (content[1] + content[5]) / 2
+                return {
+                    "x": x, "y": y,
+                    "nodeId": str(backend_id),
+                    "role": node.get("role", {}).get("value", ""),
+                    "name": node.get("name", {}).get("value", ""),
+                }
+        except Exception as exc:
+            logger.debug("find_element_by_role coordinate lookup failed: %s", exc)
+
+        return None
+
+    # ── Console logs ────────────────────────────────────────────────
+
+    async def enable_console(self) -> None:
+        """Enable console log collection."""
+        conn = await self._ensure_connected()
+        self._console_logs: list[dict] = getattr(self, "_console_logs", [])
+        await conn.send("Console.enable")
+
+    async def get_console_logs(self, clear: bool = True) -> list[dict]:
+        """Get collected console logs. Returns list of {level, text, url, line}."""
+        conn = await self._ensure_connected()
+
+        # Fetch via Runtime.evaluate since Console events need listener setup
+        result = await conn.send("Runtime.evaluate", {
+            "expression": """(() => {
+                const logs = window.__lazyclaw_console_logs || [];
+                return JSON.stringify(logs.slice(-50));
+            })()""",
+            "returnByValue": True,
+        })
+        raw = result.get("result", {}).get("value", "[]")
+
+        import json
+        try:
+            logs = json.loads(raw) if isinstance(raw, str) else []
+        except Exception:
+            logs = []
+
+        if clear:
+            await conn.send("Runtime.evaluate", {
+                "expression": "window.__lazyclaw_console_logs = [];",
+            })
+
+        return logs
+
+    async def inject_console_capture(self) -> None:
+        """Inject JS to capture console.log/warn/error into a buffer."""
+        conn = await self._ensure_connected()
+        await conn.send("Runtime.evaluate", {
+            "expression": """(() => {
+                if (window.__lazyclaw_console_hooked) return;
+                window.__lazyclaw_console_logs = [];
+                const orig = {log: console.log, warn: console.warn, error: console.error, info: console.info};
+                for (const [level, fn] of Object.entries(orig)) {
+                    console[level] = function(...args) {
+                        window.__lazyclaw_console_logs.push({
+                            level, text: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '),
+                            time: Date.now()
+                        });
+                        if (window.__lazyclaw_console_logs.length > 100)
+                            window.__lazyclaw_console_logs.shift();
+                        fn.apply(console, args);
+                    };
+                }
+                window.__lazyclaw_console_hooked = true;
+            })()""",
+        })
+
+    # ── Hover and drag ──────────────────────────────────────────────
+
+    async def hover(self, selector: str) -> None:
+        """Hover over an element matching the CSS selector."""
+        conn = await self._ensure_connected()
+        js = f"""
+        (() => {{
+            const el = document.querySelector({_js_str(selector)});
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}};
+        }})()
+        """
+        result = await conn.send(
+            "Runtime.evaluate", {"expression": js, "returnByValue": True}
+        )
+        coords = result.get("result", {}).get("value")
+        if not coords:
+            raise ValueError(f"Element not found: {selector}")
+
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": coords["x"], "y": coords["y"],
+        })
+        await asyncio.sleep(random.uniform(0.3, 0.8))
+
+    async def drag_and_drop(
+        self, source_selector: str, target_selector: str
+    ) -> None:
+        """Drag element from source to target."""
+        conn = await self._ensure_connected()
+        js = f"""
+        (() => {{
+            const src = document.querySelector({_js_str(source_selector)});
+            const tgt = document.querySelector({_js_str(target_selector)});
+            if (!src || !tgt) return null;
+            const sr = src.getBoundingClientRect();
+            const tr = tgt.getBoundingClientRect();
+            return {{
+                sx: sr.x + sr.width / 2, sy: sr.y + sr.height / 2,
+                tx: tr.x + tr.width / 2, ty: tr.y + tr.height / 2
+            }};
+        }})()
+        """
+        result = await conn.send(
+            "Runtime.evaluate", {"expression": js, "returnByValue": True}
+        )
+        coords = result.get("result", {}).get("value")
+        if not coords:
+            raise ValueError("Source or target element not found")
+
+        sx, sy, tx, ty = coords["sx"], coords["sy"], coords["tx"], coords["ty"]
+
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": sx, "y": sy,
+            "button": "left", "clickCount": 1,
+        })
+        await asyncio.sleep(random.uniform(0.1, 0.2))
+
+        # Move in steps for natural drag
+        steps = 5
+        for i in range(1, steps + 1):
+            frac = i / steps
+            await conn.send("Input.dispatchMouseEvent", {
+                "type": "mouseMoved",
+                "x": sx + (tx - sx) * frac,
+                "y": sy + (ty - sy) * frac,
+            })
+            await asyncio.sleep(random.uniform(0.03, 0.08))
+
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased", "x": tx, "y": ty,
+            "button": "left", "clickCount": 1,
+        })
+        await asyncio.sleep(random.uniform(0.2, 0.5))
+
     async def is_connected(self) -> bool:
         if not self._conn:
             return False

@@ -54,9 +54,10 @@ Your Brave browser runs on the user's desktop. When you navigate or control it, 
 ### Tool hierarchy
 1. `browser(action="open")` — OPENS visible Brave on screen. Use for "open", "show me", "launch browser".
 2. `browser(action="read")` — silent read (0.1s). Use for "check my WhatsApp", "what does the page say".
-3. `browser(action="click/type/scroll")` — interact with visible Brave.
-4. `browser(action="screenshot")` — ONLY when user explicitly requests.
-5. `web_search` — lightweight research via DDGS. No browser needed, zero tokens.
+3. `browser(action="snapshot")` — accessibility tree. Universal page structure (roles, labels). Use when you need to understand page layout before clicking.
+4. `browser(action="click/type/scroll/hover/drag")` — interact with visible Brave. Click/type accept natural descriptions ("Submit button") OR CSS selectors.
+5. `browser(action="screenshot")` — ONLY when user explicitly requests.
+6. `web_search` — lightweight research via DDGS. No browser needed, zero tokens.
 
 ### Rules
 - **NEVER use run_command for browser tasks.** No screencapture, no osascript, no AppleScript, no `open -a`.

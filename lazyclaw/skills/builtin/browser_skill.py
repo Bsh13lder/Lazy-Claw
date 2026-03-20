@@ -159,29 +159,39 @@ class BrowserSkill(BaseSkill):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["read", "open", "click", "type", "screenshot", "tabs", "scroll", "close"],
+                    "enum": ["read", "open", "click", "type", "screenshot", "tabs",
+                            "scroll", "close", "snapshot", "hover", "drag", "console_logs"],
                     "description": (
                         "read: silently read page content (invisible, no browser window shown). "
-                        "open: OPEN visible Brave on screen. Use when user says 'open', 'show me', 'make visible', 'launch browser'. "
-                        "click: click CSS selector. "
-                        "type: type text into CSS selector. "
+                        "open: OPEN visible Brave on screen. Use when user says 'open', 'show me', 'make visible'. "
+                        "click: click element by CSS selector OR natural description ('Submit button', 'Search input'). "
+                        "type: type text into element by CSS selector OR description. "
                         "screenshot: capture screenshot (ONLY when user asks). "
                         "tabs: list all open tabs. "
                         "scroll: scroll up or down. "
-                        "close: close/hide the browser. Use when user says 'close browser', 'hide browser', 'background', 'minimize'."
+                        "close: close/hide the browser. "
+                        "snapshot: get accessibility tree — semantic page structure (roles, labels, states). Universal, works on any site. "
+                        "hover: hover over element (triggers hover states, dropdowns). "
+                        "drag: drag element from source to target (CSS selectors). "
+                        "console_logs: get browser console output (errors, warnings)."
                     ),
                 },
                 "target": {
                     "type": "string",
                     "description": (
                         "For read/open: URL, shortcut (whatsapp, gmail, etc), or tab query. "
-                        "For click/type: CSS selector. "
+                        "For click/type/hover: CSS selector OR natural description ('Submit button', 'Search input'). "
+                        "For drag: source CSS selector. "
                         "Leave empty for current tab."
                     ),
                 },
                 "text": {
                     "type": "string",
                     "description": "Text to type (for 'type' action only).",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "Target CSS selector for drag action (drop destination).",
                 },
                 "direction": {
                     "type": "string",
@@ -213,8 +223,16 @@ class BrowserSkill(BaseSkill):
                 return await self._action_scroll(user_id, params)
             elif action == "close":
                 return await self._action_close(user_id, params)
+            elif action == "snapshot":
+                return await self._action_snapshot(user_id, params)
+            elif action == "hover":
+                return await self._action_hover(user_id, params)
+            elif action == "drag":
+                return await self._action_drag(user_id, params)
+            elif action == "console_logs":
+                return await self._action_console_logs(user_id, params)
             else:
-                return f"Unknown action: {action}. Use: read, open, click, type, screenshot, tabs, scroll, close"
+                return f"Unknown action: {action}. Use: read, open, click, type, screenshot, tabs, scroll, close, snapshot, hover, drag, console_logs"
         except ConnectionError:
             logger.info("browser: CDP unavailable, attempting auto-connect")
             return await self._auto_connect_and_retry(user_id, params)
@@ -331,25 +349,74 @@ class BrowserSkill(BaseSkill):
         )
 
     async def _action_click(self, user_id: str, params: dict) -> str:
-        """Click an element by CSS selector."""
-        selector = params.get("target", "").strip()
-        if not selector:
-            return "CSS selector required for click action (pass as 'target')."
+        """Click an element by CSS selector OR natural description."""
+        target = params.get("target", "").strip()
+        if not target:
+            return "Target required for click (CSS selector or description like 'Submit button')."
 
         backend = await _get_cdp_backend(user_id)
-        await backend.click(selector)
-        return f"Clicked: {selector}"
+
+        # Detect if target is a CSS selector or natural description
+        is_css = any(c in target for c in ("#", ".", "[", ">", ":", "input", "button", "div", "span", "a "))
+        if is_css:
+            await backend.click(target)
+            return f"Clicked: {target}"
+
+        # Natural description — use accessibility tree to find element
+        match = await backend.find_element_by_role(target)
+        if not match:
+            return f"No element found matching '{target}'. Try a CSS selector or use snapshot to see page structure."
+
+        conn = await backend._ensure_connected()
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": match["x"], "y": match["y"],
+            "button": "left", "clickCount": 1,
+        })
+        await asyncio.sleep(0.08)
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased", "x": match["x"], "y": match["y"],
+            "button": "left", "clickCount": 1,
+        })
+        await asyncio.sleep(0.5)
+        return f"Clicked: {match['role']} \"{match['name']}\""
 
     async def _action_type(self, user_id: str, params: dict) -> str:
-        """Type text into an element by CSS selector."""
-        selector = params.get("target", "").strip()
+        """Type text into an element by CSS selector OR natural description."""
+        target = params.get("target", "").strip()
         text = params.get("text", "")
-        if not selector or not text:
-            return "Both target (CSS selector) and text required for type action."
+        if not target or not text:
+            return "Both target and text required for type action."
 
         backend = await _get_cdp_backend(user_id)
-        await backend.type_text(selector, text)
-        return f"Typed '{text[:30]}...' into {selector}"
+
+        # Detect if target is a CSS selector or natural description
+        is_css = any(c in target for c in ("#", ".", "[", ">", ":", "input", "textarea"))
+        if is_css:
+            await backend.type_text(target, text)
+            return f"Typed '{text[:30]}...' into {target}"
+
+        # Natural description — find via accessibility tree, focus, then type
+        match = await backend.find_element_by_role(target)
+        if not match:
+            return f"No element found matching '{target}'. Try a CSS selector."
+
+        conn = await backend._ensure_connected()
+        # Click to focus
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": match["x"], "y": match["y"],
+            "button": "left", "clickCount": 1,
+        })
+        await conn.send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased", "x": match["x"], "y": match["y"],
+            "button": "left", "clickCount": 1,
+        })
+        await asyncio.sleep(0.2)
+        # Type each character
+        for char in text:
+            await conn.send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
+            await conn.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
+            await asyncio.sleep(0.05)
+        return f"Typed '{text[:30]}...' into {match['role']} \"{match['name']}\""
 
     async def _action_screenshot(self, user_id: str, params: dict) -> ToolResult:
         """Take a screenshot of the current tab."""
@@ -391,6 +458,47 @@ class BrowserSkill(BaseSkill):
         backend = await _get_cdp_backend(user_id)
         await backend.scroll(direction)
         return f"Scrolled {direction}"
+
+    async def _action_snapshot(self, user_id: str, params: dict) -> str:
+        """Get accessibility tree — semantic page structure."""
+        backend = await _get_cdp_backend(user_id)
+        tree = await backend.accessibility_tree()
+        url = await backend.current_url()
+        title = await backend.title()
+        return f"Page: {title}\nURL: {url}\n\nAccessibility Tree:\n{tree}"
+
+    async def _action_hover(self, user_id: str, params: dict) -> str:
+        """Hover over an element."""
+        target = params.get("target", "").strip()
+        if not target:
+            return "Target (CSS selector) required for hover."
+        backend = await _get_cdp_backend(user_id)
+        await backend.hover(target)
+        return f"Hovering over: {target}"
+
+    async def _action_drag(self, user_id: str, params: dict) -> str:
+        """Drag element from source to destination."""
+        source = params.get("target", "").strip()
+        dest = params.get("destination", "").strip()
+        if not source or not dest:
+            return "Both target (source selector) and destination (target selector) required for drag."
+        backend = await _get_cdp_backend(user_id)
+        await backend.drag_and_drop(source, dest)
+        return f"Dragged {source} → {dest}"
+
+    async def _action_console_logs(self, user_id: str, params: dict) -> str:
+        """Get browser console logs."""
+        backend = await _get_cdp_backend(user_id)
+        await backend.inject_console_capture()
+        logs = await backend.get_console_logs()
+        if not logs:
+            return "No console logs captured. Console capture is now active — check again after page interactions."
+        lines = []
+        for log in logs:
+            level = log.get("level", "log").upper()
+            text = log.get("text", "")
+            lines.append(f"[{level}] {text}")
+        return "\n".join(lines)
 
     async def _action_close(self, user_id: str, params: dict) -> str:
         """Close/hide the browser."""

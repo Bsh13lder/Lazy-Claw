@@ -86,6 +86,8 @@ class SystemStats:
     cost_by_model: dict[str, float] = field(default_factory=dict)
     browser_tabs: int = 0
     telegram_status: str = "disconnected"
+    eco_mode: str = "full"
+    ollama_models: tuple[str, ...] = ()
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -204,10 +206,17 @@ class TuiDashboard:
 
     def handle_event(self, chat_id: str, event: AgentEvent) -> None:
         req = self._active.get(chat_id)
-        if not req:
-            return
-
         kind = event.kind
+
+        # Background task events may arrive after the original request was unregistered
+        if not req:
+            if kind in ("background_done", "background_failed", "fast_dispatch"):
+                # Create a temporary request so the event can be displayed
+                name = event.metadata.get("name", event.metadata.get("specialist", "background"))
+                self.register_request(chat_id, f"[bg] {name}")
+                req = self._active.get(chat_id)
+            else:
+                return
         display = event.metadata.get("display_name", event.detail)
 
         if kind == "llm_call":
@@ -407,9 +416,20 @@ class SystemBar(Static):
         t_out = _fmt_tokens(stats.total_tokens_out)
         active_color = _C_ACTIVE if stats.active_count > 0 else _C_IDLE
 
+        # ECO mode badge
+        eco = stats.eco_mode.upper()
+        eco_color = _C_SUCCESS if eco == "LOCAL" else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
+
+        # Ollama models inline
+        ollama_str = ""
+        if stats.ollama_models:
+            ollama_str = f"  │  🧠 {', '.join(stats.ollama_models)}"
+
         self.update(Text.from_markup(
-            f" [{_C_COST}]{cost} today[/{_C_COST}]"
-            f"  │  ↑{t_in} ↓{t_out} tokens"
+            f" [{eco_color}]ECO:{eco}[/{eco_color}]"
+            f"{ollama_str}"
+            f"  │  [{_C_COST}]{cost} today[/{_C_COST}]"
+            f"  │  ↑{t_in} ↓{t_out}"
             f"  │  [{active_color}]{stats.active_count} active[/{active_color}]"
             f"  │  Q:{stats.queue_depth}"
             f"  │  Mem:{stats.memory_mb:.0f}MB"
@@ -695,6 +715,55 @@ class CostBar(Static):
         self.update(Text.from_markup("  │  ".join(parts[:2]) + "\n" + parts[-1] if len(parts) > 1 else "\n".join(parts)))
 
 
+class AIRoutingBar(Static):
+    """AI routing panel showing per-model stats with local/paid breakdown."""
+
+    def render_routing(self, routing_stats: dict, budget: float = 5.0) -> None:
+        """Render routing stats from EcoRouter.get_routing_stats().
+
+        routing_stats = {
+            "models": {"qwen3:0.6b": {"calls": 12, "cost": 0.0, "icon": "...", ...}},
+            "total_cost": 0.003,
+            "total_calls": 19,
+            "local_pct": 92,
+        }
+        """
+        models = routing_stats.get("models", {})
+        total_calls = routing_stats.get("total_calls", 0)
+        total_cost = routing_stats.get("total_cost", 0.0)
+        local_pct = routing_stats.get("local_pct", 0)
+
+        if not models:
+            self.update(Text.from_markup(f"[{_C_IDLE}]No AI calls yet[/{_C_IDLE}]"))
+            return
+
+        lines: list[str] = []
+        for name, m in sorted(models.items(), key=lambda x: -x[1]["calls"]):
+            pct = (m["calls"] / total_calls * 100) if total_calls else 0
+            bar_width = 20
+            filled = int(bar_width * pct / 100)
+            bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
+            tag = "[bold green]LOCAL[/bold green]" if m.get("is_local") else f"[{_C_ERROR}]PAID[/{_C_ERROR}]"
+            display = m.get("display_name", name)
+            icon = m.get("icon", "\U0001f916")
+            cost_str = "FREE" if m.get("cost", 0) == 0 else _fmt_cost(m["cost"])
+            lines.append(
+                f"{icon} {display} [{tag}]  {m['calls']} calls  "
+                f"[{_C_COST}]{cost_str}[/{_C_COST}]  [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}] {pct:.0f}%"
+            )
+
+        # Summary line
+        budget_pct = (total_cost / budget * 100) if budget > 0 else 0
+        budget_color = _C_SUCCESS if budget_pct < 50 else (_C_THINKING if budget_pct < 80 else _C_ERROR)
+        lines.append(
+            f"Today: [{_C_COST}]{_fmt_cost(total_cost)}[/{_C_COST}] "
+            f"\u2502 [{budget_color}]{local_pct}% local[/{budget_color}] "
+            f"\u2502 Budget: {_fmt_cost(total_cost)} / {_fmt_cost(budget)}"
+        )
+
+        self.update(Text.from_markup("\n".join(lines)))
+
+
 # ── Main App ────────────────────────────────────────────────────────
 
 class LazyClawApp(App):
@@ -742,6 +811,16 @@ class LazyClawApp(App):
         height: 3;
         background: $surface;
         border: solid $primary;
+        content-align: left middle;
+        padding: 0 1;
+    }
+
+    #ai-routing-bar {
+        column-span: 2;
+        height: auto;
+        max-height: 8;
+        background: $surface;
+        border: solid #F59E0B;
         content-align: left middle;
         padding: 0 1;
     }
@@ -799,6 +878,7 @@ class LazyClawApp(App):
         yield JobsBar("  Loading jobs...", id="jobs-bar")
         yield LogPanel(id="log-panel", highlight=True, markup=True)
         yield CostBar("", id="cost-bar")
+        yield AIRoutingBar("", id="ai-routing-bar")
         yield Input(
             placeholder="Type message or /command...",
             id="admin-input",
@@ -1058,6 +1138,18 @@ class LazyClawApp(App):
                     total_cost=self.dashboard.total_cost_today,
                     budget=self._eco_budget,
                 )
+            except Exception:
+                pass
+
+            # Update AI routing bar (from eco_router stats)
+            try:
+                routing_bar = self.query_one("#ai-routing-bar", AIRoutingBar)
+                eco_router = getattr(self._agent, "eco_router", None)
+                if eco_router:
+                    routing_bar.render_routing(
+                        eco_router.get_routing_stats(),
+                        budget=self._eco_budget,
+                    )
             except Exception:
                 pass
 

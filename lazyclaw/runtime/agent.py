@@ -403,6 +403,7 @@ class Agent:
         # Agentic loop
         max_iterations = self.config.max_tool_iterations
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
+        _tool_call_history: list[str] = []  # Track tool names for loop detection
 
         response = None
         iteration = 0
@@ -647,6 +648,22 @@ class Agent:
                     )
                     messages.append(tool_msg)
                     all_new_messages.append(tool_msg)
+                    _tool_call_history.append(tc.name)
+
+                # Loop detection: if same tool called 3+ times in a row, stop
+                if len(_tool_call_history) >= 3:
+                    last_3 = _tool_call_history[-3:]
+                    if last_3[0] == last_3[1] == last_3[2]:
+                        logger.warning(
+                            "Tool loop detected: %s called 3 times in a row, breaking",
+                            last_3[0],
+                        )
+                        all_new_messages.append(LLMMessage(
+                            role="assistant",
+                            content=f"I got stuck calling {last_3[0]} repeatedly. Let me try a different approach.",
+                        ))
+                        break
+
             else:
                 # Max iterations reached
                 all_new_messages.append(
@@ -718,8 +735,21 @@ class Agent:
             content = "I wasn't able to generate a response. Please try again."
         await recorder.record_final_response(content)
 
-        # Fire work summary for direct mode
+        # Fire work summary for direct mode (with model attribution)
         from lazyclaw.runtime.summary import build_work_summary
+        from lazyclaw.llm.pricing import calculate_cost
+
+        _models_used = []
+        _total_cost = 0.0
+        _routing = self.eco_router.last_routing if self.eco_router else None
+        if _routing:
+            _models_used.append((_routing.display_name, _routing.icon, _routing.is_local))
+            _total_cost = calculate_cost(
+                _routing.model,
+                _session_tokens // 2,  # approximate split
+                _session_tokens - _session_tokens // 2,
+            )
+
         _direct_summary = build_work_summary(
             start_time=_start_time,
             llm_calls=iteration + 1,
@@ -728,6 +758,8 @@ class Agent:
             total_tokens=_session_tokens,
             user_message=message,
             response=content,
+            models_used=_models_used,
+            total_cost=_total_cost,
         )
         await cb.on_event(AgentEvent(
             "work_summary", "Task complete",

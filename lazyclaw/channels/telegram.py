@@ -577,8 +577,20 @@ class TelegramAdapter(ChannelAdapter):
             )
             return
 
+        # Resolve actual user_id from database (not hardcoded "default")
+        from lazyclaw.db.connection import db_session
         user_id = "default"
-        logger.info("Telegram message from chat %s: %s", chat_id, text[:100])
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute(
+                    "SELECT id FROM users ORDER BY created_at LIMIT 1"
+                )
+                row = await cursor.fetchone()
+                if row:
+                    user_id = row[0]
+        except Exception:
+            pass
+        logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
 
         await self._process_and_reply(update, chat_id, user_id, text)
 

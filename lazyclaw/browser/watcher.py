@@ -148,15 +148,28 @@ async def check_watcher(
     if last_value is None:
         return False, None, new_context
 
-    # Compare
-    changed = current_value != last_value
+    # Compare — for WhatsApp, only trigger on unread count change (not timestamp noise)
+    changed = False
+    if page_type == "whatsapp" and isinstance(result, dict):
+        try:
+            old = json.loads(last_value)
+            old_unread = old.get("unread_count", 0)
+            new_unread = result.get("unread_count", 0)
+            old_text = old.get("text", "")[:200]
+            new_text = result.get("text", "")[:200]
+            # Only trigger if unread count changed or top chat message changed
+            changed = new_unread != old_unread or new_text != old_text
+        except (json.JSONDecodeError, TypeError):
+            changed = current_value != last_value
+    else:
+        changed = current_value != last_value
 
     if not changed:
         return False, None, new_context
 
-    # Build notification
+    # Build notification with DIFF (what's new, not everything)
     notification = _build_notification(
-        context, result, notify_template,
+        context, result, notify_template, last_value,
     )
 
     return True, notification, new_context
@@ -166,32 +179,54 @@ def _build_notification(
     context: dict,
     raw_result,
     template: str | None,
+    last_value: str | None = None,
 ) -> str:
-    """Build a human-readable notification from the change."""
+    """Build a human-readable notification showing WHAT changed."""
     url = context.get("url", "")
     page_type = context.get("page_type", "auto")
 
     if template:
         return template
 
-    # Site-specific notifications
+    # WhatsApp — show only chats with new/changed messages
     if page_type == "whatsapp" and isinstance(raw_result, dict):
+        new_text = raw_result.get("text", "")
+        old_text = ""
+        if last_value:
+            try:
+                old_data = json.loads(last_value)
+                old_text = old_data.get("text", "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Find new lines (messages that weren't in the previous check)
+        old_lines = set(old_text.split("\n"))
+        new_lines = new_text.split("\n")
+        diff_lines = [ln for ln in new_lines if ln.strip() and ln not in old_lines]
+
+        if diff_lines:
+            return "WhatsApp new:\n" + "\n".join(diff_lines[:10])
+
         unread = raw_result.get("unread_count", 0)
-        text = raw_result.get("text", "")
         if unread:
-            return f"WhatsApp: {unread} new message(s)\n{text}"
-        return f"WhatsApp update:\n{text}"
+            # Show first chat with unread
+            first_chat = new_text.split("\n\n")[0] if new_text else ""
+            return f"WhatsApp: {unread} unread\n{first_chat}"
+
+        return f"WhatsApp update:\n{new_text[:300]}"
 
     if page_type == "email" and isinstance(raw_result, dict):
         count = raw_result.get("email_count", 0)
         text = raw_result.get("text", "")
-        return f"Email: {count} new\n{text}"
+        # Show just first email
+        first = text.split("\n\n")[0] if text else ""
+        return f"Email: {count} messages\n{first}"
 
     # Generic
     host = urlparse(url).hostname or url
     if isinstance(raw_result, dict):
-        return f"Change detected on {host}: {json.dumps(raw_result)[:500]}"
-    return f"Change detected on {host}: {str(raw_result)[:500]}"
+        return f"Change on {host}: {json.dumps(raw_result)[:500]}"
+    return f"Change on {host}: {str(raw_result)[:500]}"
 
 
 def is_watcher_expired(context: dict) -> bool:

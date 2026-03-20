@@ -336,20 +336,25 @@ class HeartbeatDaemon:
 
                     if changed and notification:
                         logger.info("Watcher '%s' detected change", job_name)
-                        watcher_msg = f"[WATCHER:{job_name}] {notification}"
-                        await self._lane_queue.enqueue(user_id, watcher_msg)
 
-                        # Push directly to Telegram (don't wait for agent)
+                        # Push directly to Telegram (no agent loop — zero tokens)
                         if self._telegram_push:
                             try:
                                 logger.info("Pushing watcher notification to Telegram")
                                 await self._telegram_push(
-                                    f"🔔 Watcher: {job_name}\n\n{notification}"
+                                    f"🔔 {notification}"
                                 )
                             except Exception as exc:
                                 logger.warning("Telegram push failed: %s", exc)
-                        else:
-                            logger.debug("No telegram_push callback configured")
+
+                        # Also show in CLI (no agent loop, just display)
+                        try:
+                            await self._lane_queue.enqueue(
+                                user_id,
+                                f"[WATCHER] {notification}",
+                            )
+                        except Exception:
+                            pass
 
                         # One-shot watcher — auto-delete after first trigger
                         if new_ctx.get("one_shot"):

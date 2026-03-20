@@ -21,7 +21,7 @@ VALID_MODES = {"off", "auto", "on"}
 
 DEFAULT_BROWSER = {
     "persistent": "auto",      # "off" | "auto" | "on"
-    "idle_timeout": 600,       # seconds before auto-close (auto mode), 10 min
+    "idle_timeout": 3600,      # seconds before auto-close (auto mode), 1 hour
     "cdp_approved": False,     # user approved auto-restart Brave with CDP
 }
 

@@ -233,9 +233,16 @@ class BrowserSkill(BaseSkill):
                 return await self._action_console_logs(user_id, params)
             else:
                 return f"Unknown action: {action}. Use: read, open, click, type, screenshot, tabs, scroll, close, snapshot, hover, drag, console_logs"
-        except ConnectionError:
-            logger.info("browser: CDP unavailable, attempting auto-connect")
-            return await self._auto_connect_and_retry(user_id, params)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.info("browser: CDP connection lost (%s), relaunching", e)
+            # Browser died — relaunch visible and retry
+            global _cdp_backend
+            _cdp_backend = None
+            try:
+                await _get_visible_cdp_backend(user_id)
+                return await self.execute(user_id, params)
+            except Exception:
+                return await self._auto_connect_and_retry(user_id, params)
         except Exception as e:
             logger.error("browser %s failed: %s", action, e, exc_info=True)
             return f"Error: {e}"
@@ -246,8 +253,7 @@ class BrowserSkill(BaseSkill):
         """Read content from current tab or navigate+read a target.
 
         Connects to existing Brave via CDP. If no browser is running,
-        asks user to launch with action='open' first — never auto-launches
-        headless (headless can't maintain WhatsApp/Gmail sessions).
+        auto-launches visible Brave (headless can't maintain sessions).
         """
         from lazyclaw.browser.cdp import find_chrome_cdp
         from lazyclaw.config import load_config
@@ -255,13 +261,11 @@ class BrowserSkill(BaseSkill):
         config = load_config()
         port = getattr(config, "cdp_port", 9222)
 
-        # Check if any browser is running on CDP port
+        # If no browser running, auto-launch visible
         ws_url = await find_chrome_cdp(port)
         if not ws_url:
-            return (
-                "No browser running. Use browser(action='open') first to "
-                "launch Brave on screen, then I can read pages from it."
-            )
+            logger.info("read: no browser running, launching visible Brave")
+            await _get_visible_cdp_backend(user_id)
 
         backend = await _get_cdp_backend(user_id)
         target = params.get("target", "").strip()

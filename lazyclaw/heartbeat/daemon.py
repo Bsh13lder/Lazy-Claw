@@ -342,11 +342,14 @@ class HeartbeatDaemon:
                         # Push directly to Telegram (don't wait for agent)
                         if self._telegram_push:
                             try:
+                                logger.info("Pushing watcher notification to Telegram")
                                 await self._telegram_push(
                                     f"🔔 Watcher: {job_name}\n\n{notification}"
                                 )
                             except Exception as exc:
-                                logger.debug("Telegram push failed: %s", exc)
+                                logger.warning("Telegram push failed: %s", exc)
+                        else:
+                            logger.debug("No telegram_push callback configured")
 
                         # One-shot watcher — auto-delete after first trigger
                         if new_ctx.get("one_shot"):

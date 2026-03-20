@@ -826,14 +826,27 @@ class LazyClawApp(App):
 
             telegram_push = None
             if self._telegram_connected and telegram:
+                _tg = telegram  # capture reference
+
                 async def _telegram_push_fn(text: str) -> None:
-                    if telegram._admin_chat_id and telegram._app and telegram._app.bot:
+                    # Check admin_chat_id at call time (may be set after /start)
+                    chat_id = _tg._admin_chat_id
+                    if not chat_id:
+                        logger.debug("Telegram push skipped: no admin_chat_id yet")
+                        return
+                    if not _tg._app or not _tg._app.bot:
+                        return
+                    try:
                         from lazyclaw.channels.telegram import _telegram_send_with_retry
                         await _telegram_send_with_retry(
-                            lambda: telegram._app.bot.send_message(
-                                chat_id=telegram._admin_chat_id, text=text,
+                            lambda: _tg._app.bot.send_message(
+                                chat_id=int(chat_id), text=text,
                             )
                         )
+                        logger.info("Telegram push sent to chat %s", chat_id)
+                    except Exception as exc:
+                        logger.warning("Telegram push failed: %s", exc)
+
                 telegram_push = _telegram_push_fn
 
             heartbeat = HeartbeatDaemon(self._config, self._lane_queue, telegram_push=telegram_push)

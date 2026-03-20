@@ -844,6 +844,7 @@ class LazyClawApp(App):
         Binding("tab", "focus_next", "Next Panel"),
         Binding("1", "focus_agents", "Agents"),
         Binding("2", "focus_logs", "Logs"),
+        Binding("c", "copy_logs", "Copy Logs"),
     ]
 
     def __init__(
@@ -1025,7 +1026,21 @@ class LazyClawApp(App):
 
             from lazyclaw.db.connection import db_session
 
+            # Memory: lazyclaw process
             mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
+
+            # Memory: browser (Brave/Chrome) + ollama processes
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    "ps aux | grep -E 'Brave|Chrome|ollama' | grep -v grep | awk '{sum += $6} END {print sum/1024}'",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
+                extra_mb = float(stdout.decode().strip() or "0")
+                mem_mb += extra_mb
+            except Exception:
+                pass
 
             queue_depth = sum(
                 q.qsize() for q in self._lane_queue._lanes.values()
@@ -1110,6 +1125,25 @@ class LazyClawApp(App):
 
             telegram_status = "connected" if self._telegram_connected else "disconnected"
 
+            # ECO mode + Ollama models for header
+            eco_mode = "full"
+            ollama_models: tuple[str, ...] = ()
+            try:
+                from lazyclaw.llm.eco_settings import get_eco_settings
+                eco = await get_eco_settings(self._config, self._user_id)
+                eco_mode = eco.get("mode", "full")
+            except Exception:
+                pass
+            try:
+                eco_router = getattr(self._agent, "eco_router", None)
+                if eco_router:
+                    ollama = await eco_router._ensure_ollama()
+                    if ollama:
+                        running = await ollama.list_running()
+                        ollama_models = tuple(m["name"] for m in running)
+            except Exception:
+                pass
+
             stats = SystemStats(
                 uptime_s=self.dashboard.uptime_s,
                 total_processed=self.dashboard.total_processed,
@@ -1127,6 +1161,8 @@ class LazyClawApp(App):
                 cost_by_model=self.dashboard.cost_by_model,
                 browser_tabs=browser_tabs,
                 telegram_status=telegram_status,
+                eco_mode=eco_mode,
+                ollama_models=ollama_models,
             )
             self.post_message(StatsRefreshed(stats))
 
@@ -1189,6 +1225,32 @@ class LazyClawApp(App):
 
     def action_focus_filter(self) -> None:
         self.query_one("#admin-input").focus()
+
+    def action_copy_logs(self) -> None:
+        """Copy recent log entries to clipboard (last 50 lines)."""
+        try:
+            log_panel = self.query_one("#log-panel", LogPanel)
+            # RichLog stores lines internally — export as plain text
+            lines = []
+            for line in log_panel.lines[-50:]:
+                lines.append(line.text if hasattr(line, "text") else str(line))
+            text = "\n".join(lines)
+            if not text.strip():
+                text = "(no log entries yet)"
+            import subprocess
+            subprocess.run(
+                ["pbcopy"], input=text.encode(), check=True, timeout=2,
+            )
+            self._post_log("info", f"Copied {len(lines)} log lines to clipboard")
+        except Exception as exc:
+            # Fallback: write to /tmp
+            try:
+                path = "/tmp/lazyclaw_logs.txt"
+                with open(path, "w") as f:
+                    f.write(text)
+                self._post_log("info", f"Logs saved to {path}")
+            except Exception:
+                self._post_log("error", f"Copy failed: {exc}")
 
     # ── Admin input ──────────────────────────────────────────────────
 

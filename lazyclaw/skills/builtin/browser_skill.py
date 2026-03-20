@@ -160,13 +160,14 @@ class BrowserSkill(BaseSkill):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["read", "open", "click", "type", "screenshot", "tabs",
+                    "enum": ["read", "open", "click", "type", "press_key", "screenshot", "tabs",
                             "scroll", "close", "snapshot", "hover", "drag", "console_logs"],
                     "description": (
                         "read: silently read page content (invisible, no browser window shown). "
                         "open: OPEN visible Brave on screen. Use when user says 'open', 'show me', 'make visible'. "
                         "click: click element by CSS selector OR natural description ('Submit button', 'Search input'). "
                         "type: type text into element by CSS selector OR description. "
+                        "press_key: press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown). Use Enter to submit forms or send messages. "
                         "screenshot: capture screenshot (ONLY when user asks). "
                         "tabs: list all open tabs. "
                         "scroll: scroll up or down. "
@@ -203,35 +204,47 @@ class BrowserSkill(BaseSkill):
             "required": ["action"],
         }
 
+    async def _get_backend(self, user_id: str, tab_context=None, visible: bool = False):
+        """Return TabContext if injected, else shared CDPBackend."""
+        if tab_context is not None:
+            return tab_context
+        if visible:
+            return await _get_visible_cdp_backend(user_id)
+        return await _get_cdp_backend(user_id)
+
     async def execute(self, user_id: str, params: dict) -> str | ToolResult:
+        # Extract optional TabContext (injected by specialist runner)
+        tab_context = params.pop("_tab_context", None)
         action = params.get("action", "")
         touch_browser_activity()
 
         try:
             if action == "read":
-                return await self._action_read(user_id, params)
+                return await self._action_read(user_id, params, tab_context)
             elif action == "open":
-                return await self._action_open(user_id, params)
+                return await self._action_open(user_id, params, tab_context)
             elif action == "click":
-                return await self._action_click(user_id, params)
+                return await self._action_click(user_id, params, tab_context)
             elif action == "type":
-                return await self._action_type(user_id, params)
+                return await self._action_type(user_id, params, tab_context)
+            elif action == "press_key":
+                return await self._action_press_key(user_id, params, tab_context)
             elif action == "screenshot":
-                return await self._action_screenshot(user_id, params)
+                return await self._action_screenshot(user_id, params, tab_context)
             elif action == "tabs":
                 return await self._action_tabs(user_id, params)
             elif action == "scroll":
-                return await self._action_scroll(user_id, params)
+                return await self._action_scroll(user_id, params, tab_context)
             elif action == "close":
                 return await self._action_close(user_id, params)
             elif action == "snapshot":
-                return await self._action_snapshot(user_id, params)
+                return await self._action_snapshot(user_id, params, tab_context)
             elif action == "hover":
-                return await self._action_hover(user_id, params)
+                return await self._action_hover(user_id, params, tab_context)
             elif action == "drag":
-                return await self._action_drag(user_id, params)
+                return await self._action_drag(user_id, params, tab_context)
             elif action == "console_logs":
-                return await self._action_console_logs(user_id, params)
+                return await self._action_console_logs(user_id, params, tab_context)
             else:
                 return f"Unknown action: {action}. Use: read, open, click, type, screenshot, tabs, scroll, close, snapshot, hover, drag, console_logs"
         except (ConnectionError, TimeoutError, OSError) as e:
@@ -250,36 +263,44 @@ class BrowserSkill(BaseSkill):
 
     # ── Action handlers ─────────────────────────────────────────────────
 
-    async def _action_read(self, user_id: str, params: dict) -> str:
+    async def _action_read(self, user_id: str, params: dict, tab_context=None) -> str:
         """Read content from current tab or navigate+read a target.
 
         Connects to existing browser via CDP. If no browser running,
         auto-launches headless (background) using the shared profile
         which has cookies from previous visible sessions.
         """
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         target = params.get("target", "").strip()
 
         if target:
-            # Try finding an open tab matching the target
-            tab_list = await backend.tabs()
-            match = next(
-                (t for t in tab_list
-                 if target.lower() in t.title.lower()
-                 or target.lower() in t.url.lower()),
-                None,
-            )
-            if match:
-                await backend.switch_tab(match.id)
-            else:
-                # Auto-navigate to the target
+            if tab_context:
+                # Specialist mode — navigate the isolated tab directly
                 nav_url = _query_to_url(target)
                 if nav_url:
-                    logger.info("No tab '%s', navigating to %s", target, nav_url)
                     await backend.goto(nav_url)
                     await asyncio.sleep(3)
                 else:
-                    return f"No tab found matching '{target}' and couldn't resolve to a URL."
+                    return f"Couldn't resolve '{target}' to a URL."
+            else:
+                # Normal mode — try finding an open tab matching the target
+                tab_list = await backend.tabs()
+                match = next(
+                    (t for t in tab_list
+                     if target.lower() in t.title.lower()
+                     or target.lower() in t.url.lower()),
+                    None,
+                )
+                if match:
+                    await backend.switch_tab(match.id)
+                else:
+                    nav_url = _query_to_url(target)
+                    if nav_url:
+                        logger.info("No tab '%s', navigating to %s", target, nav_url)
+                        await backend.goto(nav_url)
+                        await asyncio.sleep(3)
+                    else:
+                        return f"No tab found matching '{target}' and couldn't resolve to a URL."
 
         # Use the JS extractor system for structured content
         result = await run_extractor(backend)
@@ -294,40 +315,41 @@ class BrowserSkill(BaseSkill):
         summary += f"\n\n{text}"
         return summary
 
-    async def _action_open(self, user_id: str, params: dict) -> str:
+    async def _action_open(self, user_id: str, params: dict, tab_context=None) -> str:
         """Open visible Brave and navigate to target."""
         target = params.get("target", "").strip()
         if not target:
             # Just open Brave, no navigation
-            await _get_visible_cdp_backend(user_id)
+            backend = await self._get_backend(user_id, tab_context, visible=True)
             return "Done — Brave is open on your screen."
 
         nav_url = _query_to_url(target)
         if not nav_url:
             return f"Couldn't resolve '{target}' to a URL."
 
-        backend = await _get_visible_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context, visible=True)
 
-        # Check if target is already open in an existing tab
-        try:
-            tab_list = await backend.tabs()
-            match = next(
-                (t for t in tab_list
-                 if target.lower() in t.title.lower()
-                 or target.lower() in t.url.lower()
-                 or nav_url.split("//")[-1].split("/")[0] in t.url),
-                None,
-            )
-            if match:
-                await backend.switch_tab(match.id)
-                return (
-                    f"Done — {match.title} is now on the user's screen in Brave. "
-                    "No screenshot needed — they can see it."
+        if not tab_context:
+            # Normal mode — check if target is already open in an existing tab
+            try:
+                tab_list = await backend.tabs()
+                match = next(
+                    (t for t in tab_list
+                     if target.lower() in t.title.lower()
+                     or target.lower() in t.url.lower()
+                     or nav_url.split("//")[-1].split("/")[0] in t.url),
+                    None,
                 )
-        except Exception:
-            pass
+                if match:
+                    await backend.switch_tab(match.id)
+                    return (
+                        f"Done — {match.title} is now on the user's screen in Brave. "
+                        "No screenshot needed — they can see it."
+                    )
+            except Exception:
+                pass
 
-        # Not open — navigate to it (with extra wait after fresh launch)
+        # Navigate to target (with extra wait after fresh launch)
         await asyncio.sleep(2)
         try:
             await backend.goto(nav_url)
@@ -342,13 +364,13 @@ class BrowserSkill(BaseSkill):
             "No screenshot needed — they can see it."
         )
 
-    async def _action_click(self, user_id: str, params: dict) -> str:
+    async def _action_click(self, user_id: str, params: dict, tab_context=None) -> str:
         """Click an element by CSS selector OR natural description."""
         target = params.get("target", "").strip()
         if not target:
             return "Target required for click (CSS selector or description like 'Submit button')."
 
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
 
         # Detect if target is a CSS selector (has CSS-specific chars)
         # or a natural description like "Send button", "Message input"
@@ -380,14 +402,14 @@ class BrowserSkill(BaseSkill):
         await asyncio.sleep(0.5)
         return f"Clicked: {match['role']} \"{match['name']}\""
 
-    async def _action_type(self, user_id: str, params: dict) -> str:
+    async def _action_type(self, user_id: str, params: dict, tab_context=None) -> str:
         """Type text into an element by CSS selector OR natural description."""
         target = params.get("target", "").strip()
         text = params.get("text", "")
         if not target or not text:
             return "Both target and text required for type action."
 
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
 
         # Detect if target is a CSS selector (has CSS-specific chars)
         is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))
@@ -418,9 +440,9 @@ class BrowserSkill(BaseSkill):
             await asyncio.sleep(0.05)
         return f"Typed '{text[:30]}...' into {match['role']} \"{match['name']}\""
 
-    async def _action_screenshot(self, user_id: str, params: dict) -> ToolResult:
+    async def _action_screenshot(self, user_id: str, params: dict, tab_context=None) -> ToolResult:
         """Take a screenshot of the current tab."""
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         url = await backend.current_url()
         title = await backend.title()
         ss_bytes = await backend.screenshot()
@@ -452,43 +474,52 @@ class BrowserSkill(BaseSkill):
             lines.append(f"     {tab.url}")
         return "\n".join(lines)
 
-    async def _action_scroll(self, user_id: str, params: dict) -> str:
+    async def _action_scroll(self, user_id: str, params: dict, tab_context=None) -> str:
         """Scroll the page up or down."""
         direction = params.get("direction", "down")
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         await backend.scroll(direction)
         return f"Scrolled {direction}"
 
-    async def _action_snapshot(self, user_id: str, params: dict) -> str:
+    async def _action_press_key(self, user_id: str, params: dict, tab_context=None) -> str:
+        """Press a keyboard key (Enter, Escape, Tab, etc)."""
+        key = params.get("target", "").strip() or params.get("text", "").strip()
+        if not key:
+            return "Key name required (e.g. Enter, Escape, Tab, Backspace, ArrowDown)."
+        backend = await self._get_backend(user_id, tab_context)
+        await backend.press_key(key)
+        return f"Pressed: {key}"
+
+    async def _action_snapshot(self, user_id: str, params: dict, tab_context=None) -> str:
         """Get accessibility tree — semantic page structure."""
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         tree = await backend.accessibility_tree()
         url = await backend.current_url()
         title = await backend.title()
         return f"Page: {title}\nURL: {url}\n\nAccessibility Tree:\n{tree}"
 
-    async def _action_hover(self, user_id: str, params: dict) -> str:
+    async def _action_hover(self, user_id: str, params: dict, tab_context=None) -> str:
         """Hover over an element."""
         target = params.get("target", "").strip()
         if not target:
             return "Target (CSS selector) required for hover."
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         await backend.hover(target)
         return f"Hovering over: {target}"
 
-    async def _action_drag(self, user_id: str, params: dict) -> str:
+    async def _action_drag(self, user_id: str, params: dict, tab_context=None) -> str:
         """Drag element from source to destination."""
         source = params.get("target", "").strip()
         dest = params.get("destination", "").strip()
         if not source or not dest:
             return "Both target (source selector) and destination (target selector) required for drag."
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         await backend.drag_and_drop(source, dest)
         return f"Dragged {source} → {dest}"
 
-    async def _action_console_logs(self, user_id: str, params: dict) -> str:
+    async def _action_console_logs(self, user_id: str, params: dict, tab_context=None) -> str:
         """Get browser console logs."""
-        backend = await _get_cdp_backend(user_id)
+        backend = await self._get_backend(user_id, tab_context)
         await backend.inject_console_capture()
         logs = await backend.get_console_logs()
         if not logs:

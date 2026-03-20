@@ -328,6 +328,45 @@ class CDPBackend:
             })
             await asyncio.sleep(random.uniform(0.03, 0.12))  # Human typing speed
 
+    async def press_key(self, key: str) -> None:
+        """Press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown, etc)."""
+        conn = await self._ensure_connected()
+        # Map common names to CDP key identifiers
+        key_map = {
+            "enter": ("Enter", "\r", 13),
+            "return": ("Enter", "\r", 13),
+            "escape": ("Escape", "", 27),
+            "esc": ("Escape", "", 27),
+            "tab": ("Tab", "\t", 9),
+            "backspace": ("Backspace", "", 8),
+            "delete": ("Delete", "", 46),
+            "arrowup": ("ArrowUp", "", 38),
+            "arrowdown": ("ArrowDown", "", 40),
+            "arrowleft": ("ArrowLeft", "", 37),
+            "arrowright": ("ArrowRight", "", 39),
+            "space": (" ", " ", 32),
+        }
+        lookup = key_map.get(key.lower().replace(" ", ""))
+        if lookup:
+            key_name, text, code = lookup
+        else:
+            key_name, text, code = key, key, 0
+
+        await conn.send("Input.dispatchKeyEvent", {
+            "type": "keyDown",
+            "key": key_name,
+            "text": text,
+            "windowsVirtualKeyCode": code,
+            "nativeVirtualKeyCode": code,
+        })
+        await asyncio.sleep(random.uniform(0.03, 0.08))
+        await conn.send("Input.dispatchKeyEvent", {
+            "type": "keyUp",
+            "key": key_name,
+            "windowsVirtualKeyCode": code,
+            "nativeVirtualKeyCode": code,
+        })
+
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         conn = await self._ensure_connected()
         delta_y = amount if direction == "down" else -amount
@@ -452,7 +491,7 @@ class CDPBackend:
         """Find an element by role/label description and return its coordinates.
 
         Accepts natural descriptions like "Search input", "Submit button",
-        "Send message". Returns {"x": float, "y": float, "nodeId": str} or None.
+        "Send message". Returns {"x": float, "y": float, "role": str, "name": str} or None.
         """
         conn = await self._ensure_connected()
         await conn.send("Accessibility.enable")
@@ -487,29 +526,29 @@ class CDPBackend:
 
         node, backend_id = best_match
 
-        # Resolve to DOM node and get coordinates
+        # Use JS to resolve backendNodeId to coordinates (more reliable than DOM.getBoxModel)
         try:
-            dom_result = await conn.send(
-                "DOM.describeNode", {"backendNodeId": backend_id}
+            resolve_result = await conn.send(
+                "DOM.resolveNode", {"backendNodeId": backend_id}
             )
-            node_id_result = await conn.send(
-                "DOM.requestNode", {"backendNodeId": backend_id}
-            )
-            dom_node_id = node_id_result.get("nodeId")
-            if not dom_node_id:
+            object_id = resolve_result.get("object", {}).get("objectId")
+            if not object_id:
                 return None
 
-            box = await conn.send(
-                "DOM.getBoxModel", {"nodeId": dom_node_id}
-            )
-            content = box.get("model", {}).get("content", [])
-            if len(content) >= 4:
-                # content is [x1,y1, x2,y2, x3,y3, x4,y4] — use center
-                x = (content[0] + content[2]) / 2
-                y = (content[1] + content[5]) / 2
+            # Call getBoundingClientRect() on the resolved object
+            box_result = await conn.send("Runtime.callFunctionOn", {
+                "objectId": object_id,
+                "functionDeclaration": """function() {
+                    const rect = this.getBoundingClientRect();
+                    return {x: rect.x + rect.width/2, y: rect.y + rect.height/2,
+                            w: rect.width, h: rect.height};
+                }""",
+                "returnByValue": True,
+            })
+            coords = box_result.get("result", {}).get("value")
+            if coords and coords.get("w", 0) > 0:
                 return {
-                    "x": x, "y": y,
-                    "nodeId": str(backend_id),
+                    "x": coords["x"], "y": coords["y"],
                     "role": node.get("role", {}).get("value", ""),
                     "name": node.get("name", {}).get("value", ""),
                 }
@@ -664,6 +703,53 @@ class CDPBackend:
             self._conn = None
         self._current_tab = None
         logger.info("CDP backend disconnected (browser still running)")
+
+    # ------------------------------------------------------------------
+    # Tab management via CDP Target domain (for TabManager)
+    # ------------------------------------------------------------------
+
+    async def new_tab(self, url: str = "about:blank") -> str:
+        """Create a new browser tab via CDP Target domain. Returns targetId."""
+        conn = await self._ensure_connected()
+        result = await conn.send("Target.createTarget", {"url": url})
+        target_id = result.get("targetId", "")
+        if not target_id:
+            raise RuntimeError("Target.createTarget returned no targetId")
+        return target_id
+
+    async def attach_to_target(self, target_id: str) -> str:
+        """Attach to a target with flat session mode. Returns sessionId.
+
+        Flat mode multiplexes all tab sessions over the single WebSocket
+        connection, using sessionId to route commands to the correct tab.
+        """
+        conn = await self._ensure_connected()
+        result = await conn.send(
+            "Target.attachToTarget",
+            {"targetId": target_id, "flatten": True},
+        )
+        session_id = result.get("sessionId", "")
+        if not session_id:
+            raise RuntimeError("Target.attachToTarget returned no sessionId")
+        # Enable required CDP domains in the new session
+        await conn.send("Page.enable", session_id=session_id)
+        await conn.send("Runtime.enable", session_id=session_id)
+        return session_id
+
+    async def send_to_target(
+        self, session_id: str, method: str, params: dict | None = None,
+    ) -> dict:
+        """Send a CDP command scoped to a specific session (tab)."""
+        conn = await self._ensure_connected()
+        return await conn.send(method, params, session_id=session_id)
+
+    async def close_tab(self, target_id: str) -> None:
+        """Close a specific browser tab via CDP."""
+        try:
+            conn = await self._ensure_connected()
+            await conn.send("Target.closeTarget", {"targetId": target_id})
+        except Exception as exc:
+            logger.debug("close_tab %s failed: %s", target_id, exc)
 
     @property
     def backend_type(self) -> str:

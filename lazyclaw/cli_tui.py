@@ -21,6 +21,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.message import Message
+from textual.suggester import SuggestFromList
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from lazyclaw.cli_server import _ActiveRequest
@@ -498,6 +499,34 @@ class RequestCard(Static):
         self.update(Text.from_markup("\n".join(lines)))
 
 
+class JobsBar(Static):
+    """Shows active cron jobs and watchers inline."""
+
+    def render_jobs(self, cron_jobs: list[dict], watchers: list[dict]) -> None:
+        if not cron_jobs and not watchers:
+            self.update(Text.from_markup(f"  [{_C_IDLE}]No scheduled jobs[/{_C_IDLE}]"))
+            return
+
+        parts: list[str] = []
+        for j in cron_jobs:
+            name = j.get("name", "?")
+            cron = j.get("cron_expression", "")
+            parts.append(f"[{_C_THINKING}]\u23f0[/{_C_THINKING}] {name} [dim]{cron}[/dim]")
+        for w in watchers:
+            name = w.get("name", "?")
+            import json as _json
+            try:
+                ctx = _json.loads(w.get("context", "{}"))
+            except Exception:
+                ctx = {}
+            url = ctx.get("url", "")
+            # Show just domain
+            domain = url.split("//")[-1].split("/")[0] if url else "?"
+            parts.append(f"[{_C_ACTIVE}]\u25ce[/{_C_ACTIVE}] {name} [dim]{domain}[/dim]")
+
+        self.update(Text.from_markup("  ".join(parts)))
+
+
 class ActivityPanel(VerticalScroll):
     """Scrollable panel of active request cards."""
 
@@ -541,7 +570,7 @@ class ActivityPanel(VerticalScroll):
 
 
 class LogPanel(RichLog):
-    """Scrollable activity feed with token/cost info on LLM entries."""
+    """Scrollable activity feed — full width, auto-scroll."""
 
     def append_entry(self, timestamp: str, kind: str, detail: str) -> None:
         style = _log_style(kind)
@@ -549,6 +578,7 @@ class LogPanel(RichLog):
         self.write(Text.from_markup(
             f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {detail}"
         ))
+        self.scroll_end(animate=False)
 
 
 class ServicesPanel(Static):
@@ -630,8 +660,8 @@ class LazyClawApp(App):
     Screen {
         layout: grid;
         grid-size: 2;
-        grid-columns: 3fr 2fr;
-        grid-rows: 3 1fr 3;
+        grid-columns: 1fr 1fr;
+        grid-rows: 3 1fr auto 1fr 3;
     }
 
     #system-bar {
@@ -644,11 +674,21 @@ class LazyClawApp(App):
     }
 
     #activity-panel {
+        column-span: 2;
         height: 100%;
         border: solid $accent;
     }
 
+    #jobs-bar {
+        column-span: 2;
+        height: auto;
+        max-height: 3;
+        padding: 0 1;
+        background: $surface;
+    }
+
     #log-panel {
+        column-span: 2;
         height: 100%;
         border: solid $success;
     }
@@ -712,9 +752,17 @@ class LazyClawApp(App):
         yield Header()
         yield SystemBar(" Starting...", id="system-bar")
         yield ActivityPanel(id="activity-panel")
+        yield JobsBar("  Loading jobs...", id="jobs-bar")
         yield LogPanel(id="log-panel", highlight=True, markup=True)
         yield CostBar("", id="cost-bar")
-        yield Input(placeholder="Type message or /command...", id="admin-input")
+        yield Input(
+            placeholder="Type message or /command...",
+            id="admin-input",
+            suggester=SuggestFromList(
+                ["/help", "/clear", "/status", "/history", "/jobs", "/watchers"],
+                case_sensitive=False,
+            ),
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -773,10 +821,22 @@ class LazyClawApp(App):
             else:
                 logger.warning("TUI: no telegram_token, skipping Telegram")
 
-            # Heartbeat
+            # Heartbeat — with Telegram push for watcher notifications
             from lazyclaw.heartbeat.daemon import HeartbeatDaemon
 
-            heartbeat = HeartbeatDaemon(self._config, self._lane_queue)
+            telegram_push = None
+            if self._telegram_connected and telegram:
+                async def _telegram_push_fn(text: str) -> None:
+                    if telegram._admin_chat_id and telegram._app and telegram._app.bot:
+                        from lazyclaw.channels.telegram import _telegram_send_with_retry
+                        await _telegram_send_with_retry(
+                            lambda: telegram._app.bot.send_message(
+                                chat_id=telegram._admin_chat_id, text=text,
+                            )
+                        )
+                telegram_push = _telegram_push_fn
+
+            heartbeat = HeartbeatDaemon(self._config, self._lane_queue, telegram_push=telegram_push)
             await heartbeat.start()
             logger.info("TUI: Heartbeat daemon started")
             self._post_log("info", "Heartbeat daemon started")
@@ -865,19 +925,51 @@ class LazyClawApp(App):
             user_id = self._user_id
             browser_cfg = await get_browser_settings(self._config, user_id)
 
-            # Job counts
+            # Job details for jobs bar + counts
+            from lazyclaw.crypto.encryption import decrypt, derive_server_key
+
             cron_count = 0
             watcher_count = 0
+            cron_jobs_list: list[dict] = []
+            watchers_list: list[dict] = []
+            enc_key = derive_server_key(
+                self._config.server_secret, self._user_id,
+            )
+
+            def _dec(val: str | None) -> str:
+                if not val:
+                    return ""
+                try:
+                    return decrypt(val, enc_key) if val.startswith("enc:") else val
+                except Exception:
+                    return val
+
             async with db_session(self._config) as db:
                 cursor = await db.execute(
-                    "SELECT job_type, COUNT(*) FROM agent_jobs "
-                    "WHERE status = 'active' GROUP BY job_type"
+                    "SELECT job_type, name, cron_expression, context FROM agent_jobs "
+                    "WHERE status = 'active' AND user_id = ?",
+                    (self._user_id,),
                 )
                 for row in await cursor.fetchall():
-                    if row[0] == "cron":
-                        cron_count = row[1]
-                    elif row[0] == "watcher":
-                        watcher_count = row[1]
+                    job_type = row[0]
+                    job_dict = {
+                        "name": _dec(row[1]),
+                        "cron_expression": _dec(row[2]),
+                        "context": _dec(row[3]),
+                    }
+                    if job_type == "cron":
+                        cron_count += 1
+                        cron_jobs_list.append(job_dict)
+                    elif job_type == "watcher":
+                        watcher_count += 1
+                        watchers_list.append(job_dict)
+
+            # Update jobs bar
+            try:
+                jobs_bar = self.query_one("#jobs-bar", JobsBar)
+                jobs_bar.render_jobs(cron_jobs_list, watchers_list)
+            except Exception:
+                pass
 
             telegram_status = "connected" if self._telegram_connected else "disconnected"
 
@@ -977,6 +1069,15 @@ class LazyClawApp(App):
                           f"Active:{self.dashboard.active_count}")
             return
 
+        if text == "/history":
+            self._show_history()
+            return
+
+        if text in ("/help", "/"):
+            self._post_log("info",
+                           "Commands: /clear /status /history /jobs /watchers /help")
+            return
+
         # Enqueue as admin message with dashboard tracking + response display
         try:
             user_id = self._user_id
@@ -1047,6 +1148,40 @@ class LazyClawApp(App):
                 pass
             url = ctx.get("url", "?")
             self._post_log("info", f"  {w.get('name', '?')} | {url}")
+
+    @work(name="history")
+    async def _show_history(self) -> None:
+        """Show recent conversation history in log panel."""
+        from lazyclaw.crypto.encryption import decrypt, derive_server_key
+        from lazyclaw.db.connection import db_session
+
+        key = derive_server_key(self._config.server_secret, self._user_id)
+        async with db_session(self._config) as db:
+            rows = await db.execute(
+                "SELECT role, content, created_at FROM agent_messages "
+                "WHERE user_id = ? AND role IN ('user', 'assistant') "
+                "ORDER BY created_at DESC LIMIT 10",
+                (self._user_id,),
+            )
+            messages = await rows.fetchall()
+
+        if not messages:
+            self._post_log("info", "No conversation history.")
+            return
+
+        self._post_log("info", "\u2500\u2500\u2500 Recent History \u2500\u2500\u2500")
+        for row in reversed(messages):
+            role, content_enc, created_at = row[0], row[1], row[2]
+            try:
+                content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
+            except Exception:
+                content = "[encrypted]"
+            ts = (created_at or "")[-8:]  # HH:MM:SS
+            preview = content[:100].replace("\n", " ")
+            if "[Channel:" in preview:
+                preview = preview[:preview.index("[Channel:")].strip()
+            kind = "admin" if role == "user" else "reply"
+            self._post_log(kind, f"{ts}  {preview}")
 
     def _post_log(self, kind: str, detail: str) -> None:
         """Post a log entry from within the app."""

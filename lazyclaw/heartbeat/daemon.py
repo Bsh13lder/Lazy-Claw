@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 class HeartbeatDaemon:
     """Periodically checks for due cron jobs and enqueues them."""
 
-    def __init__(self, config: Config, lane_queue) -> None:
+    def __init__(self, config: Config, lane_queue, telegram_push=None) -> None:
         self._config = config
         self._lane_queue = lane_queue
+        self._telegram_push = telegram_push  # async fn(text) → send to Telegram admin
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -335,10 +336,17 @@ class HeartbeatDaemon:
 
                     if changed and notification:
                         logger.info("Watcher '%s' detected change", job_name)
-                        await self._lane_queue.enqueue(
-                            user_id,
-                            f"[WATCHER:{job_name}] {notification}",
-                        )
+                        watcher_msg = f"[WATCHER:{job_name}] {notification}"
+                        await self._lane_queue.enqueue(user_id, watcher_msg)
+
+                        # Push directly to Telegram (don't wait for agent)
+                        if self._telegram_push:
+                            try:
+                                await self._telegram_push(
+                                    f"🔔 Watcher: {job_name}\n\n{notification}"
+                                )
+                            except Exception as exc:
+                                logger.debug("Telegram push failed: %s", exc)
 
                         # One-shot watcher — auto-delete after first trigger
                         if new_ctx.get("one_shot"):

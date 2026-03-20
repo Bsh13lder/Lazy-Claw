@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from lazyclaw.browser.browser_settings import touch_browser_activity
 from lazyclaw.browser.page_reader import run_extractor, _detect_page_type
@@ -349,8 +350,9 @@ class BrowserSkill(BaseSkill):
 
         backend = await _get_cdp_backend(user_id)
 
-        # Detect if target is a CSS selector or natural description
-        is_css = any(c in target for c in ("#", ".", "[", ">", ":", "input", "button", "div", "span", "a "))
+        # Detect if target is a CSS selector (has CSS-specific chars)
+        # or a natural description like "Send button", "Message input"
+        is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))
         if is_css:
             await backend.click(target)
             return f"Clicked: {target}"
@@ -358,7 +360,12 @@ class BrowserSkill(BaseSkill):
         # Natural description — use accessibility tree to find element
         match = await backend.find_element_by_role(target)
         if not match:
-            return f"No element found matching '{target}'. Try a CSS selector or use snapshot to see page structure."
+            # Fallback: try as CSS selector anyway (might be a tag name like "button")
+            try:
+                await backend.click(target)
+                return f"Clicked: {target}"
+            except (ValueError, Exception):
+                return f"No element found matching '{target}'. Try a CSS selector or use snapshot to see page structure."
 
         conn = await backend._ensure_connected()
         await conn.send("Input.dispatchMouseEvent", {
@@ -382,8 +389,8 @@ class BrowserSkill(BaseSkill):
 
         backend = await _get_cdp_backend(user_id)
 
-        # Detect if target is a CSS selector or natural description
-        is_css = any(c in target for c in ("#", ".", "[", ">", ":", "input", "textarea"))
+        # Detect if target is a CSS selector (has CSS-specific chars)
+        is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))
         if is_css:
             await backend.type_text(target, text)
             return f"Typed '{text[:30]}...' into {target}"

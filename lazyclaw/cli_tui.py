@@ -190,7 +190,9 @@ class TuiDashboard:
             chat_id=chat_id, message=message[:50],
         )
         self._app.post_message(RequestRegistered(chat_id, message[:50]))
-        self._app.post_message(LogAppended(_now(), "new", f'"{message[:40]}"'))
+        # Escape brackets for log panel (uses Rich markup)
+        safe_log = message[:40].replace("[", "\\[") if message else ""
+        self._app.post_message(LogAppended(_now(), "new", f'"{safe_log}"'))
 
     def unregister_request(self, chat_id: str) -> None:
         req = self._active.pop(chat_id, None)
@@ -452,18 +454,22 @@ class RequestCard(Static):
     def __init__(self, chat_id: str, message: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self._chat_id = chat_id
-        self._message = message
+        self._message = message or ""
         RequestCard._counter += 1
         self._number = RequestCard._counter
         self.update(self._render_initial())
 
     def _render_initial(self) -> Text:
-        return Text.from_markup(
-            f"[{_C_BORDER}]╭─[/{_C_BORDER}] [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
-            f' "{self._message}"\n'
-            f"[{_C_BORDER}]│[/{_C_BORDER}] [{_C_IDLE}]○ queued...[/{_C_IDLE}]\n"
-            f"[{_C_BORDER}]╰{'─' * 44}╯[/{_C_BORDER}]"
-        )
+        # Build Text manually to avoid Rich markup parsing of user content
+        t = Text()
+        t.append("╭─ ", style=_C_BORDER)
+        t.append(f"#{self._number}", style=_C_HEADER)
+        t.append(f' "{self._message}"\n')
+        t.append("│ ", style=_C_BORDER)
+        t.append("○ queued...", style=_C_IDLE)
+        t.append("\n")
+        t.append(f"╰{'─' * 44}╯", style=_C_BORDER)
+        return t
 
     def update_snapshot(self, snap: RequestSnapshot) -> None:
         icon, color = _phase_icon(snap.phase)
@@ -1310,13 +1316,17 @@ class LazyClawApp(App):
                 user_id, text, callback=effective_cb,
             )
             if response and response.strip():
-                # Show full response — wrap handles line length
                 for line in response.strip().split("\n"):
                     if line.strip():
                         self._post_log("reply", line)
+            # Check if task was dispatched to background — if so, keep card alive
+            req = self.dashboard._active.get(chat_id)
+            dispatched = req and req.phase == "dispatched"
+            if not dispatched:
+                self.dashboard.unregister_request(chat_id)
+            # If dispatched, background_done event will unregister it
         except Exception as exc:
             self._post_log("error", f"Agent error: {exc}")
-        finally:
             self.dashboard.unregister_request(chat_id)
 
     async def _show_jobs(self) -> None:

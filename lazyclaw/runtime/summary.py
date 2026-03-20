@@ -80,29 +80,20 @@ def format_summary_cli(summary: WorkSummary) -> str:
     return "\n".join(lines)
 
 
-def format_summary_telegram(summary: WorkSummary) -> str:
-    """Format a WorkSummary for Telegram plain text with emoji.
+def format_response_footer(summary: WorkSummary) -> str:
+    """One-line footer for Telegram response messages.
 
-    Returns a clean, structured plain text message.
-    Cost details are in /usage and server dashboard only.
+    Returns: "✅ 12.3s │ 3 LLM │ 1,847 tokens"
     """
     duration_s = summary.duration_ms / 1000
+    parts = [f"\u2705 {duration_s:.1f}s"]
+    parts.append(f"{summary.llm_calls} LLM")
+    if summary.total_tokens:
+        parts.append(f"{summary.total_tokens:,} tokens")
+    return " \u2502 ".join(parts)
 
-    lines = [f"\u2705 Done in {duration_s:.1f}s", ""]
 
-    lines.append(
-        f"\U0001f9e0 {summary.llm_calls} LLM calls | "
-        f"{summary.total_tokens:,} tokens"
-    )
-
-    if summary.tools_used:
-        tools_str = ", ".join(summary.tools_used)
-        lines.append(f"\U0001f527 {tools_str}")
-
-    if summary.specialists_used:
-        lines.append("")
-        lines.append("\U0001f465 Specialists:")
-        for name in summary.specialists_used:
-            lines.append(f"  \u2705 {name}")
-
-    return "\n".join(lines)
+# Keep old name as alias for backward compatibility
+def format_summary_telegram(summary: WorkSummary) -> str:
+    """Deprecated: use format_response_footer instead."""
+    return format_response_footer(summary)

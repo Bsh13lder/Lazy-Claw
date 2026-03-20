@@ -54,6 +54,7 @@ async def run_specialist(
     permission_checker,
     callback=None,
     cancel_token=None,
+    tab_context=None,
 ) -> SpecialistResult:
     """Run a specialist agent loop for a single task.
 
@@ -145,7 +146,15 @@ async def run_specialist(
                 if tc.name not in specialist.allowed_skills:
                     tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
                 else:
-                    tool_result = await executor.execute(tc, user_id, callback=callback)
+                    # Inject TabContext for browser isolation (immutable — new ToolCall)
+                    exec_tc = tc
+                    if tab_context and tc.name == "browser":
+                        exec_tc = ToolCall(
+                            id=tc.id,
+                            name=tc.name,
+                            arguments={**tc.arguments, "_tab_context": tab_context},
+                        )
+                    tool_result = await executor.execute(exec_tc, user_id, callback=callback)
 
                     # If approval required, note it but don't block
                     if isinstance(tool_result, str) and tool_result.startswith(APPROVAL_PREFIX):

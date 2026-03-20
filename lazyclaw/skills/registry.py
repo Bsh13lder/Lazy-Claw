@@ -258,3 +258,14 @@ class SkillRegistry:
 
         self.register(ListSiteMemoriesSkill(config=config))
         self.register(DeleteSiteMemorySkill(config=config))
+
+        # Agent limit management skills
+        from lazyclaw.skills.builtin.agent_limits import (
+            SetMaxAgentsSkill, SetRamLimitSkill,
+            ToggleAutoDelegateSkill, ShowAgentLimitsSkill,
+        )
+
+        self.register(SetMaxAgentsSkill(config=config))
+        self.register(SetRamLimitSkill(config=config))
+        self.register(ToggleAutoDelegateSkill(config=config))
+        self.register(ShowAgentLimitsSkill(config=config))

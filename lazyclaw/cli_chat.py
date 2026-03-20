@@ -19,7 +19,6 @@ from rich.status import Status
 
 from lazyclaw.config import Config
 from lazyclaw.runtime.callbacks import AgentEvent
-from lazyclaw.runtime.summary import format_summary_cli
 from lazyclaw.cli_dashboard import render_dashboard
 
 logger = logging.getLogger(__name__)
@@ -129,6 +128,8 @@ class CliCallback:
         self._approval_result: bool = False
         # Side channel — messages typed while agent/team works
         self.side_messages: list[str] = []
+        # Work summary (stored for inline footer)
+        self._work_summary = None
 
     def start_thinking(self) -> None:
         """Show spinner for initial loading phase."""
@@ -189,10 +190,12 @@ class CliCallback:
             self.current_model = model
             self.current_iteration = iteration
             self.llm_calls += 1
-            self._console.print(
-                f"  [cyan]\u25cf[/cyan] [dim]Thinking "
-                f"({model}, step {iteration})...[/dim]"
-            )
+            # Only show thinking line from step 2+ (step 1 is always expected)
+            if iteration > 1:
+                self._console.print(
+                    f"  [cyan]\u25cf[/cyan] [dim]Thinking "
+                    f"({model}, step {iteration})...[/dim]"
+                )
             self._start_spinner(
                 f"  [dim]\u25cf Thinking ({model}, step {iteration})...[/dim]"
             )
@@ -212,7 +215,7 @@ class CliCallback:
             self._stop_spinner()
             self.current_phase = "tool"
             self.current_tool = display
-            self.tool_log.append(f"\u25c6 {display}")
+            self.tool_log.append(display)
             tool_key = event.metadata.get("tool", display)
             self._tool_start_times[tool_key] = time.monotonic()
             args = event.metadata.get("args", {})
@@ -235,13 +238,11 @@ class CliCallback:
 
             error = event.metadata.get("error")
             if error:
-                self.tool_log.append(f"\u2717 {display}")
                 self._console.print(
                     f"  [red]\u2717 {display}{dur_str} \u2014 "
                     f"{str(error)[:80]}[/red]"
                 )
             else:
-                self.tool_log.append(f"\u2713 {display}")
                 self._console.print(
                     f"  [green]\u2713[/green] [dim]{display}{dur_str}[/dim]"
                 )
@@ -250,7 +251,6 @@ class CliCallback:
             self._stop_spinner()
             self.current_phase = "team"
             self.specialists_active.append(event.detail)
-            self.tool_log.append(f"% {event.detail}")
             self._console.print(f"  [cyan]% {event.detail}[/cyan]")
             self._start_spinner("  [dim]\u25cf Team evaluating...[/dim]")
 
@@ -281,13 +281,11 @@ class CliCallback:
             self._start_spinner("  [cyan]\u25cf Team working...[/cyan]")
 
         elif kind == "specialist_thinking":
+            # Suppress noisy per-iteration lines — spinner is enough
             name = event.metadata.get("specialist", "?")
             iteration = event.metadata.get("iteration", 1)
-            self._stop_spinner()
-            self._console.print(
-                f"    [dim]{name}: thinking (step {iteration})[/dim]"
-            )
-            self._start_spinner("  [cyan]\u25cf Team working...[/cyan]")
+            if name in self._team_specialists:
+                self._team_specialists[name]["iteration"] = iteration
 
         elif kind == "specialist_tool":
             name = event.metadata.get("specialist", "?")
@@ -296,7 +294,6 @@ class CliCallback:
                 self._team_specialists[name].setdefault(
                     "tools_used", []
                 ).append(tool)
-            self.tool_log.append(f"  {name} \u2192 {tool}")
             self._stop_spinner()
             self._console.print(f"    [dim]{name}: {tool}[/dim]")
             self._start_spinner("  [cyan]\u25cf Team working...[/cyan]")
@@ -334,17 +331,9 @@ class CliCallback:
             self._start_spinner("  [dim]\u25cf Merging...[/dim]")
 
         elif kind == "work_summary":
+            # Store summary for inline footer — no separate panel
             self._stop_spinner()
-            summary = event.metadata.get("summary")
-            if summary:
-                text = format_summary_cli(summary)
-                self._console.print()
-                self._console.print(
-                    Panel(
-                        text, title="[dim]Summary[/dim]",
-                        border_style="dim", width=55,
-                    )
-                )
+            self._work_summary = event.metadata.get("summary")
 
         elif kind == "token":
             if not self._streaming:
@@ -385,6 +374,7 @@ def show_agent_result(console: Console, response: str, cb: CliCallback) -> None:
     cb._stop_spinner()
     console.print()
     if cb._streaming:
+        # Streaming response already printed — close the box
         console.print("[green]\u2570\u2500[/green]")
     else:
         if response and response.strip():
@@ -398,7 +388,37 @@ def show_agent_result(console: Console, response: str, cb: CliCallback) -> None:
             )
         else:
             console.print("  [dim]No response.[/dim]")
+
+    # Inline footer — compact one-line summary
+    footer = _build_cli_footer(cb)
+    if footer:
+        console.print(f"  [dim]{footer}[/dim]")
     console.print()
+
+
+def _build_cli_footer(cb: CliCallback) -> str:
+    """Build compact one-line footer from callback stats."""
+    summary = cb._work_summary
+    if summary:
+        duration_s = summary.duration_ms / 1000
+        parts = [f"\u2713 {duration_s:.1f}s"]
+        parts.append(f"{summary.llm_calls} LLM")
+        if summary.total_tokens:
+            parts.append(f"{summary.total_tokens:,} tokens")
+        if summary.tools_used:
+            parts.append(", ".join(summary.tools_used))
+        return " \u2502 ".join(parts)
+    # Fallback if no summary (shouldn't happen normally)
+    if cb.llm_calls:
+        elapsed = time.monotonic() - cb.started_at
+        parts = [f"\u2713 {elapsed:.1f}s"]
+        parts.append(f"{cb.llm_calls} LLM")
+        if cb.total_tokens:
+            parts.append(f"{cb.total_tokens:,} tokens")
+        if cb.tool_log:
+            parts.append(", ".join(cb.tool_log[-4:]))
+        return " \u2502 ".join(parts)
+    return ""
 
 
 def accumulate_usage(ctx: ChatContext, cb: CliCallback) -> None:

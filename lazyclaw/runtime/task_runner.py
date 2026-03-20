@@ -70,6 +70,7 @@ class TaskRunner:
         name: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         callback: AgentCallback | None = None,
+        on_complete=None,
     ) -> str:
         """Submit a task for background execution. Returns task_id immediately.
 
@@ -106,7 +107,7 @@ class TaskRunner:
 
         # Spawn background execution
         bg_task = asyncio.create_task(
-            self._execute(task_id, user_id, instruction, timeout, callback),
+            self._execute(task_id, user_id, instruction, timeout, callback, on_complete),
             name=f"bg-{task_name}",
         )
         self._running[task_id] = bg_task
@@ -127,12 +128,14 @@ class TaskRunner:
         instruction: str,
         timeout: int,
         callback: AgentCallback | None,
+        on_complete=None,
     ) -> None:
         """Run agent in background with its own context."""
         from lazyclaw.runtime.agent import Agent
 
         key = derive_server_key(self._config.server_secret, user_id)
         task_name = self._task_names.get(task_id, task_id[:8])
+        _status = "done"
 
         try:
             # Create FRESH Agent instance (isolated state, no race conditions)
@@ -170,6 +173,7 @@ class TaskRunner:
                 ))
 
         except asyncio.TimeoutError:
+            _status = "failed"
             logger.warning(
                 "Background task %s (%s) timed out after %ds",
                 task_id[:8], task_name, timeout,
@@ -191,6 +195,7 @@ class TaskRunner:
                 ))
 
         except asyncio.CancelledError:
+            _status = "cancelled"
             logger.info("Background task %s (%s) cancelled", task_id[:8], task_name)
             async with db_session(self._config) as db:
                 await db.execute(
@@ -201,6 +206,7 @@ class TaskRunner:
                 await db.commit()
 
         except Exception as exc:
+            _status = "failed"
             logger.error(
                 "Background task %s (%s) failed: %s",
                 task_id[:8], task_name, exc,
@@ -226,6 +232,13 @@ class TaskRunner:
             self._task_users.pop(task_id, None)
             self._task_names.pop(task_id, None)
             self._task_starts.pop(task_id, None)
+
+            # Notify originator (e.g., team lead state cleanup)
+            if on_complete:
+                try:
+                    await on_complete(task_id, _status)
+                except Exception as exc:
+                    logger.warning("on_complete callback failed for task %s: %s", task_id[:8], exc)
 
     def list_running(self, user_id: str | None = None) -> list[dict]:
         """List running background tasks."""

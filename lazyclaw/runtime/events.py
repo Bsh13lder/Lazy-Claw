@@ -35,12 +35,19 @@ SPECIALIST_DONE = "specialist_done"
 # Observability
 WORK_SUMMARY = "work_summary"
 
+# Fast dispatch & tab lifecycle
+FAST_DISPATCH = "fast_dispatch"
+SPECIALIST_WAITING = "specialist_waiting"
+SPECIALIST_TAB_ACQUIRED = "specialist_tab_acquired"
+INSTANT_COMMAND = "instant_command"
+
 ALL_EVENT_KINDS = frozenset({
     LLM_CALL, TOKENS, TOOL_CALL, TOOL_RESULT, STREAM_DONE, TOKEN,
     APPROVAL, DONE, CANCELLED,
     TEAM_DELEGATE, TEAM_START, TEAM_MERGE,
     SPECIALIST_START, SPECIALIST_THINKING, SPECIALIST_TOOL, SPECIALIST_DONE,
     WORK_SUMMARY,
+    FAST_DISPATCH, SPECIALIST_WAITING, SPECIALIST_TAB_ACQUIRED, INSTANT_COMMAND,
 })
 
 
@@ -63,3 +70,21 @@ class WorkSummary:
     mode: str  # "direct" or "team"
     task_description: str  # first 100 chars of user message
     result_preview: str  # first 200 chars of response
+
+
+@dataclass(frozen=True)
+class SpecialistState:
+    """Immutable snapshot of a running specialist.
+
+    Use dataclasses.replace() to produce updated copies.
+    """
+
+    task_id: str
+    specialist: str
+    task_description: str
+    status: str  # "running" | "waiting_tab" | "done" | "failed" | "cancelled"
+    started_at: float
+    tab_domain: str | None = None
+    waiting_for: str | None = None
+    tools_used: tuple[str, ...] = ()
+    tokens: int = 0

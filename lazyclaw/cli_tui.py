@@ -575,11 +575,13 @@ class ActivityPanel(VerticalScroll):
         if self._empty_label:
             self._empty_label.remove()
             self._empty_label = None
-        # Remove existing card for this chat (prevents DuplicateIds crash)
+        # Use unique card ID — prevents DuplicateIds crash with concurrent requests
         card_id = f"req-{chat_id}"
         try:
-            existing = self.query_one(f"#{card_id}")
-            existing.remove()
+            existing = self.query_one(f"#{card_id}", RequestCard)
+            # Card already exists — just update its content instead of crashing
+            existing._render_initial()
+            return
         except Exception:
             pass
         card = RequestCard(chat_id, message, id=card_id)

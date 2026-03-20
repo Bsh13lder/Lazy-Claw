@@ -101,6 +101,8 @@ class _TelegramCallback:
         self.total_tokens = 0
         # Work summary (stored for footer, not sent separately)
         self._work_summary = None
+        # Fast dispatch flag — background task still running after process_message returns
+        self.dispatched = False
 
     # ── Typing indicator ──────────────────────────────────────────────
 
@@ -374,6 +376,10 @@ class _TelegramCallback:
                 self._team_specialists[name]["error"] = error
             await self._update_status(force=True)
 
+        elif kind == "fast_dispatch":
+            self.dispatched = True
+            self.current_phase = "dispatched"
+
         elif kind == "background_done":
             task_name = event.metadata.get("name", "")
             result = event.metadata.get("result", "")
@@ -388,6 +394,9 @@ class _TelegramCallback:
                 )
             except Exception:
                 pass
+            # Signal dispatch complete so adapter can clean up
+            self.dispatched = False
+            self.busy = False
 
         elif kind == "background_failed":
             task_name = event.metadata.get("name", "")
@@ -401,6 +410,9 @@ class _TelegramCallback:
                 )
             except Exception:
                 pass
+            # Signal dispatch complete so adapter can clean up
+            self.dispatched = False
+            self.busy = False
 
         elif kind == "work_summary":
             # Store summary for footer — don't send separately
@@ -565,16 +577,10 @@ class TelegramAdapter(ChannelAdapter):
             return
 
         # Status query while agent is working
-        active_cb = self._active_callbacks.get(chat_id)
-        if active_cb and active_cb.busy:
-            if _is_status_query(text):
-                await update.message.reply_text(active_cb.get_status_report())
-                return
-            # Queue the message
-            self._pending_messages.setdefault(chat_id, []).append(text)
-            await update.message.reply_text(
-                "\U0001f4e5 Queued \u2014 will process after current task."
-            )
+        active_cbs = [cb for cb in self._active_callbacks.values()
+                       if cb._chat_id == int(chat_id) and cb.busy]
+        if active_cbs and _is_status_query(text):
+            await update.message.reply_text(active_cbs[0].get_status_report())
             return
 
         # Resolve actual user_id from database (not hardcoded "default")
@@ -592,22 +598,24 @@ class TelegramAdapter(ChannelAdapter):
             pass
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
 
-        await self._process_and_reply(update, chat_id, user_id, text)
-
-        # Process queued messages
-        queued = self._pending_messages.pop(chat_id, [])
-        for queued_text in queued:
-            await self._process_and_reply(
-                update, chat_id, user_id, queued_text,
-            )
+        # Launch concurrently — LaneQueue serializes per user, fast dispatch
+        # returns in <2s so the queue drains quickly for heavy tasks
+        import asyncio as _aio
+        _aio.create_task(
+            self._process_and_reply(update, chat_id, user_id, text),
+            name=f"tg-{chat_id}-{id(text)}",
+        )
 
     async def _process_and_reply(
         self, update: Update, chat_id: str, user_id: str, text: str,
     ) -> None:
         """Run agent and reply with result. Clean lifecycle:
         typing → status (delayed) → response with footer."""
+        from uuid import uuid4
+        request_id = f"{chat_id}-{uuid4().hex[:8]}"
+
         callback = _TelegramCallback(self._app.bot, int(chat_id))
-        self._active_callbacks[chat_id] = callback
+        self._active_callbacks[request_id] = callback
 
         # Phase 1: Acknowledge — typing indicator immediately
         await callback._start_typing()
@@ -617,10 +625,10 @@ class TelegramAdapter(ChannelAdapter):
         # Wrap with server dashboard for terminal visibility
         effective_cb = callback
         if self._server_dashboard:
-            self._server_dashboard.register_request(chat_id, text)
+            self._server_dashboard.register_request(request_id, text)
             from lazyclaw.runtime.callbacks import MultiCallback
             effective_cb = MultiCallback(
-                callback, self._server_dashboard.make_request_cb(chat_id),
+                callback, self._server_dashboard.make_request_cb(request_id),
             )
 
         # Inject channel context
@@ -699,9 +707,13 @@ class TelegramAdapter(ChannelAdapter):
                 logger.error("Failed to send error reply to chat %s", chat_id)
         finally:
             callback.busy = False
-            self._active_callbacks.pop(chat_id, None)
-            if self._server_dashboard:
-                self._server_dashboard.unregister_request(chat_id)
+            if not callback.dispatched:
+                # Normal path — request fully complete, clean up dashboard
+                self._active_callbacks.pop(request_id, None)
+                if self._server_dashboard:
+                    self._server_dashboard.unregister_request(request_id)
+            # else: fast dispatch — background task still running,
+            # dashboard card stays visible until background_done/failed
 
     async def _handle_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,

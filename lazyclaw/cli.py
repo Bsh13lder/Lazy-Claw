@@ -192,6 +192,7 @@ async def run_agent(config: Config) -> None:
         eco_router=agent.eco_router,
         permission_checker=permission_checker,
     )
+    agent._task_runner = task_runner  # Enable fast dispatch
 
     # Register run_background skill
     from lazyclaw.skills.builtin.background import RunBackgroundSkill
@@ -354,7 +355,7 @@ async def _handle_slash_command(
 
 
 async def _show_chat_history(config: Config, user_id: str) -> None:
-    """Show recent messages for the current user."""
+    """Show recent conversation — user messages and assistant responses only."""
     from lazyclaw.crypto.encryption import decrypt, derive_server_key
     from lazyclaw.db.connection import db_session
 
@@ -363,7 +364,8 @@ async def _show_chat_history(config: Config, user_id: str) -> None:
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT role, content, created_at FROM agent_messages "
-            "WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+            "WHERE user_id = ? AND role IN ('user', 'assistant') "
+            "ORDER BY created_at DESC LIMIT 20",
             (user_id,),
         )
         messages = await rows.fetchall()
@@ -372,22 +374,28 @@ async def _show_chat_history(config: Config, user_id: str) -> None:
         console.print("[dim]No conversation history.[/dim]")
         return
 
-    table = Table(title="Recent Messages", style="cyan")
-    table.add_column("Time", style="dim", width=19)
-    table.add_column("Role", style="bold", width=10)
-    table.add_column("Content", max_width=60)
-
+    console.print()
     for row in reversed(messages):
         role, content_enc, created_at = row[0], row[1], row[2]
         try:
             content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
         except Exception:
             content = "[encrypted]"
-        display = content[:80] + "..." if len(content) > 80 else content
-        role_style = "cyan" if role == "user" else "green" if role == "assistant" else "dim"
-        table.add_row(created_at or "", f"[{role_style}]{role}[/{role_style}]", display)
 
-    console.print(table)
+        ts = (created_at or "")[:16]  # "2026-03-20 00:28"
+        if role == "user":
+            preview = content[:120].replace("\n", " ")
+            # Strip channel hints from display
+            if "[Channel:" in preview:
+                preview = preview[:preview.index("[Channel:")].strip()
+            console.print(f"  [dim]{ts}[/dim]  [bold cyan]\u276f[/bold cyan] {preview}")
+        else:
+            preview = content[:200].replace("\n", " ")
+            console.print(f"  [dim]{ts}[/dim]  [green]\u25c0[/green] {preview}")
+            if len(content) > 200:
+                console.print(f"               [dim]...({len(content)} chars)[/dim]")
+
+    console.print()
 
 
 async def _connect_browser(config: Config) -> None:
@@ -867,6 +875,14 @@ async def _chat_loop() -> None:
 
     checker = PermissionChecker(config, registry)
     agent = Agent(config, router, registry, permission_checker=checker)
+
+    # Wire task runner for fast dispatch
+    from lazyclaw.runtime.task_runner import TaskRunner
+    task_runner = TaskRunner(
+        config=config, router=router, registry=registry,
+        eco_router=agent.eco_router, permission_checker=checker,
+    )
+    agent._task_runner = task_runner
 
     # Share registry with gateway for API fallback path
     from lazyclaw.gateway.app import set_registry

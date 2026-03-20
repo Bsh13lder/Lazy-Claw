@@ -109,16 +109,28 @@ class CDPConnection:
         self._listener_task = asyncio.create_task(self._listen())
         logger.info("CDP connected to %s", ws_url)
 
-    async def send(self, method: str, params: dict | None = None) -> dict:
-        """Send a CDP command and wait for the response."""
+    async def send(
+        self,
+        method: str,
+        params: dict | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        """Send a CDP command and wait for the response.
+
+        When session_id is provided, the command is scoped to that specific
+        target session (tab). This enables flat-mode session multiplexing
+        over a single WebSocket connection.
+        """
         if not self._ws or not self._connected:
             raise ConnectionError("CDP not connected")
 
         self._msg_id += 1
         msg_id = self._msg_id
-        message = {"id": msg_id, "method": method}
+        message: dict = {"id": msg_id, "method": method}
         if params:
             message["params"] = params
+        if session_id:
+            message["sessionId"] = session_id
 
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[msg_id] = future

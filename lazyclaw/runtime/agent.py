@@ -15,6 +15,7 @@ from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
 from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallback
+from lazyclaw.runtime.events import SpecialistState, FAST_DISPATCH, INSTANT_COMMAND
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -97,13 +98,15 @@ _TOOL_CATEGORIES: dict[str, tuple[set[str], re.Pattern]] = {
          "list_mcp_servers", "add_mcp_server", "remove_mcp_server",
          "show_status", "run_doctor", "show_usage", "show_logs", "set_model",
          "show_team_settings", "set_team_mode", "list_specialists",
-         "manage_specialist", "browser_set_persistent", "approve_browser_connect"},
+         "manage_specialist", "browser_set_persistent", "approve_browser_connect",
+         "set_max_agents", "set_ram_limit", "toggle_auto_delegate", "show_agent_limits"},
         re.compile(
             r"\b(eco|provider|ollama|permission|mcp.*server|doctor|"
             r"diagnostic|status|model|admin|setting|config|team.*mode|specialist|"
             r"persistent.*browser|browser.*persistent|keep.*browser|browser.*always|"
             r"browser.*mode|set.*browser|browser.*auto|browser.*on|browser.*off|"
-            r"connect.*browser|approve.*browser|allow.*browser|yes.*connect)\b",
+            r"connect.*browser|approve.*browser|allow.*browser|yes.*connect|"
+            r"max.*agent|ram.*limit|auto.*delegat|agent.*limit|agent.*setting)\b",
             re.IGNORECASE,
         ),
     ),
@@ -189,6 +192,69 @@ def _wants_any_tools(message: str) -> bool:
     return True
 
 
+# ── Fast Dispatch ─────────────────────────────────────────────────────
+# Tools that trigger automatic delegation to background specialists.
+
+HEAVY_TOOLS: frozenset[str] = frozenset({
+    "browser", "web_search", "delegate", "run_command",
+    "read_file", "write_file",
+})
+
+
+class TeamLeadState:
+    """Tracks running specialists for this agent instance."""
+
+    def __init__(self) -> None:
+        self.active: dict[str, SpecialistState] = {}
+
+    def add(self, state: SpecialistState) -> None:
+        self.active[state.task_id] = state
+
+    def remove(self, task_id: str) -> SpecialistState | None:
+        return self.active.pop(task_id, None)
+
+    def format_status(self) -> str:
+        if not self.active:
+            return "No specialists running."
+        lines = [f"{len(self.active)} specialist(s) running:"]
+        for s in self.active.values():
+            elapsed = time.monotonic() - s.started_at
+            line = f"  [{s.specialist}] \"{s.task_description[:50]}\" ({elapsed:.0f}s)"
+            if s.waiting_for:
+                line += f" waiting for {s.waiting_for} tab"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+_INSTANT_RE = re.compile(
+    r"^(/status|/tasks|status|what.s running|what.s happening|whats running|whats happening)$",
+    re.IGNORECASE,
+)
+_CANCEL_RE = re.compile(r"^cancel\s+(.+)$", re.IGNORECASE)
+
+
+def _handle_instant_command(
+    message: str, team_state: TeamLeadState, task_runner=None,
+) -> str | None:
+    """Handle /status and cancel commands without LLM. Returns response or None."""
+    stripped = message.strip()
+    if _INSTANT_RE.match(stripped):
+        return team_state.format_status()
+    m = _CANCEL_RE.match(stripped)
+    if m:
+        target = m.group(1).lower()
+        for task_id, state in team_state.active.items():
+            if target in state.task_description.lower() or target in state.specialist.lower():
+                # Actually cancel the background task
+                if task_runner:
+                    import asyncio
+                    asyncio.ensure_future(task_runner.cancel(task_id, None))
+                team_state.remove(task_id)
+                return f"Cancelled: \"{state.task_description[:40]}\" ({state.specialist})"
+        return f"No running task matching \"{target}\""
+    return None
+
+
 class Agent:
     def __init__(
         self,
@@ -197,6 +263,7 @@ class Agent:
         registry: SkillRegistry | None = None,
         eco_router: EcoRouter | None = None,
         permission_checker=None,
+        task_runner=None,
     ) -> None:
         self.config = config
         self.router = router
@@ -211,6 +278,8 @@ class Agent:
             if registry
             else None
         )
+        self._task_runner = task_runner
+        self._team_state = TeamLeadState()
 
     async def process_message(
         self,
@@ -223,6 +292,14 @@ class Agent:
         cancel_token = CancellationToken()
         if hasattr(cb, 'cancel_token'):
             cb.cancel_token = cancel_token
+
+        # Instant commands — no LLM call needed
+        instant = _handle_instant_command(message, self._team_state, self._task_runner)
+        if instant is not None:
+            await cb.on_event(AgentEvent(INSTANT_COMMAND, instant, {}))
+            await cb.on_event(AgentEvent("done", "Response ready", {}))
+            return instant
+
         key = derive_server_key(self.config.server_secret, user_id)
         _start_time = time.monotonic()
         _all_tools_used: list[str] = []
@@ -434,6 +511,61 @@ class Agent:
                         LLMMessage(role="assistant", content=response.content)
                     )
                     break
+
+                # ── Fast dispatch ─────────────────────────────────────
+                # On the FIRST LLM call, if heavy tools detected and
+                # auto_delegate is on, push to TaskRunner and return
+                # immediately so the team lead stays free for new messages.
+                if (
+                    iteration == 0
+                    and self._task_runner is not None
+                    and any(tc.name in HEAVY_TOOLS for tc in response.tool_calls)
+                ):
+                    from lazyclaw.runtime.agent_settings import get_agent_settings
+
+                    _agent_settings = await get_agent_settings(self.config, user_id)
+                    if (
+                        _agent_settings.get("auto_delegate", True)
+                        and len(self._team_state.active)
+                            < _agent_settings.get("max_concurrent_specialists", 3)
+                    ):
+                        import weakref
+                        _specialist_name = response.tool_calls[0].name
+                        _team_ref = weakref.ref(self._team_state)
+
+                        async def _on_done(tid: str, status: str) -> None:
+                            state = _team_ref()
+                            if state is not None:
+                                state.remove(tid)
+
+                        _task_id = await self._task_runner.submit(
+                            user_id=user_id,
+                            instruction=message,
+                            name=f"auto_{_specialist_name}",
+                            timeout=_agent_settings.get("specialist_timeout_s", 120),
+                            callback=callback,
+                            on_complete=_on_done,
+                        )
+
+                        self._team_state.add(SpecialistState(
+                            task_id=_task_id,
+                            specialist=_specialist_name,
+                            task_description=message[:80],
+                            status="running",
+                            started_at=time.monotonic(),
+                        ))
+
+                        await cb.on_event(AgentEvent(
+                            FAST_DISPATCH,
+                            f"Dispatched to background ({_specialist_name})",
+                            {"task_id": _task_id, "specialist": _specialist_name},
+                        ))
+                        await cb.on_event(AgentEvent("stream_done", "", {}))
+                        await cb.on_event(AgentEvent("done", "Dispatched", {}))
+
+                        if _delegate_registered:
+                            self.registry.unregister("delegate")
+                        return "On it — working in background."
 
                 # Assistant message with tool calls (may have partial text content)
                 assistant_msg = LLMMessage(

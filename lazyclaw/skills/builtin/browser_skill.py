@@ -252,21 +252,10 @@ class BrowserSkill(BaseSkill):
     async def _action_read(self, user_id: str, params: dict) -> str:
         """Read content from current tab or navigate+read a target.
 
-        Connects to existing Brave via CDP. If no browser is running,
-        auto-launches visible Brave (headless can't maintain sessions).
+        Connects to existing browser via CDP. If no browser running,
+        auto-launches headless (background) using the shared profile
+        which has cookies from previous visible sessions.
         """
-        from lazyclaw.browser.cdp import find_chrome_cdp
-        from lazyclaw.config import load_config
-
-        config = load_config()
-        port = getattr(config, "cdp_port", 9222)
-
-        # If no browser running, auto-launch visible
-        ws_url = await find_chrome_cdp(port)
-        if not ws_url:
-            logger.info("read: no browser running, launching visible Brave")
-            await _get_visible_cdp_backend(user_id)
-
         backend = await _get_cdp_backend(user_id)
         target = params.get("target", "").strip()
 

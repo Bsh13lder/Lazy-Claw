@@ -40,7 +40,7 @@ class RunBackgroundSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Start a task that runs in the background while you keep chatting. "
-            "The background agent has ALL your tools (browse_web, search, memory, etc). "
+            "The background agent has ALL your tools (browser, web_search, memory, etc). "
             "Use for: sending messages, web research, checking prices, monitoring, "
             "any task that takes time. You'll be notified on Telegram when it's done. "
             "Can run up to 2 background tasks at once."

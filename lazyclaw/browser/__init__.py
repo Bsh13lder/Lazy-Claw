@@ -1,1 +1,1 @@
-"""Browser automation — Playwright-based web interaction and page reading."""
+"""Browser automation — CDP-based browser control and page reading."""

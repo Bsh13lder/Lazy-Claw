@@ -438,8 +438,8 @@ async def _connect_browser(config: Config) -> None:
 
     console.print()
     console.print(
-        "  [dim]Agent can now use: see_browser, list_tabs, read_tab, "
-        "switch_tab, browser_action[/dim]"
+        "  [dim]Agent can now use: browser (read, open, click, type, "
+        "screenshot, tabs, scroll)[/dim]"
     )
 
 

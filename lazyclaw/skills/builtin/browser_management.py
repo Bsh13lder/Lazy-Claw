@@ -61,7 +61,7 @@ class BrowserSetPersistentSkill(BaseSkill):
                 await self._ensure_browser_running(user_id)
                 return (
                     "Browser mode: ON. Brave is running in the background — "
-                    "read_tab is instant, cron jobs can use the browser "
+                    "browser is instant, cron jobs can use the browser "
                     "without startup delay."
                 )
             elif mode == "auto":

@@ -124,8 +124,7 @@ async def check_watcher(
         import asyncio
         for _ in range(5):
             count = await backend.evaluate(
-                "(() => document.querySelectorAll("
-                "'[data-testid=\"cell-frame-container\"]').length)()"
+                "(() => document.querySelectorAll('[role=\"row\"]').length)()"
             )
             if count and count > 0:
                 break

@@ -1,6 +1,5 @@
 """Background task runner — parallel agent execution.
 
-Generalizes BrowserAgentManager's pattern to ALL agent tasks.
 Each background task gets a fresh Agent instance and runs independently,
 allowing the user to keep chatting while tasks execute.
 
@@ -28,7 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Concurrency limits (same as BrowserAgentManager)
+# Concurrency limits
 MAX_GLOBAL_TASKS = 5
 MAX_PER_USER_TASKS = 2
 DEFAULT_TIMEOUT = 300  # 5 minutes

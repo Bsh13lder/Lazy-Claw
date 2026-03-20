@@ -1,7 +1,7 @@
-"""Telegram channel adapter with rich agent status notifications.
+"""Telegram channel adapter with clean, minimal notification UX.
 
-Provides real-time specialist progress, structured completion summaries,
-edit throttling to stay within Telegram rate limits, and image attachments.
+Single status message edited in-place, deleted on completion.
+Response sent with tiny inline footer. No spam.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import time
 
 import telegram.error
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -26,7 +27,6 @@ from lazyclaw.channels.base import ChannelAdapter, OutboundMessage
 from lazyclaw.config import Config
 from lazyclaw.runtime.agent import Agent
 from lazyclaw.runtime.callbacks import AgentEvent
-from lazyclaw.runtime.summary import format_summary_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -56,33 +56,23 @@ async def _telegram_send_with_retry(coro_factory, max_retries=_SEND_MAX_RETRIES)
                 raise
 
 # Minimum seconds between Telegram message edits (rate limit protection)
-_EDIT_THROTTLE_S = 2.0
+_EDIT_THROTTLE_S = 3.0
 
-# Approximate cost per LLM call (~500 output tokens) by model keyword
-_MODEL_COST_MAP = {
-    "mini": 0.0003, "haiku": 0.0004, "gpt-4o-mini": 0.0003,
-    "gpt-4o": 0.005, "sonnet": 0.005, "gpt-5": 0.01,
-    "opus": 0.02, "o3": 0.02, "o4": 0.02,
-}
+# Delay before showing status message (skip for fast responses)
+_STATUS_DELAY_S = 2.0
 
-
-def _estimate_llm_cost(model: str) -> float:
-    """Rough per-call cost estimate. NanoClaw-inspired cost tracking."""
-    lower = (model or "").lower()
-    for key, cost in _MODEL_COST_MAP.items():
-        if key in lower:
-            return cost
-    return 0.003  # conservative default
+# Typing indicator interval
+_TYPING_INTERVAL_S = 4.0
 
 
 class _TelegramCallback:
-    """Tracks agent status and sends rich live updates to Telegram chat.
+    """Tracks agent status, sends typing indicator and one edited status message.
 
-    Features over the previous version:
-    - Specialist progress grid (queued/running/done with tools)
-    - Edit throttling (2s minimum between edits)
-    - Structured completion summary with tools and timing
-    - specialist_thinking event support
+    Lifecycle:
+    1. Typing indicator starts immediately
+    2. Status message appears after 2s delay (if still working)
+    3. Status message edited in-place (throttled at 3s)
+    4. On completion: delete status, send response with inline footer
     """
 
     def __init__(self, bot, chat_id: int) -> None:
@@ -91,6 +81,10 @@ class _TelegramCallback:
         self._status_msg = None
         self._started = time.monotonic()
         self._last_edit_time: float = 0.0
+        # Typing keepalive task
+        self._typing_task: asyncio.Task | None = None
+        # Delayed status message task
+        self._status_delay_task: asyncio.Task | None = None
         # Live state
         self.busy = True
         self.current_phase = "preparing"
@@ -101,28 +95,97 @@ class _TelegramCallback:
         self.specialists_active: list[str] = []
         # Team tracking
         self._team_specialists: dict[str, dict] = {}
-        # NanoClaw-style stats counters
+        # Stats counters
         self.llm_call_count = 0
         self.tool_count = 0
-        self.estimated_cost = 0.0
+        self.total_tokens = 0
+        # Work summary (stored for footer, not sent separately)
+        self._work_summary = None
+
+    # ── Typing indicator ──────────────────────────────────────────────
+
+    async def _start_typing(self) -> None:
+        """Start background typing indicator (every 4s)."""
+        if self._typing_task and not self._typing_task.done():
+            return
+
+        async def _keepalive():
+            try:
+                while True:
+                    try:
+                        await self._bot.send_chat_action(
+                            chat_id=self._chat_id,
+                            action=ChatAction.TYPING,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(_TYPING_INTERVAL_S)
+            except asyncio.CancelledError:
+                pass
+
+        self._typing_task = asyncio.create_task(_keepalive())
+
+    async def _stop_typing(self) -> None:
+        """Cancel the typing keepalive task."""
+        if self._typing_task and not self._typing_task.done():
+            self._typing_task.cancel()
+            try:
+                await self._typing_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._typing_task = None
+
+    # ── Delayed status message ────────────────────────────────────────
+
+    def _schedule_status_message(self) -> None:
+        """Show status message after 2s delay (skipped for fast responses)."""
+        if self._status_delay_task and not self._status_delay_task.done():
+            return
+
+        async def _delayed_send():
+            try:
+                await asyncio.sleep(_STATUS_DELAY_S)
+                if self.busy:
+                    await self._update_status(force=True)
+            except asyncio.CancelledError:
+                pass
+
+        self._status_delay_task = asyncio.create_task(_delayed_send())
+
+    def _cancel_status_delay(self) -> None:
+        """Cancel the delayed status message if it hasn't fired yet."""
+        if self._status_delay_task and not self._status_delay_task.done():
+            self._status_delay_task.cancel()
+        self._status_delay_task = None
+
+    # ── Status report ─────────────────────────────────────────────────
 
     def get_status_report(self) -> str:
         """Build a detailed status report for /status queries."""
         elapsed = int(time.monotonic() - self._started)
-        lines = [f"\u23f3 Working ({elapsed}s)"]
 
         if self.current_phase == "thinking":
-            lines.append(
-                f"\U0001f9e0 Thinking ({self.current_model}, step {self.current_iteration})"
-            )
+            header = f"\U0001f504 Working ({elapsed}s)"
+            detail = f"\n\n\U0001f9e0 {self.current_model}, step {self.current_iteration}"
         elif self.current_phase == "tool":
-            lines.append(f"\U0001f527 Running: {self.current_tool}")
+            header = f"\U0001f504 Working ({elapsed}s)"
+            detail = f"\n\n\U0001f527 Running: {self.current_tool}"
         elif self.current_phase == "streaming":
-            lines.append("\u270d\ufe0f Writing response...")
-        elif self.current_phase == "team":
-            lines.append("\U0001f916 Team mode active")
+            header = f"\U0001f504 Working ({elapsed}s)"
+            detail = "\n\n\u270d\ufe0f Writing response..."
         elif self.current_phase == "merging":
-            lines.append("\U0001f500 Merging results...")
+            header = f"\U0001f504 Working ({elapsed}s)"
+            detail = "\n\n\U0001f500 Merging results..."
+        elif self.current_phase == "team":
+            header = f"\U0001f916 Team ({elapsed}s)"
+            detail = ""
+        else:
+            header = f"\U0001f504 Working ({elapsed}s)"
+            detail = ""
+
+        lines = [header]
+        if detail:
+            lines.append(detail)
 
         # Specialist grid
         if self._team_specialists:
@@ -130,59 +193,54 @@ class _TelegramCallback:
             for name, state in self._team_specialists.items():
                 lines.append(_format_specialist_line(name, state))
 
+        # Recent tools
         if self.tool_log:
             recent = self.tool_log[-4:]
             lines.append("")
-            for entry in recent:
-                lines.append(f"  {entry}")
+            lines.append("Recent: " + ", ".join(
+                entry.split(" ", 1)[-1] if " " in entry else entry
+                for entry in recent
+            ))
 
+        lines.append(f"\n\U0001f4ca {self.llm_call_count} LLM \u2502 {self.total_tokens:,} tokens")
         return "\n".join(lines)
 
-    def _build_stats_line(self) -> str:
-        """Stats footer: LLM calls + tools (cost only in /usage + server)."""
-        parts = [f"\U0001f4ca {self.llm_call_count} LLM"]
-        if self.tool_count:
-            parts.append(f"{self.tool_count} tools")
-        return " | ".join(parts)
+    # ── Status message (edited in-place) ──────────────────────────────
 
     def _build_status_text(self) -> str:
         """Build the inline status message for live editing."""
         elapsed = int(time.monotonic() - self._started)
-        stats = self._build_stats_line()
 
         if not self._team_specialists:
             # Simple mode
+            lines = [f"\U0001f504 Working ({elapsed}s)"]
+
             if self.current_phase == "thinking":
-                base = (
-                    f"\U0001f9e0 Thinking ({self.current_model}, "
-                    f"step {self.current_iteration})... ({elapsed}s)"
+                lines.append(
+                    f"\n\U0001f9e0 {self.current_model}, step {self.current_iteration}"
                 )
             elif self.current_phase == "tool":
-                base = f"\U0001f527 Running: {self.current_tool} ({elapsed}s)"
+                lines.append(f"\U0001f527 {self.current_tool}")
             elif self.current_phase == "streaming":
-                base = f"\u270d\ufe0f Writing response... ({elapsed}s)"
+                lines.append("\u270d\ufe0f Writing response...")
             elif self.current_phase == "merging":
-                base = f"\U0001f500 Merging results... ({elapsed}s)"
-            else:
-                base = f"\u23f3 Working... ({elapsed}s)"
-            return f"{base}\n\n{stats}"
+                lines.append("\U0001f500 Merging results...")
+
+            lines.append(f"\n\U0001f4ca {self.llm_call_count} LLM \u2502 {self.total_tokens:,} tokens")
+            return "\n".join(lines)
 
         # Team mode — specialist grid
-        lines = [f"\U0001f916 Team working ({elapsed}s)", ""]
+        lines = [f"\U0001f916 Team ({elapsed}s)", ""]
         for name, state in self._team_specialists.items():
             lines.append(_format_specialist_line(name, state))
-        lines.append(f"\n{stats}")
+        lines.append(f"\n\U0001f4ca {self.llm_call_count} LLM \u2502 {self.total_tokens:,} tokens")
         return "\n".join(lines)
 
     async def _update_status(self, force: bool = False) -> None:
-        """Edit the status message in-place with throttling.
-
-        Args:
-            force: Skip throttle check (for important events like done).
-        """
+        """Edit the status message in-place with throttling."""
         now = time.monotonic()
         if not force and (now - self._last_edit_time) < _EDIT_THROTTLE_S:
-            return  # Throttled — skip this update
+            return
 
         text = self._build_status_text()
         try:
@@ -196,18 +254,9 @@ class _TelegramCallback:
         except Exception:
             pass  # Telegram edit can fail if text unchanged
 
-    async def _send_permanent(self, text: str) -> None:
-        """Send a permanent (non-edited) message. Fire-and-forget safe."""
-        try:
-            await _telegram_send_with_retry(
-                lambda: self._bot.send_message(
-                    chat_id=self._chat_id, text=text,
-                )
-            )
-        except Exception:
-            pass
-
     async def _delete_status(self) -> None:
+        """Delete the status message."""
+        self._cancel_status_delay()
         if self._status_msg:
             try:
                 await self._status_msg.delete()
@@ -215,11 +264,32 @@ class _TelegramCallback:
                 pass
             self._status_msg = None
 
+    # ── Footer builder ────────────────────────────────────────────────
+
+    def _build_footer(self) -> str:
+        """Build inline footer for response message."""
+        elapsed_s = time.monotonic() - self._started
+        parts = [f"\u2705 {elapsed_s:.1f}s"]
+        if self.llm_call_count:
+            parts.append(f"{self.llm_call_count} LLM")
+        if self.total_tokens:
+            parts.append(f"{self.total_tokens:,} tokens")
+        return " \u2502 ".join(parts)
+
+    def _build_error_footer(self) -> str:
+        """Build footer for error messages."""
+        elapsed_s = time.monotonic() - self._started
+        parts = [f"{elapsed_s:.1f}s"]
+        if self.llm_call_count:
+            parts.append(f"{self.llm_call_count} LLM")
+        return " \u2502 ".join(parts)
+
+    # ── Event handlers ────────────────────────────────────────────────
+
     async def on_approval_request(
         self, skill_name: str, arguments: dict
     ) -> bool:
-        # Auto-approve in Telegram (no interactive prompt available)
-        return True
+        return True  # Auto-approve in Telegram
 
     async def on_event(self, event: AgentEvent) -> None:
         kind = event.kind
@@ -230,8 +300,10 @@ class _TelegramCallback:
             self.current_model = event.metadata.get("model", "?")
             self.current_iteration = event.metadata.get("iteration", 1)
             self.llm_call_count += 1
-            self.estimated_cost += _estimate_llm_cost(self.current_model)
             await self._update_status()
+
+        elif kind == "tokens":
+            self.total_tokens += event.metadata.get("total", 0)
 
         elif kind == "tool_call":
             self.current_phase = "tool"
@@ -242,12 +314,7 @@ class _TelegramCallback:
         elif kind == "tool_result":
             self.tool_log.append(f"\u2705 {display}")
             self.tool_count += 1
-            # Send permanent message for non-trivial tools (fire-and-forget)
-            _TRIVIAL_TOOLS = {"get_time", "calculate", "memory_recall"}
-            if display not in _TRIVIAL_TOOLS:
-                asyncio.create_task(self._send_permanent(
-                    f"\U0001f527 {display} \u2713"
-                ))
+            await self._update_status()
 
         elif kind == "team_delegate":
             self.current_phase = "team"
@@ -274,7 +341,6 @@ class _TelegramCallback:
             await self._update_status()
 
         elif kind == "specialist_thinking":
-            # Update specialist status with iteration info
             name = event.metadata.get("specialist", "?")
             iteration = event.metadata.get("iteration", 1)
             if name in self._team_specialists:
@@ -307,13 +373,6 @@ class _TelegramCallback:
                 self._team_specialists[name]["tools_used"] = tools
                 self._team_specialists[name]["error"] = error
             await self._update_status(force=True)
-            # Permanent message for specialist completion
-            if success:
-                tools_str = ", ".join(tools[-3:]) if tools else "direct"
-                text = f"\u2705 {name} ({duration_ms / 1000:.1f}s) \u2014 {tools_str}"
-            else:
-                text = f"\u274c {name} \u2014 {str(error)[:60]}"
-            asyncio.create_task(self._send_permanent(text))
 
         elif kind == "background_done":
             task_name = event.metadata.get("name", "")
@@ -321,34 +380,36 @@ class _TelegramCallback:
             if len(result) > 3000:
                 result = result[:3000] + "\n\n[truncated]"
             text = f"\u2705 Background task '{task_name}' done\n\n{result}"
-            asyncio.create_task(self._send_permanent(text))
+            try:
+                await _telegram_send_with_retry(
+                    lambda: self._bot.send_message(
+                        chat_id=self._chat_id, text=text,
+                    )
+                )
+            except Exception:
+                pass
 
         elif kind == "background_failed":
             task_name = event.metadata.get("name", "")
             error = event.metadata.get("error", "unknown error")
             text = f"\u274c Background task '{task_name}' failed: {error[:200]}"
-            asyncio.create_task(self._send_permanent(text))
+            try:
+                await _telegram_send_with_retry(
+                    lambda: self._bot.send_message(
+                        chat_id=self._chat_id, text=text,
+                    )
+                )
+            except Exception:
+                pass
 
         elif kind == "work_summary":
-            # Delete status message first to avoid duplicate info
-            await self._delete_status()
-            summary = event.metadata.get("summary")
-            if summary:
-                text = format_summary_telegram(summary)
-                try:
-                    await _telegram_send_with_retry(
-                        lambda: self._bot.send_message(
-                            chat_id=self._chat_id, text=text,
-                        )
-                    )
-                except Exception:
-                    pass
+            # Store summary for footer — don't send separately
+            self._work_summary = event.metadata.get("summary")
 
         elif kind == "attachment":
-            # Deliver binary attachments (screenshots, images) inline
             data = event.metadata.get("data", b"")
             media_type = event.metadata.get("media_type", "")
-            caption = event.detail[:1024] if event.detail else None  # Telegram limit
+            caption = event.detail[:1024] if event.detail else None
             if data and media_type.startswith("image/"):
                 try:
                     await _telegram_send_with_retry(
@@ -366,7 +427,6 @@ class _TelegramCallback:
 
         elif kind == "done":
             self.busy = False
-            await self._delete_status()
 
 
 def _format_specialist_line(name: str, state: dict) -> str:
@@ -463,18 +523,26 @@ class TelegramAdapter(ChannelAdapter):
     async def _handle_status_cmd(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Handle /status command — show what agent is doing."""
+        """Handle /status command."""
         chat_id = str(update.effective_chat.id)
         cb = self._active_callbacks.get(chat_id)
         if cb and cb.busy:
             await update.message.reply_text(cb.get_status_report())
         else:
-            await update.message.reply_text("Idle \u2014 waiting for your message.")
+            # Idle — show uptime + processed count if dashboard available
+            idle_lines = ["\U0001f4a4 Idle \u2014 waiting for your message."]
+            if self._server_dashboard:
+                up = self._server_dashboard.uptime_s
+                hours, rem = divmod(up, 3600)
+                minutes = rem // 60
+                up_str = f"{hours}h{minutes}m" if hours else f"{minutes}m"
+                done = self._server_dashboard.total_processed
+                idle_lines.append(f"\nUp {up_str} \u2502 {done} done today")
+            await update.message.reply_text("\n".join(idle_lines))
 
     def _is_allowed(self, chat_id: str) -> bool:
-        """Check if a chat is allowed to interact with the bot."""
         if not self._allowed_chats:
-            return True  # No admin set yet — first /start will claim it
+            return True
         return chat_id in self._allowed_chats
 
     async def _handle_message(
@@ -524,9 +592,15 @@ class TelegramAdapter(ChannelAdapter):
     async def _process_and_reply(
         self, update: Update, chat_id: str, user_id: str, text: str,
     ) -> None:
-        """Run agent and reply with result. Tracks status for live queries."""
+        """Run agent and reply with result. Clean lifecycle:
+        typing → status (delayed) → response with footer."""
         callback = _TelegramCallback(self._app.bot, int(chat_id))
         self._active_callbacks[chat_id] = callback
+
+        # Phase 1: Acknowledge — typing indicator immediately
+        await callback._start_typing()
+        # Delayed status message (only shows if task takes >2s)
+        callback._schedule_status_message()
 
         # Wrap with server dashboard for terminal visibility
         effective_cb = callback
@@ -537,11 +611,11 @@ class TelegramAdapter(ChannelAdapter):
                 callback, self._server_dashboard.make_request_cb(chat_id),
             )
 
-        # Inject channel context so the agent knows it's on Telegram
-        # and can send photos/messages to this chat
+        # Inject channel context
         channel_hint = (
             f"\n\n[Channel: Telegram | Chat ID: {chat_id} | "
-            f"You can send images via browser(action=\"screenshot\") — screenshots are auto-forwarded to this chat.]"
+            f"You can send images via browser(action=\"screenshot\") "
+            f"\u2014 screenshots are auto-forwarded to this chat.]"
         )
         enriched_text = text + channel_hint
 
@@ -562,32 +636,52 @@ class TelegramAdapter(ChannelAdapter):
                 "Telegram response to chat %s: %s", chat_id, response[:100],
             )
 
-            # Clean up status message
+            # Phase 3: Done — stop typing, delete status, send response with footer
+            await callback._stop_typing()
             await callback._delete_status()
 
-            # Split long messages for Telegram's 4096 char limit
-            if len(response) <= 4096:
+            footer = callback._build_footer()
+            full_response = f"{response}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
+
+            # Split long messages (4096 char limit), footer on last chunk
+            if len(full_response) <= 4096:
                 await _telegram_send_with_retry(
-                    lambda: update.message.reply_text(response)
+                    lambda: update.message.reply_text(full_response)
                 )
             else:
-                for i in range(0, len(response), 4096):
-                    chunk = response[i : i + 4096]
-                    await _telegram_send_with_retry(
-                        lambda c=chunk: update.message.reply_text(c)
-                    )
+                # Send response chunks, footer on last one
+                resp_chunks = []
+                for i in range(0, len(response), 4000):
+                    resp_chunks.append(response[i : i + 4000])
+                for i, chunk in enumerate(resp_chunks):
+                    if i == len(resp_chunks) - 1:
+                        # Last chunk gets footer
+                        chunk_with_footer = f"{chunk}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
+                        await _telegram_send_with_retry(
+                            lambda c=chunk_with_footer: update.message.reply_text(c)
+                        )
+                    else:
+                        await _telegram_send_with_retry(
+                            lambda c=chunk: update.message.reply_text(c)
+                        )
             logger.debug("Telegram: reply sent to chat %s", chat_id)
+
         except Exception as e:
             logger.error(
                 "Telegram handler error for chat %s: %s",
                 chat_id, e, exc_info=True,
             )
+            await callback._stop_typing()
             await callback._delete_status()
             try:
+                error_footer = callback._build_error_footer()
+                error_msg = (
+                    f"\u274c Something went wrong.\n\n"
+                    f"{str(e)[:200]}\n\n"
+                    f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{error_footer}"
+                )
                 await _telegram_send_with_retry(
-                    lambda: update.message.reply_text(
-                        "Sorry, something went wrong. Please try again."
-                    )
+                    lambda: update.message.reply_text(error_msg)
                 )
             except Exception:
                 logger.error("Failed to send error reply to chat %s", chat_id)
@@ -602,7 +696,7 @@ class TelegramAdapter(ChannelAdapter):
     ) -> None:
         chat_id = str(update.effective_chat.id)
 
-        # First /start claims admin — secure the bot to this chat
+        # First /start claims admin
         if not self._admin_chat_id:
             self._admin_chat_id = chat_id
             self._allowed_chats.add(chat_id)

@@ -42,7 +42,7 @@ BROWSER_SPECIALIST = SpecialistConfig(
         "Focus on completing the browsing task efficiently. Report what you found clearly "
         "and concisely. If a page requires login, use saved site credentials."
     ),
-    allowed_skills=("browse_web", "read_page", "save_site_login"),
+    allowed_skills=("browser", "web_search", "save_site_login"),
     preferred_model="gpt-5-mini",
     is_builtin=True,
 )
@@ -67,10 +67,10 @@ RESEARCH_SPECIALIST = SpecialistConfig(
         "You are a research and information gathering specialist. Your expertise is searching "
         "the web, reading local files, listing directories, and synthesizing findings into "
         "clear summaries. For local files use read_file/list_directory, for web use web_search/"
-        "read_page. Be thorough but concise. Cite sources when possible."
+        "browser. Be thorough but concise. Cite sources when possible."
     ),
     allowed_skills=(
-        "web_search", "read_page", "read_file", "list_directory", "run_command",
+        "web_search", "browser", "read_file", "list_directory", "run_command",
     ),
     preferred_model="gpt-5-mini",
     is_builtin=True,

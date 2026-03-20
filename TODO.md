@@ -101,8 +101,9 @@
 - [ ] **Example Plugin** — `plugins/example/`: Template for community plugin development.
 
 ## Future: Browser Enhancements
-- [x] **Real Chrome Mode** — Connect to user's actual Chrome via CDP (Chrome DevTools Protocol). On-demand connection, 5 skills (see_browser, list_tabs, read_tab, switch_tab, browser_action). Coexists with Playwright headless.
+- [x] **Real Chrome Mode** — Connect to user's actual Chrome via CDP. Now unified into single `browser` skill with 7 actions. CDP-only (Playwright removed).
 - [ ] **Human-like Click Delays** — Add configurable random delays between automated actions (0.3-1.5s range) to mimic human interaction patterns. Especially important for real Chrome mode where there's no natural LLM thinking gap.
+- [ ] **Auto-Extractor Generation** — When a built-in JS extractor fails (returns empty/outdated selectors), auto-generate a new one via LLM by reading the current DOM structure. One-time LLM call, then pure JS on subsequent checks. Resurrects `generate_extractor` from the old PageReader.
 - [ ] **Credential Trust Levels** — Per-site trust config so AI never sees passwords:
   - `full` — Agent reads vault, types password (current behavior)
   - `browser_only` — Server injects password directly into input field via JS/CDP, never in LLM context
@@ -378,4 +379,5 @@ Eval-driven skill development. Define standard tasks per skill with expected out
   - Session: clear_history, show_compression (2 skills)
   - Browser: list_site_memories, delete_site_memory (2 skills)
 - ECO Pipeline Wiring: ✅ COMPLETE — _ensure_free_router() async loads apihunter providers + refreshes Ollama models, dynamic valid_providers in eco_settings
-- Total registered skills: 72+ (up from ~38)
+- Browser Refactoring: ✅ COMPLETE — 13 skills → 1 unified `browser` tool (7 actions: read, open, click, type, screenshot, tabs, scroll). CDP-only, removed Playwright/browser-use/langchain-openai. Deleted 6 files (~2200 lines). Cookie copy strategy for cron jobs (port 9223).
+- Total registered skills: 71 (down from 72+ — 8 browser skills merged into 1)

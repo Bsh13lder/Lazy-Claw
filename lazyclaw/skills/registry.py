@@ -86,11 +86,14 @@ class SkillRegistry:
         self.register(MemorySaveSkill(config=config))
         self.register(MemoryRecallSkill(config=config))
 
-        from lazyclaw.skills.builtin.vault import VaultSetSkill, VaultListSkill, VaultDeleteSkill
+        from lazyclaw.skills.builtin.vault import (
+            VaultSetSkill, VaultListSkill, VaultDeleteSkill, SaveSiteLoginSkill,
+        )
 
         self.register(VaultSetSkill(config=config))
         self.register(VaultListSkill(config=config))
         self.register(VaultDeleteSkill(config=config))
+        self.register(SaveSiteLoginSkill(config=config))
 
         from lazyclaw.skills.builtin.skill_crud import CreateSkillSkill, ListSkillsSkill, DeleteSkillSkill
 
@@ -98,11 +101,9 @@ class SkillRegistry:
         self.register(ListSkillsSkill(config=config))
         self.register(DeleteSkillSkill(config=config))
 
-        from lazyclaw.skills.builtin.browser import BrowseWebSkill, ReadPageSkill, SaveSiteLoginSkill
+        from lazyclaw.skills.builtin.browser_skill import BrowserSkill
 
-        self.register(BrowseWebSkill(config=config))
-        self.register(ReadPageSkill(config=config))
-        self.register(SaveSiteLoginSkill(config=config))
+        self.register(BrowserSkill(config=config))
 
         from lazyclaw.skills.builtin.computer import (
             RunCommandSkill, ReadFileSkill, WriteFileSkill,
@@ -125,17 +126,7 @@ class SkillRegistry:
         self.register(ListJobsSkill(config=config))
         self.register(ManageJobSkill(config=config))
 
-        # Real browser skills (CDP — control user's actual Chrome)
-        from lazyclaw.skills.builtin.real_browser import (
-            SeeBrowserSkill, ListTabsSkill, ReadTabSkill,
-            SwitchTabSkill, BrowserActionSkill,
-        )
-
-        self.register(SeeBrowserSkill(config=config))
-        self.register(ListTabsSkill(config=config))
-        self.register(ReadTabSkill(config=config))
-        self.register(SwitchTabSkill(config=config))
-        self.register(BrowserActionSkill(config=config))
+        # Note: real_browser.py skills removed — merged into BrowserSkill above
 
         # Browser management skills
         from lazyclaw.skills.builtin.browser_management import (

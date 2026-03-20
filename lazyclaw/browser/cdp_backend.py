@@ -1,7 +1,7 @@
-"""CDP-based BrowserBackend — controls user's real Chrome browser.
+"""CDP browser backend — controls user's real Chrome/Brave browser.
 
-Implements BrowserBackend ABC using Chrome DevTools Protocol.
-Connects to Chrome via ws://localhost:9222 (configurable port).
+Uses Chrome DevTools Protocol via ws://localhost:9222 (configurable port).
+Standalone module — no ABC or Playwright dependency.
 """
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ import base64
 import logging
 import random
 import time
+from dataclasses import dataclass
 from typing import Any
 
-from lazyclaw.browser.backend import BrowserBackend, TabInfo
 from lazyclaw.browser.cdp import (
     CDPConnection,
     CDPTab,
@@ -27,12 +27,21 @@ logger = logging.getLogger(__name__)
 CDP_IDLE_TIMEOUT = 300
 
 
-class CDPBackend(BrowserBackend):
+@dataclass(frozen=True)
+class TabInfo:
+    """Immutable info about a browser tab."""
+
+    id: str
+    title: str
+    url: str
+    active: bool = False
+
+
+class CDPBackend:
     """Real Chrome browser control via Chrome DevTools Protocol.
 
     On-demand: connects lazily when first used, auto-disconnects on idle.
     Does NOT close the user's browser — only disconnects the WebSocket.
-    Shares profile directory with Playwright for cookie persistence.
     """
 
     def __init__(self, port: int = 9222, profile_dir: str | None = None) -> None:

@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import json
+
 from lazyclaw.skills.base import BaseSkill
 
 
@@ -118,3 +121,68 @@ class VaultDeleteSkill(BaseSkill):
         if deleted:
             return f"Credential '{params['key']}' deleted."
         return f"No credential found with key '{params['key']}'."
+
+
+class SaveSiteLoginSkill(BaseSkill):
+    """Save website login credentials to the encrypted vault for auto-login."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "save_site_login"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Save login credentials for a website. Stored encrypted in the vault. "
+            "Used for automatic login when cookies expire — the browser will "
+            "re-login automatically using these credentials. "
+            "Example: save_site_login(domain='bank.com', username='me', password='secret')"
+        )
+
+    @property
+    def category(self) -> str:
+        return "browser"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "description": "Website domain (e.g., 'bank.com', 'gmail.com')",
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Login username or email",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Login password",
+                },
+            },
+            "required": ["domain", "username", "password"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.crypto.vault import set_credential
+
+        if not self._config:
+            return "Error: config not available"
+
+        domain = params.get("domain", "").strip().lower()
+        username = params.get("username", "")
+        password = params.get("password", "")
+
+        if not domain or not username or not password:
+            return "Error: domain, username, and password are all required"
+
+        domain = domain.replace("https://", "").replace("http://", "").rstrip("/")
+
+        creds = json.dumps({"username": username, "password": password})
+        await set_credential(self._config, user_id, f"site:{domain}", creds)
+
+        return f"Login credentials saved for {domain}. Auto-login will be used when cookies expire."

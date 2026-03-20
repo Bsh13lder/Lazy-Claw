@@ -94,7 +94,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Lane Queue** | `queue/` | FIFO serial execution per user session |
 | **Skills** | `skills/` | Instruction (NL), Code (sandboxed Python), Plugin (pip). Unified registry |
 | **Channels** | `channels/` | Telegram adapter (+ future Discord, WhatsApp, Signal, SimpleX) |
-| **Browser** | `browser/` | Playwright + CDP, page reader, site memory |
+| **Browser** | `browser/` | CDP-only browser control, JS extractors, site memory |
 | **Computer** | `computer/` | Native subprocess + WebSocket connector (remote) |
 | **Memory** | `memory/` | Encrypted personal facts, conversation history, compression |
 | **MCP** | `mcp/` | Native client + server + bridge to skill registry |
@@ -136,17 +136,17 @@ These are non-obvious architectural decisions -- read the code for implementatio
 
 - **User isolation**: ALL queries scoped by `user_id`. No cross-user data access.
 - **No hardcoded tools**: All tools from skill registry. Agent discovers dynamically.
-- **Smart tool selection**: Per-message category detection sends only relevant tools (8-17 instead of 72). 70-88% token savings.
+- **Smart tool selection**: Per-message category detection sends only relevant tools (8-17 instead of 71). 70-88% token savings.
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
 - **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
 - **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
 - **Cost-aware routing**: gpt-5-mini for ALL non-complex tasks (80% cheaper). Only "analyze/compare/debug" triggers GPT-5.
-- **SmartBrowser**: Own agentic loop replacing browser-use Agent. PageReader JS extractors + DOM optimizer + gpt-5-mini decisions.
+- **Unified browser tool**: Single `browser` skill with 7 actions (read, open, click, type, screenshot, tabs, scroll). CDP-only, no Playwright.
 - **Brave browser**: Auto-detected (Brave > Chrome > Chromium). Built-in ad/tracker blocking = cleaner pages for LLM.
 - **Fast chat path**: Simple messages get last 6 messages, SOUL.md only (no capabilities/memories/tools).
 - **Layered summaries**: Daily logs (auto, gpt-5-mini) + weekly + injected into agent context. Skips 90s LLM re-summarization.
-- **Shared browser profiles**: CDP + PageReader + SmartBrowser all use `browser_profiles/{user_id}/` with system browser. Login once → all tools see it.
-- **Headless auto-launch**: Brave/Chrome launches headless automatically. `visible=true` param for user-facing tasks (QR scans).
+- **Shared browser profiles**: CDP uses `browser_profiles/{user_id}/` with system browser. Login once → all tools see cookies.
+- **Headless auto-launch**: Brave/Chrome launches headless automatically. `open` action launches visible for user-facing tasks.
 - **Human-like delays**: Random 0.2-1.5s between clicks, 0.03-0.12s typing, 0.8-1.5s navigation.
 - **Semantic Snapshots**: Accessibility tree text (50KB) instead of screenshots (5MB).
 - **MCP bridge**: External MCP tools registered as first-class skills. No separate path.
@@ -158,7 +158,6 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **CancellationToken**: Cooperative cancellation from CLI → agent → specialists. Double Ctrl+C support.
 - **ECO mode**: Three tiers (eco/hybrid/full) routing between free and paid AI providers.
 - **Token tracking**: OpenAI streaming reads usage chunk after finish_reason. Anthropic field names normalized.
-- **_BrowserChatOpenAI**: Subclass of ChatOpenAI with `__getattr__`/`__setattr__` overrides for browser-use 0.12+ compatibility.
 
 ## Git Commit Rules
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 
 from lazyclaw.config import Config
@@ -175,12 +177,95 @@ class HeartbeatDaemon:
                     "Error processing reminder %s for user %s", job_id, user_id,
                 )
 
+    async def _get_background_cdp(self, user_id: str):
+        """Get a CDP backend for background jobs without touching the user's live Brave.
+
+        Strategy:
+        - If no browser on port 9222: launch headless on 9222 (normal path)
+        - If headless browser on port 9222: reuse it directly
+        - If VISIBLE browser on port 9222: copy cookies to temp dir,
+          launch a separate headless instance on port 9223
+
+        Returns (CDPBackend, temp_dir_path_or_None). Caller must clean up
+        temp_dir if returned.
+        """
+        from lazyclaw.browser.cdp import find_chrome_cdp
+        from lazyclaw.browser.cdp_backend import CDPBackend
+
+        primary_port = getattr(self._config, "cdp_port", 9222)
+        profile_dir = self._config.database_dir / "browser_profiles" / user_id
+
+        # Check if something is running on the primary port
+        ws_url = await find_chrome_cdp(primary_port)
+
+        if not ws_url:
+            # Nothing running — use primary port, auto-launch will handle it
+            return CDPBackend(port=primary_port, profile_dir=str(profile_dir)), None
+
+        # Something IS running — check if it's headless
+        is_headless = False
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                f"ps aux | grep 'headless' | grep 'remote-debugging-port={primary_port}' | grep -v grep",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            is_headless = bool(stdout.strip())
+        except Exception:
+            # Can't tell — assume it's visible to be safe
+            pass
+
+        if is_headless:
+            # Headless on primary port — safe to reuse directly
+            return CDPBackend(port=primary_port, profile_dir=str(profile_dir)), None
+
+        # Visible browser on primary port — copy cookies to temp dir,
+        # launch separate headless on background port (9223)
+        bg_port = primary_port + 1  # 9223
+        temp_dir = None
+
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="lazyclaw_bg_")
+            if profile_dir.exists():
+                shutil.copytree(str(profile_dir), f"{temp_dir}/profile", dirs_exist_ok=True)
+                logger.info(
+                    "Copied cookies to temp profile for background CDP (port %d)",
+                    bg_port,
+                )
+            backend = CDPBackend(port=bg_port, profile_dir=f"{temp_dir}/profile")
+            return backend, temp_dir
+        except Exception as exc:
+            logger.warning("Failed to create background CDP: %s, falling back to primary", exc)
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return CDPBackend(port=primary_port, profile_dir=str(profile_dir)), None
+
+    async def _cleanup_background_cdp(self, backend, temp_dir: str | None) -> None:
+        """Clean up background CDP resources."""
+        try:
+            await backend.close()
+        except Exception:
+            pass
+        if temp_dir:
+            # Kill the background headless if we launched one
+            bg_port = getattr(self._config, "cdp_port", 9222) + 1
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "pkill", "-f", f"--remote-debugging-port={bg_port}",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+            except Exception:
+                pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     async def _check_watchers(self, user_id: str) -> None:
         """Check all active watchers for a user. Zero LLM calls."""
         import json
 
         from lazyclaw.browser.browser_settings import touch_browser_activity
-        from lazyclaw.browser.cdp import find_chrome_cdp
         from lazyclaw.browser.watcher import (
             check_watcher,
             is_check_due,
@@ -203,74 +288,69 @@ class HeartbeatDaemon:
         if not watchers:
             return
 
-        # Need a browser for watcher checks
-        port = getattr(self._config, "cdp_port", 9222)
-        if not await find_chrome_cdp(port):
-            # No browser — can't check. Will be launched by _ensure_persistent_browser
-            return
+        # Get a background-safe CDP backend (won't touch user's visible Brave)
+        backend, temp_dir = await self._get_background_cdp(user_id)
 
-        from lazyclaw.browser.cdp_backend import CDPBackend
-
-        profile_dir = str(self._config.database_dir / "browser_profiles" / user_id)
-        backend = CDPBackend(port=port, profile_dir=profile_dir)
-
-        for row in watchers:
-            job_id, enc_name, enc_instruction, enc_context = row
-            try:
-                job_name = (
-                    decrypt(enc_name, key)
-                    if enc_name and is_encrypted(enc_name)
-                    else enc_name or "unnamed"
-                )
-
-                # Decrypt and parse context
-                raw_ctx = (
-                    decrypt(enc_context, key)
-                    if enc_context and is_encrypted(enc_context)
-                    else enc_context or "{}"
-                )
-                ctx = json.loads(raw_ctx)
-
-                # Check expiration
-                if is_watcher_expired(ctx):
-                    logger.info("Watcher '%s' expired, removing", job_name)
-                    await delete_job(self._config, user_id, job_id)
-                    await self._lane_queue.enqueue(
-                        user_id,
-                        f"[WATCHER] '{job_name}' has expired and stopped.",
-                    )
-                    continue
-
-                # Check interval
-                if not is_check_due(ctx):
-                    continue
-
-                # Run the check — zero LLM calls
-                touch_browser_activity()
-                changed, notification, new_ctx = await check_watcher(backend, ctx)
-
-                # Save updated context (new last_value, last_check)
-                await update_job(
-                    self._config, user_id, job_id,
-                    context=json.dumps(new_ctx),
-                )
-
-                if changed and notification:
-                    logger.info("Watcher '%s' detected change", job_name)
-                    await self._lane_queue.enqueue(
-                        user_id,
-                        f"[WATCHER:{job_name}] {notification}",
+        try:
+            for row in watchers:
+                job_id, enc_name, enc_instruction, enc_context = row
+                try:
+                    job_name = (
+                        decrypt(enc_name, key)
+                        if enc_name and is_encrypted(enc_name)
+                        else enc_name or "unnamed"
                     )
 
-                    # One-shot watcher — auto-delete after first trigger
-                    if new_ctx.get("one_shot"):
+                    # Decrypt and parse context
+                    raw_ctx = (
+                        decrypt(enc_context, key)
+                        if enc_context and is_encrypted(enc_context)
+                        else enc_context or "{}"
+                    )
+                    ctx = json.loads(raw_ctx)
+
+                    # Check expiration
+                    if is_watcher_expired(ctx):
+                        logger.info("Watcher '%s' expired, removing", job_name)
                         await delete_job(self._config, user_id, job_id)
-                        logger.info("One-shot watcher '%s' auto-deleted", job_name)
+                        await self._lane_queue.enqueue(
+                            user_id,
+                            f"[WATCHER] '{job_name}' has expired and stopped.",
+                        )
+                        continue
 
-            except Exception:
-                logger.exception(
-                    "Error checking watcher %s for user %s", job_id, user_id,
-                )
+                    # Check interval
+                    if not is_check_due(ctx):
+                        continue
+
+                    # Run the check — zero LLM calls
+                    touch_browser_activity()
+                    changed, notification, new_ctx = await check_watcher(backend, ctx)
+
+                    # Save updated context (new last_value, last_check)
+                    await update_job(
+                        self._config, user_id, job_id,
+                        context=json.dumps(new_ctx),
+                    )
+
+                    if changed and notification:
+                        logger.info("Watcher '%s' detected change", job_name)
+                        await self._lane_queue.enqueue(
+                            user_id,
+                            f"[WATCHER:{job_name}] {notification}",
+                        )
+
+                        # One-shot watcher — auto-delete after first trigger
+                        if new_ctx.get("one_shot"):
+                            await delete_job(self._config, user_id, job_id)
+                            logger.info("One-shot watcher '%s' auto-deleted", job_name)
+
+                except Exception:
+                    logger.exception(
+                        "Error checking watcher %s for user %s", job_id, user_id,
+                    )
+        finally:
+            await self._cleanup_background_cdp(backend, temp_dir)
 
     async def _ensure_persistent_browser(self) -> None:
         """Manage browser lifecycle based on persistence mode.
@@ -331,9 +411,8 @@ class HeartbeatDaemon:
                             idle, timeout,
                         )
                         try:
-                            proc = await asyncio.create_subprocess_exec(
-                                "pkill", "-f",
-                                f"--remote-debugging-port={port}",
+                            proc = await asyncio.create_subprocess_shell(
+                                f"ps aux | grep 'remote-debugging-port={port}' | grep -v grep | awk '{{print $2}}' | xargs kill 2>/dev/null",
                                 stdout=asyncio.subprocess.DEVNULL,
                                 stderr=asyncio.subprocess.DEVNULL,
                             )

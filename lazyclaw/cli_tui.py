@@ -115,6 +115,7 @@ def _phase_icon(phase: str) -> tuple[str, str]:
         "tool": ("◆", "#60A5FA"),
         "team": ("◆", _C_SPECIALIST),
         "merging": ("◆", _C_SPECIALIST),
+        "dispatched": ("→", _C_SPECIALIST),
         "streaming": ("●", _C_ACTIVE),
         "queued": ("○", _C_IDLE),
         "done": ("✓", _C_SUCCESS),
@@ -286,6 +287,37 @@ class TuiDashboard:
 
         elif kind == "token":
             req.phase = "streaming"
+
+        elif kind == "fast_dispatch":
+            req.phase = "dispatched"
+            specialist = event.metadata.get("specialist", "?")
+            req.delegate_to = specialist
+            self._app.post_message(LogAppended(
+                _now(), "dispatch", f"→ background ({specialist})",
+            ))
+
+        elif kind == "background_done":
+            req.phase = "done"
+            name = event.metadata.get("name", "?")
+            self._app.post_message(LogAppended(
+                _now(), "done", f"Background '{name}' completed",
+            ))
+            # Post final snapshot then remove card
+            self._app.post_message(RequestUpdated(chat_id, self._snapshot(req)))
+            self.unregister_request(chat_id)
+            return  # already posted snapshot + removed
+
+        elif kind == "background_failed":
+            req.phase = "error"
+            name = event.metadata.get("name", "?")
+            error = event.metadata.get("error", "unknown")
+            self._app.post_message(LogAppended(
+                _now(), "error", f"Background '{name}' failed: {error}",
+            ))
+            # Post final snapshot then remove card
+            self._app.post_message(RequestUpdated(chat_id, self._snapshot(req)))
+            self.unregister_request(chat_id)
+            return  # already posted snapshot + removed
 
         elif kind == "work_summary":
             summary = event.metadata.get("summary")
@@ -543,7 +575,14 @@ class ActivityPanel(VerticalScroll):
         if self._empty_label:
             self._empty_label.remove()
             self._empty_label = None
-        card = RequestCard(chat_id, message, id=f"req-{chat_id}")
+        # Remove existing card for this chat (prevents DuplicateIds crash)
+        card_id = f"req-{chat_id}"
+        try:
+            existing = self.query_one(f"#{card_id}")
+            existing.remove()
+        except Exception:
+            pass
+        card = RequestCard(chat_id, message, id=card_id)
         self.mount(card)
         card.scroll_visible()
 
@@ -570,7 +609,10 @@ class ActivityPanel(VerticalScroll):
 
 
 class LogPanel(RichLog):
-    """Scrollable activity feed — full width, auto-scroll."""
+    """Scrollable activity feed — full width, word-wrap, auto-scroll."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(wrap=True, **kwargs)
 
     def append_entry(self, timestamp: str, kind: str, detail: str) -> None:
         style = _log_style(kind)
@@ -1112,9 +1154,10 @@ class LazyClawApp(App):
                 user_id, text, callback=effective_cb,
             )
             if response and response.strip():
-                # Truncate long responses for log panel
-                preview = response[:200].replace("\n", " ")
-                self._post_log("reply", preview)
+                # Show full response — wrap handles line length
+                for line in response.strip().split("\n"):
+                    if line.strip():
+                        self._post_log("reply", line)
         except Exception as exc:
             self._post_log("error", f"Agent error: {exc}")
         finally:
@@ -1262,6 +1305,7 @@ def _log_style(kind: str) -> str:
         "spec": _C_SPECIALIST,
         "llm": _C_THINKING,
         "done": f"bold {_C_SUCCESS}",
+        "dispatch": _C_SPECIALIST,
         "info": _C_ACTIVE,
         "admin": _C_HEADER,
         "reply": _C_SUCCESS,
@@ -1276,6 +1320,7 @@ def _log_icon(kind: str) -> str:
         "result": "✓",
         "start": "++",
         "spec": "→",
+        "dispatch": "→→",
         "llm": "●",
         "done": "✓✓",
         "info": "**",

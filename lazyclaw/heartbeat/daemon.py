@@ -347,14 +347,9 @@ class HeartbeatDaemon:
                             except Exception as exc:
                                 logger.warning("Telegram push failed: %s", exc)
 
-                        # Also show in CLI (no agent loop, just display)
-                        try:
-                            await self._lane_queue.enqueue(
-                                user_id,
-                                f"[WATCHER] {notification}",
-                            )
-                        except Exception:
-                            pass
+                        # Note: NOT enqueuing to lane_queue — Telegram push
+                        # is sufficient. Enqueuing triggers a full agent loop
+                        # that wastes tokens and causes tool call loops.
 
                         # One-shot watcher — auto-delete after first trigger
                         if new_ctx.get("one_shot"):

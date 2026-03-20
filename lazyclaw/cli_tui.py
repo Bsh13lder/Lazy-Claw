@@ -478,11 +478,14 @@ class RequestCard(Static):
         t_out = _fmt_tokens(snap.tokens_out)
         cost = _fmt_cost(snap.cost_usd)
 
+        # Escape user message for Rich markup
+        safe_msg = snap.message.replace("[", "\\[") if snap.message else ""
+
         # Header
         lines = [
             f"[{_C_BORDER}]╭─[/{_C_BORDER}]"
             f" [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
-            f' "{snap.message}"'
+            f' "{safe_msg}"'
         ]
 
         # Phase line
@@ -1298,7 +1301,15 @@ class LazyClawApp(App):
         # Enqueue as admin message with dashboard tracking + response display
         try:
             user_id = self._user_id
-            self._post_log("admin", f"Sent: {text[:40]}")
+            # Check if another task is running for this user
+            active_count = sum(
+                1 for r in self.dashboard._active.values()
+                if r.chat_id.startswith("admin-")
+            )
+            if active_count > 0:
+                self._post_log("admin", f"Queued: {text[:40]} (waiting for current task)")
+            else:
+                self._post_log("admin", f"Sent: {text[:40]}")
             self._process_admin_message(user_id, text)
         except Exception as exc:
             self._post_log("error", f"Failed: {exc}")

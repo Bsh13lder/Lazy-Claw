@@ -404,7 +404,7 @@ class HeartbeatDaemon:
 
                 if mode == "auto":
                     idle = browser_idle_seconds()
-                    timeout = settings.get("idle_timeout", 600)
+                    timeout = settings.get("idle_timeout", 3600)  # 1 hour default
 
                     # Check if there are active watchers — keep alive
                     has_watchers = False
@@ -418,7 +418,18 @@ class HeartbeatDaemon:
                         row = await cursor.fetchone()
                         has_watchers = row and row[0] > 0
 
-                    if browser_alive and idle > timeout and not has_watchers:
+                    # Check if there are running background tasks — keep alive
+                    has_bg_tasks = False
+                    async with db_session(self._config) as db:
+                        cursor = await db.execute(
+                            "SELECT COUNT(*) FROM background_tasks "
+                            "WHERE user_id = ? AND status = 'running'",
+                            (user_id,),
+                        )
+                        row = await cursor.fetchone()
+                        has_bg_tasks = row and row[0] > 0
+
+                    if browser_alive and idle > timeout and not has_watchers and not has_bg_tasks:
                         # Idle too long and no watchers — kill it
                         logger.info(
                             "Auto-closing idle browser (%.0fs idle, %ds timeout)",
@@ -442,7 +453,7 @@ class HeartbeatDaemon:
                                             pass
                         except Exception:
                             pass
-                    elif not browser_alive and (idle < timeout or has_watchers):
+                    elif not browser_alive and (idle < timeout or has_watchers or has_bg_tasks):
                         # Browser died but still needed — restart
                         await self._launch_browser(user_id, port)
                     return

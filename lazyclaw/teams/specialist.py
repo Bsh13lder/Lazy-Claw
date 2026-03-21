@@ -52,7 +52,8 @@ CODE_SPECIALIST = SpecialistConfig(
     display_name="Code Specialist",
     system_prompt=(
         "You are a code and skill development specialist. Your expertise is writing Python code, "
-        "creating new skills, debugging logic, and performing calculations. Focus on producing "
+        "creating new skills, debugging logic, and performing calculations. For complex code "
+        "generation tasks, use Claude Code via MCP tools if available. Focus on producing "
         "clean, working code. Explain your approach briefly, then deliver the implementation."
     ),
     allowed_skills=("calculate", "create_skill", "list_skills", "delete_skill"),

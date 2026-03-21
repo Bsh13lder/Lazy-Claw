@@ -89,13 +89,13 @@ class OllamaInstallSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Download and install an Ollama model locally. Examples: "
-            "'qwen3:4b', 'llama3.2', 'nanbeige4.1'. Large models may "
-            "take several minutes to download."
+            "'qwen3:1.7b', 'softw8/nanbeige4.1-3b-tools', 'llama3.2'. "
+            "Large models may take several minutes to download."
         )
 
     @property
     def permission_hint(self) -> str:
-        return "ask"
+        return "allow"
 
     @property
     def parameters_schema(self) -> dict:
@@ -115,20 +115,48 @@ class OllamaInstallSkill(BaseSkill):
             import httpx
 
             model = params["model"]
-            async with httpx.AsyncClient(timeout=600) as client:
+            # Stream the pull so we don't need a huge timeout waiting for
+            # the entire download. We read status lines as they arrive.
+            async with httpx.AsyncClient(timeout=httpx.Timeout(
+                1800,  # 30 min total (large models on slow connections)
+                connect=10,
+            )) as client:
                 resp = await client.post(
                     f"{_OLLAMA_BASE}/api/pull",
-                    json={"name": model, "stream": False},
+                    json={"name": model, "stream": True},
                 )
                 resp.raise_for_status()
 
-            return f"Model '{model}' installed successfully. Use it with ECO mode or directly via Ollama."
+                # Read streaming status lines until "success"
+                last_status = ""
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        import json
+                        data = json.loads(line)
+                        status = data.get("status", "")
+                        if status:
+                            last_status = status
+                        if data.get("error"):
+                            return f"Error pulling '{model}': {data['error']}"
+                    except Exception:
+                        pass
+
+            if "success" in last_status.lower():
+                return f"Model '{model}' installed successfully. Use it with ECO local/hybrid mode."
+
+            return f"Model '{model}' pull completed (status: {last_status})."
         except Exception as exc:
             exc_type = type(exc).__name__
             if "ConnectError" in exc_type or "Connection refused" in str(exc):
                 return "Ollama is not running. Start it with: ollama serve"
-            if "ReadTimeout" in exc_type:
-                return f"Download timed out for '{params['model']}'. The model may be very large — try running 'ollama pull {params['model']}' directly."
+            if "ReadTimeout" in exc_type or "TimeoutException" in exc_type:
+                return (
+                    f"Download timed out for '{params['model']}'. "
+                    f"The model may be very large — try running "
+                    f"'ollama pull {params['model']}' directly in terminal."
+                )
             if hasattr(exc, "response") and getattr(exc.response, "status_code", 0) == 404:
                 return f"Model '{params['model']}' not found. Check the name at https://ollama.com/library"
             return f"Error installing model: {exc}"

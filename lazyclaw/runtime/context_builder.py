@@ -138,10 +138,12 @@ async def _build_capabilities_section(
     # Current config
     config_parts = [f"Model: {config.default_model}"]
 
+    eco_mode = "full"
     try:
         from lazyclaw.llm.eco_settings import get_eco_settings
         eco = await get_eco_settings(config, user_id)
-        config_parts.append(f"ECO: {eco.get('eco_mode', 'full')}")
+        eco_mode = eco.get("mode", "full")
+        config_parts.append(f"ECO: {eco_mode}")
     except Exception:
         pass
 
@@ -152,7 +154,40 @@ async def _build_capabilities_section(
     except Exception:
         pass
 
+    # Ollama status (for local/hybrid modes)
+    ollama_status = ""
+    try:
+        from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+        provider = OllamaProvider()
+        if await provider.health_check():
+            running = await provider.list_running()
+            if running:
+                model_names = [m["name"] for m in running]
+                ollama_status = f"running ({', '.join(model_names)})"
+            else:
+                ollama_status = "running (no models loaded)"
+        else:
+            ollama_status = "not running"
+        await provider.close()
+    except Exception:
+        ollama_status = "unavailable"
+
     lines.append(f"**Current Config:** {' | '.join(config_parts)}")
+
+    # ECO mode guide — so the agent knows how to help users
+    lines.append("")
+    lines.append("**AI Routing (ECO modes):**")
+    lines.append(f"  Current: {eco_mode.upper()} | Ollama: {ollama_status}")
+    lines.append("  - `local`: Ollama models only, $0 always. Needs: ollama + models pulled")
+    lines.append("  - `eco`: Free API providers only (Groq, Gemini, etc), $0")
+    lines.append("  - `hybrid`: Local models first, paid fallback for complex tasks")
+    lines.append("  - `full`: Always paid AI (current default)")
+    lines.append("  Change with: eco_set_mode. Install models with: ollama_install.")
+    if ollama_status == "not running":
+        lines.append("  Note: Ollama not detected. Install from https://ollama.ai")
+    elif "no models" in ollama_status:
+        lines.append("  Note: Pull models with ollama_install (e.g. qwen3:1.7b, softw8/nanbeige4.1-3b-tools)")
+
     return "\n".join(lines)
 
 

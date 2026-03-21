@@ -215,6 +215,8 @@ class BrowserSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str | ToolResult:
         # Extract optional TabContext (injected by specialist runner)
         tab_context = params.pop("_tab_context", None)
+        # Background tasks should never open visible browser
+        self._is_background = params.pop("_background", False)
         action = params.get("action", "")
         touch_browser_activity()
 
@@ -316,18 +318,22 @@ class BrowserSkill(BaseSkill):
         return summary
 
     async def _action_open(self, user_id: str, params: dict, tab_context=None) -> str:
-        """Open visible Brave and navigate to target."""
+        """Open Brave and navigate to target. Headless in background tasks."""
+        # Background tasks use headless (user didn't ask to "show me")
+        visible = not getattr(self, "_is_background", False)
+
         target = params.get("target", "").strip()
         if not target:
-            # Just open Brave, no navigation
-            backend = await self._get_backend(user_id, tab_context, visible=True)
-            return "Done — Brave is open on your screen."
+            backend = await self._get_backend(user_id, tab_context, visible=visible)
+            if visible:
+                return "Done — Brave is open on your screen."
+            return "Done — browser ready (headless)."
 
         nav_url = _query_to_url(target)
         if not nav_url:
             return f"Couldn't resolve '{target}' to a URL."
 
-        backend = await self._get_backend(user_id, tab_context, visible=True)
+        backend = await self._get_backend(user_id, tab_context, visible=visible)
 
         if not tab_context:
             # Normal mode — check if target is already open in an existing tab

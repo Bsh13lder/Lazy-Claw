@@ -15,7 +15,7 @@ from lazyclaw.db.connection import db_session
 logger = logging.getLogger(__name__)
 
 # Valid ECO modes
-VALID_MODES = {"eco", "hybrid", "full"}
+VALID_MODES = {"eco", "hybrid", "full", "local"}
 
 # Base set of known free providers
 _BASE_PROVIDERS = {"groq", "gemini", "openrouter", "together", "mistral", "huggingface", "ollama"}
@@ -56,6 +56,8 @@ DEFAULT_ECO = {
     "locked_provider": None,
     "allowed_providers": None,
     "task_overrides": None,
+    "brain_model": None,       # None = use default from model_registry
+    "specialist_model": None,  # None = use default from model_registry
 }
 
 

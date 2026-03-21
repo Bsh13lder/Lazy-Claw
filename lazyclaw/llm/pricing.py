@@ -11,6 +11,10 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "gpt-5": {"input": 0.005, "output": 0.015},
     "gpt-4.1-mini": {"input": 0.0004, "output": 0.0016},
     "gpt-4.1": {"input": 0.002, "output": 0.008},
+    # Local Ollama models — $0 always
+    "qwen3:0.6b": {"input": 0.0, "output": 0.0},
+    "qwen3:1.7b": {"input": 0.0, "output": 0.0},
+    "softw8/nanbeige4.1-3b-tools": {"input": 0.0, "output": 0.0},
 }
 
 _FALLBACK = MODEL_COSTS["gpt-5-mini"]

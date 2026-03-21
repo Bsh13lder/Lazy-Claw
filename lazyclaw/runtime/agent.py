@@ -10,7 +10,7 @@ from uuid import uuid4
 from lazyclaw.config import Config
 from lazyclaw.llm.router import LLMRouter
 from lazyclaw.llm.eco_router import EcoRouter
-from lazyclaw.llm.providers.base import LLMMessage
+from lazyclaw.llm.providers.base import LLMMessage, ToolCall
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
@@ -53,8 +53,8 @@ _TOOL_CATEGORIES: dict[str, tuple[set[str], re.Pattern]] = {
          "watch_site", "stop_watcher", "list_watchers"},
         re.compile(
             r"\b(whatsapp|instagram|facebook|twitter|linkedin|gmail|"
-            r"open.*browser|browse|visit.*site|go to.*\.com|"
-            r"login.*to|sign.*in|check.*page|post.*on|send.*message|"
+            r"open.*browser|browse|visit.*site|go to|go on|"
+            r"login.*to|sign.*in|sign.*up|register|check.*page|post.*on|send.*message|"
             r"read.*page|fill.*form|click|navigate|"
             r"watch|watching|watchers?|monitor|notify.*when|alert.*when)\b",
             re.IGNORECASE,
@@ -91,7 +91,7 @@ _TOOL_CATEGORIES: dict[str, tuple[set[str], re.Pattern]] = {
         ),
     ),
     "admin": (
-        {"eco_set_mode", "eco_show_status", "eco_set_provider",
+        {"eco_set_mode", "eco_show_status", "eco_set_provider", "eco_set_model",
          "provider_list", "provider_add", "provider_scan",
          "ollama_list", "ollama_install", "ollama_delete", "ollama_show",
          "show_permissions", "set_permission", "list_pending_approvals",
@@ -422,6 +422,9 @@ class Agent:
                     kwargs["tools"] = tools
 
                 model_name = self.config.default_model
+                # Show actual routing model if available
+                if self.eco_router and self.eco_router.last_routing:
+                    model_name = self.eco_router.last_routing.display_name
                 logger.info("Iteration %d: calling %s", iteration + 1, model_name)
                 await cb.on_event(AgentEvent(
                     "llm_call",
@@ -590,6 +593,12 @@ class Agent:
                         {"tool": tc.name, "display_name": _display, "args": tc.arguments},
                     ))
                     await recorder.record_tool_call(tc.name, tc.arguments)
+                    # Inject background flag so browser uses headless
+                    if getattr(self, "is_background", False) and tc.name == "browser":
+                        tc = ToolCall(
+                            id=tc.id, name=tc.name,
+                            arguments={**tc.arguments, "_background": True},
+                        )
                     result = await self.executor.execute(tc, user_id, callback=cb)
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                     await cb.on_event(AgentEvent(
@@ -654,13 +663,15 @@ class Agent:
                     all_new_messages.append(tool_msg)
                     _tool_call_history.append(tc.name)
 
-                # Loop detection: if same tool called 3+ times in a row, stop
-                if len(_tool_call_history) >= 3:
-                    last_3 = _tool_call_history[-3:]
-                    if last_3[0] == last_3[1] == last_3[2]:
+                # Loop detection: same tool called N+ times in a row = stuck
+                # Browser gets higher limit (multi-step navigation is normal)
+                _loop_limit = 10 if _tool_call_history and _tool_call_history[-1] == "browser" else 3
+                if len(_tool_call_history) >= _loop_limit:
+                    last_n = _tool_call_history[-_loop_limit:]
+                    if len(set(last_n)) == 1:
                         logger.warning(
-                            "Tool loop detected: %s called 3 times in a row, breaking",
-                            last_3[0],
+                            "Tool loop detected: %s called %d times in a row, breaking",
+                            last_n[0], _loop_limit,
                         )
                         all_new_messages.append(LLMMessage(
                             role="assistant",

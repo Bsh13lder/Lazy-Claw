@@ -146,6 +146,7 @@ class TaskRunner:
                 eco_router=self._eco_router,
                 permission_checker=self._permission_checker,
             )
+            agent.is_background = True  # Browser uses headless in background
 
             async with asyncio.timeout(timeout):
                 result = await agent.process_message(

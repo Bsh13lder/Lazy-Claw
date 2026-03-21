@@ -93,6 +93,9 @@
 
 **Verification**: Permission checker resolves all skills. Deny blocks execution. Ask triggers inline approval flow. Admin role assigned to first user. Audit log records all actions.
 
+## Future: CLI Client Mode
+- [ ] **`lazyclaw chat`** — Thin REPL client that connects to running `lazyclaw start` server via HTTP API (port 18789). Tasks go through the same lane queue → show on TUI dashboard. Server runs in terminal 1, REPL in terminal 2. Both share agent, queue, browser, watchers. Great for testing.
+
 ## Future: LazyTasker Plugin + Docker
 - [ ] **LazyTasker Plugin** — `plugins/lazytasker/`: Optional integration (tasks, projects, expenses).
 - [ ] **Plugin Loader** — `lazyclaw/skills/loader.py`: Load plugin packages from filesystem.

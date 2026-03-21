@@ -15,7 +15,11 @@ from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
 from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallback
-from lazyclaw.runtime.events import SpecialistState, FAST_DISPATCH, INSTANT_COMMAND
+from lazyclaw.runtime.events import (
+    SpecialistState, FAST_DISPATCH, INSTANT_COMMAND,
+    HELP_NEEDED as _HELP_NEEDED, HELP_RESPONSE as _HELP_RESPONSE,
+)
+from lazyclaw.runtime.stuck_detector import detect_stuck as _detect_stuck
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -255,6 +259,26 @@ def _handle_instant_command(
     return None
 
 
+async def _extract_and_store_lesson(
+    eco_router, config, user_id: str, message: str, recent: list,
+) -> None:
+    """Fire-and-forget: extract a lesson from user correction and store it.
+
+    Never raises — all errors caught and logged. Uses gpt-5-mini for cost.
+    """
+    try:
+        from lazyclaw.runtime.lesson_extractor import extract_lesson
+        from lazyclaw.runtime.lesson_store import store_lesson
+
+        lesson = await extract_lesson(
+            eco_router, user_id, message, recent,
+        )
+        if lesson:
+            await store_lesson(config, user_id, lesson)
+    except Exception as e:
+        logger.debug("Lesson extraction background task failed: %s", e)
+
+
 class Agent:
     def __init__(
         self,
@@ -404,10 +428,29 @@ class Agent:
         logger.info("Context: %d messages (%d history + system + user), tools=%d",
                      len(messages), len(chat_history), len(tools))
 
+        # ── Learn from corrections (fire-and-forget) ─────────────
+        # If the user is correcting the previous response, extract a
+        # compact lesson and save it to memory for future sessions.
+        if len(history) >= 2:
+            from lazyclaw.runtime.lesson_extractor import is_correction
+
+            prev_assistant = next(
+                (m for m in reversed(history) if m.role == "assistant"),
+                None,
+            )
+            if prev_assistant and is_correction(message):
+                _aio.create_task(
+                    _extract_and_store_lesson(
+                        self.eco_router, self.config, user_id,
+                        message, history[-4:],
+                    )
+                )
+
         # Agentic loop
         max_iterations = self.config.max_tool_iterations
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
         _tool_call_history: list[str] = []  # Track tool names for loop detection
+        _tool_results: list[str] = []  # Track results for error detection
 
         response = None
         iteration = 0
@@ -662,22 +705,84 @@ class Agent:
                     messages.append(tool_msg)
                     all_new_messages.append(tool_msg)
                     _tool_call_history.append(tc.name)
+                    _tool_results.append(
+                        result if isinstance(result, str) else str(result)
+                    )
 
-                # Loop detection: same tool called N+ times in a row = stuck
-                # Browser gets higher limit (multi-step navigation is normal)
-                _loop_limit = 10 if _tool_call_history and _tool_call_history[-1] == "browser" else 3
-                if len(_tool_call_history) >= _loop_limit:
-                    last_n = _tool_call_history[-_loop_limit:]
-                    if len(set(last_n)) == 1:
+                # ── Stuck detection (replaces old inline loop detection) ──
+                # Only run if tools were actually called this iteration
+                if response and response.tool_calls:
+                    _last_result = _tool_results[-1] if _tool_results else None
+                    _stuck_signal = _detect_stuck(
+                        _tool_call_history, _tool_results, _last_result,
+                    )
+                    if _stuck_signal is not None:
                         logger.warning(
-                            "Tool loop detected: %s called %d times in a row, breaking",
-                            last_n[0], _loop_limit,
+                            "Stuck detected: %s (%s)", _stuck_signal.reason, _stuck_signal.context,
                         )
-                        all_new_messages.append(LLMMessage(
-                            role="assistant",
-                            content=f"I got stuck calling {last_3[0]} repeatedly. Let me try a different approach.",
+                        await cb.on_event(AgentEvent(
+                            _HELP_NEEDED, _stuck_signal.context,
+                            {"reason": _stuck_signal.reason, "tool": _stuck_signal.tool_name,
+                             "needs_browser": _stuck_signal.needs_browser},
                         ))
-                        break
+
+                        # Ask user for help — waits indefinitely
+                        _help_response = await cb.on_help_request(
+                            _stuck_signal.context, _stuck_signal.needs_browser,
+                        )
+
+                        if _help_response == "skip":
+                            all_new_messages.append(LLMMessage(
+                                role="assistant",
+                                content=f"I got stuck: {_stuck_signal.context}. Let me try a different approach.",
+                            ))
+                            break
+
+                        # Browser handoff: user said "ready" → open visible browser → wait for "done"
+                        if _stuck_signal.needs_browser and _help_response in (
+                            "ready", "show me", "show", "ok", "yes",
+                        ):
+                            if not getattr(self, "is_background", False):
+                                from lazyclaw.skills.builtin.browser_skill import _get_visible_cdp_backend
+                                await _get_visible_cdp_backend(user_id)
+                                await cb.on_event(AgentEvent(
+                                    _HELP_RESPONSE,
+                                    "Browser is visible. Take over and say 'done' when finished.",
+                                    {},
+                                ))
+                                _done_resp = await cb.on_help_request(
+                                    "Browser is open on your screen. Say 'done' when you're finished.",
+                                    False,
+                                )
+                                if _done_resp == "skip":
+                                    all_new_messages.append(LLMMessage(
+                                        role="assistant",
+                                        content=f"I got stuck: {_stuck_signal.context}. User chose to skip.",
+                                    ))
+                                    break
+
+                        # Take snapshot after user intervention
+                        try:
+                            from lazyclaw.skills.builtin.browser_skill import _get_cdp_backend
+                            _snap_backend = await _get_cdp_backend(user_id)
+                            _snap_url = await _snap_backend.current_url()
+                            _snap_title = await _snap_backend.title()
+                            _snapshot = f"After user help: now on {_snap_title} ({_snap_url})"
+                        except Exception:
+                            _snapshot = f"User intervention complete. Response: {_help_response}"
+
+                        # Inject snapshot, reset counters, continue loop
+                        _last_tc_id = (
+                            response.tool_calls[-1].id if response and response.tool_calls else "help"
+                        )
+                        _help_msg = LLMMessage(
+                            role="tool", content=_snapshot, tool_call_id=_last_tc_id,
+                        )
+                        messages.append(_help_msg)
+                        all_new_messages.append(_help_msg)
+                        _tool_call_history.clear()
+                        _tool_results.clear()
+                        continue
 
             else:
                 # Max iterations reached

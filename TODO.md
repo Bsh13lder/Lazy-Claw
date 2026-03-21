@@ -103,6 +103,11 @@
 - [ ] **Documentation** — `README.md`: Setup guide, architecture, plugin development guide.
 - [ ] **Example Plugin** — `plugins/example/`: Template for community plugin development.
 
+## Adaptive Agent ✅ COMPLETE
+- [x] **Human-in-the-Loop** — `lazyclaw/runtime/stuck_detector.py`: Detects stuck loops, CAPTCHAs (reCAPTCHA/hCaptcha/Turnstile), repeated errors. Agent notifies user and waits indefinitely. User says "ready" → visible browser opens. User says "done" → agent takes snapshot and continues. Works on CLI + Telegram.
+- [x] **Learn from Corrections** — `lazyclaw/runtime/lesson_extractor.py` + `lesson_store.py`: Detects user corrections via regex, extracts compact lesson via gpt-5-mini (fire-and-forget), stores to site_memory (per-domain) or personal_memory (preferences). Lessons auto-injected into context on next similar task.
+- [x] **Site Knowledge Injection** — Browser skill injects recalled site_memory into read/open results so agent sees domain-specific knowledge (login flows, navigation patterns, learned lessons).
+
 ## Future: Browser Enhancements
 - [x] **Real Chrome Mode** — Connect to user's actual Chrome via CDP. Now unified into single `browser` skill with 7 actions. CDP-only (Playwright removed).
 - [ ] **Human-like Click Delays** — Add configurable random delays between automated actions (0.3-1.5s range) to mimic human interaction patterns. Especially important for real Chrome mode where there's no natural LLM thinking gap.
@@ -277,6 +282,67 @@ Record full agent sessions as replayable traces. Every LLM call, tool invocation
 
 **Verification**: Run agent task → view full replay step-by-step → share via token → recipient sees the same trace. Team conversations visible in replay.
 
+## Phase 14: Fast Dispatch + Tab Isolation
+
+Main agent becomes a <2s router (team lead). Never does heavy work itself. Delegates to parallel specialists. Each specialist gets its own browser tab via TabManager.
+
+- [ ] **14.1 TabManager** — `lazyclaw/browser/tab_manager.py`: TabContext (scoped CDP per tab), TabLease (ownership tracking), TabManager (acquire/release/wait/evict). Max 5 specialist tabs. Auto-close on completion.
+- [ ] **14.2 Fast Dispatch** — Agent detects heavy tools on first LLM call → pushes to TaskRunner → returns "⏳ On it" in <2s → lane queue freed.
+- [ ] **14.3 Agent Settings** — `lazyclaw/runtime/agent_settings.py`: auto_delegate (bool), max_concurrent_specialists (1-10), max_ram_mb (128-4096), specialist_timeout_s (10-28800).
+- [ ] **14.4 Team Lead State** — Main agent tracks all running specialists, tab status, RAM usage. Instant /status response (no LLM call needed).
+- [ ] **14.5 Specialist Tab Communication** — When specialist needs occupied tab → waits. TabManager notifies via events. Team lead shows "waiting for tab" in status.
+- [ ] **14.6 Agent Limit Skills** — set_max_agents, set_ram_limit, toggle_auto_delegate, show_agent_limits (4 skills).
+- [ ] **14.7 Cancel Specialist** — User says "cancel weather" → team lead cancels matching specialist + releases tab.
+
+**Verification**: Send 3 messages rapidly on Telegram → 3 specialists spawn in parallel → team lead responds to /status instantly → results arrive as specialists complete.
+
+## Phase 15: Full ECO Local Mode (4-Brain Architecture)
+
+92%+ local inference, $0/day for normal use. Four brains: Qwen3 0.6B (router), Nanbeige4.1-3B (specialist), Claude Code MCP (coding), GPT-5-mini (fallback).
+
+- [ ] **15.1 Model Registry** — `lazyclaw/llm/model_registry.py`: ModelProfile frozen dataclass (name, provider, is_local, ram_mb, cost, icon, role). Catalog of local + remote models.
+- [ ] **15.2 ECO Local Mode** — Add "local" to ECO modes (local/eco/hybrid/full). Brain → Qwen3 0.6B, Specialist → Nanbeige4.1-3B, Fallback → GPT-5-mini.
+- [ ] **15.3 Ollama Integration** — Local model calls via Ollama's OpenAI-compatible API (http://localhost:11434/v1). Same code path as OpenAI — just different base_url.
+- [ ] **15.4 Model Attribution** — Every LLM call tagged with model name + icon + LOCAL/PAID. Shown in TUI agent cards, Telegram footer, /status.
+- [ ] **15.5 AI Routing Panel** — TUI panel showing per-model call counts, cost, local %, budget progress bar.
+- [ ] **15.6 Auto-Install Models** — Setup wizard offers to install local models via Ollama. `ollama pull qwen3:0.6b` + `ollama pull fauxpaslife/nanbeige4.1`.
+- [ ] **15.7 Ollama Health in TUI** — Services panel shows loaded Ollama models + RAM usage.
+
+**Verification**: Set ECO local → send 10 messages → 90%+ handled by local models → $0 cost → TUI shows routing stats.
+
+## Phase 16: Remote MCP + OAuth Browser Auth
+
+Connect to any OAuth-protected remote MCP server (Canva, GitHub, Slack, Google). LazyClaw opens Brave for login automatically. Tokens encrypted in vault.
+
+- [ ] **16.1 OAuth Flow** — `lazyclaw/mcp/oauth.py`: OAuth 2.1 + PKCE. Discover metadata → open Brave for login → catch callback on localhost → exchange code for tokens.
+- [ ] **16.2 Token Store** — `lazyclaw/mcp/token_store.py`: Encrypted token storage in vault. Auto-refresh on expiry (no browser). Key format: `mcp_oauth:{server_name}`.
+- [ ] **16.3 Streamable HTTP Transport** — Add to `lazyclaw/mcp/client.py` alongside stdio and SSE. Connect with Bearer token.
+- [ ] **16.4 MCP Manager Update** — Support `transport: "streamable_http"` in server config. OAuth flow triggered on 401.
+- [ ] **16.5 Known Servers** — Shortcuts: `connect_remote_mcp("canva")` → `https://mcp.canva.com/mcp`. Extensible dict.
+- [ ] **16.6 NL Skill** — `connect_remote_mcp`: "connect to Canva" → opens browser → authenticates → registers 20 tools.
+
+**Verification**: "connect to Canva" → Brave opens → user approves → 20 Canva tools available → "make me a banner" works → token persists across restarts.
+
+## Phase 17: Survival Instinct (Job Hunter + Auto-Apply + Work + Invoice)
+
+The agent finds matching freelance jobs, writes proposals, does the work, and gets paid. User approves at every step. Cron jobs check for new opportunities.
+
+- [ ] **17.1 JobSpy MCP** — Bundle or connect JobSpy MCP server. Search Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google simultaneously.
+- [ ] **17.2 Upwork MCP** — Connect Upwork MCP. Search jobs, manage proposals, track contracts, monitor earnings.
+- [ ] **17.3 Stripe MCP** — Connect official Stripe MCP (remote, OAuth). Create/send invoices, track payments.
+- [ ] **17.4 Skills Profile** — `lazyclaw/skills/builtin/survival.py`: User defines skills, rates, preferences. Stored encrypted.
+- [ ] **17.5 Job Matcher** — `search_jobs(keywords, budget_min, platforms)` → scores relevance against skills profile → ranks opportunities.
+- [ ] **17.6 Proposal Writer** — `apply_job(job_id)` → Claude Code MCP writes personalized cover letter → submits via Upwork/LinkedIn MCP. **User approves before submit.**
+- [ ] **17.7 Work Executor** — `start_job(job_id)` → long-running specialist (up to 8h timeout). Code → Claude Code MCP. Research → web_search + browser. Design → Canva MCP. Writing → Claude Code MCP.
+- [ ] **17.8 Delivery + Invoice** — `submit_deliverable(job_id)` → uploads via platform MCP. `create_invoice(job_id)` → Stripe MCP.
+- [ ] **17.9 Survival Cron** — Heartbeat jobs: check new matching jobs (30 min), check client messages (15 min), check payment status (daily).
+- [ ] **17.10 Survival Dashboard** — Telegram daily summary: "Found 5 jobs, applied to 2, working on 1, earned $150 this week."
+- [ ] **17.11 User Settings** — survival_mode (bool), skills_profile, min_hourly_rate, max_concurrent_jobs, platforms, auto_apply (ALWAYS false — user approves).
+
+**CRITICAL RULE**: Agent NEVER auto-applies or auto-accepts work. User approves every application and every job start. Agent proposes, user decides.
+
+**Verification**: Enable survival mode → agent finds matching jobs → notifies on Telegram → user approves → agent applies → gets hired → does the work → submits → invoices → gets paid. Full loop.
+
 ## Future: Workflow Builder UI
 
 Visual drag-and-drop editor (React Flow style) for composing multi-step agent workflows. Requires web frontend — deferred until web UI exists.
@@ -384,3 +450,4 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - ECO Pipeline Wiring: ✅ COMPLETE — _ensure_free_router() async loads apihunter providers + refreshes Ollama models, dynamic valid_providers in eco_settings
 - Browser Refactoring: ✅ COMPLETE — 13 skills → 1 unified `browser` tool (7 actions: read, open, click, type, screenshot, tabs, scroll). CDP-only, removed Playwright/browser-use/langchain-openai. Deleted 6 files (~2200 lines). Cookie copy strategy for cron jobs (port 9223).
 - Total registered skills: 71 (down from 72+ — 8 browser skills merged into 1)
+- Adaptive Agent: ✅ COMPLETE — Human-in-the-loop (stuck detection, CAPTCHA detection, user takeover with visible browser), learn from corrections (lesson extraction via gpt-5-mini, site_memory + personal_memory storage), site knowledge injection into browser tool results

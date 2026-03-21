@@ -103,6 +103,8 @@ class _TelegramCallback:
         self._work_summary = None
         # Fast dispatch flag — background task still running after process_message returns
         self.dispatched = False
+        # Help request coordination (human-in-the-loop)
+        self._help_future: asyncio.Future | None = None
 
     # ── Typing indicator ──────────────────────────────────────────────
 
@@ -302,6 +304,36 @@ class _TelegramCallback:
                 logger.warning("Telegram auto-denied dangerous skill: %s", skill_name)
                 return False
         return True
+
+    async def on_help_request(
+        self, context: str, needs_browser: bool,
+    ) -> str:
+        """Send help request to Telegram and wait indefinitely for user reply."""
+        msg = f"\U0001f198 I'm stuck: {context}\n\nReply 'ready' to take over"
+        if needs_browser:
+            msg += " (I'll open the browser for you)"
+        msg += ", or 'skip' to let me try something else."
+
+        try:
+            await _telegram_send_with_retry(
+                lambda: self._bot.send_message(
+                    chat_id=self._chat_id, text=msg,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to send help request: %s", exc)
+            return "skip"
+
+        # Wait indefinitely for user response via Telegram message
+        loop = asyncio.get_running_loop()
+        self._help_future = loop.create_future()
+        try:
+            result = await self._help_future
+        except asyncio.CancelledError:
+            return "skip"
+        finally:
+            self._help_future = None
+        return result
 
     async def on_event(self, event: AgentEvent) -> None:
         kind = event.kind
@@ -585,6 +617,17 @@ class TelegramAdapter(ChannelAdapter):
                 "\U0001f512 Not authorized. Ask the admin to add your chat ID."
             )
             return
+
+        # Check if any active callback is waiting for a help response
+        for _cb in self._active_callbacks.values():
+            if (
+                hasattr(_cb, "_help_future")
+                and _cb._help_future is not None
+                and not _cb._help_future.done()
+                and _cb._chat_id == int(chat_id)
+            ):
+                _cb._help_future.set_result(text.strip().lower())
+                return  # Consumed by help flow
 
         # Status query while agent is working
         active_cbs = [cb for cb in self._active_callbacks.values()

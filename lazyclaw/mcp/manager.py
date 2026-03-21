@@ -184,6 +184,111 @@ async def reconnect_server(config: Config, user_id: str, server_id: str) -> MCPC
     return await connect_server(config, user_id, server_id)
 
 
+async def connect_server_with_oauth(
+    config: Config,
+    user_id: str,
+    server_id: str,
+) -> MCPClient:  # type: ignore[name-defined]  # noqa: F821
+    """Connect to an MCP server, handling OAuth 2.1 if needed.
+
+    1. Check for cached valid tokens → inject Bearer header
+    2. Try normal connect
+    3. On 401 → run OAuth browser flow → reconnect with token
+    """
+    from lazyclaw.mcp.token_store import is_token_expired, load_tokens
+
+    server = await get_server(config, user_id, server_id)
+    if not server:
+        raise ValueError(f"MCP server {server_id} not found for user {user_id}")
+
+    # Check for cached valid tokens
+    tokens = await load_tokens(config, user_id, server["name"])
+    if tokens and not is_token_expired(tokens):
+        return await _connect_with_bearer(
+            config, user_id, server_id, server, tokens.access_token,
+        )
+
+    # Try connecting without auth first
+    try:
+        return await connect_server(config, user_id, server_id)
+    except Exception as exc:
+        # Check if it's a 401 requiring OAuth
+        metadata_url = _extract_resource_metadata(exc)
+        if not metadata_url:
+            raise  # Not a 401 or no metadata — let it propagate
+
+    # 401 detected — run OAuth flow via browser
+    logger.info("MCP server %s requires OAuth — opening browser", server["name"])
+
+    from lazyclaw.mcp.oauth import run_oauth_flow
+
+    tokens = await run_oauth_flow(
+        config=config,
+        user_id=user_id,
+        server_name=server["name"],
+        server_url=server["config"].get("url", ""),
+        resource_metadata_url=metadata_url,
+    )
+    return await _connect_with_bearer(
+        config, user_id, server_id, server, tokens.access_token,
+    )
+
+
+async def _connect_with_bearer(
+    config: Config,
+    user_id: str,
+    server_id: str,
+    server: dict,
+    access_token: str,
+) -> MCPClient:  # type: ignore[name-defined]  # noqa: F821
+    """Inject Bearer header into server config and (re)connect."""
+    # Disconnect existing connection
+    await disconnect_server(user_id, server_id)
+
+    # Build new config with auth headers (immutable — new dict)
+    updated_config = {
+        **server["config"],
+        "headers": {"Authorization": f"Bearer {access_token}"},
+    }
+
+    # Persist updated config to DB so reconnects preserve auth
+    key = derive_server_key(config.server_secret, user_id)
+    encrypted_config = encrypt(json.dumps(updated_config), key)
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE mcp_connections SET config = ? WHERE id = ? AND user_id = ?",
+            (encrypted_config, server_id, user_id),
+        )
+        await db.commit()
+
+    return await connect_server(config, user_id, server_id)
+
+
+def _extract_resource_metadata(exc: BaseException) -> str | None:
+    """Try to extract resource_metadata URL from an OAuth 401 error.
+
+    Checks both the exception itself and its __cause__ for
+    httpx.HTTPStatusError with a 401 response.
+    """
+    import re
+
+    for candidate in (exc, getattr(exc, "__cause__", None)):
+        if candidate is None:
+            continue
+        # Check for httpx.HTTPStatusError (lazy import to avoid hard dep)
+        status = getattr(getattr(candidate, "response", None), "status_code", None)
+        if status != 401:
+            continue
+        www_auth = getattr(candidate, "response", None)
+        if www_auth is None:
+            continue
+        header = www_auth.headers.get("www-authenticate", "")
+        match = re.search(r'resource_metadata="([^"]+)"', header)
+        if match:
+            return match.group(1)
+    return None
+
+
 def get_active_client(server_id: str) -> MCPClient | None:  # type: ignore[name-defined]  # noqa: F821
     """Get an active MCP client by server ID. Returns None if not connected."""
     return _active_clients.get(server_id)
@@ -311,7 +416,9 @@ async def connect_and_register_bundled_mcps(
             return 0
         try:
             client = await connect_server(config, user_id, server_id)
-            count = await register_mcp_tools(client, registry)
+            count = await register_mcp_tools(
+                client, registry, config=config, user_id=user_id,
+            )
             logger.info("Connected bundled MCP %s: %d tools", name, count)
             return count
         except Exception:

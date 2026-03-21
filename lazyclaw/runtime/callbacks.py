@@ -35,6 +35,17 @@ class AgentCallback(Protocol):
         self, skill_name: str, arguments: dict
     ) -> bool: ...
 
+    async def on_help_request(
+        self, context: str, needs_browser: bool
+    ) -> str:
+        """Ask the user for help when the agent is stuck.
+
+        Returns: "ready" (user will take over browser), "done" (user finished),
+        "skip" (no UI / auto-skip), or free-text instruction.
+        Waits indefinitely — no timeout.
+        """
+        ...
+
 
 class NullCallback:
     """Default no-op callback — used when no listener is attached."""
@@ -50,6 +61,14 @@ class NullCallback:
             skill_name,
         )
         return False
+
+    async def on_help_request(
+        self, context: str, needs_browser: bool
+    ) -> str:
+        _null_logger.warning(
+            "Help request auto-skipped (no callback handler): %s", context,
+        )
+        return "skip"
 
 
 class MultiCallback:
@@ -78,6 +97,21 @@ class MultiCallback:
             except Exception:
                 pass
         return False
+
+    async def on_help_request(
+        self, context: str, needs_browser: bool
+    ) -> str:
+        for cb in self._callbacks:
+            try:
+                result = await cb.on_help_request(context, needs_browser)
+                if result != "skip":
+                    return result
+            except Exception:
+                _null_logger.warning(
+                    "MultiCallback: %s.on_help_request failed",
+                    type(cb).__name__, exc_info=True,
+                )
+        return "skip"
 
 
 class CancellationToken:

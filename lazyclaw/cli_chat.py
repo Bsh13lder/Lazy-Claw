@@ -126,6 +126,11 @@ class CliCallback:
         self._pending_display_name: str = ""
         self._approval_event: asyncio.Event | None = None
         self._approval_result: bool = False
+        # Help request coordination (human-in-the-loop)
+        self._pending_help: str | None = None
+        self._help_needs_browser: bool = False
+        self._help_event: asyncio.Event | None = None
+        self._help_result: str = "skip"
         # Side channel — messages typed while agent/team works
         self.side_messages: list[str] = []
         # Work summary (stored for inline footer)
@@ -177,6 +182,20 @@ class CliCallback:
         self._pending_approval = None
         self._approval_event = None
         return self._approval_result
+
+    async def on_help_request(
+        self, context: str, needs_browser: bool,
+    ) -> str:
+        """Request human help via main loop — waits indefinitely."""
+        self._stop_spinner()
+        self._pending_help = context
+        self._help_needs_browser = needs_browser
+        self._help_event = asyncio.Event()
+        self._help_result = "skip"
+        await self._help_event.wait()
+        self._pending_help = None
+        self._help_event = None
+        return self._help_result
 
     async def on_event(self, event) -> None:  # noqa: C901
         kind = event.kind
@@ -532,6 +551,37 @@ async def run_chat_loop(
                         )
                         active_callback._approval_result = approved
                         active_callback._approval_event.set()
+                        continue
+
+                    # Check for pending help request (human-in-the-loop)
+                    if active_callback and active_callback._pending_help:
+                        # Cancel side prompt if active
+                        if _side_input_task and not _side_input_task.done():
+                            _side_input_task.cancel()
+                        _side_input_task = None
+                        active_callback._stop_spinner()
+                        con.print()
+                        con.print(
+                            f"  [bold yellow]\U0001f198 {active_callback._pending_help}[/bold yellow]"
+                        )
+                        if active_callback._help_needs_browser:
+                            con.print(
+                                "  [dim]Type 'ready' to take over the browser, "
+                                "or 'skip' to move on:[/dim]"
+                            )
+                        else:
+                            con.print(
+                                "  [dim]Type 'done' when finished, "
+                                "or 'skip' to move on:[/dim]"
+                            )
+                        _help_answer = await loop.run_in_executor(
+                            None,
+                            lambda: con.input("  > "),
+                        )
+                        active_callback._help_result = (
+                            _help_answer.strip().lower() or "skip"
+                        )
+                        active_callback._help_event.set()
                         continue
 
                     # Start async side-channel input via prompt_toolkit

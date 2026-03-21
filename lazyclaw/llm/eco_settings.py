@@ -50,7 +50,7 @@ def _get_valid_providers() -> set[str]:
 
 # Default eco settings
 DEFAULT_ECO = {
-    "mode": "full",
+    "mode": "hybrid",
     "show_badges": True,
     "monthly_paid_budget": 0,
     "locked_provider": None,

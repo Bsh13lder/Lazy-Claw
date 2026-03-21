@@ -179,6 +179,30 @@ Tables: `users`, `sessions`, `agent_messages`, `agent_chat_sessions`, `personal_
 
 **Constants:** `_FALLBACK_PERSONALITY`
 
+### `stuck_detector.py` — Stuck detection for agent loops
+
+| Function / Class | Signature | Description |
+|-----------------|-----------|-------------|
+| `StuckSignal` | `@dataclass(frozen=True)` | Immutable signal: reason, tool_name, context, needs_browser, url |
+| `detect_captcha` | `(tool_result: str) -> StuckSignal \| None` | Check tool result for CAPTCHA patterns (reCAPTCHA, hCaptcha, Turnstile) |
+| `detect_tool_loop` | `(history: list[str], limits: dict \| None) -> StuckSignal \| None` | Detect same tool called N+ times consecutively |
+| `detect_repeated_errors` | `(history: list[str], results: list[str]) -> StuckSignal \| None` | Detect consecutive error results from same tool |
+| `detect_stuck` | `(tool_history, tool_results, last_result) -> StuckSignal \| None` | Run all detectors, return first match |
+
+### `lesson_extractor.py` — Learn from user corrections
+
+| Function / Class | Signature | Description |
+|-----------------|-----------|-------------|
+| `Lesson` | `@dataclass(frozen=True)` | Immutable lesson: content, lesson_type, domain, importance |
+| `is_correction` | `(message: str) -> bool` | Fast regex check if message is a correction |
+| `extract_lesson` | `async (eco_router, user_id, user_message, recent_messages, current_url) -> Lesson \| None` | Extract lesson via gpt-5-mini |
+
+### `lesson_store.py` — Route lessons to memory systems
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `store_lesson` | `async (config, user_id, lesson, url) -> str \| None` | Store to site_memory (domain) or personal_memory (preference) |
+
 ### `context_builder.py` — System prompt builder with self-awareness
 
 | Function | Signature | Description |

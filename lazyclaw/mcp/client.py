@@ -203,7 +203,8 @@ class MCPClient:
             ) from exc
 
         url = self._config["url"]
-        self._transport_ctx = streamablehttp_client(url=url)
+        headers = self._config.get("headers", {})
+        self._transport_ctx = streamablehttp_client(url=url, headers=headers)
         read_stream, write_stream = await self._transport_ctx.__aenter__()
         return read_stream, write_stream
 

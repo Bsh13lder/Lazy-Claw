@@ -2,6 +2,9 @@
 
 Provides agent-accessible tools for managing MCP server connections
 through the skill registry. All operations delegate to lazyclaw.mcp.manager.
+
+Includes ConnectRemoteMCPSkill for OAuth-protected remote servers
+(Canva, GitHub, etc.) with automatic browser-based authentication.
 """
 
 from __future__ import annotations
@@ -359,3 +362,144 @@ class DisconnectMCPServerSkill(BaseSkill):
             return f"Disconnected from MCP server '{server['name']}'."
         except Exception as exc:
             return f"Error disconnecting MCP server: {exc}"
+
+
+# ── Remote MCP with OAuth ───────────────────────────────────────────────
+
+# Known remote MCP servers with their connection details.
+# User says "connect to canva" → we know the URL and transport.
+_KNOWN_REMOTE_SERVERS: dict[str, dict] = {
+    "canva": {
+        "url": "https://mcp.canva.com/sse",
+        "transport": "streamable_http",
+        "description": "Canva design tools",
+    },
+    # Future entries:
+    # "github": {"url": "...", "transport": "streamable_http", "description": "..."},
+    # "slack": {"url": "...", "transport": "streamable_http", "description": "..."},
+}
+
+
+class ConnectRemoteMCPSkill(BaseSkill):
+    """Connect to a remote MCP server with OAuth authentication.
+
+    Accepts a known server name (e.g. 'canva') or a custom URL.
+    If login is needed, opens Brave browser for the OAuth flow.
+    """
+
+    def __init__(self, config=None, registry=None) -> None:
+        self._config = config
+        self._registry = registry
+
+    @property
+    def category(self) -> str:
+        return "mcp_management"
+
+    @property
+    def name(self) -> str:
+        return "connect_remote_mcp"
+
+    @property
+    def description(self) -> str:
+        known = ", ".join(_KNOWN_REMOTE_SERVERS.keys())
+        return (
+            f"Connect to a remote MCP server with OAuth authentication. "
+            f"If login is needed, opens your browser automatically. "
+            f"Known servers: {known}. Or provide a custom URL."
+        )
+
+    @property
+    def permission_hint(self) -> str:
+        return "ask"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": (
+                        "Known server name (e.g. 'canva') or full URL "
+                        "(e.g. 'https://mcp.example.com/mcp')"
+                    ),
+                },
+            },
+            "required": ["server"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+
+        server_input = params["server"].strip()
+        server_lower = server_input.lower()
+
+        known = _KNOWN_REMOTE_SERVERS.get(server_lower)
+        if known:
+            server_name = server_lower
+            url = known["url"]
+            transport = known["transport"]
+            description = known["description"]
+        elif server_input.startswith("http"):
+            # Custom URL — derive name from hostname
+            from urllib.parse import urlparse
+            parsed = urlparse(server_input)
+            server_name = parsed.netloc.replace(".", "-")
+            url = server_input
+            transport = "streamable_http"
+            description = f"Remote MCP: {parsed.netloc}"
+        else:
+            known_list = ", ".join(_KNOWN_REMOTE_SERVERS.keys()) or "none"
+            return (
+                f"Unknown server '{server_input}'. "
+                f"Known servers: {known_list}. "
+                f"Or provide a URL starting with https://."
+            )
+
+        try:
+            from lazyclaw.mcp.bridge import register_mcp_tools
+            from lazyclaw.mcp.manager import (
+                add_server,
+                connect_server_with_oauth,
+                list_servers,
+            )
+
+            # Check if already registered
+            servers = await list_servers(self._config, user_id)
+            existing = _find_server_by_name(servers, server_name)
+
+            if existing:
+                server_id = existing["id"]
+            else:
+                server_id = await add_server(
+                    self._config, user_id, server_name, transport,
+                    {"url": url, "description": description},
+                )
+
+            # Connect with OAuth handling
+            client = await connect_server_with_oauth(
+                self._config, user_id, server_id,
+            )
+
+            # Register tools in skill registry
+            tool_count = 0
+            if self._registry:
+                tool_count = await register_mcp_tools(
+                    client, self._registry,
+                    config=self._config, user_id=user_id,
+                )
+
+            return (
+                f"Connected to remote MCP server '{server_name}'.\n"
+                f"Server ID: {server_id}\n"
+                f"Tools registered: {tool_count}"
+            )
+        except TimeoutError as exc:
+            return f"OAuth timed out: {exc}"
+        except Exception as exc:
+            logger.warning(
+                "Error connecting to remote MCP %s: %s",
+                server_name, exc, exc_info=True,
+            )
+            return f"Error connecting to remote MCP server: {exc}"

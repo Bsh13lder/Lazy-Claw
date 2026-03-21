@@ -66,7 +66,7 @@ _PAID_PATTERNS = re.compile(
 class EcoSettings:
     """User's ECO mode configuration."""
 
-    mode: str = "full"  # eco, hybrid, full, local
+    mode: str = "hybrid"  # eco, hybrid, full, local
     show_badges: bool = True
     monthly_paid_budget: float = 0.0  # 0 = unlimited
     locked_provider: str | None = None  # Lock to specific free provider

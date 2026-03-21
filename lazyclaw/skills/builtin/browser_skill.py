@@ -315,6 +315,17 @@ class BrowserSkill(BaseSkill):
         if page_type == "whatsapp" and result.get("unread_count"):
             summary += f"\nUnread: {result['unread_count']}"
         summary += f"\n\n{text}"
+
+        # Inject site-specific knowledge (learned lessons, login flows, etc.)
+        if url and self._config:
+            try:
+                from lazyclaw.browser.site_memory import recall, format_memories_for_context
+                memories = await recall(self._config, user_id, url)
+                if memories:
+                    summary += "\n\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
+            except Exception:
+                pass  # Site memory is best-effort
+
         return summary
 
     async def _action_open(self, user_id: str, params: dict, tab_context=None) -> str:
@@ -365,10 +376,22 @@ class BrowserSkill(BaseSkill):
             await backend.goto(nav_url)
 
         title = await backend.title()
-        return (
+        result = (
             f"Done — {title} is now open on the user's screen in Brave. "
             "No screenshot needed — they can see it."
         )
+
+        # Inject site-specific knowledge for the navigated domain
+        if nav_url and self._config:
+            try:
+                from lazyclaw.browser.site_memory import recall, format_memories_for_context
+                memories = await recall(self._config, user_id, nav_url)
+                if memories:
+                    result += "\n\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
+            except Exception:
+                pass
+
+        return result
 
     async def _action_click(self, user_id: str, params: dict, tab_context=None) -> str:
         """Click an element by CSS selector OR natural description."""

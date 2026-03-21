@@ -19,6 +19,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -171,11 +172,14 @@ async def register_client(
 # ── Browser helper ──────────────────────────────────────────────────────
 
 
-async def _open_browser_tab(config, user_id: str, url: str) -> tuple:
+async def _open_browser_tab(
+    config: Any, user_id: str, url: str,
+) -> tuple[Any, str]:
     """Open a visible Brave tab for OAuth login.
 
     Returns (cdp_backend, target_id) for cleanup.
     Inlines the _get_visible_cdp_backend pattern to avoid circular imports.
+    Raises RuntimeError if browser fails to start.
     """
     from lazyclaw.browser.cdp import find_chrome_cdp
     from lazyclaw.browser.cdp_backend import CDPBackend
@@ -200,8 +204,14 @@ async def _open_browser_tab(config, user_id: str, url: str) -> tuple:
         logger.info("Launched visible Brave for OAuth (port=%d)", port)
         for _ in range(20):
             await asyncio.sleep(0.5)
-            if await find_chrome_cdp(port):
+            ws_url = await find_chrome_cdp(port)
+            if ws_url:
                 break
+        if not ws_url:
+            raise RuntimeError(
+                f"Browser failed to start CDP on port {port} within 10 seconds. "
+                "Ensure Brave or Chrome is installed."
+            )
 
     backend = CDPBackend(port=port, profile_dir=profile_dir)
     target_id = await backend.new_tab(url)

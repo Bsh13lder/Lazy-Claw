@@ -441,7 +441,7 @@ class ConnectRemoteMCPSkill(BaseSkill):
             url = known["url"]
             transport = known["transport"]
             description = known["description"]
-        elif server_input.startswith("http"):
+        elif server_input.startswith("https://"):
             # Custom URL — derive name from hostname
             from urllib.parse import urlparse
             parsed = urlparse(server_input)
@@ -454,7 +454,7 @@ class ConnectRemoteMCPSkill(BaseSkill):
             return (
                 f"Unknown server '{server_input}'. "
                 f"Known servers: {known_list}. "
-                f"Or provide a URL starting with https://."
+                f"Or provide an HTTPS URL (e.g. https://mcp.example.com/mcp)."
             )
 
         try:

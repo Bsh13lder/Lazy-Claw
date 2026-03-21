@@ -18,3 +18,16 @@ data/
 *.log
 .lazyclaw_history
 .env.*
+.observer.lock
+
+# Docs (kept locally, not in repo)
+TODO.md
+DOCS.md
+
+# Standalone MCP servers (kept locally, not in repo)
+mcp-freeride/
+mcp-healthcheck/
+mcp-apihunter/
+mcp-vaultwhisper/
+mcp-taskai/
+mcp-lazydoctor/

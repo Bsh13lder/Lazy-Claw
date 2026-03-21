@@ -17,9 +17,9 @@ from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallback
 from lazyclaw.runtime.events import (
     SpecialistState, FAST_DISPATCH, INSTANT_COMMAND,
-    HELP_NEEDED as _HELP_NEEDED, HELP_RESPONSE as _HELP_RESPONSE,
+    HELP_NEEDED, HELP_RESPONSE,
 )
-from lazyclaw.runtime.stuck_detector import detect_stuck as _detect_stuck
+from lazyclaw.runtime.stuck_detector import detect_stuck
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -266,6 +266,8 @@ async def _extract_and_store_lesson(
 
     Never raises — all errors caught and logged. Uses gpt-5-mini for cost.
     """
+    if eco_router is None:
+        return
     try:
         from lazyclaw.runtime.lesson_extractor import extract_lesson
         from lazyclaw.runtime.lesson_store import store_lesson
@@ -713,7 +715,7 @@ class Agent:
                 # Only run if tools were actually called this iteration
                 if response and response.tool_calls:
                     _last_result = _tool_results[-1] if _tool_results else None
-                    _stuck_signal = _detect_stuck(
+                    _stuck_signal = detect_stuck(
                         _tool_call_history, _tool_results, _last_result,
                     )
                     if _stuck_signal is not None:
@@ -721,7 +723,7 @@ class Agent:
                             "Stuck detected: %s (%s)", _stuck_signal.reason, _stuck_signal.context,
                         )
                         await cb.on_event(AgentEvent(
-                            _HELP_NEEDED, _stuck_signal.context,
+                            HELP_NEEDED, _stuck_signal.context,
                             {"reason": _stuck_signal.reason, "tool": _stuck_signal.tool_name,
                              "needs_browser": _stuck_signal.needs_browser},
                         ))
@@ -746,7 +748,7 @@ class Agent:
                                 from lazyclaw.skills.builtin.browser_skill import _get_visible_cdp_backend
                                 await _get_visible_cdp_backend(user_id)
                                 await cb.on_event(AgentEvent(
-                                    _HELP_RESPONSE,
+                                    HELP_RESPONSE,
                                     "Browser is visible. Take over and say 'done' when finished.",
                                     {},
                                 ))
@@ -760,6 +762,13 @@ class Agent:
                                         content=f"I got stuck: {_stuck_signal.context}. User chose to skip.",
                                     ))
                                     break
+
+                        # Notify observability that help was received
+                        await cb.on_event(AgentEvent(
+                            HELP_RESPONSE,
+                            f"User help received: {_help_response}",
+                            {"response": _help_response},
+                        ))
 
                         # Take snapshot after user intervention
                         try:

@@ -75,7 +75,7 @@ class MCPToolSkill(BaseSkill):
 
     async def _refresh_and_reconnect(self, user_id: str) -> None:
         """Refresh OAuth token and reconnect the MCP client."""
-        from lazyclaw.mcp.manager import _connect_with_bearer, get_server
+        from lazyclaw.mcp.manager import connect_with_bearer, get_server
         from lazyclaw.mcp.oauth import refresh_access_token
         from lazyclaw.mcp.token_store import OAuthTokenData, load_tokens, save_tokens
 
@@ -105,7 +105,7 @@ class MCPToolSkill(BaseSkill):
 
         server = await get_server(self._config, user_id, self._client.server_id)
         if server:
-            await _connect_with_bearer(
+            await connect_with_bearer(
                 self._config, user_id, self._client.server_id,
                 server, new_tokens.access_token,
             )

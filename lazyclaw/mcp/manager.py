@@ -204,7 +204,7 @@ async def connect_server_with_oauth(
     # Check for cached valid tokens
     tokens = await load_tokens(config, user_id, server["name"])
     if tokens and not is_token_expired(tokens):
-        return await _connect_with_bearer(
+        return await connect_with_bearer(
             config, user_id, server_id, server, tokens.access_token,
         )
 
@@ -229,12 +229,12 @@ async def connect_server_with_oauth(
         server_url=server["config"].get("url", ""),
         resource_metadata_url=metadata_url,
     )
-    return await _connect_with_bearer(
+    return await connect_with_bearer(
         config, user_id, server_id, server, tokens.access_token,
     )
 
 
-async def _connect_with_bearer(
+async def connect_with_bearer(
     config: Config,
     user_id: str,
     server_id: str,
@@ -270,22 +270,18 @@ def _extract_resource_metadata(exc: BaseException) -> str | None:
     Checks both the exception itself and its __cause__ for
     httpx.HTTPStatusError with a 401 response.
     """
-    import re
+    from lazyclaw.mcp.oauth import parse_resource_metadata_url
 
     for candidate in (exc, getattr(exc, "__cause__", None)):
         if candidate is None:
             continue
-        # Check for httpx.HTTPStatusError (lazy import to avoid hard dep)
-        status = getattr(getattr(candidate, "response", None), "status_code", None)
-        if status != 401:
+        response = getattr(candidate, "response", None)
+        if getattr(response, "status_code", None) != 401:
             continue
-        www_auth = getattr(candidate, "response", None)
-        if www_auth is None:
-            continue
-        header = www_auth.headers.get("www-authenticate", "")
-        match = re.search(r'resource_metadata="([^"]+)"', header)
-        if match:
-            return match.group(1)
+        header = response.headers.get("www-authenticate", "")
+        url = parse_resource_metadata_url(header)
+        if url:
+            return url
     return None
 
 

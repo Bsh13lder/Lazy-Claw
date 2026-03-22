@@ -464,7 +464,8 @@ class RequestCard(Static):
         t = Text()
         t.append("╭─ ", style=_C_BORDER)
         t.append(f"#{self._number}", style=_C_HEADER)
-        t.append(f' "{self._message}"\n')
+        safe_msg = self._message.replace("[", "\\[") if self._message else ""
+        t.append(f' "{safe_msg}"\n')
         t.append("│ ", style=_C_BORDER)
         t.append("○ queued...", style=_C_IDLE)
         t.append("\n")
@@ -648,8 +649,9 @@ class LogPanel(RichLog):
     def append_entry(self, timestamp: str, kind: str, detail: str) -> None:
         style = _log_style(kind)
         icon = _log_icon(kind)
+        safe_detail = detail.replace("[", "\\[")
         self.write(Text.from_markup(
-            f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {detail}"
+            f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {safe_detail}"
         ))
         self.scroll_end(animate=False)
 
@@ -880,6 +882,8 @@ class LazyClawApp(App):
         self.dashboard = TuiDashboard(self)
         self._eco_budget: float = 5.0
         self._telegram_connected: bool = False
+        self._telegram_adapter = None
+        self._telegram_notifier = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -949,9 +953,23 @@ class LazyClawApp(App):
                     server_dashboard=self.dashboard,
                 )
                 await telegram.start()
+                self._telegram_adapter = telegram
                 self._telegram_connected = True
                 logger.info("TUI: Telegram adapter started OK")
                 self._post_log("info", "Telegram bot running")
+
+                # Universal notifier — pushes done/failed/help to Telegram
+                # from ANY platform (CLI admin input, TUI, background tasks)
+                from lazyclaw.notifications.telegram_notifier import TelegramNotifier
+
+                self._telegram_notifier = TelegramNotifier(
+                    bot=telegram._app.bot,
+                    admin_chat_id_fn=lambda: telegram._admin_chat_id,
+                )
+                # Wire into TaskRunner so even tasks with no explicit callback
+                # (e.g. run_background skill) still notify Telegram
+                if self._task_runner and self._task_runner._default_callback is None:
+                    self._task_runner._default_callback = self._telegram_notifier
             else:
                 logger.warning("TUI: no telegram_token, skipping Telegram")
 
@@ -1322,7 +1340,10 @@ class LazyClawApp(App):
         self.dashboard.register_request(chat_id, text)
         try:
             from lazyclaw.runtime.callbacks import MultiCallback
-            effective_cb = MultiCallback(cb)
+            cbs = [cb]
+            if self._telegram_notifier is not None:
+                cbs.append(self._telegram_notifier)
+            effective_cb = MultiCallback(*cbs)
             response = await self._lane_queue.enqueue(
                 user_id, text, callback=effective_cb,
             )

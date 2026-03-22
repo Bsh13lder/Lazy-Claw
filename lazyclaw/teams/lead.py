@@ -223,7 +223,7 @@ class TeamLead:
         ]
 
         response = await self._eco_router.chat(
-            messages, user_id=user_id, model=self._config.default_model,
+            messages, user_id=user_id, model=self._config.brain_model,
         )
         return _parse_analysis(response.content or "")
 
@@ -402,7 +402,7 @@ class TeamLead:
         ]
 
         response = await self._eco_router.chat(
-            messages, user_id=user_id, model=self._config.default_model,
+            messages, user_id=user_id, model=self._config.brain_model,
         )
         merged_content = response.content or ""
 

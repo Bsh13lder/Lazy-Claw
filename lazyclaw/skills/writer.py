@@ -95,7 +95,7 @@ async def generate_code_skill(
     ]
 
     # First attempt
-    response = await router.chat(config.default_model, messages, user_id=user_id)
+    response = await router.chat(config.brain_model, messages, user_id=user_id)
     parsed = _parse_llm_response(response.content)
 
     skill_name = name or parsed.get("name", "generated_skill")
@@ -117,7 +117,7 @@ async def generate_code_skill(
         messages.append(LLMMessage(role="assistant", content=response.content))
         messages.append(LLMMessage(role="user", content=retry_prompt))
 
-        response = await router.chat(config.default_model, messages, user_id=user_id)
+        response = await router.chat(config.brain_model, messages, user_id=user_id)
         parsed = _parse_llm_response(response.content)
 
         skill_code = parsed.get("code", skill_code)

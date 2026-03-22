@@ -136,7 +136,7 @@ async def _build_capabilities_section(
         lines.append("")
 
     # Current config
-    config_parts = [f"Model: {config.default_model}"]
+    config_parts = [f"Model: {config.brain_model}"]
 
     eco_mode = "full"
     try:
@@ -188,6 +188,14 @@ async def _build_capabilities_section(
     elif "no models" in ollama_status:
         lines.append("  Note: Pull models with ollama_install (e.g. qwen3:1.7b, softw8/nanbeige4.1-3b-tools)")
 
+    # Direct platform access (no browser needed)
+    lines.append("")
+    lines.append("**Direct Platform Access (no browser needed):**")
+    lines.append("  - Instagram: read/send DMs, browse feed, post photos — via private mobile API")
+    lines.append("  - WhatsApp: send/read messages — via web protocol (QR auth once)")
+    lines.append("  - Email: send/read/search — via SMTP+IMAP (works with Gmail, Outlook, any provider)")
+    lines.append("  Use these instead of browser unless user specifically asks for browser.")
+
     return "\n".join(lines)
 
 
@@ -208,30 +216,47 @@ async def _get_mcp_status_cached(config: Config, user_id: str) -> list[str]:
 async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
     """Query connected MCP server names and tool counts (uncached)."""
     try:
+        from lazyclaw.mcp.bridge import load_cached_schemas
         from lazyclaw.mcp.manager import _active_clients, BUNDLED_MCPS
         from lazyclaw.db.connection import db_session
-
-        if not _active_clients:
-            return []
+        import json as _json
 
         async with db_session(config) as db:
             rows = await db.execute(
-                "SELECT id, name FROM mcp_connections WHERE user_id = ?",
+                "SELECT id, name, favorite FROM mcp_connections WHERE user_id = ?",
                 (user_id,),
             )
-            server_map = {row[0]: row[1] for row in await rows.fetchall()}
+            all_servers = [(row[0], row[1], bool(row[2])) for row in await rows.fetchall()]
+
+        if not all_servers:
+            return []
 
         result = []
-        for server_id, client in _active_clients.items():
-            name = server_map.get(server_id, client.name)
+        for server_id, name, is_fav in all_servers:
             desc = BUNDLED_MCPS.get(name, {}).get("description", "")
-            try:
-                tools = await client.list_tools()
-                tool_count = len(tools)
-            except Exception:
-                tool_count = 0
+
+            # Get tool count: from live client or cache
+            tool_count = 0
+            if server_id in _active_clients:
+                try:
+                    tools = await _active_clients[server_id].list_tools()
+                    tool_count = len(tools)
+                except Exception:
+                    tool_count = 0
+                status = "connected"
+            else:
+                cached = await load_cached_schemas(config, name)
+                if cached:
+                    try:
+                        tool_count = len(_json.loads(cached))
+                    except Exception:
+                        pass
+                status = "idle (lazy)"
+
             entry = f"{name}: {desc}" if desc else name
-            entry += f" ({tool_count} tools)"
+            entry += f" ({tool_count} tools, {status})"
+            if is_fav:
+                entry += " [favorite]"
             result.append(entry)
 
         return result

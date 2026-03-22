@@ -51,7 +51,7 @@ class LLMRouter:
         user_id: str | None = None,
         **kwargs,
     ) -> LLMResponse:
-        model = model or self._config.default_model
+        model = model or self._config.brain_model
         provider_name = self._infer_provider_name(model)
 
         # Check cache first
@@ -72,7 +72,7 @@ class LLMRouter:
         **kwargs,
     ):
         """Stream chat responses. Yields StreamChunk instances."""
-        model = model or self._config.default_model
+        model = model or self._config.brain_model
         provider_name = self._infer_provider_name(model)
 
         if provider_name not in self._providers:

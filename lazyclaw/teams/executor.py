@@ -11,13 +11,18 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from lazyclaw.config import load_config
 from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.runner import SpecialistResult, run_specialist
-from lazyclaw.teams.specialist import SpecialistConfig
+from lazyclaw.teams.specialist import BROWSER_SPECIALIST, SpecialistConfig
 
 logger = logging.getLogger(__name__)
+
+# prevent GC from cancelling fire-and-forget tasks
+_background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,21 @@ async def _run_with_timeout(
                 ),
                 timeout=timeout,
             )
+            # Fire-and-forget: save browser learnings to site memory
+            if (
+                task.specialist.name == BROWSER_SPECIALIST.name
+                and len(result.step_history) >= MIN_STEPS_FOR_LEARNING
+            ):
+                bg_task = asyncio.create_task(save_browser_learnings(
+                    config=load_config(),
+                    user_id=user_id,
+                    step_history=result.step_history,
+                    task=task.instruction,
+                    success=result.success,
+                    error=result.error,
+                ))
+                _background_tasks.add(bg_task)
+                bg_task.add_done_callback(_background_tasks.discard)
             if callback:
                 await callback.on_event(AgentEvent(
                     "specialist_done", result.agent_name,

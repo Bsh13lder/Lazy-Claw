@@ -503,3 +503,139 @@ class ConnectRemoteMCPSkill(BaseSkill):
                 server_name, exc, exc_info=True,
             )
             return f"Error connecting to remote MCP server: {exc}"
+
+
+# ── Favorite management ─────────────────────────────────────────────────
+
+
+class FavoriteMCPServerSkill(BaseSkill):
+    """Mark an MCP server as a favorite — it will start at boot."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "mcp_management"
+
+    @property
+    def name(self) -> str:
+        return "favorite_mcp_server"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Add an MCP server to favorites so it starts automatically at boot. "
+            "Also connects it immediately."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the MCP server to favorite",
+                },
+            },
+            "required": ["name"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        try:
+            from lazyclaw.mcp.manager import (
+                connect_server,
+                connect_server_with_oauth,
+                list_servers,
+                set_favorite,
+                BUNDLED_MCPS,
+            )
+
+            servers = await list_servers(self._config, user_id)
+            server = _find_server_by_name(servers, params["name"])
+            if not server:
+                available = ", ".join(s["name"] for s in servers) or "none"
+                return (
+                    f"Error: No MCP server matching '{params['name']}' found. "
+                    f"Available: {available}"
+                )
+
+            await set_favorite(self._config, user_id, server["name"], True)
+
+            # Connect immediately if not already connected
+            if not server.get("connected"):
+                info = BUNDLED_MCPS.get(server["name"], {})
+                if info.get("oauth"):
+                    await connect_server_with_oauth(
+                        self._config, user_id, server["id"],
+                    )
+                else:
+                    await connect_server(self._config, user_id, server["id"])
+
+            return (
+                f"Added '{server['name']}' to favorites. "
+                f"It will start automatically at boot."
+            )
+        except Exception as exc:
+            return f"Error setting favorite: {exc}"
+
+
+class UnfavoriteMCPServerSkill(BaseSkill):
+    """Remove an MCP server from favorites — it will lazy-load instead."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "mcp_management"
+
+    @property
+    def name(self) -> str:
+        return "unfavorite_mcp_server"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Remove an MCP server from favorites. It will still be available "
+            "but will only connect when first used (lazy loading)."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the MCP server to unfavorite",
+                },
+            },
+            "required": ["name"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        try:
+            from lazyclaw.mcp.manager import list_servers, set_favorite
+
+            servers = await list_servers(self._config, user_id)
+            server = _find_server_by_name(servers, params["name"])
+            if not server:
+                available = ", ".join(s["name"] for s in servers) or "none"
+                return (
+                    f"Error: No MCP server matching '{params['name']}' found. "
+                    f"Available: {available}"
+                )
+
+            await set_favorite(self._config, user_id, server["name"], False)
+            return (
+                f"Removed '{server['name']}' from favorites. "
+                f"It will lazy-load on next startup (connect on first use)."
+            )
+        except Exception as exc:
+            return f"Error removing favorite: {exc}"

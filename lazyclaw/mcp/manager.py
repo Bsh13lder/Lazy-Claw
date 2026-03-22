@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
+from typing import Any
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -12,7 +14,28 @@ from lazyclaw.db.connection import db_session
 logger = logging.getLogger(__name__)
 
 # Active MCP client connections keyed by server_id
-_active_clients: dict = {}
+_active_clients: dict[str, Any] = {}
+
+# Idle timeout — auto-disconnect after this many seconds of no tool calls.
+# Favorites are exempt from idle disconnect.
+MCP_IDLE_TIMEOUT_SECONDS = 300
+
+_idle_timers: dict[str, asyncio.TimerHandle] = {}
+_favorite_server_ids: set[str] = set()
+_connect_locks: dict[str, asyncio.Lock] = {}
+
+# Reference to skill registry for idle-disconnect cleanup.
+# Set by connect_and_register_bundled_mcps() at startup.
+_registry_ref: Any = None
+
+
+def _get_connect_lock(server_id: str) -> asyncio.Lock:
+    """Get or create a per-server lock for connect serialization."""
+    lock = _connect_locks.get(server_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _connect_locks[server_id] = lock
+    return lock
 
 # Bundled MCP servers that ship with LazyClaw
 # "module" = Python module (run via sys.executable -m <module>)
@@ -44,12 +67,151 @@ BUNDLED_MCPS = {
     },
     "claude-code": {
         "npx": "@steipete/claude-code-mcp",
-        "description": "Control Claude Code CLI from LazyClaw",
+        "description": "Full coding agent — build features, debug, refactor, code review, run tests. Use for complex code tasks. For simple file edits use write_file instead.",
         # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth),
         # not the API key which may have no credits
         "strip_env": ["ANTHROPIC_API_KEY"],
     },
+    "mcp-jobspy": {
+        "module": "mcp_jobspy",
+        "description": "Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google",
+        "optional": True,
+    },
+    "stripe": {
+        "npx": "@stripe/mcp@latest",
+        "description": "Create invoices, track payments, manage subscriptions",
+        "optional": True,
+        "env_required": ["STRIPE_SECRET_KEY"],
+    },
+    "canva": {
+        "remote": "https://mcp.canva.com/mcp",
+        "description": "Design in Canva — create, edit, export presentations, social posts, logos",
+        "optional": True,
+        "oauth": True,
+    },
+    "mcp-instagram": {
+        "module": "mcp_instagram",
+        "description": "Instagram DMs, feed, posting — no browser (private mobile API)",
+        "optional": True,
+    },
+    "mcp-whatsapp": {
+        "node": "mcp-whatsapp/src/index.js",
+        "description": "WhatsApp messaging — no browser (QR auth, web protocol)",
+        "optional": True,
+    },
+    "mcp-email": {
+        "module": "mcp_email",
+        "description": "Send/read/search email via SMTP+IMAP — Gmail, Outlook, any provider",
+        "optional": True,
+    },
 }
+
+
+# -- Idle timeout management --------------------------------------------------
+
+
+def touch_client(server_id: str) -> None:
+    """Reset the idle timer for a server. Call after every tool invocation.
+
+    Favorites are exempt — they never get idle-disconnected.
+    """
+    timer = _idle_timers.pop(server_id, None)
+    if timer is not None:
+        timer.cancel()
+
+    if server_id in _favorite_server_ids:
+        return  # Favorites never idle-disconnect
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # No event loop — skip timer (e.g. during shutdown)
+
+    _idle_timers[server_id] = loop.call_later(
+        MCP_IDLE_TIMEOUT_SECONDS, _schedule_idle_disconnect, server_id,
+    )
+
+
+def _schedule_idle_disconnect(server_id: str) -> None:
+    """Sync callback for call_later — schedules the async disconnect."""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_idle_disconnect(server_id))
+    except RuntimeError:
+        pass  # Event loop closed — nothing to do
+
+
+async def _idle_disconnect(server_id: str) -> None:
+    """Disconnect a server due to idle timeout and unregister its tools."""
+    _idle_timers.pop(server_id, None)
+    client = _active_clients.get(server_id)
+    if client is None:
+        return  # Already disconnected
+
+    name = client.name
+    logger.info("Idle-disconnecting MCP server %s (%s)", name, server_id)
+
+    client = _active_clients.pop(server_id, None)
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:
+            logger.warning("Error idle-disconnecting %s", name, exc_info=True)
+
+    # Note: lazy stubs remain in registry — next call will reconnect.
+    # We don't unregister tools because LazyMCPToolSkill checks
+    # _active_clients on every call and reconnects if needed.
+
+
+# -- Favorite management -----------------------------------------------------
+
+
+async def set_favorite(
+    config: Config, user_id: str, server_name: str, favorite: bool,
+) -> bool:
+    """Set or unset a server as favorite. Returns True if updated."""
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            "UPDATE mcp_connections SET favorite = ? "
+            "WHERE user_id = ? AND name = ?",
+            (1 if favorite else 0, user_id, server_name),
+        )
+        updated = cursor.rowcount > 0
+
+        if updated:
+            # Update in-memory favorite set in same session
+            row = await db.execute(
+                "SELECT id FROM mcp_connections WHERE user_id = ? AND name = ?",
+                (user_id, server_name),
+            )
+            result = await row.fetchone()
+            if result:
+                if favorite:
+                    _favorite_server_ids.add(result[0])
+                else:
+                    _favorite_server_ids.discard(result[0])
+
+        await db.commit()
+
+    if updated:
+        logger.info(
+            "Set favorite=%s for MCP server %s", favorite, server_name,
+        )
+    return updated
+
+
+async def get_favorite_server_ids(config: Config, user_id: str) -> set[str]:
+    """Get server IDs of all favorite MCP servers for a user."""
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT id FROM mcp_connections "
+            "WHERE user_id = ? AND favorite = 1",
+            (user_id,),
+        )
+        return {row[0] for row in await rows.fetchall()}
+
+
+# -- CRUD operations ----------------------------------------------------------
 
 
 async def add_server(
@@ -94,7 +256,7 @@ async def list_servers(config: Config, user_id: str) -> list[dict]:
     key = derive_server_key(config.server_secret, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT id, name, transport, config, enabled, created_at "
+            "SELECT id, name, transport, config, enabled, created_at, favorite "
             "FROM mcp_connections WHERE user_id = ? ORDER BY created_at DESC",
             (user_id,),
         )
@@ -111,6 +273,7 @@ async def list_servers(config: Config, user_id: str) -> list[dict]:
             "config": json.loads(decrypted),
             "enabled": bool(row[4]),
             "created_at": row[5],
+            "favorite": bool(row[6]),
             "connected": row[0] in _active_clients,
         })
     return servers
@@ -291,7 +454,14 @@ def get_active_client(server_id: str) -> MCPClient | None:  # type: ignore[name-
 
 
 async def disconnect_all() -> None:
-    """Disconnect all active MCP clients."""
+    """Disconnect all active MCP clients and cancel idle timers."""
+    # Cancel all idle timers and clear state
+    for timer in _idle_timers.values():
+        timer.cancel()
+    _idle_timers.clear()
+    _favorite_server_ids.clear()
+    _connect_locks.clear()
+
     server_ids = list(_active_clients.keys())
     for server_id in server_ids:
         client = _active_clients.pop(server_id, None)
@@ -330,24 +500,53 @@ async def auto_register_bundled_mcps(
         if name in existing_names:
             continue
 
-        # Determine if this is a Python module or npx package
+        # Skip if required env vars are missing
+        import os as _os
+        env_required = info.get("env_required", [])
+        if env_required and not all(_os.environ.get(k) for k in env_required):
+            logger.debug(
+                "Skipping %s: missing env vars %s",
+                name, [k for k in env_required if not _os.environ.get(k)],
+            )
+            continue
+
+        # Determine transport type: Python module, npx, or remote URL
         if "module" in info:
             # Python module — check if importable
             try:
                 __import__(info["module"])
             except ImportError:
                 continue
+            transport = "stdio"
             server_config = {
                 "command": sys.executable,
                 "args": ["-m", info["module"]],
+            }
+        elif "node" in info:
+            # Local Node.js script — check if node is available
+            import shutil
+            if not shutil.which("node"):
+                continue
+            # Resolve path relative to project root (lazyclaw/mcp/../../)
+            node_script = os.path.join(
+                os.path.dirname(__file__), "..", "..", info["node"],
+            )
+            node_script = os.path.abspath(node_script)
+            if not os.path.isfile(node_script):
+                logger.debug("Skipping %s: script not found at %s", name, node_script)
+                continue
+            transport = "stdio"
+            server_config = {
+                "command": "node",
+                "args": [node_script],
             }
         elif "npx" in info:
             # npm package — check if npx is available
             import shutil
             if not shutil.which("npx"):
                 continue
+            transport = "stdio"
             # Build env — strip keys that should use OAuth instead of API
-            import os as _os
             npx_env = dict(info.get("env", {}))
             for strip_key in info.get("strip_env", []):
                 npx_env.setdefault(strip_key, "")  # Empty = unset for subprocess
@@ -356,6 +555,11 @@ async def auto_register_bundled_mcps(
                 "args": [info["npx"]],
                 "env": npx_env,
             }
+        elif "remote" in info:
+            # Remote MCP server (SSE or streamable HTTP)
+            url = info["remote"]
+            transport = "sse" if url.endswith("/sse") else "streamable_http"
+            server_config = {"url": url}
         else:
             continue
         server_id = str(uuid4())
@@ -365,7 +569,7 @@ async def auto_register_bundled_mcps(
             await db.execute(
                 "INSERT INTO mcp_connections (id, user_id, name, transport, config) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (server_id, user_id, name, "stdio", encrypted_config),
+                (server_id, user_id, name, transport, encrypted_config),
             )
             await db.commit()
 
@@ -382,23 +586,33 @@ async def connect_and_register_bundled_mcps(
     user_id: str,
     registry,
 ) -> int:
-    """Auto-register, connect, and register tools from all bundled MCPs.
+    """Auto-register and register tools from all bundled MCPs.
 
-    This is the all-in-one startup function: ensures bundled MCPs are in DB,
-    connects to each enabled one, and registers their tools in the skill registry.
+    Three-tier loading:
+    - **Favorites**: connect at boot, register real tools.
+    - **Non-favorites with cache**: register lazy stubs (no subprocess).
+    - **Non-favorites without cache**: connect once to cache schemas,
+      disconnect, then register lazy stubs.
 
     Returns total number of tools registered.
     """
-    from lazyclaw.mcp.bridge import register_mcp_tools
+    global _registry_ref
+    _registry_ref = registry
+
+    from lazyclaw.mcp.bridge import (
+        cache_tool_schemas,
+        load_cached_schemas,
+        register_mcp_tools,
+        register_mcp_tools_lazy,
+    )
 
     # Step 1: ensure DB entries exist
     await auto_register_bundled_mcps(config, user_id)
 
-    # Step 2: connect + register tools for all enabled bundled MCPs
-    total_tools = 0
+    # Step 2: query all enabled bundled MCPs with favorite status
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT id, name FROM mcp_connections "
+            "SELECT id, name, favorite FROM mcp_connections "
             "WHERE user_id = ? AND enabled = 1 AND name IN ({})".format(
                 ",".join("?" for _ in BUNDLED_MCPS)
             ),
@@ -406,26 +620,151 @@ async def connect_and_register_bundled_mcps(
         )
         servers = await rows.fetchall()
 
-    # Connect all MCP servers in parallel (was sequential — 12s → ~2s)
-    async def _connect_one(server_id: str, name: str) -> int:
+    # Pre-filter: skip MCPs whose runtime (module/npx) isn't available
+    import os as _os
+    import shutil
+
+    def _is_available(name: str) -> bool:
+        info = BUNDLED_MCPS.get(name, {})
+        for key in info.get("env_required", []):
+            if not _os.environ.get(key):
+                return False
+        if "module" in info:
+            try:
+                __import__(info["module"])
+            except ImportError:
+                return False
+        elif "node" in info:
+            if not shutil.which("node"):
+                return False
+            node_script = _os.path.join(
+                _os.path.dirname(__file__), "..", "..", info["node"],
+            )
+            if not _os.path.isfile(_os.path.abspath(node_script)):
+                return False
+        elif "npx" in info:
+            if not shutil.which("npx"):
+                return False
+        return True
+
+    # Split into favorites vs lazy
+    favorites: list[tuple[str, str]] = []
+    lazy: list[tuple[str, str]] = []
+
+    for row in servers:
+        sid, name, fav = row[0], row[1], bool(row[2])
+        if not _is_available(name):
+            continue
+        if fav:
+            favorites.append((sid, name))
+            _favorite_server_ids.add(sid)
+        else:
+            lazy.append((sid, name))
+
+    total_tools = 0
+
+    # -- Favorites: connect at boot in parallel (existing fast path) ----------
+
+    async def _connect_favorite(server_id: str, name: str) -> int:
         if server_id in _active_clients:
             return 0
         try:
-            client = await connect_server(config, user_id, server_id)
+            info = BUNDLED_MCPS.get(name, {})
+            if info.get("oauth"):
+                client = await connect_server_with_oauth(config, user_id, server_id)
+            else:
+                client = await connect_server(config, user_id, server_id)
+            tools = await client.list_tools()
+            await cache_tool_schemas(config, name, tools)
             count = await register_mcp_tools(
                 client, registry, config=config, user_id=user_id,
             )
-            logger.info("Connected bundled MCP %s: %d tools", name, count)
+            logger.info("Connected favorite MCP %s: %d tools", name, count)
             return count
         except Exception:
-            logger.warning("Failed to connect bundled MCP %s", name, exc_info=True)
+            logger.warning("Failed to connect favorite MCP %s", name, exc_info=True)
             return 0
 
-    import asyncio
-    results = await asyncio.gather(
-        *(_connect_one(sid, name) for sid, name in servers),
-        return_exceptions=True,
-    )
-    total_tools = sum(r for r in results if isinstance(r, int))
+    if favorites:
+        results = await asyncio.gather(
+            *(_connect_favorite(sid, name) for sid, name in favorites),
+            return_exceptions=True,
+        )
+        total_tools += sum(r for r in results if isinstance(r, int))
 
+    # -- Non-favorites: register lazy stubs from cache ------------------------
+
+    need_cold_connect: list[tuple[str, str, bool]] = []  # (server_id, name, is_oauth)
+
+    for server_id, name in lazy:
+        info = BUNDLED_MCPS.get(name, {})
+        is_oauth = bool(info.get("oauth"))
+
+        cached = await load_cached_schemas(config, name)
+        if cached is not None:
+            # Cache hit — register lazy stubs directly (no subprocess)
+            count = await register_mcp_tools_lazy(
+                server_id, name, cached, registry,
+                config=config, user_id=user_id, is_oauth=is_oauth,
+            )
+            total_tools += count
+            continue
+
+        # Skip OAuth and optional servers from cold-connect:
+        # - OAuth requires browser interaction to authenticate
+        # - Optional servers (stripe, jobspy) may hang downloading via npx
+        # User must /mcp fav or /mcp connect to activate these.
+        if is_oauth or info.get("optional"):
+            logger.debug(
+                "Skipping schema cache for %s MCP %s — "
+                "use /mcp fav or /mcp connect to activate",
+                "OAuth" if is_oauth else "optional", name,
+            )
+            continue
+
+        need_cold_connect.append((server_id, name, is_oauth))
+
+    # Cold-connect uncached servers in parallel with timeout
+    async def _cold_cache(server_id: str, name: str, is_oauth: bool) -> int:
+        try:
+            client = await asyncio.wait_for(
+                connect_server(config, user_id, server_id),
+                timeout=15,
+            )
+            tools = await client.list_tools()
+            await cache_tool_schemas(config, name, tools)
+            await disconnect_server(user_id, server_id)
+
+            cached = await load_cached_schemas(config, name)
+            if cached:
+                count = await register_mcp_tools_lazy(
+                    server_id, name, cached, registry,
+                    config=config, user_id=user_id, is_oauth=is_oauth,
+                )
+                logger.info("Cached + lazy-registered MCP %s", name)
+                return count
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout caching MCP %s (>15s) — will retry on next startup",
+                name,
+            )
+            await disconnect_server(user_id, server_id)
+        except Exception:
+            logger.warning(
+                "Failed to cache MCP %s — tools unavailable until manual connect",
+                name, exc_info=True,
+            )
+        return 0
+
+    if need_cold_connect:
+        cold_results = await asyncio.gather(
+            *(_cold_cache(sid, n, oauth) for sid, n, oauth in need_cold_connect),
+            return_exceptions=True,
+        )
+        total_tools += sum(r for r in cold_results if isinstance(r, int))
+
+    logger.info(
+        "MCP startup: %d favorites connected, %d lazy-registered, %d total tools",
+        len(favorites), len(lazy), total_tools,
+    )
     return total_tools

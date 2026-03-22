@@ -21,42 +21,40 @@ class Config:
     server_secret: str = ""
     database_dir: Path = field(default_factory=lambda: Path("./data"))
     port: int = 18789
-    default_model: str = "gpt-5"
-    worker_model: str = "gpt-5-mini"
+    brain_model: str = "gpt-5"       # Main agent, team lead, complex fallback
+    worker_model: str = "gpt-5-mini"  # Specialists, background jobs, summaries
     cors_origin: str = "http://localhost:3000"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     telegram_bot_token: str | None = None
-    browser_model: str = "gpt-5-mini"
     browser_timeout: int = 300
     computer_timeout: int = 30
     heartbeat_interval: int = 60
-    max_tool_iterations: int = 10
+    max_tool_iterations: int = 50
     log_level: str = "WARNING"
     tool_timeout: int = 60
     cdp_port: int = 9222
-    fast_model: str = ""   # Complexity routing: cheap/fast for simple messages
-    smart_model: str = ""  # Complexity routing: best for complex analysis
     browser_executable: str = ""  # Path to browser binary (Brave, Chrome, Chromium)
 
 
 def load_config() -> Config:
     root = get_project_root()
     env_path = root / ".env"
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
 
     openai_key = os.getenv("OPENAI_API_KEY") or None
     anthropic_key = os.getenv("ANTHROPIC_API_KEY") or None
 
-    # Pick default model based on which provider is configured
-    explicit_model = os.getenv("DEFAULT_MODEL")
-    if explicit_model:
-        default_model = explicit_model
+    # Brain model: main agent, team lead, complex fallback
+    explicit_brain = os.getenv("BRAIN_MODEL") or os.getenv("DEFAULT_MODEL")
+    if explicit_brain:
+        brain_model = explicit_brain
     elif anthropic_key and not openai_key:
-        default_model = "claude-sonnet-4-20250514"
+        brain_model = "claude-sonnet-4-20250514"
     else:
-        default_model = "gpt-5"
+        brain_model = "gpt-5"
 
+    # Worker model: specialists, background jobs, summaries
     explicit_worker = os.getenv("WORKER_MODEL")
     if explicit_worker:
         worker_model = explicit_worker
@@ -65,34 +63,23 @@ def load_config() -> Config:
     else:
         worker_model = "gpt-5-mini"
 
-    explicit_browser = os.getenv("BROWSER_MODEL")
-    if explicit_browser:
-        browser_model = explicit_browser
-    elif anthropic_key and not openai_key:
-        browser_model = "claude-haiku-4-5-20251001"
-    else:
-        browser_model = "gpt-5-mini"
-
     return Config(
         server_secret=os.getenv("SERVER_SECRET", ""),
         database_dir=Path(os.getenv("DATABASE_DIR", "./data")),
         port=int(os.getenv("PORT", "18789")),
-        default_model=default_model,
+        brain_model=brain_model,
         worker_model=worker_model,
         cors_origin=os.getenv("CORS_ORIGIN", "http://localhost:3000"),
         openai_api_key=openai_key,
         anthropic_api_key=anthropic_key,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
-        browser_model=browser_model,
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
         computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),
         heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "60")),
-        max_tool_iterations=int(os.getenv("MAX_TOOL_ITERATIONS", "10")),
+        max_tool_iterations=int(os.getenv("MAX_TOOL_ITERATIONS", "50")),
         log_level=os.getenv("LOG_LEVEL", "WARNING"),
         tool_timeout=int(os.getenv("TOOL_TIMEOUT", "60")),
         cdp_port=int(os.getenv("CDP_PORT", "9222")),
-        fast_model=os.getenv("FAST_MODEL", "") or worker_model,
-        smart_model=os.getenv("SMART_MODEL", "") or default_model,
         browser_executable=os.getenv("BROWSER_EXECUTABLE", "") or _detect_browser(),
     )
 

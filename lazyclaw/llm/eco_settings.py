@@ -50,7 +50,7 @@ def _get_valid_providers() -> set[str]:
 
 # Default eco settings
 DEFAULT_ECO = {
-    "mode": "hybrid",
+    "mode": "full",
     "show_badges": True,
     "monthly_paid_budget": 0,
     "locked_provider": None,
@@ -130,6 +130,9 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
     for key, value in updates.items():
         if key in DEFAULT_ECO:
             eco[key] = value
+    # Mark as explicit if user changes mode (prevents auto-detect override)
+    if "mode" in updates:
+        eco["explicit"] = True
 
     # Write back (immutable pattern — new dict)
     new_settings = dict(current_settings)
@@ -149,12 +152,14 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
 async def auto_detect_eco_mode(config: Config, user_id: str) -> str | None:
     """If mcp-freeride is available and has providers, auto-enable hybrid mode.
 
-    Only activates if the user hasn't explicitly set a mode yet (still on default 'full').
+    Only activates if the user hasn't explicitly set a mode yet.
+    We track this via the 'explicit' flag — set by update_eco_settings when
+    the user runs /eco. If explicit=True, never auto-override.
     Returns the new mode if changed, or None if no change.
     """
     current = await get_eco_settings(config, user_id)
-    if current.get("mode") != "full":
-        return None  # User already chose a mode, respect it
+    if current.get("explicit"):
+        return None  # User explicitly chose a mode, never override
 
     try:
         from mcp_freeride.config import load_config as load_freeride_config

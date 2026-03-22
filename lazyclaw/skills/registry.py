@@ -29,6 +29,14 @@ class SkillRegistry:
     def get(self, name: str) -> BaseSkill | None:
         return self._skills.get(name)
 
+    def get_mcp_by_base_name(self, base_name: str) -> BaseSkill | None:
+        """Find first MCP skill matching a base tool name."""
+        suffix = f"_{base_name}"
+        for name, skill in self._skills.items():
+            if name.startswith("mcp_") and name.endswith(suffix):
+                return skill
+        return None
+
     def list_tools(self) -> list[dict]:
         """Return all skills in OpenAI function-calling format (cached)."""
         if self._all_cache is None:
@@ -57,6 +65,13 @@ class SkillRegistry:
             ]
         return self._mcp_cache
 
+    def get_tool_schema(self, name: str) -> dict | None:
+        """Get the OpenAI-format tool schema for a single tool by name."""
+        skill = self._skills.get(name)
+        if skill is not None:
+            return skill.to_openai_tool()
+        return None
+
     def get_display_name(self, internal_name: str) -> str:
         """Resolve internal tool name to human-friendly display name."""
         skill = self._skills.get(internal_name)
@@ -79,7 +94,9 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.calculate import CalculateSkill
         from lazyclaw.skills.builtin.memory_save import MemorySaveSkill
         from lazyclaw.skills.builtin.memory_recall import MemoryRecallSkill
+        from lazyclaw.skills.builtin.tool_discovery import SearchToolsSkill
 
+        self.register(SearchToolsSkill(registry=self))
         self.register(WebSearchSkill())
         self.register(GetTimeSkill())
         self.register(CalculateSkill())
@@ -202,6 +219,7 @@ class SkillRegistry:
             ListMCPServersSkill, AddMCPServerSkill, RemoveMCPServerSkill,
             ConnectMCPServerSkill, DisconnectMCPServerSkill,
             ConnectRemoteMCPSkill,
+            FavoriteMCPServerSkill, UnfavoriteMCPServerSkill,
         )
 
         self.register(ListMCPServersSkill(config=config))
@@ -210,6 +228,8 @@ class SkillRegistry:
         self.register(ConnectMCPServerSkill(config=config))
         self.register(DisconnectMCPServerSkill(config=config))
         self.register(ConnectRemoteMCPSkill(config=config, registry=self))
+        self.register(FavoriteMCPServerSkill(config=config))
+        self.register(UnfavoriteMCPServerSkill(config=config))
 
         # Team management skills
         from lazyclaw.skills.builtin.team_management import (
@@ -273,3 +293,20 @@ class SkillRegistry:
         self.register(SetRamLimitSkill(config=config))
         self.register(ToggleAutoDelegateSkill(config=config))
         self.register(ShowAgentLimitsSkill(config=config))
+
+        # Survival skills (job hunting)
+        from lazyclaw.skills.builtin.survival import (
+            ApplyJobSkill,
+            ReviewDeliverableSkill,
+            SearchJobsSkill,
+            SetSkillsProfileSkill,
+            SurvivalModeSkill,
+            SurvivalStatusSkill,
+        )
+
+        self.register(SearchJobsSkill(config=config, registry=self))
+        self.register(ApplyJobSkill(config=config, registry=self))
+        self.register(SurvivalModeSkill(config=config))
+        self.register(SetSkillsProfileSkill(config=config))
+        self.register(SurvivalStatusSkill(config=config))
+        self.register(ReviewDeliverableSkill(config=config, registry=self))

@@ -66,7 +66,7 @@ _PAID_PATTERNS = re.compile(
 class EcoSettings:
     """User's ECO mode configuration."""
 
-    mode: str = "hybrid"  # eco, hybrid, full, local
+    mode: str = "full"  # eco, hybrid, full, local
     show_badges: bool = True
     monthly_paid_budget: float = 0.0  # 0 = unlimited
     locked_provider: str | None = None  # Lock to specific free provider
@@ -269,28 +269,13 @@ class EcoRouter:
             return None
 
     async def _ensure_free_router(self):
-        """Lazy-init free router + load apihunter providers (async)."""
+        """Lazy-init free router."""
         if self._free_router is not None:
             return self._free_router
 
-        # Use sync init first
         router = self._get_free_router()
         if router is None:
             return None
-
-        # Then async-load apihunter providers
-        try:
-            count = await router.load_apihunter_providers_async()
-            if count > 0:
-                logger.info("Loaded %d providers from apihunter", count)
-        except Exception:
-            logger.debug("Failed to load apihunter providers", exc_info=True)
-
-        # Also refresh Ollama models
-        try:
-            await router.refresh_ollama()
-        except Exception:
-            logger.debug("Failed to refresh Ollama models", exc_info=True)
 
         return router
 
@@ -369,7 +354,7 @@ class EcoRouter:
         # Unknown mode, fall back to paid
         self._record_usage(user_id, "paid")
         self.last_routing = RoutingResult(
-            model=model or self._config.default_model,
+            model=model or self._config.brain_model,
             provider="openai", is_local=False, reason="unknown_mode -> paid",
         )
         return await self._paid_router.chat(messages, model=model, user_id=user_id, **kwargs)
@@ -389,9 +374,14 @@ class EcoRouter:
 
         effective_model = model
         if effective_model is None:
-            # GPT-5 for all tasks — better tool decisions, reliable execution
-            effective_model = self._config.smart_model
-            logger.info("FULL mode -> %s", effective_model)
+            # Complexity routing: gpt-5-mini for simple, gpt-5 for complex
+            user_message = _extract_user_message(messages)
+            complexity = classify_complexity(user_message, has_tools)
+            if complexity == COMPLEXITY_COMPLEX:
+                effective_model = self._config.brain_model or self._config.brain_model
+            else:
+                effective_model = self._config.worker_model or self._config.brain_model
+            logger.info("FULL mode: %s -> %s", complexity, effective_model)
 
         # Infer provider for attribution
         provider = "openai"
@@ -399,7 +389,7 @@ class EcoRouter:
             provider = "anthropic"
 
         self.last_routing = RoutingResult(
-            model=effective_model or self._config.default_model,
+            model=effective_model or self._config.brain_model,
             provider=provider,
             is_local=False,
             reason=f"full: {effective_model}",
@@ -409,7 +399,7 @@ class EcoRouter:
             messages, model=effective_model, user_id=user_id, **kwargs
         )
         self._record_routing_stats(
-            effective_model or self._config.default_model,
+            effective_model or self._config.brain_model,
             response.usage,
         )
         return response
@@ -433,14 +423,14 @@ class EcoRouter:
             # Fall back to paid so the agent can still help (e.g. answer questions,
             # help user install Ollama, use ollama_install skill)
             self.last_routing = RoutingResult(
-                model=self._config.fast_model,
+                model=self._config.worker_model,
                 provider="openai",
                 is_local=False,
                 reason="local_fallback: ollama_unavailable",
             )
             self._record_usage(user_id, "paid")
             return await self._paid_router.chat(
-                messages, model=self._config.fast_model, user_id=user_id, **kwargs
+                messages, model=self._config.worker_model, user_id=user_id, **kwargs
             )
 
         user_message = _extract_user_message(messages)
@@ -486,17 +476,20 @@ class EcoRouter:
         # All local models failed — fall back to paid
         logger.warning("LOCAL: All local models failed, falling back to paid")
         self.last_routing = RoutingResult(
-            model=self._config.fast_model,
+            model=self._config.worker_model,
             provider="openai",
             is_local=False,
             reason="local_fallback: all_models_failed",
         )
         self._record_usage(user_id, "paid")
         return await self._paid_router.chat(
-            messages, model=self._config.fast_model, user_id=user_id, **kwargs
+            messages, model=self._config.worker_model, user_id=user_id, **kwargs
         )
 
     # ── HYBRID mode ───────────────────────────────────────────────────
+
+    # Default Qwen model for OpenRouter free tier
+    QWEN_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"
 
     async def _route_hybrid(
         self,
@@ -507,105 +500,22 @@ class EcoRouter:
         has_tools: bool,
         **kwargs,
     ) -> LLMResponse:
-        """HYBRID mode: try local first, then free APIs, then paid."""
-        from lazyclaw.llm.providers.ollama_provider import OllamaUnavailableError
+        """HYBRID mode: Qwen (OpenRouter) first → GPT-5 fallback."""
+        # Priority 1: Try Qwen via OpenRouter (free) for everything
+        qwen_response = await self._try_qwen(messages, user_id, settings, **kwargs)
+        if qwen_response is not None:
+            return qwen_response
 
-        user_message = _extract_user_message(messages)
-        complexity = classify_complexity(user_message, has_tools)
-
-        # User-configurable models
-        brain = settings.brain_model or BRAIN_MODEL
-        specialist = settings.specialist_model or SPECIALIST_MODEL
-
-        # Priority 1: Simple chat without tools → brain model (local, free)
-        if complexity == COMPLEXITY_SIMPLE and not has_tools:
-            ollama = await self._ensure_ollama()
-            if ollama:
-                self.last_routing = RoutingResult(
-                    model=brain, provider="ollama", is_local=True,
-                    reason="hybrid: simple_chat -> brain",
-                )
-                self._record_usage(user_id, "local")
-                kwargs_no_tools = dict(kwargs)
-                kwargs_no_tools.pop("tools", None)
-                kwargs_no_tools.pop("tool_choice", None)
-                try:
-                    response = await ollama.chat(messages, model=brain, **kwargs_no_tools)
-                    self._record_routing_stats(brain, response.usage)
-                    return response
-                except OllamaUnavailableError as exc:
-                    logger.info("HYBRID: Local brain failed: %s", exc)
-                    if "Cannot connect" in str(exc):
-                        self.reset_ollama_check()
-
-        # Priority 2: Standard/simple+tools → specialist model (local, free)
-        if complexity in (COMPLEXITY_SIMPLE, COMPLEXITY_STANDARD):
-            ollama = await self._ensure_ollama()
-            if ollama:
-                self.last_routing = RoutingResult(
-                    model=specialist, provider="ollama", is_local=True,
-                    reason=f"hybrid: {complexity} -> specialist",
-                )
-                self._record_usage(user_id, "local")
-                try:
-                    response = await ollama.chat(messages, model=specialist, **kwargs)
-                    self._record_routing_stats(specialist, response.usage)
-                    return response
-                except OllamaUnavailableError as exc:
-                    logger.info("HYBRID: Local specialist failed: %s", exc)
-                    if "Cannot connect" in str(exc):
-                        self.reset_ollama_check()
-
-        # Priority 3: Check task overrides for free API routing
-        task_type = classify_task(user_message, has_tools)
-        if settings.task_overrides:
-            for pattern, _override_provider in settings.task_overrides.items():
-                if pattern.lower() in user_message.lower():
-                    task_type = TASK_FREE
-                    break
-
-        if task_type == TASK_FREE:
-            free_router = await self._ensure_free_router()
-            if free_router:
-                model_hint = None
-                if settings.locked_provider:
-                    model_hint = settings.locked_provider + "/"
-
-                try:
-                    dict_messages = self._convert_to_dicts(messages)
-                    result = await free_router.chat(dict_messages, model_hint)
-                    provider = result.get("provider", "free")
-                    self._rate_limiter.record_request(provider)
-                    self._record_usage(user_id, "free")
-                    self.last_routing = RoutingResult(
-                        model=result.get("model", "free"),
-                        provider=provider,
-                        is_local=False,
-                        reason="hybrid: free_api",
-                    )
-
-                    content = result["content"]
-                    if settings.show_badges:
-                        badge = f"[ECO {result.get('provider', '?')}/{result.get('model', '?')}] "
-                        content = badge + content
-
-                    return LLMResponse(
-                        content=content,
-                        model=result.get("model", "free"),
-                        usage={"provider": provider, "eco_mode": "hybrid_free"},
-                    )
-                except Exception:
-                    logger.info("HYBRID: Free failed, falling back to paid")
-
-        # Priority 4: Paid path (complex tasks or all local/free failed)
-        effective_model = model or self._config.fast_model
+        # Priority 2: Qwen failed/stuck → fall back to GPT-5 (full, not mini)
+        logger.info("HYBRID: Qwen failed, falling back to GPT-5")
+        effective_model = model or self._config.brain_model
         provider = "openai"
         if effective_model.startswith("claude-"):
             provider = "anthropic"
 
         self.last_routing = RoutingResult(
             model=effective_model, provider=provider, is_local=False,
-            reason=f"hybrid: {complexity} -> paid",
+            reason="hybrid: qwen_failed -> gpt5",
         )
         self._record_usage(user_id, "paid")
         response = await self._paid_router.chat(
@@ -622,6 +532,60 @@ class EcoRouter:
             )
         return response
 
+    async def _try_qwen(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        **kwargs,
+    ) -> LLMResponse | None:
+        """Try Qwen via OpenRouter directly. Returns None if unavailable/failed.
+
+        Calls the OpenRouter provider directly (not the free router cascade)
+        to avoid falling through to Ollama/Groq with an OpenRouter model ID.
+        """
+        free_router = await self._ensure_free_router()
+        if not free_router:
+            return None
+
+        # Get the OpenRouter provider directly — don't cascade through all providers
+        openrouter = free_router._providers.get("openrouter")
+        if not openrouter:
+            logger.info("OpenRouter provider not configured in free router")
+            return None
+
+        try:
+            dict_messages = self._convert_to_dicts(messages)
+            result = await asyncio.wait_for(
+                openrouter.chat(dict_messages, self.QWEN_MODEL),
+                timeout=20,
+            )
+            provider = result.get("provider", "openrouter")
+            self._rate_limiter.record_request(provider)
+            self._record_usage(user_id, "free")
+            result_model = result.get("model", self.QWEN_MODEL)
+            self.last_routing = RoutingResult(
+                model=result_model,
+                provider=provider,
+                is_local=False,
+                reason="qwen_openrouter",
+            )
+            self._record_routing_stats(result_model, None)
+
+            content = result["content"]
+            if settings.show_badges:
+                badge = f"[ECO {provider}/{result_model}] "
+                content = badge + content
+
+            return LLMResponse(
+                content=content,
+                model=result_model,
+                usage={"provider": provider, "eco_mode": "hybrid_free"},
+            )
+        except Exception as exc:
+            logger.warning("Qwen/OpenRouter failed: %s", exc)
+            return None
+
     # ── ECO mode ──────────────────────────────────────────────────────
 
     async def _route_eco(
@@ -632,29 +596,22 @@ class EcoRouter:
         has_tools: bool,
         **kwargs,
     ) -> LLMResponse:
-        """ECO mode: free only, wait if rate-limited, never paid."""
+        """ECO mode: Qwen via OpenRouter only, never paid. Waits if rate-limited."""
         free_router = await self._ensure_free_router()
         if not free_router:
             self.last_routing = RoutingResult(
-                model="none", provider="free", is_local=False, reason="eco: no_providers",
+                model="none", provider="free", is_local=False, reason="eco: no_openrouter",
             )
             return LLMResponse(
                 content=(
-                    "ECO mode is enabled but no free AI providers are configured.\n\n"
-                    "Quick setup (pick any — all are free):\n"
-                    "\u2022 Groq (fastest): https://console.groq.com \u2192 Get API Key \u2192 add GROQ_API_KEY to .env\n"
-                    "\u2022 Gemini: https://aistudio.google.com/apikey \u2192 add GEMINI_API_KEY to .env\n"
-                    "\u2022 OpenRouter: https://openrouter.ai/keys \u2192 add OPENROUTER_API_KEY to .env\n"
-                    "\u2022 HuggingFace: https://huggingface.co/settings/tokens \u2192 add HF_API_KEY to .env\n\n"
+                    "ECO mode requires OpenRouter for Qwen access.\n\n"
+                    "Setup: https://openrouter.ai/keys \u2192 add OPENROUTER_API_KEY to .env\n\n"
                     "Then restart LazyClaw. Or switch to paid mode: /eco full"
                 ),
                 model="none",
             )
 
-        # Build model hint from locked_provider or task override
-        model_hint = None
-        if settings.locked_provider:
-            model_hint = settings.locked_provider + "/"
+        qwen_hint = f"openrouter/{self.QWEN_MODEL}"
 
         # Wait for rate limit capacity (ECO = patient, never paid)
         max_wait_rounds = 6  # Max ~3 minutes total
@@ -662,43 +619,43 @@ class EcoRouter:
             try:
                 dict_messages = self._convert_to_dicts(messages)
                 result = await asyncio.wait_for(
-                    free_router.chat(dict_messages, model_hint),
-                    timeout=15,
+                    free_router.chat(dict_messages, qwen_hint),
+                    timeout=20,
                 )
-                provider = result.get("provider", "free")
+                provider = result.get("provider", "openrouter")
                 self._rate_limiter.record_request(provider)
                 self._record_usage(user_id, "free")
+                result_model = result.get("model", self.QWEN_MODEL)
                 self.last_routing = RoutingResult(
-                    model=result.get("model", "free"),
+                    model=result_model,
                     provider=provider,
                     is_local=False,
-                    reason="eco: free_only",
+                    reason="eco: qwen_only",
                 )
 
                 content = result["content"]
                 if settings.show_badges:
-                    badge = f"[ECO {result.get('provider', '?')}/{result.get('model', '?')}] "
+                    badge = f"[ECO {provider}/{result_model}] "
                     content = badge + content
 
                 return LLMResponse(
                     content=content,
-                    model=result.get("model", "free"),
+                    model=result_model,
                     usage={"provider": provider, "eco_mode": "eco"},
                 )
             except Exception as exc:
-                logger.warning("ECO provider error: %s", exc)
-                if "All" in str(exc) and attempt < max_wait_rounds - 1:
+                logger.warning("ECO Qwen error: %s", exc)
+                if attempt < max_wait_rounds - 1:
                     wait = 30
-                    logger.info("ECO: All providers busy, waiting %ds (attempt %d)", wait, attempt + 1)
+                    logger.info("ECO: Qwen rate-limited, waiting %ds (attempt %d)", wait, attempt + 1)
                     await asyncio.sleep(wait)
                     continue
-                raise
 
         self.last_routing = RoutingResult(
-            model="none", provider="free", is_local=False, reason="eco: all_rate_limited",
+            model="none", provider="openrouter", is_local=False, reason="eco: qwen_rate_limited",
         )
         return LLMResponse(
-            content="All free AI providers are currently rate-limited. "
+            content="Qwen is currently rate-limited on OpenRouter. "
             "Please try again in a few minutes, or switch to HYBRID mode.",
             model="none",
         )
@@ -718,7 +675,6 @@ class EcoRouter:
         fall back to non-streaming and yield a single chunk.
         """
         from lazyclaw.llm.providers.base import StreamChunk
-        from lazyclaw.llm.providers.ollama_provider import OllamaUnavailableError
 
         settings = await _load_eco_settings(self._config, user_id)
 
@@ -738,15 +694,22 @@ class EcoRouter:
 
         # FULL mode: true streaming via paid provider
         if settings.mode == "full":
-            # Set routing attribution for full mode
+            # Complexity routing (same logic as non-streaming _route_full)
             effective_model = model
             if effective_model is None:
-                effective_model = self._config.smart_model
+                user_message = _extract_user_message(messages)
+                _has_tools = bool(kwargs.get("tools"))
+                complexity = classify_complexity(user_message, _has_tools)
+                if complexity == COMPLEXITY_COMPLEX:
+                    effective_model = self._config.brain_model or self._config.brain_model
+                else:
+                    effective_model = self._config.worker_model or self._config.brain_model
+                logger.info("FULL stream: %s -> %s", complexity, effective_model)
             provider = "openai"
             if effective_model and effective_model.startswith("claude-"):
                 provider = "anthropic"
             self.last_routing = RoutingResult(
-                model=effective_model or self._config.default_model,
+                model=effective_model or self._config.brain_model,
                 provider=provider, is_local=False,
                 reason=f"full_stream: {effective_model}",
             )
@@ -757,114 +720,52 @@ class EcoRouter:
                 yield chunk
             return
 
-        # HYBRID mode: try local first, then free, then paid streaming
+        # HYBRID mode: try Qwen first, then paid GPT-5 streaming
         if settings.mode == "hybrid":
-            has_tools = bool(kwargs.get("tools"))
-            user_message = _extract_user_message(messages)
-            complexity = classify_complexity(user_message, has_tools)
-            brain = settings.brain_model or BRAIN_MODEL
-            specialist = settings.specialist_model or SPECIALIST_MODEL
+            qwen_response = await self._try_qwen(messages, user_id, settings, **kwargs)
+            if qwen_response is not None:
+                yield StreamChunk(
+                    delta=qwen_response.content,
+                    tool_calls=qwen_response.tool_calls,
+                    usage=qwen_response.usage,
+                    model=qwen_response.model,
+                    done=True,
+                )
+                return
+            logger.info("HYBRID stream: Qwen failed, falling back to paid GPT-5")
 
-            # Try local brain for simple chat
-            if complexity == COMPLEXITY_SIMPLE and not has_tools:
-                ollama = await self._ensure_ollama()
-                if ollama:
-                    try:
-                        kwargs_no_tools = dict(kwargs)
-                        kwargs_no_tools.pop("tools", None)
-                        kwargs_no_tools.pop("tool_choice", None)
-                        response = await ollama.chat(messages, model=brain, **kwargs_no_tools)
-                        self.last_routing = RoutingResult(
-                            model=brain, provider="ollama", is_local=True,
-                            reason="hybrid_stream: simple -> brain",
-                        )
-                        self._record_usage(user_id, "local")
-                        self._record_routing_stats(brain, response.usage)
-                        yield StreamChunk(
-                            delta=response.content,
-                            tool_calls=response.tool_calls,
-                            usage=response.usage,
-                            model=response.model,
-                            done=True,
-                        )
-                        return
-                    except OllamaUnavailableError:
-                        logger.info("HYBRID stream: brain failed, falling through")
+        # ECO mode: Qwen only, no paid fallback
+        if settings.mode == "eco":
+            qwen_response = await self._try_qwen(messages, user_id, settings, **kwargs)
+            if qwen_response is not None:
+                yield StreamChunk(
+                    delta=qwen_response.content,
+                    tool_calls=qwen_response.tool_calls,
+                    usage=qwen_response.usage,
+                    model=qwen_response.model,
+                    done=True,
+                )
+                return
+            yield StreamChunk(
+                delta="Qwen unavailable on OpenRouter. Try again shortly, or: /eco hybrid",
+                model="none",
+                done=True,
+            )
+            return
 
-            # Try local specialist for standard tasks
-            if complexity in (COMPLEXITY_SIMPLE, COMPLEXITY_STANDARD):
-                ollama = await self._ensure_ollama()
-                if ollama:
-                    try:
-                        response = await ollama.chat(messages, model=specialist, **kwargs)
-                        self.last_routing = RoutingResult(
-                            model=specialist, provider="ollama", is_local=True,
-                            reason=f"hybrid_stream: {complexity} -> specialist",
-                        )
-                        self._record_usage(user_id, "local")
-                        self._record_routing_stats(specialist, response.usage)
-                        yield StreamChunk(
-                            delta=response.content,
-                            tool_calls=response.tool_calls,
-                            usage=response.usage,
-                            model=response.model,
-                            done=True,
-                        )
-                        return
-                    except OllamaUnavailableError:
-                        logger.info("HYBRID stream: specialist failed, falling through")
-
-        # ECO/HYBRID free path
-        if settings.mode in ("eco", "hybrid"):
-            has_tools = bool(kwargs.get("tools"))
-            user_message = _extract_user_message(messages)
-            use_free = settings.mode == "eco" or classify_task(user_message, has_tools) == TASK_FREE
-
-            if use_free:
-                free_router = await self._ensure_free_router()
-                if free_router:
-                    try:
-                        dict_messages = self._convert_to_dicts(messages)
-                        result = await asyncio.wait_for(
-                            free_router.chat(dict_messages, None),
-                            timeout=15,
-                        )
-                        provider = result.get("provider", "free")
-                        self._rate_limiter.record_request(provider)
-                        self._record_usage(user_id, "free")
-                        self.last_routing = RoutingResult(
-                            model=result.get("model", "free"),
-                            provider=provider,
-                            is_local=False,
-                            reason=f"{settings.mode}_stream: free",
-                        )
-
-                        content = result["content"]
-                        if settings.show_badges:
-                            badge = f"[ECO {provider}/{result.get('model', '?')}] "
-                            content = badge + content
-
-                        yield StreamChunk(
-                            delta=content,
-                            model=result.get("model", "free"),
-                            usage={"provider": provider, "eco_mode": settings.mode},
-                            done=True,
-                        )
-                        return
-                    except Exception as exc:
-                        logger.warning("ECO streaming failed: %s", exc, exc_info=True)
-                        if settings.mode == "eco":
-                            yield StreamChunk(
-                                delta="Free AI providers unavailable. Try: set eco hybrid",
-                                model="none",
-                                done=True,
-                            )
-                            return
-                        logger.info("HYBRID: Free failed, falling back to paid streaming")
-
-        # Paid streaming fallback
+        # Paid streaming fallback (hybrid after Qwen fails)
         self._record_usage(user_id, "paid")
-        effective_model = model or self._config.fast_model
+        if model:
+            effective_model = model
+        else:
+            user_message = _extract_user_message(messages)
+            _has_tools = bool(kwargs.get("tools"))
+            complexity = classify_complexity(user_message, _has_tools)
+            if complexity == COMPLEXITY_COMPLEX:
+                effective_model = self._config.brain_model or self._config.brain_model
+            else:
+                effective_model = self._config.worker_model or self._config.brain_model
+            logger.info("HYBRID fallback stream: %s -> %s", complexity, effective_model)
         provider = "openai"
         if effective_model.startswith("claude-"):
             provider = "anthropic"

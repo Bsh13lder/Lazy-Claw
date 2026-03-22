@@ -31,6 +31,8 @@ class MCPClient:
         self._write_stream: Any | None = None
         self._transport_ctx: Any | None = None
         self._session_ctx: Any | None = None
+        self._child_process: Any | None = None  # Track stdio subprocess for cleanup
+        self._devnull: Any | None = None  # Suppress child stderr; closed in _close_transport
 
     @property
     def server_id(self) -> str:
@@ -154,7 +156,10 @@ class MCPClient:
         import os
 
         child_env = dict(os.environ, **(self._config.get("env") or {}))
-        child_env.setdefault("LOG_LEVEL", "ERROR")
+        # Suppress child MCP server INFO spam on stderr
+        child_env["LOG_LEVEL"] = "ERROR"
+        child_env["LOGLEVEL"] = "ERROR"
+        child_env["MCP_LOG_LEVEL"] = "ERROR"
 
         command = self._config["command"]
         base_cmd = os.path.basename(command)
@@ -174,8 +179,20 @@ class MCPClient:
             args=self._config.get("args", []),
             env=child_env,
         )
-        self._transport_ctx = stdio_client(params)
+        # Suppress child process stderr (MCP INFO spam like "Processing request of type...")
+        self._devnull = open(os.devnull, "w")
+        self._transport_ctx = stdio_client(params, errlog=self._devnull)
         read_stream, write_stream = await self._transport_ctx.__aenter__()
+
+        # Grab the child process so we can force-kill on disconnect
+        # (prevents zombie processes when __aexit__ fails)
+        ctx = self._transport_ctx
+        if hasattr(ctx, "ag_frame") and ctx.ag_frame:
+            local_vars = ctx.ag_frame.f_locals
+            proc = local_vars.get("process")
+            if proc is not None:
+                self._child_process = proc
+
         return read_stream, write_stream
 
     async def _open_sse(self) -> tuple[Any, Any]:
@@ -205,7 +222,9 @@ class MCPClient:
         url = self._config["url"]
         headers = self._config.get("headers", {})
         self._transport_ctx = streamablehttp_client(url=url, headers=headers)
-        read_stream, write_stream = await self._transport_ctx.__aenter__()
+        result = await self._transport_ctx.__aenter__()
+        # streamablehttp_client returns (read, write, session_id) — unpack first two
+        read_stream, write_stream = result[0], result[1]
         return read_stream, write_stream
 
     async def _close_transport(self) -> None:
@@ -217,3 +236,22 @@ class MCPClient:
             self._transport_ctx = None
             self._read_stream = None
             self._write_stream = None
+        if self._devnull is not None:
+            self._devnull.close()
+            self._devnull = None
+
+        # Force-kill the child process if transport cleanup missed it
+        # (prevents zombie processes — root cause of 100+ orphaned MCPs)
+        proc = self._child_process
+        self._child_process = None
+        if proc is not None:
+            try:
+                if proc.returncode is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        proc.kill()
+                    logger.debug("Force-killed MCP child process (pid=%s)", proc.pid)
+            except Exception as exc:
+                logger.debug("Error killing MCP child process: %s", exc)

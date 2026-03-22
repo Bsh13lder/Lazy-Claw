@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -70,11 +71,16 @@ class MCPToolSkill(BaseSkill):
                 "MCP tool %s got 401 — attempting token refresh",
                 self._tool_name,
             )
-            await self._refresh_and_reconnect(user_id)
+            new_client = await self._refresh_and_reconnect(user_id)
+            # Update to the new active client (old one is disconnected)
+            self._client = new_client
             return await self._client.call_tool(self._tool_name, params)
 
-    async def _refresh_and_reconnect(self, user_id: str) -> None:
-        """Refresh OAuth token and reconnect the MCP client."""
+    async def _refresh_and_reconnect(self, user_id: str) -> MCPClient:
+        """Refresh OAuth token and reconnect the MCP client.
+
+        Returns the new active MCPClient (old one is disconnected).
+        """
         from lazyclaw.mcp.manager import connect_with_bearer, get_server
         from lazyclaw.mcp.oauth import refresh_access_token
         from lazyclaw.mcp.token_store import OAuthTokenData, load_tokens, save_tokens
@@ -104,11 +110,12 @@ class MCPToolSkill(BaseSkill):
         logger.info("OAuth token refreshed for %s", server_name)
 
         server = await get_server(self._config, user_id, self._client.server_id)
-        if server:
-            await connect_with_bearer(
-                self._config, user_id, self._client.server_id,
-                server, new_tokens.access_token,
-            )
+        if not server:
+            raise RuntimeError(f"Server {self._client.server_id} not found after refresh")
+        return await connect_with_bearer(
+            self._config, user_id, self._client.server_id,
+            server, new_tokens.access_token,
+        )
 
 
 def _is_auth_error(exc: BaseException) -> bool:
@@ -122,6 +129,164 @@ def _is_auth_error(exc: BaseException) -> bool:
         if status == 401:
             return True
     return False
+
+
+class LazyMCPToolSkill(BaseSkill):
+    """MCP tool stub that connects the server on first invocation.
+
+    Registered from cached tool schemas — no subprocess spawned until
+    the agent actually calls this tool. After connecting, subsequent
+    calls go through the live client. If the server is idle-disconnected,
+    the next call reconnects automatically.
+    """
+
+    def __init__(
+        self,
+        server_id: str,
+        server_name: str,
+        tool_name: str,
+        tool_description: str,
+        tool_schema: dict[str, Any],
+        config: Any,
+        user_id: str,
+        is_oauth: bool = False,
+    ) -> None:
+        self._server_id = server_id
+        self._server_name = server_name
+        self._tool_name = tool_name
+        self._tool_description = tool_description
+        self._tool_schema = tool_schema
+        self._config = config
+        self._user_id = user_id
+        self._is_oauth = is_oauth
+
+    @property
+    def name(self) -> str:
+        return f"{_MCP_PREFIX}{self._server_id}_{self._tool_name}"
+
+    @property
+    def display_name(self) -> str:
+        return f"{self._server_name}:{self._tool_name}"
+
+    @property
+    def description(self) -> str:
+        return f"[MCP: {self._server_name}] {self._tool_description}"
+
+    @property
+    def category(self) -> str:
+        return "mcp"
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return self._tool_schema
+
+    async def execute(self, user_id: str, params: dict[str, Any]) -> str:
+        """Connect on demand, call the tool, reset idle timer."""
+        from lazyclaw.mcp.manager import (
+            _active_clients,
+            _get_connect_lock,
+            connect_server,
+            connect_server_with_oauth,
+            touch_client,
+        )
+
+        # Serialize connects per server to prevent duplicate subprocesses
+        async with _get_connect_lock(self._server_id):
+            client = _active_clients.get(self._server_id)
+            if client is None:
+                logger.info(
+                    "Lazy-connecting MCP server %s for tool %s",
+                    self._server_name, self._tool_name,
+                )
+                if self._is_oauth:
+                    client = await connect_server_with_oauth(
+                        self._config, self._user_id, self._server_id,
+                    )
+                else:
+                    client = await connect_server(
+                        self._config, self._user_id, self._server_id,
+                    )
+
+        touch_client(self._server_id)
+        return await client.call_tool(self._tool_name, params)
+
+
+async def register_mcp_tools_lazy(
+    server_id: str,
+    server_name: str,
+    tools_json: str,
+    registry: SkillRegistry,
+    config: Any,
+    user_id: str,
+    is_oauth: bool = False,
+) -> int:
+    """Register MCP tools as lazy stubs from cached schemas.
+
+    No subprocess is spawned. Each tool connects the server on first call.
+    Returns the number of tools registered.
+    """
+    tools = json.loads(tools_json)
+    count = 0
+    for tool in tools:
+        base_name = tool["name"]
+        # Skip if a built-in skill with the same name exists
+        if registry.get(base_name) is not None:
+            logger.info("Skipping lazy MCP tool %s_%s — built-in skill '%s' exists",
+                        server_id, base_name, base_name)
+            continue
+        # Skip if another MCP server already provides this tool
+        existing_mcp = registry.get_mcp_by_base_name(base_name)
+        if existing_mcp is not None:
+            logger.info("Skipping lazy MCP tool %s_%s — already provided by %s",
+                        server_id, base_name, existing_mcp.name)
+            continue
+        skill = LazyMCPToolSkill(
+            server_id=server_id,
+            server_name=server_name,
+            tool_name=tool["name"],
+            tool_description=tool.get("description", ""),
+            tool_schema=tool.get("inputSchema", {}),
+            config=config,
+            user_id=user_id,
+            is_oauth=is_oauth,
+        )
+        registry.register(skill)
+        count += 1
+    logger.info(
+        "Registered %d lazy tool stubs for MCP server %s", count, server_name,
+    )
+    return count
+
+
+# -- Tool schema cache -------------------------------------------------------
+
+
+async def cache_tool_schemas(config: Any, server_name: str, tools: list[dict]) -> None:
+    """Save tool schemas to the mcp_tool_cache table."""
+    from lazyclaw.db.connection import db_session
+
+    tools_json = json.dumps(tools)
+    async with db_session(config) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO mcp_tool_cache (server_name, tools_json, cached_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (server_name, tools_json),
+        )
+        await db.commit()
+    logger.debug("Cached %d tool schemas for %s", len(tools), server_name)
+
+
+async def load_cached_schemas(config: Any, server_name: str) -> str | None:
+    """Load cached tool schemas JSON. Returns None if not cached."""
+    from lazyclaw.db.connection import db_session
+
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT tools_json FROM mcp_tool_cache WHERE server_name = ?",
+            (server_name,),
+        )
+        result = await row.fetchone()
+    return result[0] if result else None
 
 
 async def register_mcp_tools(
@@ -140,6 +305,18 @@ async def register_mcp_tools(
     tools = await client.list_tools()
     count = 0
     for tool in tools:
+        base_name = tool["name"]
+        # Skip if a built-in skill with the same name exists
+        if registry.get(base_name) is not None:
+            logger.info("Skipping MCP tool %s_%s — built-in skill '%s' exists",
+                        client.server_id, base_name, base_name)
+            continue
+        # Skip if another MCP server already provides this tool
+        existing_mcp = registry.get_mcp_by_base_name(base_name)
+        if existing_mcp is not None:
+            logger.info("Skipping MCP tool %s_%s — already provided by %s",
+                        client.server_id, base_name, existing_mcp.name)
+            continue
         skill = MCPToolSkill(
             client=client,
             tool_name=tool["name"],

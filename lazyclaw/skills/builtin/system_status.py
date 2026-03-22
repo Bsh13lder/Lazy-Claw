@@ -58,7 +58,7 @@ class ShowStatusSkill(BaseSkill):
             if cfg.anthropic_api_key:
                 providers.append("anthropic")
             lines.append(f"AI Providers: {', '.join(providers) if providers else 'none'}")
-            lines.append(f"Default Model: {cfg.default_model}")
+            lines.append(f"Brain Model: {cfg.brain_model}")
             lines.append(f"API Port: {cfg.port}")
             lines.append(f"Database: {cfg.database_dir / 'lazyclaw.db'}")
             lines.append(
@@ -215,8 +215,8 @@ class RunDoctorSkill(BaseSkill):
             else:
                 checks.append(("AI Provider", "FAIL", "No API key configured"))
 
-            # 3. Default Model
-            checks.append(("Default Model", "OK", cfg.default_model))
+            # 3. Brain Model
+            checks.append(("Brain Model", "OK", cfg.brain_model))
 
             # 4. Encryption round-trip
             try:

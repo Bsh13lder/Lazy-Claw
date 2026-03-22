@@ -161,7 +161,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
         LLMMessage(role="user", content=summary_prompt),
     ]
 
-    response = await router.chat(messages, model=config.fast_model, user_id=user_id)
+    response = await router.chat(messages, model=config.worker_model, user_id=user_id)
     summary = response.content
 
     # Extract key events (first line or bullet points)
@@ -214,7 +214,7 @@ async def generate_weekly_summary(
         LLMMessage(role="user", content=f"Week of {week_start}:\n\n{text}"),
     ]
 
-    response = await router.chat(messages, model=config.fast_model, user_id=user_id)
+    response = await router.chat(messages, model=config.worker_model, user_id=user_id)
     summary = response.content
 
     await save_daily_log(config, user_id, f"{week_start}_week", summary, "weekly")

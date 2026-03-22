@@ -12,6 +12,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from lazyclaw.browser.cdp import (
@@ -135,6 +136,9 @@ class CDPBackend:
             import tempfile
             profile_dir = os.path.join(tempfile.gettempdir(), "lazyclaw-cdp-profile")
 
+        # Auto-load LazyClaw ref engine extension (silent, no user prompt)
+        ext_path = str(Path(__file__).parent / "extension")
+
         cmd = [
             chrome_bin,
             "--headless=new",
@@ -144,6 +148,8 @@ class CDPBackend:
             "--no-sandbox",
             "--disable-gpu",
             "--disable-blink-features=AutomationControlled",
+            f"--load-extension={ext_path}",
+            f"--disable-extensions-except={ext_path}",
         ]
 
         try:
@@ -157,12 +163,12 @@ class CDPBackend:
                 proc.pid, self._port, profile_dir,
             )
             # Wait for Chrome to start accepting connections
-            for _ in range(15):
+            for _ in range(6):
                 await asyncio.sleep(0.5)
                 ws_url = await find_chrome_cdp(self._port)
                 if ws_url:
                     return ws_url
-            logger.warning("Chrome launched but CDP not responding after 7.5s")
+            logger.warning("Chrome launched but CDP not responding after 3s")
         except Exception as exc:
             logger.error("Failed to launch Chrome: %s", exc)
 
@@ -195,6 +201,24 @@ class CDPBackend:
 
     async def goto(self, url: str) -> None:
         conn = await self._ensure_connected()
+
+        # SPA hash navigation: if same origin but different hash/path,
+        # Page.navigate won't work (Gmail, Twitter, etc. ignore it).
+        # Use JS window.location.href instead, which SPAs do handle.
+        current = await self.current_url()
+        if _is_same_origin_nav(current, url):
+            logger.info("SPA navigation detected: %s → %s", current[:60], url[:60])
+            await conn.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"window.location.href = {_js_str(url)};",
+                    "awaitPromise": False,
+                },
+            )
+            # SPAs need time to render after hash change (Gmail: 1-2s)
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+            return
+
         await conn.send("Page.navigate", {"url": url})
         # Human-like wait for page load (0.8-1.5s)
         await asyncio.sleep(random.uniform(0.8, 1.5))
@@ -350,15 +374,22 @@ class CDPBackend:
         if lookup:
             key_name, text, code = lookup
         else:
-            key_name, text, code = key, key, 0
+            # Single printable char → send as text; multi-char names (e.g.
+            # "F5", "PageDown") are key identifiers, not literal text.
+            key_name = key
+            text = key if len(key) == 1 else ""
+            code = ord(key.upper()) if len(key) == 1 else 0
 
-        await conn.send("Input.dispatchKeyEvent", {
+        key_down = {
             "type": "keyDown",
             "key": key_name,
-            "text": text,
             "windowsVirtualKeyCode": code,
             "nativeVirtualKeyCode": code,
-        })
+        }
+        # CDP rejects text="" — only include when non-empty
+        if text:
+            key_down["text"] = text
+        await conn.send("Input.dispatchKeyEvent", key_down)
         await asyncio.sleep(random.uniform(0.03, 0.08))
         await conn.send("Input.dispatchKeyEvent", {
             "type": "keyUp",
@@ -554,6 +585,70 @@ class CDPBackend:
                 }
         except Exception as exc:
             logger.debug("find_element_by_role coordinate lookup failed: %s", exc)
+
+        return None
+
+    async def click_by_role(self, description: str) -> dict | None:
+        """Find element by role/label and click it via DOM click().
+
+        Uses the same accessibility tree search as find_element_by_role,
+        but dispatches mousedown + mouseup + click on the actual DOM element.
+        Returns {"role": str, "name": str} if clicked, None if not found.
+        """
+        conn = await self._ensure_connected()
+        await conn.send("Accessibility.enable")
+        result = await conn.send("Accessibility.getFullAXTree", {"depth": 6})
+        nodes = result.get("nodes", [])
+
+        desc_lower = description.lower()
+        best_match = None
+        best_score = 0
+
+        for node in nodes:
+            role = node.get("role", {}).get("value", "").lower()
+            name = node.get("name", {}).get("value", "").lower()
+            backend_id = node.get("backendDOMNodeId")
+            if not backend_id:
+                continue
+
+            score = 0
+            for word in desc_lower.split():
+                if word in role:
+                    score += 2
+                if word in name:
+                    score += 3
+
+            if score > best_score:
+                best_score = score
+                best_match = (node, backend_id)
+
+        if not best_match or best_score < 2:
+            return None
+
+        node, backend_id = best_match
+        try:
+            resolve_result = await conn.send(
+                "DOM.resolveNode", {"backendNodeId": backend_id}
+            )
+            object_id = resolve_result.get("object", {}).get("objectId")
+            if not object_id:
+                return None
+
+            await conn.send("Runtime.callFunctionOn", {
+                "objectId": object_id,
+                "functionDeclaration": """function() {
+                    this.scrollIntoView({block: 'center', behavior: 'instant'});
+                    this.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    this.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    this.click();
+                }""",
+            })
+            return {
+                "role": node.get("role", {}).get("value", ""),
+                "name": node.get("name", {}).get("value", ""),
+            }
+        except Exception as exc:
+            logger.debug("click_by_role failed: %s", exc)
 
         return None
 
@@ -813,11 +908,14 @@ async def restart_browser_with_cdp(
                 pass
 
     # Relaunch VISIBLE browser with CDP
+    ext_path = str(Path(__file__).parent / "extension")
     cmd = [
         browser_bin,
         f"--remote-debugging-port={port}",
         "--no-first-run",
         "--disable-blink-features=AutomationControlled",
+        f"--load-extension={ext_path}",
+        f"--disable-extensions-except={ext_path}",
     ]
     if profile_dir:
         cmd.append(f"--user-data-dir={profile_dir}")
@@ -845,6 +943,29 @@ async def restart_browser_with_cdp(
         logger.error("Failed to relaunch browser: %s", exc)
 
     return None
+
+
+def _is_same_origin_nav(current_url: str, new_url: str) -> bool:
+    """Check if navigation is within the same origin (SPA hash/path change).
+
+    Returns True when both URLs share the same scheme+host, meaning
+    the browser is already on this site and a JS-based navigation
+    will work better than Page.navigate for SPAs.
+    """
+    if not current_url or not new_url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        cur = urlparse(current_url)
+        nxt = urlparse(new_url)
+        # Same scheme + host = same origin
+        return (
+            cur.scheme == nxt.scheme
+            and cur.netloc == nxt.netloc
+            and cur.netloc != ""  # Don't match empty origins
+        )
+    except Exception:
+        return False
 
 
 def _js_str(s: str) -> str:

@@ -179,7 +179,7 @@ class WatchSiteSkill(BaseSkill):
             ]
             response = await router.chat(
                 messages,
-                model=self._config.browser_model or "gpt-5-mini",
+                model=self._config.worker_model,
             )
             js = response.content.strip()
             # Strip markdown code blocks if present

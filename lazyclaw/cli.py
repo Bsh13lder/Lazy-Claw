@@ -44,7 +44,7 @@ HELP_TEXT = """\
   /skills      List skills with permissions
   /traces      Show recent session traces
   /teams       Team config and specialists
-  /mcp         MCP server connections
+  /mcp         MCP servers (fav/unfav/connect/disconnect/add/remove)
   /compression Context compression stats
   /history     Recent conversation messages
   /logs        Recent agent activity (tool calls, LLM)
@@ -263,6 +263,7 @@ async def _handle_slash_command(
     """Handle a slash command. Returns True if handled, False if not."""
     from lazyclaw.cli_admin import (
         clear_history,
+        mcp_command,
         run_doctor,
         set_critic_mode,
         set_eco_mode,
@@ -270,7 +271,6 @@ async def _handle_slash_command(
         set_team_mode,
         show_compression,
         show_logs,
-        show_mcp,
         show_skills,
         show_status,
         show_teams,
@@ -282,6 +282,12 @@ async def _handle_slash_command(
     command = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else None
 
+    # /mcp has subcommands — handle separately
+    if command == "/mcp":
+        mcp_args = cmd.strip()[4:].strip()  # Everything after "/mcp"
+        await mcp_command(config, user_id, mcp_args)
+        return True
+
     # Info commands
     handlers = {
         "/status": lambda: show_status(config, user_id),
@@ -289,7 +295,6 @@ async def _handle_slash_command(
         "/skills": lambda: show_skills(config, user_id),
         "/traces": lambda: show_traces(config, user_id),
         "/teams": lambda: show_teams(config, user_id),
-        "/mcp": lambda: show_mcp(config, user_id),
         "/compression": lambda: show_compression(config, user_id),
         "/logs": lambda: show_logs(config, user_id),
         "/usage": lambda: _show_usage(config),
@@ -680,7 +685,7 @@ async def _show_usage(config: Config) -> None:
     console.print()
 
     # Cost estimate — only paid tokens cost money
-    model = config.default_model
+    model = config.brain_model
     pricing = _MODEL_PRICING.get(model, (5.0, 15.0))
 
     # Actual cost (only paid tokens)

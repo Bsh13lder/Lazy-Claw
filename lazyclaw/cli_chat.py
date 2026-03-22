@@ -367,6 +367,31 @@ class CliCallback:
             if self._streaming:
                 self._console.print()
 
+        elif kind == "background_done":
+            self._stop_spinner()
+            name = event.metadata.get("name", "?")
+            result = event.metadata.get("result", "")
+            self._console.print(
+                f"\n[green]✅ Background task '{name}' completed[/green]"
+            )
+            if result:
+                preview = result[:200]
+                if len(result) > 200:
+                    preview += "..."
+                self._console.print(f"  [dim]{preview}[/dim]")
+
+        elif kind == "background_failed":
+            self._stop_spinner()
+            name = event.metadata.get("name", "?")
+            error = event.metadata.get("error", "unknown")
+            self._console.print(
+                f"\n[red]❌ Background task '{name}' failed: {error}[/red]"
+            )
+
+        elif kind == "fast_dispatch":
+            self._stop_spinner()
+            self._console.print(f"\n[cyan]⚡ {event.detail}[/cyan]")
+
         elif kind == "approval":
             # Handled by main loop — no-op here to avoid duplicate display
             pass
@@ -574,14 +599,22 @@ async def run_chat_loop(
                                 "  [dim]Type 'done' when finished, "
                                 "or 'skip' to move on:[/dim]"
                             )
-                        _help_answer = await loop.run_in_executor(
-                            None,
-                            lambda: con.input("  > "),
-                        )
-                        active_callback._help_result = (
-                            _help_answer.strip().lower() or "skip"
-                        )
-                        active_callback._help_event.set()
+                        # Loop until non-empty answer (prevents terminal
+                        # race conditions from auto-skipping on empty input)
+                        _help_answer = ""
+                        while not _help_answer:
+                            _help_answer = await loop.run_in_executor(
+                                None,
+                                lambda: con.input("  > "),
+                            )
+                            _help_answer = _help_answer.strip().lower()
+                        active_callback._help_result = _help_answer
+                        # Clear _pending_help BEFORE signalling the event
+                        # to prevent the main loop from re-detecting it
+                        # on the next iteration (race condition).
+                        active_callback._pending_help = None
+                        if active_callback._help_event is not None:
+                            active_callback._help_event.set()
                         continue
 
                     # Start async side-channel input via prompt_toolkit
@@ -601,9 +634,13 @@ async def run_chat_loop(
                                 from prompt_toolkit.formatted_text import HTML
                                 return await ctx.pt_session.prompt_async(
                                     HTML("<dim>  &gt; </dim>"),
-                                    handle_sigint=False,  # We handle SIGINT, not prompt_toolkit
+                                    handle_sigint=False,
                                 )
-                            except (EOFError, KeyboardInterrupt):
+                            except KeyboardInterrupt:
+                                nonlocal _cancel_requested
+                                _cancel_requested = True
+                                return ""
+                            except (EOFError, asyncio.CancelledError):
                                 return ""
 
                         _side_input_task = asyncio.create_task(_side_prompt())

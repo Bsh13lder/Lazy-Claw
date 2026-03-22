@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 # Chat-only patterns — messages that NEVER need tools.
 # Everything else gets tools and the LLM decides what to use.
+# Action confirmations — short messages that continue a tool-using conversation.
+# "do it", "go", "run it", "yes do it", "go ahead", "start", "proceed", "continue"
+_ACTION_CONFIRM_PATTERN = re.compile(
+    r"^(do it|do that|go|go ahead|run it|start|proceed|continue|execute|"
+    r"yes do it|yeah do it|yep do it|ok do it|sure do it|"
+    r"finish it|try it|try again|retry|send it|ship it|"
+    r"first one|second one|option 1|option 2|the first|the second)[\s!?.,]*$",
+    re.IGNORECASE,
+)
+
 _CHAT_ONLY_PATTERN = re.compile(
     r"^(hi|hey|hello|yo|sup|thanks|thank you|thx|ok|okay|sure|"
     r"yes|no|yep|nope|good morning|good night|good evening|"
@@ -38,117 +48,135 @@ _CHAT_ONLY_PATTERN = re.compile(
 )
 
 
-# ── Smart Tool Selection ──────────────────────────────────────────────
-# Instead of sending 72+ tools to the LLM every time (7000+ tokens),
-# detect what the message needs and send only relevant tools.
-# This makes GPT-5 respond 3-10x faster.
+# ── Meta-Tool Pattern ─────────────────────────────────────────────────
+# Instead of regex-guessing which tools the LLM needs (brittle, 5K tokens),
+# send only 3-4 base tools. LLM discovers others via search_tools on demand.
+# Schemas for discovered tools are injected dynamically.
 
-# Always available — the core tools every message might need
-_CORE_TOOLS = {
-    "web_search", "get_current_time", "calculate",
-    "recall_memories", "save_memory",
-    "run_background", "delegate",
-}
-
-# Category → tool names + detection pattern
-_TOOL_CATEGORIES: dict[str, tuple[set[str], re.Pattern]] = {
-    "browser": (
-        {"browser", "save_site_login",
-         "watch_site", "stop_watcher", "list_watchers"},
-        re.compile(
-            r"\b(whatsapp|instagram|facebook|twitter|linkedin|gmail|"
-            r"open.*browser|browse|visit.*site|go to|go on|"
-            r"login.*to|sign.*in|sign.*up|register|check.*page|post.*on|send.*message|"
-            r"read.*page|fill.*form|click|navigate|"
-            r"watch|watching|watchers?|monitor|notify.*when|alert.*when)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    "computer": (
-        {"run_command", "read_file", "write_file", "list_directory", "take_screenshot"},
-        re.compile(
-            r"\b(run.*command|execute|terminal|shell|read.*file|write.*file|"
-            r"list.*dir|screenshot|folder|path|script)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    "skills": (
-        {"create_skill", "list_skills", "delete_skill"},
-        re.compile(
-            r"\b(create.*skill|make.*skill|build.*skill|list.*skill|"
-            r"delete.*skill|custom.*tool)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    "vault": (
-        {"vault_set", "vault_list", "vault_delete"},
-        re.compile(
-            r"\b(vault|credential|api.*key|password|secret|store.*key)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    "jobs": (
-        {"schedule_job", "set_reminder", "list_jobs", "manage_job"},
-        re.compile(
-            r"\b(schedule|cron|reminder|remind|alarm|timer|job|recurring)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    "admin": (
-        {"eco_set_mode", "eco_show_status", "eco_set_provider", "eco_set_model",
-         "provider_list", "provider_add", "provider_scan",
-         "ollama_list", "ollama_install", "ollama_delete", "ollama_show",
-         "show_permissions", "set_permission", "list_pending_approvals",
-         "list_mcp_servers", "add_mcp_server", "remove_mcp_server",
-         "show_status", "run_doctor", "show_usage", "show_logs", "set_model",
-         "show_team_settings", "set_team_mode", "list_specialists",
-         "manage_specialist", "browser_set_persistent", "approve_browser_connect",
-         "set_max_agents", "set_ram_limit", "toggle_auto_delegate", "show_agent_limits"},
-        re.compile(
-            r"\b(eco|provider|ollama|permission|mcp.*server|doctor|"
-            r"diagnostic|status|model|admin|setting|config|team.*mode|specialist|"
-            r"persistent.*browser|browser.*persistent|keep.*browser|browser.*always|"
-            r"browser.*mode|set.*browser|browser.*auto|browser.*on|browser.*off|"
-            r"connect.*browser|approve.*browser|allow.*browser|yes.*connect|"
-            r"max.*agent|ram.*limit|auto.*delegat|agent.*limit|agent.*setting)\b",
-            re.IGNORECASE,
-        ),
-    ),
-}
+# Base tools always sent (tiny — ~400 tokens total)
+_BASE_TOOL_NAMES = frozenset({
+    "search_tools", "recall_memories", "save_memory", "delegate",
+})
 
 
-def _select_tools(message: str, all_tools: list[dict]) -> list[dict]:
-    """Select only the tools relevant to this message.
+def _extract_tool_names_from_search_result(result: str) -> list[str]:
+    """Extract tool names from search_tools result text (bold **name**: pattern)."""
+    return re.findall(r"\*\*(\w+)\*\*:", result)
 
-    Always includes core tools. Adds category-specific tools based on
-    keyword detection. Falls back to ALL tools if no category matches
-    (unknown task type — let the LLM decide).
+
+def _compact_history(
+    history: list[LLMMessage], keep_recent: int = 4,
+) -> list[LLMMessage]:
+    """Keep last N user/assistant exchanges in full, compact older ones.
+
+    Old messages become 1-line summaries. Tool messages are dropped.
+    Returns new list (immutable pattern).
     """
-    lower = message.lower()
+    if not history:
+        return history
 
-    # Start with core tools
-    needed: set[str] = set(_CORE_TOOLS)
+    # Split into user/assistant pairs and tool messages
+    # Keep system messages (summaries) as-is
+    recent: list[LLMMessage] = []
+    old: list[LLMMessage] = []
 
-    # Add categories whose patterns match
-    matched_any = False
-    for cat_name, (tool_names, pattern) in _TOOL_CATEGORIES.items():
-        if pattern.search(lower):
-            needed.update(tool_names)
-            matched_any = True
+    # Count user/assistant messages from the end
+    user_assistant_count = 0
+    for msg in reversed(history):
+        if msg.role in ("user", "assistant") and not msg.tool_calls:
+            user_assistant_count += 1
 
-    if not matched_any:
-        # No specific category matched — use general-purpose set.
-        # Includes common tools but skips admin, replay, MCP management.
-        needed.update({
-            "browser", "web_search",
-            "run_command", "read_file", "write_file", "list_directory",
-            "create_skill", "list_skills",
-            "schedule_job", "set_reminder", "list_jobs",
-            "vault_list",
-        })
+    # Walk forward, putting old messages into compact and recent into full
+    seen_recent = 0
+    cutoff = max(0, user_assistant_count - keep_recent)
+    ua_idx = 0
 
-    filtered = [t for t in all_tools if t.get("function", {}).get("name") in needed]
-    return filtered
+    for msg in history:
+        # System messages (summaries) — always keep
+        if msg.role == "system":
+            recent.append(msg)
+            continue
+
+        # Tool messages from old conversations — drop entirely
+        if msg.role == "tool":
+            if ua_idx < cutoff:
+                continue  # drop old tool results
+            recent.append(msg)
+            continue
+
+        # Assistant with tool_calls from old conversations — compact
+        if msg.role == "assistant" and msg.tool_calls:
+            if ua_idx < cutoff:
+                tools_used = ", ".join(tc.name for tc in msg.tool_calls)
+                summary = f"[Used {tools_used}]"
+                if msg.content:
+                    summary = msg.content[:100] + f" [{tools_used}]"
+                old.append(LLMMessage(role="assistant", content=summary))
+                continue
+            recent.append(msg)
+            continue
+
+        # User/assistant messages
+        if msg.role in ("user", "assistant"):
+            ua_idx += 1
+            if ua_idx <= cutoff:
+                # Compact old messages
+                content = (msg.content or "")[:100]
+                if len(msg.content or "") > 100:
+                    content += "..."
+                old.append(LLMMessage(role=msg.role, content=content))
+            else:
+                recent.append(msg)
+            continue
+
+        recent.append(msg)
+
+    # If there are old messages, combine into a single summary
+    if old:
+        summary_lines = []
+        for msg in old[-6:]:  # Keep last 6 compacted messages max
+            prefix = "User" if msg.role == "user" else "Assistant"
+            summary_lines.append(f"{prefix}: {msg.content}")
+        compact_msg = LLMMessage(
+            role="system",
+            content="--- Earlier conversation (compacted) ---\n" + "\n".join(summary_lines),
+        )
+        return [compact_msg] + recent
+
+    return recent
+
+
+def _prune_old_tool_results(
+    messages: list[LLMMessage], keep_last_n: int = 2,
+) -> list[LLMMessage]:
+    """Replace old tool results with 1-line summaries. Keep last N in full.
+
+    Returns new list (immutable pattern — never mutate input).
+    Keeps tool_call_id intact for OpenAI validation.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
+
+    if len(tool_indices) <= keep_last_n:
+        return messages
+
+    to_compress = set(tool_indices[:-keep_last_n])
+
+    result: list[LLMMessage] = []
+    for i, msg in enumerate(messages):
+        if i in to_compress:
+            content = msg.content or ""
+            summary = content[:150].replace("\n", " ").strip()
+            if len(content) > 150:
+                summary += "..."
+            result.append(LLMMessage(
+                role=msg.role,
+                content=f"[Previous result truncated] {summary}",
+                tool_call_id=msg.tool_call_id,
+            ))
+        else:
+            result.append(msg)
+
+    return result
 
 
 def _strip_tool_messages(history: list[LLMMessage]) -> list[LLMMessage]:
@@ -186,8 +214,12 @@ def _wants_any_tools(message: str) -> bool:
     if tools are available. We only block tools for pure greetings/acks.
     """
     lower = message.lower().strip()
-    # Very short messages (under 8 chars) — greetings like "hi", "ok"
-    if len(lower) < 8:
+    # Action confirmations — these continue a prior tool-using conversation.
+    # MUST check before the short-message filter, because "do it" is <8 chars.
+    if _ACTION_CONFIRM_PATTERN.match(lower):
+        return True
+    # Very short messages (under 5 chars) — greetings like "hi", "ok", "ty"
+    if len(lower) < 5:
         return False
     # Known chat-only patterns — no tools needed
     if _CHAT_ONLY_PATTERN.match(lower):
@@ -200,7 +232,7 @@ def _wants_any_tools(message: str) -> bool:
 # Tools that trigger automatic delegation to background specialists.
 
 HEAVY_TOOLS: frozenset[str] = frozenset({
-    "browser", "web_search", "delegate", "run_command",
+    "web_search", "run_command",
     "read_file", "write_file",
 })
 
@@ -396,29 +428,31 @@ class Agent:
             self.registry.register(delegate_skill)
             _delegate_registered = True
 
-        # Smart tool selection — only send relevant tools to the LLM.
-        # "hi" → 0 tools (fast path). "check whatsapp" → 15 tools. "what time" → 7 tools.
-        # This makes GPT-5 respond 3-10x faster than sending all 72+ tools.
+        # Meta-tool pattern: send only base tools (search_tools, memory, delegate).
+        # LLM discovers other tools on demand via search_tools → schemas injected dynamically.
         needs_tools = self.registry is not None and _wants_any_tools(message)
         tools: list = []
         if needs_tools:
-            all_tools = self.registry.list_core_tools() + self.registry.list_mcp_tools()
-            tools = _select_tools(message, all_tools)
-            logger.info("Smart tools: %d/%d selected for: %s", len(tools), len(all_tools), message[:50])
+            # Only send base tool schemas (~400 tokens instead of 5000+)
+            tools = [
+                schema for name in _BASE_TOOL_NAMES
+                if (schema := self.registry.get_tool_schema(name)) is not None
+            ]
+            logger.info("Meta-tool mode: %d base tools for: %s", len(tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 
-        # Build context — for simple chat, use minimal history (fast path)
+        # Build context — keep recent messages, compact old ones
         if needs_tools:
-            # Full history for tool-capable requests
-            chat_history = history
+            chat_history = _compact_history(history, keep_recent=4)
         else:
-            # Minimal history for simple chat — last 6 user/assistant messages only
-            # This drops the huge summary + old context, making GPT-5 respond in ~5s
             chat_history = _strip_tool_messages(history)
             if len(chat_history) > 6:
                 chat_history = chat_history[-6:]
 
+        # Message order optimized for prompt caching:
+        # 1. System (STATIC — cached), 2. Channel (semi-static),
+        # 3. History (dynamic), 4. User message (dynamic)
         system_messages = [LLMMessage(role="system", content=system_prompt)]
         if channel_context:
             system_messages.append(LLMMessage(role="system", content=channel_context))
@@ -448,8 +482,10 @@ class Agent:
                     )
                 )
 
-        # Agentic loop
+        # Agentic loop — brain decides when to stop, safety cap prevents runaway
         max_iterations = self.config.max_tool_iterations
+        _nudge_at = int(max_iterations * 0.8)  # Nudge LLM at 80% of cap
+        _nudged = False
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
         _tool_call_history: list[str] = []  # Track tool names for loop detection
         _tool_results: list[str] = []  # Track results for error detection
@@ -462,11 +498,19 @@ class Agent:
                     await cb.on_event(AgentEvent("done", "Cancelled", {}))
                     return "Operation cancelled."
 
+                # Prune old tool results to save tokens (keep last 2 full)
+                if iteration > 0:
+                    messages = _prune_old_tool_results(messages, keep_last_n=2)
+
                 kwargs: dict = {}
                 if tools:
                     kwargs["tools"] = tools
 
-                model_name = self.config.default_model
+                # Worker (Haiku) for all iterations — cheap and fast.
+                # Brain (Sonnet) available via Claude Code MCP for complex tasks.
+                iter_model = self.config.worker_model
+
+                model_name = iter_model
                 # Show actual routing model if available
                 if self.eco_router and self.eco_router.last_routing:
                     model_name = self.eco_router.last_routing.display_name
@@ -488,7 +532,7 @@ class Agent:
 
                 try:
                     async for chunk in self.eco_router.stream_chat(
-                        messages, user_id=user_id, **kwargs
+                        messages, user_id=user_id, model=iter_model, **kwargs
                     ):
                         if chunk.delta:
                             streamed_content += chunk.delta
@@ -711,6 +755,41 @@ class Agent:
                         result if isinstance(result, str) else str(result)
                     )
 
+                    # Dynamic schema injection: after search_tools returns,
+                    # inject discovered tool schemas so LLM can call them next iteration
+                    if tc.name == "search_tools" and self.registry:
+                        discovered = _extract_tool_names_from_search_result(
+                            result if isinstance(result, str) else str(result)
+                        )
+                        for dname in discovered:
+                            schema = self.registry.get_tool_schema(dname)
+                            if schema and schema not in tools:
+                                tools.append(schema)
+                        if discovered:
+                            logger.info(
+                                "Injected %d tool schemas: %s",
+                                len(discovered), ", ".join(discovered),
+                            )
+
+                # ── Running-long nudge ──
+                # At 80% of safety cap, tell the LLM to wrap up or ask user
+                if iteration >= _nudge_at and not _nudged:
+                    _nudged = True
+                    _nudge_msg = LLMMessage(
+                        role="system",
+                        content=(
+                            "You've been working for a while. You have a few steps left. "
+                            "Either: (1) finish what you're doing and summarize results, "
+                            "or (2) if you need more work, explain what's left and ask "
+                            "the user if they want you to continue."
+                        ),
+                    )
+                    messages.append(_nudge_msg)
+                    logger.info(
+                        "Iteration %d/%d: injected running-long nudge",
+                        iteration + 1, max_iterations,
+                    )
+
                 # ── Stuck detection (replaces old inline loop detection) ──
                 # Only run if tools were actually called this iteration
                 if response and response.tool_calls:
@@ -722,6 +801,22 @@ class Agent:
                         logger.warning(
                             "Stuck detected: %s (%s)", _stuck_signal.reason, _stuck_signal.context,
                         )
+
+                        # Auto-escalate: retry with brain_model before asking user
+                        if iter_model != self.config.brain_model and not getattr(self, "_escalated", False):
+                            self._escalated = True
+                            logger.info("Auto-escalating to brain model: %s", self.config.brain_model)
+                            await cb.on_event(AgentEvent(
+                                "llm_call",
+                                f"Escalating to {self.config.brain_model}...",
+                                {"escalation": True, "model": self.config.brain_model},
+                            ))
+                            # Clear stuck state — give brain a fresh shot
+                            _tool_call_history.clear()
+                            _tool_results.clear()
+                            iter_model = self.config.brain_model
+                            continue
+
                         await cb.on_event(AgentEvent(
                             HELP_NEEDED, _stuck_signal.context,
                             {"reason": _stuck_signal.reason, "tool": _stuck_signal.tool_name,
@@ -740,13 +835,18 @@ class Agent:
                             ))
                             break
 
-                        # Browser handoff: user said "ready" → open visible browser → wait for "done"
+                        # Browser handoff: user said "ready" → ensure visible → wait for "done"
                         if _stuck_signal.needs_browser and _help_response in (
                             "ready", "show me", "show", "ok", "yes",
                         ):
                             if not getattr(self, "is_background", False):
-                                from lazyclaw.skills.builtin.browser_skill import _get_visible_cdp_backend
+                                from lazyclaw.skills.builtin.browser_skill import (
+                                    _get_visible_cdp_backend, _raise_browser_window,
+                                )
                                 await _get_visible_cdp_backend(user_id)
+                                await _raise_browser_window()
+                                # Give macOS time to bring window to foreground
+                                await asyncio.sleep(1.0)
                                 await cb.on_event(AgentEvent(
                                     HELP_RESPONSE,
                                     "Browser is visible. Take over and say 'done' when finished.",
@@ -780,12 +880,11 @@ class Agent:
                         except Exception:
                             _snapshot = f"User intervention complete. Response: {_help_response}"
 
-                        # Inject snapshot, reset counters, continue loop
-                        _last_tc_id = (
-                            response.tool_calls[-1].id if response and response.tool_calls else "help"
-                        )
+                        # Inject snapshot as assistant message (NOT tool —
+                        # tool results were already appended, so a second tool
+                        # msg with the same id would orphan and crash OpenAI).
                         _help_msg = LLMMessage(
-                            role="tool", content=_snapshot, tool_call_id=_last_tc_id,
+                            role="assistant", content=_snapshot,
                         )
                         messages.append(_help_msg)
                         all_new_messages.append(_help_msg)
@@ -794,12 +893,20 @@ class Agent:
                         continue
 
             else:
-                # Max iterations reached
+                # Safety cap reached — shouldn't happen often with nudge
+                logger.warning(
+                    "Safety cap reached (%d iterations). Last tool: %s",
+                    max_iterations,
+                    _tool_call_history[-1] if _tool_call_history else "none",
+                )
                 all_new_messages.append(
                     LLMMessage(
                         role="assistant",
                         content=(response.content if response and response.content else "")
-                        or "I've reached the maximum number of tool calls. Here's what I found so far.",
+                        or (
+                            "I hit the safety limit. Here's what I've done so far. "
+                            "Say 'continue' if you want me to keep going."
+                        ),
                     )
                 )
         except asyncio.CancelledError:

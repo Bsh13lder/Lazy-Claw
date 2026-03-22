@@ -50,12 +50,14 @@ class TaskRunner:
         registry: SkillRegistry,
         eco_router: EcoRouter,
         permission_checker=None,
+        default_callback: AgentCallback | None = None,
     ) -> None:
         self._config = config
         self._router = router
         self._registry = registry
         self._eco_router = eco_router
         self._permission_checker = permission_checker
+        self._default_callback = default_callback
 
         # In-memory tracking (cleaned up on completion)
         self._running: dict[str, asyncio.Task] = {}
@@ -133,6 +135,8 @@ class TaskRunner:
         """Run agent in background with its own context."""
         from lazyclaw.runtime.agent import Agent
 
+        # Fall back to default notifier so background tasks ALWAYS notify
+        callback = callback or self._default_callback
         key = derive_server_key(self._config.server_secret, user_id)
         task_name = self._task_names.get(task_id, task_id[:8])
         _status = "done"

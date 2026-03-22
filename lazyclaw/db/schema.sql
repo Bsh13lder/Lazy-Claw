@@ -176,7 +176,15 @@ CREATE TABLE IF NOT EXISTS mcp_connections (
     transport TEXT NOT NULL,
     config TEXT NOT NULL,
     enabled INTEGER DEFAULT 1,
+    favorite INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS mcp_tool_cache (
+    server_name TEXT NOT NULL,
+    tools_json TEXT NOT NULL,
+    cached_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (server_name)
 );
 
 CREATE TABLE IF NOT EXISTS agent_jobs (

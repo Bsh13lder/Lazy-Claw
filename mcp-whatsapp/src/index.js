@@ -195,17 +195,20 @@ async function startWhatsApp() {
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       log(`WhatsApp disconnected (code=${statusCode}, reconnect=${shouldReconnect})`);
 
-      // Code 440 = session replaced/invalidated — clear auth to force fresh QR
-      if (statusCode === 440 || statusCode === DisconnectReason.loggedOut) {
-        log("Session invalidated (code=" + statusCode + ") — clearing auth for fresh QR");
+      // Code 440 = connection replaced by another device/session.
+      // Do NOT auto-reconnect — causes reconnect war. Wait for user to call whatsapp_setup.
+      if (statusCode === 440) {
+        log("Connection replaced (code=440). Stopped. Call whatsapp_setup to reconnect.");
+        sock = null;
+      } else if (statusCode === DisconnectReason.loggedOut) {
+        log("Logged out — clearing auth for fresh QR on next setup");
         try {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true });
           fs.mkdirSync(AUTH_DIR, { recursive: true });
         } catch (e) {
           log("Failed to clear auth dir: " + e.message);
         }
-        // Reconnect — will trigger QR since auth is gone
-        setTimeout(() => startWhatsApp(), 3000);
+        sock = null;
       } else if (shouldReconnect) {
         setTimeout(() => startWhatsApp(), 3000);
       }
@@ -410,17 +413,17 @@ function err(message) {
 const TOOLS = [
   {
     name: "whatsapp_setup",
-    description: "Initialize WhatsApp and get QR code for authentication. Call this first.",
+    description: "Initialize WhatsApp connection and get QR code. Only call if whatsapp_read/send returns 'not connected'.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "whatsapp_status",
-    description: "Check WhatsApp connection status.",
+    description: "Check WhatsApp connection status. Usually not needed — just call whatsapp_read directly.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "whatsapp_send",
-    description: "Send a text message via WhatsApp.",
+    description: "Send a WhatsApp message. Resolves contact by name or phone number.",
     inputSchema: {
       type: "object",
       properties: {
@@ -432,11 +435,11 @@ const TOOLS = [
   },
   {
     name: "whatsapp_read",
-    description: "Read recent messages from a WhatsApp chat.",
+    description: "Read recent WhatsApp messages. Without contact: reads the most recent chat. With contact: reads that specific chat. Call this FIRST for any WhatsApp task.",
     inputSchema: {
       type: "object",
       properties: {
-        contact: { type: "string", description: 'Contact name or phone number. E.g. "lisichka" or "34612345678"' },
+        contact: { type: "string", description: 'Optional: contact name or phone. Omit to read most recent chat.' },
         limit: { type: "number", description: "Number of messages to fetch (default 10)" },
       },
       required: ["contact"],
@@ -486,7 +489,18 @@ const TOOLS = [
 async function handleSetup() {
   if (isReady && sock) {
     const me = sock.user;
-    return ok({ status: "connected", phone: me ? me.id.split(":")[0] : "unknown" });
+    return ok({ status: "connected", phone: me ? me.id.split(":")[0] : "unknown", contacts: contacts.size });
+  }
+  // Not connected — start/restart WhatsApp
+  if (!sock) {
+    log("Setup called — starting WhatsApp connection...");
+    await startWhatsApp();
+    // Wait briefly for QR or connection
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  if (isReady && sock) {
+    const me = sock.user;
+    return ok({ status: "connected", phone: me ? me.id.split(":")[0] : "unknown", contacts: contacts.size });
   }
   if (latestQR) {
     let qrAscii = "";
@@ -496,9 +510,9 @@ async function handleSetup() {
         resolve();
       });
     });
-    return ok({ status: "qr_needed", qr: latestQR, qr_ascii: qrAscii });
+    return ok({ status: "qr_needed", qr: latestQR, qr_ascii: qrAscii, note: "Scan QR in WhatsApp app → Linked Devices" });
   }
-  return ok({ status: "initializing" });
+  return ok({ status: "initializing", note: "Waiting for QR code..." });
 }
 
 async function handleStatus() {
@@ -542,8 +556,28 @@ async function handleSend(args) {
 async function handleRead(args) {
   if (!isReady || !sock) return err("WhatsApp not connected. Call whatsapp_setup first.");
   const contact = args.contact || args.phone;
-  if (!contact) return err("'contact' is required (name or phone).");
   const limit = args.limit || 10;
+
+  // No contact specified — read the most recent chat
+  if (!contact) {
+    // Find the chat with the most recent message
+    let latestJid = null;
+    let latestTs = 0;
+    for (const [jid, msgs] of messageStore) {
+      if (jid === "status@broadcast") continue;
+      for (const msg of msgs) {
+        const ts = Number(msg.messageTimestamp || 0);
+        if (ts > latestTs) { latestTs = ts; latestJid = jid; }
+      }
+    }
+    if (!latestJid) {
+      return ok({ messages: [], note: "No messages cached yet." });
+    }
+    const c = contacts.get(latestJid);
+    const contactName = c?.name || c?.notify || latestJid.split("@")[0];
+    // Rewrite args with resolved contact and recurse
+    return handleRead({ contact: contactName, limit });
+  }
 
   const resolved = resolveContact(contact);
   if (!resolved) return err(`Contact '${contact}' not found. Use whatsapp_list_chats to see available contacts.`);

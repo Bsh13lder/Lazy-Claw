@@ -183,6 +183,8 @@ class TuiDashboard:
         self._total_tokens_out: int = 0
         self._total_cost_today: float = 0.0
         self._cost_by_model: dict[str, float] = {}
+        # Dedup: skip consecutive identical log entries
+        self._last_log_key: str = ""
 
     def make_request_cb(self, chat_id: str) -> _TuiRequestCallback:
         return _TuiRequestCallback(self, chat_id)
@@ -211,6 +213,15 @@ class TuiDashboard:
     def handle_event(self, chat_id: str, event: AgentEvent) -> None:
         req = self._active.get(chat_id)
         kind = event.kind
+
+        # Dedup consecutive identical log events (tool_result, tool_call)
+        if kind in ("tool_result", "tool_call"):
+            log_key = f"{chat_id}:{kind}:{event.detail}"
+            if log_key == self._last_log_key:
+                return  # Skip duplicate
+            self._last_log_key = log_key
+        else:
+            self._last_log_key = ""
 
         # Background task events may arrive after the original request was unregistered
         if not req:

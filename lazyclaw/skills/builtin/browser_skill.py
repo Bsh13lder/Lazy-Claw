@@ -68,11 +68,20 @@ async def _get_cdp_backend(user_id: str = "default"):
 async def _get_visible_cdp_backend(user_id: str = "default"):
     """Ensure a VISIBLE Brave is running with CDP and return backend.
 
-    Three cases:
+    Platform-aware:
+    - Server mode (Linux + LAZYCLAW_SERVER_MODE): starts noVNC remote session
+    - Desktop (Mac/Linux desktop): opens visible window directly
+
+    Three desktop cases:
     1. Visible browser already on port → reuse (no-op, already on stuck page)
     2. Headless browser on port → kill it, relaunch visible, navigate to stuck URL
     3. Nothing running → launch visible Brave fresh
     """
+    from lazyclaw.browser.remote_takeover import is_server_mode
+
+    if is_server_mode():
+        return await _get_remote_cdp_backend(user_id)
+
     from lazyclaw.browser.cdp import find_chrome_cdp
     from lazyclaw.browser.cdp_backend import CDPBackend, restart_browser_with_cdp
     from lazyclaw.config import load_config
@@ -114,7 +123,7 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
 
         if stuck_url:
             try:
-                await _cdp_backend.navigate(stuck_url)
+                await _cdp_backend.goto(stuck_url)
                 logger.info("Visible browser opened on stuck URL: %s", stuck_url)
             except Exception:
                 pass
@@ -201,6 +210,76 @@ async def _raise_browser_window() -> None:
         pass  # wmctrl not installed — silently skip
     except Exception:
         pass
+
+
+async def _get_remote_cdp_backend(user_id: str = "default"):
+    """Start a noVNC remote session and return a CDPBackend connected to it.
+
+    Used on headless Linux servers. The browser runs on a virtual display
+    and is accessible via noVNC in the user's mobile browser.
+    """
+    from lazyclaw.browser.cdp_backend import CDPBackend
+    from lazyclaw.browser.remote_takeover import (
+        get_active_session,
+        start_remote_session,
+    )
+    from lazyclaw.config import load_config
+
+    global _cdp_backend
+    config = load_config()
+    port = getattr(config, "cdp_port", 9222)
+    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+
+    # Reuse existing remote session if active
+    existing = get_active_session(user_id)
+    if existing:
+        if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
+            _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+        return _cdp_backend
+
+    # Capture stuck URL from current headless browser
+    stuck_url: str | None = None
+    if _cdp_backend is not None:
+        try:
+            stuck_url = await _cdp_backend.current_url()
+        except Exception:
+            pass
+
+    # Kill headless browser before starting visible one on virtual display
+    try:
+        kill_proc = await asyncio.create_subprocess_exec(
+            "pkill", "-f", f"--remote-debugging-port={int(port)}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await kill_proc.wait()
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+    await start_remote_session(
+        user_id=user_id,
+        cdp_port=port,
+        profile_dir=profile_dir,
+        browser_bin=config.browser_executable,
+        stuck_url=stuck_url,
+    )
+    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+    return _cdp_backend
+
+
+async def _stop_remote_session(user_id: str = "default") -> None:
+    """Stop remote noVNC session and relaunch headless browser."""
+    from lazyclaw.browser.remote_takeover import stop_remote_session
+
+    global _cdp_backend
+
+    await stop_remote_session(user_id)
+
+    # Relaunch headless browser so the agent can continue
+    _cdp_backend = None
+    backend = await _get_cdp_backend(user_id)
+    await backend._ensure_connected()
 
 
 # ── Unified BrowserSkill ────────────────────────────────────────────────

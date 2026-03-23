@@ -491,6 +491,27 @@ class _TelegramCallback:
             self.dispatched = False
             self.busy = False
 
+        elif kind == "help_response":
+            # Forward noVNC remote takeover URL to the user
+            novnc_url = event.metadata.get("novnc_url")
+            if novnc_url:
+                context = event.metadata.get("stuck_context", "Browser control needed")
+                is_http = novnc_url.startswith("http://")
+                text = f"\U0001f510 Need help: {context}\n\nTap to take control:\n{novnc_url}"
+                if is_http:
+                    text += "\n\n\u26a0\ufe0f Connection is not encrypted (HTTP). Use on trusted network only."
+                try:
+                    await _telegram_send_with_retry(
+                        lambda: self._bot.send_message(
+                            chat_id=self._chat_id, text=text,
+                        )
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to send noVNC URL to chat %s: %s",
+                        self._chat_id, exc,
+                    )
+
         elif kind == "work_summary":
             # Store summary for footer — don't send separately
             self._work_summary = event.metadata.get("summary")

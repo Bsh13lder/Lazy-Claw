@@ -60,6 +60,14 @@ _BASE_TOOL_NAMES = frozenset({
     "connect_mcp_server", "disconnect_mcp_server", "browser",
 })
 
+# Channel keywords → prefer MCP tools over browser
+# When message matches, auto-inject matching MCP tools and drop browser
+_CHANNEL_KEYWORDS: dict[str, list[str]] = {
+    "whatsapp": ["whatsapp", "wa msg", "wa message"],
+    "instagram": ["instagram", "ig msg", "ig message", "insta"],
+    "email": ["email", "gmail", "mail", "inbox"],
+}
+
 # Max chars for a tool result before truncation (prevents MCP JSON blowup)
 _MAX_TOOL_RESULT_CHARS = 4000
 
@@ -251,7 +259,7 @@ def _wants_any_tools(message: str) -> bool:
 # Tools that trigger automatic delegation to background specialists.
 
 HEAVY_TOOLS: frozenset[str] = frozenset({
-    "web_search", "run_command",
+    "browser", "web_search", "run_command",
     "read_file", "write_file",
 })
 
@@ -466,26 +474,60 @@ class Agent:
 
         # Meta-tool pattern: send only base tools (search_tools, memory, delegate).
         # LLM discovers other tools on demand via search_tools → schemas injected dynamically.
+        # Channel detection: if message mentions whatsapp/instagram/email, prefer MCP tools over browser.
         needs_tools = self.registry is not None and _wants_any_tools(message)
         tools: list = []
         if needs_tools:
-            # Only send base tool schemas (~400 tokens instead of 5000+)
+            from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
+
+            # Detect channel keywords → find matching MCP tools
+            _msg_lower = message.lower()
+            _matched_channels: list[str] = []
+            for channel, keywords in _CHANNEL_KEYWORDS.items():
+                if any(kw in _msg_lower for kw in keywords):
+                    _matched_channels.append(channel)
+
+            # Find MCP tools for matched channels
+            _channel_tools: list = []
+            if _matched_channels:
+                for tool_info in self.registry.list_mcp_tools():
+                    func = tool_info.get("function", {})
+                    tname = func.get("name", "").lower()
+                    tdesc = func.get("description", "").lower()
+                    for ch in _matched_channels:
+                        if ch in tname or ch in tdesc:
+                            schema = self.registry.get_tool_schema(func.get("name", ""))
+                            if schema is not None:
+                                _channel_tools.append(schema)
+                            break
+
+            # Build base tools — drop browser if channel MCP tools found
+            _base_names = _BASE_TOOL_NAMES
+            if _channel_tools:
+                _base_names = _BASE_TOOL_NAMES - {"browser"}
+                logger.info("Channel detected: %s → %d MCP tools, browser dropped", _matched_channels, len(_channel_tools))
+
             tools = [
-                schema for name in _BASE_TOOL_NAMES
+                schema for name in _base_names
                 if (schema := self.registry.get_tool_schema(name)) is not None
             ]
-            # Include tools from favorite connected MCPs directly
-            from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
-            for sid in _favorite_server_ids:
-                if sid in _active_clients:
-                    for tool_info in self.registry.list_mcp_tools():
-                        func = tool_info.get("function", {})
-                        tname = func.get("name", "")
-                        if sid.replace("-", "") in tname.replace("-", ""):
-                            schema = self.registry.get_tool_schema(tname)
-                            if schema is not None:
-                                tools.append(schema)
-            logger.info("Meta-tool mode: %d base tools for: %s", len(tools), message[:50])
+            tools.extend(_channel_tools)
+
+            # Also include tools from favorite connected MCPs
+            _fav_prefixes = tuple(
+                f"mcp_{sid}_" for sid in _favorite_server_ids
+                if sid in _active_clients
+            )
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            if _fav_prefixes:
+                for tool_info in self.registry.list_mcp_tools():
+                    func = tool_info.get("function", {})
+                    tname = func.get("name", "")
+                    if tname.startswith(_fav_prefixes) and tname not in _existing_names:
+                        schema = self.registry.get_tool_schema(tname)
+                        if schema is not None:
+                            tools.append(schema)
+            logger.info("Meta-tool mode: %d tools (%d channel MCP) for: %s", len(tools), len(_channel_tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 
@@ -537,6 +579,7 @@ class Agent:
         _tool_call_history: list[str] = []  # Track tool names for loop detection
         _tool_results: list[str] = []  # Track results for error detection
         _escalated = False  # True after auto-escalation to brain_model
+        _escalation_iter = 0  # Iteration when escalation happened
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
 
         response = None
@@ -562,8 +605,13 @@ class Agent:
                 if tools:
                     kwargs["tools"] = tools
 
-                # Worker (Haiku) by default. Brain (Sonnet) only after auto-escalation.
-                if not _escalated:
+                # Worker (Haiku) by default. Brain (Sonnet) only during escalation window.
+                # Escalation lasts max 5 iterations, then falls back to worker.
+                _MAX_ESCALATION_ITERS = 5
+                if _escalated and (iteration - _escalation_iter) >= _MAX_ESCALATION_ITERS:
+                    _escalated = False  # Reset — Sonnet didn't help either
+                    iter_model = self.config.worker_model
+                elif not _escalated:
                     iter_model = self.config.worker_model
 
                 model_name = iter_model
@@ -744,9 +792,10 @@ class Agent:
                         result = await self.executor.execute(tc, user_id, callback=cb)
 
                     # Cap oversized results before injecting into context
-                    if isinstance(result, str):
+                    # Skip capping + caching for approval responses (JSON args must stay intact)
+                    if isinstance(result, str) and not result.startswith(APPROVAL_PREFIX):
                         result = _cap_tool_result(result)
-                    _tool_call_cache[_cache_key] = result if isinstance(result, str) else str(result)
+                        _tool_call_cache[_cache_key] = result
 
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                     await cb.on_event(AgentEvent(
@@ -868,7 +917,8 @@ class Agent:
                         # Auto-escalate: retry with brain_model before asking user
                         if not _escalated:
                             _escalated = True
-                            logger.info("Auto-escalating to brain model: %s", self.config.brain_model)
+                            _escalation_iter = iteration
+                            logger.info("Auto-escalating to brain model: %s (max %d iters)", self.config.brain_model, _MAX_ESCALATION_ITERS)
                             await cb.on_event(AgentEvent(
                                 "llm_call",
                                 f"Escalating to {self.config.brain_model}...",
@@ -905,20 +955,43 @@ class Agent:
                             if not getattr(self, "is_background", False):
                                 from lazyclaw.skills.builtin.browser_skill import (
                                     _get_visible_cdp_backend, _raise_browser_window,
+                                    _stop_remote_session,
                                 )
                                 await _get_visible_cdp_backend(user_id)
-                                await _raise_browser_window()
-                                # Give macOS time to bring window to foreground
-                                await asyncio.sleep(1.0)
-                                await cb.on_event(AgentEvent(
-                                    HELP_RESPONSE,
-                                    "Browser is visible. Take over and say 'done' when finished.",
-                                    {},
-                                ))
-                                _done_resp = await cb.on_help_request(
-                                    "Browser is open on your screen. Say 'done' when you're finished.",
-                                    False,
+
+                                # Server mode: send noVNC URL via Telegram
+                                from lazyclaw.browser.remote_takeover import (
+                                    get_active_session, is_server_mode,
                                 )
+                                _remote = get_active_session(user_id) if is_server_mode() else None
+
+                                if _remote:
+                                    await cb.on_event(AgentEvent(
+                                        HELP_RESPONSE,
+                                        f"Browser ready for remote control: {_remote.url}",
+                                        {"novnc_url": _remote.url,
+                                         "stuck_context": _stuck_signal.context},
+                                    ))
+                                    _done_resp = await cb.on_help_request(
+                                        "Say 'done' when you're finished.",
+                                        False,
+                                    )
+                                    # Cleanup: stop noVNC, relaunch headless
+                                    await _stop_remote_session(user_id)
+                                else:
+                                    await _raise_browser_window()
+                                    # Give macOS time to bring window to foreground
+                                    await asyncio.sleep(1.0)
+                                    await cb.on_event(AgentEvent(
+                                        HELP_RESPONSE,
+                                        "Browser is visible. Take over and say 'done' when finished.",
+                                        {},
+                                    ))
+                                    _done_resp = await cb.on_help_request(
+                                        "Browser is open on your screen. Say 'done' when you're finished.",
+                                        False,
+                                    )
+
                                 if _done_resp == "skip":
                                     all_new_messages.append(LLMMessage(
                                         role="assistant",

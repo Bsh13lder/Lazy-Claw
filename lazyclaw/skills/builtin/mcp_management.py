@@ -146,7 +146,7 @@ class AddMCPServerSkill(BaseSkill):
             from lazyclaw.mcp.manager import add_server
 
             transport = params["transport"]
-            server_name = params["name"]
+            server_name = params.get("name") or params.get("server_name") or ""
 
             # Build server_config based on transport type
             server_config: dict = {}
@@ -222,7 +222,7 @@ class RemoveMCPServerSkill(BaseSkill):
             from lazyclaw.mcp.manager import list_servers, remove_server
 
             servers = await list_servers(self._config, user_id)
-            server = _find_server_by_name(servers, params["name"])
+            server = _find_server_by_name(servers, params.get("name") or params.get("server_name") or "")
             if not server:
                 available = ", ".join(s["name"] for s in servers) or "none"
                 return (
@@ -287,8 +287,9 @@ class ConnectMCPServerSkill(BaseSkill):
                 reconnect_server,
             )
 
+            name = params.get("name") or params.get("server_name") or ""
             servers = await list_servers(self._config, user_id)
-            server = _find_server_by_name(servers, params["name"])
+            server = _find_server_by_name(servers, name)
             if not server:
                 available = ", ".join(s["name"] for s in servers) or "none"
                 return (
@@ -347,7 +348,7 @@ class DisconnectMCPServerSkill(BaseSkill):
             from lazyclaw.mcp.manager import disconnect_server, list_servers
 
             servers = await list_servers(self._config, user_id)
-            server = _find_server_by_name(servers, params["name"])
+            server = _find_server_by_name(servers, params.get("name") or params.get("server_name") or "")
             if not server:
                 available = ", ".join(s["name"] for s in servers) or "none"
                 return (
@@ -555,7 +556,7 @@ class FavoriteMCPServerSkill(BaseSkill):
             )
 
             servers = await list_servers(self._config, user_id)
-            server = _find_server_by_name(servers, params["name"])
+            server = _find_server_by_name(servers, params.get("name") or params.get("server_name") or "")
             if not server:
                 available = ", ".join(s["name"] for s in servers) or "none"
                 return (
@@ -624,7 +625,7 @@ class UnfavoriteMCPServerSkill(BaseSkill):
             from lazyclaw.mcp.manager import list_servers, set_favorite
 
             servers = await list_servers(self._config, user_id)
-            server = _find_server_by_name(servers, params["name"])
+            server = _find_server_by_name(servers, params.get("name") or params.get("server_name") or "")
             if not server:
                 available = ", ".join(s["name"] for s in servers) or "none"
                 return (

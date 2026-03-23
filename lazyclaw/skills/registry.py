@@ -162,6 +162,10 @@ class SkillRegistry:
         self.register(StopWatcherSkill(config=config))
         self.register(ListWatchersSkill(config=config))
 
+        # MCP watcher skill (WhatsApp, Email monitoring via MCP)
+        from lazyclaw.skills.builtin.watch_mcp import WatchMCPSkill
+        self.register(WatchMCPSkill(config=config))
+
         # AI management skills (ECO mode, providers, Ollama)
         from lazyclaw.skills.builtin.eco_management import (
             EcoSetModeSkill, EcoShowStatusSkill, EcoSetProviderSkill,

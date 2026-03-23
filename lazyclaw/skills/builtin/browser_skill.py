@@ -23,13 +23,9 @@ _cdp_backend = None
 
 # ── Shortcut mapping ────────────────────────────────────────────────────
 
+# Services with MCP connectors are EXCLUDED — agent must use MCP tools instead.
+# Only services without MCP connectors get browser shortcuts.
 _SHORTCUTS = {
-    "whatsapp": "https://web.whatsapp.com",
-    "wa": "https://web.whatsapp.com",
-    "gmail": "https://mail.google.com",
-    "mail": "https://mail.google.com",
-    "email": "https://mail.google.com",
-    "instagram": "https://www.instagram.com",
     "twitter": "https://x.com",
     "x": "https://x.com",
     "facebook": "https://www.facebook.com",
@@ -156,8 +152,9 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
 async def _is_browser_headless(port: int) -> bool:
     """Check if the browser process on the given CDP port is headless."""
     try:
+        # Use "--" to stop pgrep parsing the pattern as flags (starts with --)
         proc = await asyncio.create_subprocess_exec(
-            "pgrep", "-f", f"--headless.*--remote-debugging-port={port}",
+            "pgrep", "-f", "--", f"headless.*remote-debugging-port={port}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -212,7 +209,7 @@ class BrowserSkill(BaseSkill):
     """Single CDP-based tool for all browser interactions.
 
     Pure action tool — buy tickets, check in, pay bills, order from Amazon,
-    read WhatsApp/Gmail, navigate. Controls user's real visible Brave.
+    read Gmail, navigate. Controls user's real visible Brave.
     """
 
     def __init__(self, config=None) -> None:
@@ -237,11 +234,11 @@ class BrowserSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Control the user's REAL Brave browser. This is the user's visible browser "
-            "on their screen. Use for reading pages, navigating, clicking, typing, "
-            "taking screenshots, listing tabs, scrolling. Supports shortcuts: "
-            "'whatsapp', 'gmail', 'instagram', 'twitter', 'facebook', 'linkedin'. "
-            "For WhatsApp, Gmail, or any logged-in site — ALWAYS use this tool."
+            "Control the user's REAL Brave browser. Visible on their screen. "
+            "Use for reading pages, navigating, clicking, typing, "
+            "taking screenshots, listing tabs, scrolling. Shortcuts: "
+            "'twitter', 'facebook', 'linkedin'. "
+            "NOT for messaging or email apps — those have dedicated MCP tools."
         )
 
     @property
@@ -277,7 +274,7 @@ class BrowserSkill(BaseSkill):
                 "target": {
                     "type": "string",
                     "description": (
-                        "For read/open: URL, shortcut (whatsapp, gmail, etc), or tab query. "
+                        "For read/open: URL, shortcut (twitter, facebook, linkedin), or tab query. "
                         "For click/type/hover: CSS selector OR natural description. "
                         "For drag: source CSS selector. "
                         "Leave empty for current tab."
@@ -336,7 +333,31 @@ class BrowserSkill(BaseSkill):
             return await _get_visible_cdp_backend(user_id)
         return await _get_cdp_backend(user_id)
 
+    # Services with MCP connectors — hard block browser usage
+    _MCP_SERVICES = {
+        "whatsapp": "whatsapp",
+        "wa": "whatsapp",
+        "web.whatsapp.com": "whatsapp",
+        "instagram": "instagram",
+        "ig": "instagram",
+        "instagram.com": "instagram",
+        "gmail": "email",
+        "mail": "email",
+        "email": "email",
+        "mail.google.com": "email",
+    }
+
     async def execute(self, user_id: str, params: dict) -> str | ToolResult:
+        # Hard block: redirect MCP-backed services away from browser
+        target = (params.get("target") or "").lower().strip()
+        for keyword, mcp_name in self._MCP_SERVICES.items():
+            if keyword in target:
+                return (
+                    f"STOP: Do not use browser for this. Use search_tools('{mcp_name}') "
+                    f"to find the {mcp_name}_* MCP tools instead. Browser is only for "
+                    f"services without MCP connectors, or when user explicitly says 'in browser'."
+                )
+
         # Extract optional TabContext (injected by specialist runner)
         tab_context = params.pop("_tab_context", None)
         # Background tasks should never open visible browser
@@ -535,16 +556,20 @@ class BrowserSkill(BaseSkill):
         return summary
 
     async def _action_open(self, user_id: str, params: dict, tab_context=None) -> str:
-        """Open Brave and navigate to target. Headless by default."""
-        # Headless by default — only visible when user explicitly asks
-        # (params "visible" flag set by agent when user says "show me", "make visible")
+        """Open Brave and navigate to target. Headless by default for navigation."""
         force_visible = params.pop("visible", False)
-        visible = force_visible
+        is_background = getattr(self, "_is_background", False)
 
         target = (params.get("target") or "").strip()
+
+        # No target = "show me the browser" → visible unless background
+        # With target = navigation → headless unless explicitly visible
+        visible = force_visible or (not target and not is_background)
+
         if not target:
             backend = await self._get_backend(user_id, tab_context, visible=visible)
             if visible:
+                await _raise_browser_window()
                 return "Done — Brave is open on your screen."
             return "Done — browser ready (headless)."
 
@@ -553,6 +578,8 @@ class BrowserSkill(BaseSkill):
             return f"Couldn't resolve '{target}' to a URL."
 
         backend = await self._get_backend(user_id, tab_context, visible=visible)
+        if visible:
+            await _raise_browser_window()
 
         if not tab_context:
             # Tab matching only for shortcuts (gmail, whatsapp), NOT full URLs.
@@ -1004,7 +1031,7 @@ class BrowserSkill(BaseSkill):
         if not settings.get("cdp_approved"):
             return (
                 "I need to restart Brave with debugging enabled so I can "
-                "read your browser tabs (WhatsApp, Gmail, etc). All your "
+                "read your browser tabs. All your "
                 "tabs and logins will be preserved — just a 2-3 second "
                 "restart. Say 'yes, connect browser' to allow. I'll "
                 "remember your choice for next time."

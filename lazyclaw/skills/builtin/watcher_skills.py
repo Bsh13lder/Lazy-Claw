@@ -25,10 +25,10 @@ class WatchSiteSkill(BaseSkill):
             "Watch a website for changes. Zero token cost per check — uses "
             "JavaScript extraction directly, no LLM calls during polling. "
             "Sends notification via Telegram when a change is detected. "
-            "WhatsApp and Gmail have built-in smart extractors. Other sites "
-            "get auto-generated JS extractors. "
-            "Use when user says 'watch my WhatsApp', 'notify me when price "
-            "drops', 'monitor this page', 'alert me for new emails'."
+            "Sites get auto-generated JS extractors. "
+            "Use when user says 'notify me when price "
+            "drops', 'monitor this page'. "
+            "Do NOT use for WhatsApp, Instagram, or Email — those have MCP tools."
         )
 
     @property
@@ -39,8 +39,7 @@ class WatchSiteSkill(BaseSkill):
                 "url": {
                     "type": "string",
                     "description": (
-                        "URL to watch. Use 'whatsapp' as shortcut for "
-                        "https://web.whatsapp.com"
+                        "URL to watch. NOT for WhatsApp/Instagram/Email (use MCP tools)"
                     ),
                 },
                 "what_to_watch": {
@@ -85,9 +84,11 @@ class WatchSiteSkill(BaseSkill):
 
         # Shortcuts
         if url.lower() in ("whatsapp", "wa"):
-            url = "https://web.whatsapp.com"
+            return "Error: Use whatsapp_* MCP tools for WhatsApp, not browser watcher. Call search_tools('whatsapp') to find them."
         elif url.lower() in ("gmail", "email", "mail"):
-            url = "https://mail.google.com"
+            return "Error: Use email_* MCP tools for Email, not browser watcher. Call search_tools('email') to find them."
+        elif url.lower() in ("instagram", "ig"):
+            return "Error: Use instagram_* MCP tools for Instagram, not browser watcher. Call search_tools('instagram') to find them."
 
         # Calculate expiration
         expires_at = None

@@ -80,6 +80,12 @@ class HeartbeatDaemon:
                 logger.exception(
                     "Failed checking watchers for user %s", user_id
                 )
+            try:
+                await self._check_mcp_watchers(user_id)
+            except Exception:
+                logger.exception(
+                    "Failed checking MCP watchers for user %s", user_id
+                )
 
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
@@ -365,6 +371,102 @@ class HeartbeatDaemon:
                     )
         finally:
             await self._cleanup_background_cdp(backend, temp_dir)
+
+    async def _check_mcp_watchers(self, user_id: str) -> None:
+        """Check all MCP-based watchers (WhatsApp, Email, etc.). Zero LLM calls."""
+        import json
+
+        from lazyclaw.heartbeat.mcp_watcher import (
+            check_mcp_watcher,
+            is_mcp_check_due,
+            is_mcp_watcher,
+            is_mcp_watcher_expired,
+        )
+        from lazyclaw.heartbeat.orchestrator import delete_job, update_job
+
+        key = derive_server_key(self._config.server_secret, user_id)
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute(
+                "SELECT id, name, instruction, context "
+                "FROM agent_jobs "
+                "WHERE user_id = ? AND status = 'active' AND job_type = 'watcher'",
+                (user_id,),
+            )
+            watchers = await cursor.fetchall()
+
+        if not watchers:
+            return
+
+        # Get active MCP clients
+        from lazyclaw.mcp.manager import _active_clients
+
+        for row in watchers:
+            job_id, enc_name, enc_instruction, enc_context = row
+            try:
+                job_name = (
+                    decrypt(enc_name, key)
+                    if enc_name and is_encrypted(enc_name)
+                    else enc_name or "unnamed"
+                )
+                raw_ctx = (
+                    decrypt(enc_context, key)
+                    if enc_context and is_encrypted(enc_context)
+                    else enc_context or "{}"
+                )
+                ctx = json.loads(raw_ctx)
+
+                # Only handle MCP watchers here (browser watchers handled by _check_watchers)
+                if not is_mcp_watcher(ctx):
+                    continue
+
+                if is_mcp_watcher_expired(ctx):
+                    logger.info("MCP watcher '%s' expired, removing", job_name)
+                    await delete_job(self._config, user_id, job_id)
+                    if self._telegram_push:
+                        await self._telegram_push(f"MCP watcher '{job_name}' expired and stopped.")
+                    continue
+
+                if not is_mcp_check_due(ctx):
+                    continue
+
+                # Run the MCP check
+                changed, notification, new_ctx = await check_mcp_watcher(
+                    ctx, _active_clients,
+                )
+
+                # Save updated context
+                await update_job(
+                    self._config, user_id, job_id,
+                    context=json.dumps(new_ctx),
+                )
+
+                if changed and notification:
+                    logger.info("MCP watcher '%s' detected change", job_name)
+
+                    # Push to Telegram
+                    if self._telegram_push:
+                        try:
+                            await self._telegram_push(f"\U0001f514 {notification}")
+                        except Exception as exc:
+                            logger.warning("Telegram push failed: %s", exc)
+
+                    # Auto-reply: enqueue to agent if instruction provided
+                    auto_reply = ctx.get("auto_reply")
+                    if auto_reply and self._lane_queue:
+                        await self._lane_queue.enqueue(
+                            user_id,
+                            f"[MCP_WATCHER] New messages detected. Instruction: {auto_reply}\n\nContext:\n{notification}",
+                        )
+
+                    if new_ctx.get("one_shot"):
+                        await delete_job(self._config, user_id, job_id)
+                        logger.info("One-shot MCP watcher '%s' auto-deleted", job_name)
+
+            except Exception:
+                logger.exception(
+                    "Error checking MCP watcher %s for user %s", job_id, user_id,
+                )
 
     async def _ensure_persistent_browser(self) -> None:
         """Manage browser lifecycle based on persistence mode.

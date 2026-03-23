@@ -10,6 +10,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import time
 
 import telegram.error
@@ -63,6 +64,19 @@ _STATUS_DELAY_S = 2.0
 
 # Typing indicator interval
 _TYPING_INTERVAL_S = 4.0
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove common markdown formatting for plain-text Telegram messages."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
+    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+    return text
 
 
 class _TelegramCallback:
@@ -424,10 +438,31 @@ class _TelegramCallback:
 
         elif kind == "background_done":
             task_name = event.metadata.get("name", "")
-            result = event.metadata.get("result", "")
+            result = _strip_markdown(event.metadata.get("result", ""))
             if len(result) > 3000:
                 result = result[:3000] + "\n\n[truncated]"
-            text = f"\u2705 Background task '{task_name}' done\n\n{result}"
+
+            # Stats line
+            stats_parts: list[str] = []
+            _dur = event.metadata.get("duration_ms")
+            if _dur is not None:
+                _s = _dur / 1000
+                stats_parts.append(f"{_s:.0f}s" if _s < 60 else f"{_s / 60:.1f}m")
+            _tok = event.metadata.get("total_tokens")
+            if _tok:
+                stats_parts.append(f"{_tok:,} tokens")
+            _calls = event.metadata.get("llm_calls")
+            if _calls:
+                stats_parts.append(f"{_calls} LLM calls")
+            _cost = event.metadata.get("total_cost")
+            if _cost and _cost > 0:
+                stats_parts.append(f"${_cost:.4f}")
+            _tools = event.metadata.get("tools_used")
+            if _tools:
+                stats_parts.append(f"tools: {', '.join(_tools)}")
+            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
+
+            text = f"\u2705 Background task '{task_name}' done{stats_line}\n\n{result}"
             try:
                 await _telegram_send_with_retry(
                     lambda: self._bot.send_message(
@@ -714,6 +749,7 @@ class TelegramAdapter(ChannelAdapter):
             await callback._stop_typing()
             await callback._delete_status()
 
+            response = _strip_markdown(response)
             footer = callback._build_footer()
             full_response = f"{response}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
 

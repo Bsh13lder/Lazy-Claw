@@ -11,9 +11,30 @@ Skips all noisy intermediate events (tool_call, token, etc.).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove common markdown formatting for plain-text Telegram messages."""
+    # Bold: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    # Italic: *text* or _text_
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    # Strikethrough: ~~text~~
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    # Inline code: `text`
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    # Headers: ### text → text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Links: [text](url) → text (url)
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
+    # Bullet points: - text → • text
+    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+    return text
 
 
 class TelegramNotifier:
@@ -100,30 +121,74 @@ class TelegramNotifier:
             return None
 
         if kind == "done":
-            msg = "\u2705 Task complete"
             summary = self._work_summary
-            if summary is not None:
-                elapsed = getattr(summary, "elapsed_s", None)
-                llm_calls = getattr(summary, "llm_calls", None)
-                if elapsed is not None and llm_calls is not None:
-                    msg += f" \u2014 {elapsed:.0f}s, {llm_calls} LLM calls"
             self._work_summary = None
-            return msg
+
+            stats_parts: list[str] = []
+            result_preview = ""
+            if summary is not None:
+                dur = getattr(summary, "duration_ms", None)
+                if dur is not None:
+                    secs = dur / 1000
+                    stats_parts.append(f"{secs:.0f}s" if secs < 60 else f"{secs / 60:.1f}m")
+                calls = getattr(summary, "llm_calls", None)
+                if calls:
+                    stats_parts.append(f"{calls} LLM calls")
+                tokens = getattr(summary, "total_tokens", None)
+                if tokens:
+                    stats_parts.append(f"{tokens:,} tokens")
+                cost = getattr(summary, "total_cost", None)
+                if cost and cost > 0:
+                    stats_parts.append(f"${cost:.4f}")
+                tools = getattr(summary, "tools_used", None)
+                if tools:
+                    stats_parts.append(f"tools: {', '.join(tools)}")
+                preview = getattr(summary, "result_preview", None)
+                if preview:
+                    result_preview = f"\n\n{_strip_markdown(preview)}"
+
+            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
+            return f"\u2705 Task complete{stats_line}{result_preview}"
 
         if kind == "background_done":
             name = event.metadata.get("name", "")
-            result = event.metadata.get("result", "")
+            result = _strip_markdown(event.metadata.get("result", ""))
             preview = result[:500]
             if len(result) > 500:
                 preview += "\n\n[truncated]"
-            return f"\u2705 Background '{name}' done\n\n{preview}"
+
+            # Stats line from work_summary (if available)
+            stats_parts: list[str] = []
+            duration_ms = event.metadata.get("duration_ms")
+            if duration_ms is not None:
+                secs = duration_ms / 1000
+                stats_parts.append(f"{secs:.0f}s" if secs < 60 else f"{secs / 60:.1f}m")
+            tokens = event.metadata.get("total_tokens")
+            if tokens:
+                stats_parts.append(f"{tokens:,} tokens")
+            llm_calls = event.metadata.get("llm_calls")
+            if llm_calls:
+                stats_parts.append(f"{llm_calls} LLM calls")
+            cost = event.metadata.get("total_cost")
+            if cost and cost > 0:
+                stats_parts.append(f"${cost:.4f}")
+            models = event.metadata.get("models_used")
+            if models:
+                stats_parts.append(", ".join(models))
+            tools = event.metadata.get("tools_used")
+            if tools:
+                stats_parts.append(f"tools: {', '.join(tools)}")
+
+            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
+            return f"\u2705 Background '{name}' done{stats_line}\n\n{preview}"
 
         if kind == "background_failed":
             name = event.metadata.get("name", "")
-            error = event.metadata.get("error", "")[:200]
+            error = _strip_markdown(event.metadata.get("error", ""))[:200]
             return f"\u274c Background '{name}' failed: {error}"
 
         if kind == "help_needed":
-            return f"\U0001f198 Agent stuck: {event.detail}\n\nReply in CLI/TUI to help."
+            detail = _strip_markdown(event.detail or "")
+            return f"\U0001f198 Agent stuck: {detail}\n\nReply in CLI/TUI to help."
 
         return None

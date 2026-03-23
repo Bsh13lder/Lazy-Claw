@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from rich.console import Console
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from lazyclaw.config import Config
@@ -553,6 +553,160 @@ async def clear_history(config: Config, user_id: str) -> None:
         await db.commit()
 
     console.print(f"[green]Cleared {deleted} messages.[/green]")
+
+
+async def nuke_account(config: Config, user_id: str) -> None:
+    """Selective account data wipe with confirmation checklist."""
+    from lazyclaw.db.connection import db_session
+
+    categories = [
+        ("1", "Conversations", [
+            ("agent_messages", "user_id"),
+            ("agent_chat_sessions", "user_id"),
+            ("message_summaries", "user_id"),
+        ]),
+        ("2", "Memories", [
+            ("personal_memory", "user_id"),
+            ("site_memory", "user_id"),
+        ]),
+        ("3", "Daily summaries", [
+            ("daily_logs", "user_id"),
+        ]),
+        ("4", "Vault (passwords & API keys)", [
+            ("credential_vault", "user_id"),
+        ]),
+        ("5", "Custom skills", [
+            ("skills", "user_id"),
+        ]),
+        ("6", "Browser history", [
+            ("browser_task_logs", "_browser_task_join"),
+            ("browser_tasks", "user_id"),
+        ]),
+        ("7", "Background tasks", [
+            ("background_tasks", "user_id"),
+        ]),
+        ("8", "Jobs & queue", [
+            ("agent_jobs", "user_id"),
+            ("job_queue", "user_id"),
+        ]),
+        ("9", "Traces & replays", [
+            ("agent_traces", "user_id"),
+            ("trace_shares", "user_id"),
+        ]),
+        ("10", "Team messages & custom specialists", [
+            ("agent_team_messages", "user_id"),
+            ("specialists", "_specialists_custom"),
+        ]),
+        ("11", "Approvals & audit log", [
+            ("approval_requests", "user_id"),
+            ("audit_log", "user_id"),
+        ]),
+        ("12", "MCP connections", [
+            ("mcp_connections", "user_id"),
+        ]),
+    ]
+
+    console.print("\n[bold red]Account Data Wipe[/bold red]\n")
+    console.print("Select what to delete:\n")
+    for num, label, _tables in categories:
+        console.print(f"  [cyan]{num:>2}[/cyan] — {label}")
+    console.print(f"  [cyan] A[/cyan] — [bold]Everything above[/bold]")
+    console.print()
+
+    choice = Prompt.ask("Enter numbers (e.g. 1,4,7) or A for all", default="")
+    if not choice:
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    selected = {s.strip().upper() for s in choice.split(",")}
+    all_nums = {cat[0] for cat in categories}
+    if "A" in selected:
+        selected = all_nums
+
+    invalid = selected - all_nums
+    if invalid:
+        console.print(f"[yellow]Unknown selection: {', '.join(invalid)}[/yellow]")
+        return
+
+    chosen = [cat for cat in categories if cat[0] in selected]
+    if not chosen:
+        console.print("[dim]Nothing selected.[/dim]")
+        return
+
+    # Single transaction: count, confirm, delete
+    async with db_session(config) as db:
+        # Show what will be deleted with row counts
+        console.print("\n[bold]Will delete:[/bold]")
+        for _num, label, tables in chosen:
+            total = 0
+            for table, col in tables:
+                try:
+                    if col == "_browser_task_join":
+                        row = await db.execute(
+                            "SELECT COUNT(*) FROM browser_task_logs "
+                            "WHERE task_id IN ("
+                            "SELECT id FROM browser_tasks WHERE user_id = ?)",
+                            (user_id,),
+                        )
+                    elif col == "_specialists_custom":
+                        row = await db.execute(
+                            "SELECT COUNT(*) FROM specialists "
+                            "WHERE user_id = ? AND is_builtin = 0",
+                            (user_id,),
+                        )
+                    else:
+                        row = await db.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE {col} = ?",
+                            (user_id,),
+                        )
+                    count = (await row.fetchone())[0]
+                    total += count
+                except Exception:
+                    console.print(f"  [yellow]{table}: not found — skipping[/yellow]")
+            console.print(f"  [red]{label}[/red]: {total} records")
+
+        # Vault warning
+        if any(cat[0] == "4" for cat in chosen):
+            console.print(
+                "\n[bold yellow]Warning:[/bold yellow] This will delete all stored "
+                "passwords and API keys. You'll need to re-enter them."
+            )
+
+        console.print()
+        confirm = Prompt.ask("Type 'DELETE' to confirm", default="")
+        if confirm != "DELETE":
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+        # Execute all deletions
+        deleted_total = 0
+        for _num, _label, tables in chosen:
+            for table, col in tables:
+                try:
+                    if col == "_browser_task_join":
+                        result = await db.execute(
+                            "DELETE FROM browser_task_logs "
+                            "WHERE task_id IN ("
+                            "SELECT id FROM browser_tasks WHERE user_id = ?)",
+                            (user_id,),
+                        )
+                    elif col == "_specialists_custom":
+                        result = await db.execute(
+                            "DELETE FROM specialists "
+                            "WHERE user_id = ? AND is_builtin = 0",
+                            (user_id,),
+                        )
+                    else:
+                        result = await db.execute(
+                            f"DELETE FROM {table} WHERE {col} = ?",
+                            (user_id,),
+                        )
+                    deleted_total += result.rowcount
+                except Exception:
+                    pass  # Already warned during count phase
+        await db.commit()
+
+    console.print(f"\n[green]Deleted {deleted_total} records.[/green]")
 
 
 # ---------------------------------------------------------------------------

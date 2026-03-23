@@ -28,6 +28,7 @@ from lazyclaw.cli_server import _ActiveRequest
 from lazyclaw.config import Config
 from lazyclaw.llm.pricing import calculate_cost
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.team_lead import TeamLead
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ def _phase_icon(phase: str) -> tuple[str, str]:
         "queued": ("○", _C_IDLE),
         "done": ("✓", _C_SUCCESS),
         "error": ("✗", _C_ERROR),
+        "stuck": ("⚠", _C_ERROR),
     }.get(phase, ("○", _C_IDLE))
 
 
@@ -329,6 +331,15 @@ class TuiDashboard:
             self._app.post_message(RequestUpdated(chat_id, self._snapshot(req)))
             self.unregister_request(chat_id)
             return  # already posted snapshot + removed
+
+        elif kind == "help_needed":
+            req.phase = "stuck"
+            reason = event.metadata.get("reason", "unknown")
+            tool = event.metadata.get("tool", "?")
+            self._app.post_message(LogAppended(
+                _now(), "error",
+                f"STUCK: {reason} on {tool} — {event.detail[:60]}",
+            ))
 
         elif kind == "work_summary":
             summary = event.metadata.get("summary")
@@ -726,6 +737,53 @@ class CostBar(Static):
         self.update(Text.from_markup("  │  ".join(parts[:2]) + "\n" + parts[-1] if len(parts) > 1 else "\n".join(parts)))
 
 
+class TeamLeadBar(Static):
+    """Live TeamLead status — shows running + recent tasks."""
+
+    def render_status(self, team_lead: TeamLead | None) -> None:
+        if team_lead is None:
+            self.update(Text.from_markup(f"[{_C_IDLE}]TeamLead: offline[/{_C_IDLE}]"))
+            return
+        active_tasks = team_lead.active_tasks
+        recent_tasks = team_lead.recent_tasks[:3]
+        if not active_tasks and not recent_tasks:
+            self.update(Text.from_markup(f"[{_C_IDLE}]All clear \u2014 no tasks[/{_C_IDLE}]"))
+            return
+
+        parts: list[str] = []
+
+        # Active tasks
+        now = time.monotonic()
+        for t in active_tasks:
+            elapsed = now - t.started_at
+            icon = "\U0001f310" if "browser" in t.name.lower() else ("\u26a1" if t.lane == "background" else "\u25cf")
+            step = f" step {t.step_count}: {t.current_step}" if t.current_step else ""
+            color = _C_ACTIVE
+            if elapsed > 60:
+                color = _C_THINKING
+            if elapsed > 120:
+                color = _C_ERROR
+            parts.append(
+                f"[{color}]{icon} {t.description[:40]} ({t.lane}, {elapsed:.0f}s){step}[/{color}]"
+            )
+
+        # Recent (last 3 for compact bar)
+        for t in recent_tasks:
+            ago = now - (t.completed_at or now)
+            icon = {
+                "done": "\u2713", "failed": "\u2717", "cancelled": "\u2014",
+            }.get(t.status, "?")
+            color = _C_SUCCESS if t.status == "done" else _C_ERROR
+            preview = t.result_preview[:30] or t.error[:30] or ""
+            if preview:
+                preview = f" \u2014 {preview}"
+            parts.append(
+                f"[{color}]{icon} {t.description[:30]} ({ago:.0f}s ago){preview}[/{color}]"
+            )
+
+        self.update(Text.from_markup("\n".join(parts)))
+
+
 class AIRoutingBar(Static):
     """AI routing panel showing per-model stats with local/paid breakdown."""
 
@@ -785,7 +843,7 @@ class LazyClawApp(App):
         layout: grid;
         grid-size: 2;
         grid-columns: 1fr 1fr;
-        grid-rows: 3 1fr auto 1fr 3;
+        grid-rows: 3 1fr auto auto 1fr 3;
     }
 
     #system-bar {
@@ -801,6 +859,15 @@ class LazyClawApp(App):
         column-span: 2;
         height: 100%;
         border: solid $accent;
+    }
+
+    #team-lead-bar {
+        column-span: 2;
+        height: auto;
+        max-height: 6;
+        padding: 0 1;
+        background: $surface;
+        border: solid #14B8A6;
     }
 
     #jobs-bar {
@@ -868,6 +935,7 @@ class LazyClawApp(App):
         telegram_token: str | None = None,
         permission_checker=None,
         default_user_id: str = "",
+        team_lead: TeamLead | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -879,6 +947,7 @@ class LazyClawApp(App):
         self._telegram_token = telegram_token
         self._permission_checker = permission_checker
         self._user_id = default_user_id
+        self._team_lead = team_lead
         self.dashboard = TuiDashboard(self)
         self._eco_budget: float = 5.0
         self._telegram_connected: bool = False
@@ -889,6 +958,7 @@ class LazyClawApp(App):
         yield Header()
         yield SystemBar(" Starting...", id="system-bar")
         yield ActivityPanel(id="activity-panel")
+        yield TeamLeadBar("  All clear", id="team-lead-bar")
         yield JobsBar("  Loading jobs...", id="jobs-bar")
         yield LogPanel(id="log-panel", highlight=True, markup=True)
         yield CostBar("", id="cost-bar")
@@ -1216,6 +1286,13 @@ class LazyClawApp(App):
             except Exception:
                 pass
 
+            # Update TeamLead bar (live task tracker)
+            try:
+                tl_bar = self.query_one("#team-lead-bar", TeamLeadBar)
+                tl_bar.render_status(self._team_lead)
+            except Exception:
+                pass
+
         except Exception:
             pass
 
@@ -1508,6 +1585,7 @@ def _log_style(kind: str) -> str:
         "admin": _C_HEADER,
         "reply": _C_SUCCESS,
         "error": _C_ERROR,
+        "stuck": f"bold {_C_ERROR}",
     }.get(kind, "dim")
 
 
@@ -1525,4 +1603,5 @@ def _log_icon(kind: str) -> str:
         "admin": ">>",
         "reply": "←",
         "error": "✗",
+        "stuck": "⚠",
     }.get(kind, "  ")

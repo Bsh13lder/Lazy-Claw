@@ -14,6 +14,8 @@ import time
 from typing import TYPE_CHECKING, Callable
 from uuid import uuid4
 
+from lazyclaw.runtime.team_lead import TeamLead
+
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
@@ -27,9 +29,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Concurrency limits
-MAX_GLOBAL_TASKS = 5
-MAX_PER_USER_TASKS = 2
+# Concurrency limits — agents are async coroutines (~50KB each), not processes
+MAX_GLOBAL_TASKS = 10
+MAX_PER_USER_TASKS = 10
 DEFAULT_TIMEOUT = 300  # 5 minutes
 
 
@@ -51,6 +53,7 @@ class TaskRunner:
         eco_router: EcoRouter,
         permission_checker=None,
         default_callback: AgentCallback | None = None,
+        team_lead: TeamLead | None = None,
     ) -> None:
         self._config = config
         self._router = router
@@ -58,6 +61,7 @@ class TaskRunner:
         self._eco_router = eco_router
         self._permission_checker = permission_checker
         self._default_callback = default_callback
+        self._team_lead = team_lead
 
         # In-memory tracking (cleaned up on completion)
         self._running: dict[str, asyncio.Task] = {}
@@ -117,6 +121,10 @@ class TaskRunner:
         self._task_names[task_id] = task_name
         self._task_starts[task_id] = time.monotonic()
 
+        # Register with TeamLead for instant status
+        if self._team_lead:
+            self._team_lead.register(task_id, task_name, instruction[:80], "background")
+
         logger.info(
             "Background task %s (%s) started for user %s",
             task_id[:8], task_name, user_id,
@@ -134,12 +142,31 @@ class TaskRunner:
     ) -> None:
         """Run agent in background with its own context."""
         from lazyclaw.runtime.agent import Agent
+        from lazyclaw.runtime.events import WorkSummary
 
         # Fall back to default notifier so background tasks ALWAYS notify
         callback = callback or self._default_callback
         key = derive_server_key(self._config.server_secret, user_id)
         task_name = self._task_names.get(task_id, task_id[:8])
         _status = "done"
+
+        # Wrapper callback to capture work_summary from agent
+        _captured_summary: WorkSummary | None = None
+        _original_cb = callback
+
+        class _SummaryCapture:
+            """Transparent wrapper that captures the work_summary event."""
+
+            def __getattr__(self, name):
+                return getattr(_original_cb, name)
+
+            async def on_event(self, event: AgentEvent) -> None:
+                nonlocal _captured_summary
+                if event.kind == "work_summary":
+                    _captured_summary = event.metadata.get("summary")
+                await _original_cb.on_event(event)
+
+        callback = _SummaryCapture()
 
         try:
             # Create FRESH Agent instance (isolated state, no race conditions)
@@ -169,16 +196,31 @@ class TaskRunner:
 
             logger.info("Background task %s (%s) completed", task_id[:8], task_name)
 
+            if self._team_lead:
+                self._team_lead.complete(task_id, result[:100])
+
+            # Build rich notification with stats from work_summary
+            meta: dict = {"task_id": task_id, "name": task_name, "result": result}
+            if _captured_summary is not None:
+                meta["duration_ms"] = _captured_summary.duration_ms
+                meta["total_tokens"] = _captured_summary.total_tokens
+                meta["llm_calls"] = _captured_summary.llm_calls
+                meta["tools_used"] = list(_captured_summary.tools_used)
+                meta["total_cost"] = _captured_summary.total_cost
+                meta["models_used"] = [m[0] for m in _captured_summary.models_used]
+
             # Notify user
-            if callback:
-                await callback.on_event(AgentEvent(
+            if _original_cb:
+                await _original_cb.on_event(AgentEvent(
                     "background_done",
                     f"Background task '{task_name}' completed",
-                    {"task_id": task_id, "name": task_name, "result": result},
+                    meta,
                 ))
 
         except asyncio.TimeoutError:
             _status = "failed"
+            if self._team_lead:
+                self._team_lead.fail(task_id, f"Timed out after {timeout}s")
             logger.warning(
                 "Background task %s (%s) timed out after %ds",
                 task_id[:8], task_name, timeout,
@@ -201,6 +243,8 @@ class TaskRunner:
 
         except asyncio.CancelledError:
             _status = "cancelled"
+            if self._team_lead:
+                self._team_lead.cancel(task_id)
             logger.info("Background task %s (%s) cancelled", task_id[:8], task_name)
             async with db_session(self._config) as db:
                 await db.execute(
@@ -212,6 +256,8 @@ class TaskRunner:
 
         except Exception as exc:
             _status = "failed"
+            if self._team_lead:
+                self._team_lead.fail(task_id, str(exc)[:200])
             logger.error(
                 "Background task %s (%s) failed: %s",
                 task_id[:8], task_name, exc,

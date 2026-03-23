@@ -61,6 +61,29 @@ class AnthropicProvider(BaseLLMProvider):
 
         return result
 
+    @staticmethod
+    def _with_cache(system_parts: list[str], tools: list[dict] | None) -> tuple:
+        """Add cache_control breakpoints to system prompt and tools.
+
+        Anthropic prompt caching: static content (system + tools) is cached
+        across iterations in the agentic loop. First call pays 25% write
+        surcharge, subsequent calls get 90% discount on cached tokens.
+        """
+        # System: list of text blocks, cache_control on the last one
+        system = None
+        if system_parts:
+            blocks = [{"type": "text", "text": part} for part in system_parts]
+            blocks[-1]["cache_control"] = {"type": "ephemeral"}
+            system = blocks
+
+        # Tools: cache_control on the last tool definition
+        cached_tools = None
+        if tools:
+            cached_tools = list(tools)  # shallow copy
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+        return system, cached_tools
+
     async def chat(self, messages: list[LLMMessage], model: str, **kwargs) -> LLMResponse:
         system_parts = [m.content for m in messages if m.role == "system"]
 
@@ -76,10 +99,14 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": kwargs.pop("max_tokens", 4096),
             **kwargs,
         }
-        if system_parts:
-            create_kwargs["system"] = "\n\n".join(system_parts)
-        if tools:
-            create_kwargs["tools"] = self._convert_tools(tools)
+
+        # Apply prompt caching to system + tools
+        converted_tools = self._convert_tools(tools) if tools else None
+        cached_system, cached_tools = self._with_cache(system_parts, converted_tools)
+        if cached_system:
+            create_kwargs["system"] = cached_system
+        if cached_tools:
+            create_kwargs["tools"] = cached_tools
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
@@ -99,13 +126,16 @@ class AnthropicProvider(BaseLLMProvider):
         if response.usage:
             input_t = response.usage.input_tokens
             output_t = response.usage.output_tokens
+            cache_created = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
             usage = {
                 "prompt_tokens": input_t,
                 "completion_tokens": output_t,
                 "total_tokens": input_t + output_t,
-                # Keep Anthropic names too for backward compat
                 "input_tokens": input_t,
                 "output_tokens": output_t,
+                "cache_creation_input_tokens": cache_created,
+                "cache_read_input_tokens": cache_read,
             }
 
         return LLMResponse(
@@ -132,10 +162,14 @@ class AnthropicProvider(BaseLLMProvider):
             "max_tokens": kwargs.pop("max_tokens", 4096),
             **kwargs,
         }
-        if system_parts:
-            create_kwargs["system"] = "\n\n".join(system_parts)
-        if tools:
-            create_kwargs["tools"] = self._convert_tools(tools)
+
+        # Apply prompt caching to system + tools
+        converted_tools = self._convert_tools(tools) if tools else None
+        cached_system, cached_tools = self._with_cache(system_parts, converted_tools)
+        if cached_system:
+            create_kwargs["system"] = cached_system
+        if cached_tools:
+            create_kwargs["tools"] = cached_tools
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
@@ -143,9 +177,21 @@ class AnthropicProvider(BaseLLMProvider):
             collected_text = ""
             collected_tool_calls: list[ToolCall] = []
             current_tool: dict | None = None
+            # Track input usage from message_start (has cache stats)
+            _input_usage: dict = {}
 
             async for event in stream:
-                if event.type == "content_block_start":
+                if event.type == "message_start":
+                    # Capture input tokens + cache stats (only in message_start)
+                    msg_usage = getattr(event.message, "usage", None)
+                    if msg_usage:
+                        _input_usage = {
+                            "input_tokens": getattr(msg_usage, "input_tokens", 0),
+                            "cache_creation_input_tokens": getattr(msg_usage, "cache_creation_input_tokens", 0) or 0,
+                            "cache_read_input_tokens": getattr(msg_usage, "cache_read_input_tokens", 0) or 0,
+                        }
+
+                elif event.type == "content_block_start":
                     block = event.content_block
                     if block.type == "tool_use":
                         current_tool = {
@@ -185,7 +231,8 @@ class AnthropicProvider(BaseLLMProvider):
                 elif event.type == "message_delta":
                     usage = None
                     if hasattr(event, "usage") and event.usage:
-                        input_t = getattr(event.usage, "input_tokens", 0)
+                        # message_delta has output_tokens; input comes from message_start
+                        input_t = _input_usage.get("input_tokens", 0)
                         output_t = getattr(event.usage, "output_tokens", 0)
                         usage = {
                             "prompt_tokens": input_t,
@@ -193,6 +240,8 @@ class AnthropicProvider(BaseLLMProvider):
                             "total_tokens": input_t + output_t,
                             "input_tokens": input_t,
                             "output_tokens": output_t,
+                            "cache_creation_input_tokens": _input_usage.get("cache_creation_input_tokens", 0),
+                            "cache_read_input_tokens": _input_usage.get("cache_read_input_tokens", 0),
                         }
                     yield StreamChunk(
                         delta="",

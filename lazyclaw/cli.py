@@ -70,6 +70,7 @@ HELP_TEXT = """\
 [bold]Session:[/bold]
   /clear       Start fresh chat session
   /wipe        Clear all conversation history
+  /nuke        Selective account data wipe (with confirmation)
   /help        Show this help
   /exit        Quit (also /quit, /q)"""
 
@@ -170,7 +171,12 @@ async def run_agent(config: Config) -> None:
         pass
 
     permission_checker = PermissionChecker(config, registry)
-    agent = Agent(config, router, registry, permission_checker=permission_checker)
+
+    # TeamLead — persistent session coordinator (shared singleton)
+    from lazyclaw.runtime.team_lead import TeamLead
+    team_lead = TeamLead()
+
+    agent = Agent(config, router, registry, permission_checker=permission_checker, team_lead=team_lead)
 
     # Share registry with gateway
     from lazyclaw.gateway.app import set_registry
@@ -191,6 +197,7 @@ async def run_agent(config: Config) -> None:
         config=config, router=router, registry=registry,
         eco_router=agent.eco_router,
         permission_checker=permission_checker,
+        team_lead=team_lead,
     )
     agent._task_runner = task_runner  # Enable fast dispatch
 
@@ -220,6 +227,7 @@ async def run_agent(config: Config) -> None:
         telegram_token=config.telegram_bot_token,
         permission_checker=permission_checker,
         default_user_id=user_id,
+        team_lead=team_lead,
     )
 
     try:
@@ -264,6 +272,7 @@ async def _handle_slash_command(
     from lazyclaw.cli_admin import (
         clear_history,
         mcp_command,
+        nuke_account,
         run_doctor,
         set_critic_mode,
         set_eco_mode,
@@ -305,6 +314,7 @@ async def _handle_slash_command(
         "/update": lambda: _run_update(),
         "/version": lambda: _show_version(),
         "/wipe": lambda: clear_history(config, user_id),
+        "/nuke": lambda: nuke_account(config, user_id),
         "/history": lambda: _show_chat_history(config, user_id),
         "/connect-browser": lambda: _connect_browser(config),
         "/connectbrowser": lambda: _connect_browser(config),
@@ -879,13 +889,19 @@ async def _chat_loop() -> None:
         pass
 
     checker = PermissionChecker(config, registry)
-    agent = Agent(config, router, registry, permission_checker=checker)
+
+    # TeamLead — persistent session coordinator (shared singleton)
+    from lazyclaw.runtime.team_lead import TeamLead
+    team_lead = TeamLead()
+
+    agent = Agent(config, router, registry, permission_checker=checker, team_lead=team_lead)
 
     # Wire task runner for fast dispatch
     from lazyclaw.runtime.task_runner import TaskRunner
     task_runner = TaskRunner(
         config=config, router=router, registry=registry,
         eco_router=agent.eco_router, permission_checker=checker,
+        team_lead=team_lead,
     )
     agent._task_runner = task_runner
 
@@ -930,6 +946,7 @@ async def _chat_loop() -> None:
         user_id=user_id,
         console=console,
         pt_session=pt_session,
+        team_lead=team_lead,
         session_usage=_session_usage,
     )
 

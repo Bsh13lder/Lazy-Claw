@@ -16,9 +16,10 @@ from lazyclaw.db.connection import db_session
 
 from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallback
 from lazyclaw.runtime.events import (
-    SpecialistState, FAST_DISPATCH, INSTANT_COMMAND,
+    FAST_DISPATCH, INSTANT_COMMAND,
     HELP_NEEDED, HELP_RESPONSE,
 )
+from lazyclaw.runtime.team_lead import TeamLead
 from lazyclaw.runtime.stuck_detector import detect_stuck
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
@@ -56,7 +57,11 @@ _CHAT_ONLY_PATTERN = re.compile(
 # Base tools always sent (tiny — ~400 tokens total)
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "recall_memories", "save_memory", "delegate",
+    "connect_mcp_server", "disconnect_mcp_server", "browser",
 })
+
+# Max chars for a tool result before truncation (prevents MCP JSON blowup)
+_MAX_TOOL_RESULT_CHARS = 4000
 
 
 def _extract_tool_names_from_search_result(result: str) -> list[str]:
@@ -179,6 +184,20 @@ def _prune_old_tool_results(
     return result
 
 
+def _cap_tool_result(result: str) -> str:
+    """Truncate oversized tool results to save tokens.
+
+    MCP tools can return huge JSON arrays (50+ contacts, full page snapshots).
+    Cap at ~4K chars — enough for the LLM to understand, not enough to blow up context.
+    """
+    if not result or len(result) <= _MAX_TOOL_RESULT_CHARS:
+        return result
+    # Keep first part + tail hint
+    truncated = result[:_MAX_TOOL_RESULT_CHARS]
+    remaining = len(result) - _MAX_TOOL_RESULT_CHARS
+    return f"{truncated}\n... [truncated {remaining} chars]"
+
+
 def _strip_tool_messages(history: list[LLMMessage]) -> list[LLMMessage]:
     """Remove tool-related messages from history for tool-free conversations.
 
@@ -237,56 +256,24 @@ HEAVY_TOOLS: frozenset[str] = frozenset({
 })
 
 
-class TeamLeadState:
-    """Tracks running specialists for this agent instance."""
-
-    def __init__(self) -> None:
-        self.active: dict[str, SpecialistState] = {}
-
-    def add(self, state: SpecialistState) -> None:
-        self.active[state.task_id] = state
-
-    def remove(self, task_id: str) -> SpecialistState | None:
-        return self.active.pop(task_id, None)
-
-    def format_status(self) -> str:
-        if not self.active:
-            return "No specialists running."
-        lines = [f"{len(self.active)} specialist(s) running:"]
-        for s in self.active.values():
-            elapsed = time.monotonic() - s.started_at
-            line = f"  [{s.specialist}] \"{s.task_description[:50]}\" ({elapsed:.0f}s)"
-            if s.waiting_for:
-                line += f" waiting for {s.waiting_for} tab"
-            lines.append(line)
-        return "\n".join(lines)
-
-
-_INSTANT_RE = re.compile(
-    r"^(/status|/tasks|status|what.s running|what.s happening|whats running|whats happening)$",
-    re.IGNORECASE,
-)
-_CANCEL_RE = re.compile(r"^cancel\s+(.+)$", re.IGNORECASE)
-
-
 def _handle_instant_command(
-    message: str, team_state: TeamLeadState, task_runner=None,
+    message: str, team_lead: TeamLead | None, task_runner=None,
+    user_id: str | None = None,
 ) -> str | None:
-    """Handle /status and cancel commands without LLM. Returns response or None."""
+    """Handle status and cancel commands without LLM. Returns response or None."""
+    if team_lead is None:
+        return None
     stripped = message.strip()
-    if _INSTANT_RE.match(stripped):
-        return team_state.format_status()
-    m = _CANCEL_RE.match(stripped)
-    if m:
-        target = m.group(1).lower()
-        for task_id, state in team_state.active.items():
-            if target in state.task_description.lower() or target in state.specialist.lower():
-                # Actually cancel the background task
-                if task_runner:
-                    import asyncio
-                    asyncio.ensure_future(task_runner.cancel(task_id, None))
-                team_state.remove(task_id)
-                return f"Cancelled: \"{state.task_description[:40]}\" ({state.specialist})"
+    if TeamLead.is_status_query(stripped):
+        return team_lead.format_status()
+    is_cancel, target = TeamLead.is_cancel_command(stripped)
+    if is_cancel:
+        task_id = team_lead.find_cancel_target(target)
+        if task_id:
+            if task_runner and user_id:
+                asyncio.ensure_future(task_runner.cancel(task_id, user_id))
+            team_lead.cancel(task_id)
+            return f"Cancelled task matching \"{target}\""
         return f"No running task matching \"{target}\""
     return None
 
@@ -322,6 +309,7 @@ class Agent:
         eco_router: EcoRouter | None = None,
         permission_checker=None,
         task_runner=None,
+        team_lead: TeamLead | None = None,
     ) -> None:
         self.config = config
         self.router = router
@@ -337,7 +325,7 @@ class Agent:
             else None
         )
         self._task_runner = task_runner
-        self._team_state = TeamLeadState()
+        self._team_lead = team_lead
 
     async def process_message(
         self,
@@ -353,7 +341,7 @@ class Agent:
             cb.cancel_token = cancel_token
 
         # Instant commands — no LLM call needed
-        instant = _handle_instant_command(message, self._team_state, self._task_runner)
+        instant = _handle_instant_command(message, self._team_lead, self._task_runner, user_id)
         if instant is not None:
             await cb.on_event(AgentEvent(INSTANT_COMMAND, instant, {}))
             await cb.on_event(AgentEvent("done", "Response ready", {}))
@@ -362,6 +350,54 @@ class Agent:
         key = derive_server_key(self.config.server_secret, user_id)
         _start_time = time.monotonic()
         _all_tools_used: list[str] = []
+
+        # ── Compound task splitting ──────────────────────────────────
+        # If message has multiple tasks AND we have a TaskRunner,
+        # split and dispatch each to the right lane. TeamLead stays free.
+        if (
+            self._team_lead
+            and self._task_runner
+            and not getattr(self, "is_background", False)
+            and _wants_any_tools(message)
+        ):
+            from lazyclaw.runtime.task_splitter import split_tasks, _looks_compound
+
+            if _looks_compound(message):
+                sub_tasks = await split_tasks(
+                    self.eco_router, user_id, message,
+                    worker_model=self.config.worker_model,
+                )
+                if len(sub_tasks) > 1:
+                    # Dispatch each sub-task
+                    dispatched: list[str] = []
+                    for st in sub_tasks:
+                        task_id = await self._task_runner.submit(
+                            user_id=user_id,
+                            instruction=st.instruction,
+                            name=st.name,
+                            callback=callback,
+                        )
+                        dispatched.append(f"{st.name} ({st.lane})")
+
+                    summary = ", ".join(dispatched)
+                    status_msg = (
+                        f"On it — split into {len(sub_tasks)} tasks:\n"
+                        + "\n".join(f"  • {d}" for d in dispatched)
+                    )
+
+                    await cb.on_event(AgentEvent(
+                        FAST_DISPATCH, status_msg,
+                        {"tasks": len(sub_tasks), "names": dispatched},
+                    ))
+                    await cb.on_event(AgentEvent("stream_done", "", {}))
+                    await cb.on_event(AgentEvent("done", "Dispatched", {}))
+                    return status_msg
+
+        # Register foreground task with TeamLead (skip for background agents)
+        _fg_task_id: str | None = None
+        if self._team_lead and not getattr(self, "is_background", False):
+            _fg_task_id = str(uuid4())
+            self._team_lead.register(_fg_task_id, "chat", message[:80], "foreground")
         _session_tokens = 0
 
         # Initialize trace recorder
@@ -438,6 +474,17 @@ class Agent:
                 schema for name in _BASE_TOOL_NAMES
                 if (schema := self.registry.get_tool_schema(name)) is not None
             ]
+            # Include tools from favorite connected MCPs directly
+            from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
+            for sid in _favorite_server_ids:
+                if sid in _active_clients:
+                    for tool_info in self.registry.list_mcp_tools():
+                        func = tool_info.get("function", {})
+                        tname = func.get("name", "")
+                        if sid.replace("-", "") in tname.replace("-", ""):
+                            schema = self.registry.get_tool_schema(tname)
+                            if schema is not None:
+                                tools.append(schema)
             logger.info("Meta-tool mode: %d base tools for: %s", len(tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
@@ -489,26 +536,35 @@ class Agent:
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
         _tool_call_history: list[str] = []  # Track tool names for loop detection
         _tool_results: list[str] = []  # Track results for error detection
+        _escalated = False  # True after auto-escalation to brain_model
+        _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
 
         response = None
         iteration = 0
         try:
             for iteration in range(max_iterations):
                 if cancel_token.is_cancelled:
+                    if self._team_lead and _fg_task_id:
+                        self._team_lead.cancel(_fg_task_id)
+                    if _delegate_registered and self.registry:
+                        self.registry.unregister("delegate")
                     await cb.on_event(AgentEvent("done", "Cancelled", {}))
                     return "Operation cancelled."
 
-                # Prune old tool results to save tokens (keep last 2 full)
+                # Prune old tool results to save tokens
+                # Early iterations: keep 2 full results for context
+                # Later iterations: keep only 1 (agent already has the gist)
                 if iteration > 0:
-                    messages = _prune_old_tool_results(messages, keep_last_n=2)
+                    keep_n = 1 if iteration >= 3 else 2
+                    messages = _prune_old_tool_results(messages, keep_last_n=keep_n)
 
                 kwargs: dict = {}
                 if tools:
                     kwargs["tools"] = tools
 
-                # Worker (Haiku) for all iterations — cheap and fast.
-                # Brain (Sonnet) available via Claude Code MCP for complex tasks.
-                iter_model = self.config.worker_model
+                # Worker (Haiku) by default. Brain (Sonnet) only after auto-escalation.
+                if not _escalated:
+                    iter_model = self.config.worker_model
 
                 model_name = iter_model
                 # Show actual routing model if available
@@ -621,19 +677,13 @@ class Agent:
                     from lazyclaw.runtime.agent_settings import get_agent_settings
 
                     _agent_settings = await get_agent_settings(self.config, user_id)
+                    _active_count = self._team_lead.active_count if self._team_lead else 0
                     if (
                         _agent_settings.get("auto_delegate", True)
-                        and len(self._team_state.active)
+                        and _active_count
                             < _agent_settings.get("max_concurrent_specialists", 3)
                     ):
-                        import weakref
                         _specialist_name = response.tool_calls[0].name
-                        _team_ref = weakref.ref(self._team_state)
-
-                        async def _on_done(tid: str, status: str) -> None:
-                            state = _team_ref()
-                            if state is not None:
-                                state.remove(tid)
 
                         _task_id = await self._task_runner.submit(
                             user_id=user_id,
@@ -641,16 +691,12 @@ class Agent:
                             name=f"auto_{_specialist_name}",
                             timeout=_agent_settings.get("specialist_timeout_s", 120),
                             callback=callback,
-                            on_complete=_on_done,
                         )
 
-                        self._team_state.add(SpecialistState(
-                            task_id=_task_id,
-                            specialist=_specialist_name,
-                            task_description=message[:80],
-                            status="running",
-                            started_at=time.monotonic(),
-                        ))
+                        # Foreground task was re-routed to background
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.cancel(_fg_task_id)
+                            _fg_task_id = None
 
                         await cb.on_event(AgentEvent(
                             FAST_DISPATCH,
@@ -688,12 +734,29 @@ class Agent:
                             id=tc.id, name=tc.name,
                             arguments={**tc.arguments, "_background": True},
                         )
-                    result = await self.executor.execute(tc, user_id, callback=cb)
+
+                    # Duplicate call cache — skip re-executing identical tool calls
+                    _cache_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
+                    if _cache_key in _tool_call_cache:
+                        result = _tool_call_cache[_cache_key]
+                        logger.info("Tool %s cache hit (skipped re-execution)", tc.name)
+                    else:
+                        result = await self.executor.execute(tc, user_id, callback=cb)
+
+                    # Cap oversized results before injecting into context
+                    if isinstance(result, str):
+                        result = _cap_tool_result(result)
+                    _tool_call_cache[_cache_key] = result if isinstance(result, str) else str(result)
+
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                     await cb.on_event(AgentEvent(
                         "tool_result", _display,
                         {"tool": tc.name, "display_name": _display},
                     ))
+
+                    # Track step with TeamLead
+                    if self._team_lead and _fg_task_id:
+                        self._team_lead.update_step(_fg_task_id, _display)
 
                     # Handle approval-required responses
                     if isinstance(result, str) and result.startswith(APPROVAL_PREFIX):
@@ -803,8 +866,8 @@ class Agent:
                         )
 
                         # Auto-escalate: retry with brain_model before asking user
-                        if iter_model != self.config.brain_model and not getattr(self, "_escalated", False):
-                            self._escalated = True
+                        if not _escalated:
+                            _escalated = True
                             logger.info("Auto-escalating to brain model: %s", self.config.brain_model)
                             await cb.on_event(AgentEvent(
                                 "llm_call",
@@ -894,6 +957,9 @@ class Agent:
 
             else:
                 # Safety cap reached — shouldn't happen often with nudge
+                if self._team_lead and _fg_task_id:
+                    self._team_lead.fail(_fg_task_id, "Safety cap reached")
+                    _fg_task_id = None
                 logger.warning(
                     "Safety cap reached (%d iterations). Last tool: %s",
                     max_iterations,
@@ -910,102 +976,114 @@ class Agent:
                     )
                 )
         except asyncio.CancelledError:
+            if self._team_lead and _fg_task_id:
+                self._team_lead.cancel(_fg_task_id)
             await cb.on_event(AgentEvent("done", "Cancelled", {}))
             if _delegate_registered and self.registry:
                 self.registry.unregister("delegate")
             return "Operation cancelled."
 
-        # Resolve chat session
-        if not chat_session_id:
-            async with db_session(self.config) as db:
-                row = await db.execute(
-                    "SELECT id FROM agent_chat_sessions "
-                    "WHERE user_id = ? AND archived_at IS NULL "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (user_id,),
-                )
-                existing = await row.fetchone()
-                if existing:
-                    chat_session_id = existing[0]
-                else:
-                    chat_session_id = str(uuid4())
-                    await db.execute(
-                        "INSERT INTO agent_chat_sessions (id, user_id) VALUES (?, ?)",
-                        (chat_session_id, user_id),
+        # ── Post-loop: persist + cleanup (guarded by finally) ─────────
+        content = ""
+        try:
+            # Resolve chat session
+            if not chat_session_id:
+                async with db_session(self.config) as db:
+                    row = await db.execute(
+                        "SELECT id FROM agent_chat_sessions "
+                        "WHERE user_id = ? AND archived_at IS NULL "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (user_id,),
                     )
-                    await db.commit()
+                    existing = await row.fetchone()
+                    if existing:
+                        chat_session_id = existing[0]
+                    else:
+                        chat_session_id = str(uuid4())
+                        await db.execute(
+                            "INSERT INTO agent_chat_sessions (id, user_id) VALUES (?, ?)",
+                            (chat_session_id, user_id),
+                        )
+                        await db.commit()
 
-        # Store ALL messages (user, assistant, tool calls, tool results) encrypted
-        # Batch insert for performance (~10-20ms savings over individual inserts)
-        rows = []
-        for msg in all_new_messages:
-            msg_id = str(uuid4())
-            encrypted_content = encrypt(msg.content, key)
-            tool_name = None
-            metadata = None
+            # Store ALL messages (user, assistant, tool calls, tool results) encrypted
+            rows = []
+            for msg in all_new_messages:
+                msg_id = str(uuid4())
+                encrypted_content = encrypt(msg.content, key)
+                tool_name = None
+                metadata = None
 
-            if msg.tool_calls:
-                metadata = json.dumps(
-                    [
-                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                        for tc in msg.tool_calls
-                    ]
+                if msg.tool_calls:
+                    metadata = json.dumps(
+                        [
+                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                            for tc in msg.tool_calls
+                        ]
+                    )
+                if msg.tool_call_id:
+                    tool_name = msg.tool_call_id
+
+                rows.append((msg_id, user_id, chat_session_id, msg.role, encrypted_content, tool_name, metadata))
+
+            async with db_session(self.config) as db:
+                await db.executemany(
+                    "INSERT INTO agent_messages (id, user_id, chat_session_id, role, content, tool_name, metadata) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
                 )
-            if msg.tool_call_id:
-                tool_name = msg.tool_call_id
+                await db.commit()
 
-            rows.append((msg_id, user_id, chat_session_id, msg.role, encrypted_content, tool_name, metadata))
+            # Record and return the final assistant message content
+            final = all_new_messages[-1]
+            content = final.content or ""
+            if not content.strip():
+                content = "I wasn't able to generate a response. Please try again."
+            await recorder.record_final_response(content)
 
-        async with db_session(self.config) as db:
-            await db.executemany(
-                "INSERT INTO agent_messages (id, user_id, chat_session_id, role, content, tool_name, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rows,
+            # Fire work summary for direct mode (with model attribution)
+            from lazyclaw.runtime.summary import build_work_summary
+            from lazyclaw.llm.pricing import calculate_cost
+
+            _models_used = []
+            _total_cost = 0.0
+            _routing = self.eco_router.last_routing if self.eco_router else None
+            if _routing:
+                _models_used.append((_routing.display_name, _routing.icon, _routing.is_local))
+                _total_cost = calculate_cost(
+                    _routing.model,
+                    _session_tokens // 2,  # approximate split
+                    _session_tokens - _session_tokens // 2,
+                )
+
+            _direct_summary = build_work_summary(
+                start_time=_start_time,
+                llm_calls=iteration + 1,
+                tools_used=_all_tools_used,
+                specialists=[],
+                total_tokens=_session_tokens,
+                user_message=message,
+                response=content,
+                models_used=_models_used,
+                total_cost=_total_cost,
             )
-            await db.commit()
+            await cb.on_event(AgentEvent(
+                "work_summary", "Task complete",
+                {"summary": _direct_summary},
+            ))
 
-        # Record and return the final assistant message content
-        final = all_new_messages[-1]
-        content = final.content or ""
-        if not content.strip():
-            content = "I wasn't able to generate a response. Please try again."
-        await recorder.record_final_response(content)
+        finally:
+            # ALWAYS mark foreground task done/failed in TeamLead
+            if self._team_lead and _fg_task_id:
+                if content:
+                    self._team_lead.complete(_fg_task_id, content[:100])
+                else:
+                    self._team_lead.fail(_fg_task_id, "Post-loop error")
 
-        # Fire work summary for direct mode (with model attribution)
-        from lazyclaw.runtime.summary import build_work_summary
-        from lazyclaw.llm.pricing import calculate_cost
+            await cb.on_event(AgentEvent("done", "Response ready", {}))
 
-        _models_used = []
-        _total_cost = 0.0
-        _routing = self.eco_router.last_routing if self.eco_router else None
-        if _routing:
-            _models_used.append((_routing.display_name, _routing.icon, _routing.is_local))
-            _total_cost = calculate_cost(
-                _routing.model,
-                _session_tokens // 2,  # approximate split
-                _session_tokens - _session_tokens // 2,
-            )
-
-        _direct_summary = build_work_summary(
-            start_time=_start_time,
-            llm_calls=iteration + 1,
-            tools_used=_all_tools_used,
-            specialists=[],
-            total_tokens=_session_tokens,
-            user_message=message,
-            response=content,
-            models_used=_models_used,
-            total_cost=_total_cost,
-        )
-        await cb.on_event(AgentEvent(
-            "work_summary", "Task complete",
-            {"summary": _direct_summary},
-        ))
-
-        await cb.on_event(AgentEvent("done", "Response ready", {}))
-
-        # Clean up delegate skill to avoid stale callback references
-        if _delegate_registered and self.registry:
-            self.registry.unregister("delegate")
+            # Clean up delegate skill to avoid stale callback references
+            if _delegate_registered and self.registry:
+                self.registry.unregister("delegate")
 
         return content

@@ -178,10 +178,8 @@ class DelegateSkill(BaseSkill):
     # ── Site knowledge ─────────────────────────────────────────────
 
     # Common domains → short names for search queries
+    # Services with MCP connectors excluded — agent uses MCP tools, not browser
     _DOMAIN_HINTS: dict[str, str] = {
-        "gmail": "mail.google.com",
-        "whatsapp": "web.whatsapp.com",
-        "instagram": "instagram.com",
         "twitter": "x.com",
         "facebook": "facebook.com",
         "linkedin": "linkedin.com",

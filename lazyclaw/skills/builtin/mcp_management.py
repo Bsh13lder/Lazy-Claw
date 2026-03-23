@@ -297,7 +297,19 @@ class ConnectMCPServerSkill(BaseSkill):
                     f"Available: {available}"
                 )
 
+            from lazyclaw.mcp.manager import _active_clients
+
             reconnect = params.get("reconnect", False)
+
+            # Skip if already connected and healthy (prevents cancel scope errors)
+            if not reconnect and server["id"] in _active_clients:
+                existing = _active_clients[server["id"]]
+                if existing.is_connected:
+                    return (
+                        f"MCP server '{server['name']}' is already connected. "
+                        f"Use reconnect=true to force reconnect."
+                    )
+
             if reconnect:
                 client = await reconnect_server(
                     self._config, user_id, server["id"]

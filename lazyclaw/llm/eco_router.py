@@ -2,12 +2,12 @@
 
 Four modes:
 - LOCAL:  Ollama only, $0 always. Brain + specialist local models.
-- ECO:    Free API providers only, $0 always. Waits if rate-limited.
-- HYBRID: Local first, paid fallback. Auto-decides per task complexity.
+- ECO:    Free API providers only, $0 always. Cascades all providers.
+- HYBRID: Free workers + paid brain (Haiku). Haiku fallback.
 - FULL:   Always paid. Maximum quality.
 
 Sits between agent.py and llm/router.py. For free calls, uses
-mcp-freeride's FreeRideRouter directly (as library, not MCP protocol).
+lazyclaw.llm.free_providers directly (no mcp-freeride dependency).
 For local calls, uses OllamaProvider directly via OpenAI-compatible API.
 """
 
@@ -20,15 +20,23 @@ import re
 from dataclasses import dataclass
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, decrypt_field
 from lazyclaw.db.connection import db_session
+from lazyclaw.llm.free_providers import (
+    PRIORITY_ORDER,
+    PROVIDER_DEFS,
+    FreeProviderResult,
+    cascade_chat,
+    chat as free_chat,
+    discover_providers,
+    stream_chat as free_stream_chat,
+)
 from lazyclaw.llm.model_registry import (
     BRAIN_MODEL,
     SPECIALIST_MODEL,
     RoutingResult,
     get_model,
 )
-from lazyclaw.llm.providers.base import LLMMessage, LLMResponse
+from lazyclaw.llm.providers.base import LLMMessage, LLMResponse, StreamChunk
 from lazyclaw.llm.rate_limiter import RateLimiter
 from lazyclaw.llm.router import LLMRouter
 
@@ -74,6 +82,8 @@ class EcoSettings:
     task_overrides: dict[str, str] | None = None  # task_type → provider/model
     brain_model: str | None = None       # Override brain model (None = default)
     specialist_model: str | None = None  # Override specialist model (None = default)
+    free_providers: list[str] | None = None  # Configured free providers
+    preferred_free_model: str | None = None  # Preferred free model override
 
 
 def _parse_eco_settings(raw: str | None) -> EcoSettings:
@@ -97,6 +107,10 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
     if task_overrides and not isinstance(task_overrides, dict):
         task_overrides = None
 
+    free_providers = eco.get("free_providers")
+    if free_providers and not isinstance(free_providers, list):
+        free_providers = None
+
     return EcoSettings(
         mode=eco.get("mode", "full"),
         show_badges=eco.get("show_badges", True),
@@ -106,6 +120,8 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
         task_overrides=task_overrides,
         brain_model=eco.get("brain_model"),
         specialist_model=eco.get("specialist_model"),
+        free_providers=free_providers,
+        preferred_free_model=eco.get("preferred_free_model"),
     )
 
 
@@ -182,8 +198,13 @@ def _extract_user_message(messages: list[LLMMessage]) -> str:
     return ""
 
 
+# ── Haiku model for hybrid brain/fallback ──────────────────────────────
+
+HYBRID_BRAIN_MODEL = "claude-haiku-4-5-20251001"
+
+
 class EcoRouter:
-    """Routes requests between local (Ollama), free (mcp-freeride), and paid.
+    """Routes requests between local (Ollama), free, and paid providers.
 
     Usage:
         eco = EcoRouter(config, paid_router)
@@ -194,10 +215,11 @@ class EcoRouter:
     def __init__(self, config: Config, paid_router: LLMRouter) -> None:
         self._config = config
         self._paid_router = paid_router
-        self._free_router = None  # Lazy init
-        self._free_router_unavailable = False  # Cache import failure
         self._rate_limiter = RateLimiter()
         self._usage: dict[str, dict] = {}  # user_id → {"free": N, "paid": N, "local": N}
+
+        # Cached free provider API keys (lazy init)
+        self._free_keys: dict[str, str] | None = None
 
         # Ollama provider (lazy init, protected by lock)
         self._ollama = None  # OllamaProvider | None
@@ -209,6 +231,40 @@ class EcoRouter:
 
         # Per-model stats for TUI routing panel
         self._routing_stats: dict[str, dict] = {}  # model → {calls, tokens_in, tokens_out}
+
+    # ── Free provider keys ─────────────────────────────────────────────
+
+    def _get_free_keys(self) -> dict[str, str]:
+        """Discover and cache free provider API keys from env."""
+        if self._free_keys is None:
+            self._free_keys = discover_providers()
+            if self._free_keys:
+                names = ", ".join(self._free_keys.keys())
+                logger.info("Free providers available: %s", names)
+            else:
+                logger.info("No free provider API keys found in environment")
+        return self._free_keys
+
+    def _get_provider_order(self, settings: EcoSettings) -> list[str]:
+        """Get ordered list of free providers to try, respecting user settings."""
+        keys = self._get_free_keys()
+        if not keys:
+            return []
+
+        # If user locked to a specific provider, use only that
+        if settings.locked_provider and settings.locked_provider in keys:
+            return [settings.locked_provider]
+
+        # If user specified a provider list, respect it
+        if settings.free_providers:
+            return [p for p in settings.free_providers if p in keys]
+
+        # Default: priority order filtered to configured providers
+        return [p for p in PRIORITY_ORDER if p in keys]
+
+    def refresh_free_keys(self) -> None:
+        """Re-scan env vars for free provider keys (e.g. after /eco add)."""
+        self._free_keys = None
 
     # ── Ollama provider ───────────────────────────────────────────────
 
@@ -248,41 +304,10 @@ class EcoRouter:
         self._ollama = None
         self._ollama_checked = False
 
-    # ── Free router (mcp-freeride) ────────────────────────────────────
-
-    def _get_free_router(self):
-        """Lazy-init the free router from mcp-freeride."""
-        if self._free_router is not None:
-            return self._free_router
-        if self._free_router_unavailable:
-            return None
-        try:
-            from mcp_freeride.config import load_config as load_freeride_config
-            from mcp_freeride.router import FreeRideRouter
-
-            freeride_config = load_freeride_config()
-            self._free_router = FreeRideRouter(freeride_config)
-            return self._free_router
-        except ImportError:
-            self._free_router_unavailable = True
-            logger.warning("mcp-freeride not installed, ECO mode unavailable")
-            return None
-
-    async def _ensure_free_router(self):
-        """Lazy-init free router."""
-        if self._free_router is not None:
-            return self._free_router
-
-        router = self._get_free_router()
-        if router is None:
-            return None
-
-        return router
-
     # ── Message conversion ────────────────────────────────────────────
 
     def _convert_to_dicts(self, messages: list[LLMMessage]) -> list[dict]:
-        """Convert LLMMessage list to OpenAI-format dicts for free router.
+        """Convert LLMMessage list to OpenAI-format dicts for free providers.
 
         Free APIs don't support tool roles, so we convert tool context
         into plain user/assistant messages to preserve conversation flow.
@@ -325,6 +350,120 @@ class EcoRouter:
         if usage:
             stats["tokens_in"] += usage.get("prompt_tokens", 0)
             stats["tokens_out"] += usage.get("completion_tokens", 0)
+
+    # ── Free provider helper ──────────────────────────────────────────
+
+    async def _try_free(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        **kwargs,
+    ) -> LLMResponse | None:
+        """Try free providers in priority order. Returns None if all fail.
+
+        Uses the rate limiter to skip providers that are at capacity,
+        then cascades through remaining providers.
+        """
+        keys = self._get_free_keys()
+        if not keys:
+            return None
+
+        order = self._get_provider_order(settings)
+        if not order:
+            return None
+
+        # Filter to providers with rate limit capacity
+        available = [
+            p for p in order
+            if self._rate_limiter.has_capacity(p)
+        ]
+        if not available:
+            # All rate-limited — find shortest wait
+            return None
+
+        dict_messages = self._convert_to_dicts(messages)
+
+        try:
+            result = await cascade_chat(
+                messages=dict_messages,
+                provider_order=available,
+                api_keys=keys,
+                preferred_model=settings.preferred_free_model,
+            )
+        except RuntimeError:
+            return None
+
+        self._rate_limiter.record_request(result.provider)
+        self._record_usage(user_id, "free")
+        self.last_routing = RoutingResult(
+            model=result.model,
+            provider=result.provider,
+            is_local=False,
+            reason=f"free: {result.provider}/{result.model}",
+        )
+        self._record_routing_stats(result.model, result.usage)
+
+        content = result.content
+        if settings.show_badges:
+            content = f"[ECO {result.provider}/{result.model}] {content}"
+
+        return LLMResponse(
+            content=content,
+            model=result.model,
+            usage={
+                **result.usage,
+                "provider": result.provider,
+                "eco_mode": settings.mode,
+            },
+        )
+
+    async def _try_free_stream(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+    ) -> AsyncIteratorOrNone:
+        """Try streaming from free providers. Returns None if no provider available."""
+        keys = self._get_free_keys()
+        if not keys:
+            return None
+
+        order = self._get_provider_order(settings)
+        available = [p for p in order if self._rate_limiter.has_capacity(p)]
+        if not available:
+            return None
+
+        dict_messages = self._convert_to_dicts(messages)
+
+        # Try each provider until one works
+        for provider_name in available:
+            api_key = keys.get(provider_name)
+            if not api_key:
+                continue
+
+            model = None
+            if settings.preferred_free_model:
+                pdef = PROVIDER_DEFS.get(provider_name)
+                if pdef and settings.preferred_free_model in pdef.free_models:
+                    model = settings.preferred_free_model
+
+            try:
+                # Return a generator wrapper that handles attribution
+                return _FreeStreamWrapper(
+                    provider_name=provider_name,
+                    api_key=api_key,
+                    messages=dict_messages,
+                    model=model,
+                    eco_router=self,
+                    user_id=user_id,
+                    settings=settings,
+                )
+            except Exception as exc:
+                logger.warning("Free stream %s failed: %s", provider_name, exc)
+                continue
+
+        return None
 
     # ── Main chat router ──────────────────────────────────────────────
 
@@ -449,24 +588,24 @@ class EcoRouter:
             # Standard/complex without tools: try brain first (faster), specialist if fails
             models_to_try = [brain, specialist]
 
-        for model in models_to_try:
-            reason = f"local: {complexity} -> {model.split('/')[-1]}"
+        for local_model in models_to_try:
+            reason = f"local: {complexity} -> {local_model.split('/')[-1]}"
             self.last_routing = RoutingResult(
-                model=model, provider="ollama", is_local=True, reason=reason,
+                model=local_model, provider="ollama", is_local=True, reason=reason,
             )
 
             local_kwargs = dict(kwargs)
-            if model == brain:
+            if local_model == brain:
                 local_kwargs.pop("tools", None)
                 local_kwargs.pop("tool_choice", None)
 
             try:
                 self._record_usage(user_id, "local")
-                response = await ollama.chat(messages, model=model, **local_kwargs)
-                self._record_routing_stats(model, response.usage)
+                response = await ollama.chat(messages, model=local_model, **local_kwargs)
+                self._record_routing_stats(local_model, response.usage)
                 return response
             except OllamaUnavailableError as exc:
-                logger.warning("LOCAL: Model %s failed: %s", model, exc)
+                logger.warning("LOCAL: Model %s failed: %s", local_model, exc)
                 # Don't reset ollama check on model errors (400/404) —
                 # only reset on connection errors so we don't spam reconnects
                 if "Cannot connect" in str(exc):
@@ -488,9 +627,6 @@ class EcoRouter:
 
     # ── HYBRID mode ───────────────────────────────────────────────────
 
-    # Default Qwen model for OpenRouter free tier
-    QWEN_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"
-
     async def _route_hybrid(
         self,
         messages: list[LLMMessage],
@@ -500,28 +636,31 @@ class EcoRouter:
         has_tools: bool,
         **kwargs,
     ) -> LLMResponse:
-        """HYBRID mode: Qwen (OpenRouter) first → GPT-5 fallback."""
-        # Priority 1: Try Qwen via OpenRouter (free) for everything
-        qwen_response = await self._try_qwen(messages, user_id, settings, **kwargs)
-        if qwen_response is not None:
-            return qwen_response
+        """HYBRID mode: free workers + paid brain (Haiku). Haiku fallback.
 
-        # Priority 2: Qwen failed/stuck → fall back to GPT-5 (full, not mini)
-        logger.info("HYBRID: Qwen failed, falling back to GPT-5")
-        effective_model = model or self._config.brain_model
-        provider = "openai"
-        if effective_model.startswith("claude-"):
-            provider = "anthropic"
+        Brain (Haiku, paid, cheap, always reliable) handles decisions.
+        Workers (free providers) handle execution — specialists, tools, etc.
+        If free rate-limited → fallback to Haiku (NOT Sonnet — keep it cheap).
+        """
+        # Try free providers first for all tasks
+        free_response = await self._try_free(messages, user_id, settings, **kwargs)
+        if free_response is not None:
+            return free_response
 
+        # Free failed/rate-limited → fall back to Haiku (cheap paid)
+        fallback_model = model or HYBRID_BRAIN_MODEL
+        logger.info("HYBRID: free providers exhausted, falling back to %s", fallback_model)
+
+        provider = "anthropic" if fallback_model.startswith("claude-") else "openai"
         self.last_routing = RoutingResult(
-            model=effective_model, provider=provider, is_local=False,
-            reason="hybrid: qwen_failed -> gpt5",
+            model=fallback_model, provider=provider, is_local=False,
+            reason=f"hybrid_fallback: free_exhausted -> {fallback_model}",
         )
         self._record_usage(user_id, "paid")
         response = await self._paid_router.chat(
-            messages, model=effective_model, user_id=user_id, **kwargs
+            messages, model=fallback_model, user_id=user_id, **kwargs
         )
-        self._record_routing_stats(effective_model, response.usage)
+        self._record_routing_stats(fallback_model, response.usage)
 
         if settings.show_badges and response.content:
             response = LLMResponse(
@@ -531,60 +670,6 @@ class EcoRouter:
                 tool_calls=response.tool_calls,
             )
         return response
-
-    async def _try_qwen(
-        self,
-        messages: list[LLMMessage],
-        user_id: str,
-        settings: EcoSettings,
-        **kwargs,
-    ) -> LLMResponse | None:
-        """Try Qwen via OpenRouter directly. Returns None if unavailable/failed.
-
-        Calls the OpenRouter provider directly (not the free router cascade)
-        to avoid falling through to Ollama/Groq with an OpenRouter model ID.
-        """
-        free_router = await self._ensure_free_router()
-        if not free_router:
-            return None
-
-        # Get the OpenRouter provider directly — don't cascade through all providers
-        openrouter = free_router._providers.get("openrouter")
-        if not openrouter:
-            logger.info("OpenRouter provider not configured in free router")
-            return None
-
-        try:
-            dict_messages = self._convert_to_dicts(messages)
-            result = await asyncio.wait_for(
-                openrouter.chat(dict_messages, self.QWEN_MODEL),
-                timeout=20,
-            )
-            provider = result.get("provider", "openrouter")
-            self._rate_limiter.record_request(provider)
-            self._record_usage(user_id, "free")
-            result_model = result.get("model", self.QWEN_MODEL)
-            self.last_routing = RoutingResult(
-                model=result_model,
-                provider=provider,
-                is_local=False,
-                reason="qwen_openrouter",
-            )
-            self._record_routing_stats(result_model, None)
-
-            content = result["content"]
-            if settings.show_badges:
-                badge = f"[ECO {provider}/{result_model}] "
-                content = badge + content
-
-            return LLMResponse(
-                content=content,
-                model=result_model,
-                usage={"provider": provider, "eco_mode": "hybrid_free"},
-            )
-        except Exception as exc:
-            logger.warning("Qwen/OpenRouter failed: %s", exc)
-            return None
 
     # ── ECO mode ──────────────────────────────────────────────────────
 
@@ -596,67 +681,51 @@ class EcoRouter:
         has_tools: bool,
         **kwargs,
     ) -> LLMResponse:
-        """ECO mode: Qwen via OpenRouter only, never paid. Waits if rate-limited."""
-        free_router = await self._ensure_free_router()
-        if not free_router:
+        """ECO mode: free providers only, never paid. Cascades all, waits if rate-limited."""
+        keys = self._get_free_keys()
+        if not keys:
             self.last_routing = RoutingResult(
-                model="none", provider="free", is_local=False, reason="eco: no_openrouter",
+                model="none", provider="free", is_local=False, reason="eco: no_providers",
             )
             return LLMResponse(
                 content=(
-                    "ECO mode requires OpenRouter for Qwen access.\n\n"
-                    "Setup: https://openrouter.ai/keys \u2192 add OPENROUTER_API_KEY to .env\n\n"
-                    "Then restart LazyClaw. Or switch to paid mode: /eco full"
+                    "ECO mode requires at least one free provider.\n\n"
+                    "Run /eco setup to configure free API keys, or switch to paid: /eco full"
                 ),
                 model="none",
             )
 
-        qwen_hint = f"openrouter/{self.QWEN_MODEL}"
-
-        # Wait for rate limit capacity (ECO = patient, never paid)
+        # Try with patience — ECO never pays, so wait for rate limits
         max_wait_rounds = 6  # Max ~3 minutes total
         for attempt in range(max_wait_rounds):
-            try:
-                dict_messages = self._convert_to_dicts(messages)
-                result = await asyncio.wait_for(
-                    free_router.chat(dict_messages, qwen_hint),
-                    timeout=20,
-                )
-                provider = result.get("provider", "openrouter")
-                self._rate_limiter.record_request(provider)
-                self._record_usage(user_id, "free")
-                result_model = result.get("model", self.QWEN_MODEL)
-                self.last_routing = RoutingResult(
-                    model=result_model,
-                    provider=provider,
-                    is_local=False,
-                    reason="eco: qwen_only",
-                )
+            free_response = await self._try_free(messages, user_id, settings, **kwargs)
+            if free_response is not None:
+                return free_response
 
-                content = result["content"]
-                if settings.show_badges:
-                    badge = f"[ECO {provider}/{result_model}] "
-                    content = badge + content
-
-                return LLMResponse(
-                    content=content,
-                    model=result_model,
-                    usage={"provider": provider, "eco_mode": "eco"},
+            if attempt < max_wait_rounds - 1:
+                # Find the shortest wait across all providers
+                order = self._get_provider_order(settings)
+                min_wait = min(
+                    (self._rate_limiter.wait_seconds(p) for p in order),
+                    default=30,
                 )
-            except Exception as exc:
-                logger.warning("ECO Qwen error: %s", exc)
-                if attempt < max_wait_rounds - 1:
-                    wait = 30
-                    logger.info("ECO: Qwen rate-limited, waiting %ds (attempt %d)", wait, attempt + 1)
-                    await asyncio.sleep(wait)
-                    continue
+                wait = max(5, min(min_wait + 2, 30))  # Clamp 5-30s
+                logger.info(
+                    "ECO: all providers rate-limited, waiting %.0fs (attempt %d/%d)",
+                    wait, attempt + 1, max_wait_rounds,
+                )
+                await asyncio.sleep(wait)
 
         self.last_routing = RoutingResult(
-            model="none", provider="openrouter", is_local=False, reason="eco: qwen_rate_limited",
+            model="none", provider="free", is_local=False,
+            reason="eco: all_providers_rate_limited",
         )
+        configured = ", ".join(keys.keys())
         return LLMResponse(
-            content="Qwen is currently rate-limited on OpenRouter. "
-            "Please try again in a few minutes, or switch to HYBRID mode.",
+            content=(
+                f"All free providers are rate-limited ({configured}).\n"
+                "Please try again in a few minutes, or switch to HYBRID mode: /eco hybrid"
+            ),
             model="none",
         )
 
@@ -671,11 +740,9 @@ class EcoRouter:
     ):
         """Stream chat responses.
 
-        Paid path supports true streaming. Local/ECO/hybrid free paths
-        fall back to non-streaming and yield a single chunk.
+        Free providers support true SSE streaming. Local falls back to
+        non-streaming single chunk. Paid uses paid provider streaming.
         """
-        from lazyclaw.llm.providers.base import StreamChunk
-
         settings = await _load_eco_settings(self._config, user_id)
 
         # LOCAL mode: non-streaming single chunk
@@ -720,57 +787,30 @@ class EcoRouter:
                 yield chunk
             return
 
-        # HYBRID mode: try Qwen first, then paid GPT-5 streaming
-        if settings.mode == "hybrid":
-            qwen_response = await self._try_qwen(messages, user_id, settings, **kwargs)
-            if qwen_response is not None:
-                yield StreamChunk(
-                    delta=qwen_response.content,
-                    tool_calls=qwen_response.tool_calls,
-                    usage=qwen_response.usage,
-                    model=qwen_response.model,
-                    done=True,
-                )
-                return
-            logger.info("HYBRID stream: Qwen failed, falling back to paid GPT-5")
-
-        # ECO mode: Qwen only, no paid fallback
+        # ECO mode: stream from free providers, no paid fallback
         if settings.mode == "eco":
-            qwen_response = await self._try_qwen(messages, user_id, settings, **kwargs)
-            if qwen_response is not None:
-                yield StreamChunk(
-                    delta=qwen_response.content,
-                    tool_calls=qwen_response.tool_calls,
-                    usage=qwen_response.usage,
-                    model=qwen_response.model,
-                    done=True,
-                )
-                return
-            yield StreamChunk(
-                delta="Qwen unavailable on OpenRouter. Try again shortly, or: /eco hybrid",
-                model="none",
-                done=True,
-            )
+            async for chunk in self._stream_free_or_error(
+                messages, user_id, settings,
+                error_msg="Free providers unavailable. Try again shortly, or: /eco hybrid",
+            ):
+                yield chunk
             return
 
-        # Paid streaming fallback (hybrid after Qwen fails)
+        # HYBRID mode: try free streaming first, then paid Haiku streaming
+        if settings.mode == "hybrid":
+            stream_wrapper = await self._try_free_stream(messages, user_id, settings)
+            if stream_wrapper is not None:
+                async for chunk in stream_wrapper:
+                    yield chunk
+                return
+            logger.info("HYBRID stream: free providers exhausted, falling back to Haiku")
+
+        # Paid streaming fallback (hybrid after free fails, or unknown mode)
+        fallback_model = model or HYBRID_BRAIN_MODEL
         self._record_usage(user_id, "paid")
-        if model:
-            effective_model = model
-        else:
-            user_message = _extract_user_message(messages)
-            _has_tools = bool(kwargs.get("tools"))
-            complexity = classify_complexity(user_message, _has_tools)
-            if complexity == COMPLEXITY_COMPLEX:
-                effective_model = self._config.brain_model or self._config.brain_model
-            else:
-                effective_model = self._config.worker_model or self._config.brain_model
-            logger.info("HYBRID fallback stream: %s -> %s", complexity, effective_model)
-        provider = "openai"
-        if effective_model.startswith("claude-"):
-            provider = "anthropic"
+        provider = "anthropic" if fallback_model.startswith("claude-") else "openai"
         self.last_routing = RoutingResult(
-            model=effective_model, provider=provider, is_local=False,
+            model=fallback_model, provider=provider, is_local=False,
             reason="paid_stream_fallback",
         )
 
@@ -780,7 +820,7 @@ class EcoRouter:
 
         first_chunk = True
         async for chunk in self._paid_router.stream_chat(
-            messages, model=model, user_id=user_id, **kwargs
+            messages, model=fallback_model, user_id=user_id, **kwargs
         ):
             if first_chunk and badge_prefix and chunk.delta:
                 yield StreamChunk(
@@ -793,6 +833,22 @@ class EcoRouter:
                 first_chunk = False
             else:
                 yield chunk
+
+    async def _stream_free_or_error(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        error_msg: str,
+    ):
+        """Stream from free providers, or yield error chunk."""
+        stream_wrapper = await self._try_free_stream(messages, user_id, settings)
+        if stream_wrapper is not None:
+            async for chunk in stream_wrapper:
+                yield chunk
+            return
+
+        yield StreamChunk(delta=error_msg, model="none", done=True)
 
     # ── Stats ─────────────────────────────────────────────────────────
 
@@ -849,3 +905,94 @@ class EcoRouter:
     def get_rate_limit_status(self) -> dict:
         """Get current rate limit status for all providers."""
         return self._rate_limiter.get_status()
+
+    def get_free_provider_status(self) -> list[dict]:
+        """Get status of all free providers (configured or not)."""
+        from lazyclaw.llm.free_providers import get_provider_info
+
+        info = get_provider_info()
+        rate_status = self._rate_limiter.get_status()
+
+        for item in info:
+            name = item["name"]
+            rs = rate_status.get(name, {})
+            item["rate_limit_used"] = rs.get("minute_used", 0)
+            item["rate_limit_max"] = rs.get("minute_max", 0)
+            item["has_capacity"] = rs.get("has_capacity", True)
+        return info
+
+
+# ── Free stream wrapper ───────────────────────────────────────────────
+
+# Type alias for optional async iterator
+AsyncIteratorOrNone = object  # Can't type async iterator union cleanly
+
+
+class _FreeStreamWrapper:
+    """Wraps free_providers.stream_chat to handle attribution and badges."""
+
+    def __init__(
+        self,
+        provider_name: str,
+        api_key: str,
+        messages: list[dict],
+        model: str | None,
+        eco_router: EcoRouter,
+        user_id: str,
+        settings: EcoSettings,
+    ) -> None:
+        self._provider_name = provider_name
+        self._api_key = api_key
+        self._messages = messages
+        self._model = model
+        self._eco_router = eco_router
+        self._user_id = user_id
+        self._settings = settings
+
+    def __aiter__(self):
+        return self._stream()
+
+    async def _stream(self):
+        first = True
+        try:
+            async for chunk in free_stream_chat(
+                self._provider_name,
+                self._api_key,
+                self._messages,
+                self._model,
+            ):
+                if first:
+                    self._eco_router._rate_limiter.record_request(self._provider_name)
+                    self._eco_router._record_usage(self._user_id, "free")
+                    self._eco_router.last_routing = RoutingResult(
+                        model=chunk.model or self._model or "unknown",
+                        provider=self._provider_name,
+                        is_local=False,
+                        reason=f"free_stream: {self._provider_name}",
+                    )
+                    first = False
+
+                    badge_prefix = ""
+                    if self._settings.show_badges:
+                        badge_prefix = f"[ECO {self._provider_name}] "
+
+                    if badge_prefix and chunk.delta:
+                        yield StreamChunk(
+                            delta=badge_prefix + chunk.delta,
+                            model=chunk.model,
+                            done=chunk.done,
+                        )
+                        continue
+
+                yield StreamChunk(
+                    delta=chunk.delta,
+                    model=chunk.model,
+                    done=chunk.done,
+                )
+        except Exception as exc:
+            logger.warning("Free stream %s error: %s", self._provider_name, exc)
+            yield StreamChunk(
+                delta=f"[Stream error: {self._provider_name}]",
+                model="none",
+                done=True,
+            )

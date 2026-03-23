@@ -26,6 +26,12 @@ _SERVICE_CONFIG = {
         "default_args": {"limit": 10},
         "contact_param": None,
     },
+    "instagram": {
+        "tool_name": "instagram_get_notifications",
+        "default_interval_min": 10,
+        "default_args": {},
+        "contact_param": None,
+    },
 }
 
 
@@ -62,9 +68,9 @@ class WatchMCPSkill(BaseSkill):
                 "service": {
                     "type": "string",
                     "description": (
-                        "Service to watch: 'whatsapp' or 'email'"
+                        "Service to watch: 'whatsapp', 'email', or 'instagram'"
                     ),
-                    "enum": ["whatsapp", "email"],
+                    "enum": ["whatsapp", "email", "instagram"],
                 },
                 "contact": {
                     "type": "string",
@@ -125,13 +131,21 @@ class WatchMCPSkill(BaseSkill):
         if contact and svc["contact_param"]:
             tool_args[svc["contact_param"]] = contact
 
-        # Check MCP connection
+        # Check MCP connection — match by server NAME, not UUID
         from lazyclaw.mcp.manager import _active_clients
-        client_key = f"mcp-{service}"
-        if client_key not in _active_clients and service not in _active_clients:
+        _found_client = None
+        for sid, client in _active_clients.items():
+            client_name = getattr(client, "name", "") or ""
+            if service in client_name.lower():
+                _found_client = sid
+                break
+        if _found_client is None:
+            # Show names not UUIDs in error
+            _names = [getattr(c, "name", sid) for sid, c in _active_clients.items()]
             return (
                 f"Error: {service} MCP server not connected. "
-                f"Connect it first with: connect_mcp_server('{service}')"
+                f"Active: {', '.join(_names) or 'none'}. "
+                f"Connect it first with: connect_mcp_server(name='{service}')"
             )
 
         # Calculate expiration

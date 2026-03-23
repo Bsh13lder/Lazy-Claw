@@ -266,27 +266,15 @@ class RunDoctorSkill(BaseSkill):
                 except ImportError:
                     checks.append((pkg_name, "WARN", f"Not installed ({desc})"))
 
-            # 7. Free AI providers
-            try:
-                from mcp_freeride.config import (
-                    get_configured_providers,
-                    load_config as load_freeride_config,
+            # 7. Free AI providers (direct integration)
+            from lazyclaw.llm.free_providers import discover_providers
+            free_provs = discover_providers()
+            if free_provs:
+                checks.append(
+                    ("Free AI", "OK", f"Providers: {', '.join(free_provs.keys())}")
                 )
-
-                freeride_cfg = load_freeride_config()
-                free_provs = [
-                    p
-                    for p in get_configured_providers(freeride_cfg)
-                    if p != "ollama"
-                ]
-                if free_provs:
-                    checks.append(
-                        ("Free AI", "OK", f"Providers: {', '.join(free_provs)}")
-                    )
-                else:
-                    checks.append(("Free AI", "WARN", "No free API keys"))
-            except ImportError:
-                checks.append(("Free AI", "WARN", "mcp-freeride not installed"))
+            else:
+                checks.append(("Free AI", "WARN", "No free API keys"))
 
             # 8. Telegram
             if cfg.telegram_bot_token:

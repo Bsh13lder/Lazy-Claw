@@ -19,8 +19,8 @@ class EcoSetModeSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Set the AI routing mode. 'local' uses Ollama models only ($0), "
-            "'eco' uses free API providers ($0), 'hybrid' tries local then paid, "
-            "'full' always uses paid AI for best quality."
+            "'eco' uses free API providers ($0), 'hybrid' uses free workers + "
+            "paid brain (Haiku), 'full' always uses paid AI for best quality."
         )
 
     @property
@@ -48,8 +48,15 @@ class EcoSetModeSkill(BaseSkill):
 
             descriptions = {
                 "local": "LOCAL mode enabled — all AI requests use Ollama models ($0). Requires Ollama running.",
-                "eco": "ECO mode enabled — all AI requests routed to free providers ($0 cost). Quality may vary.",
-                "hybrid": "HYBRID mode enabled — local models first, paid fallback for complex tasks.",
+                "eco": (
+                    "ECO mode enabled — all AI requests routed to free providers ($0 cost). "
+                    "Cascades: Groq → OpenRouter → Google → Together → Mistral. "
+                    "Waits if all rate-limited (never pays)."
+                ),
+                "hybrid": (
+                    "HYBRID mode enabled — free providers for workers, Haiku (cheap paid) for brain/fallback. "
+                    "Cost: ~$0.002/message instead of $0.05."
+                ),
                 "full": "FULL mode enabled — all requests use paid AI for maximum quality.",
             }
             return descriptions.get(mode, f"Mode set to '{mode}'.")
@@ -89,131 +96,69 @@ class EcoShowStatusSkill(BaseSkill):
             return "Error: Not configured"
         try:
             from lazyclaw.llm.eco_settings import get_eco_settings
+            from lazyclaw.llm.free_providers import get_provider_info
 
             settings = await get_eco_settings(self._config, user_id)
             mode = settings.get("mode", "full")
 
-            lines = ["== ECO Status =="]
-            lines.append(f"Mode: {mode.upper()}")
+            lines = [f"ECO Status: {mode.upper()}"]
+            lines.append("\u2501" * 20)
 
-            # Mode descriptions
-            mode_desc = {
-                "local": "Ollama models only, $0 always",
-                "eco": "Free API providers only, $0",
-                "hybrid": "Local first, paid fallback for complex",
-                "full": "Always paid AI, maximum quality",
-            }
-            lines.append(f"  ({mode_desc.get(mode, 'unknown')})")
+            # Mode-specific routing info
+            if mode == "eco":
+                lines.append("Brain: best free model (Groq > OpenRouter > Gemini)")
+                lines.append("Worker: fastest free model")
+                lines.append("Fallback: wait and retry (never pays)")
+            elif mode == "hybrid":
+                lines.append("Brain: claude-haiku-4-5 (paid)")
+                lines.append("Worker: free provider (Groq/OpenRouter/Gemini)")
+                lines.append("Fallback: claude-haiku-4-5")
+            elif mode == "full":
+                lines.append("Brain: gpt-5 / config brain_model (paid)")
+                lines.append("Worker: gpt-5-mini / config worker_model (paid)")
+                lines.append("No free providers used")
+            elif mode == "local":
+                brain = settings.get("brain_model") or "qwen3:0.6b"
+                spec = settings.get("specialist_model") or "qwen3:0.6b"
+                lines.append(f"Brain: {brain} (Ollama)")
+                lines.append(f"Specialist: {spec} (Ollama)")
 
-            # Local model assignments (brain/specialist)
+            # Free providers status
             lines.append("")
-            lines.append("== Local Models (4-Brain Architecture) ==")
-            try:
-                from lazyclaw.llm.model_registry import (
-                    BRAIN_MODEL, SPECIALIST_MODEL, get_model,
-                )
-                # User overrides from settings
-                user_brain = settings.get("brain_model") or BRAIN_MODEL
-                user_spec = settings.get("specialist_model") or SPECIALIST_MODEL
-                brain_profile = get_model(user_brain)
-                spec_profile = get_model(user_spec)
-                brain_ram = f" ({brain_profile.ram_mb}MB)" if brain_profile else ""
-                spec_ram = f" ({spec_profile.ram_mb}MB)" if spec_profile else ""
-                lines.append(f"  Brain:      {user_brain}{brain_ram}")
-                lines.append(f"  Specialist: {user_spec}{spec_ram}")
-                if user_brain != BRAIN_MODEL:
-                    lines.append(f"  (default brain: {BRAIN_MODEL})")
-                if user_spec != SPECIALIST_MODEL:
-                    lines.append(f"  (default specialist: {SPECIALIST_MODEL})")
-                lines.append("")
-                lines.append("  Change with: eco_set_model(role='brain', model='...')")
-                lines.append("  Change with: eco_set_model(role='specialist', model='...')")
-            except Exception:
-                lines.append("  (model registry unavailable)")
-
-            # Routing info for paid modes
-            if mode in ("full", "hybrid"):
-                lines.append("")
-                lines.append("== Paid Routing ==")
-                lines.append("  Simple/standard tasks → gpt-5-mini (cheap)")
-                lines.append("  Complex (analyze/debug/plan) → gpt-5 (best quality)")
-                lines.append("  Coding → Claude Code MCP (free via subscription)")
-
-            # Recommended local models (for local/hybrid mode)
-            lines.append("")
-            lines.append("== Local Models (for local/hybrid mode) ==")
-            lines.append("  Requires 16GB+ RAM for specialist models.")
-            lines.append("  On 8GB Mac: use 'full' mode (paid) instead.")
-            lines.append("")
-            lines.append("  Recommended (16GB+ RAM):")
-            lines.append("    ollama pull softw8/nanbeige4.1-3b-tools  (2.5GB, tool-optimized)")
-            lines.append("    ollama pull qwen3:1.7b                   (1.4GB, brain)")
-            lines.append("  Lightweight (8GB RAM, limited):")
-            lines.append("    ollama pull qwen3:0.6b                   (0.5GB, basic chat only)")
-            lines.append("  Install via chat: ollama_install or 'install ollama <model>'")
-
-            # Ollama status + installed models
-            lines.append("")
-            lines.append("== Ollama Status ==")
-            try:
-                from lazyclaw.llm.providers.ollama_provider import OllamaProvider
-                provider = OllamaProvider()
-                if await provider.health_check():
-                    import httpx
-                    async with httpx.AsyncClient(timeout=5) as client:
-                        resp = await client.get(f"{_OLLAMA_BASE}/api/tags")
-                        data = resp.json()
-                    models = data.get("models", [])
-                    if models:
-                        lines.append(f"  Running: yes ({len(models)} models installed)")
-                        for m in models:
-                            name = m.get("name", "?")
-                            size_gb = m.get("size", 0) / 1_000_000_000
-                            # Mark brain/specialist
-                            tag = ""
-                            if name == BRAIN_MODEL or name.startswith(BRAIN_MODEL.split(":")[0]):
-                                tag = " ← BRAIN"
-                            elif name == SPECIALIST_MODEL or name.startswith(SPECIALIST_MODEL.split("/")[-1].split(":")[0]):
-                                tag = " ← SPECIALIST"
-                            lines.append(f"    - {name} ({size_gb:.1f}GB){tag}")
-                    else:
-                        lines.append("  Running: yes (no models installed)")
-                        lines.append(f"  Install: ollama pull {BRAIN_MODEL}")
-                        lines.append(f"  Install: ollama pull {SPECIALIST_MODEL}")
+            lines.append("Free Providers:")
+            provider_info = get_provider_info()
+            for p in provider_info:
+                status = "\u2713" if p["configured"] else "\u2717"
+                detail = ""
+                if p["configured"]:
+                    models_str = ", ".join(
+                        m.split("/")[-1].replace(":free", "")
+                        for m in p["models"]
+                    )
+                    detail = f" \u2014 {models_str}"
                 else:
-                    lines.append("  Running: NO")
-                    lines.append("  Install Ollama: https://ollama.ai")
-                await provider.close()
-            except Exception as exc:
-                lines.append(f"  Error: {exc}")
+                    detail = f" \u2014 not configured (/eco add {p['name']})"
+                lines.append(f"  {status} {p['name']:12s}{detail}")
 
-            lines.append("")
-            lines.append(f"Show badges: {settings.get('show_badges', True)}")
-            budget = settings.get("monthly_paid_budget", 0)
-            lines.append(f"Paid budget: {'unlimited' if budget == 0 else f'${budget}/mo'}")
+            # Preferred model
+            pref = settings.get("preferred_free_model")
+            if pref:
+                lines.append(f"\nPreferred model: {pref}")
 
             locked = settings.get("locked_provider")
             if locked:
                 lines.append(f"Locked provider: {locked}")
 
-            # Free providers
+            # Commands
             lines.append("")
-            lines.append("== Free API Providers ==")
-            try:
-                from mcp_freeride.config import load_config as load_freeride_config
-                from mcp_freeride.config import get_configured_providers
-
-                freeride_config = load_freeride_config()
-                providers = get_configured_providers(freeride_config)
-                if providers:
-                    for p in providers:
-                        lines.append(f"  - {p}")
-                else:
-                    lines.append("  (none configured)")
-            except ImportError:
-                lines.append("  mcp-freeride not installed")
-            except Exception as exc:
-                lines.append(f"  Error: {exc}")
+            lines.append("Commands:")
+            lines.append("  /eco full         Switch to full paid")
+            lines.append("  /eco hybrid       Free workers + paid brain")
+            lines.append("  /eco eco          Free only ($0)")
+            lines.append("  /eco add <name>   Add free provider")
+            lines.append("  /eco remove <name> Remove provider")
+            lines.append("  /eco setup        Interactive setup wizard")
+            lines.append("  /eco models       List available free models")
 
             return "\n".join(lines)
         except Exception as exc:
@@ -236,7 +181,7 @@ class EcoSetProviderSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Lock ECO mode to a specific free AI provider (e.g., 'groq', "
-            "'gemini', 'ollama'), or set to 'auto' to let the system choose "
+            "'google', 'openrouter'), or set to 'auto' to let the system choose "
             "the best available."
         )
 
@@ -248,8 +193,8 @@ class EcoSetProviderSkill(BaseSkill):
                 "provider": {
                     "type": "string",
                     "description": (
-                        "Provider name (groq, gemini, openrouter, together, "
-                        "mistral, huggingface, ollama) or 'auto'"
+                        "Provider name (groq, google, openrouter, together, "
+                        "mistral) or 'auto'"
                     ),
                 },
             },
@@ -270,7 +215,7 @@ class EcoSetProviderSkill(BaseSkill):
             )
 
             if locked is None:
-                return "Provider unlocked — system will auto-select the best available free provider."
+                return "Provider unlocked \u2014 system will auto-select the best available free provider."
             return f"ECO provider locked to '{locked}'. All free requests will use this provider."
         except ValueError as exc:
             return f"Error: {exc}"
@@ -371,3 +316,55 @@ class EcoSetModelSkill(BaseSkill):
             )
         except Exception as exc:
             return f"Error setting model: {exc}"
+
+
+class EcoListModelsSkill(BaseSkill):
+    """List all available free models across all configured providers."""
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "ai_management"
+
+    @property
+    def name(self) -> str:
+        return "eco_list_models"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List all free models available across configured providers. "
+            "Shows which providers are active, their models, and rate limits."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            from lazyclaw.llm.free_providers import get_provider_info
+
+            provider_info = get_provider_info()
+            lines = ["Available Free Models:"]
+            lines.append("\u2501" * 30)
+
+            for p in provider_info:
+                status = "\u2713 configured" if p["configured"] else "\u2717 not configured"
+                lines.append(f"\n{p['name'].upper()} ({status})")
+                if p["rate_limit_rpm"]:
+                    lines.append(f"  Rate limit: {p['rate_limit_rpm']} req/min")
+                for model in p["models"]:
+                    lines.append(f"  - {model}")
+                if not p["configured"]:
+                    lines.append(f"  Get key: {p['signup_url']}")
+
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error listing models: {exc}"

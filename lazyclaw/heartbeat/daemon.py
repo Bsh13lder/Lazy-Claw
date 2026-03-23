@@ -431,6 +431,7 @@ class HeartbeatDaemon:
                     continue
 
                 # Run the MCP check
+                logger.info("MCP watcher '%s' checking (%s)...", job_name, ctx.get("service", "?"))
                 changed, notification, new_ctx = await check_mcp_watcher(
                     ctx, _active_clients,
                 )

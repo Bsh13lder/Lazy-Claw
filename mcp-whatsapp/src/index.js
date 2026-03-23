@@ -50,6 +50,10 @@ const messageStore = new Map(); // jid → [{ key, message, messageTimestamp, pu
 const MAX_MESSAGES_PER_CHAT = 100;
 
 const CONTACTS_FILE = path.join(DATA_DIR, "contacts.json");
+const MESSAGES_FILE = path.join(DATA_DIR, "messages.json");
+
+// Debounce message saves — avoid disk thrashing on burst of messages
+let _msgSaveTimer = null;
 
 function saveContacts() {
   try {
@@ -58,12 +62,48 @@ function saveContacts() {
   } catch (_) {}
 }
 
+function saveMessages() {
+  try {
+    const obj = {};
+    for (const [jid, msgs] of messageStore) {
+      // Only save last 20 per chat to keep file small
+      obj[jid] = msgs.slice(-20);
+    }
+    fs.writeFileSync(MESSAGES_FILE, JSON.stringify(obj));
+  } catch (_) {}
+}
+
+function saveMessagesDebounced() {
+  if (_msgSaveTimer) clearTimeout(_msgSaveTimer);
+  _msgSaveTimer = setTimeout(saveMessages, 2000);
+}
+
 function loadContacts() {
   try {
     if (fs.existsSync(CONTACTS_FILE)) {
       const obj = JSON.parse(fs.readFileSync(CONTACTS_FILE, "utf8"));
-      for (const [jid, c] of Object.entries(obj)) contacts.set(jid, c);
+      for (const [jid, c] of Object.entries(obj)) {
+        // Normalize phone: only real phone numbers (@s.whatsapp.net), not LID numbers
+        c.phone = extractPhone(jid);
+        contacts.set(jid, c);
+      }
       log(`Loaded ${contacts.size} contacts from cache`);
+    }
+  } catch (_) {}
+}
+
+function loadMessages() {
+  try {
+    if (fs.existsSync(MESSAGES_FILE)) {
+      const obj = JSON.parse(fs.readFileSync(MESSAGES_FILE, "utf8"));
+      let total = 0;
+      for (const [jid, msgs] of Object.entries(obj)) {
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          messageStore.set(jid, msgs);
+          total += msgs.length;
+        }
+      }
+      log(`Loaded ${total} messages across ${messageStore.size} chats from cache`);
     }
   } catch (_) {}
 }
@@ -81,7 +121,51 @@ async function loadAuthState() {
 // WhatsApp connection via Baileys
 // ---------------------------------------------------------------------------
 
+// Lock file to prevent multiple processes connecting with same auth
+const LOCK_FILE = path.join(DATA_DIR, "whatsapp.lock");
+
+function acquireLock() {
+  try {
+    // Check if another process holds the lock
+    if (fs.existsSync(LOCK_FILE)) {
+      const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
+      const age = Date.now() - lockData.time;
+      // Lock is stale if older than 60s (process probably crashed)
+      if (age < 60000) {
+        const otherPid = lockData.pid;
+        // Check if process is still alive
+        try { process.kill(otherPid, 0); return false; } catch (_) { /* dead */ }
+      }
+    }
+    fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() }));
+    return true;
+  } catch (_) { return true; }
+}
+
+function releaseLock() {
+  try { fs.unlinkSync(LOCK_FILE); } catch (_) {}
+}
+
+// Refresh lock periodically
+setInterval(() => {
+  try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() })); } catch (_) {}
+}, 30000);
+
+process.on("exit", releaseLock);
+process.on("SIGINT", () => { releaseLock(); process.exit(0); });
+process.on("SIGTERM", () => { releaseLock(); process.exit(0); });
+
 async function startWhatsApp() {
+  // Prevent 440 loop: only one process should connect at a time
+  // Skip lock for explicit setup calls (user wants to reconnect)
+  if (!acquireLock()) {
+    log("Another WhatsApp MCP process holds the lock — taking over");
+    releaseLock();
+    // Small delay to let the other process notice
+    await new Promise((r) => setTimeout(r, 500));
+    fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() }));
+  }
+
   const {
     default: makeWASocket,
     DisconnectReason,
@@ -199,6 +283,7 @@ async function startWhatsApp() {
       // Do NOT auto-reconnect — causes reconnect war. Wait for user to call whatsapp_setup.
       if (statusCode === 440) {
         log("Connection replaced (code=440). Stopped. Call whatsapp_setup to reconnect.");
+        releaseLock();
         sock = null;
       } else if (statusCode === DisconnectReason.loggedOut) {
         log("Logged out — clearing auth for fresh QR on next setup");
@@ -219,19 +304,20 @@ async function startWhatsApp() {
   sock.ev.on("messaging-history.set", (event) => {
     const before = contacts.size;
     for (const c of (event.contacts || [])) {
+      const cJid = c.jid || c.id || "";
       contacts.set(c.id, {
         name: c.name || c.verifiedName || c.notify || "",
         notify: c.notify || "",
-        phone: (c.jid || c.id || "").split("@")[0].split(":")[0],
+        phone: extractPhone(cJid),
       });
     }
     // Also extract contacts from chats
     for (const chat of (event.chats || [])) {
       if (!contacts.has(chat.id)) {
         contacts.set(chat.id, {
-          name: chat.name || chat.id.split("@")[0],
+          name: chat.name || extractPhone(chat.id) || chat.id.split("@")[0],
           notify: "",
-          phone: chat.id.split("@")[0].split(":")[0],
+          phone: extractPhone(chat.id),
         });
       }
     }
@@ -248,7 +334,7 @@ async function startWhatsApp() {
       contacts.set(c.id, {
         name: c.name || c.verifiedName || c.notify || "",
         notify: c.notify || "",
-        phone: c.id.split("@")[0].split(":")[0],
+        phone: extractPhone(c.id),
       });
     }
     log(`Contacts upsert: ${contacts.size} total`);
@@ -257,7 +343,7 @@ async function startWhatsApp() {
 
   sock.ev.on("contacts.update", (updates) => {
     for (const u of updates) {
-      const existing = contacts.get(u.id) || { phone: u.id.split("@")[0].split(":")[0] };
+      const existing = contacts.get(u.id) || { phone: extractPhone(u.id) };
       if (u.name) existing.name = u.name;
       if (u.notify) existing.notify = u.notify;
       contacts.set(u.id, existing);
@@ -271,8 +357,8 @@ async function startWhatsApp() {
       const jid = chat.id;
       if (!contacts.has(jid)) {
         contacts.set(jid, {
-          name: chat.name || jid.split("@")[0],
-          phone: jid.split("@")[0].split(":")[0],
+          name: chat.name || extractPhone(jid) || jid.split("@")[0],
+          phone: extractPhone(jid),
         });
       }
     }
@@ -280,6 +366,9 @@ async function startWhatsApp() {
 
   // Track message senders + store messages for reading
   sock.ev.on("messages.upsert", ({ messages: msgs, type }) => {
+    if (msgs.length > 0) {
+      log(`messages.upsert: ${msgs.length} messages (type=${type})`);
+    }
     for (const msg of msgs) {
       const jid = msg.key.remoteJid;
       if (!jid || jid === "status@broadcast") continue;
@@ -287,9 +376,9 @@ async function startWhatsApp() {
       // Update contact info
       if (!contacts.has(jid)) {
         contacts.set(jid, {
-          name: msg.pushName || jid.split("@")[0],
+          name: msg.pushName || extractPhone(jid) || jid.split("@")[0],
           notify: msg.pushName || "",
-          phone: jid.split("@")[0].split(":")[0],
+          phone: extractPhone(jid),
         });
       } else if (msg.pushName) {
         const c = contacts.get(jid);
@@ -310,10 +399,15 @@ async function startWhatsApp() {
         }
       }
     }
+    saveMessagesDebounced();
   });
 
   // Also store messages from history sync
   sock.ev.on("messaging-history.set", (event) => {
+    const msgCount = (event.messages || []).length;
+    const chatCount = (event.chats || []).length;
+    const contactCount = (event.contacts || []).length;
+    log(`History sync event: ${msgCount} messages, ${chatCount} chats, ${contactCount} contacts, isLatest=${event.isLatest}`);
     for (const msg of (event.messages || [])) {
       const jid = msg.key?.remoteJid;
       if (!jid || jid === "status@broadcast") continue;
@@ -330,6 +424,11 @@ async function startWhatsApp() {
         msgs.splice(0, msgs.length - MAX_MESSAGES_PER_CHAT);
       }
     }
+    const totalStored = [...messageStore.values()].reduce((s, m) => s + m.length, 0);
+    if (msgCount > 0) {
+      log(`After history sync: ${totalStored} messages stored across ${messageStore.size} chats`);
+      saveMessagesDebounced();
+    }
   });
 }
 
@@ -339,6 +438,13 @@ async function startWhatsApp() {
 
 function formatJid(phone) {
   return phone.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
+}
+
+/** Extract phone number from JID. Returns "+NNNN" for phone JIDs, null for LID/group. */
+function extractPhone(jid) {
+  if (!jid || !jid.endsWith("@s.whatsapp.net")) return null;
+  const num = jid.split("@")[0].split(":")[0];
+  return num ? "+" + num : null;
 }
 
 /** Normalize a JID — strip group suffix (:NN) for direct messages. */
@@ -384,14 +490,14 @@ function resolveContact(query) {
       continue;
     }
     // Exact match on phone
-    if (phone === q) return { jid: normalizeJid(jid), name: c.name || c.notify || c.phone };
+    if (phone && phone === q) return { jid: normalizeJid(jid), name: c.name || c.notify || c.phone || "Unknown" };
     // Partial match scoring — bonus for phone JIDs
     const score = (name.includes(q) ? 2 : 0)
       + (notify.includes(q) ? 2 : 0)
-      + (phone.includes(q) ? 1 : 0)
+      + (phone && phone.includes(q) ? 1 : 0)
       + (isPhoneJid ? 1 : 0);
     if (score > bestScore) {
-      best = { jid: normalizeJid(jid), name: c.name || c.notify || c.phone };
+      best = { jid: normalizeJid(jid), name: c.name || c.notify || c.phone || "Unknown" };
       bestScore = score;
     }
   }
@@ -442,7 +548,7 @@ const TOOLS = [
         contact: { type: "string", description: 'Optional: contact name or phone. Omit to read most recent chat.' },
         limit: { type: "number", description: "Number of messages to fetch (default 10)" },
       },
-      required: ["contact"],
+      required: [],
     },
   },
   {
@@ -574,7 +680,7 @@ async function handleRead(args) {
       return ok({ messages: [], note: "No messages cached yet." });
     }
     const c = contacts.get(latestJid);
-    const contactName = c?.name || c?.notify || latestJid.split("@")[0];
+    const contactName = c?.name || c?.notify || extractPhone(latestJid) || latestJid.split("@")[0];
     // Rewrite args with resolved contact and recurse
     return handleRead({ contact: contactName, limit });
   }
@@ -597,10 +703,41 @@ async function handleRead(args) {
   }
 
   if (stored.length === 0) {
+    // On-demand: trigger presence + mark-read to nudge WhatsApp into delivering messages
+    log(`No cached messages for ${resolved.name} (${resolved.jid}) — requesting on-demand`);
+    try {
+      await sock.presenceSubscribe(resolved.jid);
+      await sock.sendPresenceUpdate("available", resolved.jid);
+      // Send read receipt — triggers message delivery for unread chats
+      await sock.readMessages([{ remoteJid: resolved.jid, id: undefined, participant: undefined }]).catch(() => {});
+      // Wait for messages.upsert events to fire
+      await new Promise((r) => setTimeout(r, 3000));
+      // Re-check cache after waiting
+      const fresh = messageStore.get(resolved.jid) || [];
+      if (fresh.length > 0) {
+        stored.push(...fresh);
+        log(`On-demand fetch: got ${fresh.length} messages for ${resolved.name}`);
+      } else {
+        // Try JID variant lookup again
+        const phone = resolved.jid.split("@")[0].split(":")[0];
+        for (const [jid, msgs] of messageStore) {
+          if (jid.split("@")[0].split(":")[0] === phone && msgs.length > 0) {
+            stored.push(...msgs);
+            log(`On-demand fetch: found ${msgs.length} messages via JID variant ${jid}`);
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      log(`On-demand message request failed: ${e.message}`);
+    }
+  }
+
+  if (stored.length === 0) {
     return ok({
       contact: resolved.name,
       messages: [],
-      note: "No messages cached yet. Messages appear after they are sent or received while the server is running.",
+      note: "No messages cached yet. Messages appear after they are sent or received while connected. Try sending a message to this contact first.",
     });
   }
 
@@ -646,11 +783,12 @@ async function handleListChats(args) {
     // Include direct chats: @s.whatsapp.net (phone) and @lid (Linked Identity, Baileys v6)
     // Skip groups (@g.us) and broadcast
     if (jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid")) {
-      const displayName = c.name || c.notify || c.phone;
+      const phone = extractPhone(jid);
+      const displayName = c.name || c.notify || phone || "Unknown";
       const msgCount = (messageStore.get(jid) || []).length;
       results.push({
         name: displayName,
-        phone: jid.endsWith("@s.whatsapp.net") ? c.phone : null,
+        phone,
         jid,
         messages_cached: msgCount,
       });
@@ -691,7 +829,7 @@ async function handleSearch(args) {
   for (const [jid, c] of contacts) {
     const name = (c.name || "").toLowerCase();
     const notify = (c.notify || "").toLowerCase();
-    if (name.includes(q) || notify.includes(q) || c.phone.includes(q)) {
+    if (name.includes(q) || notify.includes(q) || (c.phone && c.phone.includes(q))) {
       matches.push({ name: c.name || c.notify, phone: c.phone, jid });
     }
     if (matches.length >= 10) break;
@@ -773,6 +911,7 @@ async function main() {
   await mcpServer.connect(transport);
   log("mcp-whatsapp v0.2.0 (Baileys) running on stdio");
   loadContacts();
+  loadMessages();
 
   // Start WhatsApp (no browser!)
   await startWhatsApp();

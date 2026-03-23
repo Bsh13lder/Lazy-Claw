@@ -169,13 +169,14 @@ class SkillRegistry:
         # AI management skills (ECO mode, providers, Ollama)
         from lazyclaw.skills.builtin.eco_management import (
             EcoSetModeSkill, EcoShowStatusSkill, EcoSetProviderSkill,
-            EcoSetModelSkill,
+            EcoSetModelSkill, EcoListModelsSkill,
         )
 
         self.register(EcoSetModeSkill(config=config))
         self.register(EcoShowStatusSkill(config=config))
         self.register(EcoSetProviderSkill(config=config))
         self.register(EcoSetModelSkill(config=config))
+        self.register(EcoListModelsSkill(config=config))
 
         from lazyclaw.skills.builtin.provider_management import (
             ProviderListSkill, ProviderAddSkill, ProviderScanSkill,

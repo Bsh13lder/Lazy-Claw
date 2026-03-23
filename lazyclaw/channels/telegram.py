@@ -586,16 +586,34 @@ def _is_status_query(text: str) -> bool:
     return lower in _STATUS_KEYWORDS or lower == "/status"
 
 
+async def resolve_user_id(config) -> str:
+    """Resolve the primary user_id from database. Shared by adapter + commands."""
+    from lazyclaw.db.connection import db_session
+    try:
+        async with db_session(config) as db:
+            cursor = await db.execute(
+                "SELECT id FROM users ORDER BY created_at LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return "default"
+
+
 class TelegramAdapter(ChannelAdapter):
     def __init__(
         self, token: str, agent: Agent, config: Config, lane_queue=None,
-        server_dashboard=None,
+        server_dashboard=None, task_runner=None, team_lead=None,
     ) -> None:
         self._token = token
         self._agent = agent
         self._config = config
         self._lane_queue = lane_queue
         self._server_dashboard = server_dashboard
+        self._task_runner = task_runner
+        self._team_lead = team_lead
         self._app = None
         # Track active callback per chat for status queries
         self._active_callbacks: dict[str, _TelegramCallback] = {}
@@ -609,10 +627,23 @@ class TelegramAdapter(ChannelAdapter):
 
     async def start(self) -> None:
         self._app = ApplicationBuilder().token(self._token).build()
-        self._app.add_handler(CommandHandler("start", self._handle_start))
+
+        # Register all admin slash commands (instant, no LLM)
+        from lazyclaw.channels.telegram_commands import TelegramCommands
+        self._commands = TelegramCommands(
+            adapter=self,
+            config=self._config,
+            agent=self._agent,
+            task_runner=self._task_runner,
+            team_lead=self._team_lead,
+        )
+        self._commands.register(self._app)
+
+        # /status still handled here (needs access to active callbacks)
         self._app.add_handler(
             CommandHandler("status", self._handle_status_cmd),
         )
+        # Text messages → agent (must be AFTER command handlers)
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
@@ -621,6 +652,14 @@ class TelegramAdapter(ChannelAdapter):
         await self._app.start()
         await self._app.updater.start_polling()
         logger.info("Telegram adapter started")
+
+        # Register "/" autocomplete menu with Telegram (must be after start)
+        try:
+            from lazyclaw.channels.telegram_commands import BOT_COMMANDS
+            await self._app.bot.set_my_commands(BOT_COMMANDS)
+            logger.info("Telegram command menu registered (%d commands)", len(BOT_COMMANDS))
+        except Exception as exc:
+            logger.debug("Could not set bot commands menu: %s", exc)
 
     async def stop(self) -> None:
         if self._app is None:
@@ -693,18 +732,7 @@ class TelegramAdapter(ChannelAdapter):
             return
 
         # Resolve actual user_id from database (not hardcoded "default")
-        from lazyclaw.db.connection import db_session
-        user_id = "default"
-        try:
-            async with db_session(self._config) as db:
-                cursor = await db.execute(
-                    "SELECT id FROM users ORDER BY created_at LIMIT 1"
-                )
-                row = await cursor.fetchone()
-                if row:
-                    user_id = row[0]
-        except Exception:
-            pass
+        user_id = await resolve_user_id(self._config)
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
 
         # Launch concurrently — LaneQueue serializes per user, fast dispatch
@@ -825,39 +853,6 @@ class TelegramAdapter(ChannelAdapter):
                     self._server_dashboard.unregister_request(request_id)
             # else: fast dispatch — background task still running,
             # dashboard card stays visible until background_done/failed
-
-    async def _handle_start(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        chat_id = str(update.effective_chat.id)
-
-        # First /start claims admin
-        if not self._admin_chat_id:
-            self._admin_chat_id = chat_id
-            self._allowed_chats.add(chat_id)
-            logger.info("Telegram admin claimed by chat %s", chat_id)
-            await update.message.reply_text(
-                "\U0001f512 Admin locked to this chat.\n\n"
-                "Hey! I'm Claw, your AI assistant.\n"
-                "Send me a message to chat.\n"
-                "While I'm working, type /status or \"what's happening\" "
-                "to see progress with specialist details."
-            )
-            return
-
-        if chat_id not in self._allowed_chats:
-            logger.warning("Unauthorized /start from chat %s", chat_id)
-            await update.message.reply_text(
-                "\U0001f512 Not authorized. This bot is locked to another chat."
-            )
-            return
-
-        await update.message.reply_text(
-            "Hey! I'm Claw, your AI assistant.\n\n"
-            "Send me a message to chat.\n"
-            "While I'm working, type /status or \"what's happening\" "
-            "to see progress with specialist details."
-        )
 
     async def send_message(
         self, external_user_id: str, message: OutboundMessage,

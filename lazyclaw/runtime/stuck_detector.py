@@ -58,8 +58,9 @@ def detect_captcha(tool_result: str) -> StuckSignal | None:
 # Note: same-result detector catches the real stuck case (identical results).
 # Tool loop detector only catches mindless repetition of the same tool.
 DEFAULT_LOOP_LIMITS: dict[str, int] = {
-    "browser": 20,  # Browser workflows need many steps
-    "web_search": 10,  # Research needs 3-5 searches then synthesis — don't interrupt
+    "browser": 8,  # Browser workflows need steps, but 20 was too many — cap at 8
+    "web_search": 6,  # Research needs 3-5 searches then synthesis
+    "list_directory": 3,  # Directory listing should not loop
     "default": 3,
 }
 

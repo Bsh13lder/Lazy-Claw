@@ -28,6 +28,8 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "skills": ALLOW,
     "custom": ALLOW,
     "security": ASK,
+    "mcp": ALLOW,
+    "mcp_management": ALLOW,
 }
 
 

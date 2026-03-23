@@ -432,9 +432,9 @@ class _TuiRequestCallback:
 # ── Widgets ─────────────────────────────────────────────────────────
 
 class SystemBar(Static):
-    """Top bar showing cost + tokens + active agents."""
+    """Top bar showing model names, ECO mode, services, cost, and tokens."""
 
-    def update_stats(self, stats: SystemStats) -> None:
+    def update_stats(self, stats: SystemStats, config=None) -> None:
         cost = _fmt_cost(stats.total_cost_today)
         t_in = _fmt_tokens(stats.total_tokens_in)
         t_out = _fmt_tokens(stats.total_tokens_out)
@@ -442,21 +442,40 @@ class SystemBar(Static):
 
         # ECO mode badge
         eco = stats.eco_mode.upper()
-        eco_color = _C_SUCCESS if eco == "LOCAL" else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
+        eco_color = _C_SUCCESS if eco in ("LOCAL", "ECO") else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
 
-        # Ollama models inline
-        ollama_str = ""
-        if stats.ollama_models:
-            ollama_str = f"  │  🧠 {', '.join(stats.ollama_models)}"
+        # Model names from config
+        brain = ""
+        worker = ""
+        if config:
+            brain = getattr(config, "brain_model", "").split("/")[-1]
+            worker = getattr(config, "worker_model", "").split("/")[-1]
+
+        # Service status indicators
+        tg_dot = f"[{_C_SUCCESS}]\u2713[/{_C_SUCCESS}]" if stats.telegram_status == "connected" else f"[{_C_ERROR}]\u2717[/{_C_ERROR}]"
+        br_dot = f"[{_C_SUCCESS}]\u2713[/{_C_SUCCESS}]" if stats.browser_alive else f"[{_C_IDLE}]\u2014[/{_C_IDLE}]"
+        mcp_dot = f"[{_C_SUCCESS}]{stats.mcp_count}[/{_C_SUCCESS}]" if stats.mcp_count > 0 else f"[{_C_IDLE}]0[/{_C_IDLE}]"
+
+        # Line 1: Mode + Models + Cost
+        line1_parts = [f"[{eco_color}]{eco}[/{eco_color}]"]
+        if brain:
+            line1_parts.append(f"Brain:[bold]{brain}[/bold]")
+        if worker:
+            line1_parts.append(f"Worker:[dim]{worker}[/dim]")
+        line1_parts.append(f"[{_C_COST}]{cost}[/{_C_COST}]")
+        line1_parts.append(f"\u2191{t_in} \u2193{t_out}")
+        line1_parts.append(f"[{active_color}]{stats.active_count} active[/{active_color}]")
+
+        # Line 2: Services
+        line2 = (
+            f"TG:{tg_dot}  Browser:{br_dot}"
+            f"  MCP:{mcp_dot}"
+            f"  Q:{stats.queue_depth}"
+            f"  Mem:{stats.memory_mb:.0f}MB"
+        )
 
         self.update(Text.from_markup(
-            f" [{eco_color}]ECO:{eco}[/{eco_color}]"
-            f"{ollama_str}"
-            f"  │  [{_C_COST}]{cost} today[/{_C_COST}]"
-            f"  │  ↑{t_in} ↓{t_out}"
-            f"  │  [{active_color}]{stats.active_count} active[/{active_color}]"
-            f"  │  Q:{stats.queue_depth}"
-            f"  │  Mem:{stats.memory_mb:.0f}MB"
+            " " + "  \u2502  ".join(line1_parts) + "\n " + line2
         ))
 
 
@@ -501,30 +520,39 @@ class RequestCard(Static):
         t_out = _fmt_tokens(snap.tokens_out)
         cost = _fmt_cost(snap.cost_usd)
 
+        # Color-coded border by status
+        border_color = {
+            "done": _C_SUCCESS, "error": _C_ERROR, "stuck": _C_ERROR,
+            "queued": _C_IDLE,
+        }.get(snap.phase, _C_ACTIVE if snap.phase in ("thinking", "tool", "team", "streaming") else _C_BORDER)
+
         # Escape user message for Rich markup
         safe_msg = snap.message.replace("[", "\\[") if snap.message else ""
+        # Show task description, not just "request #N"
+        display_msg = safe_msg[:50] + "..." if len(safe_msg) > 50 else safe_msg
 
         # Header
         lines = [
-            f"[{_C_BORDER}]╭─[/{_C_BORDER}]"
+            f"[{border_color}]╭─[/{border_color}]"
             f" [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
-            f' "{safe_msg}"'
+            f' "{display_msg}"'
         ]
 
-        # Phase line
+        # Phase line with model shortname
         phase_label = snap.phase
-        model_str = f"  {snap.model}" if snap.model else ""
+        model_short = snap.model.split("/")[-1] if snap.model else ""
         step_str = f"  step {snap.step_current}" if snap.step_current else ""
         lines.append(
-            f"[{_C_BORDER}]│[/{_C_BORDER}]"
-            f" [{color}]{icon} {phase_label}[/{color}]{model_str}{step_str}"
+            f"[{border_color}]│[/{border_color}]"
+            f" [{color}]{icon} {phase_label}[/{color}]"
+            f"  [dim]{model_short}[/dim]{step_str}"
         )
 
         # Delegate chain
         if snap.delegate_to:
             lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
-                f" [{_C_SPECIALIST}]● delegate → {snap.delegate_to}[/{_C_SPECIALIST}]"
+                f"[{border_color}]│[/{border_color}]"
+                f" [{_C_SPECIALIST}]\u25cf delegate \u2192 {snap.delegate_to}[/{_C_SPECIALIST}]"
             )
 
         # Progress bar when step_total > 0
@@ -533,9 +561,9 @@ class RequestCard(Static):
             bar_width = 16
             filled_chars = int(bar_width * filled / snap.step_total)
             empty_chars = bar_width - filled_chars
-            bar = "█" * filled_chars + "░" * empty_chars
+            bar = "\u2588" * filled_chars + "\u2591" * empty_chars
             lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f"[{border_color}]│[/{border_color}]"
                 f" [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
                 f" {filled}/{snap.step_total} steps"
             )
@@ -545,7 +573,7 @@ class RequestCard(Static):
             unique_tools = list(dict.fromkeys(snap.tools_used[-6:]))
             tools_str = ", ".join(unique_tools)
             lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f"[{border_color}]│[/{border_color}]"
                 f" [dim]Tools: {tools_str}[/dim]"
             )
 
@@ -554,14 +582,14 @@ class RequestCard(Static):
             spec_parts = []
             for name, status in snap.specialists:
                 s_icon, s_color = {
-                    "queued": ("○", _C_IDLE),
-                    "running": ("●", _C_ACTIVE),
-                    "done": ("✓", _C_SUCCESS),
-                    "error": ("✗", _C_ERROR),
-                }.get(status, ("○", _C_IDLE))
+                    "queued": ("\u25cb", _C_IDLE),
+                    "running": ("\u25cf", _C_ACTIVE),
+                    "done": ("\u2713", _C_SUCCESS),
+                    "error": ("\u2717", _C_ERROR),
+                }.get(status, ("\u25cb", _C_IDLE))
                 spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
             lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
+                f"[{border_color}]│[/{border_color}]"
                 f"  {'  '.join(spec_parts)}"
             )
 
@@ -570,15 +598,16 @@ class RequestCard(Static):
         if snap.trigger != "user":
             trigger_badge = f" [{_C_SPECIALIST}][{snap.trigger}][/{_C_SPECIALIST}]"
         lines.append(
-            f"[{_C_BORDER}]│[/{_C_BORDER}]"
-            f" ↑{t_in} ↓{t_out}"
+            f"[{border_color}]│[/{border_color}]"
+            f" \u2191{t_in} \u2193{t_out}"
             f"  [{_C_COST}]{cost}[/{_C_COST}]"
             f"  [dim]{elapsed}[/dim]"
             f"{trigger_badge}"
         )
 
         # Footer
-        lines.append(f"[{_C_BORDER}]╰{'─' * 44}╯[/{_C_BORDER}]")
+        horiz_line = "\u2500" * 44
+        lines.append(f"[{border_color}]\u2570{horiz_line}\u256f[/{border_color}]")
 
         self.update(Text.from_markup("\n".join(lines)))
 
@@ -663,15 +692,37 @@ class ActivityPanel(VerticalScroll):
 
 
 class LogPanel(RichLog):
-    """Scrollable activity feed — full width, word-wrap, auto-scroll."""
+    """Scrollable activity feed — color-coded by type, auto-scroll.
+
+    Event types get distinct colors: green=success, yellow=tool,
+    cyan=delegate, red=error. Recent entries (last 30s) are bright.
+    """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(wrap=True, **kwargs)
+        self._filter: str = "all"  # all, tools, errors, llm
+
+    def set_filter(self, filter_name: str) -> None:
+        """Set log filter: all, tools, errors, llm."""
+        self._filter = filter_name.lower()
 
     def append_entry(self, timestamp: str, kind: str, detail: str) -> None:
+        # Filter entries if a filter is active
+        if self._filter == "tools" and kind not in ("tool", "result"):
+            return
+        if self._filter == "errors" and kind not in ("error", "stuck"):
+            return
+        if self._filter == "llm" and kind not in ("llm", "done"):
+            return
+
         style = _log_style(kind)
         icon = _log_icon(kind)
         safe_detail = detail.replace("[", "\\[")
+
+        # Truncate long details for readability
+        if len(safe_detail) > 120:
+            safe_detail = safe_detail[:117] + "..."
+
         self.write(Text.from_markup(
             f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {safe_detail}"
         ))
@@ -978,7 +1029,8 @@ class LazyClawApp(App):
             placeholder="Type message or /command...",
             id="admin-input",
             suggester=SuggestFromList(
-                ["/help", "/clear", "/status", "/history", "/jobs", "/watchers"],
+                ["/help", "/clear", "/status", "/history", "/jobs", "/watchers",
+                 "/filter all", "/filter tools", "/filter errors", "/filter llm"],
                 case_sensitive=False,
             ),
         )
@@ -1032,6 +1084,8 @@ class LazyClawApp(App):
                     self._telegram_token, self._agent, self._config,
                     lane_queue=self._lane_queue,
                     server_dashboard=self.dashboard,
+                    task_runner=self._task_runner,
+                    team_lead=self._team_lead,
                 )
                 await telegram.start()
                 self._telegram_adapter = telegram
@@ -1328,7 +1382,7 @@ class LazyClawApp(App):
 
     def on_stats_refreshed(self, msg: StatsRefreshed) -> None:
         bar = self.query_one("#system-bar", SystemBar)
-        bar.update_stats(msg.stats)
+        bar.update_stats(msg.stats, config=self._config)
 
     # ── Focus actions ─────────────────────────────────────────────────
 
@@ -1399,9 +1453,19 @@ class LazyClawApp(App):
             self._show_history()
             return
 
+        if text.startswith("/filter"):
+            filter_arg = text[7:].strip().lower() or "all"
+            if filter_arg in ("all", "tools", "errors", "llm"):
+                self.query_one("#log-panel", LogPanel).set_filter(filter_arg)
+                self._post_log("info", f"Log filter: {filter_arg}")
+            else:
+                self._post_log("info", "Filters: all, tools, errors, llm")
+            return
+
         if text in ("/help", "/"):
             self._post_log("info",
-                           "Commands: /clear /status /history /jobs /watchers /help")
+                           "Commands: /clear /status /history /jobs /watchers "
+                           "/filter <all|tools|errors|llm> /help")
             return
 
         # Enqueue as admin message with dashboard tracking + response display

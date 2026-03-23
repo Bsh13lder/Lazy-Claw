@@ -211,6 +211,19 @@ async def get_favorite_server_ids(config: Config, user_id: str) -> set[str]:
         return {row[0] for row in await rows.fetchall()}
 
 
+async def get_server_id_by_name(
+    config: Config, user_id: str, name: str,
+) -> str | None:
+    """Look up the server ID for a named MCP connection. Returns None if not found."""
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT id FROM mcp_connections WHERE user_id = ? AND name = ?",
+            (user_id, name),
+        )
+        result = await row.fetchone()
+    return result[0] if result else None
+
+
 # -- CRUD operations ----------------------------------------------------------
 
 
@@ -306,9 +319,23 @@ async def get_server(config: Config, user_id: str, server_id: str) -> dict | Non
     }
 
 
-async def connect_server(config: Config, user_id: str, server_id: str) -> MCPClient:  # type: ignore[name-defined]  # noqa: F821
-    """Connect to an MCP server. Returns the active MCPClient."""
+async def connect_server(
+    config: Config, user_id: str, server_id: str, *, force: bool = False,
+) -> MCPClient:  # type: ignore[name-defined]  # noqa: F821
+    """Connect to an MCP server. Returns the active MCPClient.
+
+    If the server is already connected and healthy, returns the existing
+    client without reconnecting (avoids anyio cancel scope errors from
+    cross-task disconnect). Pass force=True to reconnect anyway.
+    """
     from lazyclaw.mcp.client import MCPClient
+
+    # Reuse existing healthy connection (avoids cancel scope errors)
+    if not force and server_id in _active_clients:
+        existing = _active_clients[server_id]
+        if existing.is_connected:
+            logger.debug("MCP server %s already connected — reusing", server_id)
+            return existing
 
     server = await get_server(config, user_id, server_id)
     if not server:
@@ -343,8 +370,7 @@ async def disconnect_server(user_id: str, server_id: str) -> None:
 
 async def reconnect_server(config: Config, user_id: str, server_id: str) -> MCPClient:  # type: ignore[name-defined]  # noqa: F821
     """Disconnect and reconnect to an MCP server."""
-    await disconnect_server(user_id, server_id)
-    return await connect_server(config, user_id, server_id)
+    return await connect_server(config, user_id, server_id, force=True)
 
 
 async def connect_server_with_oauth(

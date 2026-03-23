@@ -58,6 +58,7 @@ _CHAT_ONLY_PATTERN = re.compile(
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "recall_memories", "save_memory", "delegate",
     "connect_mcp_server", "disconnect_mcp_server", "browser",
+    "watch_messages", "watch_site",
 })
 
 # Channel keywords → prefer MCP tools over browser
@@ -66,6 +67,13 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "whatsapp": ["whatsapp", "wa msg", "wa message"],
     "instagram": ["instagram", "ig msg", "ig message", "insta"],
     "email": ["email", "gmail", "mail", "inbox"],
+}
+
+# Channel name → bundled MCP server name (for on-demand connect)
+_CHANNEL_TO_MCP: dict[str, str] = {
+    "whatsapp": "mcp-whatsapp",
+    "instagram": "mcp-instagram",
+    "email": "mcp-email",
 }
 
 # Max chars for a tool result before truncation (prevents MCP JSON blowup)
@@ -501,6 +509,73 @@ class Agent:
                                 _channel_tools.append(schema)
                             break
 
+                # On-demand connect: if channel detected but no MCP tools found,
+                # the optional MCP server was never cached. Connect it now.
+                if not _channel_tools:
+                    logger.info(
+                        "No MCP tools found for channels %s — attempting on-demand connect",
+                        _matched_channels,
+                    )
+                    try:
+                        from lazyclaw.mcp.manager import (
+                            connect_server, get_server_id_by_name,
+                        )
+                        from lazyclaw.mcp.bridge import (
+                            cache_tool_schemas, register_mcp_tools,
+                        )
+
+                        for ch in _matched_channels:
+                            mcp_name = _CHANNEL_TO_MCP.get(ch)
+                            if not mcp_name:
+                                continue
+                            try:
+                                sid = await get_server_id_by_name(
+                                    self.config, user_id, mcp_name,
+                                )
+                                if not sid:
+                                    logger.info("No MCP server %s registered for user", mcp_name)
+                                    continue
+                                logger.info("On-demand connecting %s (id=%s)...", mcp_name, sid[:8])
+                                client = await asyncio.wait_for(
+                                    connect_server(self.config, user_id, sid),
+                                    timeout=15,
+                                )
+                                tools_list = await client.list_tools()
+                                await cache_tool_schemas(self.config, mcp_name, tools_list)
+                                count = await register_mcp_tools(
+                                    client, self.registry,
+                                    config=self.config, user_id=user_id,
+                                )
+                                logger.info(
+                                    "On-demand connected %s: %d tools registered",
+                                    mcp_name, count,
+                                )
+                                # Re-scan for channel tools after registration
+                                for tool_info in self.registry.list_mcp_tools():
+                                    func = tool_info.get("function", {})
+                                    tname = func.get("name", "").lower()
+                                    tdesc = func.get("description", "").lower()
+                                    if ch in tname or ch in tdesc:
+                                        schema = self.registry.get_tool_schema(
+                                            func.get("name", ""),
+                                        )
+                                        if schema is not None:
+                                            _channel_tools.append(schema)
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "Timeout connecting %s on-demand (>15s)", mcp_name,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed on-demand connect for %s",
+                                    mcp_name, exc_info=True,
+                                )
+                    except Exception:
+                        logger.warning(
+                            "On-demand MCP connect failed (import or setup)",
+                            exc_info=True,
+                        )
+
             # Build base tools — drop browser if channel MCP tools found
             _base_names = _BASE_TOOL_NAMES
             if _channel_tools:
@@ -607,9 +682,11 @@ class Agent:
 
                 # Worker (Haiku) by default. Brain (Sonnet) only during escalation window.
                 # Escalation lasts max 5 iterations, then falls back to worker.
+                # _escalated stays True so next stuck detection goes to user/break.
                 _MAX_ESCALATION_ITERS = 5
                 if _escalated and (iteration - _escalation_iter) >= _MAX_ESCALATION_ITERS:
-                    _escalated = False  # Reset — Sonnet didn't help either
+                    # Window expired — fall back to worker model but keep _escalated=True
+                    # so next stuck detection doesn't re-escalate (goes to user instead)
                     iter_model = self.config.worker_model
                 elif not _escalated:
                     iter_model = self.config.worker_model
@@ -706,10 +783,31 @@ class Agent:
                     )
 
                 if not response.tool_calls:
+                    _final_content = response.content or streamed_content or ""
+
+                    # Empty response from worker model (known Haiku issue:
+                    # 88 completion tokens consumed but content_len=0, tool_calls=0).
+                    # Retry once with brain model before giving up.
+                    if (
+                        not _final_content.strip()
+                        and tools
+                        and not _escalated
+                        and iteration == 0
+                    ):
+                        logger.warning(
+                            "Empty LLM response from %s (usage=%s, tools=%d) — retrying with brain model",
+                            response.model, response.usage, len(tools),
+                        )
+                        _escalated = True
+                        _escalation_iter = iteration
+                        iter_model = self.config.brain_model
+                        streamed_content = ""
+                        continue  # Retry this iteration with brain model
+
                     # Final text response (already streamed to user)
                     await cb.on_event(AgentEvent("stream_done", "", {}))
                     all_new_messages.append(
-                        LLMMessage(role="assistant", content=response.content)
+                        LLMMessage(role="assistant", content=_final_content)
                     )
                     break
 
@@ -758,6 +856,11 @@ class Agent:
                             self.registry.unregister("delegate")
                         return "On it — working in background."
 
+                # End streaming before tool lines appear (prevents text/tool garbling)
+                if streamed_content:
+                    await cb.on_event(AgentEvent("stream_done", "", {}))
+                    streamed_content = ""
+
                 # Assistant message with tool calls (may have partial text content)
                 assistant_msg = LLMMessage(
                     role="assistant",
@@ -767,8 +870,35 @@ class Agent:
                 messages.append(assistant_msg)
                 all_new_messages.append(assistant_msg)
 
+                # If delegate is among tool calls, execute ONLY delegate.
+                # Delegate runs a full specialist loop — other parallel tool
+                # calls are redundant and waste tokens (double-agent problem).
+                _tool_calls_to_run = response.tool_calls
+                _skipped_calls: list[ToolCall] = []
+                if len(response.tool_calls) > 1:
+                    _delegate_calls = [
+                        tc for tc in response.tool_calls if tc.name == "delegate"
+                    ]
+                    if _delegate_calls:
+                        _skipped_calls = [
+                            tc for tc in response.tool_calls if tc.name != "delegate"
+                        ]
+                        _tool_calls_to_run = _delegate_calls
+                        logger.info(
+                            "Delegate detected — skipping %d parallel tool calls",
+                            len(_skipped_calls),
+                        )
+
+                # Inject stub results for skipped calls (LLM expects tool_call_id responses)
+                for sc in _skipped_calls:
+                    messages.append(LLMMessage(
+                        role="tool",
+                        content="Skipped — delegate is handling this task.",
+                        tool_call_id=sc.id,
+                    ))
+
                 # Execute each tool call
-                for tc in response.tool_calls:
+                for tc in _tool_calls_to_run:
                     _display = self.registry.get_display_name(tc.name) if self.registry else tc.name
                     _all_tools_used.append(_display)
                     await cb.on_event(AgentEvent(
@@ -798,16 +928,9 @@ class Agent:
                         _tool_call_cache[_cache_key] = result
 
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
-                    await cb.on_event(AgentEvent(
-                        "tool_result", _display,
-                        {"tool": tc.name, "display_name": _display},
-                    ))
 
-                    # Track step with TeamLead
-                    if self._team_lead and _fg_task_id:
-                        self._team_lead.update_step(_fg_task_id, _display)
-
-                    # Handle approval-required responses
+                    # Handle approval-required responses BEFORE emitting tool_result
+                    # to avoid duplicate result events (one for placeholder, one for real)
                     if isinstance(result, str) and result.startswith(APPROVAL_PREFIX):
                         try:
                             parts = result[len(APPROVAL_PREFIX):]
@@ -854,6 +977,16 @@ class Agent:
                                 f"Do not retry this action. Explain what you wanted to do "
                                 f"and ask if the user wants to try a different approach."
                             )
+                    else:
+                        # Normal tool (no approval needed) — emit result event
+                        await cb.on_event(AgentEvent(
+                            "tool_result", _display,
+                            {"tool": tc.name, "display_name": _display},
+                        ))
+
+                    # Track step with TeamLead
+                    if self._team_lead and _fg_task_id:
+                        self._team_lead.update_step(_fg_task_id, _display)
 
                     tool_msg = LLMMessage(
                         role="tool",
@@ -914,21 +1047,49 @@ class Agent:
                             "Stuck detected: %s (%s)", _stuck_signal.reason, _stuck_signal.context,
                         )
 
-                        # Auto-escalate: retry with brain_model before asking user
+                        # Auto-escalate: switch to brain model + inject decision prompt.
+                        # Sonnet decides: try a DIFFERENT approach (tool call) or give up (text response).
+                        # If it responds with text → loop breaks naturally at the "no tool_calls" check.
                         if not _escalated:
                             _escalated = True
                             _escalation_iter = iteration
-                            logger.info("Auto-escalating to brain model: %s (max %d iters)", self.config.brain_model, _MAX_ESCALATION_ITERS)
+                            logger.info("Auto-escalating to brain model: %s", self.config.brain_model)
                             await cb.on_event(AgentEvent(
                                 "llm_call",
                                 f"Escalating to {self.config.brain_model}...",
                                 {"escalation": True, "model": self.config.brain_model},
                             ))
-                            # Clear stuck state — give brain a fresh shot
+                            # Inject decision prompt — Sonnet sees the stuck context
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=(
+                                    f"⚠ STUCK: {_stuck_signal.context}\n\n"
+                                    f"You have been repeating the same tool with no progress. "
+                                    f"You MUST either:\n"
+                                    f"1. Try a COMPLETELY DIFFERENT approach (different tool, different URL, different strategy)\n"
+                                    f"2. If the task is impossible right now, STOP and explain to the user what went wrong "
+                                    f"and what they can do (just respond with text, no tool call)\n\n"
+                                    f"Do NOT call the same tool again with similar arguments."
+                                ),
+                            ))
                             _tool_call_history.clear()
                             _tool_results.clear()
                             iter_model = self.config.brain_model
                             continue
+
+                        # Sonnet also got stuck — give up.
+                        # Background agents: break immediately (can't ask user).
+                        # Foreground agents: ask user for help.
+                        if getattr(self, "is_background", False):
+                            logger.warning("Background agent stuck after escalation — giving up")
+                            all_new_messages.append(LLMMessage(
+                                role="assistant",
+                                content=(
+                                    f"I got stuck and couldn't recover: {_stuck_signal.context}. "
+                                    f"The page may need manual interaction or a different approach."
+                                ),
+                            ))
+                            break
 
                         await cb.on_event(AgentEvent(
                             HELP_NEEDED, _stuck_signal.context,

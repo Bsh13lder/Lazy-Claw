@@ -332,7 +332,7 @@ class BrowserSkill(BaseSkill):
                 "action": {
                     "type": "string",
                     "enum": ["read", "open", "click", "type", "press_key", "screenshot", "tabs",
-                            "scroll", "close", "snapshot", "hover", "drag", "console_logs", "chain"],
+                            "scroll", "close", "show", "snapshot", "hover", "drag", "console_logs", "chain"],
                     "description": (
                         "read: get page CONTENT (text, emails, messages) — no interactive refs. Use to understand what's on the page. "
                         "open: navigate + get content summary AND interactive refs [e1],[e2] — use for first visit to a page. "
@@ -344,6 +344,7 @@ class BrowserSkill(BaseSkill):
                         "tabs: list all open tabs. "
                         "scroll: scroll up or down. "
                         "close: close/hide the browser. "
+                        "show: make the browser window visible on screen. Use when user says 'show me', 'make visible', 'let me see'. Shows the EXISTING browser session — same tabs, same page. "
                         "hover: hover over element. "
                         "drag: drag element from source to target. "
                         "console_logs: get browser console output. "
@@ -463,6 +464,8 @@ class BrowserSkill(BaseSkill):
                 return await self._action_scroll(user_id, params, tab_context)
             elif action == "close":
                 return await self._action_close(user_id, params)
+            elif action == "show":
+                return await self._action_show(user_id)
             elif action == "snapshot":
                 return await self._action_snapshot(user_id, params, tab_context)
             elif action == "hover":
@@ -1096,6 +1099,27 @@ class BrowserSkill(BaseSkill):
             return "Browser closed. Cookies saved — next open will restore your sessions."
         except Exception as e:
             return f"Error closing browser: {e}"
+
+    async def _action_show(self, user_id: str) -> str:
+        """Make the existing browser visible without killing the session.
+
+        Switches headless → visible on the same profile dir so all tabs,
+        cookies, and the current page are preserved. Works from background
+        tasks too — user explicitly asked to see the browser.
+        """
+        try:
+            await _get_visible_cdp_backend(user_id)
+            await _raise_browser_window()
+            # Read current page to confirm what's showing
+            backend = await _get_cdp_backend(user_id)
+            try:
+                url = await backend.current_url()
+                title = await backend.title()
+                return f"Browser is now visible. Showing: {title} ({url})"
+            except Exception:
+                return "Browser is now visible on your screen."
+        except Exception as e:
+            return f"Could not make browser visible: {e}"
 
     # ── Auto-connect logic ──────────────────────────────────────────────
 

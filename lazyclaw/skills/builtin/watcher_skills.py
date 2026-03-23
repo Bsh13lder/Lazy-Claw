@@ -82,13 +82,13 @@ class WatchSiteSkill(BaseSkill):
         duration = params.get("duration_hours", 2)
         custom_js = params.get("custom_js")
 
-        # Shortcuts
+        # Block MCP channels — use watch_messages skill instead
         if url.lower() in ("whatsapp", "wa"):
-            return "Error: Use whatsapp_* MCP tools for WhatsApp, not browser watcher. Call search_tools('whatsapp') to find them."
+            return "Error: Use watch_messages skill for WhatsApp monitoring, not browser watcher."
         elif url.lower() in ("gmail", "email", "mail"):
-            return "Error: Use email_* MCP tools for Email, not browser watcher. Call search_tools('email') to find them."
-        elif url.lower() in ("instagram", "ig"):
-            return "Error: Use instagram_* MCP tools for Instagram, not browser watcher. Call search_tools('instagram') to find them."
+            return "Error: Use watch_messages skill for Email monitoring, not browser watcher."
+        elif url.lower() in ("instagram", "ig", "insta"):
+            return "Error: Use watch_messages skill for Instagram monitoring, not browser watcher."
 
         # Calculate expiration
         expires_at = None

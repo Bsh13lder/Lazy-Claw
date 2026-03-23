@@ -11,6 +11,7 @@ import logging
 
 from lazyclaw.config import Config
 from lazyclaw.db.connection import db_session
+from lazyclaw.llm.free_providers import PROVIDER_DEFS, discover_providers
 
 logger = logging.getLogger(__name__)
 
@@ -18,34 +19,12 @@ logger = logging.getLogger(__name__)
 VALID_MODES = {"eco", "hybrid", "full", "local"}
 
 # Base set of known free providers
-_BASE_PROVIDERS = {"groq", "gemini", "openrouter", "together", "mistral", "huggingface", "ollama"}
+_BASE_PROVIDERS = set(PROVIDER_DEFS.keys()) | {"ollama"}
 
 
 def _get_valid_providers() -> set[str]:
-    """Return valid provider names, including any from apihunter registry."""
-    try:
-        from mcp_apihunter.config import load_config as load_ah_config
-        from mcp_apihunter.registry import Registry
-        import asyncio
-
-        config = load_ah_config()
-        registry = Registry(config.db_path)
-
-        async def _load():
-            await registry.init_db()
-            entries = await registry.list_all(status_filter="active")
-            return {e.name for e in entries}
-
-        try:
-            asyncio.get_running_loop()
-            return set(_BASE_PROVIDERS)  # Can't run sync in async context
-        except RuntimeError:
-            pass
-
-        extra = asyncio.run(_load())
-        return _BASE_PROVIDERS | extra
-    except Exception:
-        return set(_BASE_PROVIDERS)
+    """Return valid provider names."""
+    return set(_BASE_PROVIDERS)
 
 
 # Default eco settings
@@ -58,6 +37,8 @@ DEFAULT_ECO = {
     "task_overrides": None,
     "brain_model": None,       # None = use default from model_registry
     "specialist_model": None,  # None = use default from model_registry
+    "free_providers": None,    # None = auto-detect from env
+    "preferred_free_model": None,  # None = use provider default
 }
 
 
@@ -108,6 +89,14 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         if invalid:
             raise ValueError(f"Invalid providers: {invalid}")
 
+    # Validate free_providers if provided
+    if "free_providers" in updates and updates["free_providers"] is not None:
+        if not isinstance(updates["free_providers"], list):
+            raise ValueError("free_providers must be a list")
+        invalid = set(updates["free_providers"]) - valid_providers
+        if invalid:
+            raise ValueError(f"Invalid free providers: {invalid}")
+
     # Load current settings
     async with db_session(config) as db:
         row = await db.execute(
@@ -150,7 +139,7 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
 
 
 async def auto_detect_eco_mode(config: Config, user_id: str) -> str | None:
-    """If mcp-freeride is available and has providers, auto-enable hybrid mode.
+    """If free providers are available, auto-enable hybrid mode.
 
     Only activates if the user hasn't explicitly set a mode yet.
     We track this via the 'explicit' flag — set by update_eco_settings when
@@ -161,22 +150,17 @@ async def auto_detect_eco_mode(config: Config, user_id: str) -> str | None:
     if current.get("explicit"):
         return None  # User explicitly chose a mode, never override
 
-    try:
-        from mcp_freeride.config import load_config as load_freeride_config
-        from mcp_freeride.config import get_configured_providers
-
-        freeride_config = load_freeride_config()
-        providers = get_configured_providers(freeride_config)
-        if providers:
-            await update_eco_settings(config, user_id, {"mode": "hybrid"})
-            logger.info(
-                "Auto-enabled hybrid ECO mode (%d free providers: %s)",
-                len(providers), ", ".join(providers),
-            )
-            return "hybrid"
-    except ImportError:
-        pass
-    except Exception:
-        logger.debug("ECO auto-detect failed", exc_info=True)
+    providers = discover_providers()
+    if providers:
+        provider_names = list(providers.keys())
+        await update_eco_settings(
+            config, user_id,
+            {"mode": "hybrid", "free_providers": provider_names},
+        )
+        logger.info(
+            "Auto-enabled hybrid ECO mode (%d free providers: %s)",
+            len(providers), ", ".join(provider_names),
+        )
+        return "hybrid"
 
     return None

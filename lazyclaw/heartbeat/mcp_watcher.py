@@ -59,8 +59,8 @@ def is_mcp_watcher(ctx: dict) -> bool:
 
 def is_mcp_check_due(ctx: dict) -> bool:
     """Check if enough time has passed since last MCP check."""
-    interval = ctx.get("check_interval", 120)
-    last = ctx.get("last_check", 0)
+    interval = float(ctx.get("check_interval", 120))
+    last = float(ctx.get("last_check", 0))
     return (time.time() - last) >= interval
 
 
@@ -92,13 +92,16 @@ async def check_mcp_watcher(
     tool_args = ctx.get("tool_args", {})
     last_seen = set(ctx.get("last_seen_ids", []))
 
-    # Find the MCP client for this service
-    client = mcp_clients.get(f"mcp-{service}")
+    # Find the MCP client — match by client name (server_id may be a UUID)
+    client = None
+    for sid, c in mcp_clients.items():
+        client_name = getattr(c, "name", "") or ""
+        if service in client_name.lower() or service in sid.lower():
+            client = c
+            break
     if client is None:
-        # Try without prefix
-        client = mcp_clients.get(service)
-    if client is None:
-        logger.warning("MCP watcher: no client for service '%s'", service)
+        _names = [getattr(c, "name", sid) for sid, c in mcp_clients.items()]
+        logger.warning("MCP watcher: no client for service '%s' (active: %s)", service, _names)
         new_ctx = dict(ctx)
         new_ctx["last_check"] = time.time()
         return False, None, new_ctx
@@ -176,6 +179,21 @@ def _extract_new_items(
             if str(item.get("id", i)) not in last_seen
         ]
 
+    # Instagram: notifications list
+    if service == "instagram":
+        items = data if isinstance(data, list) else data.get("notifications", [])
+        new_items = []
+        for i, item in enumerate(items):
+            item_id = str(item.get("id", item.get("pk", i)))
+            if item_id not in last_seen:
+                new_items.append({
+                    "id": item_id,
+                    "type": item.get("type", "notification"),
+                    "user": item.get("user", item.get("from", "?")),
+                    "text": item.get("text", item.get("body", "")),
+                })
+        return new_items
+
     # Generic: treat as list of objects with "id" field
     items = data if isinstance(data, list) else []
     return [
@@ -211,6 +229,19 @@ def _format_notification(
             lines.append(f"  {sender}: {subj}")
         if len(items) > 5:
             lines.append(f"  ... and {len(items) - 5} more")
+        return "\n".join(lines)
+
+    if service == "instagram":
+        lines = [f"Instagram — {len(items)} new:"]
+        for item in items[:5]:
+            user = item.get("user", "?")
+            text = item.get("text", "")[:80]
+            ntype = item.get("type", "")
+            lines.append(f"  {user} ({ntype}): {text}")
+        if len(items) > 5:
+            lines.append(f"  ... and {len(items) - 5} more")
+        if instruction:
+            lines.append(f"\nInstruction: {instruction}")
         return "\n".join(lines)
 
     # Generic

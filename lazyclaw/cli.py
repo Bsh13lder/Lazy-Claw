@@ -318,6 +318,7 @@ async def _handle_slash_command(
         "/history": lambda: _show_chat_history(config, user_id),
         "/connect-browser": lambda: _connect_browser(config),
         "/connectbrowser": lambda: _connect_browser(config),
+        "/restart": lambda: _restart_server(),
     }
 
     if command in ("/help", "/"):
@@ -464,6 +465,24 @@ async def _connect_browser(config: Config) -> None:
         "  [dim]Agent can now use: browser (read, open, click, type, "
         "screenshot, tabs, scroll)[/dim]"
     )
+
+
+async def _restart_server() -> None:
+    """Restart the LazyClaw server process."""
+    import os
+    import sys
+
+    console.print("[yellow]Restarting LazyClaw...[/yellow]")
+
+    # Clean up MCP connections
+    try:
+        from lazyclaw.mcp.manager import disconnect_all
+        await disconnect_all()
+    except Exception:
+        pass
+
+    # Re-exec the current process with same args
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 async def _show_version() -> None:
@@ -909,17 +928,50 @@ async def _chat_loop() -> None:
     from lazyclaw.gateway.app import set_registry
     set_registry(registry)
 
+    # Start heartbeat daemon for watcher/cron jobs in REPL mode
+    heartbeat_task = None
+    try:
+        from lazyclaw.heartbeat.daemon import HeartbeatDaemon
+        from lazyclaw.queue.lane import LaneQueue
+
+        lane_queue = LaneQueue()
+        lane_queue.set_handler(agent.process_message)
+        heartbeat = HeartbeatDaemon(config, lane_queue)
+        heartbeat_task = asyncio.create_task(heartbeat.start())
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Heartbeat daemon failed to start: %s", exc)
+
     console.print(Panel(LOGO, subtitle=f"v{__version__}", style="cyan"))
+
+    # Status banner — one glance to see everything is working
+    eco_label = eco_mode.upper() if eco_mode else "Full"
+    eco_color = {"eco": "green", "hybrid": "cyan"}.get(eco_mode or "", "white")
+    banner_parts = [
+        f"[bold]Mode:[/bold] [{eco_color}]{eco_label}[/{eco_color}]",
+        f"[bold]Brain:[/bold] [cyan]{config.brain_model.split('/')[-1]}[/cyan]",
+        f"[bold]Worker:[/bold] [dim]{config.worker_model.split('/')[-1]}[/dim]",
+    ]
+    console.print("  " + "  \u2502  ".join(banner_parts))
+
+    # MCP + services line
+    svc_parts = []
     if mcp_tool_count > 0:
-        console.print(f"[dim]Loaded {mcp_tool_count} MCP tools from bundled servers.[/dim]")
-    if eco_mode:
-        console.print(f"[dim]ECO mode auto-enabled: {eco_mode} (free providers detected)[/dim]")
+        svc_parts.append(f"[bold]MCP:[/bold] [green]{mcp_tool_count} tools[/green]")
+    else:
+        svc_parts.append("[bold]MCP:[/bold] [dim]none[/dim]")
+    svc_parts.append("[bold]Browser:[/bold] [dim]idle[/dim]")
+    if config.telegram_bot_token:
+        svc_parts.append("[bold]Telegram:[/bold] [green]\u2713[/green]")
+    console.print("  " + "  \u2502  ".join(svc_parts))
+
+    console.print()
     console.print("[dim]Type a message to chat. /help for commands.[/dim]")
-    console.print("[dim]Up/Down: history  |  Esc: clear line  |  Ctrl+C: cancel agent  |  /?: status[/dim]")
+    console.print("[dim]Up/Down: history  |  Esc: clear  |  Ctrl+C: cancel  |  Tab: complete  |  /?: status[/dim]")
     console.print()
 
-    # prompt_toolkit session — up/down history, Esc clear, proper key bindings
+    # prompt_toolkit session — up/down history, Esc clear, tab-completion
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
 
@@ -931,10 +983,23 @@ async def _chat_loop() -> None:
         """Esc clears the current input line."""
         event.current_buffer.reset()
 
+    _slash_commands = [
+        "/help", "/status", "/users", "/skills", "/traces", "/teams",
+        "/mcp", "/compression", "/history", "/logs", "/usage", "/tasks",
+        "/doctor", "/critic", "/team", "/eco", "/model", "/permissions",
+        "/allow", "/deny", "/connect-browser", "/install-mcps", "/update",
+        "/version", "/clear", "/wipe", "/nuke", "/exit", "/quit",
+    ]
+    _slash_completer = WordCompleter(
+        _slash_commands, sentence=True,
+    )
+
     pt_session: PromptSession = PromptSession(
         history=FileHistory(history_path),
         key_bindings=kb,
         enable_history_search=True,
+        completer=_slash_completer,
+        complete_while_typing=False,
     )
 
     # Delegate to non-blocking chat loop in cli_chat.py

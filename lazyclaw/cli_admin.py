@@ -897,19 +897,15 @@ async def run_doctor(config: Config, user_id: str) -> None:
             checks.append((pkg_name, "[yellow]WARN[/yellow]", f"Not installed ({description})"))
             missing_mcps.append(pkg_name)
 
-    # 6b. Free AI providers
-    try:
-        from mcp_freeride.config import load_config as load_freeride_config
-        from mcp_freeride.config import get_configured_providers
-        freeride_config = load_freeride_config()
-        free_providers = [p for p in get_configured_providers(freeride_config) if p != "ollama"]
-        if free_providers:
-            checks.append(("Free AI", "[green]OK[/green]", f"Providers: {', '.join(free_providers)}"))
-        else:
-            checks.append(("Free AI", "[yellow]WARN[/yellow]",
-                "No free API keys. Get one free: https://console.groq.com → GROQ_API_KEY"))
-    except ImportError:
-        checks.append(("Free AI", "[yellow]WARN[/yellow]", "mcp-freeride not installed"))
+    # 6b. Free AI providers (direct integration, no mcp-freeride needed)
+    from lazyclaw.llm.free_providers import discover_providers
+    free_providers = discover_providers()
+    if free_providers:
+        names = ", ".join(free_providers.keys())
+        checks.append(("Free AI", "[green]OK[/green]", f"Providers: {names}"))
+    else:
+        checks.append(("Free AI", "[yellow]WARN[/yellow]",
+            "No free API keys. Get one free: https://console.groq.com \u2192 GROQ_API_KEY"))
 
     # 7. Telegram
     if config.telegram_bot_token:

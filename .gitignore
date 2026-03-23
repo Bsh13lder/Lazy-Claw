@@ -30,4 +30,5 @@ mcp-healthcheck/
 mcp-apihunter/
 mcp-vaultwhisper/
 mcp-taskai/
-mcp-lazydoctor/
+mcp-lazydoctor/node_modules/
+.wwebjs_cache/

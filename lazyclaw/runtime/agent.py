@@ -79,10 +79,10 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
 
 # Survival/job keywords → inject search_jobs + survival tools directly
 _SURVIVAL_KEYWORDS = frozenset({
-    "job", "jobs", "jobspy", "freelance", "gig", "gigs", "upwork",
-    "indeed", "glassdoor", "linkedin job", "ziprecruiter",
+    "jobs", "jobspy", "freelance", "gig", "gigs",
     "find work", "find job", "search job", "apply job", "apply for",
-    "survival mode", "survival", "skills profile",
+    "survival mode", "survival status", "skills profile",
+    "start gig", "submit deliverable", "invoice client",
 })
 
 # Survival skill names to inject when job keywords detected
@@ -907,11 +907,12 @@ class Agent:
                             )
                         else:
                             # ALL tool calls were hallucinated — inject correction and retry
-                            _avail = sorted(_valid_names - {"search_tools"})[:10]
+                            _avail = sorted(_valid_names - {"search_tools", "delegate"})[:10]
                             _correction = (
                                 f"[SYSTEM: The tool '{_dropped_names[0]}' is not available right now. "
+                                f"Do NOT delegate to specialists — respond directly to the user. "
                                 f"Available tools: {', '.join(_avail)}. "
-                                f"Use one of these tools or explain to the user why you cannot proceed.]"
+                                f"Use one of these tools or respond with what you already know.]"
                             )
                             messages.append(LLMMessage(role="assistant", content=response.content or ""))
                             messages.append(LLMMessage(role="user", content=_correction))

@@ -229,17 +229,14 @@ async def register_mcp_tools_lazy(
     count = 0
     for tool in tools:
         base_name = tool["name"]
-        # Skip if a built-in skill with the same name exists
-        if registry.get(base_name) is not None:
-            logger.info("Skipping lazy MCP tool %s_%s — built-in skill '%s' exists",
-                        server_id, base_name, base_name)
-            continue
         # Skip if another MCP server already provides this tool
         existing_mcp = registry.get_mcp_by_base_name(base_name)
         if existing_mcp is not None:
             logger.info("Skipping lazy MCP tool %s_%s — already provided by %s",
                         server_id, base_name, existing_mcp.name)
             continue
+        # Note: built-in skills with same base_name are NOT skipped.
+        # MCP tools get prefixed names so they coexist with built-ins.
         skill = LazyMCPToolSkill(
             server_id=server_id,
             server_name=server_name,
@@ -306,17 +303,16 @@ async def register_mcp_tools(
     count = 0
     for tool in tools:
         base_name = tool["name"]
-        # Skip if a built-in skill with the same name exists
-        if registry.get(base_name) is not None:
-            logger.info("Skipping MCP tool %s_%s — built-in skill '%s' exists",
-                        client.server_id, base_name, base_name)
-            continue
         # Skip if another MCP server already provides this tool
         existing_mcp = registry.get_mcp_by_base_name(base_name)
         if existing_mcp is not None:
             logger.info("Skipping MCP tool %s_%s — already provided by %s",
                         client.server_id, base_name, existing_mcp.name)
             continue
+        # Note: built-in skills with same base_name are NOT skipped.
+        # MCP tools get a prefixed name (mcp_{server_id}_{name}) so they
+        # coexist with built-ins. Built-ins can then call the MCP tool
+        # internally (e.g. search_jobs calls mcp-jobspy's search_jobs).
         skill = MCPToolSkill(
             client=client,
             tool_name=tool["name"],

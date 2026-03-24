@@ -332,3 +332,27 @@ CREATE TABLE IF NOT EXISTS background_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_bg_tasks_user_status
 ON background_tasks(user_id, status);
+
+CREATE TABLE IF NOT EXISTS survival_gigs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    external_job_id TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    budget TEXT,
+    budget_value REAL DEFAULT 0,
+    client_name TEXT,
+    url TEXT,
+    status TEXT NOT NULL DEFAULT 'found',
+    proposal_text TEXT,
+    workspace_path TEXT,
+    deliverable_summary TEXT,
+    invoice_id TEXT,
+    amount_earned REAL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_gigs_user_status
+ON survival_gigs(user_id, status);

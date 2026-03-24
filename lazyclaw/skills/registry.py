@@ -299,12 +299,15 @@ class SkillRegistry:
         self.register(ToggleAutoDelegateSkill(config=config))
         self.register(ShowAgentLimitsSkill(config=config))
 
-        # Survival skills (job hunting)
+        # Survival skills (job hunting + gig execution pipeline)
         from lazyclaw.skills.builtin.survival import (
             ApplyJobSkill,
+            InvoiceClientSkill,
             ReviewDeliverableSkill,
             SearchJobsSkill,
             SetSkillsProfileSkill,
+            StartGigSkill,
+            SubmitDeliverableSkill,
             SurvivalModeSkill,
             SurvivalStatusSkill,
         )
@@ -315,3 +318,6 @@ class SkillRegistry:
         self.register(SetSkillsProfileSkill(config=config))
         self.register(SurvivalStatusSkill(config=config))
         self.register(ReviewDeliverableSkill(config=config, registry=self))
+        self.register(StartGigSkill(config=config, registry=self))
+        self.register(SubmitDeliverableSkill(config=config, registry=self))
+        self.register(InvoiceClientSkill(config=config, registry=self))

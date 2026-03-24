@@ -458,7 +458,14 @@ class SnapshotManager:
         With landmark_filter: show only that landmark's elements.
         """
         if not snapshot.landmarks:
-            return f"Page: {snapshot.title} | {snapshot.url}\n\nNo interactive elements found."
+            return (
+                f"Page: {snapshot.title} | {snapshot.url}\n\n"
+                f"⚠ PAGE IS BLANK — 0 elements detected. This usually means:\n"
+                f"1. The page requires LOGIN (session expired) — ask the user to log in\n"
+                f"2. The page is still loading — try browser(action='snapshot') after waiting\n"
+                f"3. JavaScript blocked the content\n"
+                f"Do NOT pretend you can see content. Tell the user the page is blank."
+            )
 
         lines = [f"Page: {snapshot.title} | {_short_url(snapshot.url)}"]
 

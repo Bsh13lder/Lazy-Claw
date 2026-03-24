@@ -28,6 +28,7 @@ class SkillsProfile:
     preferred_categories: tuple[str, ...] = ()
     excluded_keywords: tuple[str, ...] = ()
     work_hours: str = "flexible"
+    branding_mode: str = "lazyclaw"  # "lazyclaw" = AI agent identity, "personal" = human freelancer
 
 
 DEFAULT_PROFILE = SkillsProfile()

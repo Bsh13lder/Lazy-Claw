@@ -144,6 +144,9 @@ class HeartbeatDaemon:
                 )
 
                 logger.info("Job '%s' (%s) is due, enqueueing", job_name, job_id)
+                if not self._lane_queue._running:
+                    logger.debug("LaneQueue not ready yet — skipping job '%s' this tick", job_name)
+                    continue
                 await self._lane_queue.enqueue(
                     user_id, f"[JOB:{job_name}] {instruction}"
                 )
@@ -569,7 +572,7 @@ class HeartbeatDaemon:
                         row = await cursor.fetchone()
                         has_bg_tasks = row and row[0] > 0
 
-                    if browser_alive and idle > timeout and not has_watchers and not has_bg_tasks:
+                    if browser_alive and idle != float("inf") and idle > timeout and not has_watchers and not has_bg_tasks:
                         # Idle too long and no watchers — kill it
                         logger.info(
                             "Auto-closing idle browser (%.0fs idle, %ds timeout)",

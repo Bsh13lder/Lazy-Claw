@@ -705,6 +705,13 @@ class TelegramAdapter(ChannelAdapter):
         if not text:
             return
 
+        # If user replied to a specific message, include the quoted text as context
+        # so the agent knows what the user is responding to
+        if update.message.reply_to_message and update.message.reply_to_message.text:
+            quoted = update.message.reply_to_message.text.strip()
+            if quoted:
+                text = f"[Replying to: {quoted[:500]}]\n\n{text}"
+
         # Security: only allow admin/authorized chats
         if not self._is_allowed(chat_id):
             logger.warning("Unauthorized Telegram message from chat %s", chat_id)

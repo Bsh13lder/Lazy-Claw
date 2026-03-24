@@ -59,8 +59,11 @@ def is_mcp_watcher(ctx: dict) -> bool:
 
 def is_mcp_check_due(ctx: dict) -> bool:
     """Check if enough time has passed since last MCP check."""
-    interval = float(ctx.get("check_interval", 120))
-    last = float(ctx.get("last_check", 0))
+    try:
+        interval = float(ctx.get("check_interval", 120))
+        last = float(ctx.get("last_check", 0))
+    except (ValueError, TypeError):
+        return True  # Corrupted data — run check to fix it
     return (time.time() - last) >= interval
 
 
@@ -106,14 +109,10 @@ async def check_mcp_watcher(
         new_ctx["last_check"] = time.time()
         return False, None, new_ctx
 
-    # Call the MCP tool
+    # Call the MCP tool — client.call_tool() returns a string
     try:
-        result = await client.call_tool(tool_name, tool_args)
-        raw_text = ""
-        for content in result.content:
-            if hasattr(content, "text"):
-                raw_text += content.text
-        data = json.loads(raw_text)
+        raw_text = await client.call_tool(tool_name, tool_args)
+        data = json.loads(raw_text) if raw_text.strip().startswith(("{", "[")) else {"text": raw_text}
     except Exception as exc:
         logger.warning("MCP watcher call failed (%s): %s", tool_name, exc)
         new_ctx = dict(ctx)

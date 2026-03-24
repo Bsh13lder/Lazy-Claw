@@ -775,6 +775,24 @@ class TelegramAdapter(ChannelAdapter):
             f"\u2014 screenshots are auto-forwarded to this chat.]"
         )
 
+        # Inject last watcher notification context so agent knows who messaged
+        try:
+            from lazyclaw.heartbeat.daemon import get_last_watcher_context
+            import time as _time
+            _wctx = get_last_watcher_context(user_id)
+            if _wctx and (_time.time() - _wctx.get("timestamp", 0)) < 600:  # within 10 min
+                _svc = _wctx["service"]
+                _notif = _wctx.get("notification", "")
+                channel_context += (
+                    f"\n\n[RECENT {_svc.upper()} NOTIFICATION — user is likely replying to this]\n"
+                    f"{_notif}\n\n"
+                    f"IMPORTANT: If user says 'reply', 'tell him', 'say yes', etc. — "
+                    f"use the MCP {_svc}_send tool to send the message to the contact shown above. "
+                    f"Do NOT ask who to reply to — the contact is in the notification above."
+                )
+        except Exception:
+            pass
+
         try:
             logger.debug("Telegram: awaiting agent response for chat %s", chat_id)
             if self._lane_queue:

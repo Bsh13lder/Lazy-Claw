@@ -15,6 +15,26 @@ from lazyclaw.heartbeat.cron import calculate_next_run, is_due
 
 logger = logging.getLogger(__name__)
 
+# Last watcher notification per user — agent reads this for reply context
+# Format: {user_id: {"service": "whatsapp", "items": [...], "notification": "...", "timestamp": float}}
+_last_watcher_context: dict[str, dict] = {}
+
+
+def get_last_watcher_context(user_id: str) -> dict | None:
+    """Get last watcher notification context for a user. Used by agent for reply context."""
+    return _last_watcher_context.get(user_id)
+
+
+def _store_watcher_context(user_id: str, service: str, items: list, notification: str) -> None:
+    """Store last watcher notification so agent can reference it."""
+    import time
+    _last_watcher_context[user_id] = {
+        "service": service,
+        "items": items[:5],  # Cap stored items
+        "notification": notification,
+        "timestamp": time.time(),
+    }
+
 
 class HeartbeatDaemon:
     """Periodically checks for due cron jobs and enqueues them."""
@@ -319,6 +339,10 @@ class HeartbeatDaemon:
                     )
                     ctx = json.loads(raw_ctx)
 
+                    # Skip MCP watchers — handled by _check_mcp_watchers()
+                    if ctx.get("type") == "mcp_watcher":
+                        continue
+
                     # Check expiration
                     if is_watcher_expired(ctx):
                         logger.info("Watcher '%s' expired, removing", job_name)
@@ -445,19 +469,23 @@ class HeartbeatDaemon:
                 if changed and notification:
                     logger.info("MCP watcher '%s' detected change", job_name)
 
-                    # Push to Telegram
+                    # Push to Telegram with reply hint
                     if self._telegram_push:
                         try:
-                            await self._telegram_push(f"\U0001f514 {notification}")
+                            hint = "\n\nReply here to respond (I'll send it via WhatsApp)"
+                            await self._telegram_push(f"\U0001f514 {notification}{hint}")
                         except Exception as exc:
                             logger.warning("Telegram push failed: %s", exc)
+
+                    # Store last notification so agent has context for user replies
+                    _store_watcher_context(user_id, ctx.get("service", ""), [], notification)
 
                     # Auto-reply: enqueue to agent if instruction provided
                     auto_reply = ctx.get("auto_reply")
                     if auto_reply and self._lane_queue:
                         await self._lane_queue.enqueue(
                             user_id,
-                            f"[MCP_WATCHER] New messages detected. Instruction: {auto_reply}\n\nContext:\n{notification}",
+                            f"[MCP_WATCHER] New {service} messages. {auto_reply}\n\n{notification}",
                         )
 
                     if new_ctx.get("one_shot"):

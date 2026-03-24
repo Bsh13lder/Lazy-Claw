@@ -55,10 +55,18 @@ _CHAT_ONLY_PATTERN = re.compile(
 # Schemas for discovered tools are injected dynamically.
 
 # Base tools always sent (tiny — ~400 tokens total)
+# NOTE: browser is NOT here — only injected when user explicitly asks for it
 _BASE_TOOL_NAMES = frozenset({
-    "search_tools", "recall_memories", "save_memory", "delegate",
-    "connect_mcp_server", "disconnect_mcp_server", "browser",
+    "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
+    "connect_mcp_server", "disconnect_mcp_server",
     "watch_messages", "watch_site",
+})
+
+# Browser only when user explicitly asks — prevents unwanted visible browser popups
+_BROWSER_KEYWORDS = frozenset({
+    "browser", "open", "show me", "show it", "visible", "wallapop",
+    "navigate to", "go to", "visit", "open the", "open a",
+    "qr", "scan", "log in", "login", "sign in",
 })
 
 # Channel keywords → prefer MCP tools over browser
@@ -266,9 +274,11 @@ def _wants_any_tools(message: str) -> bool:
 # ── Fast Dispatch ─────────────────────────────────────────────────────
 # Tools that trigger automatic delegation to background specialists.
 
+# Tools that trigger background dispatch. Browser is NOT here —
+# browser tasks often need user interaction (login, captcha, 0-element pages).
+# They run foreground so stuck detection can fall back to the user.
 HEAVY_TOOLS: frozenset[str] = frozenset({
-    "browser", "web_search", "run_command",
-    "read_file", "write_file",
+    "run_command", "read_file", "write_file",
 })
 
 
@@ -576,11 +586,19 @@ class Agent:
                             exc_info=True,
                         )
 
-            # Build base tools — drop browser if channel MCP tools found
-            _base_names = _BASE_TOOL_NAMES
-            if _channel_tools:
-                _base_names = _BASE_TOOL_NAMES - {"browser"}
-                logger.info("Channel detected: %s → %d MCP tools, browser dropped", _matched_channels, len(_channel_tools))
+            # Build base tools + conditionally add browser
+            _base_names = set(_BASE_TOOL_NAMES)
+
+            # Browser only when user explicitly asks (keyword match)
+            _wants_browser = any(kw in _msg_lower for kw in _BROWSER_KEYWORDS)
+            _wants_visible = any(kw in _msg_lower for kw in (
+                "visible", "show me", "show it", "let me see", "make visible",
+            ))
+            if _wants_browser and not _channel_tools:
+                _base_names.add("browser")
+                logger.info("Browser keyword detected — browser tool included")
+            elif _channel_tools:
+                logger.info("Channel detected: %s → %d MCP tools, no browser", _matched_channels, len(_channel_tools))
 
             tools = [
                 schema for name in _base_names
@@ -625,6 +643,22 @@ class Agent:
             + chat_history
             + [LLMMessage(role="user", content=message)]
         )
+
+        # If user wants visible browser, prepend instruction to user message
+        # so LLM calls show action before navigating
+        if needs_tools and locals().get("_wants_visible", False):
+            _vis_prefix = (
+                "[IMPORTANT: Browser runs HEADLESS (invisible). "
+                "You MUST call browser(action='show') FIRST before any other browser action. "
+                "Then navigate.]\n\n"
+            )
+            # Modify the last user message in-place
+            _last_msg = messages[-1]
+            if _last_msg.role == "user":
+                messages[-1] = LLMMessage(
+                    role="user", content=_vis_prefix + _last_msg.content,
+                )
+
         logger.info("Context: %d messages (%d history + system + user), tools=%d",
                      len(messages), len(chat_history), len(tools))
 
@@ -782,6 +816,28 @@ class Agent:
                         tool_calls=[],
                     )
 
+                # Filter out hallucinated tool calls for tools not in the current list
+                if tools and response.tool_calls:
+                    _valid_names = {
+                        t.get("function", {}).get("name") for t in tools
+                    }
+                    _valid_calls = [
+                        tc for tc in response.tool_calls if tc.name in _valid_names
+                    ]
+                    _dropped = len(response.tool_calls) - len(_valid_calls)
+                    if _dropped > 0:
+                        logger.warning(
+                            "Dropped %d hallucinated tool calls (not in current tools): %s",
+                            _dropped,
+                            [tc.name for tc in response.tool_calls if tc.name not in _valid_names],
+                        )
+                        response = _LLMResp(
+                            content=response.content,
+                            model=response.model,
+                            usage=response.usage,
+                            tool_calls=_valid_calls or None,
+                        )
+
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""
 
@@ -815,10 +871,18 @@ class Agent:
                 # On the FIRST LLM call, if heavy tools detected and
                 # auto_delegate is on, push to TaskRunner and return
                 # immediately so the team lead stays free for new messages.
+                # Only dispatch tools that are actually in the current tools list
+                # (prevents hallucinated tool calls from triggering background dispatch)
+                _current_tool_names = {
+                    t.get("function", {}).get("name") for t in tools
+                } if tools else set()
                 if (
                     iteration == 0
                     and self._task_runner is not None
-                    and any(tc.name in HEAVY_TOOLS for tc in response.tool_calls)
+                    and any(
+                        tc.name in HEAVY_TOOLS and tc.name in _current_tool_names
+                        for tc in response.tool_calls
+                    )
                 ):
                     from lazyclaw.runtime.agent_settings import get_agent_settings
 

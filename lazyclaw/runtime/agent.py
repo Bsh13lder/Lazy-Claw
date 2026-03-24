@@ -948,17 +948,16 @@ class Agent:
                     break
 
                 # ── Fast dispatch ─────────────────────────────────────
-                # On the FIRST LLM call, if heavy tools detected and
-                # auto_delegate is on, push to TaskRunner and return
-                # immediately so the team lead stays free for new messages.
-                # Only dispatch tools that are actually in the current tools list
-                # (prevents hallucinated tool calls from triggering background dispatch)
+                # On first heavy tool call (any iteration), push to TaskRunner
+                # and return immediately so the lane queue stays free.
+                # Only dispatch tools that are actually in the current tools list.
                 _current_tool_names = {
                     t.get("function", {}).get("name") for t in tools
                 } if tools else set()
                 if (
-                    iteration == 0
+                    iteration <= 2  # Allow dispatch on first few iterations
                     and self._task_runner is not None
+                    and not getattr(self, "is_background", False)  # Don't re-dispatch background tasks
                     and any(
                         tc.name in HEAVY_TOOLS and tc.name in _current_tool_names
                         for tc in response.tool_calls

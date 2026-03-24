@@ -73,10 +73,15 @@ BROWSER_SPECIALIST = SpecialistConfig(
         "SITE KNOWLEDGE:\n"
         "- Your task MAY include '--- Site Knowledge ---' with tips from previous visits\n"
         "- Use as hints, not gospel. If they don't work, ADAPT.\n\n"
+        "CRITICAL — NEVER DO THESE:\n"
+        "- NEVER tell the user to 'look at the screen' or 'you should see X'\n"
+        "- NEVER ask the user to click buttons or fill forms — YOU do it\n"
+        "- NEVER say 'the page is open, go ahead' — YOU execute the task\n"
+        "- NEVER give up and ask the user to do it themselves\n"
+        "- If you need user INPUT (documents, credentials, choices), ask specifically what you need\n\n"
         "REPORTING:\n"
         "- Always report real counts and outcomes, never fabricate\n"
-        "- If partially done, report what worked and what's left\n"
-        "- If you need user input (documents, credentials), ask clearly what you need"
+        "- If partially done, report what worked and what's left"
     ),
     allowed_skills=("browser", "web_search", "save_site_login"),
     preferred_model="smart",  # Resolved by runner to config.worker_model

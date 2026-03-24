@@ -90,6 +90,13 @@ class CDPBackend:
         await self._conn.send("Page.enable")
         await self._conn.send("Runtime.enable")
 
+        # Apply stealth (mobile UA, anti-detection, touch emulation)
+        try:
+            from lazyclaw.browser.stealth import apply_stealth
+            await apply_stealth(self._conn)
+        except Exception as exc:
+            logger.warning("Stealth injection failed (non-fatal): %s", exc)
+
         self._last_activity = time.monotonic()
         logger.info(
             "CDP connected to tab: %s (%s)",
@@ -139,6 +146,8 @@ class CDPBackend:
         # Auto-load LazyClaw ref engine extension (silent, no user prompt)
         ext_path = str(Path(__file__).parent / "extension")
 
+        from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
+
         cmd = [
             chrome_bin,
             "--headless=new",
@@ -147,7 +156,7 @@ class CDPBackend:
             "--no-first-run",
             "--no-sandbox",
             "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
+            *STEALTH_LAUNCH_ARGS,
             f"--load-extension={ext_path}",
             f"--disable-extensions-except={ext_path}",
         ]
@@ -229,6 +238,15 @@ class CDPBackend:
             )
         except Exception:
             pass  # Some pages don't trigger navigation events
+
+        # Wait for DOM to settle + auto-solve Cloudflare if detected
+        try:
+            from lazyclaw.browser.stealth import detect_and_solve_cloudflare, wait_for_page_ready
+
+            await wait_for_page_ready(conn, timeout=5.0)
+            await detect_and_solve_cloudflare(conn, timeout=20.0)
+        except Exception:
+            pass
 
     async def current_url(self) -> str:
         conn = await self._ensure_connected()
@@ -908,12 +926,14 @@ async def restart_browser_with_cdp(
                 pass
 
     # Relaunch VISIBLE browser with CDP
+    from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
+
     ext_path = str(Path(__file__).parent / "extension")
     cmd = [
         browser_bin,
         f"--remote-debugging-port={port}",
         "--no-first-run",
-        "--disable-blink-features=AutomationControlled",
+        *STEALTH_LAUNCH_ARGS,
         f"--load-extension={ext_path}",
         f"--disable-extensions-except={ext_path}",
     ]

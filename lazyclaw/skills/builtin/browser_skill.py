@@ -136,12 +136,14 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
     os.makedirs(profile_dir, exist_ok=True)
     ext_path = str(_Path(__file__).parent.parent.parent / "browser" / "extension")
 
+    from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
+
     await asyncio.create_subprocess_exec(
         chrome_bin,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
-        "--disable-blink-features=AutomationControlled",
+        *STEALTH_LAUNCH_ARGS,
         f"--load-extension={ext_path}",
         f"--disable-extensions-except={ext_path}",
         stdout=asyncio.subprocess.DEVNULL,

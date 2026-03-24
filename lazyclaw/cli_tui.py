@@ -717,7 +717,11 @@ class LogPanel(RichLog):
 
         style = _log_style(kind)
         icon = _log_icon(kind)
-        safe_detail = detail.replace("[", "\\[")
+
+        # Convert markdown bold (**text**) to Rich markup, then escape brackets
+        import re as _re
+        safe_detail = _re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', detail)
+        safe_detail = safe_detail.replace("[", "\\[").replace("\\[bold]", "[bold]").replace("\\[/bold]", "[/bold]")
 
         # Truncate long details for readability
         if len(safe_detail) > 120:

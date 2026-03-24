@@ -202,6 +202,79 @@ def _extract_new_items(
     ]
 
 
+def _whatsapp_sender_name(msg: dict) -> str:
+    """Extract a human-readable sender name from a WhatsApp message.
+
+    Priority: pushName > name > participant name > cleaned JID.
+    Group JIDs (xxxxx@g.us) show as 'Group' with participant name if available.
+    """
+    jid = msg.get("from", "")
+    is_group = jid.endswith("@g.us")
+
+    # Try human names first
+    name = msg.get("pushName") or msg.get("name") or msg.get("senderName") or ""
+    if name:
+        if is_group:
+            group_name = msg.get("groupName") or msg.get("subject") or "Group"
+            return f"{name} ({group_name})"
+        return name
+
+    # For groups, try participant field
+    if is_group:
+        participant = msg.get("participant", "")
+        part_name = msg.get("participantName") or msg.get("participantPushName") or ""
+        if part_name:
+            group_name = msg.get("groupName") or msg.get("subject") or "Group"
+            return f"{part_name} ({group_name})"
+        group_name = msg.get("groupName") or msg.get("subject") or ""
+        if group_name:
+            return group_name
+        # Last resort: shorten the JID
+        return f"Group {jid.split('@')[0][-6:]}"
+
+    # Individual: extract phone number from JID
+    phone = jid.split("@")[0] if "@" in jid else jid
+    if len(phone) > 8:
+        return f"+{phone}"
+    return phone or "?"
+
+
+def _whatsapp_body_preview(msg: dict) -> str:
+    """Get a readable preview of a WhatsApp message body.
+
+    Handles: text, media, stickers, voice notes, locations.
+    """
+    body = msg.get("body", "")
+    if body and body != "[media]":
+        return body[:120]
+
+    # Check media type
+    msg_type = msg.get("type") or msg.get("messageType") or ""
+    has_media = msg.get("hasMedia", False)
+
+    if "image" in msg_type or msg.get("image"):
+        caption = msg.get("caption", "")
+        return f"[Photo] {caption[:80]}" if caption else "[Photo]"
+    if "video" in msg_type or msg.get("video"):
+        return "[Video]"
+    if "audio" in msg_type or "ptt" in msg_type or msg.get("audio"):
+        return "[Voice note]"
+    if "sticker" in msg_type or msg.get("sticker"):
+        return "[Sticker]"
+    if "document" in msg_type or msg.get("document"):
+        fname = msg.get("fileName") or msg.get("filename") or ""
+        return f"[File: {fname}]" if fname else "[Document]"
+    if "location" in msg_type or msg.get("location"):
+        return "[Location]"
+    if "contact" in msg_type:
+        return "[Contact card]"
+
+    if has_media:
+        return "[Media]"
+
+    return body[:120] if body else "[Empty message]"
+
+
 def _format_notification(
     items: list[dict],
     service: str,
@@ -209,38 +282,50 @@ def _format_notification(
 ) -> str:
     """Format new items into a Telegram notification."""
     if service == "whatsapp":
-        lines = [f"WhatsApp — {len(items)} new message(s):"]
-        for msg in items[:5]:  # Cap at 5 to avoid spam
-            sender = msg.get("from", "?")
-            body = msg.get("body", "")[:100]
-            lines.append(f"  {sender}: {body}")
-        if len(items) > 5:
-            lines.append(f"  ... and {len(items) - 5} more")
-        if instruction:
-            lines.append(f"\nInstruction: {instruction}")
+        # Group messages by sender, show contact name + last message
+        by_sender: dict[str, list[dict]] = {}
+        for msg in items:
+            sender = _whatsapp_sender_name(msg)
+            by_sender.setdefault(sender, []).append(msg)
+
+        total = len(items)
+        senders = list(by_sender.keys())
+        sender_names = ", ".join(senders[:3])
+        if len(senders) > 3:
+            sender_names += f" +{len(senders) - 3}"
+
+        lines = [f"WhatsApp — {total} new from {sender_names}\n"]
+        for sender, msgs in list(by_sender.items())[:5]:
+            last_msg = _whatsapp_body_preview(msgs[-1])
+            count = len(msgs)
+            count_label = f" ({count})" if count > 1 else ""
+            lines.append(f"{sender}{count_label}: {last_msg}")
+        if len(by_sender) > 5:
+            lines.append(f"... +{len(by_sender) - 5} more contacts")
+        lines.append(f"\n{total} unread total")
         return "\n".join(lines)
 
     if service == "email":
-        lines = [f"Email — {len(items)} new:"]
+        lines = [f"Email — {len(items)} new\n"]
         for item in items[:5]:
-            subj = item.get("subject", "no subject")[:60]
             sender = item.get("from", "?")
-            lines.append(f"  {sender}: {subj}")
+            subj = item.get("subject", "no subject")[:80]
+            lines.append(f"{sender}: {subj}")
         if len(items) > 5:
-            lines.append(f"  ... and {len(items) - 5} more")
+            lines.append(f"... +{len(items) - 5} more")
+        lines.append(f"\n{len(items)} unread total")
         return "\n".join(lines)
 
     if service == "instagram":
-        lines = [f"Instagram — {len(items)} new:"]
+        lines = [f"Instagram — {len(items)} new\n"]
         for item in items[:5]:
             user = item.get("user", "?")
-            text = item.get("text", "")[:80]
-            ntype = item.get("type", "")
-            lines.append(f"  {user} ({ntype}): {text}")
+            text = item.get("text", "")[:100]
+            ntype = item.get("type", "message")
+            lines.append(f"{user} ({ntype}): {text}")
         if len(items) > 5:
-            lines.append(f"  ... and {len(items) - 5} more")
-        if instruction:
-            lines.append(f"\nInstruction: {instruction}")
+            lines.append(f"... +{len(items) - 5} more")
+        lines.append(f"\n{len(items)} unread total")
         return "\n".join(lines)
 
     # Generic

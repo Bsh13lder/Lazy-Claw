@@ -59,7 +59,7 @@ _CHAT_ONLY_PATTERN = re.compile(
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
     "connect_mcp_server", "disconnect_mcp_server",
-    "watch_messages", "watch_site",
+    "watch_messages", "watch_site", "list_watchers", "stop_watcher",
 })
 
 # Browser only when user explicitly asks — prevents unwanted visible browser popups
@@ -520,11 +520,10 @@ class Agent:
                 if any(kw in _msg_lower for kw in keywords):
                     _matched_channels.append(channel)
 
-            # Re-inject channel tools if message looks like a reply to recent channel activity
-            # (e.g. "tell him I will come" after a WhatsApp watcher notification)
-            _REPLY_HINTS = {"reply", "tell", "send", "respond", "answer", "say", "him", "her", "them", "back"}
-            if not _matched_channels and any(w in _msg_lower.split() for w in _REPLY_HINTS):
-                for msg in history[-4:]:  # Only last 4 messages (tight context)
+            # Re-inject channel tools if the LAST assistant response used them
+            # (conversation continuity — "connect instagram" → "login" → "read DMs")
+            if not _matched_channels:
+                for msg in history[-2:]:  # Only last 2 messages (immediate context)
                     if msg.role == "assistant" and msg.tool_calls:
                         for tc in msg.tool_calls:
                             tname = tc.name.lower()
@@ -532,7 +531,7 @@ class Agent:
                                 if channel in tname and channel not in _matched_channels:
                                     _matched_channels.append(channel)
                 if _matched_channels:
-                    logger.info("Channel tools re-injected (reply context): %s", _matched_channels)
+                    logger.info("Channel tools re-injected (conversation continuity): %s", _matched_channels)
 
             # Find MCP tools for matched channels
             _channel_tools: list = []

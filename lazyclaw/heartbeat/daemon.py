@@ -257,8 +257,17 @@ class HeartbeatDaemon:
 
         try:
             temp_dir = tempfile.mkdtemp(prefix="lazyclaw_bg_")
+            # Skip runtime lock/socket files that can't be copied
+            _SKIP_NAMES = {"SingletonSocket", "SingletonLock", "SingletonCookie", "RunningChromeVersion"}
+
+            def _ignore_runtime(directory: str, files: list[str]) -> set[str]:
+                return {f for f in files if f in _SKIP_NAMES}
+
             if profile_dir.exists():
-                shutil.copytree(str(profile_dir), f"{temp_dir}/profile", dirs_exist_ok=True)
+                shutil.copytree(
+                    str(profile_dir), f"{temp_dir}/profile",
+                    dirs_exist_ok=True, ignore=_ignore_runtime,
+                )
                 logger.info(
                     "Copied cookies to temp profile for background CDP (port %d)",
                     bg_port,

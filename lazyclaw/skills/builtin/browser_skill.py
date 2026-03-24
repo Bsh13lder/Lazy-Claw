@@ -694,7 +694,51 @@ class BrowserSkill(BaseSkill):
             await asyncio.sleep(3)
             await backend.goto(nav_url)
 
-        result = await self._page_context_summary(backend, None, nav_url)
+        # Blank page detection — wait for content to render (SPA, JS-heavy sites)
+        for _wait in (0.5, 1.0, 2.0, 3.0):
+            try:
+                _check = await backend.evaluate(
+                    "(document.body.innerText || '').trim().length > 0 || "
+                    "document.querySelectorAll('input,button,a,[role=\"button\"]').length > 0"
+                )
+                if _check:
+                    break
+            except Exception:
+                break
+            await asyncio.sleep(_wait)
+        else:
+            # Still blank after 6.5s — auto-refresh once
+            try:
+                await backend.evaluate("location.reload()")
+                await asyncio.sleep(3)
+            except Exception:
+                pass
+
+        # Page survey — quick DOM analysis prepended to result
+        try:
+            _survey = await backend.evaluate("""(() => {
+                const inputs = document.querySelectorAll('input:not([type=hidden]),textarea,select');
+                const buttons = document.querySelectorAll('button,[type=submit],[role=button]');
+                const links = document.querySelectorAll('a[href]');
+                const forms = document.querySelectorAll('form');
+                const tables = document.querySelectorAll('table');
+                const status = document.querySelector('meta[http-equiv="status"]');
+                const title = document.title || '';
+                const textLen = (document.body.innerText || '').trim().length;
+                let pageType = 'CONTENT';
+                if (forms.length > 0 && inputs.length >= 2) pageType = 'FORM';
+                else if (inputs.length === 2 && title.toLowerCase().includes('login')) pageType = 'LOGIN';
+                else if (inputs.length === 2 && document.querySelector('[type=password]')) pageType = 'LOGIN';
+                else if (tables.length > 0) pageType = 'TABLE';
+                else if (textLen < 50 && inputs.length === 0) pageType = 'BLANK';
+                else if (links.length > 20) pageType = 'LIST';
+                return `Page: ${pageType} | ${inputs.length} inputs, ${buttons.length} buttons, ${links.length} links, ${forms.length} forms | text: ${textLen} chars`;
+            })()""")
+            _survey_line = f"[{_survey}]\n" if _survey else ""
+        except Exception:
+            _survey_line = ""
+
+        result = _survey_line + await self._page_context_summary(backend, None, nav_url)
 
         # Inject site-specific knowledge for the navigated domain
         if nav_url and self._config:

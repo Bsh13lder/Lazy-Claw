@@ -77,6 +77,21 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "email": ["email", "gmail", "mail", "inbox"],
 }
 
+# Survival/job keywords → inject search_jobs + survival tools directly
+_SURVIVAL_KEYWORDS = frozenset({
+    "job", "jobs", "jobspy", "freelance", "gig", "gigs", "upwork",
+    "indeed", "glassdoor", "linkedin job", "ziprecruiter",
+    "find work", "find job", "search job", "apply job", "apply for",
+    "survival mode", "survival", "skills profile",
+})
+
+# Survival skill names to inject when job keywords detected
+_SURVIVAL_TOOL_NAMES = frozenset({
+    "search_jobs", "apply_job", "survival_mode", "survival_status",
+    "set_skills_profile", "review_deliverable",
+    "start_gig", "submit_deliverable", "invoice_client",
+})
+
 # Channel name → bundled MCP server name (for on-demand connect)
 _CHANNEL_TO_MCP: dict[str, str] = {
     "whatsapp": "mcp-whatsapp",
@@ -505,6 +520,20 @@ class Agent:
                 if any(kw in _msg_lower for kw in keywords):
                     _matched_channels.append(channel)
 
+            # Re-inject channel tools if message looks like a reply to recent channel activity
+            # (e.g. "tell him I will come" after a WhatsApp watcher notification)
+            _REPLY_HINTS = {"reply", "tell", "send", "respond", "answer", "say", "him", "her", "them", "back"}
+            if not _matched_channels and any(w in _msg_lower.split() for w in _REPLY_HINTS):
+                for msg in history[-4:]:  # Only last 4 messages (tight context)
+                    if msg.role == "assistant" and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            tname = tc.name.lower()
+                            for channel in _CHANNEL_KEYWORDS:
+                                if channel in tname and channel not in _matched_channels:
+                                    _matched_channels.append(channel)
+                if _matched_channels:
+                    logger.info("Channel tools re-injected (reply context): %s", _matched_channels)
+
             # Find MCP tools for matched channels
             _channel_tools: list = []
             if _matched_channels:
@@ -586,6 +615,33 @@ class Agent:
                             exc_info=True,
                         )
 
+            # Context carry-forward: if recent history used specific tools,
+            # re-inject them so follow-up messages ("apply for it", "click that")
+            # have access to the same tools without needing keywords again.
+            _history_tool_names: set[str] = set()
+            for msg in history[-8:]:  # Scan last 8 messages
+                if msg.role == "assistant" and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        _history_tool_names.add(tc.name)
+
+            # Survival/job keyword detection → inject survival tools
+            _survival_tools: list = []
+            _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
+            # Also trigger if recent history used survival tools
+            if not _wants_survival and _history_tool_names & _SURVIVAL_TOOL_NAMES:
+                _wants_survival = True
+                logger.info("Survival tools re-injected from recent history context")
+            if _wants_survival:
+                for sname in _SURVIVAL_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(sname)
+                    if schema is not None:
+                        _survival_tools.append(schema)
+                if _survival_tools:
+                    logger.info(
+                        "Job/survival keywords detected — %d survival tools injected",
+                        len(_survival_tools),
+                    )
+
             # Build base tools + conditionally add browser
             _base_names = set(_BASE_TOOL_NAMES)
 
@@ -594,17 +650,28 @@ class Agent:
             _wants_visible = any(kw in _msg_lower for kw in (
                 "visible", "show me", "show it", "let me see", "make visible",
             ))
-            if _wants_browser and not _channel_tools:
+            # Re-inject browser if recent history used it (follow-up context)
+            if not _wants_browser and "browser" in _history_tool_names:
+                _wants_browser = True
+                logger.info("Browser re-injected from recent history context")
+            if _wants_browser and not _channel_tools and not _survival_tools:
                 _base_names.add("browser")
                 logger.info("Browser keyword detected — browser tool included")
             elif _channel_tools:
                 logger.info("Channel detected: %s → %d MCP tools, no browser", _matched_channels, len(_channel_tools))
+            elif _survival_tools:
+                logger.info("Survival detected: %d tools injected, browser suppressed", len(_survival_tools))
 
             tools = [
                 schema for name in _base_names
                 if (schema := self.registry.get_tool_schema(name)) is not None
             ]
             tools.extend(_channel_tools)
+            # Add survival tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for st in _survival_tools:
+                if st.get("function", {}).get("name") not in _existing_names:
+                    tools.append(st)
 
             # Also include tools from favorite connected MCPs
             _fav_prefixes = tuple(
@@ -826,17 +893,30 @@ class Agent:
                     ]
                     _dropped = len(response.tool_calls) - len(_valid_calls)
                     if _dropped > 0:
+                        _dropped_names = [tc.name for tc in response.tool_calls if tc.name not in _valid_names]
                         logger.warning(
                             "Dropped %d hallucinated tool calls (not in current tools): %s",
-                            _dropped,
-                            [tc.name for tc in response.tool_calls if tc.name not in _valid_names],
+                            _dropped, _dropped_names,
                         )
-                        response = _LLMResp(
-                            content=response.content,
-                            model=response.model,
-                            usage=response.usage,
-                            tool_calls=_valid_calls or None,
-                        )
+                        if _valid_calls:
+                            response = _LLMResp(
+                                content=response.content,
+                                model=response.model,
+                                usage=response.usage,
+                                tool_calls=_valid_calls,
+                            )
+                        else:
+                            # ALL tool calls were hallucinated — inject correction and retry
+                            _avail = sorted(_valid_names - {"search_tools"})[:10]
+                            _correction = (
+                                f"[SYSTEM: The tool '{_dropped_names[0]}' is not available right now. "
+                                f"Available tools: {', '.join(_avail)}. "
+                                f"Use one of these tools or explain to the user why you cannot proceed.]"
+                            )
+                            messages.append(LLMMessage(role="assistant", content=response.content or ""))
+                            messages.append(LLMMessage(role="user", content=_correction))
+                            logger.warning("Injecting correction for hallucinated tools, retrying LLM")
+                            continue  # Retry the agentic loop iteration
 
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""
@@ -1123,17 +1203,17 @@ class Agent:
                                 f"Escalating to {self.config.brain_model}...",
                                 {"escalation": True, "model": self.config.brain_model},
                             ))
-                            # Inject decision prompt — Sonnet sees the stuck context
+                            # Inject corrective nudge — force different approach
                             messages.append(LLMMessage(
                                 role="system",
                                 content=(
                                     f"⚠ STUCK: {_stuck_signal.context}\n\n"
-                                    f"You have been repeating the same tool with no progress. "
-                                    f"You MUST either:\n"
-                                    f"1. Try a COMPLETELY DIFFERENT approach (different tool, different URL, different strategy)\n"
-                                    f"2. If the task is impossible right now, STOP and explain to the user what went wrong "
-                                    f"and what they can do (just respond with text, no tool call)\n\n"
-                                    f"Do NOT call the same tool again with similar arguments."
+                                    f"STOP repeating the same action. You MUST choose ONE:\n"
+                                    f"1. Use web_search to RESEARCH how to accomplish this task — find the right URL, steps, or workaround\n"
+                                    f"2. Try a COMPLETELY DIFFERENT approach (different URL, different button, different strategy)\n"
+                                    f"3. Use action='read' to understand what's actually on the page before clicking\n"
+                                    f"4. If the task is truly impossible right now, STOP and explain what went wrong (text only, no tool call)\n\n"
+                                    f"Do NOT call the same tool with similar arguments. Do NOT ask the user to do it themselves."
                                 ),
                             ))
                             _tool_call_history.clear()

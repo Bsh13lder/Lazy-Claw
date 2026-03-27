@@ -32,3 +32,6 @@ mcp-vaultwhisper/
 mcp-taskai/
 mcp-lazydoctor/node_modules/
 .wwebjs_cache/
+
+.vscode/
+mcp-whatsapp/node_modules/

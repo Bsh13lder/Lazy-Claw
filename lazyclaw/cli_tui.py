@@ -128,6 +128,7 @@ def _phase_icon(phase: str) -> tuple[str, str]:
         "done": ("✓", _C_SUCCESS),
         "error": ("✗", _C_ERROR),
         "stuck": ("⚠", _C_ERROR),
+        "cancelled": ("✗", _C_ERROR),
     }.get(phase, ("○", _C_IDLE))
 
 
@@ -534,10 +535,12 @@ class RequestCard(Static):
         t_out = _fmt_tokens(snap.tokens_out)
         cost = _fmt_cost(snap.cost_usd)
 
+        is_cancelled = snap.phase == "cancelled"
+
         # Color-coded border by status
         border_color = {
             "done": _C_SUCCESS, "error": _C_ERROR, "stuck": _C_ERROR,
-            "queued": _C_IDLE,
+            "queued": _C_IDLE, "cancelled": _C_IDLE,
         }.get(snap.phase, _C_ACTIVE if snap.phase in ("thinking", "tool", "team", "streaming") else _C_BORDER)
 
         # Escape user message for Rich markup
@@ -545,11 +548,22 @@ class RequestCard(Static):
         # Show task description, not just "request #N"
         display_msg = safe_msg[:50] + "..." if len(safe_msg) > 50 else safe_msg
 
+        # Header — show × cancel hint for active tasks, [cancelled] badge for cancelled
+        cancel_hint = ""
+        if is_cancelled:
+            cancel_hint = f"  [{_C_ERROR}]\\[cancelled][/{_C_ERROR}]"
+        elif snap.phase not in ("done", "error"):
+            cancel_hint = f"  [dim]×[/dim]"
+
+        # Dim entire message if cancelled (strikethrough effect)
+        msg_style = "dim strike" if is_cancelled else ""
+        msg_markup = f"[{msg_style}]{display_msg}[/{msg_style}]" if msg_style else f'"{display_msg}"'
+
         # Header
         lines = [
             f"[{border_color}]╭─[/{border_color}]"
             f" [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
-            f' "{display_msg}"'
+            f" {msg_markup}{cancel_hint}"
         ]
 
         # Phase line with model shortname
@@ -600,6 +614,7 @@ class RequestCard(Static):
                     "running": ("\u25cf", _C_ACTIVE),
                     "done": ("\u2713", _C_SUCCESS),
                     "error": ("\u2717", _C_ERROR),
+                    "cancelled": ("\u2717", _C_ERROR),
                 }.get(status, ("\u25cb", _C_IDLE))
                 spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
             lines.append(
@@ -913,6 +928,158 @@ class AIRoutingBar(Static):
         self.update(Text.from_markup("\n".join(lines)))
 
 
+# ── Settings Panel ──────────────────────────────────────────────────
+
+class SettingsPanel(Static):
+    """Rich 5-column settings panel matching the mockup design.
+
+    Shows toggle indicators (◉/○), select values with ▾, permission
+    colors (green=allow, yellow=ask, red=deny), and proper alignment.
+    Changes via /set commands.
+    """
+
+    def render_settings(
+        self,
+        eco: dict,
+        agent: dict,
+        browser: dict,
+        team: dict | None = None,
+    ) -> None:
+        """Render settings in 5 side-by-side columns using Rich markup."""
+
+        # ── Helpers ──
+        def _toggle(on: bool, label: str = "") -> str:
+            """Render toggle: [◉ on] or [○ off]."""
+            if on:
+                return f"[{_C_SUCCESS}]◉ {label or 'on'}[/{_C_SUCCESS}]"
+            return f"[{_C_IDLE}]○ {label or 'off'}[/{_C_IDLE}]"
+
+        def _select(value: str, color: str = _C_ACTIVE) -> str:
+            """Render select: [value ▾]."""
+            return f"[{color}]{value} ▾[/{color}]"
+
+        def _perm(value: str) -> str:
+            """Render permission with auto-color."""
+            colors = {"allow": _C_SUCCESS, "ask": _C_HEADER, "deny": _C_ERROR}
+            c = colors.get(value, _C_IDLE)
+            return f"[{c}]{value} ▾[/{c}]"
+
+        def _row(label: str, value: str, width: int = 18) -> str:
+            """Render aligned setting row."""
+            padded = label.ljust(width)
+            return f"  [dim]{padded}[/dim] {value}"
+
+        def _header(title: str) -> str:
+            return f"[{_C_HEADER}][bold]{title}[/bold][/{_C_HEADER}]\n  {'─' * 24}"
+
+        # ── Extract values ──
+        mode = eco.get("mode", "off")
+        mode_color = _C_SUCCESS if mode in ("eco_on", "eco", "on") else (
+            _C_ACTIVE if mode == "hybrid" else _C_IDLE
+        )
+        brain = eco.get("brain_model") or "default"
+        worker = eco.get("worker_model") or "default"
+        fallback = eco.get("fallback_model") or "default"
+        budget = eco.get("monthly_paid_budget", 5.0) or 5.0
+        auto_fb = eco.get("auto_fallback", False)
+        show_badges = eco.get("show_badges", True)
+        max_w = eco.get("max_workers", 10)
+
+        auto_del = agent.get("auto_delegate", True)
+        max_spec = agent.get("max_concurrent_specialists", 3)
+        max_ram = agent.get("max_ram_mb", 512)
+        timeout_s = agent.get("specialist_timeout_s", 120)
+
+        persistent = browser.get("persistent", "auto")
+        idle_timeout = browser.get("idle_timeout", 3600)
+
+        # ── Build columns ──
+        col1_lines = [
+            _header("AI / MODELS"),
+            _row("ECO Mode", _select(mode, mode_color)),
+            _row("Brain Model", _select(brain, "#7dcfff")),
+            _row("Worker Model", _select(worker, "#7dcfff")),
+            _row("Fallback", _select(fallback, "#ff9e64")),
+            _row("Show Badges", _toggle(show_badges)),
+            _row("Auto Fallback", _toggle(auto_fb)),
+            _row("Max Workers", f"{max_w}"),
+            _row("Budget", f"[{_C_COST}]${budget:.2f}[/{_C_COST}]"),
+        ]
+
+        col2_lines = [
+            _header("TEAMS / AGENT"),
+            _row("Auto Delegate", _toggle(auto_del)),
+            _row("Max Specialists", f"{max_spec}"),
+            _row("Max RAM (MB)", f"{max_ram}"),
+            _row("Timeout", f"{timeout_s}s"),
+        ]
+
+        col3_lines = [
+            _header("BROWSER"),
+            _row("Persistent", _select(persistent, "#ff9e64")),
+            _row("Idle Timeout", f"{idle_timeout}s"),
+        ]
+
+        col4_lines = [
+            _header("PERMISSIONS"),
+            _row("Default Rule", _perm("ask")),
+            _row("Browser Actions", _perm("allow")),
+            _row("Shell Commands", _perm("ask")),
+            _row("File Access", _perm("allow")),
+            _row("Vault Access", _perm("deny")),
+        ]
+
+        col5_lines = [
+            _header("CHANNELS"),
+            _row("Telegram", _toggle(True, "connected")),
+            _row("Discord", _toggle(False)),
+            _row("WhatsApp", _toggle(False)),
+        ]
+
+        # ── Merge columns side-by-side ──
+        # Pad each column to same height
+        all_cols = [col1_lines, col2_lines, col3_lines, col4_lines, col5_lines]
+        max_rows = max(len(c) for c in all_cols)
+        for col in all_cols:
+            while len(col) < max_rows:
+                col.append("")
+
+        # Terminal is ~120-160 chars wide. Show as 2-3 columns or stacked.
+        # For Textual Static widget, stack vertically in groups.
+        output_parts: list[str] = []
+
+        # Group 1: AI + Teams side-by-side (using ║ separator)
+        for i in range(max_rows):
+            left = col1_lines[i] if i < len(col1_lines) else ""
+            right = col2_lines[i] if i < len(col2_lines) else ""
+            # Pad left column to ~35 chars (approximate)
+            output_parts.append(f"{left}     {right}" if right else left)
+
+        output_parts.append("")  # spacer
+
+        # Group 2: Browser + Permissions + Channels
+        max_rows_2 = max(len(col3_lines), len(col4_lines), len(col5_lines))
+        for i in range(max_rows_2):
+            c3 = col3_lines[i] if i < len(col3_lines) else ""
+            c4 = col4_lines[i] if i < len(col4_lines) else ""
+            c5 = col5_lines[i] if i < len(col5_lines) else ""
+            parts = [p for p in [c3, c4, c5] if p]
+            output_parts.append("     ".join(parts))
+
+        # Footer hint
+        output_parts.append("")
+        output_parts.append(
+            f"[dim]Change via: /set eco <on|hybrid|off> │ "
+            f"/set brain <model> │ /set budget <N> │ "
+            f"/set team <on|off>[/dim]"
+        )
+        output_parts.append(
+            f"[dim]Press [{_C_HEADER}]3[/{_C_HEADER}] to return to dashboard[/dim]"
+        )
+
+        self.update(Text.from_markup("\n".join(output_parts)))
+
+
 # ── Main App ────────────────────────────────────────────────────────
 
 class LazyClawApp(App):
@@ -993,16 +1160,43 @@ class LazyClawApp(App):
         margin: 0 0 1 0;
         padding: 0;
     }
+
+    #settings-panel {
+        column-span: 2;
+        height: auto;
+        max-height: 100%;
+        background: $surface;
+        border: solid #565f89;
+        padding: 1 2;
+        display: none;
+        overflow-y: auto;
+    }
+
+    #settings-panel.visible {
+        display: block;
+    }
+
+    .settings-open #activity-panel,
+    .settings-open #team-lead-bar,
+    .settings-open #jobs-bar,
+    .settings-open #log-panel,
+    .settings-open #cost-bar,
+    .settings-open #ai-routing-bar {
+        display: none;
+    }
     """
 
     TITLE = "LazyClaw Server"
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
         Binding("slash", "focus_filter", "/Filter"),
-        Binding("tab", "focus_next", "Next Panel"),
-        Binding("1", "focus_agents", "Agents"),
-        Binding("2", "focus_logs", "Logs"),
-        Binding("c", "copy_logs", "Copy Logs"),
+        Binding("tab", "focus_next", "Navigate"),
+        Binding("f1", "focus_agents", "Activity"),
+        Binding("f2", "focus_logs", "Logs"),
+        Binding("f3", "toggle_settings", "Settings", priority=True),
+        Binding("escape", "close_settings", "Back", show=False),
+        Binding("x", "cancel_focused", "Cancel Task"),
+        Binding("c", "copy_logs", "Copy"),
     ]
 
     def __init__(
@@ -1033,6 +1227,7 @@ class LazyClawApp(App):
         self._telegram_connected: bool = False
         self._telegram_adapter = None
         self._telegram_notifier = None
+        self._settings_visible: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1043,12 +1238,17 @@ class LazyClawApp(App):
         yield LogPanel(id="log-panel", highlight=True, markup=True)
         yield CostBar("", id="cost-bar")
         yield AIRoutingBar("", id="ai-routing-bar")
+        yield SettingsPanel("", id="settings-panel")
         yield Input(
             placeholder="Type message or /command...",
             id="admin-input",
             suggester=SuggestFromList(
                 ["/help", "/clear", "/status", "/history", "/jobs", "/watchers",
-                 "/filter all", "/filter tools", "/filter errors", "/filter llm"],
+                 "/filter all", "/filter tools", "/filter errors", "/filter llm",
+                 "/cancel", "/cancel all", "/cancel bg",
+                 "/set eco on", "/set eco hybrid", "/set eco off",
+                 "/set brain", "/set worker", "/set budget",
+                 "/settings"],
                 case_sensitive=False,
             ),
         )
@@ -1455,6 +1655,109 @@ class LazyClawApp(App):
             except Exception:
                 self._post_log("error", f"Copy failed: {exc}")
 
+    # ── Cancel / Settings actions ────────────────────────────────────
+
+    def action_cancel_focused(self) -> None:
+        """Cancel the first active request (x key)."""
+        active = self.dashboard._active
+        if not active:
+            self._post_log("info", "Nothing to cancel")
+            return
+        # Cancel the first non-done active request
+        for chat_id, req in list(active.items()):
+            if req.phase not in ("done", "error", "cancelled"):
+                self._cancel_request(chat_id)
+                return
+        self._post_log("info", "No active tasks to cancel")
+
+    def _cancel_request(self, chat_id: str) -> None:
+        """Cancel a single request by chat_id."""
+        req = self.dashboard._active.get(chat_id)
+        if not req:
+            return
+        name = req.message[:30]
+        # Cancel via TeamLead
+        if self._team_lead:
+            task_id = self._team_lead.find_cancel_target(name)
+            if task_id:
+                self._team_lead.cancel(task_id)
+        # Cancel via TaskRunner (background)
+        if self._task_runner:
+            for tid, uid in list(self._task_runner._task_users.items()):
+                tname = self._task_runner._task_names.get(tid, "")
+                if chat_id in tid or name in tname:
+                    asyncio.ensure_future(
+                        self._task_runner.cancel(tid, uid)
+                    )
+                    break
+        # Update card to cancelled
+        req.phase = "cancelled"
+        snap = self.dashboard._snapshot(req)
+        self.post_message(RequestUpdated(chat_id, snap))
+        self._post_log("cancel", f"Cancelled: \"{name}\"")
+        # Remove after brief display
+        self.set_timer(2.0, lambda: self.dashboard.unregister_request(chat_id))
+
+    @work(name="cancel-all")
+    async def _cancel_all_active(self) -> None:
+        """Cancel all active foreground requests."""
+        active = list(self.dashboard._active.keys())
+        count = 0
+        for chat_id in active:
+            req = self.dashboard._active.get(chat_id)
+            if req and req.phase not in ("done", "error", "cancelled"):
+                self._cancel_request(chat_id)
+                count += 1
+        if count == 0:
+            self._post_log("info", "Nothing to cancel")
+        else:
+            self._post_log("cancel", f"Cancelled {count} task(s)")
+
+    @work(name="cancel-bg")
+    async def _cancel_all_bg(self) -> None:
+        """Cancel all background tasks."""
+        if self._task_runner:
+            count = await self._task_runner.cancel_all()
+            self._post_log("cancel", f"Cancelled {count} background task(s)")
+        else:
+            self._post_log("info", "No task runner available")
+
+    def action_close_settings(self) -> None:
+        """Close settings panel if open (Escape key)."""
+        if self._settings_visible:
+            self.action_toggle_settings()
+
+    def action_toggle_settings(self) -> None:
+        """Toggle settings panel — replaces dashboard panels (F3 key)."""
+        panel = self.query_one("#settings-panel", SettingsPanel)
+        self._settings_visible = not self._settings_visible
+        if self._settings_visible:
+            panel.add_class("visible")
+            self.add_class("settings-open")
+            self._load_settings_panel()
+            self._post_log("info", "⚙ Settings — press F3 or Esc to return to dashboard")
+        else:
+            panel.remove_class("visible")
+            self.remove_class("settings-open")
+            self._post_log("info", "Dashboard restored")
+
+    @work(name="load-settings")
+    async def _load_settings_panel(self) -> None:
+        """Load current settings and render in the settings panel."""
+        try:
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            from lazyclaw.runtime.agent_settings import get_agent_settings
+            from lazyclaw.browser.browser_settings import get_browser_settings
+
+            eco = await get_eco_settings(self._config, self._user_id)
+            agent = await get_agent_settings(self._config, self._user_id)
+            browser = await get_browser_settings(self._config, self._user_id)
+
+            panel = self.query_one("#settings-panel", SettingsPanel)
+            panel.render_settings(eco, agent, browser)
+        except Exception as exc:
+            self._post_log("error", f"Failed to load settings: {exc}")
+
     # ── Admin input ──────────────────────────────────────────────────
 
     @on(Input.Submitted, "#admin-input")
@@ -1496,10 +1799,23 @@ class LazyClawApp(App):
                 self._post_log("info", "Filters: all, tools, errors, llm")
             return
 
+        if text.startswith("/cancel"):
+            await self._handle_cancel_command(text)
+            return
+
+        if text.startswith("/set "):
+            await self._handle_set_command(text)
+            return
+
+        if text == "/settings":
+            self.action_toggle_settings()
+            return
+
         if text in ("/help", "/"):
             self._post_log("info",
                            "Commands: /clear /status /history /jobs /watchers "
-                           "/filter <all|tools|errors|llm> /help")
+                           "/filter <all|tools|errors|llm> "
+                           "/cancel [id|all|bg] /set <key> <value> /settings /help")
             return
 
         # Enqueue as admin message with dashboard tracking + response display
@@ -1546,6 +1862,97 @@ class LazyClawApp(App):
         except Exception as exc:
             self._post_log("error", f"Agent error: {exc}")
             self.dashboard.unregister_request(chat_id)
+
+    async def _handle_cancel_command(self, text: str) -> None:
+        """Handle /cancel [id|all|bg] commands."""
+        arg = text[7:].strip().lower()
+
+        if not arg or arg == "all":
+            # Cancel everything
+            await self._cancel_all_active()
+            await self._cancel_all_bg()
+            return
+
+        if arg == "bg":
+            await self._cancel_all_bg()
+            return
+
+        # Try cancel by number (card number) or name
+        # First try matching against active requests
+        for chat_id, req in list(self.dashboard._active.items()):
+            if req.phase in ("done", "error", "cancelled"):
+                continue
+            # Match by card message content or partial name
+            if arg in req.message.lower() or arg in chat_id.lower():
+                self._cancel_request(chat_id)
+                return
+
+        # Try via TeamLead
+        if self._team_lead:
+            task_id = self._team_lead.find_cancel_target(arg)
+            if task_id:
+                self._team_lead.cancel(task_id)
+                if self._task_runner:
+                    await self._task_runner.cancel(task_id, self._user_id)
+                self._post_log("cancel", f"Cancelled: \"{arg}\"")
+                return
+
+        self._post_log("info", f"No match for \"{arg}\"")
+
+    async def _handle_set_command(self, text: str) -> None:
+        """Handle /set <key> <value> commands."""
+        parts = text.split(None, 2)
+        if len(parts) < 3:
+            self._post_log("info", "Usage: /set <eco|brain|worker|budget|team> <value>")
+            return
+
+        key = parts[1].lower()
+        val = parts[2].strip()
+
+        try:
+            if key == "eco":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                valid = ("on", "eco_on", "hybrid", "off")
+                if val.lower() not in valid:
+                    self._post_log("info", f"ECO modes: {', '.join(valid)}")
+                    return
+                mode = "eco_on" if val.lower() == "on" else val.lower()
+                await update_eco_settings(self._config, self._user_id, {"mode": mode})
+                self._post_log("info", f"ECO mode → {mode}")
+
+            elif key == "brain":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                await update_eco_settings(self._config, self._user_id, {"brain_model": val})
+                self._post_log("info", f"Brain model → {val}")
+
+            elif key == "worker":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                await update_eco_settings(self._config, self._user_id, {"worker_model": val})
+                self._post_log("info", f"Worker model → {val}")
+
+            elif key == "budget":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                budget = float(val)
+                await update_eco_settings(self._config, self._user_id, {"monthly_paid_budget": budget})
+                self._eco_budget = budget
+                self._post_log("info", f"Budget → ${budget:.2f}")
+
+            elif key == "team":
+                from lazyclaw.runtime.agent_settings import update_agent_settings
+                on = val.lower() in ("on", "auto", "true", "1")
+                await update_agent_settings(self._config, self._user_id, {"auto_delegate": on})
+                self._post_log("info", f"Auto delegate → {'on' if on else 'off'}")
+
+            else:
+                self._post_log("info", f"Unknown setting: {key}. Use: eco, brain, worker, budget, team")
+                return
+
+            # Refresh settings panel if visible
+            if self._settings_visible:
+                self._load_settings_panel()
+
+        except Exception as exc:
+            self._post_log("error", f"Failed to update {key}: {exc}")
 
     async def _show_jobs(self) -> None:
         """Show active cron jobs in log panel."""
@@ -1695,6 +2102,7 @@ def _log_style(kind: str) -> str:
         "reply": _C_SUCCESS,
         "error": _C_ERROR,
         "stuck": f"bold {_C_ERROR}",
+        "cancel": f"bold {_C_ERROR}",
     }.get(kind, "dim")
 
 
@@ -1713,4 +2121,5 @@ def _log_icon(kind: str) -> str:
         "reply": "←",
         "error": "✗",
         "stuck": "⚠",
+        "cancel": "🛑",
     }.get(kind, "  ")

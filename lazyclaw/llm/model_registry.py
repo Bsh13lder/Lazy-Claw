@@ -1,10 +1,9 @@
-"""Static model catalog and 3-role mode table for ECO routing.
+"""Static model catalog and 2-role mode table for ECO routing.
 
-Three roles: Brain (= Team Lead), Worker, Fallback.
-Three modes:
-  ECO ON:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission)
-  HYBRID:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (auto)
-  FULL:    Sonnet brain + Haiku worker + Opus fallback (auto)
+Two roles: Brain (= Team Lead), Worker, Fallback.
+Two modes:
+  HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  FULL:    User-configurable brain/worker/fallback (paid, auto)
 """
 
 from __future__ import annotations
@@ -32,17 +31,12 @@ class ModelProfile:
 # ── Mode → Model table (single source of truth) ─────────────────────
 
 MODE_MODELS: dict[str, dict[str, str]] = {
-    "eco_on": {
-        "brain":    "claude-haiku-4-5-20251001",
-        "worker":   "mlx-community/Nanbeige4.1-3B-8bit",
-        "fallback": "claude-sonnet-4-20250514",
-    },
     "hybrid": {
         "brain":    "claude-haiku-4-5-20251001",
         "worker":   "mlx-community/Nanbeige4.1-3B-8bit",
-        "fallback": "claude-sonnet-4-20250514",
+        "fallback": "claude-haiku-4-5-20251001",
     },
-    "off": {
+    "full": {
         "brain":    "claude-sonnet-4-20250514",
         "worker":   "claude-haiku-4-5-20251001",
         "fallback": "claude-opus-4-6",
@@ -56,16 +50,16 @@ OLLAMA_WORKER_MODEL = "nanbeige4.1:3b"
 
 def get_mode_models(mode: str) -> dict[str, str]:
     """Get brain/worker/fallback model IDs for a mode."""
-    return dict(MODE_MODELS.get(mode, MODE_MODELS["off"]))
+    return dict(MODE_MODELS.get(mode, MODE_MODELS["hybrid"]))
 
 
 # ── Backward-compat aliases (used by imports, remove later) ──────────
 
-BRAIN_MODEL = MODE_MODELS["eco_on"]["brain"]
-WORKER_MODEL = MODE_MODELS["eco_on"]["worker"]
-FALLBACK_MODEL = MODE_MODELS["eco_on"]["fallback"]
-PAID_BRAIN_MODEL = MODE_MODELS["off"]["brain"]
-PAID_WORKER_MODEL = MODE_MODELS["off"]["worker"]
+BRAIN_MODEL = MODE_MODELS["hybrid"]["brain"]
+WORKER_MODEL = MODE_MODELS["hybrid"]["worker"]
+FALLBACK_MODEL = MODE_MODELS["hybrid"]["fallback"]
+PAID_BRAIN_MODEL = MODE_MODELS["full"]["brain"]
+PAID_WORKER_MODEL = MODE_MODELS["full"]["worker"]
 
 
 # ── Model catalog ─────────────────────────────────────────────────────
@@ -359,7 +353,7 @@ def total_local_ram_mb() -> int:
 
 def estimate_eco_ram_mb(brain: str | None = None, worker: str | None = None) -> int:
     """Estimate RAM for a brain+worker combo."""
-    defaults = MODE_MODELS["eco_on"]
+    defaults = MODE_MODELS["hybrid"]
     brain_profile = get_model(brain or defaults["brain"])
     worker_profile = get_model(worker or defaults["worker"])
     brain_ram = brain_profile.ram_mb if brain_profile else 0

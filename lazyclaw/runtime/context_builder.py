@@ -6,6 +6,7 @@ Capabilities are cached (60s TTL) to avoid per-message MCP RPC overhead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -22,6 +23,9 @@ _CAPABILITIES_TTL = 60.0
 # Cache for MCP status (60s TTL)
 _mcp_cache: list[str] = []
 _mcp_cache_time: float = 0.0
+
+# Lock protecting both caches against concurrent async rebuilds
+_cache_lock = asyncio.Lock()
 
 
 async def build_context(
@@ -82,14 +86,20 @@ async def _build_capabilities_cached(
     """Build capabilities section with 60s TTL cache."""
     global _capabilities_cache, _capabilities_time
 
+    # Fast path (no lock) — return cached if still valid
     now = time.monotonic()
     if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
         return _capabilities_cache
 
-    result = await _build_capabilities_section(config, user_id, registry)
-    _capabilities_cache = result
-    _capabilities_time = now
-    return result
+    # Slow path — acquire lock, double-check, then rebuild
+    async with _cache_lock:
+        now = time.monotonic()
+        if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
+            return _capabilities_cache
+        result = await _build_capabilities_section(config, user_id, registry)
+        _capabilities_cache = result
+        _capabilities_time = now
+        return result
 
 
 def invalidate_capabilities_cache() -> None:
@@ -136,13 +146,13 @@ async def _build_capabilities_section(
         lines.append("")
 
     # Current config — show ECO-resolved models
-    eco_mode = "off"
+    eco_mode = "hybrid"
     _brain_display = config.brain_model
     try:
         from lazyclaw.llm.eco_settings import get_eco_settings
         from lazyclaw.llm.model_registry import get_mode_models
         eco = await get_eco_settings(config, user_id)
-        eco_mode = eco.get("mode", "off")
+        eco_mode = eco.get("mode", "hybrid")
         _m = get_mode_models(eco_mode)
         _brain_display = eco.get("brain_model") or _m["brain"]
     except Exception:
@@ -180,7 +190,7 @@ async def _build_capabilities_section(
         ollama_status = "unavailable"
 
     lines.append(f"**Config:** {' | '.join(config_parts)} | Ollama: {ollama_status}")
-    lines.append(f"  ECO modes: local/eco/hybrid/full (current: {eco_mode}). Change: eco_set_mode")
+    lines.append(f"  ECO modes: hybrid/full (current: {eco_mode}). Change: eco_set_mode")
     lines.append("  Direct channels (no browser): Instagram, WhatsApp, Email — prefer over browser")
 
     return "\n".join(lines)
@@ -190,14 +200,20 @@ async def _get_mcp_status_cached(config: Config, user_id: str) -> list[str]:
     """Get MCP status with 60s TTL cache (avoids ListToolsRequest spam)."""
     global _mcp_cache, _mcp_cache_time
 
+    # Fast path (no lock)
     now = time.monotonic()
     if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
         return _mcp_cache
 
-    result = await _get_mcp_status(config, user_id)
-    _mcp_cache = result
-    _mcp_cache_time = now
-    return result
+    # Slow path — lock, double-check, rebuild
+    async with _cache_lock:
+        now = time.monotonic()
+        if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
+            return _mcp_cache
+        result = await _get_mcp_status(config, user_id)
+        _mcp_cache = result
+        _mcp_cache_time = now
+        return result
 
 
 async def _get_mcp_status(config: Config, user_id: str) -> list[str]:

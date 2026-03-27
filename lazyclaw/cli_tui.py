@@ -446,10 +446,9 @@ class SystemBar(Static):
         active_color = _C_ACTIVE if stats.active_count > 0 else _C_IDLE
 
         # ECO mode badge — normalize display name
-        _eco_labels = {"eco_on": "ECO", "hybrid": "HYBRID", "off": "PAID",
-                       "local": "ECO", "eco": "ECO", "full": "PAID"}
+        _eco_labels = {"hybrid": "HYBRID", "full": "FULL"}
         eco = _eco_labels.get(stats.eco_mode, stats.eco_mode.upper())
-        eco_color = _C_SUCCESS if eco == "ECO" else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
+        eco_color = _C_ACTIVE if eco == "HYBRID" else _C_IDLE
 
         # Model names from config
         brain = ""
@@ -973,10 +972,8 @@ class SettingsPanel(Static):
             return f"[{_C_HEADER}][bold]{title}[/bold][/{_C_HEADER}]\n  {'─' * 24}"
 
         # ── Extract values ──
-        mode = eco.get("mode", "off")
-        mode_color = _C_SUCCESS if mode in ("eco_on", "eco", "on") else (
-            _C_ACTIVE if mode == "hybrid" else _C_IDLE
-        )
+        mode = eco.get("mode", "hybrid")
+        mode_color = _C_ACTIVE if mode == "hybrid" else _C_IDLE
         brain = eco.get("brain_model") or "default"
         worker = eco.get("worker_model") or "default"
         fallback = eco.get("fallback_model") or "default"
@@ -1686,8 +1683,11 @@ class LazyClawApp(App):
             for tid, uid in list(self._task_runner._task_users.items()):
                 tname = self._task_runner._task_names.get(tid, "")
                 if chat_id in tid or name in tname:
-                    asyncio.ensure_future(
-                        self._task_runner.cancel(tid, uid)
+                    from lazyclaw.runtime.aio_helpers import fire_and_forget
+
+                    fire_and_forget(
+                        self._task_runner.cancel(tid, uid),
+                        name=f"cancel-{tid}",
                     )
                     break
         # Update card to cancelled
@@ -1912,13 +1912,12 @@ class LazyClawApp(App):
         try:
             if key == "eco":
                 from lazyclaw.llm.eco_settings import update_eco_settings
-                valid = ("on", "eco_on", "hybrid", "off")
+                valid = ("hybrid", "full")
                 if val.lower() not in valid:
                     self._post_log("info", f"ECO modes: {', '.join(valid)}")
                     return
-                mode = "eco_on" if val.lower() == "on" else val.lower()
-                await update_eco_settings(self._config, self._user_id, {"mode": mode})
-                self._post_log("info", f"ECO mode → {mode}")
+                await update_eco_settings(self._config, self._user_id, {"mode": val.lower()})
+                self._post_log("info", f"ECO mode → {val.lower()}")
 
             elif key == "brain":
                 from lazyclaw.llm.eco_settings import update_eco_settings

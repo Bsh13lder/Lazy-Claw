@@ -18,9 +18,9 @@ class EcoSetModeSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Set the AI routing mode. 'local' uses Ollama models only ($0), "
-            "'eco' uses free API providers ($0), 'hybrid' uses free workers + "
-            "paid brain (Haiku), 'full' always uses paid AI for best quality."
+            "Set the AI routing mode. 'hybrid' uses Haiku brain + local "
+            "Nanbeige worker (cheap). 'full' uses user-configured paid models "
+            "for maximum quality."
         )
 
     @property
@@ -30,7 +30,7 @@ class EcoSetModeSkill(BaseSkill):
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": ["local", "eco", "hybrid", "full"],
+                    "enum": ["hybrid", "full"],
                     "description": "The ECO mode to set",
                 },
             },
@@ -47,19 +47,18 @@ class EcoSetModeSkill(BaseSkill):
             await update_eco_settings(self._config, user_id, {"mode": mode})
 
             descriptions = {
-                "local": "LOCAL mode enabled — all AI requests use Ollama models ($0). Requires Ollama running.",
-                "eco": (
-                    "ECO mode enabled — all AI requests routed to free providers ($0 cost). "
-                    "Cascades: Groq → OpenRouter → Google → Together → Mistral. "
-                    "Waits if all rate-limited (never pays)."
-                ),
                 "hybrid": (
-                    "HYBRID mode enabled — free providers for workers, Haiku (cheap paid) for brain/fallback. "
-                    "Cost: ~$0.002/message instead of $0.05."
+                    "HYBRID mode enabled — Haiku brain + local Nanbeige worker ($0). "
+                    "Best balance of cost and quality."
                 ),
-                "full": "FULL mode enabled — all requests use paid AI for maximum quality.",
+                "full": (
+                    "FULL mode enabled — all requests use paid AI for maximum quality. "
+                    "Configure models with /eco brain MODEL, /eco worker MODEL."
+                ),
             }
             return descriptions.get(mode, f"Mode set to '{mode}'.")
+        except ValueError as exc:
+            return str(exc)
         except Exception as exc:
             return f"Error setting ECO mode: {exc}"
 
@@ -99,29 +98,29 @@ class EcoShowStatusSkill(BaseSkill):
             from lazyclaw.llm.free_providers import get_provider_info
 
             settings = await get_eco_settings(self._config, user_id)
-            mode = settings.get("mode", "full")
+            mode = settings.get("mode", "hybrid")
 
             lines = [f"ECO Status: {mode.upper()}"]
             lines.append("\u2501" * 20)
 
+            from lazyclaw.llm.model_registry import get_mode_models
+            models = get_mode_models(mode)
+
             # Mode-specific routing info
-            if mode == "eco":
-                lines.append("Brain: best free model (Groq > OpenRouter > Gemini)")
-                lines.append("Worker: fastest free model")
-                lines.append("Fallback: wait and retry (never pays)")
-            elif mode == "hybrid":
-                lines.append("Brain: claude-haiku-4-5 (paid)")
-                lines.append("Worker: free provider (Groq/OpenRouter/Gemini)")
-                lines.append("Fallback: claude-haiku-4-5")
-            elif mode == "full":
-                lines.append("Brain: gpt-5 / config brain_model (paid)")
-                lines.append("Worker: gpt-5-mini / config worker_model (paid)")
-                lines.append("No free providers used")
-            elif mode == "local":
-                brain = settings.get("brain_model") or "qwen3:0.6b"
-                spec = settings.get("specialist_model") or "qwen3:0.6b"
-                lines.append(f"Brain: {brain} (Ollama)")
-                lines.append(f"Specialist: {spec} (Ollama)")
+            if mode == "hybrid":
+                brain = settings.get("brain_model") or models["brain"]
+                worker = settings.get("worker_model") or models["worker"]
+                fallback = settings.get("fallback_model") or models["fallback"]
+                lines.append(f"Brain: {brain} (paid)")
+                lines.append(f"Worker: {worker} (local, try Ollama first)")
+                lines.append(f"Fallback: {fallback}")
+            else:  # full
+                brain = settings.get("full_brain_model") or settings.get("brain_model") or models["brain"]
+                worker = settings.get("full_worker_model") or settings.get("worker_model") or models["worker"]
+                fallback = settings.get("full_fallback_model") or settings.get("fallback_model") or models["fallback"]
+                lines.append(f"Brain: {brain} (paid)")
+                lines.append(f"Worker: {worker} (paid)")
+                lines.append(f"Fallback: {fallback}")
 
             # Free providers status
             lines.append("")
@@ -152,12 +151,10 @@ class EcoShowStatusSkill(BaseSkill):
             # Commands
             lines.append("")
             lines.append("Commands:")
-            lines.append("  /eco full         Switch to full paid")
-            lines.append("  /eco hybrid       Free workers + paid brain")
-            lines.append("  /eco eco          Free only ($0)")
-            lines.append("  /eco add <name>   Add free provider")
-            lines.append("  /eco remove <name> Remove provider")
-            lines.append("  /eco setup        Interactive setup wizard")
+            lines.append("  /eco hybrid       Haiku brain + local worker (cheap)")
+            lines.append("  /eco full         User-configured paid models")
+            lines.append("  /eco brain MODEL  Set brain model")
+            lines.append("  /eco worker MODEL Set worker model")
             lines.append("  /eco models       List available free models")
 
             return "\n".join(lines)
@@ -224,7 +221,7 @@ class EcoSetProviderSkill(BaseSkill):
 
 
 class EcoSetModelSkill(BaseSkill):
-    """Set which Ollama model is used as brain or specialist in local/hybrid mode."""
+    """Set which model is used as brain or worker in HYBRID/FULL mode."""
 
     def __init__(self, config=None):
         self._config = config
@@ -240,11 +237,9 @@ class EcoSetModelSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Set the brain or specialist model for local/hybrid ECO mode. "
-            "Brain handles simple chat (fast, small). Specialist handles tool "
-            "calling and complex tasks (larger, smarter). "
-            "Example: set brain to 'qwen3:1.7b', set specialist to "
-            "'softw8/nanbeige4.1-3b-tools'. Use 'default' to reset."
+            "Set the brain or worker model for HYBRID/FULL ECO mode. "
+            "Brain handles chat and routing. Worker handles tool calling "
+            "and complex tasks. Use 'default' to reset to system defaults."
         )
 
     @property
@@ -254,7 +249,7 @@ class EcoSetModelSkill(BaseSkill):
             "properties": {
                 "role": {
                     "type": "string",
-                    "enum": ["brain", "specialist"],
+                    "enum": ["brain", "worker"],
                     "description": "Which role to assign the model to",
                 },
                 "model": {
@@ -282,7 +277,7 @@ class EcoSetModelSkill(BaseSkill):
             if model.lower() == "default":
                 key = "brain_model" if role == "brain" else "worker_model"
                 await update_eco_settings(self._config, user_id, {key: None})
-                defaults = get_mode_models("eco_on")
+                defaults = get_mode_models("hybrid")
                 default = defaults["brain"] if role == "brain" else defaults["worker"]
                 return f"{role.title()} model reset to default: {default}"
 
@@ -312,8 +307,7 @@ class EcoSetModelSkill(BaseSkill):
 
             return (
                 f"{role.title()} model set to '{model}'.\n"
-                f"This model will be used for {'simple chat and routing' if role == 'brain' else 'tool calling and complex tasks'} "
-                f"in local/hybrid mode."
+                f"This model will be used for {'chat and routing' if role == 'brain' else 'tool calling and complex tasks'}."
             )
         except Exception as exc:
             return f"Error setting model: {exc}"

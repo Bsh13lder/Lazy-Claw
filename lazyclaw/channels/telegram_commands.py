@@ -120,7 +120,9 @@ class TelegramCommands:
         )
 
     async def _agent_dispatch(self, update: Update, chat_id: str, user_id: str, text: str) -> None:
-        asyncio.create_task(
+        from lazyclaw.runtime.aio_helpers import fire_and_forget
+
+        fire_and_forget(
             self._adapter._process_and_reply(update, chat_id, user_id, text),
             name=f"tg-cmd-{chat_id}-{id(text)}",
         )
@@ -251,7 +253,7 @@ class TelegramCommands:
             from lazyclaw.llm.model_registry import get_mode_models
             from lazyclaw.llm.eco_settings import get_eco_settings
             _eco = await get_eco_settings(self._config, user_id)
-            _models = get_mode_models(_eco.get("mode", "off"))
+            _models = get_mode_models(_eco.get("mode", "hybrid"))
             await self._reply(update,
                 f"\U0001f9e0 <b>Models</b>\n\n"
                 f"Brain: <code>{_eco.get('brain_model') or _models['brain']}</code>\n"
@@ -276,21 +278,23 @@ class TelegramCommands:
             return
         args = context.args or []
         from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
-        from lazyclaw.llm.eco_router import normalize_mode, MODE_ECO_ON, MODE_ECO_HYBRID, MODE_ECO_OFF
+        from lazyclaw.llm.eco_router import normalize_mode, MODE_HYBRID, MODE_FULL, _DISABLED_MODES, DISABLED_MODE_MESSAGE
+        from lazyclaw.llm.model_registry import get_mode_models
 
         if not args:
             # Show current status
             s = await get_eco_settings(self._config, user_id)
-            mode = s.get("mode", "off")
+            mode = s.get("mode", "hybrid")
             icons = {
-                MODE_ECO_ON: "\U0001f331", MODE_ECO_HYBRID: "\u2696\ufe0f", MODE_ECO_OFF: "\U0001f680",
+                MODE_HYBRID: "\u2696\ufe0f", MODE_FULL: "\U0001f680",
             }
             labels = {
-                MODE_ECO_ON: "ECO ON (Local)", MODE_ECO_HYBRID: "HYBRID", MODE_ECO_OFF: "OFF (Paid)",
+                MODE_HYBRID: "HYBRID", MODE_FULL: "FULL",
             }
-            brain = s.get("brain_model") or ("Qwen3.5 9B" if mode == MODE_ECO_ON else "Sonnet 4.6")
-            worker = s.get("worker_model") or ("Nanbeige 3B" if mode != MODE_ECO_OFF else "Haiku 4.5")
-            fallback = s.get("fallback_model") or "Sonnet 4.6"
+            _models = get_mode_models(mode)
+            brain = s.get("brain_model") or _models["brain"]
+            worker = s.get("worker_model") or _models["worker"]
+            fallback = s.get("fallback_model") or _models["fallback"]
             max_w = s.get("max_workers", 10)
             auto_fb = "\u2705" if s.get("auto_fallback") else "\u274c"
             budget = s.get("monthly_paid_budget", 0)
@@ -308,13 +312,11 @@ class TelegramCommands:
                 text += f"\U0001f4b0 Budget: ${budget:.2f}/mo\n"
             text += (
                 "\n<b>Commands:</b>\n"
-                "<code>/eco on</code> — Local models ($0)\n"
-                "<code>/eco hybrid</code> — Sonnet brain + local workers\n"
-                "<code>/eco off</code> — All paid\n"
-                "<code>/eco auto on|off</code> — Auto-fallback\n"
-                "<code>/eco workers N</code> — Max workers (1-20)\n"
+                "<code>/eco hybrid</code> — Haiku brain + local worker\n"
+                "<code>/eco full</code> — User-configured paid models\n"
                 "<code>/eco brain MODEL</code> — Set brain model\n"
                 "<code>/eco worker MODEL</code> — Set worker model\n"
+                "<code>/eco workers N</code> — Max workers (1-20)\n"
                 "<code>/eco budget N</code> — Monthly $ cap"
             )
             await self._reply(update, text)
@@ -322,12 +324,15 @@ class TelegramCommands:
 
         subcmd = args[0].lower()
 
-        # Mode change: /eco on|hybrid|off|local|full|eco
-        if subcmd in ("on", "hybrid", "off", "local", "full", "eco"):
+        # Mode change: /eco hybrid|full (reject old eco/local modes)
+        if subcmd in ("on", "hybrid", "off", "local", "full", "eco", "eco_on"):
+            if subcmd in _DISABLED_MODES:
+                await self._reply(update, f"\u26a0\ufe0f {DISABLED_MODE_MESSAGE}")
+                return
             normalized = normalize_mode(subcmd)
             await update_eco_settings(self._config, user_id, {"mode": normalized})
             labels = {
-                MODE_ECO_ON: "ECO ON (Local)", MODE_ECO_HYBRID: "HYBRID", MODE_ECO_OFF: "OFF (Paid)",
+                MODE_HYBRID: "HYBRID", MODE_FULL: "FULL",
             }
             await self._reply(update, f"\u2705 ECO: <b>{labels.get(normalized, normalized)}</b>")
             return
@@ -472,8 +477,8 @@ class TelegramCommands:
 
             if w_ok:
                 from lazyclaw.llm.eco_settings import update_eco_settings
-                await update_eco_settings(self._config, user_id, {"mode": "eco_on"})
-                lines.append("\n\U0001f389 Worker running! Auto-switched to <b>ECO ON</b> (Haiku brain + local worker)")
+                await update_eco_settings(self._config, user_id, {"mode": "hybrid"})
+                lines.append("\n\U0001f389 Worker running! Auto-switched to <b>HYBRID</b> (Haiku brain + local worker)")
             else:
                 lines.append(
                     "\n\u274c Both failed. Is mlx-lm installed?\n"
@@ -627,7 +632,7 @@ class TelegramCommands:
             from lazyclaw.llm.model_registry import get_mode_models
             from lazyclaw.llm.eco_settings import get_eco_settings
             _eco = await get_eco_settings(self._config, user_id)
-            _models = get_mode_models(_eco.get("mode", "off"))
+            _models = get_mode_models(_eco.get("mode", "hybrid"))
             await self._reply(update,
                 f"\U0001f4b0 <b>Usage Stats</b>\n━━━━━━━━━━━━\n\n"
                 f"\U0001f4ac Messages: <b>{mc:,}</b>\n"
@@ -1119,11 +1124,11 @@ class TelegramCommands:
     async def _update_pinned(self, chat_id: str, msg_id: int) -> None:
         from lazyclaw.llm.model_registry import get_mode_models
         # Show ECO-resolved models (not config defaults)
-        _mode = "off"
+        _mode = "hybrid"
         try:
             from lazyclaw.llm.eco_settings import get_eco_settings
             _eco = await get_eco_settings(self._config, self._admin_user_id or "")
-            _mode = _eco.get("mode", "off")
+            _mode = _eco.get("mode", "hybrid")
         except Exception:
             pass
         _models = get_mode_models(_mode)

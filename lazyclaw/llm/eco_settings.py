@@ -3,10 +3,9 @@
 Settings stored in the existing users.settings JSON column
 under the "eco" key. No new DB table needed.
 
-Three modes (3 roles: Brain = Team Lead, Worker, Fallback):
-  eco_on  — Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission)
-  hybrid  — Haiku brain + Nanbeige worker ($0) + Sonnet fallback (auto)
-  off     — Sonnet brain + Haiku worker + Opus fallback (auto)
+Two modes (3 roles: Brain, Worker, Fallback):
+  hybrid  — Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  full    — User-configurable brain/worker/fallback (paid, auto)
 """
 
 from __future__ import annotations
@@ -16,7 +15,12 @@ import logging
 
 from lazyclaw.config import Config
 from lazyclaw.db.connection import db_session
-from lazyclaw.llm.eco_router import VALID_MODES, normalize_mode
+from lazyclaw.llm.eco_router import (
+    VALID_MODES,
+    _DISABLED_MODES,
+    DISABLED_MODE_MESSAGE,
+    normalize_mode,
+)
 from lazyclaw.llm.free_providers import PROVIDER_DEFS, discover_providers
 
 logger = logging.getLogger(__name__)
@@ -32,21 +36,22 @@ def _get_valid_providers() -> set[str]:
 
 # Default eco settings
 DEFAULT_ECO = {
-    "mode": "off",
+    "mode": "hybrid",
     "show_badges": True,
     "monthly_paid_budget": 0,
-    "auto_fallback": False,
+    "auto_fallback": True,
     "max_workers": 10,
     "brain_model": None,       # None = use default from model_registry
     "worker_model": None,      # None = use default from model_registry
     "fallback_model": None,    # None = use default from model_registry
+    # FULL mode user-settable overrides (take priority over generic overrides)
+    "full_brain_model": None,
+    "full_worker_model": None,
+    "full_fallback_model": None,
     "locked_provider": None,
     "allowed_providers": None,
     "free_providers": None,    # None = auto-detect from env
     "preferred_free_model": None,
-    # Legacy compat
-    "specialist_model": None,
-    "task_overrides": None,
 }
 
 
@@ -74,10 +79,15 @@ async def get_eco_settings(config: Config, user_id: str) -> dict:
     merged = dict(DEFAULT_ECO)
     merged.update(eco)
 
-    # Normalize mode (backward compat: local→eco_on, full→off, eco→eco_on)
-    merged["mode"] = normalize_mode(merged.get("mode", "off"))
+    # Normalize mode (backward compat: full→full, off→full, etc.)
+    raw_mode = merged.get("mode", "hybrid")
+    normalized = normalize_mode(raw_mode)
+    # Reject disabled modes — fall back to hybrid
+    if normalized in _DISABLED_MODES:
+        normalized = "hybrid"
+    merged["mode"] = normalized
 
-    # Migrate specialist_model → worker_model
+    # Migrate specialist_model → worker_model (legacy)
     if merged.get("specialist_model") and not merged.get("worker_model"):
         merged["worker_model"] = merged["specialist_model"]
 
@@ -88,11 +98,14 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
     """Update user's ECO mode settings. Returns the new settings."""
     # Normalize mode if provided
     if "mode" in updates:
-        normalized = normalize_mode(updates["mode"])
+        raw = updates["mode"].lower().strip()
+        if raw in _DISABLED_MODES:
+            raise ValueError(DISABLED_MODE_MESSAGE)
+        normalized = normalize_mode(raw)
         if normalized not in VALID_MODES:
             raise ValueError(
                 f"Invalid eco mode: {updates['mode']}. "
-                f"Use: on, hybrid, off"
+                f"Use: hybrid, full"
             )
         updates["mode"] = normalized
 

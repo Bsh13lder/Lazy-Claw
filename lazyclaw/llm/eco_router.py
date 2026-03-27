@@ -1,13 +1,12 @@
-"""ECO Router v3 — Simplified 3-role architecture.
+"""ECO Router v4 — Simplified 2-mode architecture.
 
 Three roles: Brain (= Team Lead), Worker, Fallback.
-Three modes:
-  ECO ON:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission)
-  HYBRID:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (auto)
-  FULL:    Sonnet brain + Haiku worker + Opus fallback (auto)
+Two modes:
+  HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  FULL:    User-configurable brain/worker/fallback (paid, auto)
 
-ECO ON and HYBRID use the same models — only fallback behavior differs.
 All model assignments come from MODE_MODELS in model_registry.py.
+User overrides in eco_settings take priority over defaults.
 """
 
 from __future__ import annotations
@@ -43,34 +42,44 @@ logger = logging.getLogger(__name__)
 
 # ── ECO Modes ─────────────────────────────────────────────────────────
 
-MODE_ECO_ON = "eco_on"      # Haiku brain + Nanbeige worker, ask before fallback
-MODE_ECO_HYBRID = "hybrid"  # Haiku brain + Nanbeige worker, auto-fallback
-MODE_ECO_OFF = "off"        # Sonnet brain + Haiku worker + Opus fallback
+MODE_HYBRID = "hybrid"  # Haiku brain + Nanbeige local worker, auto-fallback
+MODE_FULL = "full"      # User-configurable brain/worker/fallback (paid)
 
-# Legacy mode aliases (backward compat)
+# Legacy aliases — map old names to the two supported modes
 _MODE_ALIASES = {
-    "local": MODE_ECO_ON,
-    "eco": MODE_ECO_ON,
-    "eco_on": MODE_ECO_ON,
-    "on": MODE_ECO_ON,
-    "hybrid": MODE_ECO_HYBRID,
-    "full": MODE_ECO_OFF,
-    "off": MODE_ECO_OFF,
+    "hybrid": MODE_HYBRID,
+    "full": MODE_FULL,
+    "off": MODE_FULL,
 }
 
-VALID_MODES = frozenset({MODE_ECO_ON, MODE_ECO_HYBRID, MODE_ECO_OFF})
+# Old eco/local modes are disabled (require 32GB+ RAM)
+_DISABLED_MODES = frozenset({"local", "eco", "eco_on", "on"})
+
+DISABLED_MODE_MESSAGE = (
+    "ECO mode (local-only) requires 32GB+ RAM and is coming in a future update. "
+    "Use HYBRID for the best balance of cost and quality."
+)
+
+VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL})
+
+# Backward-compat aliases for imports that used the old names
+MODE_ECO_ON = MODE_HYBRID      # deprecated
+MODE_ECO_HYBRID = MODE_HYBRID  # deprecated
+MODE_ECO_OFF = MODE_FULL       # deprecated
 
 
 def normalize_mode(mode: str) -> str:
     """Normalize mode string to canonical form."""
-    return _MODE_ALIASES.get(mode.lower().strip(), MODE_ECO_OFF)
+    key = mode.lower().strip()
+    if key in _DISABLED_MODES:
+        return key  # caller should check and reject
+    return _MODE_ALIASES.get(key, MODE_HYBRID)
 
 
 # ── Request role (who's asking) ───────────────────────────────────────
 
 ROLE_BRAIN = "brain"      # Chat, planning, synthesis — no tools
 ROLE_WORKER = "worker"    # Tool execution — gets tools
-ROLE_FALLBACK = "fallback"  # Paid fallback when local fails
 
 
 # ── Complexity classification ─────────────────────────────────────────
@@ -124,21 +133,22 @@ def _extract_user_message(messages: list[LLMMessage]) -> str:
 class EcoSettings:
     """User's ECO mode configuration."""
 
-    mode: str = MODE_ECO_OFF
+    mode: str = MODE_HYBRID
     show_badges: bool = True
     monthly_paid_budget: float = 0.0        # 0 = unlimited
-    auto_fallback: bool = False             # Auto-approve paid fallback
+    auto_fallback: bool = True              # Both modes auto-fallback
     max_workers: int = 10                   # Max concurrent workers
     brain_model: str | None = None          # Override brain (None = default)
     worker_model: str | None = None         # Override worker (None = default)
     fallback_model: str | None = None       # Override fallback (None = default)
+    # FULL mode user-settable overrides
+    full_brain_model: str | None = None
+    full_worker_model: str | None = None
+    full_fallback_model: str | None = None
     locked_provider: str | None = None      # Lock to specific free provider
     allowed_providers: list[str] | None = None
     free_providers: list[str] | None = None
     preferred_free_model: str | None = None
-    # Legacy compat
-    specialist_model: str | None = None
-    task_overrides: dict[str, str] | None = None
 
 
 def _parse_eco_settings(raw: str | None) -> EcoSettings:
@@ -162,28 +172,28 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
     if free_providers and not isinstance(free_providers, list):
         free_providers = None
 
-    task_overrides = eco.get("task_overrides")
-    if task_overrides and not isinstance(task_overrides, dict):
-        task_overrides = None
-
-    raw_mode = eco.get("mode", "off")
+    raw_mode = eco.get("mode", "hybrid")
     mode = normalize_mode(raw_mode)
+    # Reject disabled modes — fall back to hybrid
+    if mode in _DISABLED_MODES:
+        mode = MODE_HYBRID
 
     return EcoSettings(
         mode=mode,
         show_badges=eco.get("show_badges", True),
         monthly_paid_budget=float(eco.get("monthly_paid_budget", 0)),
-        auto_fallback=eco.get("auto_fallback", False),
+        auto_fallback=eco.get("auto_fallback", True),
         max_workers=int(eco.get("max_workers", 10)),
         brain_model=eco.get("brain_model"),
         worker_model=eco.get("worker_model") or eco.get("specialist_model"),
         fallback_model=eco.get("fallback_model"),
+        full_brain_model=eco.get("full_brain_model"),
+        full_worker_model=eco.get("full_worker_model"),
+        full_fallback_model=eco.get("full_fallback_model"),
         locked_provider=eco.get("locked_provider"),
         allowed_providers=allowed,
         free_providers=free_providers,
         preferred_free_model=eco.get("preferred_free_model"),
-        specialist_model=eco.get("specialist_model"),
-        task_overrides=task_overrides,
     )
 
 
@@ -258,7 +268,7 @@ class EcoRouter:
             try:
                 from lazyclaw.llm.providers.mlx_provider import MLXProvider
 
-                _eco_models = get_mode_models("eco_on")
+                _eco_models = get_mode_models("hybrid")
                 _worker_model = _eco_models["worker"]
                 _brain_model = _eco_models["brain"]
 
@@ -394,9 +404,17 @@ class EcoRouter:
     def _resolve_models(self, settings: EcoSettings) -> dict[str, str]:
         """Get brain/worker/fallback model IDs for the current mode.
 
-        User overrides in settings take priority over MODE_MODELS defaults.
+        HYBRID: defaults from MODE_MODELS, generic overrides apply.
+        FULL: full_*_model overrides take priority, then generic overrides,
+              then MODE_MODELS defaults.
         """
         defaults = get_mode_models(settings.mode)
+        if settings.mode == MODE_FULL:
+            return {
+                "brain": settings.full_brain_model or settings.brain_model or defaults["brain"],
+                "worker": settings.full_worker_model or settings.worker_model or defaults["worker"],
+                "fallback": settings.full_fallback_model or settings.fallback_model or defaults["fallback"],
+            }
         return {
             "brain": settings.brain_model or defaults["brain"],
             "worker": settings.worker_model or defaults["worker"],
@@ -404,10 +422,8 @@ class EcoRouter:
         }
 
     def _is_auto_fallback(self, settings: EcoSettings) -> bool:
-        """ECO ON asks permission, HYBRID and FULL auto-fallback."""
-        if settings.mode == MODE_ECO_ON:
-            return settings.auto_fallback  # default False
-        return True  # HYBRID + FULL always auto-fallback
+        """Both HYBRID and FULL always auto-fallback."""
+        return True
 
     # ── Main chat router ──────────────────────────────────────────────
 
@@ -425,14 +441,14 @@ class EcoRouter:
             messages: Conversation messages.
             user_id: User ID for settings lookup.
             model: Explicit model override (bypasses routing).
-            role: ROLE_BRAIN, ROLE_WORKER, or ROLE_FALLBACK.
+            role: ROLE_BRAIN or ROLE_WORKER.
             **kwargs: tools, tool_choice, temperature, etc.
         """
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
 
         # Explicit model override — bypass routing
-        if model and role == ROLE_FALLBACK:
+        if model and role not in (ROLE_BRAIN, ROLE_WORKER):
             return await self._route_paid(messages, user_id, model, **kwargs)
 
         if role == ROLE_BRAIN:
@@ -460,7 +476,7 @@ class EcoRouter:
         models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """Brain: always paid API (Haiku in ECO/HYBRID, Sonnet in FULL)."""
+        """Brain: paid API (Haiku in HYBRID, user-configured in FULL)."""
         brain_name = models["brain"]
         return await self._route_paid(
             messages, user_id, brain_name,
@@ -478,7 +494,7 @@ class EcoRouter:
         models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """Worker: local first (ECO/HYBRID), paid (FULL), fallback cascade."""
+        """Worker: local first (HYBRID), paid (FULL), fallback cascade."""
         worker_name = models["worker"]
         worker_profile = get_model(worker_name)
         is_local_worker = worker_profile and worker_profile.is_local
@@ -491,7 +507,7 @@ class EcoRouter:
                 **kwargs,
             )
 
-        # ECO/HYBRID: try local Nanbeige first
+        # HYBRID: try local Nanbeige first
         _, worker_provider = await self._ensure_local()
         provider = worker_provider or self._ollama
         if provider:
@@ -584,35 +600,13 @@ class EcoRouter:
         reason: str = "fallback",
         **kwargs,
     ) -> LLMResponse:
-        """Fallback to paid when local/worker fails.
-
-        ECO ON: ask permission. HYBRID/FULL: auto-fallback.
-        """
+        """Fallback to paid when local/worker fails. Always auto-fallback."""
         fallback_name = models["fallback"]
-
-        if self._is_auto_fallback(settings):
-            logger.info("Auto-fallback to %s: %s", fallback_name, reason)
-            return await self._route_paid(
-                messages, user_id, fallback_name,
-                reason=f"auto_fallback: {reason}",
-                **kwargs,
-            )
-
-        # ECO ON: ask user for permission
-        self._set_routing("none", "fallback", is_local=False, reason=f"ask_fallback: {reason}")
-        profile = get_model(fallback_name)
-        cost_hint = ""
-        if profile:
-            cost_hint = f" (~${profile.cost_input}/M input)"
-
-        return LLMResponse(
-            content=(
-                f"Local model unavailable. Use {fallback_name}{cost_hint}?\n\n"
-                f"Reply 'yes' to approve, or run:\n"
-                f"  /eco auto on — auto-approve fallbacks\n"
-                f"  /eco install — install local models"
-            ),
-            model="none",
+        logger.info("Auto-fallback to %s: %s", fallback_name, reason)
+        return await self._route_paid(
+            messages, user_id, fallback_name,
+            reason=f"auto_fallback: {reason}",
+            **kwargs,
         )
 
     # ── Free provider helper ──────────────────────────────────────────
@@ -656,7 +650,8 @@ class EcoRouter:
 
         content = result.content
         if settings.show_badges:
-            content = f"[ECO {result.provider}] {content}"
+            mode_label = "HYBRID" if settings.mode == MODE_HYBRID else "FULL"
+            content = f"[{mode_label} {result.provider}] {content}"
 
         return LLMResponse(
             content=content,
@@ -716,7 +711,7 @@ class EcoRouter:
                 yield chunk
             return
 
-        # ECO/HYBRID: local worker streaming (Nanbeige)
+        # HYBRID: local worker streaming (Nanbeige)
         _, worker_provider = await self._ensure_local()
         provider = worker_provider or self._ollama
         if provider:
@@ -824,9 +819,8 @@ class EcoRouter:
         ollama_available = self._ollama is not None
 
         mode_labels = {
-            MODE_ECO_ON: "ECO ON",
-            MODE_ECO_HYBRID: "HYBRID",
-            MODE_ECO_OFF: "FULL",
+            MODE_HYBRID: "HYBRID",
+            MODE_FULL: "FULL",
         }
 
         return {

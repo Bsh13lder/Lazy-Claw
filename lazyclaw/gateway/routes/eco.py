@@ -18,7 +18,6 @@ class UpdateEcoRequest(BaseModel):
     monthly_paid_budget: float | None = None
     locked_provider: str | None = None
     allowed_providers: list[str] | None = None
-    task_overrides: dict[str, str] | None = None
     free_providers: list[str] | None = None
     preferred_free_model: str | None = None
 

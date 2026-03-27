@@ -113,6 +113,11 @@ async def check_mcp_watcher(
     try:
         raw_text = await client.call_tool(tool_name, tool_args)
         data = json.loads(raw_text) if raw_text.strip().startswith(("{", "[")) else {"text": raw_text}
+        _msg_count = len(data.get("messages", [])) if isinstance(data, dict) else 0
+        logger.info(
+            "MCP watcher %s: got %d messages, %d already seen",
+            service, _msg_count, len(last_seen),
+        )
     except Exception as exc:
         logger.warning("MCP watcher call failed (%s): %s", tool_name, exc)
         new_ctx = dict(ctx)
@@ -126,6 +131,7 @@ async def check_mcp_watcher(
     new_ctx["last_check"] = time.time()
 
     if not new_items:
+        logger.debug("MCP watcher %s: no new items", service)
         return False, None, new_ctx
 
     # Update seen IDs (keep last 100 to prevent unbounded growth)
@@ -146,6 +152,7 @@ def _extract_new_items(
     """Extract new items from MCP tool response, filtering out already-seen ones."""
 
     # WhatsApp: {"contact": "...", "messages": [...]}
+    # MCP returns: {from, body, time, fromMe} per message
     if service == "whatsapp":
         messages = []
         if isinstance(data, dict):
@@ -158,14 +165,17 @@ def _extract_new_items(
             # Skip our own messages
             if msg.get("fromMe", False):
                 continue
-            # Build unique ID from timestamp + body prefix
-            msg_id = f"{msg.get('timestamp', 0)}_{str(msg.get('body', ''))[:20]}"
+            # Build unique ID from time + body prefix
+            # MCP returns "time" (formatted string), not "timestamp" (unix)
+            msg_time = msg.get("time") or msg.get("timestamp") or "0"
+            msg_body = str(msg.get("body", ""))[:30]
+            msg_id = f"{msg_time}_{msg_body}"
             if msg_id not in last_seen:
                 new_msgs.append({
                     "id": msg_id,
                     "from": msg.get("from", "unknown"),
                     "body": msg.get("body", ""),
-                    "timestamp": msg.get("timestamp", 0),
+                    "timestamp": msg_time,
                 })
         return new_msgs
 

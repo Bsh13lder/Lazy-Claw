@@ -248,10 +248,15 @@ class TelegramCommands:
             return
         args = context.args or []
         if not args:
+            from lazyclaw.llm.model_registry import get_mode_models
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            _eco = await get_eco_settings(self._config, user_id)
+            _models = get_mode_models(_eco.get("mode", "off"))
             await self._reply(update,
                 f"\U0001f9e0 <b>Models</b>\n\n"
-                f"Brain: <code>{self._config.brain_model}</code>\n"
-                f"Worker: <code>{self._config.worker_model}</code>\n\n"
+                f"Brain: <code>{_eco.get('brain_model') or _models['brain']}</code>\n"
+                f"Worker: <code>{_eco.get('worker_model') or _models['worker']}</code>\n"
+                f"Fallback: <code>{_eco.get('fallback_model') or _models['fallback']}</code>\n\n"
                 f"Change: <code>/model brain MODEL</code>"
             )
             return
@@ -452,24 +457,23 @@ class TelegramCommands:
         worker_model = settings.get("worker_model") or WORKER_MODEL
 
         if subcmd in ("on", "start"):
-            await self._reply(update, "\u23f3 Starting local AI servers...")
+            # ECO mode: brain is Haiku (API), only start worker locally.
+            # Starting both on 16GB M2 causes OOM (Qwen 9B + Nanbeige 3B).
+            await self._reply(update, "\u23f3 Starting local worker server...")
 
-            b_ok = await manager.start_brain(brain_model)
             w_ok = await manager.start_worker(worker_model)
 
-            # Reset eco_router's local provider cache so it discovers the new servers
+            # Reset eco_router's local provider cache so it discovers the new server
             eco_router.reset_local_check()
 
             lines = []
-            lines.append(f"{'✅' if b_ok else '❌'} Brain: {brain_model.split('/')[-1]}")
             lines.append(f"{'✅' if w_ok else '❌'} Worker: {worker_model.split('/')[-1]}")
+            lines.append(f"ℹ️ Brain: {brain_model.split('/')[-1]} (API — no local server needed)")
 
-            if b_ok and w_ok:
+            if w_ok:
                 from lazyclaw.llm.eco_settings import update_eco_settings
                 await update_eco_settings(self._config, user_id, {"mode": "eco_on"})
-                lines.append("\n\U0001f389 Both servers running! Auto-switched to <b>ECO ON</b> (local $0)")
-            elif b_ok or w_ok:
-                lines.append("\n\u26a0\ufe0f Partial start — check logs")
+                lines.append("\n\U0001f389 Worker running! Auto-switched to <b>ECO ON</b> (Haiku brain + local worker)")
             else:
                 lines.append(
                     "\n\u274c Both failed. Is mlx-lm installed?\n"
@@ -531,14 +535,12 @@ class TelegramCommands:
             return
 
         if subcmd == "restart":
-            await self._reply(update, "\u23f3 Restarting local AI servers...")
+            await self._reply(update, "\u23f3 Restarting local worker...")
             await manager.stop_all()
-            b_ok = await manager.start_brain(brain_model)
             w_ok = await manager.start_worker(worker_model)
             eco_router.reset_local_check()
-            b = "\u2705" if b_ok else "\u274c"
             w = "\u2705" if w_ok else "\u274c"
-            await self._reply(update, f"{b} Brain\n{w} Worker\n\n\u2705 Restarted!")
+            await self._reply(update, f"{w} Worker: {worker_model.split('/')[-1]}\nℹ️ Brain: API (no local server)\n\n\u2705 Restarted!")
             return
 
         await self._reply(update, "\u274c Use: <code>/local on|off|restart|brain|worker</code>")
@@ -622,13 +624,17 @@ class TelegramCommands:
                 mc = (await (await db.execute("SELECT COUNT(*) FROM agent_messages WHERE user_id=?", (user_id,))).fetchone())[0]
                 sc = (await (await db.execute("SELECT COUNT(*) FROM agent_traces WHERE user_id=? AND entry_type='session_start'", (user_id,))).fetchone())[0]
                 mm = (await (await db.execute("SELECT COUNT(*) FROM personal_memory WHERE user_id=?", (user_id,))).fetchone())[0]
+            from lazyclaw.llm.model_registry import get_mode_models
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            _eco = await get_eco_settings(self._config, user_id)
+            _models = get_mode_models(_eco.get("mode", "off"))
             await self._reply(update,
                 f"\U0001f4b0 <b>Usage Stats</b>\n━━━━━━━━━━━━\n\n"
                 f"\U0001f4ac Messages: <b>{mc:,}</b>\n"
                 f"\U0001f4c1 Sessions: <b>{sc:,}</b>\n"
                 f"\U0001f9e0 Memories: <b>{mm:,}</b>\n\n"
-                f"\U0001f916 Brain: <code>{self._config.brain_model}</code>\n"
-                f"\u2699\ufe0f Worker: <code>{self._config.worker_model}</code>"
+                f"\U0001f916 Brain: <code>{_eco.get('brain_model') or _models['brain']}</code>\n"
+                f"\u2699\ufe0f Worker: <code>{_eco.get('worker_model') or _models['worker']}</code>"
             )
         except Exception as e:
             await self._reply(update, f"\u274c Failed: {e}")
@@ -1111,11 +1117,21 @@ class TelegramCommands:
                     pass
 
     async def _update_pinned(self, chat_id: str, msg_id: int) -> None:
+        from lazyclaw.llm.model_registry import get_mode_models
+        # Show ECO-resolved models (not config defaults)
+        _mode = "off"
+        try:
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            _eco = await get_eco_settings(self._config, self._admin_user_id or "")
+            _mode = _eco.get("mode", "off")
+        except Exception:
+            pass
+        _models = get_mode_models(_mode)
         lines = [
             "\U0001f43e <b>LazyClaw Status</b>",
             "━━━━━━━━━━━━",
-            f"\U0001f9e0 Brain: <code>{self._config.brain_model}</code>",
-            f"\u2699\ufe0f Worker: <code>{self._config.worker_model}</code>",
+            f"\U0001f9e0 Brain: <code>{_models['brain']}</code>",
+            f"\u2699\ufe0f Worker: <code>{_models['worker']}</code>",
         ]
         try:
             from lazyclaw.mcp.manager import _active_clients

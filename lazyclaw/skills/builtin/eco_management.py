@@ -273,16 +273,17 @@ class EcoSetModelSkill(BaseSkill):
             return "Error: Not configured"
         try:
             from lazyclaw.llm.eco_settings import update_eco_settings
-            from lazyclaw.llm.model_registry import BRAIN_MODEL, SPECIALIST_MODEL
+            from lazyclaw.llm.model_registry import get_mode_models
 
             role = params["role"]
             model = params["model"].strip()
 
             # Reset to default
             if model.lower() == "default":
-                key = "brain_model" if role == "brain" else "specialist_model"
+                key = "brain_model" if role == "brain" else "worker_model"
                 await update_eco_settings(self._config, user_id, {key: None})
-                default = BRAIN_MODEL if role == "brain" else SPECIALIST_MODEL
+                defaults = get_mode_models("eco_on")
+                default = defaults["brain"] if role == "brain" else defaults["worker"]
                 return f"{role.title()} model reset to default: {default}"
 
             # Verify model is installed in Ollama
@@ -306,7 +307,7 @@ class EcoSetModelSkill(BaseSkill):
             except Exception:
                 pass  # Ollama might be down, allow setting anyway
 
-            key = "brain_model" if role == "brain" else "specialist_model"
+            key = "brain_model" if role == "brain" else "worker_model"
             await update_eco_settings(self._config, user_id, {key: model})
 
             return (

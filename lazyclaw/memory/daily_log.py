@@ -146,8 +146,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
 
     conversation_text = "\n".join(conversation_lines[:100])  # Cap at 100 messages
 
-    # Summarize via LLM (use fast model — cheap and quick)
-    router = LLMRouter(config)
+    # Summarize via LLM — use ECO router (ROLE_WORKER = cheap/local)
     summary_prompt = (
         "Summarize this day's conversations into a brief daily log. "
         "Include: key topics discussed, decisions made, tasks completed, and any important information. "
@@ -161,7 +160,14 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
         LLMMessage(role="user", content=summary_prompt),
     ]
 
-    response = await router.chat(messages, model=config.worker_model, user_id=user_id)
+    # Use eco_router if available, fallback to direct router
+    try:
+        from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+        eco = EcoRouter(config, LLMRouter(config))
+        response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
+    except Exception:
+        router = LLMRouter(config)
+        response = await router.chat(messages, model=config.worker_model, user_id=user_id)
     summary = response.content
 
     # Extract key events (first line or bullet points)
@@ -204,7 +210,6 @@ async def generate_weekly_summary(
         f"**{l['date']}:**\n{l['summary']}" for l in sorted(week_logs, key=lambda x: x["date"])
     )
 
-    router = LLMRouter(config)
     messages = [
         LLMMessage(
             role="system",
@@ -214,7 +219,13 @@ async def generate_weekly_summary(
         LLMMessage(role="user", content=f"Week of {week_start}:\n\n{text}"),
     ]
 
-    response = await router.chat(messages, model=config.worker_model, user_id=user_id)
+    try:
+        from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+        eco = EcoRouter(config, LLMRouter(config))
+        response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
+    except Exception:
+        router = LLMRouter(config)
+        response = await router.chat(messages, model=config.worker_model, user_id=user_id)
     summary = response.content
 
     await save_daily_log(config, user_id, f"{week_start}_week", summary, "weekly")

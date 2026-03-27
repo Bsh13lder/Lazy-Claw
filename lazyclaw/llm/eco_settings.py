@@ -3,10 +3,10 @@
 Settings stored in the existing users.settings JSON column
 under the "eco" key. No new DB table needed.
 
-Three modes:
-  eco_on  — Local brain (Qwen3.5-9B) + local workers (Nanbeige4.1-3B)
-  hybrid  — Paid brain (Sonnet) + local workers (Nanbeige4.1-3B)
-  off     — All paid (Sonnet brain + Haiku workers)
+Three modes (3 roles: Brain = Team Lead, Worker, Fallback):
+  eco_on  — Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission)
+  hybrid  — Haiku brain + Nanbeige worker ($0) + Sonnet fallback (auto)
+  off     — Sonnet brain + Haiku worker + Opus fallback (auto)
 """
 
 from __future__ import annotations

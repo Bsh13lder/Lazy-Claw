@@ -1,21 +1,13 @@
-"""ECO Router v2 — Brain + Worker Pool architecture.
+"""ECO Router v3 — Simplified 3-role architecture.
 
+Three roles: Brain (= Team Lead), Worker, Fallback.
 Three modes:
-- ECO ON:     Local models only. Brain=Qwen3.5-9B, Workers=Nanbeige4.1-3B.
-              Fallback to Claude Sonnet (with permission or auto).
-- ECO HYBRID: Paid brain (Sonnet 4.6) + local workers (Nanbeige).
-              Best quality brain, free execution.
-- ECO OFF:    All paid. Brain=Sonnet 4.6, Workers=Haiku 4.5.
-              Maximum quality, maximum cost.
+  ECO ON:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission)
+  HYBRID:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (auto)
+  FULL:    Sonnet brain + Haiku worker + Opus fallback (auto)
 
-Architecture:
-  - Brain handles chat, planning, decomposition, synthesis. Never gets tools.
-  - Workers handle tool execution. Up to 20 concurrent via asyncio.
-  - Workers are generic — each picks its own tools from the registry.
-  - stuck_detector decides when a worker is stuck, not a hardcoded counter.
-  - Fallback to Claude Sonnet anywhere, with user permission or auto-approve.
-
-Sits between agent.py and llm/router.py + mlx_provider.py.
+ECO ON and HYBRID use the same models — only fallback behavior differs.
+All model assignments come from MODE_MODELS in model_registry.py.
 """
 
 from __future__ import annotations
@@ -37,13 +29,8 @@ from lazyclaw.llm.free_providers import (
     stream_chat as free_stream_chat,
 )
 from lazyclaw.llm.model_registry import (
-    BRAIN_MODEL,
-    WORKER_MODEL,
-    FALLBACK_MODEL,
-    PAID_BRAIN_MODEL,
-    PAID_WORKER_MODEL,
-    OLLAMA_BRAIN_MODEL,
-    OLLAMA_WORKER_MODEL,
+    MODE_MODELS,
+    get_mode_models,
     RoutingResult,
     get_model,
 )
@@ -56,9 +43,9 @@ logger = logging.getLogger(__name__)
 
 # ── ECO Modes ─────────────────────────────────────────────────────────
 
-MODE_ECO_ON = "eco_on"      # Local brain + local workers, $0
-MODE_ECO_HYBRID = "hybrid"  # Paid brain + local workers
-MODE_ECO_OFF = "off"        # All paid
+MODE_ECO_ON = "eco_on"      # Haiku brain + Nanbeige worker, ask before fallback
+MODE_ECO_HYBRID = "hybrid"  # Haiku brain + Nanbeige worker, auto-fallback
+MODE_ECO_OFF = "off"        # Sonnet brain + Haiku worker + Opus fallback
 
 # Legacy mode aliases (backward compat)
 _MODE_ALIASES = {
@@ -271,19 +258,23 @@ class EcoRouter:
             try:
                 from lazyclaw.llm.providers.mlx_provider import MLXProvider
 
+                _eco_models = get_mode_models("eco_on")
+                _worker_model = _eco_models["worker"]
+                _brain_model = _eco_models["brain"]
+
                 # Check :8081 first (worker/nanbeige — most common for single-model)
                 worker = MLXProvider("http://127.0.0.1:8081")
                 if await worker.health_check():
-                    worker._loaded_model = WORKER_MODEL
+                    worker._loaded_model = _worker_model
                     self._mlx_worker = worker
-                    logger.info("MLX connected on :8081 → %s", WORKER_MODEL)
+                    logger.info("MLX connected on :8081 → %s", _worker_model)
 
                 # Check :8080 (brain — only if dual-model setup)
                 brain = MLXProvider("http://127.0.0.1:8080")
                 if await brain.health_check():
-                    brain._loaded_model = BRAIN_MODEL
+                    brain._loaded_model = _brain_model
                     self._mlx_brain = brain
-                    logger.info("MLX connected on :8080 → %s", BRAIN_MODEL)
+                    logger.info("MLX connected on :8080 → %s", _brain_model)
 
                 # Single server: use one model for both roles
                 if self._mlx_worker and not self._mlx_brain:
@@ -398,6 +389,26 @@ class EcoRouter:
             model=model, provider=provider, is_local=is_local, reason=reason,
         )
 
+    # ── Resolve models for current mode ─────────────────────────────
+
+    def _resolve_models(self, settings: EcoSettings) -> dict[str, str]:
+        """Get brain/worker/fallback model IDs for the current mode.
+
+        User overrides in settings take priority over MODE_MODELS defaults.
+        """
+        defaults = get_mode_models(settings.mode)
+        return {
+            "brain": settings.brain_model or defaults["brain"],
+            "worker": settings.worker_model or defaults["worker"],
+            "fallback": settings.fallback_model or defaults["fallback"],
+        }
+
+    def _is_auto_fallback(self, settings: EcoSettings) -> bool:
+        """ECO ON asks permission, HYBRID and FULL auto-fallback."""
+        if settings.mode == MODE_ECO_ON:
+            return settings.auto_fallback  # default False
+        return True  # HYBRID + FULL always auto-fallback
+
     # ── Main chat router ──────────────────────────────────────────────
 
     async def chat(
@@ -414,176 +425,95 @@ class EcoRouter:
             messages: Conversation messages.
             user_id: User ID for settings lookup.
             model: Explicit model override (bypasses routing).
-            role: ROLE_BRAIN (no tools), ROLE_WORKER (tools), ROLE_FALLBACK.
+            role: ROLE_BRAIN, ROLE_WORKER, or ROLE_FALLBACK.
             **kwargs: tools, tool_choice, temperature, etc.
         """
         settings = await _load_eco_settings(self._config, user_id)
+        models = self._resolve_models(settings)
 
         # Explicit model override — bypass routing
         if model and role == ROLE_FALLBACK:
             return await self._route_paid(messages, user_id, model, **kwargs)
 
-        if settings.mode == MODE_ECO_ON:
-            return await self._route_eco_on(
-                messages, user_id, settings, role, model, **kwargs
+        if role == ROLE_BRAIN:
+            return await self._route_brain(
+                messages, user_id, settings, models, **kwargs
             )
 
-        if settings.mode == MODE_ECO_HYBRID:
-            return await self._route_hybrid(
-                messages, user_id, settings, role, model, **kwargs
+        if role == ROLE_WORKER:
+            return await self._route_worker(
+                messages, user_id, settings, models, **kwargs
             )
 
-        # ECO OFF — all paid
-        return await self._route_eco_off(
-            messages, user_id, settings, role, model, **kwargs
+        # Unknown role — default to brain
+        return await self._route_brain(
+            messages, user_id, settings, models, **kwargs
         )
 
-    # ── ECO ON: Local brain + local workers ───────────────────────────
+    # ── Brain routing (same for all modes — just picks the right model)
 
-    async def _route_eco_on(
+    async def _route_brain(
         self,
         messages: list[LLMMessage],
         user_id: str,
         settings: EcoSettings,
-        role: str,
-        model: str | None,
+        models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """ECO ON: Haiku brain (paid, cheap, instant) + local workers (Nanbeige, $0).
-
-        Fallback to Sonnet if Haiku can't handle complexity.
-        """
-        brain_provider, worker_provider = await self._ensure_local()
-
-        # Resolve models
-        brain_name = settings.brain_model or BRAIN_MODEL
-        worker_name = settings.worker_model or WORKER_MODEL
-
-        if role == ROLE_BRAIN:
-            # Brain: Haiku via API (instant, no thinking overhead)
-            # Falls back to Sonnet if Haiku unavailable
-            return await self._route_paid(
-                messages, user_id, brain_name,
-                reason=f"eco_on: brain -> {brain_name}",
-                **kwargs,
-            )
-
-        if role == ROLE_WORKER:
-            # Worker: Nanbeige local (tool calling champion, $0)
-            provider = worker_provider or self._ollama
-            if provider:
-                try:
-                    return await self._call_local(
-                        provider, messages, worker_name, user_id,
-                        reason=f"eco_on: worker -> {worker_name}",
-                        **kwargs,
-                    )
-                except Exception as exc:
-                    logger.warning("ECO ON worker failed: %s — trying free", exc)
-
-            # No local worker or failed — try free providers
-            free_resp = await self._try_free(messages, user_id, settings, **kwargs)
-            if free_resp:
-                return free_resp
-
-            # No free either — fallback
-            return await self._fallback(
-                messages, user_id, settings,
-                reason="eco_on: worker_failed",
-                **kwargs,
-            )
-
-        # Unknown role — brain default
-        return await self._route_eco_on(
-            messages, user_id, settings, ROLE_BRAIN, model, **kwargs
+        """Brain: always paid API (Haiku in ECO/HYBRID, Sonnet in FULL)."""
+        brain_name = models["brain"]
+        return await self._route_paid(
+            messages, user_id, brain_name,
+            reason=f"{settings.mode}: brain -> {brain_name}",
+            **kwargs,
         )
 
-    # ── ECO HYBRID: Paid brain + local workers ────────────────────────
+    # ── Worker routing ────────────────────────────────────────────────
 
-    async def _route_hybrid(
+    async def _route_worker(
         self,
         messages: list[LLMMessage],
         user_id: str,
         settings: EcoSettings,
-        role: str,
-        model: str | None,
+        models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """HYBRID: Sonnet brain + local workers."""
+        """Worker: local first (ECO/HYBRID), paid (FULL), fallback cascade."""
+        worker_name = models["worker"]
+        worker_profile = get_model(worker_name)
+        is_local_worker = worker_profile and worker_profile.is_local
 
-        if role == ROLE_BRAIN:
-            # Brain keeps tools (needs delegate, search_tools, etc.)
-            brain_name = model or settings.brain_model or PAID_BRAIN_MODEL
-            return await self._route_paid(
-                messages, user_id, brain_name,
-                reason=f"hybrid: paid_brain -> {brain_name}",
-                **kwargs,
-            )
-
-        if role == ROLE_WORKER:
-            # Worker: local first, then free, then paid fallback
-            brain_provider, worker_provider = await self._ensure_local()
-            worker_name = settings.worker_model or WORKER_MODEL
-            provider = worker_provider or self._ollama
-
-            if provider:
-                try:
-                    return await self._call_local(
-                        provider, messages, worker_name, user_id,
-                        reason=f"hybrid: local_worker -> {worker_name}",
-                        **kwargs,
-                    )
-                except Exception as exc:
-                    logger.warning("HYBRID worker failed: %s — trying free", exc)
-
-            # Local unavailable or failed — try free providers
-            free_resp = await self._try_free(messages, user_id, settings, **kwargs)
-            if free_resp:
-                return free_resp
-
-            # All free exhausted — paid worker (Haiku, cheap)
-            worker_paid = PAID_WORKER_MODEL
-            return await self._route_paid(
-                messages, user_id, worker_paid,
-                reason=f"hybrid: paid_worker_fallback -> {worker_paid}",
-                **kwargs,
-            )
-
-        return await self._route_hybrid(
-            messages, user_id, settings, ROLE_BRAIN, model, **kwargs
-        )
-
-    # ── ECO OFF: All paid ─────────────────────────────────────────────
-
-    async def _route_eco_off(
-        self,
-        messages: list[LLMMessage],
-        user_id: str,
-        settings: EcoSettings,
-        role: str,
-        model: str | None,
-        **kwargs,
-    ) -> LLMResponse:
-        """ECO OFF: all paid. Sonnet brain, Haiku workers."""
-
-        if role == ROLE_BRAIN:
-            brain_name = model or settings.brain_model or PAID_BRAIN_MODEL
-            return await self._route_paid(
-                messages, user_id, brain_name,
-                reason=f"off: brain -> {brain_name}",
-                **kwargs,
-            )
-
-        if role == ROLE_WORKER:
-            worker_name = model or settings.worker_model or PAID_WORKER_MODEL
+        # FULL mode: worker is paid (Haiku) — go straight to API
+        if not is_local_worker:
             return await self._route_paid(
                 messages, user_id, worker_name,
-                reason=f"off: worker -> {worker_name}",
+                reason=f"{settings.mode}: worker -> {worker_name}",
                 **kwargs,
             )
 
-        return await self._route_eco_off(
-            messages, user_id, settings, ROLE_BRAIN, model, **kwargs
+        # ECO/HYBRID: try local Nanbeige first
+        _, worker_provider = await self._ensure_local()
+        provider = worker_provider or self._ollama
+        if provider:
+            try:
+                return await self._call_local(
+                    provider, messages, worker_name, user_id,
+                    reason=f"{settings.mode}: worker -> {worker_name}",
+                    **kwargs,
+                )
+            except Exception as exc:
+                logger.warning("%s worker failed: %s — trying free", settings.mode, exc)
+
+        # Local failed — try free providers
+        free_resp = await self._try_free(messages, user_id, settings, **kwargs)
+        if free_resp:
+            return free_resp
+
+        # All free exhausted — fallback
+        return await self._fallback(
+            messages, user_id, settings, models,
+            reason=f"{settings.mode}: worker_failed",
+            **kwargs,
         )
 
     # ── Paid call helper ──────────────────────────────────────────────
@@ -650,17 +580,17 @@ class EcoRouter:
         messages: list[LLMMessage],
         user_id: str,
         settings: EcoSettings,
+        models: dict[str, str],
         reason: str = "fallback",
         **kwargs,
     ) -> LLMResponse:
-        """Fallback to paid when local fails.
+        """Fallback to paid when local/worker fails.
 
-        If auto_fallback is True, silently use Sonnet.
-        If False, return a message asking the user to approve.
+        ECO ON: ask permission. HYBRID/FULL: auto-fallback.
         """
-        fallback_name = settings.fallback_model or FALLBACK_MODEL
+        fallback_name = models["fallback"]
 
-        if settings.auto_fallback:
+        if self._is_auto_fallback(settings):
             logger.info("Auto-fallback to %s: %s", fallback_name, reason)
             return await self._route_paid(
                 messages, user_id, fallback_name,
@@ -668,7 +598,7 @@ class EcoRouter:
                 **kwargs,
             )
 
-        # Ask user for permission (return info message)
+        # ECO ON: ask user for permission
         self._set_routing("none", "fallback", is_local=False, reason=f"ask_fallback: {reason}")
         profile = get_model(fallback_name)
         cost_hint = ""
@@ -750,57 +680,16 @@ class EcoRouter:
     ):
         """Stream chat responses. Routes based on ECO mode + role."""
         settings = await _load_eco_settings(self._config, user_id)
+        models = self._resolve_models(settings)
 
-        if settings.mode == MODE_ECO_ON:
-            async for chunk in self._stream_eco_on(
-                messages, user_id, settings, role, model, **kwargs
-            ):
-                yield chunk
-            return
-
-        if settings.mode == MODE_ECO_HYBRID:
-            async for chunk in self._stream_hybrid(
-                messages, user_id, settings, role, model, **kwargs
-            ):
-                yield chunk
-            return
-
-        # ECO OFF — paid streaming
-        effective_model = model
         if role == ROLE_BRAIN:
-            effective_model = model or settings.brain_model or PAID_BRAIN_MODEL
-        elif role == ROLE_WORKER:
-            effective_model = model or settings.worker_model or PAID_WORKER_MODEL
-
-        self._record_usage(user_id, "paid")
-        provider = "anthropic" if (effective_model or "").startswith("claude-") else "openai"
-        self._set_routing(
-            effective_model or PAID_BRAIN_MODEL, provider,
-            is_local=False, reason=f"off_stream: {role}",
-        )
-
-        async for chunk in self._paid_router.stream_chat(
-            messages, model=effective_model, user_id=user_id, **kwargs
-        ):
-            yield chunk
-
-    async def _stream_eco_on(
-        self,
-        messages: list[LLMMessage],
-        user_id: str,
-        settings: EcoSettings,
-        role: str,
-        model: str | None,
-        **kwargs,
-    ):
-        """ECO ON streaming: Haiku brain (paid stream) + local workers."""
-        if role == ROLE_BRAIN:
-            # Brain: Haiku via paid streaming (instant, no thinking)
-            brain_name = settings.brain_model or BRAIN_MODEL
+            # Brain: always paid streaming
+            brain_name = models["brain"]
             self._record_usage(user_id, "paid")
             provider = "anthropic" if brain_name.startswith("claude-") else "openai"
             self._set_routing(
-                brain_name, provider, is_local=False, reason="eco_on_stream: brain",
+                brain_name, provider, is_local=False,
+                reason=f"{settings.mode}_stream: brain",
             )
             async for chunk in self._paid_router.stream_chat(
                 messages, model=brain_name, user_id=user_id, **kwargs
@@ -808,11 +697,28 @@ class EcoRouter:
                 yield chunk
             return
 
-        # Worker: local streaming (Nanbeige)
-        brain_provider, worker_provider = await self._ensure_local()
-        provider = worker_provider or self._ollama
-        worker_name = settings.worker_model or WORKER_MODEL
+        # Worker streaming
+        worker_name = models["worker"]
+        worker_profile = get_model(worker_name)
+        is_local_worker = worker_profile and worker_profile.is_local
 
+        # FULL mode: paid worker streaming
+        if not is_local_worker:
+            self._record_usage(user_id, "paid")
+            provider = "anthropic" if worker_name.startswith("claude-") else "openai"
+            self._set_routing(
+                worker_name, provider, is_local=False,
+                reason=f"{settings.mode}_stream: worker",
+            )
+            async for chunk in self._paid_router.stream_chat(
+                messages, model=worker_name, user_id=user_id, **kwargs
+            ):
+                yield chunk
+            return
+
+        # ECO/HYBRID: local worker streaming (Nanbeige)
+        _, worker_provider = await self._ensure_local()
+        provider = worker_provider or self._ollama
         if provider:
             try:
                 async for chunk in provider.stream_chat(
@@ -822,7 +728,7 @@ class EcoRouter:
                 self._record_usage(user_id, "local")
                 self._set_routing(
                     worker_name, "mlx", is_local=True,
-                    reason=f"eco_on_stream: worker",
+                    reason=f"{settings.mode}_stream: worker",
                 )
                 return
             except Exception as exc:
@@ -830,40 +736,12 @@ class EcoRouter:
 
         # Fallback
         response = await self._fallback(
-            messages, user_id, settings, reason="eco_on_stream_fallback", **kwargs
+            messages, user_id, settings, models,
+            reason=f"{settings.mode}_stream_fallback", **kwargs,
         )
         yield StreamChunk(
             delta=response.content, model=response.model, done=True,
         )
-
-    async def _stream_hybrid(
-        self,
-        messages: list[LLMMessage],
-        user_id: str,
-        settings: EcoSettings,
-        role: str,
-        model: str | None,
-        **kwargs,
-    ):
-        """HYBRID streaming: paid brain streaming, local worker → chunk."""
-        if role == ROLE_BRAIN:
-            brain_name = model or settings.brain_model or PAID_BRAIN_MODEL
-            self._record_usage(user_id, "paid")
-            provider = "anthropic" if brain_name.startswith("claude-") else "openai"
-            self._set_routing(
-                brain_name, provider, is_local=False, reason="hybrid_stream: brain",
-            )
-            async for chunk in self._paid_router.stream_chat(
-                messages, model=brain_name, user_id=user_id, **kwargs
-            ):
-                yield chunk
-            return
-
-        # Worker: local streaming
-        async for chunk in self._stream_eco_on(
-            messages, user_id, settings, ROLE_WORKER, model, **kwargs
-        ):
-            yield chunk
 
     # ── Stats ─────────────────────────────────────────────────────────
 
@@ -939,33 +817,26 @@ class EcoRouter:
     async def get_mode_display(self, user_id: str) -> dict:
         """Get current mode info for display in Telegram/TUI."""
         settings = await _load_eco_settings(self._config, user_id)
+        models = self._resolve_models(settings)
 
         brain_provider, worker_provider = await self._ensure_local()
         mlx_available = brain_provider is not None
         ollama_available = self._ollama is not None
 
         mode_labels = {
-            MODE_ECO_ON: "ECO ON (Local)",
-            MODE_ECO_HYBRID: "ECO HYBRID",
-            MODE_ECO_OFF: "ECO OFF (Paid)",
+            MODE_ECO_ON: "ECO ON",
+            MODE_ECO_HYBRID: "HYBRID",
+            MODE_ECO_OFF: "FULL",
         }
-
-        brain_model = settings.brain_model or (
-            BRAIN_MODEL if settings.mode == MODE_ECO_ON else PAID_BRAIN_MODEL
-        )
-        worker_model = settings.worker_model or (
-            WORKER_MODEL if settings.mode != MODE_ECO_OFF else PAID_WORKER_MODEL
-        )
-        fallback_model = settings.fallback_model or FALLBACK_MODEL
 
         return {
             "mode": settings.mode,
             "mode_label": mode_labels.get(settings.mode, settings.mode),
-            "brain_model": brain_model,
-            "worker_model": worker_model,
-            "fallback_model": fallback_model,
+            "brain_model": models["brain"],
+            "worker_model": models["worker"],
+            "fallback_model": models["fallback"],
             "max_workers": settings.max_workers,
-            "auto_fallback": settings.auto_fallback,
+            "auto_fallback": self._is_auto_fallback(settings),
             "mlx_available": mlx_available,
             "ollama_available": ollama_available,
             "free_providers": list(self._get_free_keys().keys()),

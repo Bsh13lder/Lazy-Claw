@@ -1,14 +1,10 @@
-"""Static model catalog and routing result for ECO mode.
+"""Static model catalog and 3-role mode table for ECO routing.
 
-Defines ModelProfile for all known models (local + paid) and RoutingResult
-for tracking which model handled each request. Used by eco_router for
-routing decisions and by summary/TUI for attribution display.
-
-ECO Architecture:
-  Brain:    Qwen3.5-9B (MLX/Ollama, local, free) — chat, planning, synthesis
-  Worker:   Nanbeige4.1-3B (MLX/Ollama, local, free) — tool execution
-  Coder:    Claude Code MCP (free with subscription) — code tasks
-  Fallback: Claude Sonnet 4.6 (paid) — when local fails
+Three roles: Brain (= Team Lead), Worker, Fallback.
+Three modes:
+  ECO ON:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission)
+  HYBRID:  Haiku brain + Nanbeige worker ($0) + Sonnet fallback (auto)
+  FULL:    Sonnet brain + Haiku worker + Opus fallback (auto)
 """
 
 from __future__ import annotations
@@ -33,22 +29,43 @@ class ModelProfile:
     role: str               # "brain" | "worker" | "coder" | "fallback"
 
 
-# ── Default model constants (for imports) ─────────────────────────────
+# ── Mode → Model table (single source of truth) ─────────────────────
 
-# ECO ON: Haiku brain (cheap, instant, no thinking overhead) + Nanbeige worker (local, $0)
-BRAIN_MODEL = "claude-haiku-4-5-20251001"
-WORKER_MODEL = "mlx-community/Nanbeige4.1-3B-8bit"
-
-# ECO HYBRID / OFF: Sonnet brain (smarter) + Haiku worker or local
-PAID_BRAIN_MODEL = "claude-sonnet-4-20250514"
-PAID_WORKER_MODEL = "claude-haiku-4-5-20251001"
-
-# Fallback: Sonnet (when Haiku can't handle complexity)
-FALLBACK_MODEL = "claude-sonnet-4-20250514"
+MODE_MODELS: dict[str, dict[str, str]] = {
+    "eco_on": {
+        "brain":    "claude-haiku-4-5-20251001",
+        "worker":   "mlx-community/Nanbeige4.1-3B-8bit",
+        "fallback": "claude-sonnet-4-20250514",
+    },
+    "hybrid": {
+        "brain":    "claude-haiku-4-5-20251001",
+        "worker":   "mlx-community/Nanbeige4.1-3B-8bit",
+        "fallback": "claude-sonnet-4-20250514",
+    },
+    "off": {
+        "brain":    "claude-sonnet-4-20250514",
+        "worker":   "claude-haiku-4-5-20251001",
+        "fallback": "claude-opus-4-6",
+    },
+}
 
 # Ollama equivalents (when MLX not available)
 OLLAMA_BRAIN_MODEL = "qwen3.5:9b"
 OLLAMA_WORKER_MODEL = "nanbeige4.1:3b"
+
+
+def get_mode_models(mode: str) -> dict[str, str]:
+    """Get brain/worker/fallback model IDs for a mode."""
+    return dict(MODE_MODELS.get(mode, MODE_MODELS["off"]))
+
+
+# ── Backward-compat aliases (used by imports, remove later) ──────────
+
+BRAIN_MODEL = MODE_MODELS["eco_on"]["brain"]
+WORKER_MODEL = MODE_MODELS["eco_on"]["worker"]
+FALLBACK_MODEL = MODE_MODELS["eco_on"]["fallback"]
+PAID_BRAIN_MODEL = MODE_MODELS["off"]["brain"]
+PAID_WORKER_MODEL = MODE_MODELS["off"]["worker"]
 
 
 # ── Model catalog ─────────────────────────────────────────────────────
@@ -235,6 +252,20 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         role="worker",
     ),
 
+    "claude-opus-4-6": ModelProfile(
+        name="claude-opus-4-6",
+        display_name="Opus 4.6",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=15.0,      # $15/M input
+        cost_output=75.0,     # $75/M output
+        icon="\U0001f48e",    # 💎
+        max_context=200000,
+        tool_calling=True,
+        role="fallback",
+    ),
+
     # ── PAID — OpenAI (legacy, kept for users with OpenAI keys) ───────
     "gpt-5-mini": ModelProfile(
         name="gpt-5-mini",
@@ -328,8 +359,9 @@ def total_local_ram_mb() -> int:
 
 def estimate_eco_ram_mb(brain: str | None = None, worker: str | None = None) -> int:
     """Estimate RAM for a brain+worker combo."""
-    brain_profile = get_model(brain or BRAIN_MODEL)
-    worker_profile = get_model(worker or WORKER_MODEL)
+    defaults = MODE_MODELS["eco_on"]
+    brain_profile = get_model(brain or defaults["brain"])
+    worker_profile = get_model(worker or defaults["worker"])
     brain_ram = brain_profile.ram_mb if brain_profile else 0
     worker_ram = worker_profile.ram_mb if worker_profile else 0
     return brain_ram + worker_ram

@@ -153,10 +153,8 @@ class WatchSiteSkill(BaseSkill):
     async def _generate_extractor_js(self, what: str, url: str) -> str | None:
         """One-time LLM call to generate a JS extractor for unknown sites."""
         try:
-            from lazyclaw.llm.router import LLMRouter
             from lazyclaw.llm.providers.base import LLMMessage
 
-            router = LLMRouter(self._config)
             messages = [
                 LLMMessage(
                     role="system",
@@ -178,10 +176,16 @@ class WatchSiteSkill(BaseSkill):
                     ),
                 ),
             ]
-            response = await router.chat(
-                messages,
-                model=self._config.worker_model,
-            )
+            # Use eco_router via ROLE_WORKER (cheap), fallback to direct router
+            try:
+                from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+                from lazyclaw.llm.router import LLMRouter
+                eco = EcoRouter(self._config, LLMRouter(self._config))
+                response = await eco.chat(messages, user_id="system", role=ROLE_WORKER)
+            except Exception:
+                from lazyclaw.llm.router import LLMRouter
+                router = LLMRouter(self._config)
+                response = await router.chat(messages, model=self._config.worker_model)
             js = response.content.strip()
             # Strip markdown code blocks if present
             if js.startswith("```"):

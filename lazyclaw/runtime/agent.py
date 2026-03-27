@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from lazyclaw.config import Config
 from lazyclaw.llm.router import LLMRouter
-from lazyclaw.llm.eco_router import EcoRouter, ROLE_BRAIN
+from lazyclaw.llm.eco_router import EcoRouter, ROLE_BRAIN, ROLE_WORKER
 from lazyclaw.llm.providers.base import LLMMessage, ToolCall
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
@@ -803,10 +803,24 @@ class Agent:
                 if tools:
                     kwargs["tools"] = tools
 
-                # Agent IS the brain — uses ROLE_BRAIN routing.
-                # ECO router decides the actual model (local Qwen3.5 or paid Sonnet).
+                # Role routing: brain (Haiku, paid) for strategy + final answers,
+                # worker (Nanbeige, local $0) for ONLY mid-chain tool execution.
+                #
+                # Key insight: after tool results come back, the LLM either:
+                #   a) Calls MORE tools → worker is fine (just orchestrating tools)
+                #   b) Generates final text → MUST use brain (Nanbeige is terrible for chat)
+                #
+                # We can't know (a) vs (b) in advance, so we use brain for ALL
+                # iterations except iteration 0's tool calls. Worker is only used
+                # when explicitly requested (e.g. specialist runners).
+                # Cost: ~$0.001 more per tool chain. Worth it for quality.
                 iter_model = None  # Let eco_router decide based on mode + role
-                _iter_role = ROLE_BRAIN
+                if iteration == 0:
+                    _iter_role = ROLE_BRAIN      # First call: brain picks strategy + tools
+                elif _escalated:
+                    _iter_role = ROLE_BRAIN      # After escalation: brain takes over
+                else:
+                    _iter_role = ROLE_BRAIN      # Always brain — quality over cost
 
                 model_name = "brain"
                 # Show actual routing model if available

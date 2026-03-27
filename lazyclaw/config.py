@@ -50,7 +50,7 @@ def load_config() -> Config:
     if explicit_brain:
         brain_model = explicit_brain
     elif anthropic_key and not openai_key:
-        brain_model = "claude-sonnet-4-20250514"
+        brain_model = "claude-haiku-4-5-20251001"
     else:
         brain_model = "gpt-5"
 

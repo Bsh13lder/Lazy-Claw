@@ -135,14 +135,21 @@ async def _build_capabilities_section(
             lines.append(f"  - {mcp_line}")
         lines.append("")
 
-    # Current config
-    config_parts = [f"Model: {config.brain_model}"]
-
-    eco_mode = "full"
+    # Current config — show ECO-resolved models
+    eco_mode = "off"
+    _brain_display = config.brain_model
     try:
         from lazyclaw.llm.eco_settings import get_eco_settings
+        from lazyclaw.llm.model_registry import get_mode_models
         eco = await get_eco_settings(config, user_id)
-        eco_mode = eco.get("mode", "full")
+        eco_mode = eco.get("mode", "off")
+        _m = get_mode_models(eco_mode)
+        _brain_display = eco.get("brain_model") or _m["brain"]
+    except Exception:
+        pass
+    config_parts = [f"Model: {_brain_display}"]
+
+    try:
         config_parts.append(f"ECO: {eco_mode}")
     except Exception:
         pass

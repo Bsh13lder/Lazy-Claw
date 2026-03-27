@@ -495,9 +495,10 @@ class HeartbeatDaemon:
                     # Auto-reply: enqueue to agent if instruction provided
                     auto_reply = ctx.get("auto_reply")
                     if auto_reply and self._lane_queue:
+                        _svc = ctx.get("service", "")
                         await self._lane_queue.enqueue(
                             user_id,
-                            f"[MCP_WATCHER] New {service} messages. {auto_reply}\n\n{notification}",
+                            f"[MCP_WATCHER] New {_svc} messages. {auto_reply}\n\n{notification}",
                         )
 
                     if new_ctx.get("one_shot"):

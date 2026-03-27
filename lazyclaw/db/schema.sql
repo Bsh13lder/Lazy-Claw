@@ -356,3 +356,16 @@ CREATE TABLE IF NOT EXISTS survival_gigs (
 
 CREATE INDEX IF NOT EXISTS idx_gigs_user_status
 ON survival_gigs(user_id, status);
+
+-- Performance indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_job_queue_user_status
+ON job_queue(user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_site_memory_user_domain
+ON site_memory(user_id, domain);
+
+CREATE INDEX IF NOT EXISTS idx_channel_bindings_user
+ON channel_bindings(user_id, channel);
+
+CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date
+ON daily_logs(user_id, date DESC);

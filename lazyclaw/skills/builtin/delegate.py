@@ -151,9 +151,10 @@ class DelegateSkill(BaseSkill):
             callback=self._callback,
         )
 
-        # Fire-and-forget: save browser learnings to site memory
+        # Save browser learnings (delegate calls run_specialist directly,
+        # not through executor.py, so this is the only save path here)
         if specialist_key == "browser" and len(result.step_history) >= MIN_STEPS_FOR_LEARNING:
-            task = asyncio.create_task(save_browser_learnings(
+            bg_task = asyncio.create_task(save_browser_learnings(
                 config=self._config,
                 user_id=user_id,
                 step_history=result.step_history,
@@ -161,8 +162,8 @@ class DelegateSkill(BaseSkill):
                 success=result.success,
                 error=result.error,
             ))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _background_tasks.add(bg_task)
+            bg_task.add_done_callback(_background_tasks.discard)
 
         if result.success:
             tools_note = ""
@@ -212,102 +213,6 @@ class DelegateSkill(BaseSkill):
                 return knowledge
         except Exception:
             pass
-
-        return ""
-
-    async def _maybe_research_site(
-        self, user_id: str, instruction: str,
-    ) -> str:
-        """Check site_memory for the target domain. If empty, research first.
-
-        NOTE: No longer called automatically. Kept for manual /research command.
-        Returns site knowledge string or empty string.
-        """
-        from lazyclaw.browser.site_memory import (
-            recall, remember, format_memories_for_context,
-        )
-
-        # Extract domain from instruction
-        domain = self._extract_domain(instruction)
-        if not domain:
-            return ""
-
-        # Check if we already have site knowledge
-        try:
-            memories = await recall(self._config, user_id, f"https://{domain}/")
-            if memories:
-                knowledge = format_memories_for_context(memories)
-                logger.info(
-                    "Site recon for %s: found %d cached memories",
-                    domain, sum(len(v) for v in memories.values()),
-                )
-                return knowledge
-        except Exception as e:
-            logger.warning("Failed to recall site memories for %s: %s", domain, e)
-
-        # No knowledge — run web search only (no browser, avoids redirect loops)
-        logger.info("Site recon for %s: no cached knowledge, researching...", domain)
-
-        action_hint = instruction[:200]
-        research_task = (
-            f"Use web_search ONLY (do NOT open browser) to research:\n"
-            f"How to do this on {domain} web interface: \"{action_hint}\"\n\n"
-            f"Search for and summarize:\n"
-            f"1. Is this a single-page app (SPA)? If yes, how to navigate via URL (not typing in search box)\n"
-            f"2. Search/filter operators and EXACT URL format (e.g. Gmail: mail.google.com/mail/u/0/#search/category%3Apromotions+older_than%3A30d)\n"
-            f"3. Bulk action workflow: how to select all, delete/archive in bulk\n"
-            f"4. Common pitfalls (e.g. operators that conflict, features that must be enabled)\n\n"
-            f"IMPORTANT: For SPAs, the browser automation uses URL hash navigation, NOT typing in search boxes.\n"
-            f"Provide the exact URL patterns with proper encoding (spaces→+, colons→%3A).\n\n"
-            f"Do 3-5 searches. Return a concise guide."
-        )
-
-        # Use a search-only specialist (no browser) to avoid redirect loops
-        _recon_specialist = SpecialistConfig(
-            name="site_recon",
-            display_name="Site Recon",
-            system_prompt=(
-                "You are a quick web researcher. Use web_search ONLY — never open a browser.\n"
-                "Do EXACTLY 3 targeted searches, then STOP and return your findings as text.\n"
-                "Do NOT do more than 3 searches. After 3 searches, synthesize and respond.\n"
-                "Return a concise step-by-step guide with exact URL patterns and button names."
-            ),
-            allowed_skills=("web_search",),
-            preferred_model="gpt-5-mini",
-            is_builtin=True,
-        )
-
-        try:
-            from lazyclaw.teams.runner import run_specialist
-
-            research_result = await run_specialist(
-                user_id=user_id,
-                specialist=_recon_specialist,
-                task=research_task,
-                registry=self._registry,
-                eco_router=self._eco_router,
-                permission_checker=self._permission_checker,
-                callback=self._callback,
-            )
-
-            if research_result.success and research_result.result:
-                # Save to site_memory for future visits
-                try:
-                    await remember(
-                        self._config, user_id,
-                        f"https://{domain}/",
-                        memory_type="site_research",
-                        title=f"How to: {action_hint[:80]}",
-                        content={"workflow": research_result.result[:3000]},
-                    )
-                    logger.info("Saved site research for %s", domain)
-                except Exception as e:
-                    logger.warning("Failed to save site research: %s", e)
-
-                return research_result.result
-
-        except Exception as e:
-            logger.warning("Site research failed for %s: %s", domain, e)
 
         return ""
 

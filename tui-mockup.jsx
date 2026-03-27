@@ -689,18 +689,36 @@ function SettingsPanel({ settings, onChange }) {
         {/* Column 1: AI / Models */}
         <div style={{ flex: "1 1 200px", minWidth: 200 }}>
           <SectionHeader text="AI / MODELS" />
-          <SettingRow label="ECO Mode">
+          <SettingRow label="Mode">
             <SettingSelect value={settings.ecoMode} options={ECO_MODES} color={settings.ecoMode === "eco" ? COLORS.green : settings.ecoMode === "hybrid" ? COLORS.orange : COLORS.cyan} onChange={set("ecoMode")} />
           </SettingRow>
-          <SettingRow label="Brain Model">
-            <SettingSelect value={settings.brainModel} options={BRAIN_MODELS} color={COLORS.cyan} onChange={set("brainModel")} />
-          </SettingRow>
-          <SettingRow label="Worker Model">
-            <SettingSelect value={settings.workerModel} options={WORKER_MODELS} color={COLORS.cyan} onChange={set("workerModel")} />
-          </SettingRow>
-          <SettingRow label="Fallback Model">
-            <SettingSelect value={settings.fallbackModel} options={FALLBACK_MODELS} color={COLORS.orange} onChange={set("fallbackModel")} />
-          </SettingRow>
+          {settings.ecoMode === "eco" && (
+            <>
+              <SettingRow label="Brain"><Mono color={COLORS.green}>local only</Mono></SettingRow>
+              <SettingRow label="Worker"><Mono color={COLORS.green}>local only</Mono></SettingRow>
+              <SettingRow label="Fallback"><Mono color={COLORS.red}>none ($0)</Mono></SettingRow>
+            </>
+          )}
+          {settings.ecoMode === "hybrid" && (
+            <>
+              <SettingRow label="Brain"><Mono color={COLORS.cyan}>haiku (paid)</Mono></SettingRow>
+              <SettingRow label="Worker"><Mono color={COLORS.green}>nanbeige (local)</Mono></SettingRow>
+              <SettingRow label="Fallback"><Mono color={COLORS.cyan}>haiku</Mono></SettingRow>
+            </>
+          )}
+          {settings.ecoMode === "full" && (
+            <>
+              <SettingRow label="Brain">
+                <SettingSelect value={settings.brainModel} options={BRAIN_MODELS} color={COLORS.cyan} onChange={set("brainModel")} />
+              </SettingRow>
+              <SettingRow label="Worker">
+                <SettingSelect value={settings.workerModel} options={WORKER_MODELS} color={COLORS.cyan} onChange={set("workerModel")} />
+              </SettingRow>
+              <SettingRow label="Fallback">
+                <SettingSelect value={settings.fallbackModel} options={FALLBACK_MODELS} color={COLORS.orange} onChange={set("fallbackModel")} />
+              </SettingRow>
+            </>
+          )}
           <SettingRow label="Show Badges">
             <Toggle on={settings.showBadges} onClick={toggle("showBadges")} />
           </SettingRow>

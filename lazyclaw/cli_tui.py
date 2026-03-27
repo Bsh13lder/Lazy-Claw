@@ -65,6 +65,10 @@ class RequestSnapshot:
     step_total: int = 0
     trigger: str = "user"
     delegate_to: str = ""
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    step_name: str = ""
+    compact: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,78 @@ def _fmt_cost(c: float) -> str:
     if c < 0.001:
         return f"${c:.4f}"
     return f"${c:.3f}"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format duration: 1.2s, 24s, 2m 14s."""
+    if seconds < 60:
+        return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}m {secs}s"
+
+
+def _fmt_time(dt: datetime | None) -> str:
+    """Format datetime as HH:MM:SS."""
+    if dt is None:
+        return ""
+    return dt.strftime("%H:%M:%S")
+
+
+def _seconds_to_human(s: int | float) -> str:
+    """Convert seconds to human-readable: 300 → '5m', 3600 → '1h'."""
+    s = int(s)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    hours = s // 3600
+    mins = (s % 3600) // 60
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
+def _cron_to_human(expr: str) -> str:
+    """Best-effort cron expression to human string."""
+    parts = expr.strip().split()
+    if len(parts) < 5:
+        return expr
+    minute, hour = parts[0], parts[1]
+    # Daily at HH:MM
+    if parts[2] == "*" and parts[3] == "*" and parts[4] == "*":
+        if minute.isdigit() and hour.isdigit():
+            return f"daily {hour}:{minute.zfill(2)}"
+    # Every N minutes: */N * * * *
+    if minute.startswith("*/") and hour == "*":
+        return f"every {minute[2:]}m"
+    return expr
+
+
+def _time_ago(iso_str: str | None) -> str:
+    """Convert ISO timestamp to 'Nm ago' or 'Nh ago'."""
+    if not iso_str:
+        return "never"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        delta = (datetime.now() - dt).total_seconds()
+        if delta < 0:
+            return "just now"
+        return _seconds_to_human(delta) + " ago"
+    except Exception:
+        return "?"
+
+
+def _time_until(iso_str: str | None) -> str:
+    """Convert ISO timestamp to 'in Nm' or 'in Nh'."""
+    if not iso_str:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        delta = (dt - datetime.now()).total_seconds()
+        if delta < 0:
+            return "overdue"
+        return _seconds_to_human(delta)
+    except Exception:
+        return "?"
 
 
 def _phase_icon(phase: str) -> tuple[str, str]:
@@ -190,9 +266,13 @@ class TuiDashboard:
         self._cost_by_model: dict[str, float] = {}
         # Dedup: skip consecutive identical log entries
         self._last_log_key: str = ""
+        # Per-request callback refs for cancel token access
+        self._callbacks: dict[str, _TuiRequestCallback] = {}
 
     def make_request_cb(self, chat_id: str) -> _TuiRequestCallback:
-        return _TuiRequestCallback(self, chat_id)
+        cb = _TuiRequestCallback(self, chat_id)
+        self._callbacks[chat_id] = cb
+        return cb
 
     def register_request(self, chat_id: str, message: str) -> None:
         self._active[chat_id] = _ActiveRequest(
@@ -205,8 +285,10 @@ class TuiDashboard:
 
     def unregister_request(self, chat_id: str) -> None:
         req = self._active.pop(chat_id, None)
+        self._callbacks.pop(chat_id, None)
         self._total_processed += 1
         if req:
+            req.finished_at = datetime.now()
             elapsed = time.monotonic() - req.started
             tools = len(req.tools_used)
             cost_str = _fmt_cost(req.cost_usd)
@@ -245,6 +327,7 @@ class TuiDashboard:
             req.iteration = event.metadata.get("iteration", 1)
             req.step_current = event.metadata.get("iteration", 1)
             req.step_total = event.metadata.get("max_iterations", 0)
+            req.step_name = event.metadata.get("step_name", "") or "thinking"
             cost_usd = event.metadata.get("cost_usd", 0.0)
             if cost_usd:
                 req.cost_usd += cost_usd
@@ -278,6 +361,7 @@ class TuiDashboard:
         elif kind == "tool_call":
             req.phase = "tool"
             req.tools_used.append(display)
+            req.step_name = display
             self._app.post_message(LogAppended(_now(), "tool", display))
 
         elif kind == "tool_result":
@@ -294,6 +378,7 @@ class TuiDashboard:
         elif kind == "specialist_start":
             name = event.metadata.get("specialist", "?")
             req.delegate_to = name
+            req.step_name = f"delegate → {name}"
             if name in req.specialists:
                 req.specialists[name] = "running"
             self._app.post_message(LogAppended(_now(), "spec", f"{name} started"))
@@ -313,6 +398,7 @@ class TuiDashboard:
 
         elif kind == "team_merge":
             req.phase = "merging"
+            req.step_name = "merging specialist results"
 
         elif kind == "token":
             req.phase = "streaming"
@@ -371,6 +457,12 @@ class TuiDashboard:
         self._app.post_message(RequestUpdated(chat_id, self._snapshot(req)))
 
     def _snapshot(self, req: _ActiveRequest) -> RequestSnapshot:
+        # Determine if card should be compact (done/error, single tool, no specialists)
+        is_terminal = req.phase in ("done", "error", "cancelled")
+        has_specialists = bool(req.specialists)
+        many_tools = len(req.tools_used) > 1
+        compact = is_terminal and not has_specialists and not many_tools
+
         return RequestSnapshot(
             chat_id=req.chat_id,
             message=req.message,
@@ -387,6 +479,10 @@ class TuiDashboard:
             step_total=req.step_total,
             trigger=req.trigger,
             delegate_to=req.delegate_to,
+            started_at=req.started_at,
+            finished_at=req.finished_at,
+            step_name=req.step_name,
+            compact=compact,
         )
 
     @property
@@ -424,6 +520,7 @@ class _TuiRequestCallback:
     def __init__(self, dashboard: TuiDashboard, chat_id: str) -> None:
         self._dashboard = dashboard
         self._chat_id = chat_id
+        self.cancel_token = None  # Set by agent.py via hasattr check
 
     async def on_event(self, event: AgentEvent) -> None:
         self._dashboard.handle_event(self._chat_id, event)
@@ -529,12 +626,13 @@ class RequestCard(Static):
 
     def update_snapshot(self, snap: RequestSnapshot) -> None:
         icon, color = _phase_icon(snap.phase)
-        elapsed = f"{snap.elapsed_s:.1f}s"
         t_in = _fmt_tokens(snap.tokens_in)
         t_out = _fmt_tokens(snap.tokens_out)
         cost = _fmt_cost(snap.cost_usd)
+        duration = _fmt_duration(snap.elapsed_s)
 
         is_cancelled = snap.phase == "cancelled"
+        is_compact = snap.compact
 
         # Color-coded border by status
         border_color = {
@@ -544,15 +642,15 @@ class RequestCard(Static):
 
         # Escape user message for Rich markup
         safe_msg = snap.message.replace("[", "\\[") if snap.message else ""
-        # Show task description, not just "request #N"
-        display_msg = safe_msg[:50] + "..." if len(safe_msg) > 50 else safe_msg
+        max_msg_len = 22 if is_compact else 50
+        display_msg = safe_msg[:max_msg_len] + "\u2026" if len(safe_msg) > max_msg_len else safe_msg
 
         # Header — show × cancel hint for active tasks, [cancelled] badge for cancelled
         cancel_hint = ""
         if is_cancelled:
             cancel_hint = f"  [{_C_ERROR}]\\[cancelled][/{_C_ERROR}]"
         elif snap.phase not in ("done", "error"):
-            cancel_hint = f"  [dim]×[/dim]"
+            cancel_hint = f"  [dim]\u00d7[/dim]"
 
         # Dim entire message if cancelled (strikethrough effect)
         msg_style = "dim strike" if is_cancelled else ""
@@ -560,76 +658,99 @@ class RequestCard(Static):
 
         # Header
         lines = [
-            f"[{border_color}]╭─[/{border_color}]"
+            f"[{border_color}]\u256d\u2500[/{border_color}]"
             f" [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
             f" {msg_markup}{cancel_hint}"
         ]
 
-        # Phase line with model shortname
+        # Phase line with model shortname + step with name
         phase_label = snap.phase
         model_short = snap.model.split("/")[-1] if snap.model else ""
-        step_str = f"  step {snap.step_current}" if snap.step_current else ""
+        step_str = ""
+        if snap.step_current:
+            step_str = f"  step {snap.step_current}"
+            if snap.step_total:
+                step_str += f"/{snap.step_total}"
+            if snap.step_name:
+                step_str += f": {snap.step_name}"
         lines.append(
-            f"[{border_color}]│[/{border_color}]"
+            f"[{border_color}]\u2502[/{border_color}]"
             f" [{color}]{icon} {phase_label}[/{color}]"
             f"  [dim]{model_short}[/dim]{step_str}"
         )
 
-        # Delegate chain
-        if snap.delegate_to:
-            lines.append(
-                f"[{border_color}]│[/{border_color}]"
-                f" [{_C_SPECIALIST}]\u25cf delegate \u2192 {snap.delegate_to}[/{_C_SPECIALIST}]"
-            )
+        if not is_compact:
+            # Step name standalone (when no step_current but name exists)
+            if snap.step_name and not snap.step_current:
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" \u21b3 \"{snap.step_name}\""
+                )
 
-        # Progress bar when step_total > 0
-        if snap.step_total > 0:
-            filled = min(snap.step_current, snap.step_total)
-            bar_width = 16
-            filled_chars = int(bar_width * filled / snap.step_total)
-            empty_chars = bar_width - filled_chars
-            bar = "\u2588" * filled_chars + "\u2591" * empty_chars
-            lines.append(
-                f"[{border_color}]│[/{border_color}]"
-                f" [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
-                f" {filled}/{snap.step_total} steps"
-            )
+            # Delegate chain
+            if snap.delegate_to:
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" [{_C_SPECIALIST}]\u25cf delegate \u2192 {snap.delegate_to}[/{_C_SPECIALIST}]"
+                )
 
-        # Tools
-        if snap.tools_used:
-            unique_tools = list(dict.fromkeys(snap.tools_used[-6:]))
-            tools_str = ", ".join(unique_tools)
-            lines.append(
-                f"[{border_color}]│[/{border_color}]"
-                f" [dim]Tools: {tools_str}[/dim]"
-            )
+            # Progress bar when step_total > 0
+            if snap.step_total > 0:
+                filled = min(snap.step_current, snap.step_total)
+                bar_width = 16
+                filled_chars = int(bar_width * filled / snap.step_total)
+                empty_chars = bar_width - filled_chars
+                bar = "\u2588" * filled_chars + "\u2591" * empty_chars
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
+                    f" {filled}/{snap.step_total} steps"
+                )
 
-        # Specialist grid
-        if snap.specialists:
-            spec_parts = []
-            for name, status in snap.specialists:
-                s_icon, s_color = {
-                    "queued": ("\u25cb", _C_IDLE),
-                    "running": ("\u25cf", _C_ACTIVE),
-                    "done": ("\u2713", _C_SUCCESS),
-                    "error": ("\u2717", _C_ERROR),
-                    "cancelled": ("\u2717", _C_ERROR),
-                }.get(status, ("\u25cb", _C_IDLE))
-                spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
-            lines.append(
-                f"[{border_color}]│[/{border_color}]"
-                f"  {'  '.join(spec_parts)}"
-            )
+            # Tools
+            if snap.tools_used:
+                unique_tools = list(dict.fromkeys(snap.tools_used[-6:]))
+                tools_str = ", ".join(unique_tools)
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" [dim]Tools: {tools_str}[/dim]"
+                )
 
-        # Token/cost/time line
+            # Specialist grid
+            if snap.specialists:
+                spec_parts = []
+                for name, status in snap.specialists:
+                    s_icon, s_color = {
+                        "queued": ("\u25cb", _C_IDLE),
+                        "running": ("\u25cf", _C_ACTIVE),
+                        "done": ("\u2713", _C_SUCCESS),
+                        "error": ("\u2717", _C_ERROR),
+                        "cancelled": ("\u2717", _C_ERROR),
+                    }.get(status, ("\u25cb", _C_IDLE))
+                    spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f"  {'  '.join(spec_parts)}"
+                )
+
+        # Token/cost/time footer with wall-clock timestamps
         trigger_badge = ""
         if snap.trigger != "user":
-            trigger_badge = f" [{_C_SPECIALIST}][{snap.trigger}][/{_C_SPECIALIST}]"
+            trigger_badge = f" [{_C_SPECIALIST}]\\[{snap.trigger}][/{_C_SPECIALIST}]"
+
+        started_str = _fmt_time(snap.started_at)
+        finished_str = _fmt_time(snap.finished_at)
+        time_parts = f"[dim]{started_str}[/dim]"
+        if finished_str:
+            time_parts += f" [dim]\u2192 {finished_str}[/dim]"
+        duration_color = _C_ERROR if is_cancelled else (_C_SUCCESS if snap.phase == "done" else _C_ACTIVE)
+
         lines.append(
-            f"[{border_color}]│[/{border_color}]"
+            f"[{border_color}]\u2502[/{border_color}]"
             f" \u2191{t_in} \u2193{t_out}"
             f"  [{_C_COST}]{cost}[/{_C_COST}]"
-            f"  [dim]{elapsed}[/dim]"
+            f"  {time_parts}"
+            f"  [bold {duration_color}]{duration}[/bold {duration_color}]"
             f"{trigger_badge}"
         )
 
@@ -641,18 +762,34 @@ class RequestCard(Static):
 
 
 class JobsBar(Static):
-    """Shows active cron jobs and watchers inline."""
+    """Shows active cron jobs and watchers with timing details."""
 
     def render_jobs(self, cron_jobs: list[dict], watchers: list[dict]) -> None:
         if not cron_jobs and not watchers:
             self.update(Text.from_markup(f"  [{_C_IDLE}]No scheduled jobs[/{_C_IDLE}]"))
             return
 
-        parts: list[str] = []
-        for j in cron_jobs:
-            name = j.get("name", "?")
-            cron = j.get("cron_expression", "")
-            parts.append(f"[{_C_THINKING}]\u23f0[/{_C_THINKING}] {name} [dim]{cron}[/dim]")
+        lines: list[str] = []
+
+        # Cron jobs — title, interval, last run, next run
+        if cron_jobs:
+            cron_parts: list[str] = []
+            for j in cron_jobs:
+                name = j.get("name", "?")
+                cron_expr = j.get("cron_expression", "")
+                interval = _cron_to_human(cron_expr) if cron_expr else cron_expr
+                last_ago = _time_ago(j.get("last_run"))
+                next_in = _time_until(j.get("next_run"))
+                cron_parts.append(
+                    f"[{_C_THINKING}]\u23f0[/{_C_THINKING}]"
+                    f" [bold]{name}[/bold]"
+                    f" [dim]\u2014 {interval}"
+                    f" \u2014 last: {last_ago}"
+                    f" \u2014 next: {next_in}[/dim]"
+                )
+            lines.append("  ".join(cron_parts))
+
+        # Watchers — title, interval, last/next, prompt in quotes
         for w in watchers:
             name = w.get("name", "?")
             import json as _json
@@ -660,25 +797,77 @@ class JobsBar(Static):
                 ctx = _json.loads(w.get("context", "{}"))
             except Exception:
                 ctx = {}
-            url = ctx.get("url", "")
-            # Show just domain
-            domain = url.split("//")[-1].split("/")[0] if url else "?"
-            parts.append(f"[{_C_ACTIVE}]\u25ce[/{_C_ACTIVE}] {name} [dim]{domain}[/dim]")
+            interval_s = ctx.get("interval_seconds", 0)
+            interval_str = _seconds_to_human(interval_s) if interval_s else "?"
+            prompt = ctx.get("instruction", ctx.get("prompt", ""))
+            last_ago = _time_ago(w.get("last_run"))
+            next_in = _time_until(w.get("next_run"))
 
-        self.update(Text.from_markup("  ".join(parts)))
+            line = (
+                f"[{_C_ACTIVE}]\u25ce[/{_C_ACTIVE}]"
+                f" [bold]{name}[/bold]"
+                f" [dim]\u2014 every {interval_str}"
+                f" \u2014 last: {last_ago}"
+                f" \u2014 next: {next_in} \u2014[/dim]"
+            )
+            if prompt:
+                safe_prompt = prompt[:60].replace("[", "\\[")
+                line += f" [{_C_IDLE}]\"{safe_prompt}\"[/{_C_IDLE}]"
+            lines.append(line)
+
+        self.update(Text.from_markup("\n".join(lines)))
+
+
+class _CardRow(Horizontal):
+    """A horizontal row of request cards in the activity grid."""
+    pass
 
 
 class ActivityPanel(VerticalScroll):
-    """Scrollable panel of active request cards."""
+    """Scrollable grid panel of active request cards.
+
+    Cards are arranged in a flex-wrap grid using Horizontal rows:
+    - Complex cards (specialists or multiple tools): ~half width (2 per row)
+    - Compact completed cards (single tool, done): ~third width (3 per row)
+    """
 
     _empty_label: Static | None = None
+    _card_compactness: dict[str, bool] = {}
+    # Track which row each card belongs to
+    _card_rows: dict[str, str] = {}  # chat_id -> row_id
+    _row_counter: int = 0
 
     def on_mount(self) -> None:
+        self._card_compactness = {}
+        self._card_rows = {}
+        self._row_counter = 0
         self._empty_label = Static(
             Text.from_markup(f"  [{_C_IDLE}]No active agents[/{_C_IDLE}]"),
             id="empty-label",
         )
         self.mount(self._empty_label)
+
+    def _find_or_create_row(self, compact: bool) -> _CardRow:
+        """Find a row with room for another card, or create a new one.
+
+        Full cards: max 2 per row. Compact cards: max 3 per row.
+        """
+        max_per_row = 3 if compact else 2
+        target_class = "compact-row" if compact else "full-row"
+
+        # Try to find an existing row with room
+        for row in self.query(_CardRow):
+            if row.has_class(target_class):
+                card_count = len(row.query(RequestCard))
+                if card_count < max_per_row:
+                    return row
+
+        # Create new row
+        self._row_counter += 1
+        row_id = f"card-row-{self._row_counter}"
+        row = _CardRow(id=row_id, classes=target_class)
+        self.mount(row)
+        return row
 
     def add_request(self, chat_id: str, message: str) -> None:
         if self._empty_label:
@@ -687,20 +876,38 @@ class ActivityPanel(VerticalScroll):
         # Use unique card ID — prevents DuplicateIds crash with concurrent requests
         card_id = f"req-{chat_id}"
         try:
-            existing = self.query_one(f"#{card_id}", RequestCard)
-            # Card already exists — just update its content instead of crashing
-            existing._render_initial()
-            return
+            self.query_one(f"#{card_id}", RequestCard)
+            return  # Card already exists
         except Exception:
             pass
-        card = RequestCard(chat_id, message, id=card_id)
-        self.mount(card)
+        self._card_compactness[chat_id] = False
+        row = self._find_or_create_row(compact=False)
+        card = RequestCard(chat_id, message, id=card_id, classes="card-full")
+        row.mount(card)
+        self._card_rows[chat_id] = row.id or ""
         card.scroll_visible()
 
     def update_request(self, chat_id: str, snapshot: RequestSnapshot) -> None:
         try:
             card = self.query_one(f"#req-{chat_id}", RequestCard)
             card.update_snapshot(snapshot)
+            # Move card to appropriate row type if compactness changed
+            was_compact = self._card_compactness.get(chat_id, False)
+            if snapshot.compact != was_compact:
+                self._card_compactness[chat_id] = snapshot.compact
+                # Remove from current row, add to correct row type
+                old_row_id = self._card_rows.get(chat_id)
+                card.remove()
+                new_row = self._find_or_create_row(compact=snapshot.compact)
+                cls = "card-compact" if snapshot.compact else "card-full"
+                card.remove_class("card-full")
+                card.remove_class("card-compact")
+                card.add_class(cls)
+                new_row.mount(card)
+                self._card_rows[chat_id] = new_row.id or ""
+                # Clean up empty old row
+                if old_row_id:
+                    self._cleanup_empty_row(old_row_id)
         except Exception:
             pass
 
@@ -710,6 +917,10 @@ class ActivityPanel(VerticalScroll):
             card.remove()
         except Exception:
             pass
+        row_id = self._card_rows.pop(chat_id, None)
+        self._card_compactness.pop(chat_id, None)
+        if row_id:
+            self._cleanup_empty_row(row_id)
         # Restore empty label if no cards left
         if not self.query(RequestCard):
             self._empty_label = Static(
@@ -717,6 +928,15 @@ class ActivityPanel(VerticalScroll):
                 id="empty-label",
             )
             self.mount(self._empty_label)
+
+    def _cleanup_empty_row(self, row_id: str) -> None:
+        """Remove a row if it has no more cards."""
+        try:
+            row = self.query_one(f"#{row_id}", _CardRow)
+            if not row.query(RequestCard):
+                row.remove()
+        except Exception:
+            pass
 
 
 class LogPanel(RichLog):
@@ -943,6 +1163,9 @@ class SettingsPanel(Static):
         agent: dict,
         browser: dict,
         team: dict | None = None,
+        perms: dict | None = None,
+        telegram_connected: bool = False,
+        cdp_port: int = 9222,
     ) -> None:
         """Render settings in 5 side-by-side columns using Rich markup."""
 
@@ -990,6 +1213,13 @@ class SettingsPanel(Static):
         persistent = browser.get("persistent", "auto")
         idle_timeout = browser.get("idle_timeout", 3600)
 
+        team = team or {}
+        team_mode = team.get("mode", "never")
+        critic_mode = team.get("critic_mode", "auto")
+
+        perms = perms or {}
+        cat = perms.get("category_defaults", {})
+
         # ── Build columns ──
         col1_lines = [
             _header("AI / MODELS"),
@@ -1005,6 +1235,8 @@ class SettingsPanel(Static):
 
         col2_lines = [
             _header("TEAMS / AGENT"),
+            _row("Team Mode", _select(team_mode)),
+            _row("Critic Mode", _select(critic_mode)),
             _row("Auto Delegate", _toggle(auto_del)),
             _row("Max Specialists", f"{max_spec}"),
             _row("Max RAM (MB)", f"{max_ram}"),
@@ -1015,20 +1247,23 @@ class SettingsPanel(Static):
             _header("BROWSER"),
             _row("Persistent", _select(persistent, "#ff9e64")),
             _row("Idle Timeout", f"{idle_timeout}s"),
+            _row("CDP Port", f"{cdp_port}"),
         ]
 
         col4_lines = [
             _header("PERMISSIONS"),
-            _row("Default Rule", _perm("ask")),
-            _row("Browser Actions", _perm("allow")),
-            _row("Shell Commands", _perm("ask")),
-            _row("File Access", _perm("allow")),
-            _row("Vault Access", _perm("deny")),
+            _row("General", _perm(cat.get("general", "allow"))),
+            _row("Browser", _perm(cat.get("browser", "allow"))),
+            _row("Computer", _perm(cat.get("computer", "ask"))),
+            _row("Vault", _perm(cat.get("vault", "ask"))),
+            _row("MCP / Shell", _perm(cat.get("mcp", "allow"))),
+            _row("Security", _perm(cat.get("security", "ask"))),
         ]
 
+        tg_label = "connected" if telegram_connected else "off"
         col5_lines = [
             _header("CHANNELS"),
-            _row("Telegram", _toggle(True, "connected")),
+            _row("Telegram", _toggle(telegram_connected, tg_label)),
             _row("Discord", _toggle(False)),
             _row("WhatsApp", _toggle(False)),
         ]
@@ -1071,7 +1306,7 @@ class SettingsPanel(Static):
             f"/set team <on|off>[/dim]"
         )
         output_parts.append(
-            f"[dim]Press [{_C_HEADER}]3[/{_C_HEADER}] to return to dashboard[/dim]"
+            f"[dim]Press [{_C_HEADER}]3[/{_C_HEADER}] or Esc to return to dashboard[/dim]"
         )
 
         self.update(Text.from_markup("\n".join(output_parts)))
@@ -1117,7 +1352,7 @@ class LazyClawApp(App):
     #jobs-bar {
         column-span: 2;
         height: auto;
-        max-height: 3;
+        max-height: 8;
         padding: 0 1;
         background: $surface;
     }
@@ -1152,10 +1387,33 @@ class LazyClawApp(App):
         dock: bottom;
     }
 
+    _CardRow {
+        height: auto;
+        width: 100%;
+    }
+
+    .full-row {
+        height: auto;
+    }
+
+    .compact-row {
+        height: auto;
+    }
+
     RequestCard {
         height: auto;
-        margin: 0 0 1 0;
+        margin: 0 1 1 0;
         padding: 0;
+    }
+
+    .card-full {
+        width: 1fr;
+        min-width: 40;
+    }
+
+    .card-compact {
+        width: 1fr;
+        min-width: 26;
     }
 
     #settings-panel {
@@ -1188,9 +1446,9 @@ class LazyClawApp(App):
         Binding("q", "quit", "Quit", priority=True),
         Binding("slash", "focus_filter", "/Filter"),
         Binding("tab", "focus_next", "Navigate"),
-        Binding("f1", "focus_agents", "Activity"),
-        Binding("f2", "focus_logs", "Logs"),
-        Binding("f3", "toggle_settings", "Settings", priority=True),
+        Binding("1", "focus_agents", "Activity"),
+        Binding("2", "focus_logs", "Logs"),
+        Binding("3", "toggle_settings", "Settings"),
         Binding("escape", "close_settings", "Back", show=False),
         Binding("x", "cancel_focused", "Cancel Task"),
         Binding("c", "copy_logs", "Copy"),
@@ -1475,7 +1733,8 @@ class LazyClawApp(App):
 
             async with db_session(self._config) as db:
                 cursor = await db.execute(
-                    "SELECT job_type, name, cron_expression, context FROM agent_jobs "
+                    "SELECT job_type, name, cron_expression, context, "
+                    "last_run, next_run, instruction FROM agent_jobs "
                     "WHERE status = 'active' AND user_id = ?",
                     (self._user_id,),
                 )
@@ -1485,6 +1744,9 @@ class LazyClawApp(App):
                         "name": _dec(row[1]),
                         "cron_expression": _dec(row[2]),
                         "context": _dec(row[3]),
+                        "last_run": row[4] or "",
+                        "next_run": row[5] or "",
+                        "instruction": _dec(row[6]),
                     }
                     if job_type == "cron":
                         cron_count += 1
@@ -1673,6 +1935,10 @@ class LazyClawApp(App):
         if not req:
             return
         name = req.message[:30]
+        # Cancel via CancellationToken (cooperative signal to agent loop)
+        cb = self.dashboard._callbacks.get(chat_id)
+        if cb and cb.cancel_token:
+            cb.cancel_token.cancel()
         # Cancel via TeamLead
         if self._team_lead:
             task_id = self._team_lead.find_cancel_target(name)
@@ -1728,14 +1994,14 @@ class LazyClawApp(App):
             self.action_toggle_settings()
 
     def action_toggle_settings(self) -> None:
-        """Toggle settings panel — replaces dashboard panels (F3 key)."""
+        """Toggle settings panel — replaces dashboard panels (3 key)."""
         panel = self.query_one("#settings-panel", SettingsPanel)
         self._settings_visible = not self._settings_visible
         if self._settings_visible:
             panel.add_class("visible")
             self.add_class("settings-open")
             self._load_settings_panel()
-            self._post_log("info", "⚙ Settings — press F3 or Esc to return to dashboard")
+            self._post_log("info", "Settings — press 3 or Esc to return to dashboard")
         else:
             panel.remove_class("visible")
             self.remove_class("settings-open")
@@ -1745,16 +2011,26 @@ class LazyClawApp(App):
     async def _load_settings_panel(self) -> None:
         """Load current settings and render in the settings panel."""
         try:
-            from lazyclaw.llm.eco_settings import get_eco_settings
-            from lazyclaw.runtime.agent_settings import get_agent_settings
             from lazyclaw.browser.browser_settings import get_browser_settings
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            from lazyclaw.permissions.settings import get_permission_settings
+            from lazyclaw.runtime.agent_settings import get_agent_settings
+            from lazyclaw.teams.settings import get_team_settings
 
             eco = await get_eco_settings(self._config, self._user_id)
             agent = await get_agent_settings(self._config, self._user_id)
             browser = await get_browser_settings(self._config, self._user_id)
+            team = await get_team_settings(self._config, self._user_id)
+            perms = await get_permission_settings(self._config, self._user_id)
 
             panel = self.query_one("#settings-panel", SettingsPanel)
-            panel.render_settings(eco, agent, browser)
+            panel.render_settings(
+                eco, agent, browser,
+                team=team,
+                perms=perms,
+                telegram_connected=self._telegram_connected,
+                cdp_port=getattr(self._config, "cdp_port", 9222),
+            )
         except Exception as exc:
             self._post_log("error", f"Failed to load settings: {exc}")
 

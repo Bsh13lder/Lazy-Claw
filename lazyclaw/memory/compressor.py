@@ -56,7 +56,12 @@ async def compress_history(
 
         existing = await get_daily_log(config, user_id, yesterday)
         if not existing:
-            asyncio.create_task(_background_daily_summary(config, user_id, yesterday))
+            from lazyclaw.runtime.aio_helpers import fire_and_forget
+
+            fire_and_forget(
+                _background_daily_summary(config, user_id, yesterday),
+                name=f"daily-summary-{user_id}-{yesterday}",
+            )
     except Exception:
         pass  # Don't block message processing
 

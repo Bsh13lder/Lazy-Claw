@@ -26,6 +26,8 @@ class _ActiveRequest:
     chat_id: str
     message: str
     started: float = field(default_factory=time.monotonic)
+    started_at: datetime = field(default_factory=datetime.now)
+    finished_at: datetime | None = None
     phase: str = "queued"
     model: str = ""
     iteration: int = 0
@@ -39,6 +41,7 @@ class _ActiveRequest:
     step_total: int = 0
     trigger: str = "user"
     delegate_to: str = ""
+    step_name: str = ""
 
 
 @dataclass(frozen=True)

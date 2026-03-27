@@ -24,6 +24,9 @@ MCP_IDLE_TIMEOUT_SECONDS = 300
 _idle_timers: dict[str, asyncio.TimerHandle] = {}
 _favorite_server_ids: set[str] = set()
 _connect_locks: dict[str, asyncio.Lock] = {}
+# Version counter per server — incremented on every tool call,
+# checked by idle timer to avoid disconnecting during active use.
+_activity_versions: dict[str, int] = {}
 
 # Reference to skill registry for idle-disconnect cleanup.
 # Set by connect_and_register_bundled_mcps() at startup.
@@ -114,8 +117,13 @@ BUNDLED_MCPS = {
 def touch_client(server_id: str) -> None:
     """Reset the idle timer for a server. Call after every tool invocation.
 
+    Increments a version counter so the idle timer callback can detect
+    whether new activity occurred since the timer was scheduled.
     Favorites are exempt — they never get idle-disconnected.
     """
+    # Increment version — signals that this server is actively being used
+    _activity_versions[server_id] = _activity_versions.get(server_id, 0) + 1
+
     timer = _idle_timers.pop(server_id, None)
     if timer is not None:
         timer.cancel()
@@ -128,23 +136,40 @@ def touch_client(server_id: str) -> None:
     except RuntimeError:
         return  # No event loop — skip timer (e.g. during shutdown)
 
+    # Capture current version — timer callback will compare against it
+    version_at_schedule = _activity_versions[server_id]
     _idle_timers[server_id] = loop.call_later(
-        MCP_IDLE_TIMEOUT_SECONDS, _schedule_idle_disconnect, server_id,
+        MCP_IDLE_TIMEOUT_SECONDS,
+        _schedule_idle_disconnect, server_id, version_at_schedule,
     )
 
 
-def _schedule_idle_disconnect(server_id: str) -> None:
+def _schedule_idle_disconnect(server_id: str, version_at_schedule: int) -> None:
     """Sync callback for call_later — schedules the async disconnect."""
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_idle_disconnect(server_id))
+        loop.create_task(_idle_disconnect(server_id, version_at_schedule))
     except RuntimeError:
         pass  # Event loop closed — nothing to do
 
 
-async def _idle_disconnect(server_id: str) -> None:
-    """Disconnect a server due to idle timeout and unregister its tools."""
+async def _idle_disconnect(server_id: str, version_at_schedule: int) -> None:
+    """Disconnect a server due to idle timeout and unregister its tools.
+
+    Only disconnects if no tool calls have happened since the timer was
+    scheduled (version_at_schedule matches current version).
+    """
     _idle_timers.pop(server_id, None)
+
+    # Version mismatch = tool call happened while timer was pending → skip
+    current_version = _activity_versions.get(server_id, 0)
+    if current_version != version_at_schedule:
+        logger.debug(
+            "Skipping idle disconnect for %s: version %d != %d (activity during timer)",
+            server_id, version_at_schedule, current_version,
+        )
+        return
+
     client = _active_clients.get(server_id)
     if client is None:
         return  # Already disconnected
@@ -488,6 +513,7 @@ async def disconnect_all() -> None:
     _idle_timers.clear()
     _favorite_server_ids.clear()
     _connect_locks.clear()
+    _activity_versions.clear()
 
     server_ids = list(_active_clients.keys())
     for server_id in server_ids:

@@ -19,6 +19,8 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-opus-4-20250514": {"input": 0.005, "output": 0.025},
     "claude-opus-4-5-20250410": {"input": 0.005, "output": 0.025},
     "claude-opus-4-6-20250625": {"input": 0.005, "output": 0.025},
+    "claude-opus-4-6": {"input": 0.005, "output": 0.025},
+    "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
     # Local MLX models — $0 always
     "mlx-community/Qwen3.5-4B-4bit": {"input": 0.0, "output": 0.0},
     "mlx-community/Qwen3.5-9B-MLX-4bit": {"input": 0.0, "output": 0.0},

@@ -51,58 +51,68 @@ class CDPBackend:
         self._conn: CDPConnection | None = None
         self._current_tab: CDPTab | None = None
         self._last_activity: float = 0.0
+        self._connect_lock = asyncio.Lock()
 
     async def _ensure_connected(self) -> CDPConnection:
         """Lazy connect: discover Chrome and connect to active tab.
 
         If no Chrome is running, auto-launches headless Chrome.
         If Chrome has no tabs, creates a new blank tab automatically.
+        Uses asyncio.Lock to prevent duplicate Chrome launches from
+        concurrent coroutines.
         """
+        # Fast path: already connected (no lock needed)
         if self._conn and self._conn.is_connected:
             self._last_activity = time.monotonic()
             return self._conn
 
-        ws_url = await find_chrome_cdp(self._port)
-        if not ws_url:
-            # Auto-launch headless Chrome instead of asking the user
-            ws_url = await self._auto_launch_chrome()
+        async with self._connect_lock:
+            # Re-check after acquiring lock (another coroutine may have connected)
+            if self._conn and self._conn.is_connected:
+                self._last_activity = time.monotonic()
+                return self._conn
+
+            ws_url = await find_chrome_cdp(self._port)
             if not ws_url:
-                raise ConnectionError(
-                    f"Could not launch Chrome with debugging port {self._port}."
-                )
+                # Auto-launch headless Chrome instead of asking the user
+                ws_url = await self._auto_launch_chrome()
+                if not ws_url:
+                    raise ConnectionError(
+                        f"Could not launch Chrome with debugging port {self._port}."
+                    )
 
-        # Connect to the first (active) page tab
-        tabs = await list_chrome_tabs(self._port)
-        page_tabs = [t for t in tabs if t.tab_type == "page"]
+            # Connect to the first (active) page tab
+            tabs = await list_chrome_tabs(self._port)
+            page_tabs = [t for t in tabs if t.tab_type == "page"]
 
-        if not page_tabs:
-            # No tabs — create one via CDP /json/new endpoint
-            logger.info("Chrome has no tabs, creating a new one")
-            page_tabs = await self._create_tab()
             if not page_tabs:
-                raise ConnectionError("Chrome has no open tabs and failed to create one.")
+                # No tabs — create one via CDP /json/new endpoint
+                logger.info("Chrome has no tabs, creating a new one")
+                page_tabs = await self._create_tab()
+                if not page_tabs:
+                    raise ConnectionError("Chrome has no open tabs and failed to create one.")
 
-        self._current_tab = page_tabs[0]
-        self._conn = CDPConnection()
-        await self._conn.connect(self._current_tab.ws_url)
+            self._current_tab = page_tabs[0]
+            self._conn = CDPConnection()
+            await self._conn.connect(self._current_tab.ws_url)
 
-        # Enable required CDP domains
-        await self._conn.send("Page.enable")
-        await self._conn.send("Runtime.enable")
+            # Enable required CDP domains
+            await self._conn.send("Page.enable")
+            await self._conn.send("Runtime.enable")
 
-        # Apply stealth (mobile UA, anti-detection, touch emulation)
-        try:
-            from lazyclaw.browser.stealth import apply_stealth
-            await apply_stealth(self._conn)
-        except Exception as exc:
-            logger.warning("Stealth injection failed (non-fatal): %s", exc)
+            # Apply stealth (mobile UA, anti-detection, touch emulation)
+            try:
+                from lazyclaw.browser.stealth import apply_stealth
+                await apply_stealth(self._conn)
+            except Exception as exc:
+                logger.warning("Stealth injection failed (non-fatal): %s", exc)
 
-        self._last_activity = time.monotonic()
-        logger.info(
-            "CDP connected to tab: %s (%s)",
-            self._current_tab.title, self._current_tab.url,
-        )
-        return self._conn
+            self._last_activity = time.monotonic()
+            logger.info(
+                "CDP connected to tab: %s (%s)",
+                self._current_tab.title, self._current_tab.url,
+            )
+            return self._conn
 
     async def _auto_launch_chrome(self) -> str | None:
         """Launch headless browser with remote debugging. Returns CDP ws_url or None.

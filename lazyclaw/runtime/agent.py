@@ -319,7 +319,12 @@ def _handle_instant_command(
         task_id = team_lead.find_cancel_target(target)
         if task_id:
             if task_runner and user_id:
-                asyncio.ensure_future(task_runner.cancel(task_id, user_id))
+                from lazyclaw.runtime.aio_helpers import fire_and_forget
+
+                fire_and_forget(
+                    task_runner.cancel(task_id, user_id),
+                    name=f"cancel-{task_id}",
+                )
             team_lead.cancel(task_id)
             return f"Cancelled task matching \"{target}\""
         return f"No running task matching \"{target}\""
@@ -696,19 +701,19 @@ class Agent:
                     tools.append(st)
 
             # Include favorite MCP tools
-                _fav_prefixes = tuple(
-                    f"mcp_{sid}_" for sid in _favorite_server_ids
-                    if sid in _active_clients
-                )
-                _existing_names = {t.get("function", {}).get("name") for t in tools}
-                if _fav_prefixes:
-                    for tool_info in self.registry.list_mcp_tools():
-                        func = tool_info.get("function", {})
-                        tname = func.get("name", "")
-                        if tname.startswith(_fav_prefixes) and tname not in _existing_names:
-                            schema = self.registry.get_tool_schema(tname)
-                            if schema is not None:
-                                tools.append(schema)
+            _fav_prefixes = tuple(
+                f"mcp_{sid}_" for sid in _favorite_server_ids
+                if sid in _active_clients
+            )
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            if _fav_prefixes:
+                for tool_info in self.registry.list_mcp_tools():
+                    func = tool_info.get("function", {})
+                    tname = func.get("name", "")
+                    if tname.startswith(_fav_prefixes) and tname not in _existing_names:
+                        schema = self.registry.get_tool_schema(tname)
+                        if schema is not None:
+                            tools.append(schema)
             logger.info("%s mode: %d tools for: %s", "LOCAL" if _is_local_model else "META", len(tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
@@ -735,7 +740,7 @@ class Agent:
 
         # If user wants visible browser, prepend instruction to user message
         # so LLM calls show action before navigating
-        if needs_tools and locals().get("_wants_visible", False):
+        if needs_tools and _wants_visible:
             _vis_prefix = (
                 "[IMPORTANT: Browser runs HEADLESS (invisible). "
                 "You MUST call browser(action='show') FIRST before any other browser action. "

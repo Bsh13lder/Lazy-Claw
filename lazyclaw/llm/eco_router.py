@@ -580,9 +580,16 @@ class EcoRouter:
         self._record_usage(user_id, "local")
 
         try:
-            response = await provider.chat(messages, model=model, **kwargs)
+            response = await asyncio.wait_for(
+                provider.chat(messages, model=model, **kwargs),
+                timeout=120,  # 2min max for local models
+            )
             self._record_routing_stats(model, response.usage)
             return response
+        except asyncio.TimeoutError:
+            logger.warning("Local model %s timed out (>120s) — resetting cache", model)
+            self.reset_local_check()
+            raise
         except Exception as exc:
             logger.warning("Local model %s failed: %s — resetting cache", model, exc)
             # Reset so next call re-detects servers (maybe one crashed)

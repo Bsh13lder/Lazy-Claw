@@ -393,6 +393,8 @@ class Agent:
         if hasattr(cb, 'cancel_token'):
             cb.cancel_token = cancel_token
 
+        logger.info("process_message START: user=%s msg=%s", user_id[:8], message[:40])
+
         # Instant commands — no LLM call needed
         instant = _handle_instant_command(message, self._team_lead, self._task_runner, user_id)
         if instant is not None:
@@ -455,7 +457,9 @@ class Agent:
         # Initialize trace recorder
         from lazyclaw.replay.recorder import TraceRecorder
         recorder = TraceRecorder(self.config, user_id)
+        logger.debug("process_message TRACE: recording user message...")
         await recorder.record_user_message(message)
+        logger.debug("process_message TRACE: recorded OK")
 
         import asyncio as _aio
 
@@ -469,6 +473,7 @@ class Agent:
         try:
             from lazyclaw.llm.eco_router import MODE_ECO_ON
             from lazyclaw.llm.eco_settings import get_eco_settings as _get_eco
+            logger.debug("process_message TRACE: loading eco settings...")
             _eco = await _get_eco(self.config, user_id)
             _is_local_model = _eco.get("mode") == MODE_ECO_ON
         except Exception:
@@ -493,13 +498,24 @@ class Agent:
                     )
                 return await rows.fetchall()
 
+        logger.debug("process_message TRACE: needs_tools_early=%s", needs_tools_early)
         if needs_tools_early:
             # Full parallel init — load history, skills, and rich context
-            history_rows, _, system_prompt = await _aio.gather(
-                _load_history(),
-                load_user_skills(self.config, user_id, self.registry),
-                build_context(self.config, user_id, registry=self.registry),
-            )
+            # Run sequentially with traces to find which one hangs
+            logger.info("process_message TRACE: loading history...")
+            history_rows = await _load_history()
+            logger.info("process_message TRACE: history loaded, loading skills...")
+            await load_user_skills(self.config, user_id, self.registry)
+            logger.info("process_message TRACE: skills loaded, building context...")
+            try:
+                system_prompt = await asyncio.wait_for(
+                    build_context(self.config, user_id, registry=self.registry),
+                    timeout=15,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("build_context timed out (>15s) — using personality only")
+                system_prompt = load_personality()
+            logger.info("process_message TRACE: context built")
         else:
             # Fast chat path — minimal system prompt, skip skills + MCP + memories
             _is_greeting = _CHAT_ONLY_PATTERN.match(message.strip().lower().rstrip("!?."))
@@ -508,12 +524,17 @@ class Agent:
                 system_prompt = "You are LazyClaw, a helpful AI assistant. Be friendly and concise."
             else:
                 system_prompt = load_personality()  # Full SOUL.md, cached
+            logger.debug("process_message TRACE: loading history...")
             history_rows = await _load_history()
+            logger.debug("process_message TRACE: history loaded")
 
+        logger.info("process_message TRACE: compressing history...")
         history = await compress_history(
             self.config, self.eco_router, user_id, chat_session_id,
             raw_messages=history_rows,
         )
+
+        logger.info("process_message TRACE: history compressed (%d messages)", len(history))
 
         # Register delegate skill — lets the agent dispatch to specialists
         # inline (NanoClaw pattern: no separate team lead LLM call)

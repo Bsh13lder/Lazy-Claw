@@ -1617,6 +1617,9 @@ class LazyClawApp(App):
             # Persistent browser
             await self._init_persistent_browser()
 
+            # Auto-start MLX worker if HYBRID mode
+            await self._auto_start_mlx()
+
             logger.info("TUI: all services started, running uvicorn")
             self._post_log("info", f"API on http://localhost:{self._config.port}")
 
@@ -1650,6 +1653,64 @@ class LazyClawApp(App):
                         self._post_log("info", "Persistent browser running")
         except Exception:
             pass
+
+    async def _auto_start_mlx(self) -> None:
+        """Auto-start MLX worker server if ECO mode is HYBRID and no server running."""
+        try:
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            from lazyclaw.llm.model_registry import get_mode_models
+            from lazyclaw.llm.providers.mlx_provider import MLXProvider
+
+            eco = await get_eco_settings(self._config, self._user_id)
+            mode = eco.get("mode", "full")
+            if mode not in ("hybrid",):
+                return
+
+            # Check if MLX worker already running on :8081
+            probe = MLXProvider("http://127.0.0.1:8081")
+            if await probe.health_check():
+                self._post_log("info", "MLX worker already running on :8081")
+                return
+
+            # Check RAM — need ~4.5GB free for Nanbeige 3B Q8
+            try:
+                from lazyclaw.llm.ram_monitor import get_ram_status
+                ram = await get_ram_status()
+                free_mb = ram.headroom_mb
+                if free_mb < 2000:
+                    self._post_log(
+                        "info",
+                        f"MLX skipped — only {free_mb}MB free (need ~4.5GB)",
+                    )
+                    logger.warning(
+                        "MLX auto-start skipped: %dMB free < 2000MB threshold",
+                        free_mb,
+                    )
+                    return
+            except Exception:
+                pass  # RAM check failed, try starting anyway
+
+            # Start MLX worker
+            models = get_mode_models("hybrid")
+            worker_model = models["worker"]
+
+            from lazyclaw.llm.mlx_manager import MLXManager
+            manager = MLXManager()
+            self._post_log("info", f"Starting MLX worker ({worker_model})...")
+            logger.info("TUI: auto-starting MLX worker: %s", worker_model)
+
+            healthy = await manager.start_worker(worker_model)
+            if healthy:
+                self._post_log("info", "MLX worker running on :8081")
+                logger.info("TUI: MLX worker healthy on :8081")
+                # Store manager for graceful shutdown
+                self._mlx_manager = manager
+            else:
+                self._post_log("error", "MLX worker failed to start")
+                logger.error("TUI: MLX worker failed health check")
+        except Exception as exc:
+            logger.warning("MLX auto-start failed: %s", exc)
+            self._post_log("info", f"MLX not available: {exc}")
 
     async def _refresh_stats(self) -> None:
         """Periodic system stats refresh (every 2s)."""
@@ -2319,6 +2380,10 @@ class LazyClawApp(App):
             await self._lane_queue.stop()
             from lazyclaw.mcp.manager import disconnect_all
             await asyncio.wait_for(disconnect_all(), timeout=3)
+            # Stop MLX server if we started it
+            mlx = getattr(self, "_mlx_manager", None)
+            if mlx:
+                await mlx.stop_all()
             from lazyclaw.db.connection import close_pool
             await close_pool()
         except Exception:

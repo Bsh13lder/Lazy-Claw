@@ -91,15 +91,28 @@ async def _build_capabilities_cached(
     if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
         return _capabilities_cache
 
-    # Slow path — acquire lock, double-check, then rebuild
-    async with _cache_lock:
+    # Slow path — acquire lock with timeout to avoid deadlock from stuck MCP
+    try:
+        acquired = await asyncio.wait_for(_cache_lock.acquire(), timeout=3)
+    except asyncio.TimeoutError:
+        logger.warning("Capabilities cache lock held >3s — returning stale or empty")
+        return _capabilities_cache or ""
+    try:
         now = time.monotonic()
         if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
             return _capabilities_cache
-        result = await _build_capabilities_section(config, user_id, registry)
+        result = await asyncio.wait_for(
+            _build_capabilities_section(config, user_id, registry),
+            timeout=10,
+        )
         _capabilities_cache = result
         _capabilities_time = now
         return result
+    except asyncio.TimeoutError:
+        logger.warning("_build_capabilities_section timed out (>10s)")
+        return _capabilities_cache or ""
+    finally:
+        _cache_lock.release()
 
 
 def invalidate_capabilities_cache() -> None:
@@ -205,15 +218,28 @@ async def _get_mcp_status_cached(config: Config, user_id: str) -> list[str]:
     if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
         return _mcp_cache
 
-    # Slow path — lock, double-check, rebuild
-    async with _cache_lock:
+    # Slow path — lock with timeout, rebuild
+    try:
+        await asyncio.wait_for(_cache_lock.acquire(), timeout=3)
+    except asyncio.TimeoutError:
+        logger.warning("MCP cache lock held >3s — returning stale")
+        return _mcp_cache
+    try:
         now = time.monotonic()
         if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
             return _mcp_cache
-        result = await _get_mcp_status(config, user_id)
+        result = await asyncio.wait_for(
+            _get_mcp_status(config, user_id),
+            timeout=8,
+        )
         _mcp_cache = result
         _mcp_cache_time = now
         return result
+    except asyncio.TimeoutError:
+        logger.warning("_get_mcp_status timed out (>8s)")
+        return _mcp_cache
+    finally:
+        _cache_lock.release()
 
 
 async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
@@ -242,9 +268,12 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
             tool_count = 0
             if server_id in _active_clients:
                 try:
-                    tools = await _active_clients[server_id].list_tools()
+                    tools = await asyncio.wait_for(
+                        _active_clients[server_id].list_tools(),
+                        timeout=5,
+                    )
                     tool_count = len(tools)
-                except Exception:
+                except (asyncio.TimeoutError, Exception):
                     tool_count = 0
                 status = "connected"
             else:

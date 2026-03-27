@@ -122,6 +122,10 @@ class SkillRegistry:
 
         self.register(BrowserSkill(config=config))
 
+        from lazyclaw.skills.builtin.payment_skill import PaymentSkill
+
+        self.register(PaymentSkill(config=config))
+
         from lazyclaw.skills.builtin.computer import (
             RunCommandSkill, ReadFileSkill, WriteFileSkill,
             ListDirectorySkill, TakeScreenshotSkill,

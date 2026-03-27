@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 from lazyclaw.config import load_config
-from lazyclaw.llm.eco_router import EcoRouter
+from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
 from lazyclaw.llm.providers.base import LLMMessage, ToolCall
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.runtime.stuck_detector import detect_stuck
@@ -24,8 +24,10 @@ from lazyclaw.teams.specialist import SpecialistConfig
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 50
-_NUDGE_AT = int(MAX_ITERATIONS * 0.8)  # 40
+# No hardcoded iteration cap — stuck_detector handles loop/error detection.
+# Safety cap only prevents truly runaway loops (should never be hit).
+MAX_ITERATIONS = 200
+_NUDGE_AT = 30  # Nudge after 30 iterations to wrap up
 
 
 @dataclass(frozen=True)
@@ -147,18 +149,11 @@ async def run_specialist(
             if filtered_tools:
                 kwargs["tools"] = filtered_tools
 
-            # Specialists are executors — they use worker_model by default.
-            # "smart" alias kept for future use but resolves to brain_model only
-            # when explicitly needed. Default: all specialists use worker (Haiku).
-            _cfg = load_config()
-            _specialist_model = specialist.preferred_model
-            if _specialist_model == "smart":
-                _specialist_model = _cfg.worker_model
-            elif _specialist_model == "fast" or not _specialist_model:
-                _specialist_model = _cfg.worker_model
-            logger.info("Specialist %s iteration %d: calling %s", specialist.name, _iteration + 1, _specialist_model)
+            # Workers use ROLE_WORKER — eco_router picks the right model
+            # (Nanbeige local in ECO ON, Haiku in ECO OFF, etc.)
+            logger.info("Worker %s iteration %d", specialist.name, _iteration + 1)
             response = await eco_router.chat(
-                messages, user_id=user_id, model=_specialist_model, **kwargs
+                messages, user_id=user_id, role=ROLE_WORKER, **kwargs
             )
             model_used = response.model or model_used
 

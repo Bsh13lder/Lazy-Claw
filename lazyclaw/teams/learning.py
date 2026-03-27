@@ -195,5 +195,20 @@ async def save_browser_learnings(
             len(learnings), domain, success,
         )
 
+        # Compile successful paths for replay without LLM
+        if success and len(step_history) >= 3:
+            try:
+                from lazyclaw.browser.path_compiler import compile_path, save_compiled_path
+
+                compiled = compile_path(step_history, task, url)
+                if compiled:
+                    await save_compiled_path(config, user_id, compiled)
+                    logger.info(
+                        "Compiled path saved for %s (%d steps)",
+                        domain, len(compiled.steps),
+                    )
+            except Exception:
+                logger.debug("Path compilation failed", exc_info=True)
+
     except Exception:
         logger.debug("Specialist learning save failed", exc_info=True)

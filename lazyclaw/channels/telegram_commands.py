@@ -40,6 +40,8 @@ BOT_COMMANDS = [
     BotCommand("doctor", "\U0001fa7a Diagnostics"),
     BotCommand("screen", "\U0001f5a5 Desktop screenshot / VNC"),
     BotCommand("wipe", "\U0001f9f9 Clear history"),
+    BotCommand("local", "\U0001f9e0 Local AI servers"),
+    BotCommand("ram", "\U0001f4be RAM usage"),
     BotCommand("nuke", "\U0001f4a3 Data wipe"),
 ]
 
@@ -77,6 +79,8 @@ class TelegramCommands:
             "email": self._handle_platform,
             "survival": self._handle_survival, "profile": self._handle_profile,
             "browser": self._handle_browser, "screen": self._handle_screen,
+            "local": self._handle_local,
+            "ram": self._handle_ram,
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
         }
         for name, handler in cmds.items():
@@ -266,28 +270,288 @@ class TelegramCommands:
         if not user_id:
             return
         args = context.args or []
-        try:
-            from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
-        except ImportError:
-            from lazyclaw.gateway.routes.eco import get_eco_settings, update_eco_settings
+        from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
+        from lazyclaw.llm.eco_router import normalize_mode, MODE_ECO_ON, MODE_ECO_HYBRID, MODE_ECO_OFF
 
         if not args:
+            # Show current status
             s = await get_eco_settings(self._config, user_id)
-            mode = s.get("mode", "full")
-            icons = {"local": "\U0001f4bb", "eco": "\U0001f331", "hybrid": "\u2696\ufe0f", "full": "\U0001f680"}
+            mode = s.get("mode", "off")
+            icons = {
+                MODE_ECO_ON: "\U0001f331", MODE_ECO_HYBRID: "\u2696\ufe0f", MODE_ECO_OFF: "\U0001f680",
+            }
+            labels = {
+                MODE_ECO_ON: "ECO ON (Local)", MODE_ECO_HYBRID: "HYBRID", MODE_ECO_OFF: "OFF (Paid)",
+            }
+            brain = s.get("brain_model") or ("Qwen3.5 9B" if mode == MODE_ECO_ON else "Sonnet 4.6")
+            worker = s.get("worker_model") or ("Nanbeige 3B" if mode != MODE_ECO_OFF else "Haiku 4.5")
+            fallback = s.get("fallback_model") or "Sonnet 4.6"
+            max_w = s.get("max_workers", 10)
+            auto_fb = "\u2705" if s.get("auto_fallback") else "\u274c"
             budget = s.get("monthly_paid_budget", 0)
-            text = f"{icons.get(mode, '')} <b>ECO: {mode.upper()}</b>"
+
+            text = (
+                f"{icons.get(mode, '')} <b>ECO: {labels.get(mode, mode)}</b>\n"
+                f"━━━━━━━━━━━━\n"
+                f"\U0001f9e0 Brain: <b>{brain}</b>\n"
+                f"\U0001f916 Worker: <b>{worker}</b>\n"
+                f"\U0001f4ab Fallback: {fallback}\n"
+                f"\U0001f465 Max workers: {max_w}\n"
+                f"\u26a1 Auto-fallback: {auto_fb}\n"
+            )
             if budget:
-                text += f"\n\U0001f4b0 Budget: ${budget:.2f}/mo"
-            text += "\n\nChange: <code>/eco local|eco|hybrid|full</code>"
+                text += f"\U0001f4b0 Budget: ${budget:.2f}/mo\n"
+            text += (
+                "\n<b>Commands:</b>\n"
+                "<code>/eco on</code> — Local models ($0)\n"
+                "<code>/eco hybrid</code> — Sonnet brain + local workers\n"
+                "<code>/eco off</code> — All paid\n"
+                "<code>/eco auto on|off</code> — Auto-fallback\n"
+                "<code>/eco workers N</code> — Max workers (1-20)\n"
+                "<code>/eco brain MODEL</code> — Set brain model\n"
+                "<code>/eco worker MODEL</code> — Set worker model\n"
+                "<code>/eco budget N</code> — Monthly $ cap"
+            )
             await self._reply(update, text)
-        else:
-            mode = args[0].lower()
-            if mode not in ("local", "eco", "hybrid", "full"):
-                await self._reply(update, "\u274c Valid: local, eco, hybrid, full")
+            return
+
+        subcmd = args[0].lower()
+
+        # Mode change: /eco on|hybrid|off|local|full|eco
+        if subcmd in ("on", "hybrid", "off", "local", "full", "eco"):
+            normalized = normalize_mode(subcmd)
+            await update_eco_settings(self._config, user_id, {"mode": normalized})
+            labels = {
+                MODE_ECO_ON: "ECO ON (Local)", MODE_ECO_HYBRID: "HYBRID", MODE_ECO_OFF: "OFF (Paid)",
+            }
+            await self._reply(update, f"\u2705 ECO: <b>{labels.get(normalized, normalized)}</b>")
+            return
+
+        # Auto-fallback: /eco auto on|off
+        if subcmd == "auto" and len(args) > 1:
+            val = args[1].lower() in ("on", "true", "yes", "1")
+            await update_eco_settings(self._config, user_id, {"auto_fallback": val})
+            icon = "\u2705" if val else "\u274c"
+            await self._reply(update, f"{icon} Auto-fallback: <b>{'ON' if val else 'OFF'}</b>")
+            return
+
+        # Workers: /eco workers N
+        if subcmd == "workers" and len(args) > 1:
+            try:
+                n = int(args[1])
+                await update_eco_settings(self._config, user_id, {"max_workers": n})
+                await self._reply(update, f"\u2705 Max workers: <b>{n}</b>")
+            except (ValueError, Exception) as e:
+                await self._reply(update, f"\u274c {e}")
+            return
+
+        # Brain model: /eco brain MODEL
+        if subcmd == "brain" and len(args) > 1:
+            model = " ".join(args[1:])
+            await update_eco_settings(self._config, user_id, {"brain_model": model})
+            await self._reply(update, f"\u2705 Brain: <b>{model}</b>")
+            return
+
+        # Worker model: /eco worker MODEL
+        if subcmd == "worker" and len(args) > 1:
+            model = " ".join(args[1:])
+            await update_eco_settings(self._config, user_id, {"worker_model": model})
+            await self._reply(update, f"\u2705 Worker: <b>{model}</b>")
+            return
+
+        # Fallback model: /eco fallback MODEL
+        if subcmd == "fallback" and len(args) > 1:
+            model = " ".join(args[1:])
+            await update_eco_settings(self._config, user_id, {"fallback_model": model})
+            await self._reply(update, f"\u2705 Fallback: <b>{model}</b>")
+            return
+
+        # Budget: /eco budget N
+        if subcmd == "budget" and len(args) > 1:
+            try:
+                val = float(args[1])
+                await update_eco_settings(self._config, user_id, {"monthly_paid_budget": val})
+                label = f"${val:.2f}/mo" if val > 0 else "unlimited"
+                await self._reply(update, f"\u2705 Budget: <b>{label}</b>")
+            except (ValueError, Exception) as e:
+                await self._reply(update, f"\u274c {e}")
+            return
+
+        await self._reply(update, "\u274c Unknown. Use: <code>/eco on|hybrid|off</code>")
+
+    # -- /ram ---------------------------------------------------------------
+
+    # -- /local ---------------------------------------------------------------
+
+    async def _handle_local(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        args = context.args or []
+        from lazyclaw.llm.mlx_manager import MLXManager
+        from lazyclaw.llm.model_registry import BRAIN_MODEL, WORKER_MODEL
+        from lazyclaw.llm.eco_settings import get_eco_settings
+
+        # Get or create MLX manager (singleton on eco_router)
+        eco_router = getattr(self._agent, "eco_router", None)
+        if not eco_router:
+            await self._reply(update, "\u274c No eco_router available")
+            return
+
+        # Lazy-init MLX manager on eco_router
+        if not hasattr(eco_router, "_mlx_manager"):
+            eco_router._mlx_manager = MLXManager()
+        manager = eco_router._mlx_manager
+
+        if not args:
+            # Show status
+            status = await manager.check_health()
+            brain = status["brain"]
+            worker = status["worker"]
+
+            b_icon = "\u2705" if brain["healthy"] else "\u274c"
+            w_icon = "\u2705" if worker["healthy"] else "\u274c"
+            b_model = brain["model"] or "not running"
+            w_model = worker["model"] or "not running"
+            b_port = brain["port"] or 8080
+            w_port = worker["port"] or 8081
+
+            # RAM info
+            from lazyclaw.llm.ram_monitor import get_ram_status
+            ram = await get_ram_status()
+
+            text = (
+                "\U0001f9e0 <b>Local AI Servers</b>\n"
+                "━━━━━━━━━━━━\n"
+                f"{b_icon} Brain: <b>{b_model}</b> (:{b_port})\n"
+                f"{w_icon} Worker: <b>{w_model}</b> (:{w_port})\n"
+                f"\n\U0001f4be RAM: {ram.system_used_pct:.0f}% used"
+            )
+            if ram.ai_total_mb > 0:
+                text += f" (AI: {ram.ai_total_mb}MB)"
+            text += f"\n\U0001f7e2 Free: {ram.headroom_mb}MB"
+
+            text += (
+                "\n\n<b>Commands:</b>\n"
+                "<code>/local on</code> — Start brain + worker\n"
+                "<code>/local off</code> — Stop all servers\n"
+                "<code>/local brain</code> — Start brain only\n"
+                "<code>/local worker</code> — Worker only (hybrid mode)\n"
+                "<code>/local stop brain</code> — Stop brain, keep worker\n"
+                "<code>/local stop worker</code> — Stop worker, keep brain\n"
+                "<code>/local restart</code> — Restart all"
+            )
+            await self._reply(update, text)
+            return
+
+        subcmd = args[0].lower()
+
+        # Get user's configured models
+        settings = await get_eco_settings(self._config, user_id)
+        brain_model = settings.get("brain_model") or BRAIN_MODEL
+        worker_model = settings.get("worker_model") or WORKER_MODEL
+
+        if subcmd in ("on", "start"):
+            await self._reply(update, "\u23f3 Starting local AI servers...")
+
+            b_ok = await manager.start_brain(brain_model)
+            w_ok = await manager.start_worker(worker_model)
+
+            # Reset eco_router's local provider cache so it discovers the new servers
+            eco_router.reset_local_check()
+
+            lines = []
+            lines.append(f"{'✅' if b_ok else '❌'} Brain: {brain_model.split('/')[-1]}")
+            lines.append(f"{'✅' if w_ok else '❌'} Worker: {worker_model.split('/')[-1]}")
+
+            if b_ok and w_ok:
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                await update_eco_settings(self._config, user_id, {"mode": "eco_on"})
+                lines.append("\n\U0001f389 Both servers running! Auto-switched to <b>ECO ON</b> (local $0)")
+            elif b_ok or w_ok:
+                lines.append("\n\u26a0\ufe0f Partial start — check logs")
+            else:
+                lines.append(
+                    "\n\u274c Both failed. Is mlx-lm installed?\n"
+                    "<code>pip install mlx-lm</code>"
+                )
+
+            await self._reply(update, "\n".join(lines))
+            return
+
+        if subcmd in ("off", "stop") and len(args) == 1:
+            await manager.stop_all()
+            eco_router.reset_local_check()
+            await self._reply(update, "\u2705 Local AI servers stopped.")
+            return
+
+        # /local stop brain | /local stop worker
+        if subcmd == "stop" and len(args) > 1:
+            target = args[1].lower()
+            if target == "brain" and hasattr(manager, '_brain') and manager._brain:
+                await manager._stop_server(manager._brain)
+                manager._brain = None
+                eco_router.reset_local_check()
+                await self._reply(update, "\u2705 Brain stopped. Worker still running.")
                 return
-            await update_eco_settings(self._config, user_id, {"mode": mode})
-            await self._reply(update, f"\u2705 ECO: <b>{mode.upper()}</b>")
+            if target == "worker" and hasattr(manager, '_worker') and manager._worker:
+                await manager._stop_server(manager._worker)
+                manager._worker = None
+                eco_router.reset_local_check()
+                await self._reply(update, "\u2705 Worker stopped. Brain still running.")
+                return
+            await self._reply(update, "\u274c Use: <code>/local stop brain</code> or <code>/local stop worker</code>")
+            return
+
+        if subcmd == "brain":
+            await self._reply(update, f"\u23f3 Starting brain: {brain_model.split('/')[-1]}...")
+            ok = await manager.start_brain(brain_model)
+            eco_router.reset_local_check()
+            icon = "\u2705" if ok else "\u274c"
+            await self._reply(update, f"{icon} Brain: {'running' if ok else 'failed'}")
+            return
+
+        if subcmd == "worker":
+            # Worker-only = hybrid mode (Sonnet brain + local nanbeige workers)
+            await self._reply(update, f"\u23f3 Starting worker: {worker_model.split('/')[-1]}...")
+            ok = await manager.start_worker(worker_model)
+            eco_router.reset_local_check()
+            if ok:
+                # Auto-suggest hybrid mode
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                await update_eco_settings(self._config, user_id, {"mode": "hybrid"})
+                await self._reply(
+                    update,
+                    f"\u2705 Worker running: {worker_model.split('/')[-1]}\n"
+                    f"\u2696\ufe0f Auto-switched to <b>HYBRID</b> mode\n"
+                    f"(Sonnet brain + local worker)"
+                )
+            else:
+                await self._reply(update, "\u274c Worker failed to start")
+            return
+
+        if subcmd == "restart":
+            await self._reply(update, "\u23f3 Restarting local AI servers...")
+            await manager.stop_all()
+            b_ok = await manager.start_brain(brain_model)
+            w_ok = await manager.start_worker(worker_model)
+            eco_router.reset_local_check()
+            b = "\u2705" if b_ok else "\u274c"
+            w = "\u2705" if w_ok else "\u274c"
+            await self._reply(update, f"{b} Brain\n{w} Worker\n\n\u2705 Restarted!")
+            return
+
+        await self._reply(update, "\u274c Use: <code>/local on|off|restart|brain|worker</code>")
+
+    # -- /ram ---------------------------------------------------------------
+
+    async def _handle_ram(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        from lazyclaw.llm.ram_monitor import get_ram_status, format_ram_telegram
+        status = await get_ram_status()
+        await self._reply(update, format_ram_telegram(status))
 
     # -- /doctor -----------------------------------------------------------
 

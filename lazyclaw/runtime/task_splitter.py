@@ -85,11 +85,11 @@ async def split_tasks(
     eco_router,
     user_id: str,
     message: str,
-    worker_model: str = "gpt-5-mini",
+    worker_model: str | None = None,
 ) -> list[SubTask]:
     """Split a compound message into sub-tasks.
 
-    Uses worker_model (config.worker_model) for cheap classification.
+    Uses eco_router brain role for cheap classification.
     Returns a list of SubTask. Single messages return [SubTask(original)].
     Never raises — returns single-task fallback on any error.
     """
@@ -104,7 +104,7 @@ async def split_tasks(
                 LLMMessage(role="user", content=message),
             ],
             user_id=user_id,
-            model=worker_model,
+            role="brain",
             max_tokens=200,
         )
 

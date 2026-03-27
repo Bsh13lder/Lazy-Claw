@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 
 from lazyclaw.config import load_config
-from lazyclaw.llm.eco_router import EcoRouter
+from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.skills.registry import SkillRegistry
 from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
@@ -139,7 +139,7 @@ async def execute_team(
     registry: SkillRegistry,
     eco_router: EcoRouter,
     permission_checker,
-    max_parallel: int = 3,
+    max_parallel: int = 10,
     timeout: int = 120,
     callback=None,
     cancel_token=None,

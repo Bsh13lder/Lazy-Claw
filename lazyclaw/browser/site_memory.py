@@ -27,6 +27,7 @@ MEMORY_TYPES = frozenset({
     "cookie_note",
     "custom",
     "site_learning",
+    "compiled_path",
 })
 
 

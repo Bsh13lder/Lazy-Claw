@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from lazyclaw.config import Config
 from lazyclaw.llm.router import LLMRouter
-from lazyclaw.llm.eco_router import EcoRouter
+from lazyclaw.llm.eco_router import EcoRouter, ROLE_BRAIN
 from lazyclaw.llm.providers.base import LLMMessage, ToolCall
 from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
 from lazyclaw.db.connection import db_session
@@ -54,12 +54,19 @@ _CHAT_ONLY_PATTERN = re.compile(
 # send only 3-4 base tools. LLM discovers others via search_tools on demand.
 # Schemas for discovered tools are injected dynamically.
 
-# Base tools always sent (tiny — ~400 tokens total)
-# NOTE: browser is NOT here — only injected when user explicitly asks for it
+# Base tools always sent — everything the brain needs to work
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
+    "browser",
+    "read_file", "write_file", "run_command", "list_directory",
     "connect_mcp_server", "disconnect_mcp_server",
     "watch_messages", "watch_site", "list_watchers", "stop_watcher",
+})
+
+# Minimal tools for local models (4B can't handle 4000+ tool tokens)
+# Brain only needs delegate (dispatch workers) + search + memory
+_LOCAL_TOOL_NAMES = frozenset({
+    "delegate", "web_search", "recall_memories", "save_memory", "search_tools",
 })
 
 # Browser only when user explicitly asks — prevents unwanted visible browser popups
@@ -406,7 +413,6 @@ class Agent:
             if _looks_compound(message):
                 sub_tasks = await split_tasks(
                     self.eco_router, user_id, message,
-                    worker_model=self.config.worker_model,
                 )
                 if len(sub_tasks) > 1:
                     # Dispatch each sub-task
@@ -453,6 +459,16 @@ class Agent:
         from lazyclaw.runtime.context_builder import build_context
         from lazyclaw.runtime.personality import load_personality
 
+        # Check if using local model (needed for greeting prompt optimization)
+        _is_local_model = False
+        try:
+            from lazyclaw.llm.eco_router import MODE_ECO_ON
+            from lazyclaw.llm.eco_settings import get_eco_settings as _get_eco
+            _eco = await _get_eco(self.config, user_id)
+            _is_local_model = _eco.get("mode") == MODE_ECO_ON
+        except Exception:
+            pass
+
         # Decide upfront: does this message need tools?
         needs_tools_early = self.registry is not None and _wants_any_tools(message)
 
@@ -481,7 +497,12 @@ class Agent:
             )
         else:
             # Fast chat path — minimal system prompt, skip skills + MCP + memories
-            system_prompt = load_personality()  # Cached, ~0ms
+            _is_greeting = _CHAT_ONLY_PATTERN.match(message.strip().lower().rstrip("!?."))
+            if _is_greeting and _is_local_model:
+                # Tiny prompt for greetings on local models
+                system_prompt = "You are LazyClaw, a helpful AI assistant. Be friendly and concise."
+            else:
+                system_prompt = load_personality()  # Full SOUL.md, cached
             history_rows = await _load_history()
 
         history = await compress_history(
@@ -510,6 +531,7 @@ class Agent:
         # Channel detection: if message mentions whatsapp/instagram/email, prefer MCP tools over browser.
         needs_tools = self.registry is not None and _wants_any_tools(message)
         tools: list = []
+
         if needs_tools:
             from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
 
@@ -665,6 +687,7 @@ class Agent:
                 schema for name in _base_names
                 if (schema := self.registry.get_tool_schema(name)) is not None
             ]
+
             tools.extend(_channel_tools)
             # Add survival tools (deduplicated)
             _existing_names = {t.get("function", {}).get("name") for t in tools}
@@ -672,21 +695,21 @@ class Agent:
                 if st.get("function", {}).get("name") not in _existing_names:
                     tools.append(st)
 
-            # Also include tools from favorite connected MCPs
-            _fav_prefixes = tuple(
-                f"mcp_{sid}_" for sid in _favorite_server_ids
-                if sid in _active_clients
-            )
-            _existing_names = {t.get("function", {}).get("name") for t in tools}
-            if _fav_prefixes:
-                for tool_info in self.registry.list_mcp_tools():
-                    func = tool_info.get("function", {})
-                    tname = func.get("name", "")
-                    if tname.startswith(_fav_prefixes) and tname not in _existing_names:
-                        schema = self.registry.get_tool_schema(tname)
-                        if schema is not None:
-                            tools.append(schema)
-            logger.info("Meta-tool mode: %d tools (%d channel MCP) for: %s", len(tools), len(_channel_tools), message[:50])
+            # Include favorite MCP tools
+                _fav_prefixes = tuple(
+                    f"mcp_{sid}_" for sid in _favorite_server_ids
+                    if sid in _active_clients
+                )
+                _existing_names = {t.get("function", {}).get("name") for t in tools}
+                if _fav_prefixes:
+                    for tool_info in self.registry.list_mcp_tools():
+                        func = tool_info.get("function", {})
+                        tname = func.get("name", "")
+                        if tname.startswith(_fav_prefixes) and tname not in _existing_names:
+                            schema = self.registry.get_tool_schema(tname)
+                            if schema is not None:
+                                tools.append(schema)
+            logger.info("%s mode: %d tools for: %s", "LOCAL" if _is_local_model else "META", len(tools), message[:50])
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 
@@ -780,18 +803,12 @@ class Agent:
                 if tools:
                     kwargs["tools"] = tools
 
-                # Worker (Haiku) by default. Brain (Sonnet) only during escalation window.
-                # Escalation lasts max 5 iterations, then falls back to worker.
-                # _escalated stays True so next stuck detection goes to user/break.
-                _MAX_ESCALATION_ITERS = 5
-                if _escalated and (iteration - _escalation_iter) >= _MAX_ESCALATION_ITERS:
-                    # Window expired — fall back to worker model but keep _escalated=True
-                    # so next stuck detection doesn't re-escalate (goes to user instead)
-                    iter_model = self.config.worker_model
-                elif not _escalated:
-                    iter_model = self.config.worker_model
+                # Agent IS the brain — uses ROLE_BRAIN routing.
+                # ECO router decides the actual model (local Qwen3.5 or paid Sonnet).
+                iter_model = None  # Let eco_router decide based on mode + role
+                _iter_role = ROLE_BRAIN
 
-                model_name = iter_model
+                model_name = "brain"
                 # Show actual routing model if available
                 if self.eco_router and self.eco_router.last_routing:
                     model_name = self.eco_router.last_routing.display_name
@@ -805,37 +822,81 @@ class Agent:
                     model=None, message_count=len(messages), has_tools=bool(tools),
                 )
 
-                # Use streaming when callback is present (CLI) for real-time output
                 from lazyclaw.llm.providers.base import LLMResponse as _LLMResp
 
                 streamed_content = ""
                 response = None
 
-                try:
-                    async for chunk in self.eco_router.stream_chat(
-                        messages, user_id=user_id, model=iter_model, **kwargs
-                    ):
-                        if chunk.delta:
-                            streamed_content += chunk.delta
+                # When tools are available, use non-streaming chat() to reliably
+                # capture tool calls. MLX streaming drops tool_calls in many cases.
+                # For pure chat (no tools), stream for real-time UX.
+                if tools:
+                    try:
+                        response = await self.eco_router.chat(
+                            messages, user_id=user_id, model=iter_model,
+                            role=_iter_role, **kwargs
+                        )
+                        if response.content:
                             await cb.on_event(AgentEvent(
-                                "token", chunk.delta, {"model": chunk.model},
+                                "token", response.content, {"model": response.model},
                             ))
+                    except Exception as exc:
+                        logger.error("Chat failed: %s", exc, exc_info=True)
+                        response = _LLMResp(
+                            content=f"Sorry, an error occurred: {exc}",
+                            model="unknown",
+                            tool_calls=[],
+                        )
+                else:
+                    # No tools — stream for real-time output
+                    # Buffer <think>...</think> blocks — don't show thinking to user
+                    _in_think_block = False
+                    _think_buffer = ""
+                    try:
+                        async for chunk in self.eco_router.stream_chat(
+                            messages, user_id=user_id, model=iter_model,
+                            role=_iter_role, **kwargs
+                        ):
+                            if chunk.delta:
+                                streamed_content += chunk.delta
 
-                        if chunk.done:
-                            response = _LLMResp(
-                                content=streamed_content,
-                                model=chunk.model,
-                                usage=chunk.usage,
-                                tool_calls=chunk.tool_calls,
-                            )
-                except Exception as exc:
-                    logger.error("Streaming failed: %s", exc, exc_info=True)
-                    await cb.on_event(AgentEvent("stream_done", "", {}))
-                    response = _LLMResp(
-                        content=f"Sorry, an error occurred: {exc}",
-                        model="unknown",
-                        tool_calls=[],
-                    )
+                                # Buffer thinking, only emit real content
+                                text = chunk.delta
+                                if "<think>" in streamed_content and not _in_think_block:
+                                    _in_think_block = True
+                                    _think_buffer = ""
+                                if _in_think_block:
+                                    _think_buffer += text
+                                    if "</think>" in _think_buffer:
+                                        # Thinking done — emit anything after </think>
+                                        after = _think_buffer.split("</think>", 1)[1].strip()
+                                        _in_think_block = False
+                                        _think_buffer = ""
+                                        if after:
+                                            await cb.on_event(AgentEvent(
+                                                "token", after, {"model": chunk.model},
+                                            ))
+                                    # Don't emit while in think block
+                                else:
+                                    await cb.on_event(AgentEvent(
+                                        "token", text, {"model": chunk.model},
+                                    ))
+
+                            if chunk.done:
+                                response = _LLMResp(
+                                    content=streamed_content,
+                                    model=chunk.model,
+                                    usage=chunk.usage,
+                                    tool_calls=chunk.tool_calls,
+                                )
+                    except Exception as exc:
+                        logger.error("Streaming failed: %s", exc, exc_info=True)
+                        await cb.on_event(AgentEvent("stream_done", "", {}))
+                        response = _LLMResp(
+                            content=f"Sorry, an error occurred: {exc}",
+                            model="unknown",
+                            tool_calls=[],
+                        )
 
                 if response is None:
                     response = _LLMResp(content=streamed_content or "No response received.", model="unknown")
@@ -867,6 +928,14 @@ class Agent:
                      "completion": completion_tokens, "model": response.model,
                      "eco_mode": eco_mode},
                 ))
+
+                # Debug: log tool state
+                logger.info(
+                    "TOOL STATE: tools_sent=%d, tool_calls_received=%d, names=%s",
+                    len(tools),
+                    len(response.tool_calls or []),
+                    [tc.name for tc in (response.tool_calls or [])],
+                )
 
                 # If no tools were provided but LLM returned tool_calls
                 # (hallucination from history patterns), ignore them
@@ -921,6 +990,12 @@ class Agent:
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""
 
+                    # Strip <think>...</think> tags from local models (Nanbeige)
+                    if "<think>" in _final_content:
+                        _final_content = re.sub(
+                            r"<think>.*?</think>\s*", "", _final_content, flags=re.DOTALL
+                        ).strip()
+
                     # Empty response from worker model (known Haiku issue:
                     # 88 completion tokens consumed but content_len=0, tool_calls=0).
                     # Retry once with brain model before giving up.
@@ -936,7 +1011,8 @@ class Agent:
                         )
                         _escalated = True
                         _escalation_iter = iteration
-                        iter_model = self.config.brain_model
+                        iter_model = None  # Let eco_router decide
+                        _iter_role = ROLE_BRAIN
                         streamed_content = ""
                         continue  # Retry this iteration with brain model
 
@@ -1196,11 +1272,11 @@ class Agent:
                         if not _escalated:
                             _escalated = True
                             _escalation_iter = iteration
-                            logger.info("Auto-escalating to brain model: %s", self.config.brain_model)
+                            logger.info("Auto-escalating to brain model (via eco_router)")
                             await cb.on_event(AgentEvent(
                                 "llm_call",
-                                f"Escalating to {self.config.brain_model}...",
-                                {"escalation": True, "model": self.config.brain_model},
+                                "Escalating to brain model...",
+                                {"escalation": True},
                             ))
                             # Inject corrective nudge — force different approach
                             messages.append(LLMMessage(
@@ -1217,7 +1293,8 @@ class Agent:
                             ))
                             _tool_call_history.clear()
                             _tool_results.clear()
-                            iter_model = self.config.brain_model
+                            iter_model = None  # Let eco_router decide
+                            _iter_role = ROLE_BRAIN
                             continue
 
                         # Sonnet also got stuck — give up.

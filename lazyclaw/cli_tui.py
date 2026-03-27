@@ -89,6 +89,10 @@ class SystemStats:
     telegram_status: str = "disconnected"
     eco_mode: str = "full"
     ollama_models: tuple[str, ...] = ()
+    # RAM monitor (ECO v2)
+    ram_system_pct: float = 0.0
+    ram_ai_mb: int = 0
+    ram_free_mb: int = 0
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -440,9 +444,11 @@ class SystemBar(Static):
         t_out = _fmt_tokens(stats.total_tokens_out)
         active_color = _C_ACTIVE if stats.active_count > 0 else _C_IDLE
 
-        # ECO mode badge
-        eco = stats.eco_mode.upper()
-        eco_color = _C_SUCCESS if eco in ("LOCAL", "ECO") else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
+        # ECO mode badge — normalize display name
+        _eco_labels = {"eco_on": "ECO", "hybrid": "HYBRID", "off": "PAID",
+                       "local": "ECO", "eco": "ECO", "full": "PAID"}
+        eco = _eco_labels.get(stats.eco_mode, stats.eco_mode.upper())
+        eco_color = _C_SUCCESS if eco == "ECO" else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
 
         # Model names from config
         brain = ""
@@ -456,12 +462,20 @@ class SystemBar(Static):
         br_dot = f"[{_C_SUCCESS}]\u2713[/{_C_SUCCESS}]" if stats.browser_alive else f"[{_C_IDLE}]\u2014[/{_C_IDLE}]"
         mcp_dot = f"[{_C_SUCCESS}]{stats.mcp_count}[/{_C_SUCCESS}]" if stats.mcp_count > 0 else f"[{_C_IDLE}]0[/{_C_IDLE}]"
 
-        # Line 1: Mode + Models + Cost
+        # RAM — always visible on line 1
+        ram_pct = stats.ram_system_pct
+        ram_color = _C_SUCCESS if ram_pct < 70 else (_C_ACTIVE if ram_pct < 85 else _C_ERROR)
+        ram_text = f"[{ram_color}]RAM:{ram_pct:.0f}%[/{ram_color}]"
+        if stats.ram_ai_mb > 0:
+            ram_text += f"[{ram_color}](AI:{stats.ram_ai_mb}MB)[/{ram_color}]"
+
+        # Line 1: Mode + Models + RAM + Cost
         line1_parts = [f"[{eco_color}]{eco}[/{eco_color}]"]
         if brain:
             line1_parts.append(f"Brain:[bold]{brain}[/bold]")
         if worker:
             line1_parts.append(f"Worker:[dim]{worker}[/dim]")
+        line1_parts.append(ram_text)
         line1_parts.append(f"[{_C_COST}]{cost}[/{_C_COST}]")
         line1_parts.append(f"\u2191{t_in} \u2193{t_out}")
         line1_parts.append(f"[{active_color}]{stats.active_count} active[/{active_color}]")
@@ -471,7 +485,7 @@ class SystemBar(Static):
             f"TG:{tg_dot}  Browser:{br_dot}"
             f"  MCP:{mcp_dot}"
             f"  Q:{stats.queue_depth}"
-            f"  Mem:{stats.memory_mb:.0f}MB"
+            f"  Free:{stats.ram_free_mb}MB"
         )
 
         self.update(Text.from_markup(
@@ -1310,6 +1324,19 @@ class LazyClawApp(App):
             except Exception:
                 pass
 
+            # RAM monitor — always collect, never block
+            ram_pct = 0.0
+            ram_ai = 0
+            ram_free = 0
+            try:
+                from lazyclaw.llm.ram_monitor import get_ram_status
+                ram = await get_ram_status()
+                ram_pct = ram.system_used_pct
+                ram_ai = ram.ai_total_mb
+                ram_free = ram.headroom_mb
+            except Exception as _ram_err:
+                logger.debug("RAM monitor error: %s", _ram_err)
+
             stats = SystemStats(
                 uptime_s=self.dashboard.uptime_s,
                 total_processed=self.dashboard.total_processed,
@@ -1329,6 +1356,9 @@ class LazyClawApp(App):
                 telegram_status=telegram_status,
                 eco_mode=eco_mode,
                 ollama_models=ollama_models,
+                ram_system_pct=ram_pct,
+                ram_ai_mb=ram_ai,
+                ram_free_mb=ram_free,
             )
             self.post_message(StatsRefreshed(stats))
 

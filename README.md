@@ -55,25 +55,33 @@ LazyClaw takes a different approach:
 ## Quickstart
 
 ```bash
-# Clone
 git clone https://github.com/Bsh13lder/Lazy-Claw.git
 cd Lazy-Claw
-
-# Install
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-
-# Setup (interactive wizard — configures AI provider, encryption, Telegram)
-lazyclaw setup
-
-# Chat (CLI REPL)
-lazyclaw
-
-# Full server (API + Telegram + Heartbeat + Dashboard)
-lazyclaw start
+./install.sh
 ```
 
-**Requirements:** Python 3.11+, an AI provider key (OpenAI or Anthropic).
+That's it. The installer handles Python, dependencies, and setup automatically.
+
+```bash
+lazyclaw        # Chat REPL
+lazyclaw start  # Full server (API + Telegram + TUI Dashboard)
+lazyclaw setup  # Re-run setup wizard
+```
+
+<details>
+<summary><strong>Manual install</strong></summary>
+
+```bash
+git clone https://github.com/Bsh13lder/Lazy-Claw.git
+cd Lazy-Claw
+pip install pipx && pipx install --editable .
+lazyclaw setup
+```
+
+Requires: Python 3.11+, pipx, an AI provider key (OpenAI or Anthropic).
+</details>
+
+**Requirements:** Python 3.11+ (installed automatically on macOS), an AI provider key (OpenAI or Anthropic).
 
 > **For best results, use Anthropic.** Claude Haiku 4.5 as default + Sonnet 4.6 for complex tasks gives the fastest responses (2-5s) with excellent tool use. LazyClaw auto-configures the optimal model routing when it detects an Anthropic API key.
 

@@ -160,7 +160,14 @@ async def apply_stealth(conn) -> None:
     except Exception as exc:
         logger.warning("Failed to inject stealth JS: %s", exc)
 
-    # 2. Enable touch (legit — many laptops have touchscreens)
+    # 2. Patch screenX/screenY CDP bug (Cloudflare Turnstile checks this)
+    try:
+        from lazyclaw.browser.human_input import apply_screen_patch
+        await apply_screen_patch(conn)
+    except Exception as exc:
+        logger.warning("Failed to inject screen patch: %s", exc)
+
+    # 3. Enable touch (legit — many laptops have touchscreens)
     try:
         await conn.send(
             "Emulation.setTouchEmulationEnabled",
@@ -169,7 +176,7 @@ async def apply_stealth(conn) -> None:
     except Exception as exc:
         logger.warning("Failed to enable touch: %s", exc)
 
-    logger.info("Stealth applied (anti-detection + touch)")
+    logger.info("Stealth applied (anti-detection + screen patch + touch)")
 
 
 async def wait_for_page_ready(conn, timeout: float = 5.0) -> bool:

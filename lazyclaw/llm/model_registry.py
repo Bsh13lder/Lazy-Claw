@@ -1,8 +1,14 @@
-"""Static model catalog and routing result for ECO local mode.
+"""Static model catalog and routing result for ECO mode.
 
 Defines ModelProfile for all known models (local + paid) and RoutingResult
 for tracking which model handled each request. Used by eco_router for
 routing decisions and by summary/TUI for attribution display.
+
+ECO Architecture:
+  Brain:    Qwen3.5-9B (MLX/Ollama, local, free) — chat, planning, synthesis
+  Worker:   Nanbeige4.1-3B (MLX/Ollama, local, free) — tool execution
+  Coder:    Claude Code MCP (free with subscription) — code tasks
+  Fallback: Claude Sonnet 4.6 (paid) — when local fails
 """
 
 from __future__ import annotations
@@ -14,29 +20,138 @@ from dataclasses import dataclass
 class ModelProfile:
     """Immutable profile for a known AI model."""
 
-    name: str               # Ollama model name or API model ID
+    name: str               # Model ID (Ollama name, MLX HF path, or API model ID)
     display_name: str       # Shown in TUI/Telegram
-    provider: str           # "ollama" | "openai" | "anthropic" | "mcp"
+    provider: str           # "mlx" | "ollama" | "openai" | "anthropic" | "mcp"
     is_local: bool
     ram_mb: int             # Estimated RAM when loaded (0 for remote)
-    cost_input: float       # USD per 1K input tokens (0.0 for local)
-    cost_output: float      # USD per 1K output tokens (0.0 for local)
+    cost_input: float       # USD per 1M input tokens (0.0 for local)
+    cost_output: float      # USD per 1M output tokens (0.0 for local)
     icon: str               # Emoji for TUI display
     max_context: int        # Max context window tokens
     tool_calling: bool      # Supports function/tool calling
-    role: str               # "brain" | "specialist" | "coder" | "fallback"
+    role: str               # "brain" | "worker" | "coder" | "fallback"
 
 
-# ── Model names (constants for imports) ───────────────────────────────
+# ── Default model constants (for imports) ─────────────────────────────
 
-BRAIN_MODEL = "qwen3:0.6b"
-SPECIALIST_MODEL = "qwen3:0.6b"
+# ECO ON: Haiku brain (cheap, instant, no thinking overhead) + Nanbeige worker (local, $0)
+BRAIN_MODEL = "claude-haiku-4-5-20251001"
+WORKER_MODEL = "mlx-community/Nanbeige4.1-3B-8bit"
+
+# ECO HYBRID / OFF: Sonnet brain (smarter) + Haiku worker or local
+PAID_BRAIN_MODEL = "claude-sonnet-4-20250514"
+PAID_WORKER_MODEL = "claude-haiku-4-5-20251001"
+
+# Fallback: Sonnet (when Haiku can't handle complexity)
+FALLBACK_MODEL = "claude-sonnet-4-20250514"
+
+# Ollama equivalents (when MLX not available)
+OLLAMA_BRAIN_MODEL = "qwen3.5:9b"
+OLLAMA_WORKER_MODEL = "nanbeige4.1:3b"
 
 
 # ── Model catalog ─────────────────────────────────────────────────────
 
 MODEL_CATALOG: dict[str, ModelProfile] = {
-    # LOCAL — FREE (Ollama)
+    # ── LOCAL — MLX (Apple Silicon native, preferred) ─────────────────
+    # Brain: Qwen3.5-4B — best reasoning/writing at 4B, fits with worker on 16GB
+    "mlx-community/Qwen3.5-4B-4bit": ModelProfile(
+        name="mlx-community/Qwen3.5-4B-4bit",
+        display_name="Qwen3.5 4B",
+        provider="mlx",
+        is_local=True,
+        ram_mb=3500,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f9e0",  # 🧠
+        max_context=262144,
+        tool_calling=True,
+        role="brain",
+    ),
+    # Brain: Qwen3.5-9B — better quality, needs 32GB+ RAM for dual-model
+    "mlx-community/Qwen3.5-9B-MLX-4bit": ModelProfile(
+        name="mlx-community/Qwen3.5-9B-MLX-4bit",
+        display_name="Qwen3.5 9B",
+        provider="mlx",
+        is_local=True,
+        ram_mb=5600,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f9e0",  # 🧠
+        max_context=262144,
+        tool_calling=True,
+        role="brain",
+    ),
+    "mlx-community/Qwen3.5-9B-8bit": ModelProfile(
+        name="mlx-community/Qwen3.5-9B-8bit",
+        display_name="Qwen3.5 9B Q8",
+        provider="mlx",
+        is_local=True,
+        ram_mb=10400,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f9e0",  # 🧠
+        max_context=262144,
+        tool_calling=True,
+        role="brain",
+    ),
+    "mlx-community/Nanbeige4.1-3B-8bit": ModelProfile(
+        name="mlx-community/Nanbeige4.1-3B-8bit",
+        display_name="Nanbeige 3B Q8",
+        provider="mlx",
+        is_local=True,
+        ram_mb=4200,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f916",  # 🤖
+        max_context=262144,
+        tool_calling=True,
+        role="worker",
+    ),
+    "mlx-community/Nanbeige4.1-3B-4bit": ModelProfile(
+        name="mlx-community/Nanbeige4.1-3B-4bit",
+        display_name="Nanbeige 3B Q4",
+        provider="mlx",
+        is_local=True,
+        ram_mb=2200,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f916",  # 🤖
+        max_context=262144,
+        tool_calling=True,
+        role="worker",
+    ),
+
+    # ── LOCAL — Ollama (cross-platform fallback) ──────────────────────
+    "qwen3.5:9b": ModelProfile(
+        name="qwen3.5:9b",
+        display_name="Qwen3.5 9B (Ollama)",
+        provider="ollama",
+        is_local=True,
+        ram_mb=6600,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f9e0",  # 🧠
+        max_context=262144,
+        tool_calling=True,
+        role="brain",
+    ),
+    "nanbeige4.1:3b": ModelProfile(
+        name="nanbeige4.1:3b",
+        display_name="Nanbeige 3B (Ollama)",
+        provider="ollama",
+        is_local=True,
+        ram_mb=2500,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f916",  # 🤖
+        max_context=262144,
+        tool_calling=True,
+        role="worker",
+    ),
+
+    # Legacy Ollama models (kept for backward compat)
     "qwen3:0.6b": ModelProfile(
         name="qwen3:0.6b",
         display_name="qwen3:0.6b",
@@ -74,12 +189,13 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         icon="\U0001f916",  # 🤖
         max_context=262144,
         tool_calling=True,
-        role="specialist",
+        role="worker",
     ),
-    # MCP — FREE (user's Claude subscription)
+
+    # ── MCP — FREE (user's Claude subscription) ──────────────────────
     "claude_code": ModelProfile(
         name="claude_code",
-        display_name="claude_code",
+        display_name="Claude Code",
         provider="mcp",
         is_local=False,
         ram_mb=0,
@@ -90,15 +206,44 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         tool_calling=True,
         role="coder",
     ),
-    # PAID — fallback only
+
+    # ── PAID — Claude (fallback + ECO OFF) ────────────────────────────
+    "claude-sonnet-4-20250514": ModelProfile(
+        name="claude-sonnet-4-20250514",
+        display_name="Sonnet 4.6",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=3.0,      # $3/M input
+        cost_output=15.0,     # $15/M output
+        icon="\U0001f4ab",    # 💫
+        max_context=200000,
+        tool_calling=True,
+        role="brain",
+    ),
+    "claude-haiku-4-5-20251001": ModelProfile(
+        name="claude-haiku-4-5-20251001",
+        display_name="Haiku 4.5",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=1.0,       # $1/M input
+        cost_output=5.0,       # $5/M output
+        icon="\U0001f343",    # 🍃
+        max_context=200000,
+        tool_calling=True,
+        role="worker",
+    ),
+
+    # ── PAID — OpenAI (legacy, kept for users with OpenAI keys) ───────
     "gpt-5-mini": ModelProfile(
         name="gpt-5-mini",
-        display_name="gpt-5-mini",
+        display_name="GPT-5 Mini",
         provider="openai",
         is_local=False,
         ram_mb=0,
-        cost_input=0.00015,
-        cost_output=0.0006,
+        cost_input=0.15,
+        cost_output=0.6,
         icon="\U0001f4b0",  # 💰
         max_context=128000,
         tool_calling=True,
@@ -106,12 +251,12 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
     ),
     "gpt-5": ModelProfile(
         name="gpt-5",
-        display_name="gpt-5",
+        display_name="GPT-5",
         provider="openai",
         is_local=False,
         ram_mb=0,
-        cost_input=0.005,
-        cost_output=0.015,
+        cost_input=5.0,
+        cost_output=15.0,
         icon="\U0001f4b0",  # 💰
         max_context=128000,
         tool_calling=True,
@@ -126,10 +271,10 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
 class RoutingResult:
     """Immutable record of which model handled a request and why."""
 
-    model: str          # e.g. "qwen3:0.6b"
-    provider: str       # e.g. "ollama"
+    model: str          # e.g. "qwen3.5-9b"
+    provider: str       # e.g. "mlx"
     is_local: bool
-    reason: str         # e.g. "simple_chat -> brain"
+    reason: str         # e.g. "eco_on: brain -> chat"
 
     @property
     def display_name(self) -> str:
@@ -143,7 +288,12 @@ class RoutingResult:
 
     @property
     def cost_label(self) -> str:
-        return "FREE" if self.is_local else "PAID"
+        if self.is_local:
+            return "FREE"
+        profile = get_model(self.model)
+        if profile and profile.cost_input == 0.0:
+            return "FREE"
+        return "PAID"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -154,10 +304,32 @@ def get_model(name: str) -> ModelProfile | None:
 
 
 def get_local_models() -> tuple[ModelProfile, ...]:
-    """Return all local (Ollama) model profiles."""
+    """Return all local model profiles (MLX + Ollama)."""
     return tuple(m for m in MODEL_CATALOG.values() if m.is_local)
 
 
+def get_mlx_models() -> tuple[ModelProfile, ...]:
+    """Return MLX-specific model profiles."""
+    return tuple(m for m in MODEL_CATALOG.values() if m.provider == "mlx")
+
+
+def get_paid_models() -> tuple[ModelProfile, ...]:
+    """Return all paid model profiles."""
+    return tuple(
+        m for m in MODEL_CATALOG.values()
+        if not m.is_local and m.cost_input > 0
+    )
+
+
 def total_local_ram_mb() -> int:
-    """Total estimated RAM for all local models."""
+    """Total estimated RAM for all local models if loaded simultaneously."""
     return sum(m.ram_mb for m in MODEL_CATALOG.values() if m.is_local)
+
+
+def estimate_eco_ram_mb(brain: str | None = None, worker: str | None = None) -> int:
+    """Estimate RAM for a brain+worker combo."""
+    brain_profile = get_model(brain or BRAIN_MODEL)
+    worker_profile = get_model(worker or WORKER_MODEL)
+    brain_ram = brain_profile.ram_mb if brain_profile else 0
+    worker_ram = worker_profile.ram_mb if worker_profile else 0
+    return brain_ram + worker_ram

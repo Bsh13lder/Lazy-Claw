@@ -306,7 +306,7 @@ class CDPBackend:
 
     async def click(self, selector: str) -> None:
         conn = await self._ensure_connected()
-        # Find element center coordinates via JS
+        # Find element center coordinates and size via JS
         js = f"""
         (() => {{
             const el = document.querySelector({_js_str(selector)});
@@ -314,7 +314,8 @@ class CDPBackend:
             const rect = el.getBoundingClientRect();
             return {{
                 x: rect.x + rect.width / 2,
-                y: rect.y + rect.height / 2
+                y: rect.y + rect.height / 2,
+                w: rect.width, h: rect.height
             }};
         }})()
         """
@@ -327,48 +328,36 @@ class CDPBackend:
             raise ValueError(f"Element not found: {selector}")
 
         x, y = coords["x"], coords["y"]
-        # Dispatch mouse events
-        # Small delay between press and release (human finger)
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mousePressed",
-            "x": x, "y": y,
-            "button": "left",
-            "clickCount": 1,
-        })
-        await asyncio.sleep(random.uniform(0.05, 0.12))
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseReleased",
-            "x": x, "y": y,
-            "button": "left",
-            "clickCount": 1,
-        })
-        # Human pause after clicking (0.2-1.5s)
-        await asyncio.sleep(random.uniform(0.2, 1.5))
+        target_size = min(coords.get("w", 20), coords.get("h", 20))
+
+        # Human-like click: Bezier movement + complete event chain
+        from lazyclaw.browser.human_input import human_click
+        await human_click(conn, x, y, target_size=target_size)
 
     async def type_text(self, selector: str, text: str) -> None:
         conn = await self._ensure_connected()
-        # Focus the element first
-        await conn.send(
+        # Find element coordinates and click to focus (human-like)
+        js = f"""
+        (() => {{
+            const el = document.querySelector({_js_str(selector)});
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}};
+        }})()
+        """
+        result = await conn.send(
             "Runtime.evaluate",
-            {
-                "expression": (
-                    f"document.querySelector({_js_str(selector)})?.focus()"
-                ),
-            },
+            {"expression": js, "returnByValue": True},
         )
-        await asyncio.sleep(random.uniform(0.1, 0.3))
-        # Type each character with human-like timing
-        for char in text:
-            await conn.send("Input.dispatchKeyEvent", {
-                "type": "keyDown",
-                "text": char,
-                "key": char,
-            })
-            await conn.send("Input.dispatchKeyEvent", {
-                "type": "keyUp",
-                "key": char,
-            })
-            await asyncio.sleep(random.uniform(0.03, 0.12))  # Human typing speed
+        coords = result.get("result", {}).get("value")
+
+        # Type with human-like keystroke timing
+        from lazyclaw.browser.human_input import human_type
+        await human_type(
+            conn, text,
+            field_x=coords["x"] if coords else None,
+            field_y=coords["y"] if coords else None,
+        )
 
     async def press_key(self, key: str) -> None:
         """Press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown, etc)."""
@@ -418,12 +407,9 @@ class CDPBackend:
 
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         conn = await self._ensure_connected()
-        delta_y = amount if direction == "down" else -amount
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseWheel",
-            "x": 400, "y": 300,
-            "deltaX": 0, "deltaY": delta_y,
-        })
+        # Human-like scroll with momentum deceleration
+        from lazyclaw.browser.human_input import human_scroll
+        await human_scroll(conn, direction=direction, amount=amount)
 
     async def wait_for_selector(
         self, selector: str, timeout_ms: int = 5000,
@@ -748,16 +734,15 @@ class CDPBackend:
         if not coords:
             raise ValueError(f"Element not found: {selector}")
 
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseMoved",
-            "x": coords["x"], "y": coords["y"],
-        })
+        # Human-like Bezier movement to hover position
+        from lazyclaw.browser.human_input import human_move_to
+        await human_move_to(conn, coords["x"], coords["y"])
         await asyncio.sleep(random.uniform(0.3, 0.8))
 
     async def drag_and_drop(
         self, source_selector: str, target_selector: str
     ) -> None:
-        """Drag element from source to target."""
+        """Drag element from source to target with Bezier path."""
         conn = await self._ensure_connected()
         js = f"""
         (() => {{
@@ -781,25 +766,30 @@ class CDPBackend:
 
         sx, sy, tx, ty = coords["sx"], coords["sy"], coords["tx"], coords["ty"]
 
+        # Move to source with Bezier curve
+        from lazyclaw.browser.human_input import human_move_to, _generate_bezier_path
+        await human_move_to(conn, sx, sy)
+
+        # Press and hold
         await conn.send("Input.dispatchMouseEvent", {
-            "type": "mousePressed", "x": sx, "y": sy,
+            "type": "mousePressed", "x": round(sx), "y": round(sy),
             "button": "left", "clickCount": 1,
         })
         await asyncio.sleep(random.uniform(0.1, 0.2))
 
-        # Move in steps for natural drag
-        steps = 5
-        for i in range(1, steps + 1):
-            frac = i / steps
+        # Drag along Bezier curve to target
+        path = _generate_bezier_path(sx, sy, tx, ty)
+        for point in path:
             await conn.send("Input.dispatchMouseEvent", {
                 "type": "mouseMoved",
-                "x": sx + (tx - sx) * frac,
-                "y": sy + (ty - sy) * frac,
+                "x": round(point.x),
+                "y": round(point.y),
             })
-            await asyncio.sleep(random.uniform(0.03, 0.08))
+            await asyncio.sleep(random.uniform(0.02, 0.06))
 
+        # Release at target
         await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseReleased", "x": tx, "y": ty,
+            "type": "mouseReleased", "x": round(tx), "y": round(ty),
             "button": "left", "clickCount": 1,
         })
         await asyncio.sleep(random.uniform(0.2, 0.5))

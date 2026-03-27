@@ -2,6 +2,11 @@
 
 Settings stored in the existing users.settings JSON column
 under the "eco" key. No new DB table needed.
+
+Three modes:
+  eco_on  — Local brain (Qwen3.5-9B) + local workers (Nanbeige4.1-3B)
+  hybrid  — Paid brain (Sonnet) + local workers (Nanbeige4.1-3B)
+  off     — All paid (Sonnet brain + Haiku workers)
 """
 
 from __future__ import annotations
@@ -11,15 +16,13 @@ import logging
 
 from lazyclaw.config import Config
 from lazyclaw.db.connection import db_session
+from lazyclaw.llm.eco_router import VALID_MODES, normalize_mode
 from lazyclaw.llm.free_providers import PROVIDER_DEFS, discover_providers
 
 logger = logging.getLogger(__name__)
 
-# Valid ECO modes
-VALID_MODES = {"eco", "hybrid", "full", "local"}
-
-# Base set of known free providers
-_BASE_PROVIDERS = set(PROVIDER_DEFS.keys()) | {"ollama"}
+# Base set of known providers
+_BASE_PROVIDERS = set(PROVIDER_DEFS.keys()) | {"ollama", "mlx"}
 
 
 def _get_valid_providers() -> set[str]:
@@ -29,16 +32,21 @@ def _get_valid_providers() -> set[str]:
 
 # Default eco settings
 DEFAULT_ECO = {
-    "mode": "full",
+    "mode": "off",
     "show_badges": True,
     "monthly_paid_budget": 0,
+    "auto_fallback": False,
+    "max_workers": 10,
+    "brain_model": None,       # None = use default from model_registry
+    "worker_model": None,      # None = use default from model_registry
+    "fallback_model": None,    # None = use default from model_registry
     "locked_provider": None,
     "allowed_providers": None,
-    "task_overrides": None,
-    "brain_model": None,       # None = use default from model_registry
-    "specialist_model": None,  # None = use default from model_registry
     "free_providers": None,    # None = auto-detect from env
-    "preferred_free_model": None,  # None = use provider default
+    "preferred_free_model": None,
+    # Legacy compat
+    "specialist_model": None,
+    "task_overrides": None,
 }
 
 
@@ -65,23 +73,36 @@ async def get_eco_settings(config: Config, user_id: str) -> dict:
     # Merge with defaults for any missing keys
     merged = dict(DEFAULT_ECO)
     merged.update(eco)
+
+    # Normalize mode (backward compat: local→eco_on, full→off, eco→eco_on)
+    merged["mode"] = normalize_mode(merged.get("mode", "off"))
+
+    # Migrate specialist_model → worker_model
+    if merged.get("specialist_model") and not merged.get("worker_model"):
+        merged["worker_model"] = merged["specialist_model"]
+
     return merged
 
 
 async def update_eco_settings(config: Config, user_id: str, updates: dict) -> dict:
     """Update user's ECO mode settings. Returns the new settings."""
-    # Validate mode if provided
+    # Normalize mode if provided
     if "mode" in updates:
-        if updates["mode"] not in VALID_MODES:
-            raise ValueError(f"Invalid eco mode: {updates['mode']}. Must be one of: {VALID_MODES}")
+        normalized = normalize_mode(updates["mode"])
+        if normalized not in VALID_MODES:
+            raise ValueError(
+                f"Invalid eco mode: {updates['mode']}. "
+                f"Use: on, hybrid, off"
+            )
+        updates["mode"] = normalized
 
-    # Validate locked_provider if provided
+    # Validate locked_provider
     valid_providers = _get_valid_providers()
     if "locked_provider" in updates and updates["locked_provider"] is not None:
         if updates["locked_provider"] not in valid_providers:
             raise ValueError(f"Invalid provider: {updates['locked_provider']}")
 
-    # Validate allowed_providers if provided
+    # Validate allowed_providers
     if "allowed_providers" in updates and updates["allowed_providers"] is not None:
         if not isinstance(updates["allowed_providers"], list):
             raise ValueError("allowed_providers must be a list")
@@ -89,13 +110,27 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         if invalid:
             raise ValueError(f"Invalid providers: {invalid}")
 
-    # Validate free_providers if provided
+    # Validate free_providers
     if "free_providers" in updates and updates["free_providers"] is not None:
         if not isinstance(updates["free_providers"], list):
             raise ValueError("free_providers must be a list")
         invalid = set(updates["free_providers"]) - valid_providers
         if invalid:
             raise ValueError(f"Invalid free providers: {invalid}")
+
+    # Validate max_workers
+    if "max_workers" in updates:
+        val = int(updates["max_workers"])
+        if not 1 <= val <= 20:
+            raise ValueError("max_workers must be 1-20")
+        updates["max_workers"] = val
+
+    # Validate monthly_paid_budget
+    if "monthly_paid_budget" in updates:
+        val = float(updates["monthly_paid_budget"])
+        if val < 0:
+            raise ValueError("monthly_paid_budget must be >= 0")
+        updates["monthly_paid_budget"] = val
 
     # Load current settings
     async with db_session(config) as db:
@@ -111,7 +146,7 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         except (json.JSONDecodeError, TypeError):
             current_settings = {}
 
-    # Update eco section
+    # Update eco section (immutable pattern)
     eco = current_settings.get("eco", dict(DEFAULT_ECO))
     if not isinstance(eco, dict):
         eco = dict(DEFAULT_ECO)
@@ -119,11 +154,12 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
     for key, value in updates.items():
         if key in DEFAULT_ECO:
             eco[key] = value
-    # Mark as explicit if user changes mode (prevents auto-detect override)
+
+    # Mark as explicit if user changes mode
     if "mode" in updates:
         eco["explicit"] = True
 
-    # Write back (immutable pattern — new dict)
+    # Write back
     new_settings = dict(current_settings)
     new_settings["eco"] = eco
     settings_json = json.dumps(new_settings)
@@ -139,16 +175,13 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
 
 
 async def auto_detect_eco_mode(config: Config, user_id: str) -> str | None:
-    """If free providers are available, auto-enable hybrid mode.
+    """Auto-detect best ECO mode based on available providers.
 
-    Only activates if the user hasn't explicitly set a mode yet.
-    We track this via the 'explicit' flag — set by update_eco_settings when
-    the user runs /eco. If explicit=True, never auto-override.
-    Returns the new mode if changed, or None if no change.
+    Only activates if user hasn't explicitly set a mode.
     """
     current = await get_eco_settings(config, user_id)
     if current.get("explicit"):
-        return None  # User explicitly chose a mode, never override
+        return None
 
     providers = discover_providers()
     if providers:
@@ -158,7 +191,7 @@ async def auto_detect_eco_mode(config: Config, user_id: str) -> str | None:
             {"mode": "hybrid", "free_providers": provider_names},
         )
         logger.info(
-            "Auto-enabled hybrid ECO mode (%d free providers: %s)",
+            "Auto-enabled hybrid ECO (%d free providers: %s)",
             len(providers), ", ".join(provider_names),
         )
         return "hybrid"

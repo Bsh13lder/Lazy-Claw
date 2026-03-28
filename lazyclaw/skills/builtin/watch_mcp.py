@@ -149,11 +149,11 @@ class WatchMCPSkill(BaseSkill):
             )
 
         # Calculate expiration
+        # duration <= 0 means infinite (no expiration, continuous watch)
+        # duration > 0 means watch for N hours then stop
         expires_at = None
         one_shot = False
-        if duration == 0:
-            one_shot = True
-        elif duration > 0:
+        if duration > 0:
             from datetime import datetime, timedelta, timezone
             expires_at = (
                 datetime.now(timezone.utc) + timedelta(hours=duration)
@@ -188,9 +188,7 @@ class WatchMCPSkill(BaseSkill):
         )
 
         # Format response
-        if one_shot:
-            duration_str = "until first new message"
-        elif expires_at:
+        if expires_at:
             duration_str = f"for {duration} hours"
         else:
             duration_str = "indefinitely"

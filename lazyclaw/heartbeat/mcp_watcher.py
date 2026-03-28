@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ def is_mcp_watcher_expired(ctx: dict) -> bool:
 async def check_mcp_watcher(
     ctx: dict,
     mcp_clients: dict,
+    config: Any = None,
+    user_id: str = "",
 ) -> tuple[bool, str | None, dict]:
     """Run a single MCP watcher check.
 
@@ -102,6 +105,17 @@ async def check_mcp_watcher(
         if service in client_name.lower() or service in sid.lower():
             client = c
             break
+
+    # Auto-reconnect: if client missing but config available, try to reconnect
+    if client is None and config and user_id:
+        try:
+            from lazyclaw.mcp.manager import reconnect_service
+            client = await reconnect_service(config, user_id, service)
+            if client is not None:
+                logger.info("MCP watcher: auto-reconnected '%s'", service)
+        except Exception:
+            logger.warning("MCP watcher: auto-reconnect failed for '%s'", service, exc_info=True)
+
     if client is None:
         _names = [getattr(c, "name", sid) for sid, c in mcp_clients.items()]
         logger.warning("MCP watcher: no client for service '%s' (active: %s)", service, _names)
@@ -113,7 +127,11 @@ async def check_mcp_watcher(
     try:
         raw_text = await client.call_tool(tool_name, tool_args)
         data = json.loads(raw_text) if raw_text.strip().startswith(("{", "[")) else {"text": raw_text}
-        _msg_count = len(data.get("messages", [])) if isinstance(data, dict) else 0
+        _msg_count = 0
+        if isinstance(data, dict):
+            _msg_count = len(
+                data.get("messages") or data.get("most_recent_messages") or []
+            )
         logger.info(
             "MCP watcher %s: got %d messages, %d already seen",
             service, _msg_count, len(last_seen),
@@ -151,25 +169,26 @@ def _extract_new_items(
 ) -> list[dict]:
     """Extract new items from MCP tool response, filtering out already-seen ones."""
 
-    # WhatsApp: {"contact": "...", "messages": [...]}
-    # MCP returns: {from, body, time, fromMe} per message
+    # WhatsApp: two response formats depending on whether contact was specified:
+    # 1. With contact: {"contact": "...", "messages": [{from, body, time, fromMe, id}]}
+    # 2. Without contact (overview): {"chats": [...], "most_recent_messages": [{...}]}
+    # Only use actual messages (with Baileys IDs) — NOT the chat overview.
+    # Chat overview lists ALL chats with any history, flooding notifications.
     if service == "whatsapp":
-        messages = []
+        new_msgs: list[dict] = []
+
+        messages: list[dict] = []
         if isinstance(data, dict):
-            messages = data.get("messages", [])
+            messages = data.get("messages") or data.get("most_recent_messages") or []
         elif isinstance(data, list):
             messages = data
 
-        new_msgs = []
         for msg in messages:
-            # Skip our own messages
             if msg.get("fromMe", False):
                 continue
-            # Build unique ID from time + body prefix
-            # MCP returns "time" (formatted string), not "timestamp" (unix)
             msg_time = msg.get("time") or msg.get("timestamp") or "0"
             msg_body = str(msg.get("body", ""))[:30]
-            msg_id = f"{msg_time}_{msg_body}"
+            msg_id = msg.get("id") or f"{msg_time}_{msg_body}"
             if msg_id not in last_seen:
                 new_msgs.append({
                     "id": msg_id,
@@ -177,6 +196,7 @@ def _extract_new_items(
                     "body": msg.get("body", ""),
                     "timestamp": msg_time,
                 })
+
         return new_msgs
 
     # Email: list of {"subject": ..., "from": ..., "id": ...}
@@ -249,6 +269,18 @@ def _whatsapp_sender_name(msg: dict) -> str:
     return phone or "?"
 
 
+def _compact_time(raw: str) -> str:
+    """Extract HH:MM from a timestamp string like '2026-03-28 14:32:05 UTC'."""
+    if not raw or raw == "0":
+        return ""
+    parts = str(raw).split(" ")
+    if len(parts) >= 2 and ":" in parts[1]:
+        return parts[1][:5]
+    if ":" in str(raw):
+        return str(raw)[:5]
+    return ""
+
+
 def _whatsapp_body_preview(msg: dict) -> str:
     """Get a readable preview of a WhatsApp message body.
 
@@ -290,53 +322,67 @@ def _format_notification(
     service: str,
     instruction: str,
 ) -> str:
-    """Format new items into a Telegram notification."""
+    """Format new items into a clean Telegram notification.
+
+    Design: show the LATEST message prominently, then a compact summary
+    of other chats. Not a dump of all unread messages.
+    """
     if service == "whatsapp":
-        # Group messages by sender, show contact name + last message
+        # Group by sender (already resolved names from _formatMsg)
         by_sender: dict[str, list[dict]] = {}
         for msg in items:
-            sender = _whatsapp_sender_name(msg)
+            sender = msg.get("from", "?")
             by_sender.setdefault(sender, []).append(msg)
 
         total = len(items)
-        senders = list(by_sender.keys())
-        sender_names = ", ".join(senders[:3])
-        if len(senders) > 3:
-            sender_names += f" +{len(senders) - 3}"
+        chat_count = len(by_sender)
+        lines: list[str] = []
 
-        lines = [f"WhatsApp — {total} new from {sender_names}\n"]
-        for sender, msgs in list(by_sender.items())[:5]:
-            last_msg = _whatsapp_body_preview(msgs[-1])
-            count = len(msgs)
-            count_label = f" ({count})" if count > 1 else ""
-            lines.append(f"{sender}{count_label}: {last_msg}")
-        if len(by_sender) > 5:
-            lines.append(f"... +{len(by_sender) - 5} more contacts")
-        lines.append(f"\n{total} unread total")
+        if total == 1:
+            # ── Single message: clean and simple ──
+            msg = items[0]
+            sender = msg.get("from", "?")
+            body = _whatsapp_body_preview(msg)
+            t = _compact_time(msg.get("timestamp", ""))
+            time_tag = f"  \u00b7  {t}" if t else ""
+            lines.append(f"\U0001f4ac  {sender}{time_tag}")
+            lines.append(f"\u2514 {body}")
+        else:
+            # ── Multiple messages: show each sender with latest msg ──
+            lines.append(f"\U0001f4ac  WhatsApp  \u00b7  {total} new")
+            lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+            shown = 0
+            for sender, msgs in list(by_sender.items())[:5]:
+                last = msgs[-1]
+                body = _whatsapp_body_preview(last)
+                t = _compact_time(last.get("timestamp", ""))
+                count_tag = f" ({len(msgs)})" if len(msgs) > 1 else ""
+                time_tag = f"  {t}" if t else ""
+                lines.append(f"\n\u25B8 {sender}{count_tag}{time_tag}")
+                lines.append(f"  {body[:100]}")
+                shown += 1
+            if chat_count > 5:
+                lines.append(f"\n  +{chat_count - 5} more chats")
+
         return "\n".join(lines)
 
     if service == "email":
-        lines = [f"Email — {len(items)} new\n"]
-        for item in items[:5]:
-            sender = item.get("from", "?")
-            subj = item.get("subject", "no subject")[:80]
-            lines.append(f"{sender}: {subj}")
-        if len(items) > 5:
-            lines.append(f"... +{len(items) - 5} more")
-        lines.append(f"\n{len(items)} unread total")
+        latest = items[-1]
+        sender = latest.get("from", "?")
+        subj = latest.get("subject", "no subject")[:80]
+        lines = [f"\U0001f4e7  {sender}", f"\u2514 {subj}"]
+        if len(items) > 1:
+            lines.append(f"\n+{len(items) - 1} more")
         return "\n".join(lines)
 
     if service == "instagram":
-        lines = [f"Instagram — {len(items)} new\n"]
-        for item in items[:5]:
-            user = item.get("user", "?")
-            text = item.get("text", "")[:100]
-            ntype = item.get("type", "message")
-            lines.append(f"{user} ({ntype}): {text}")
-        if len(items) > 5:
-            lines.append(f"... +{len(items) - 5} more")
-        lines.append(f"\n{len(items)} unread total")
+        latest = items[-1]
+        user = latest.get("user", "?")
+        text = latest.get("text", "")[:100]
+        ntype = latest.get("type", "notification")
+        lines = [f"\U0001f4f7  {user} ({ntype})", f"\u2514 {text}"]
+        if len(items) > 1:
+            lines.append(f"\n+{len(items) - 1} more")
         return "\n".join(lines)
 
-    # Generic
-    return f"{service} — {len(items)} new item(s) detected"
+    return f"{service} \u2014 {len(items)} new"

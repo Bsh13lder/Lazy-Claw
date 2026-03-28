@@ -102,6 +102,7 @@ BUNDLED_MCPS = {
         "node": "mcp-whatsapp/src/index.js",
         "description": "WhatsApp messaging — no browser (QR auth, web protocol)",
         "optional": True,
+        "persistent": True,  # Never idle-disconnect — WhatsApp needs continuous WS
     },
     "mcp-email": {
         "module": "mcp_email",
@@ -397,6 +398,30 @@ async def disconnect_server(user_id: str, server_id: str) -> None:
 async def reconnect_server(config: Config, user_id: str, server_id: str) -> MCPClient:  # type: ignore[name-defined]  # noqa: F821
     """Disconnect and reconnect to an MCP server."""
     return await connect_server(config, user_id, server_id, force=True)
+
+
+async def reconnect_service(
+    config: Config, user_id: str, service: str,
+) -> "MCPClient | None":  # type: ignore[name-defined]  # noqa: F821
+    """Reconnect an MCP service by its short name (e.g. 'whatsapp' → 'mcp-whatsapp').
+
+    Used by MCP watcher to auto-reconnect disconnected services.
+    Returns the MCPClient if successful, None otherwise.
+    """
+    mcp_name = f"mcp-{service}" if not service.startswith("mcp-") else service
+    if mcp_name not in BUNDLED_MCPS:
+        logger.debug("reconnect_service: '%s' is not a bundled MCP", mcp_name)
+        return None
+    try:
+        server_id = await get_server_id_by_name(config, user_id, mcp_name)
+        if not server_id:
+            logger.warning("reconnect_service: no server_id for '%s'", mcp_name)
+            return None
+        client = await connect_server(config, user_id, server_id)
+        return client
+    except Exception:
+        logger.warning("reconnect_service: failed to reconnect '%s'", mcp_name, exc_info=True)
+        return None
 
 
 async def connect_server_with_oauth(
@@ -708,7 +733,10 @@ async def connect_and_register_bundled_mcps(
         sid, name, fav = row[0], row[1], bool(row[2])
         if not _is_available(name):
             continue
-        if fav:
+        # Persistent bundled MCPs (e.g. WhatsApp) act like favorites:
+        # connect at boot, never idle-disconnect
+        is_persistent = BUNDLED_MCPS.get(name, {}).get("persistent", False)
+        if fav or is_persistent:
             favorites.append((sid, name))
             _favorite_server_ids.add(sid)
         else:

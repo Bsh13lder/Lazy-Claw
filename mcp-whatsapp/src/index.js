@@ -205,11 +205,27 @@ function acquireLock() {
     if (fs.existsSync(LOCK_FILE)) {
       const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
       const age = Date.now() - lockData.time;
-      // Lock is stale if older than 60s (process probably crashed)
-      if (age < 60000) {
+      // Lock is stale if older than 30s (process probably crashed)
+      if (age < 30000) {
         const otherPid = lockData.pid;
         // Check if process is still alive
-        try { process.kill(otherPid, 0); return false; } catch (_) { /* dead */ }
+        try {
+          process.kill(otherPid, 0);
+          // Process alive — check if it's orphaned (ppid=1)
+          try {
+            const { execSync } = require("child_process");
+            const ppid = execSync(`ps -o ppid= -p ${otherPid}`, { timeout: 2000 }).toString().trim();
+            if (ppid === "1") {
+              // Orphaned zombie — kill it and take over
+              log(`Killing orphaned WhatsApp process (pid=${otherPid}, ppid=1)`);
+              try { process.kill(otherPid, "SIGTERM"); } catch (_) {}
+            } else {
+              return false; // Legitimate process holds the lock
+            }
+          } catch (_) {
+            return false; // Can't check ppid — assume legitimate
+          }
+        } catch (_) { /* dead — take over */ }
       }
     }
     fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() }));
@@ -230,7 +246,31 @@ process.on("exit", releaseLock);
 process.on("SIGINT", () => { releaseLock(); process.exit(0); });
 process.on("SIGTERM", () => { releaseLock(); process.exit(0); });
 
+/** Kill any orphaned node processes running this same script (not us). */
+function killOrphanedProcesses() {
+  let killed = false;
+  try {
+    const { execSync } = require("child_process");
+    const scriptPath = "mcp-whatsapp/src/index.js";
+    // Find all node processes running this script
+    const out = execSync(`pgrep -f "${scriptPath}" 2>/dev/null || true`, { timeout: 3000 }).toString().trim();
+    for (const line of out.split("\n")) {
+      const pid = parseInt(line.trim(), 10);
+      if (pid && pid !== process.pid) {
+        log(`Killing orphaned WhatsApp MCP process (pid=${pid})`);
+        try { process.kill(pid, "SIGKILL"); killed = true; } catch (_) {}
+      }
+    }
+  } catch (_) { /* pgrep not available or failed — skip */ }
+  // After killing orphans, remove stale lock so we can acquire it
+  if (killed) {
+    try { fs.unlinkSync(LOCK_FILE); } catch (_) {}
+  }
+}
+
 async function startWhatsApp(force = false) {
+  // Clean up any orphaned instances of this script first
+  killOrphanedProcesses();
   // Prevent 440 loop: only one process should connect at a time
   if (!force && !acquireLock()) {
     log("Another WhatsApp MCP process holds the lock — running cache-only (no new connection)");
@@ -612,6 +652,7 @@ function _formatMsg(msg) {
   const ts = Number(msg.messageTimestamp || 0);
   const time = ts > 0 ? new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : "unknown";
   return {
+    id: msg.key.id,
     from: msg.key.fromMe ? "me" : (contacts.get(msg.key.remoteJid)?.name || msg.pushName || msg.key.remoteJid),
     body,
     time,
@@ -825,21 +866,18 @@ async function handleRead(args) {
       return ok({ chats: [], messages: [], note: "No messages cached yet. Send or receive a message first." });
     }
 
-    // Also include messages from the most recent chat
-    const topJid = [...messageStore.entries()]
-      .filter(([j]) => j !== "status@broadcast")
-      .sort(([, a], [, b]) => {
-        const ta = Math.max(...a.map(m => Number(m.messageTimestamp || 0)));
-        const tb = Math.max(...b.map(m => Number(m.messageTimestamp || 0)));
-        return tb - ta;
-      })[0]?.[0];
-
-    let recentMessages = [];
-    if (topJid) {
-      const stored = _getMessages(topJid);
-      const sorted = [...stored].sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
-      recentMessages = sorted.slice(0, 5).map(_formatMsg);
+    // Collect recent messages from ALL chats (not just the top one).
+    // This gives the watcher cross-chat coverage for notifications.
+    let allRecent = [];
+    for (const [jid, msgs] of messageStore) {
+      if (jid === "status@broadcast") continue;
+      for (const msg of msgs) {
+        allRecent.push(msg);
+      }
     }
+    // Sort by timestamp descending, take the most recent ones
+    allRecent.sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
+    const recentMessages = allRecent.slice(0, limit * 2).map(_formatMsg);
 
     return ok({
       chats: overview,

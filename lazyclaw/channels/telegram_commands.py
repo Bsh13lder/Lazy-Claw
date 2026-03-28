@@ -30,6 +30,7 @@ BOT_COMMANDS = [
     BotCommand("usage", "\U0001f4b0 Token costs"),
     BotCommand("eco", "\U0001f331 AI mode"),
     BotCommand("model", "\U0001f9e0 Show/change models"),
+    BotCommand("watch", "\U0001f514 Watchers (WhatsApp/Email)"),
     BotCommand("mcp", "\U0001f50c MCP servers"),
     BotCommand("key", "\U0001f511 API keys"),
     BotCommand("history", "\U0001f4ac Recent messages"),
@@ -75,6 +76,7 @@ class TelegramCommands:
             "tasks": self._handle_tasks, "cancel": self._handle_cancel,
             "history": self._handle_history, "wipe": self._handle_wipe,
             "nuke": self._handle_nuke, "mcp": self._handle_mcp,
+            "watch": self._handle_watch,
             "whatsapp": self._handle_platform, "instagram": self._handle_platform,
             "email": self._handle_platform,
             "survival": self._handle_survival, "profile": self._handle_profile,
@@ -179,6 +181,7 @@ class TelegramCommands:
             "/history \u2014 \U0001f4ac Recent messages\n"
             "/wipe \u2014 \U0001f9f9 Clear history\n\n"
             "\U0001f50c <b>Integrations</b>\n"
+            "/watch \u2014 \U0001f514 Watchers (create/list/stop)\n"
             "/mcp \u2014 MCP servers\n"
             "/whatsapp \u2014 WhatsApp setup/status\n"
             "/instagram \u2014 Instagram setup/status\n"
@@ -186,7 +189,9 @@ class TelegramCommands:
             "\U0001f4bc <b>Survival</b>\n"
             "/survival \u2014 Job hunting on/off\n"
             "/profile \u2014 \U0001f464 Freelance profile\n\n"
-            "\U0001f6e1 <b>Admin</b>\n"
+            "\U0001f6e1 <b>System</b>\n"
+            "/local \u2014 \U0001f9e0 Local AI servers\n"
+            "/ram \u2014 \U0001f4be RAM usage\n"
             "/screen \u2014 \U0001f5a5 Desktop screenshot / VNC\n"
             "/browser \u2014 \U0001f310 Browser control\n"
             "/doctor \u2014 \U0001fa7a Diagnostics\n"
@@ -647,30 +652,99 @@ class TelegramCommands:
     # -- /tasks ------------------------------------------------------------
 
     async def _handle_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._auth(update):
+        user_id = await self._auth(update)
+        if not user_id:
             return
+
+        sections: list[str] = []
+
+        # Active agent tasks
         if self._team_lead:
             status = self._team_lead.format_status()
             if status:
-                await self._reply(update, f"\u26a1 <b>Tasks</b>\n━━━━━━━━━━━━\n\n{status}", html=False)
-                return
+                sections.append(f"\U0001f504 <b>Running</b>\n{status}")
+
         if self._task_runner:
             try:
-                user_id = await self._resolve_user(str(update.effective_chat.id))
                 tasks = self._task_runner.list_all(user_id)
-                if not tasks:
-                    await self._reply(update, "\u26a1 No tasks running.")
-                    return
-                lines = ["\u26a1 <b>Tasks</b>\n━━━━━━━━━━━━\n"]
-                icons = {"running": "\U0001f504", "done": "\u2705", "failed": "\u274c"}
-                for t in tasks:
-                    icon = icons.get(t.get("status", ""), "\u2753")
-                    lines.append(f"  {icon} {t.get('name', 'unnamed')}")
-                await self._reply(update, "\n".join(lines))
-            except Exception as e:
-                await self._reply(update, f"\u274c Failed: {e}")
-        else:
-            await self._reply(update, "\u26a1 No tasks running.")
+                if tasks:
+                    icons = {"running": "\U0001f504", "done": "\u2705", "failed": "\u274c"}
+                    task_lines = []
+                    for t in tasks:
+                        icon = icons.get(t.get("status", ""), "\u2753")
+                        task_lines.append(f"  {icon} {t.get('name', 'unnamed')}")
+                    sections.append("\n".join(task_lines))
+            except Exception:
+                pass
+
+        # Watcher jobs (WhatsApp, Email, etc.)
+        try:
+            import json as _json
+            from datetime import datetime as _dt, timezone as _tz
+            from lazyclaw.heartbeat.orchestrator import list_jobs
+
+            jobs = await list_jobs(self._config, user_id)
+            watchers = [j for j in jobs if j.get("job_type") == "watcher"
+                        and j.get("status") in ("active", "paused")]
+            if watchers:
+                watcher_lines = ["\U0001f514 <b>Watchers</b>"]
+                for w in watchers:
+                    name = w.get("name", "?")
+                    status = w.get("status", "?")
+                    icon = "\u2705" if status == "active" else "\u23f8"
+
+                    # Parse context for details
+                    raw_ctx = w.get("context", "{}")
+                    try:
+                        ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
+                    except (ValueError, TypeError):
+                        ctx = {}
+
+                    service = ctx.get("service", "")
+                    interval = int(ctx.get("check_interval", 120)) // 60
+                    last_check = ctx.get("last_check", 0)
+                    seen = len(ctx.get("last_seen_ids", []))
+
+                    time_str = ""
+                    if last_check and last_check > 0:
+                        last_dt = _dt.fromtimestamp(last_check, tz=_tz.utc)
+                        time_str = last_dt.strftime("%H:%M")
+
+                    details = f"every {interval}m"
+                    if time_str:
+                        details += f" \u2022 last {time_str}"
+                    if seen:
+                        details += f" \u2022 {seen} seen"
+
+                    watcher_lines.append(f"  {icon} {name}")
+                    watcher_lines.append(f"      <i>{details}</i>")
+
+                sections.append("\n".join(watcher_lines))
+
+            # Cron jobs
+            crons = [j for j in jobs if j.get("job_type") == "cron"
+                     and j.get("status") in ("active", "paused")]
+            if crons:
+                cron_lines = ["\u23f0 <b>Scheduled</b>"]
+                for c in crons:
+                    name = c.get("name", "?")
+                    cron_expr = c.get("cron_expression", "")
+                    icon = "\u2705" if c.get("status") == "active" else "\u23f8"
+                    cron_lines.append(f"  {icon} {name}")
+                    if cron_expr:
+                        cron_lines.append(f"      <i>{cron_expr}</i>")
+                sections.append("\n".join(cron_lines))
+
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).debug("Tasks: failed to list jobs: %s", exc)
+
+        if not sections:
+            await self._reply(update, "\u26a1 No tasks or watchers active.")
+            return
+
+        header = "\u26a1 <b>Tasks &amp; Watchers</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        await self._reply(update, header + "\n\n".join(sections))
 
     # -- /cancel -----------------------------------------------------------
 
@@ -775,15 +849,31 @@ class TelegramCommands:
             if not servers:
                 await self._reply(update, "\U0001f50c No MCP servers registered.")
                 return
-            lines = ["\U0001f50c <b>MCP Servers</b>\n━━━━━━━━━━━━\n"]
+
+            connected_count = sum(1 for s in servers if s["id"] in _active_clients)
+            lines = [
+                f"\U0001f50c <b>MCP Servers</b>  ({connected_count}/{len(servers)} online)",
+                "━━━━━━━━━━━━━━━━━━",
+            ]
             for s in servers:
                 name = s.get("name", "?")
-                fav = "\u2b50 " if s.get("favorite") else "  "
-                connected = " \u2705" if s["id"] in _active_clients else ""
+                sid = s["id"]
+                fav = "\u2b50" if s.get("favorite") else "  "
+                is_connected = sid in _active_clients
+                status = "\u2705" if is_connected else "\u26aa"
                 desc = BUNDLED_MCPS.get(name, {}).get("description", "")
-                lines.append(f"{fav}<b>{name}</b>{connected}")
+
+                lines.append(f"{fav} {status} <b>{name}</b>")
                 if desc:
-                    lines.append(f"    <i>{desc[:55]}</i>")
+                    lines.append(f"      <i>{desc[:60]}</i>")
+
+            lines.append("")
+            lines.append(
+                "\U0001f527 <b>Commands:</b>\n"
+                "<code>/mcp connect NAME</code>\n"
+                "<code>/mcp disconnect NAME</code>\n"
+                "<code>/mcp fav NAME</code>  \u2022  <code>/mcp unfav NAME</code>"
+            )
             await self._reply(update, "\n".join(lines))
             return
         subcmd = args[0].lower()
@@ -815,6 +905,128 @@ class TelegramCommands:
                 await self._reply(update, "\U0001f50c Subcommands: fav, unfav, connect, disconnect")
         except Exception as e:
             await self._reply(update, f"\u274c Failed: {e}")
+
+    # -- /watch ------------------------------------------------------------
+
+    async def _handle_watch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        args = context.args or []
+        subcmd = args[0].lower() if args else ""
+
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        from lazyclaw.heartbeat.orchestrator import list_jobs, delete_job
+
+        jobs = await list_jobs(self._config, user_id)
+        watchers = [j for j in jobs if j.get("job_type") == "watcher"
+                    and j.get("status") in ("active", "paused")]
+
+        # /watch stop [name] — stop a watcher
+        if subcmd == "stop":
+            target = " ".join(args[1:]).lower() if len(args) > 1 else ""
+            if not watchers:
+                await self._reply(update, "\U0001f514 No active watchers to stop.")
+                return
+            # Find match
+            match = None
+            for w in watchers:
+                wname = (w.get("name") or "").lower()
+                if not target or target in wname:
+                    match = w
+                    break
+            if not match:
+                await self._reply(update, f"\u274c No watcher matching '{target}' found.")
+                return
+            await delete_job(self._config, user_id, match["id"])
+            await self._reply(update, f"\U0001f6d1 Stopped: <b>{match.get('name', '?')}</b>")
+            return
+
+        # /watch whatsapp [minutes] — create a new watcher
+        if subcmd in ("whatsapp", "wa", "email", "instagram", "ig"):
+            service = {"wa": "whatsapp", "ig": "instagram"}.get(subcmd, subcmd)
+            interval_min = 2
+            if len(args) > 1:
+                try:
+                    interval_min = max(1, int(args[1]))
+                except ValueError:
+                    pass
+
+            # Check if already watching this service
+            already = any(service in (w.get("name") or "").lower() for w in watchers)
+            if already:
+                await self._reply(
+                    update,
+                    f"\u26a0\ufe0f Already watching {service}. "
+                    f"Use <code>/watch stop</code> first."
+                )
+                return
+
+            # Create watcher via skill
+            from lazyclaw.skills.builtin.watch_mcp import WatchMCPSkill
+            skill = WatchMCPSkill(config=self._config)
+            result = await skill.execute(user_id, {
+                "service": service,
+                "check_interval_minutes": interval_min,
+                "duration_hours": -1,  # Infinite
+            })
+            await self._reply(update, f"\U0001f514 {result}")
+            return
+
+        # /watch (no args) — list active watchers
+        if not watchers:
+            await self._reply(
+                update,
+                "\U0001f514 <b>Watchers</b>\n"
+                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+                "No active watchers.\n\n"
+                "\U0001f527 <b>Commands:</b>\n"
+                "<code>/watch whatsapp</code> \u2014 watch WhatsApp (2 min)\n"
+                "<code>/watch whatsapp 1</code> \u2014 watch every 1 min\n"
+                "<code>/watch email</code> \u2014 watch Email\n"
+                "<code>/watch stop</code> \u2014 stop a watcher"
+            )
+            return
+
+        lines = [
+            "\U0001f514 <b>Watchers</b>",
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        ]
+        for w in watchers:
+            name = w.get("name", "?")
+            status = w.get("status", "?")
+            icon = "\u2705" if status == "active" else "\u23f8"
+
+            raw_ctx = w.get("context", "{}")
+            try:
+                ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
+            except (ValueError, TypeError):
+                ctx = {}
+
+            service = ctx.get("service", "")
+            interval = int(ctx.get("check_interval", 120)) // 60
+            last_check = ctx.get("last_check", 0)
+            seen = len(ctx.get("last_seen_ids", []))
+
+            time_str = ""
+            if last_check and last_check > 0:
+                last_dt = _dt.fromtimestamp(last_check, tz=_tz.utc)
+                time_str = last_dt.strftime("%H:%M")
+
+            details = f"every {interval}m"
+            if time_str:
+                details += f" \u2022 last {time_str}"
+            if seen:
+                details += f" \u2022 {seen} seen"
+
+            lines.append(f"\n{icon} <b>{name}</b>")
+            lines.append(f"    {details}")
+
+        lines.append(
+            "\n\n\U0001f527 <code>/watch stop</code> \u2014 stop a watcher"
+        )
+        await self._reply(update, "\n".join(lines))
 
     # -- /whatsapp, /instagram, /email -------------------------------------
 

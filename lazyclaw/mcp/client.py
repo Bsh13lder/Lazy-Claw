@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -10,6 +11,18 @@ logger = logging.getLogger(__name__)
 _ALLOWED_MCP_COMMANDS = frozenset({
     "python", "python3", "node", "npx", "uvx", "docker",
 })
+
+
+def _get_child_pids(parent_pid: int) -> set[int]:
+    """Get PIDs of direct child processes (macOS/Linux)."""
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-P", str(parent_pid)],
+            text=True, timeout=2,
+        )
+        return {int(line) for line in out.strip().split("\n") if line.strip()}
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return set()
 
 
 class MCPClient:
@@ -32,7 +45,8 @@ class MCPClient:
         self._transport_ctx: Any | None = None
         self._session_ctx: Any | None = None
         self._child_process: Any | None = None  # Track stdio subprocess for cleanup
-        self._devnull: Any | None = None  # Suppress child stderr; closed in _close_transport
+        self._child_pid: int | None = None  # PID of child process (robust tracking)
+        self._stderr_log: Any | None = None  # MCP stderr log file handle
 
     @property
     def server_id(self) -> str:
@@ -179,19 +193,23 @@ class MCPClient:
             args=self._config.get("args", []),
             env=child_env,
         )
-        # Suppress child process stderr (MCP INFO spam like "Processing request of type...")
-        self._devnull = open(os.devnull, "w")
-        self._transport_ctx = stdio_client(params, errlog=self._devnull)
-        read_stream, write_stream = await self._transport_ctx.__aenter__()
+        # Log MCP stderr to file instead of suppressing it
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+        os.makedirs(log_dir, exist_ok=True)
+        safe_name = self._name.replace("/", "_").replace(" ", "_")
+        self._stderr_log = open(os.path.join(log_dir, f"mcp-{safe_name}.stderr.log"), "a")
+        self._transport_ctx = stdio_client(params, errlog=self._stderr_log)
 
-        # Grab the child process so we can force-kill on disconnect
-        # (prevents zombie processes when __aexit__ fails)
-        ctx = self._transport_ctx
-        if hasattr(ctx, "ag_frame") and ctx.ag_frame:
-            local_vars = ctx.ag_frame.f_locals
-            proc = local_vars.get("process")
-            if proc is not None:
-                self._child_process = proc
+        # Track child PIDs before/after __aenter__ to find the spawned process
+        my_pid = os.getpid()
+        pids_before = _get_child_pids(my_pid)
+        read_stream, write_stream = await self._transport_ctx.__aenter__()
+        pids_after = _get_child_pids(my_pid)
+
+        new_pids = pids_after - pids_before
+        if new_pids:
+            self._child_pid = new_pids.pop()
+            logger.debug("MCP %s: tracked child PID %d", self._name, self._child_pid)
 
         return read_stream, write_stream
 
@@ -236,9 +254,9 @@ class MCPClient:
             self._transport_ctx = None
             self._read_stream = None
             self._write_stream = None
-        if self._devnull is not None:
-            self._devnull.close()
-            self._devnull = None
+        if self._stderr_log is not None:
+            self._stderr_log.close()
+            self._stderr_log = None
 
         # Force-kill the child process if transport cleanup missed it
         # (prevents zombie processes — root cause of 100+ orphaned MCPs)
@@ -255,3 +273,15 @@ class MCPClient:
                     logger.debug("Force-killed MCP child process (pid=%s)", proc.pid)
             except Exception as exc:
                 logger.debug("Error killing MCP child process: %s", exc)
+
+        # PID-based fallback: kill child by PID if process object wasn't captured
+        child_pid = self._child_pid
+        self._child_pid = None
+        if child_pid is not None and proc is None:
+            try:
+                os.kill(child_pid, 0)  # Check if alive
+                import signal
+                os.kill(child_pid, signal.SIGTERM)
+                logger.debug("Force-killed MCP child by PID %d", child_pid)
+            except OSError:
+                pass  # Already dead — good

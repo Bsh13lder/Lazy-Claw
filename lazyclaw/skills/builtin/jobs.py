@@ -6,12 +6,30 @@ through conversation. Uses the existing heartbeat daemon for execution.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_watcher_context(raw: str) -> dict:
+    """Parse watcher context JSON, returning empty dict on failure.
+
+    Context is decrypted by list_jobs/_row_to_dict before reaching here,
+    but may still be encrypted if decryption failed or field is raw.
+    """
+    if not raw:
+        return {}
+    # Skip encrypted values (decryption should have happened in list_jobs)
+    if isinstance(raw, str) and raw.startswith("enc:"):
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 class ScheduleJobSkill(BaseSkill):
@@ -260,6 +278,31 @@ class ListJobsSkill(BaseSkill):
                 lines.append(f"  {status_icon} {name}")
                 lines.append(f"    Type: Reminder (one-time)")
                 lines.append(f"    Fires: {next_run}")
+            elif job_type == "watcher":
+                # Watcher jobs store state in context JSON, not DB fields
+                ctx = _parse_watcher_context(job.get("context", "{}"))
+                interval_sec = ctx.get("check_interval", 120)
+                interval_min = int(interval_sec) // 60
+                last_check = ctx.get("last_check", 0)
+                service = ctx.get("service", "?")
+                seen_count = len(ctx.get("last_seen_ids", []))
+                expires = ctx.get("expires_at", "")
+
+                if last_check and last_check > 0:
+                    last_dt = datetime.fromtimestamp(last_check, tz=timezone.utc)
+                    last_str = last_dt.strftime("%Y-%m-%d %H:%M UTC")
+                else:
+                    last_str = "never"
+
+                expires_str = ""
+                if expires:
+                    expires_str = f"\n    Expires: {expires[:19]} UTC"
+
+                lines.append(f"  {status_icon} {name}")
+                lines.append(f"    Type: MCP Watcher ({service})")
+                lines.append(f"    Check every: {interval_min} min")
+                lines.append(f"    Last check: {last_str}")
+                lines.append(f"    Seen messages: {seen_count}{expires_str}")
             else:
                 cron = job.get("cron_expression", "?")
                 last_run = job.get("last_run", "never")

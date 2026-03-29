@@ -27,6 +27,11 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "mlx-community/Qwen3.5-9B-8bit": {"input": 0.0, "output": 0.0},
     "mlx-community/Nanbeige4.1-3B-8bit": {"input": 0.0, "output": 0.0},
     "mlx-community/Nanbeige4.1-3B-4bit": {"input": 0.0, "output": 0.0},
+    # Claude Code CLI — subscription, no per-token cost
+    "claude-cli": {"input": 0.0, "output": 0.0},
+    "claude-cli (sonnet)": {"input": 0.0, "output": 0.0},
+    "claude-cli (opus)": {"input": 0.0, "output": 0.0},
+    "claude-cli (haiku)": {"input": 0.0, "output": 0.0},
     # Local Ollama models — $0 always
     "qwen3.5:9b": {"input": 0.0, "output": 0.0},
     "nanbeige4.1:3b": {"input": 0.0, "output": 0.0},

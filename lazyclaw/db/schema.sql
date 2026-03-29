@@ -211,6 +211,33 @@ CREATE TABLE IF NOT EXISTS job_queue (
     processed_at TEXT
 );
 
+-- Task manager (second brain)
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    description TEXT,
+    category TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'todo',
+    owner TEXT NOT NULL DEFAULT 'user',
+    due_date TEXT,
+    reminder_at TEXT,
+    reminder_job_id TEXT,
+    recurring TEXT,
+    tags TEXT,
+    nag_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_user_status
+ON tasks(user_id, status, due_date);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_user_reminder
+ON tasks(user_id, reminder_at);
+
 -- Permissions system
 
 CREATE TABLE IF NOT EXISTS approval_requests (

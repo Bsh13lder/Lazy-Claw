@@ -29,6 +29,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Counter for human-readable task names
+_task_counter = 0
+
+
+def _short_name(instruction: str, task_id: str) -> str:
+    """Generate a short human-readable name from the instruction.
+
+    Examples: 'Task #1: check bitcoin price', 'Task #2: send email'.
+    """
+    global _task_counter
+    _task_counter += 1
+
+    # Extract first meaningful words (skip [JOB:...] prefixes)
+    text = instruction.strip()
+    if text.startswith("["):
+        bracket_end = text.find("]")
+        if bracket_end > 0:
+            text = text[bracket_end + 1:].strip()
+
+    # Take first ~40 chars, break at word boundary
+    words = text.split()[:8]
+    short = " ".join(words)
+    if len(short) > 40:
+        short = short[:37] + "..."
+
+    return f"Task #{_task_counter}: {short}" if short else f"Task #{_task_counter}"
+
+
+# Module-level singleton — set in TaskRunner.__init__.
+# Skills use this to access the runner without constructor injection.
+_task_runner_instance = None  # set to TaskRunner instance at runtime
+
 # Concurrency limits — agents are async coroutines (~50KB each), not processes
 MAX_GLOBAL_TASKS = 10
 MAX_PER_USER_TASKS = 10
@@ -63,6 +95,10 @@ class TaskRunner:
         self._default_callback = default_callback
         self._team_lead = team_lead
 
+        # Set module-level singleton for skill access
+        global _task_runner_instance
+        _task_runner_instance = self
+
         # In-memory tracking (cleaned up on completion)
         self._running: dict[str, asyncio.Task] = {}
         self._task_users: dict[str, str] = {}
@@ -96,7 +132,7 @@ class TaskRunner:
             )
 
         task_id = str(uuid4())
-        task_name = name or f"task_{task_id[:8]}"
+        task_name = name or _short_name(instruction, task_id)
 
         # Store in DB (encrypted)
         key = derive_server_key(self._config.server_secret, user_id)

@@ -669,6 +669,7 @@ class TelegramCommands:
             if status:
                 sections.append(f"\U0001f504 <b>Running</b>\n{status}")
 
+        _cancel_buttons = []
         if self._task_runner:
             try:
                 tasks = self._task_runner.list_all(user_id)
@@ -677,7 +678,16 @@ class TelegramCommands:
                     task_lines = []
                     for t in tasks:
                         icon = icons.get(t.get("status", ""), "\u2753")
-                        task_lines.append(f"  {icon} {t.get('name', 'unnamed')}")
+                        name = t.get("name", "unnamed")
+                        task_lines.append(f"  {icon} {name}")
+                        # Add cancel button for running tasks
+                        if t.get("status") == "running":
+                            _cancel_buttons.append(
+                                [InlineKeyboardButton(
+                                    f"\U0001f6d1 Cancel: {name[:30]}",
+                                    callback_data=f"bgtask:cancel:{t['id']}",
+                                )]
+                            )
                     sections.append("\n".join(task_lines))
             except Exception:
                 pass
@@ -749,29 +759,49 @@ class TelegramCommands:
             return
 
         header = "\u26a1 <b>Tasks &amp; Watchers</b>\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-        await self._reply(update, header + "\n\n".join(sections))
+        text = header + "\n\n".join(sections)
+        if _cancel_buttons:
+            keyboard = InlineKeyboardMarkup(_cancel_buttons)
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await self._reply(update, text)
 
     # -- /cancel -----------------------------------------------------------
 
     async def _handle_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._auth(update):
+        user_id = await self._auth(update)
+        if not user_id:
             return
+
+        cancelled = 0
         target = " ".join(context.args) if context.args else ""
+
+        # Cancel foreground tasks (TeamLead)
         if self._team_lead:
             task_id = self._team_lead.find_cancel_target(target) if target else None
-            if not task_id:
-                active = self._team_lead.active_tasks
-                if active:
-                    for t in active:
-                        self._team_lead.cancel(t.id)
-                    await self._reply(update, f"\U0001f6d1 Cancelled {len(active)} task(s).")
-                else:
-                    await self._reply(update, "\U0001f6d1 Nothing to cancel.")
-            else:
+            if task_id:
                 self._team_lead.cancel(task_id)
-                await self._reply(update, f"\U0001f6d1 Cancelled: <code>{task_id[:8]}</code>")
+                cancelled += 1
+            else:
+                for t in self._team_lead.active_tasks:
+                    self._team_lead.cancel(t.id)
+                    cancelled += 1
+
+        # Cancel background tasks (TaskRunner) — the actual asyncio tasks
+        if self._task_runner:
+            running = self._task_runner.list_running(user_id)
+            for task_info in running:
+                tid = task_info.get("id", "")
+                if target and target.lower() not in (task_info.get("name", "")).lower():
+                    continue
+                ok = await self._task_runner.cancel(tid, user_id)
+                if ok:
+                    cancelled += 1
+
+        if cancelled:
+            await self._reply(update, f"\U0001f6d1 Cancelled {cancelled} task(s).")
         else:
-            await self._reply(update, "\U0001f6d1 No task tracker available.")
+            await self._reply(update, "\U0001f6d1 Nothing to cancel.")
 
     # -- /history ----------------------------------------------------------
 
@@ -1458,6 +1488,98 @@ class TelegramCommands:
             else:
                 self._adapter._allowed_chats.discard(value)
                 await query.edit_message_text(f"\u2705 Removed admin: {value}")
+
+        elif action == "bgtask":
+            # Background task cancel from /tasks inline buttons
+            if value.startswith("cancel:"):
+                task_id = value.split(":", 1)[1]
+                if self._task_runner:
+                    ok = await self._task_runner.cancel(task_id, user_id)
+                    if ok:
+                        await query.edit_message_text("\U0001f6d1 Task cancelled.")
+                    else:
+                        await query.edit_message_text("\u274c Task not found or already finished.")
+                else:
+                    await query.edit_message_text("\u274c No task runner available.")
+
+        elif action == "task":
+            # Task manager inline buttons: done, snooze, tomorrow
+            try:
+                sub_action, task_id = value.split(":", 1)
+            except ValueError:
+                return
+            try:
+                from lazyclaw.tasks.store import complete_task, update_task
+                from datetime import timedelta
+
+                if sub_action == "done":
+                    # Get task name before completing
+                    from lazyclaw.tasks.store import get_task
+                    task_info = await get_task(self._config, user_id, task_id)
+                    task_title = task_info.get("title", "Task") if task_info else "Task"
+
+                    ok = await complete_task(self._config, user_id, task_id)
+                    if ok:
+                        _now = datetime.now(timezone.utc)
+                        try:
+                            import time as _time
+                            _off = -_time.timezone if _time.daylight == 0 else -_time.altzone
+                            _local = _now.astimezone(timezone(timedelta(seconds=_off)))
+                            _time_str = _local.strftime("%H:%M")
+                        except Exception:
+                            _time_str = _now.strftime("%H:%M UTC")
+                        await query.edit_message_text(
+                            f"\u2705 Done: {task_title}\n"
+                            f"Completed at {_time_str}"
+                        )
+                    else:
+                        await query.edit_message_text("\u274c Failed to complete.")
+                elif sub_action == "snooze":
+                    snooze_dt = datetime.now(timezone.utc) + timedelta(hours=1)
+                    await update_task(
+                        self._config, user_id, task_id,
+                        reminder_at=snooze_dt.isoformat(), nag_count=0,
+                    )
+                    try:
+                        import time as _time
+                        _off = -_time.timezone if _time.daylight == 0 else -_time.altzone
+                        _local = snooze_dt.astimezone(timezone(timedelta(seconds=_off)))
+                        _snooze_str = _local.strftime("%H:%M")
+                    except Exception:
+                        _snooze_str = snooze_dt.strftime("%H:%M UTC")
+                    await query.edit_message_text(
+                        f"\u23f0 Snoozed — next reminder at {_snooze_str}"
+                    )
+                elif sub_action == "tomorrow":
+                    # Tomorrow 9am in LOCAL time → convert to UTC
+                    try:
+                        import time as _time
+                        _off = -_time.timezone if _time.daylight == 0 else -_time.altzone
+                        _local_tz = timezone(timedelta(seconds=_off))
+                        _local_tomorrow = (
+                            datetime.now(_local_tz).replace(
+                                hour=9, minute=0, second=0, microsecond=0,
+                            ) + timedelta(days=1)
+                        )
+                        tomorrow_9am = _local_tomorrow.astimezone(
+                            timezone.utc
+                        ).isoformat()
+                    except Exception:
+                        tomorrow_9am = (
+                            datetime.now(timezone.utc).replace(
+                                hour=7, minute=0, second=0, microsecond=0,
+                            ) + timedelta(days=1)
+                        ).isoformat()
+                    await update_task(
+                        self._config, user_id, task_id,
+                        reminder_at=tomorrow_9am,
+                        due_date=tomorrow_9am[:10],
+                        nag_count=0,
+                    )
+                    await query.edit_message_text("\U0001f4c5 Moved to tomorrow 9:00 AM")
+            except Exception as exc:
+                logger.warning("Task callback failed: %s", exc, exc_info=True)
+                await query.edit_message_text(f"\u274c Error: {exc}")
 
     # -- Pinned status (auto-refresh) --------------------------------------
 

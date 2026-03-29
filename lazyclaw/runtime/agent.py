@@ -84,6 +84,35 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "email": ["email", "gmail", "mail", "inbox"],
 }
 
+# Task manager keywords → inject task skills directly
+_TASK_KEYWORDS = frozenset({
+    # Core task words
+    "task", "tasks", "todo", "to-do", "to do",
+    # Reminder triggers (including typos)
+    "remind", "reminder", "remember", "remeber", "rember", "reminde",
+    "remind me", "remember me", "don't forget", "dont forget",
+    # Time-based triggers (catches "after 10 minutes", "in 30 minutes")
+    " minutes", " minute", " hours", " hour",
+    # Task management
+    "briefing", "daily briefing", "what do i have", "my tasks",
+    "overdue", "upcoming", "someday", "complete task", "done with",
+    "add task", "new task", "schedule", "deadline",
+    # AI tasks
+    "your job", "your task", "your todo", "your todos",
+    "do your todos", "do the todo", "work on your", "execute your",
+    "do todo list", "work todos", "ai tasks", "agent tasks",
+    # Stop/cancel
+    "stop tasks", "stop background", "cancel task", "cancel all",
+    "stop all", "cancel background", "stop running",
+})
+
+# Task skill names to inject when task keywords detected
+_TASK_TOOL_NAMES = frozenset({
+    "add_task", "list_tasks", "complete_task", "update_task",
+    "delete_task", "daily_briefing", "work_todos", "stop_background",
+    "set_reminder", "schedule_job", "list_jobs",
+})
+
 # Survival/job keywords → inject search_jobs + survival tools directly
 _SURVIVAL_KEYWORDS = frozenset({
     "jobs", "jobspy", "freelance", "gig", "gigs",
@@ -658,10 +687,43 @@ class Agent:
                                     "Timeout connecting %s on-demand (>15s)", mcp_name,
                                 )
                             except Exception:
-                                logger.warning(
-                                    "Failed on-demand connect for %s",
-                                    mcp_name, exc_info=True,
+                                # Retry once — MCP SDK has a cancel scope race
+                                # that fails intermittently on first connect
+                                logger.info(
+                                    "First connect for %s failed, retrying...",
+                                    mcp_name,
                                 )
+                                try:
+                                    await asyncio.sleep(0.5)
+                                    client = await asyncio.wait_for(
+                                        connect_server(self.config, user_id, sid),
+                                        timeout=15,
+                                    )
+                                    tools_list = await client.list_tools()
+                                    await cache_tool_schemas(self.config, mcp_name, tools_list)
+                                    count = await register_mcp_tools(
+                                        client, self.registry,
+                                        config=self.config, user_id=user_id,
+                                    )
+                                    logger.info(
+                                        "On-demand connected %s on retry: %d tools",
+                                        mcp_name, count,
+                                    )
+                                    for tool_info in self.registry.list_mcp_tools():
+                                        func = tool_info.get("function", {})
+                                        tname = func.get("name", "").lower()
+                                        tdesc = func.get("description", "").lower()
+                                        if ch in tname or ch in tdesc:
+                                            schema = self.registry.get_tool_schema(
+                                                func.get("name", ""),
+                                            )
+                                            if schema is not None:
+                                                _channel_tools.append(schema)
+                                except Exception:
+                                    logger.warning(
+                                        "Failed on-demand connect for %s (after retry)",
+                                        mcp_name, exc_info=True,
+                                    )
                     except Exception:
                         logger.warning(
                             "On-demand MCP connect failed (import or setup)",
@@ -676,6 +738,23 @@ class Agent:
                 if msg.role == "assistant" and msg.tool_calls:
                     for tc in msg.tool_calls:
                         _history_tool_names.add(tc.name)
+
+            # Task manager keyword detection → inject task tools
+            _task_tools_extra: list = []
+            _wants_tasks = any(kw in _msg_lower for kw in _TASK_KEYWORDS)
+            if not _wants_tasks and _history_tool_names & _TASK_TOOL_NAMES:
+                _wants_tasks = True
+                logger.info("Task tools re-injected from recent history context")
+            if _wants_tasks:
+                for tname in _TASK_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(tname)
+                    if schema is not None:
+                        _task_tools_extra.append(schema)
+                if _task_tools_extra:
+                    logger.info(
+                        "Task keywords detected — %d task tools injected",
+                        len(_task_tools_extra),
+                    )
 
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
@@ -707,13 +786,15 @@ class Agent:
             if not _wants_browser and "browser" in _history_tool_names:
                 _wants_browser = True
                 logger.info("Browser re-injected from recent history context")
-            if _wants_browser and not _channel_tools and not _survival_tools:
+            if _wants_browser and not _channel_tools and not _survival_tools and not _task_tools_extra:
                 _base_names.add("browser")
                 logger.info("Browser keyword detected — browser tool included")
             elif _channel_tools:
                 logger.info("Channel detected: %s → %d MCP tools, no browser", _matched_channels, len(_channel_tools))
             elif _survival_tools:
                 logger.info("Survival detected: %d tools injected, browser suppressed", len(_survival_tools))
+            elif _task_tools_extra:
+                logger.info("Task detected: %d tools injected", len(_task_tools_extra))
 
             tools = [
                 schema for name in _base_names
@@ -721,6 +802,12 @@ class Agent:
             ]
 
             tools.extend(_channel_tools)
+            # Add task manager tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for tt in _task_tools_extra:
+                if tt.get("function", {}).get("name") not in _existing_names:
+                    tools.append(tt)
+
             # Add survival tools (deduplicated)
             _existing_names = {t.get("function", {}).get("name") for t in tools}
             for st in _survival_tools:
@@ -1020,10 +1107,11 @@ class Agent:
                             # ALL tool calls were hallucinated — inject correction and retry
                             _avail = sorted(_valid_names - {"search_tools", "delegate"})[:10]
                             _correction = (
-                                f"[SYSTEM: The tool '{_dropped_names[0]}' is not available right now. "
-                                f"Do NOT delegate to specialists — respond directly to the user. "
-                                f"Available tools: {', '.join(_avail)}. "
-                                f"Use one of these tools or respond with what you already know.]"
+                                f"[SYSTEM: The tool '{_dropped_names[0]}' is not available in your current toolset. "
+                                f"Use search_tools('{_dropped_names[0].split('_')[0]}') to discover available tools — "
+                                f"it may exist under a different name. "
+                                f"Your current tools: {', '.join(_avail)}. "
+                                f"Try search_tools FIRST, then use what you find, or respond with text if nothing fits.]"
                             )
                             messages.append(LLMMessage(role="assistant", content=response.content or ""))
                             messages.append(LLMMessage(role="user", content=_correction))
@@ -1084,10 +1172,14 @@ class Agent:
                                 return True
                     return False
 
+                # Don't fast-dispatch if task tools were injected — task
+                # operations (add_task, daily_briefing) should stay foreground.
+                _has_task_tools = bool(_current_tool_names & _TASK_TOOL_NAMES)
                 if (
                     iteration <= 2  # Allow dispatch on first few iterations
                     and self._task_runner is not None
                     and not getattr(self, "is_background", False)  # Don't re-dispatch background tasks
+                    and not _has_task_tools  # Task messages stay foreground
                     and any(
                         _is_heavy(tc.name) and tc.name in _current_tool_names
                         for tc in response.tool_calls
@@ -1107,7 +1199,7 @@ class Agent:
                         _task_id = await self._task_runner.submit(
                             user_id=user_id,
                             instruction=message,
-                            name=f"auto_{_specialist_name}",
+                            name=None,  # auto-generates readable name from instruction
                             timeout=_agent_settings.get("specialist_timeout_s", 120),
                             callback=callback,
                         )
@@ -1288,6 +1380,27 @@ class Agent:
                                 "Injected %d tool schemas: %s",
                                 len(discovered), ", ".join(discovered),
                             )
+
+                # ── Terminal task tools: force text response next iteration ──
+                # After add_task, complete_task, delete_task — the job is done.
+                # Inject a stop signal so the LLM responds with text, not more tools.
+                _TERMINAL_TOOLS = frozenset({
+                    "add_task", "complete_task", "delete_task", "update_task",
+                    "daily_briefing", "list_tasks", "work_todos",
+                })
+                if response and response.tool_calls:
+                    _terminal_used = any(
+                        tc.name in _TERMINAL_TOOLS for tc in response.tool_calls
+                    )
+                    if _terminal_used:
+                        messages.append(LLMMessage(
+                            role="system",
+                            content=(
+                                "RESPOND NOW with a SHORT message (1-3 sentences max). "
+                                "Do NOT call any more tools. Do NOT explain how things work. "
+                                "Do NOT write code or technical details. Just show the result."
+                            ),
+                        ))
 
                 # ── Running-long nudge ──
                 # At 80% of safety cap, tell the LLM to wrap up or ask user

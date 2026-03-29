@@ -147,6 +147,22 @@ class SkillRegistry:
         self.register(ListJobsSkill(config=config))
         self.register(ManageJobSkill(config=config))
 
+        # Task manager skills (second brain)
+        from lazyclaw.skills.builtin.task_manager import (
+            AddTaskSkill, ListTasksSkill, CompleteTaskSkill,
+            UpdateTaskSkill, DeleteTaskSkill, DailyBriefingSkill,
+            WorkTodosSkill, StopBackgroundSkill,
+        )
+
+        self.register(AddTaskSkill(config=config))
+        self.register(ListTasksSkill(config=config))
+        self.register(CompleteTaskSkill(config=config))
+        self.register(UpdateTaskSkill(config=config))
+        self.register(DeleteTaskSkill(config=config))
+        self.register(DailyBriefingSkill(config=config))
+        self.register(WorkTodosSkill(config=config))
+        self.register(StopBackgroundSkill(config=config))
+
         # Note: real_browser.py skills removed — merged into BrowserSkill above
 
         # Browser management skills

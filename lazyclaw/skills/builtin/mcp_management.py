@@ -724,6 +724,7 @@ class InstallMCPServerSkill(BaseSkill):
         if not self._config:
             return "Error: Not configured"
         try:
+            import asyncio
             from lazyclaw.mcp.manager import (
                 _resolve_mcp_name,
                 auto_register_bundled_mcps,
@@ -746,8 +747,22 @@ class InstallMCPServerSkill(BaseSkill):
             servers = await list_servers(self._config, user_id)
             server = _find_server_by_name(servers, mcp_name)
             if server:
-                await connect_server(self._config, user_id, server["id"])
-                return f"Installed and connected: {mcp_name}"
+                # Retry once on connect failure (MCP SDK cancel scope race)
+                for attempt in range(2):
+                    try:
+                        await connect_server(self._config, user_id, server["id"])
+                        return f"Installed and connected: {mcp_name}"
+                    except Exception as exc:
+                        if attempt == 0:
+                            logger.info(
+                                "Connect failed for %s, retrying: %s", mcp_name, exc,
+                            )
+                            await asyncio.sleep(0.5)
+                        else:
+                            return (
+                                f"Installed {mcp_name} but connect failed: {exc}. "
+                                f"Try: connect_mcp_server(name='{mcp_name}')"
+                            )
             return f"{msg} — use connect_mcp_server to connect."
         except Exception as exc:
             return f"Error installing MCP server: {exc}"

@@ -1588,7 +1588,7 @@ class LazyClawApp(App):
             if self._telegram_connected and telegram:
                 _tg = telegram  # capture reference
 
-                async def _telegram_push_fn(text: str) -> None:
+                async def _telegram_push_fn(text: str, reply_markup=None) -> None:
                     # Check admin_chat_id at call time (may be set after /start)
                     chat_id = _tg._admin_chat_id
                     if not chat_id:
@@ -1601,6 +1601,7 @@ class LazyClawApp(App):
                         await _telegram_send_with_retry(
                             lambda: _tg._app.bot.send_message(
                                 chat_id=int(chat_id), text=text,
+                                reply_markup=reply_markup,
                             )
                         )
                         logger.info("Telegram push sent to chat %s", chat_id)

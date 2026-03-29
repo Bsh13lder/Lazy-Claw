@@ -30,7 +30,10 @@ from lazyclaw.llm.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_S = 120
+_TIMEOUT_S = 45  # Reduced from 120 — retry on timeout instead of blocking
+_MAX_RETRIES = 2  # Retry once before giving up (total 2 attempts)
+_WARM_POOL_SIZE = 1  # Pre-warmed processes ready for instant use
+_WARM_EXPIRE_S = 60  # Kill warm process if unused after 60s
 _TOOL_CALL_PATTERN = re.compile(
     r"\[TOOL_CALL\](.*?)\[/TOOL_CALL\]",
     re.DOTALL,
@@ -224,6 +227,9 @@ class ClaudeCLIProvider(BaseLLMProvider):
         self._claude_bin = claude_bin or shutil.which("claude") or "claude"
         self._model = model
         self._active_sessions: dict[str, bool] = {}  # session_id → has_been_used
+        # Warm pool: pre-spawned processes ready for immediate use
+        self._warm_procs: list[tuple[asyncio.subprocess.Process, float]] = []
+        self._warming: bool = False
 
     async def verify_key(self) -> bool:
         """Check if claude CLI is available."""
@@ -310,33 +316,109 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
         logger.debug("Claude CLI call: tools=%d, model=%s", len(tools), self._model)
 
+        last_error = None
+        for attempt in range(_MAX_RETRIES):
+            # Try to grab a pre-warmed process first
+            proc = self._grab_warm_proc(args)
+
+            try:
+                if proc is None:
+                    proc = await asyncio.create_subprocess_exec(
+                        *args,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=prompt_text.encode("utf-8")),
+                    timeout=_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+                if attempt < _MAX_RETRIES - 1:
+                    logger.warning(
+                        "Claude CLI timed out after %ds (attempt %d/%d), retrying...",
+                        _TIMEOUT_S, attempt + 1, _MAX_RETRIES,
+                    )
+                    continue
+                logger.error("Claude CLI timed out after %ds (all retries)", _TIMEOUT_S)
+                raise RuntimeError(f"Claude CLI timed out after {_TIMEOUT_S}s")
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "claude CLI not found. Install Claude Code: "
+                    "https://docs.anthropic.com/en/docs/claude-code"
+                )
+
+            if proc.returncode != 0:
+                err = stderr.decode("utf-8", errors="replace").strip()
+                if attempt < _MAX_RETRIES - 1:
+                    logger.warning(
+                        "Claude CLI failed (exit %d, attempt %d/%d): %s",
+                        proc.returncode, attempt + 1, _MAX_RETRIES, err[:100],
+                    )
+                    continue
+                logger.error("Claude CLI failed (exit %d): %s", proc.returncode, err)
+                raise RuntimeError(f"Claude CLI error: {err}")
+
+            raw = stdout.decode("utf-8", errors="replace").strip()
+
+            # Pre-warm next process in background (for next iteration)
+            asyncio.create_task(self._pre_warm(args))
+
+            return self._parse_response(raw)
+
+        raise RuntimeError("Claude CLI failed after all retries")
+
+    def _grab_warm_proc(
+        self, args: list[str],
+    ) -> asyncio.subprocess.Process | None:
+        """Grab a pre-warmed process if one is available and alive."""
+        import time
+        now = time.monotonic()
+        while self._warm_procs:
+            proc, spawned_at = self._warm_procs.pop(0)
+            age = now - spawned_at
+            if age > _WARM_EXPIRE_S:
+                # Too old — kill it
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                continue
+            if proc.returncode is not None:
+                continue  # Already exited
+            logger.debug("Using pre-warmed CLI process (age: %.1fs)", age)
+            return proc
+        return None
+
+    async def _pre_warm(self, args: list[str]) -> None:
+        """Spawn a process in the background so it's ready for the next call.
+
+        The process starts, loads claude, and blocks on stdin.read().
+        When we later call proc.communicate(input=...), it gets the prompt instantly.
+        """
+        if self._warming or len(self._warm_procs) >= _WARM_POOL_SIZE:
+            return
+        self._warming = True
         try:
+            import time
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt_text.encode("utf-8")),
-                timeout=_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            logger.error("Claude CLI timed out after %ds", _TIMEOUT_S)
-            raise RuntimeError(f"Claude CLI timed out after {_TIMEOUT_S}s")
-        except FileNotFoundError:
-            raise RuntimeError(
-                "claude CLI not found. Install Claude Code: "
-                "https://docs.anthropic.com/en/docs/claude-code"
-            )
-
-        if proc.returncode != 0:
-            err = stderr.decode("utf-8", errors="replace").strip()
-            logger.error("Claude CLI failed (exit %d): %s", proc.returncode, err)
-            raise RuntimeError(f"Claude CLI error: {err}")
-
-        raw = stdout.decode("utf-8", errors="replace").strip()
-        return self._parse_response(raw)
+            self._warm_procs.append((proc, time.monotonic()))
+            logger.debug("Pre-warmed CLI process (PID %s)", proc.pid)
+        except Exception as exc:
+            logger.debug("Pre-warm failed: %s", exc)
+        finally:
+            self._warming = False
 
     def _parse_response(self, raw: str) -> LLMResponse:
         """Parse claude -p --output-format json response."""

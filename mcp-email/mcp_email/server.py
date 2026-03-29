@@ -10,6 +10,7 @@ import imaplib
 import json
 import logging
 import re
+from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -26,6 +27,54 @@ app = Server("mcp-email")
 
 # Active email configs keyed by email address
 _configs: dict[str, dict] = {}
+
+# Persist configs across restarts
+_CONFIG_FILE: Path | None = None
+
+
+def _get_config_path() -> Path:
+    """Get the path for persisted email configs."""
+    global _CONFIG_FILE
+    if _CONFIG_FILE is None:
+        # Try data/ directory (lazyclaw project), fall back to ~/.lazyclaw/
+        candidates = [
+            Path(__file__).resolve().parent.parent.parent / "data",
+            Path.home() / ".lazyclaw",
+        ]
+        for d in candidates:
+            if d.exists():
+                _CONFIG_FILE = d / "email_configs.json"
+                break
+        if _CONFIG_FILE is None:
+            candidates[0].mkdir(parents=True, exist_ok=True)
+            _CONFIG_FILE = candidates[0] / "email_configs.json"
+    return _CONFIG_FILE
+
+
+def _save_configs() -> None:
+    """Persist configs to disk."""
+    try:
+        path = _get_config_path()
+        path.write_text(json.dumps(_configs, indent=2))
+    except Exception as exc:
+        logger.warning("Failed to save email configs: %s", exc)
+
+
+def _load_configs() -> None:
+    """Load persisted configs from disk."""
+    global _configs
+    try:
+        path = _get_config_path()
+        if path.exists():
+            _configs = json.loads(path.read_text())
+            if _configs:
+                logger.info("Loaded %d email account(s) from %s", len(_configs), path)
+    except Exception as exc:
+        logger.warning("Failed to load email configs: %s", exc)
+
+
+# Load on import
+_load_configs()
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +410,7 @@ async def _handle_setup(args: dict) -> str:
             pass
 
     _configs[addr] = cfg
+    _save_configs()
 
     note = ""
     if provider and provider.get("note"):

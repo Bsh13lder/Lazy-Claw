@@ -177,7 +177,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="email_read",
-            description="Read recent emails from a configured account via IMAP.",
+            description=(
+                "Read recent emails from a configured account via IMAP. "
+                "For bulk operations (organize, cleanup), set unread_only=false and limit=50+."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -192,12 +195,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max emails to return (default 10)",
+                        "description": "Max emails to return (default 10, use 50+ for bulk organize/cleanup)",
                         "default": 10,
                     },
                     "unread_only": {
                         "type": "boolean",
-                        "description": "Only return unread emails (default true)",
+                        "description": "Only return unread emails (default true, set false for organize/cleanup)",
                         "default": True,
                     },
                 },
@@ -206,7 +209,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="email_search",
-            description="Search emails by query string via IMAP SEARCH.",
+            description=(
+                "Search emails by query string via IMAP SEARCH. "
+                "For bulk operations (organize, cleanup), use limit=50 or higher. "
+                "Default limit=10 is for quick lookups only."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -225,7 +232,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max results (default 10)",
+                        "description": "Max results (default 10, use 50+ for bulk organize/cleanup)",
                         "default": 10,
                     },
                 },
@@ -275,9 +282,10 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="email_move",
             description=(
-                "Move emails to a different folder/label. "
+                "Move emails to a different folder/label — REMOVES from source folder. "
                 "For Gmail: use label names like 'Important', 'INBOX', '[Gmail]/Trash', '[Gmail]/Spam'. "
-                "Use email_folders to see available folders."
+                "WARNING: This removes emails from INBOX. To add a label WITHOUT removing, "
+                "use email_label instead. Use email_folders to see available folders."
             ),
             inputSchema={
                 "type": "object",

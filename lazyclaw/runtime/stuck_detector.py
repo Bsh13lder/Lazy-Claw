@@ -87,13 +87,14 @@ def detect_tool_loop(
     """Detect when the same tool is called N+ times consecutively.
 
     Browser gets a higher limit (multi-step navigation is normal).
+    MCP batch tools (email_*, whatsapp_*) get 10 before stuck.
     """
     if not history:
         return None
 
     effective_limits = {**DEFAULT_LOOP_LIMITS, **(limits or {})}
     last_tool = history[-1]
-    limit = effective_limits.get(last_tool, effective_limits["default"])
+    limit = _effective_limit(last_tool, effective_limits)
 
     if len(history) < limit:
         return None

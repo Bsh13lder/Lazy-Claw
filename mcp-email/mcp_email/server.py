@@ -255,10 +255,14 @@ async def _handle_setup(args: dict) -> str:
     }
 
     # Test SMTP connection
-    smtp = aiosmtplib.SMTP(hostname=cfg["smtp_host"], port=cfg["smtp_port"])
     try:
+        smtp = aiosmtplib.SMTP(
+            hostname=cfg["smtp_host"],
+            port=cfg["smtp_port"],
+            use_tls=(cfg["smtp_port"] == 465),
+            start_tls=(cfg["smtp_port"] == 587),
+        )
         await smtp.connect()
-        await smtp.starttls()
         await smtp.login(addr, password)
     except Exception as exc:
         return f"SMTP connection failed for {addr}: {exc}"
@@ -293,10 +297,14 @@ async def _handle_status(args: dict) -> str:
         return json.dumps({"email": addr, "status": "not_configured"})
 
     domain = addr.rsplit("@", 1)[-1] if "@" in addr else "unknown"
-    smtp = aiosmtplib.SMTP(hostname=cfg["smtp_host"], port=cfg["smtp_port"])
+    smtp = aiosmtplib.SMTP(
+        hostname=cfg["smtp_host"],
+        port=cfg["smtp_port"],
+        use_tls=(cfg["smtp_port"] == 465),
+        start_tls=(cfg["smtp_port"] == 587),
+    )
     try:
         await smtp.connect()
-        await smtp.starttls()
         await smtp.login(cfg["email"], cfg["password"])
         return json.dumps({"email": addr, "status": "connected", "provider": domain})
     except Exception as exc:
@@ -339,10 +347,14 @@ async def _handle_send(args: dict) -> str:
     if bcc:
         all_recipients.extend(r.strip() for r in bcc.split(","))
 
-    smtp = aiosmtplib.SMTP(hostname=cfg["smtp_host"], port=cfg["smtp_port"])
+    smtp = aiosmtplib.SMTP(
+        hostname=cfg["smtp_host"],
+        port=cfg["smtp_port"],
+        use_tls=(cfg["smtp_port"] == 465),
+        start_tls=(cfg["smtp_port"] == 587),
+    )
     try:
         await smtp.connect()
-        await smtp.starttls()
         await smtp.login(cfg["email"], cfg["password"])
         await smtp.send_message(msg, recipients=all_recipients)
     finally:

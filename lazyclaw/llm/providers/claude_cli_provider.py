@@ -261,11 +261,10 @@ class ClaudeCLIProvider(BaseLLMProvider):
         # Build the prompt from messages
         prompt_text = _serialize_messages(messages)
 
-        # Build CLI args — use --system-prompt (override) when tools
-        # are present to prevent Claude Code's own system prompt from
-        # leaking tool names (Read, Edit, Bash) that confuse routing.
+        # Build CLI args — prompt piped via stdin (not CLI arg) to avoid
+        # OS argument length limits on large conversations.
         args = [
-            self._claude_bin, "-p", prompt_text,
+            self._claude_bin, "-p", "-",  # "-" reads prompt from stdin
             "--output-format", "json",
             "--tools", "",  # Disable Claude Code's built-in tools
             "--model", self._model,
@@ -314,11 +313,12 @@ class ClaudeCLIProvider(BaseLLMProvider):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
+                proc.communicate(input=prompt_text.encode("utf-8")),
                 timeout=_TIMEOUT_S,
             )
         except asyncio.TimeoutError:

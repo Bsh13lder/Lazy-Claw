@@ -291,11 +291,29 @@ class ConnectMCPServerSkill(BaseSkill):
             servers = await list_servers(self._config, user_id)
             server = _find_server_by_name(servers, name)
             if not server:
-                available = ", ".join(s["name"] for s in servers) or "none"
-                return (
-                    f"Error: No MCP server matching '{params['name']}' found. "
-                    f"Available: {available}"
+                # Auto-install if it's a bundled MCP
+                from lazyclaw.mcp.manager import (
+                    _resolve_mcp_name,
+                    auto_register_bundled_mcps,
+                    install_bundled_mcp,
                 )
+
+                mcp_name = _resolve_mcp_name(name)
+                if mcp_name:
+                    success, msg = await install_bundled_mcp(mcp_name)
+                    if success:
+                        await auto_register_bundled_mcps(
+                            self._config, user_id
+                        )
+                        servers = await list_servers(self._config, user_id)
+                        server = _find_server_by_name(servers, mcp_name)
+
+                if not server:
+                    available = ", ".join(s["name"] for s in servers) or "none"
+                    return (
+                        f"Error: No MCP server matching '{name}' found. "
+                        f"Available: {available}"
+                    )
 
             from lazyclaw.mcp.manager import _active_clients
 
@@ -652,3 +670,84 @@ class UnfavoriteMCPServerSkill(BaseSkill):
             )
         except Exception as exc:
             return f"Error removing favorite: {exc}"
+
+
+class InstallMCPServerSkill(BaseSkill):
+    """Install a bundled MCP server package and connect it.
+
+    Handles pip install (Python) or npm install (Node.js) automatically.
+    Use when the user says 'install email MCP', 'set up instagram', etc.
+    """
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "mcp_management"
+
+    @property
+    def name(self) -> str:
+        return "install_mcp_server"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Install a bundled MCP server package and connect it. "
+            "MUST use this when user says 'install email', 'install instagram', "
+            "'set up email MCP', 'connect email server', 'I need email', "
+            "'add whatsapp', etc. Accepts short names: email, instagram, "
+            "whatsapp, jobspy — or full: mcp-email, mcp-instagram."
+        )
+
+    @property
+    def permission_hint(self) -> str:
+        return "ask"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "MCP server name — short ('email', 'instagram') "
+                        "or full ('mcp-email', 'mcp-instagram')"
+                    ),
+                },
+            },
+            "required": ["name"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        try:
+            from lazyclaw.mcp.manager import (
+                _resolve_mcp_name,
+                auto_register_bundled_mcps,
+                connect_server,
+                install_bundled_mcp,
+                list_servers,
+            )
+
+            raw_name = params.get("name") or params.get("server_name") or ""
+            mcp_name = _resolve_mcp_name(raw_name)
+            if not mcp_name:
+                return f"Unknown MCP server: '{raw_name}'"
+
+            success, msg = await install_bundled_mcp(mcp_name)
+            if not success:
+                return f"Install failed: {msg}"
+
+            # Register in DB and connect
+            await auto_register_bundled_mcps(self._config, user_id)
+            servers = await list_servers(self._config, user_id)
+            server = _find_server_by_name(servers, mcp_name)
+            if server:
+                await connect_server(self._config, user_id, server["id"])
+                return f"Installed and connected: {mcp_name}"
+            return f"{msg} — use connect_mcp_server to connect."
+        except Exception as exc:
+            return f"Error installing MCP server: {exc}"

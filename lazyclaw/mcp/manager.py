@@ -111,6 +111,146 @@ BUNDLED_MCPS = {
     },
 }
 
+# -- Install locks (prevent concurrent installs of same MCP) -------------------
+_install_locks: dict[str, asyncio.Lock] = {}
+
+
+def _resolve_mcp_name(name: str) -> str | None:
+    """Resolve user input ('email') to a BUNDLED_MCPS key ('mcp-email').
+
+    Tries: exact match → 'mcp-' prefixed → partial contains.
+    """
+    name_lower = name.lower().strip()
+    if name_lower in BUNDLED_MCPS:
+        return name_lower
+    prefixed = f"mcp-{name_lower}"
+    if prefixed in BUNDLED_MCPS:
+        return prefixed
+    matches = [key for key in BUNDLED_MCPS if name_lower in key.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+async def install_bundled_mcp(name: str) -> tuple[bool, str]:
+    """Install a single bundled MCP package (pip or npm).
+
+    Returns (success, human-readable message).
+    Non-blocking — uses asyncio.create_subprocess_exec.
+    """
+    import importlib
+    import shutil
+
+    from lazyclaw.config import get_project_root
+
+    resolved = _resolve_mcp_name(name)
+    if not resolved:
+        return False, f"Unknown MCP: {name}"
+    mcp_key = resolved
+    info = BUNDLED_MCPS[mcp_key]
+
+    # Per-MCP lock to prevent concurrent installs (setdefault is GIL-atomic)
+    lock = _install_locks.setdefault(mcp_key, asyncio.Lock())
+    async with lock:
+        root = get_project_root()
+        github_repo = "https://github.com/Bsh13lder/Lazy-Claw.git"
+
+        if "module" in info:
+            # Python module — check if already importable
+            try:
+                importlib.import_module(info["module"])
+                return True, f"{mcp_key} is already installed"
+            except ImportError:
+                pass
+
+            pip_cmd = [sys.executable, "-m", "pip", "install"]
+            pkg_path = root / mcp_key
+
+            # Try local directory first
+            if pkg_path.exists():
+                proc = await asyncio.create_subprocess_exec(
+                    *pip_cmd, "-e", str(pkg_path), "-q",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=120,
+                    )
+                except asyncio.TimeoutError:
+                    if proc.returncode is None:
+                        proc.kill()
+                    await proc.wait()
+                    return False, f"Install timed out for {mcp_key}"
+                else:
+                    if proc.returncode == 0:
+                        importlib.invalidate_caches()
+                        return True, f"Installed {mcp_key}"
+
+            # GitHub fallback
+            pip_url = f"git+{github_repo}#subdirectory={mcp_key}"
+            proc = await asyncio.create_subprocess_exec(
+                *pip_cmd, pip_url, "-q",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=180,
+                )
+            except asyncio.TimeoutError:
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.wait()
+                return False, f"Install timed out for {mcp_key}"
+
+            if proc.returncode == 0:
+                importlib.invalidate_caches()
+                return True, f"Installed {mcp_key}"
+            err = stderr.decode(errors="replace").strip()
+            return False, f"Install failed: {err[:120]}"
+
+        elif "node" in info:
+            # Node.js package — npm install in package directory
+            pkg_dir_name = info["node"].split("/")[0]
+            pkg_path = root / pkg_dir_name
+
+            if not pkg_path.exists():
+                return False, f"Package directory not found: {pkg_dir_name}"
+
+            if (pkg_path / "node_modules").exists():
+                return True, f"{mcp_key} is already installed"
+
+            if not shutil.which("npm"):
+                return False, "npm is not available on this system"
+
+            proc = await asyncio.create_subprocess_exec(
+                "npm", "install",
+                cwd=str(pkg_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=120,
+                )
+            except asyncio.TimeoutError:
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.wait()
+                return False, f"npm install timed out for {mcp_key}"
+
+            if proc.returncode == 0:
+                return True, f"Installed {mcp_key}"
+            err = stderr.decode(errors="replace").strip()
+            return False, f"npm install failed: {err[:120]}"
+
+        elif "npx" in info or "remote" in info:
+            kind = "npx" if "npx" in info else "remote"
+            return True, f"{mcp_key} runs via {kind} — no install needed"
+
+        return False, f"Unknown package type for {mcp_key}"
+
 
 # -- Idle timeout management --------------------------------------------------
 

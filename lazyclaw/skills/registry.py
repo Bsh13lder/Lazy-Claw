@@ -229,6 +229,7 @@ class SkillRegistry:
             ConnectMCPServerSkill, DisconnectMCPServerSkill,
             ConnectRemoteMCPSkill,
             FavoriteMCPServerSkill, UnfavoriteMCPServerSkill,
+            InstallMCPServerSkill,
         )
 
         self.register(ListMCPServersSkill(config=config))
@@ -239,6 +240,7 @@ class SkillRegistry:
         self.register(ConnectRemoteMCPSkill(config=config, registry=self))
         self.register(FavoriteMCPServerSkill(config=config))
         self.register(UnfavoriteMCPServerSkill(config=config))
+        self.register(InstallMCPServerSkill(config=config))
 
         # Team management skills
         from lazyclaw.skills.builtin.team_management import (

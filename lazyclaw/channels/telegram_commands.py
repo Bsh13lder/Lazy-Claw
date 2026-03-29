@@ -842,68 +842,200 @@ class TelegramCommands:
         args = context.args or []
         from lazyclaw.mcp.manager import (
             list_servers, set_favorite, connect_server, disconnect_server,
-            _active_clients, BUNDLED_MCPS,
+            _active_clients, BUNDLED_MCPS, _resolve_mcp_name,
+            install_bundled_mcp, auto_register_bundled_mcps,
         )
+
+        # -- /mcp (no args) — list registered + available-to-install ----------
         if not args:
             servers = await list_servers(self._config, user_id)
-            if not servers:
-                await self._reply(update, "\U0001f50c No MCP servers registered.")
-                return
+            registered_names = {s.get("name") for s in servers}
 
-            connected_count = sum(1 for s in servers if s["id"] in _active_clients)
-            lines = [
-                f"\U0001f50c <b>MCP Servers</b>  ({connected_count}/{len(servers)} online)",
-                "━━━━━━━━━━━━━━━━━━",
+            lines: list[str] = []
+            if servers:
+                connected_count = sum(
+                    1 for s in servers if s["id"] in _active_clients
+                )
+                lines.append(
+                    f"\U0001f50c <b>MCP Servers</b>  "
+                    f"({connected_count}/{len(servers)} online)"
+                )
+                lines.append("━━━━━━━━━━━━━━━━━━")
+                for s in servers:
+                    sname = s.get("name", "?")
+                    sid = s["id"]
+                    fav = "\u2b50" if s.get("favorite") else "  "
+                    is_connected = sid in _active_clients
+                    status = "\u2705" if is_connected else "\u26aa"
+                    desc = BUNDLED_MCPS.get(sname, {}).get("description", "")
+                    lines.append(f"{fav} {status} <b>{sname}</b>")
+                    if desc:
+                        lines.append(f"      <i>{desc[:60]}</i>")
+
+            # Show uninstalled bundled MCPs
+            uninstalled = [
+                (n, info) for n, info in BUNDLED_MCPS.items()
+                if n not in registered_names
             ]
-            for s in servers:
-                name = s.get("name", "?")
-                sid = s["id"]
-                fav = "\u2b50" if s.get("favorite") else "  "
-                is_connected = sid in _active_clients
-                status = "\u2705" if is_connected else "\u26aa"
-                desc = BUNDLED_MCPS.get(name, {}).get("description", "")
+            if uninstalled:
+                lines.append("")
+                lines.append("\U0001f4e6 <b>Available to install:</b>")
+                for n, info in uninstalled:
+                    desc = info.get("description", "")[:55]
+                    lines.append(f"  \u2b07\ufe0f <code>{n}</code>")
+                    if desc:
+                        lines.append(f"      <i>{desc}</i>")
 
-                lines.append(f"{fav} {status} <b>{name}</b>")
-                if desc:
-                    lines.append(f"      <i>{desc[:60]}</i>")
+            if not servers and not uninstalled:
+                await self._reply(update, "\U0001f50c No MCP servers available.")
+                return
 
             lines.append("")
             lines.append(
                 "\U0001f527 <b>Commands:</b>\n"
+                "<code>/mcp install NAME</code>\n"
                 "<code>/mcp connect NAME</code>\n"
                 "<code>/mcp disconnect NAME</code>\n"
                 "<code>/mcp fav NAME</code>  \u2022  <code>/mcp unfav NAME</code>"
             )
             await self._reply(update, "\n".join(lines))
             return
+
         subcmd = args[0].lower()
         name = " ".join(args[1:]) if len(args) > 1 else ""
+
+        # -- /mcp install NAME ------------------------------------------------
+        if subcmd == "install":
+            if not name:
+                await self._reply(
+                    update, "\U0001f50c Usage: <code>/mcp install NAME</code>"
+                )
+                return
+            mcp_name = _resolve_mcp_name(name)
+            if not mcp_name:
+                await self._reply(update, f"\u274c Unknown MCP: {name}")
+                return
+            await self._reply(
+                update, f"\u23f3 Installing <b>{mcp_name}</b>..."
+            )
+            try:
+                success, msg = await install_bundled_mcp(mcp_name)
+                if not success:
+                    await self._reply(update, f"\u274c {msg}")
+                    return
+                # Register in DB + connect
+                await auto_register_bundled_mcps(self._config, user_id)
+                servers = await list_servers(self._config, user_id)
+                server = next(
+                    (s for s in servers if s["name"] == mcp_name), None
+                )
+                if server:
+                    await connect_server(self._config, user_id, server["id"])
+                    await self._reply(
+                        update,
+                        f"\u2705 Installed and connected: <b>{mcp_name}</b>",
+                    )
+                else:
+                    await self._reply(
+                        update, f"\u2705 {msg}\nUse <code>/mcp connect {mcp_name}</code>"
+                    )
+            except Exception as e:
+                await self._reply(update, f"\u274c Install failed: {e}")
+            return
+
         if not name:
-            await self._reply(update, f"\U0001f50c Usage: <code>/mcp {subcmd} NAME</code>")
+            await self._reply(
+                update, f"\U0001f50c Usage: <code>/mcp {subcmd} NAME</code>"
+            )
             return
+
+        # -- Find server in DB -------------------------------------------------
         servers = await list_servers(self._config, user_id)
-        server = next((s for s in servers if s["name"].lower() == name.lower()), None)
+        server = next(
+            (s for s in servers if s["name"].lower() == name.lower()), None
+        )
         if not server:
-            server = next((s for s in servers if name.lower() in s["name"].lower()), None)
+            server = next(
+                (s for s in servers if name.lower() in s["name"].lower()), None
+            )
+
+        # -- Auto-install on connect if not found ------------------------------
+        if not server and subcmd == "connect":
+            mcp_name = _resolve_mcp_name(name)
+            if mcp_name:
+                await self._reply(
+                    update, f"\u23f3 Installing <b>{mcp_name}</b>..."
+                )
+                try:
+                    success, msg = await install_bundled_mcp(mcp_name)
+                    if not success:
+                        await self._reply(update, f"\u274c {msg}")
+                        return
+                    await auto_register_bundled_mcps(self._config, user_id)
+                    servers = await list_servers(self._config, user_id)
+                    server = next(
+                        (s for s in servers if s["name"] == mcp_name), None
+                    )
+                    if server:
+                        await connect_server(
+                            self._config, user_id, server["id"]
+                        )
+                        await self._reply(
+                            update,
+                            f"\u2705 Installed and connected: <b>{mcp_name}</b>",
+                        )
+                        return
+                    else:
+                        await self._reply(
+                            update,
+                            f"\u2705 Installed but could not register.\n"
+                            f"Try <code>/mcp connect {mcp_name}</code>",
+                        )
+                        return
+                except Exception as e:
+                    logger.exception("MCP auto-install failed for %s", mcp_name)
+                    await self._reply(update, f"\u274c Install failed: {e}")
+                    return
+
         if not server:
-            await self._reply(update, f"\u274c Server '{name}' not found. Use /mcp to list.")
+            await self._reply(
+                update,
+                f"\u274c Server '{name}' not found. Use /mcp to list.",
+            )
             return
+
         try:
             if subcmd == "fav":
                 await set_favorite(self._config, user_id, server["name"], True)
-                await self._reply(update, f"\u2b50 <b>{server['name']}</b> added to favorites")
+                await self._reply(
+                    update, f"\u2b50 <b>{server['name']}</b> added to favorites"
+                )
             elif subcmd == "unfav":
-                await set_favorite(self._config, user_id, server["name"], False)
-                await self._reply(update, f"\u2705 <b>{server['name']}</b> removed from favorites")
+                await set_favorite(
+                    self._config, user_id, server["name"], False
+                )
+                await self._reply(
+                    update,
+                    f"\u2705 <b>{server['name']}</b> removed from favorites",
+                )
             elif subcmd == "connect":
                 await connect_server(self._config, user_id, server["id"])
-                await self._reply(update, f"\u2705 Connected: <b>{server['name']}</b>")
+                await self._reply(
+                    update, f"\u2705 Connected: <b>{server['name']}</b>"
+                )
             elif subcmd in ("disconnect", "disc"):
                 await disconnect_server(user_id, server["id"])
-                await self._reply(update, f"\U0001f50c Disconnected: <b>{server['name']}</b>")
+                await self._reply(
+                    update,
+                    f"\U0001f50c Disconnected: <b>{server['name']}</b>",
+                )
             else:
-                await self._reply(update, "\U0001f50c Subcommands: fav, unfav, connect, disconnect")
+                await self._reply(
+                    update,
+                    "\U0001f50c Subcommands: install, connect, disconnect, fav, unfav",
+                )
         except Exception as e:
+            logger.exception("MCP command %s failed", subcmd)
             await self._reply(update, f"\u274c Failed: {e}")
 
     # -- /watch ------------------------------------------------------------

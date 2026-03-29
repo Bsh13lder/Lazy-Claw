@@ -239,6 +239,7 @@ class EcoRouter:
         self._ollama = None         # OllamaProvider fallback
         self._local_checked = False
         self._local_lock = asyncio.Lock()
+        self._mlx_manager: Any | None = None  # MLXManager for on-demand
 
         # Free provider keys (lazy init)
         self._free_keys: dict[str, str] | None = None
@@ -254,15 +255,28 @@ class EcoRouter:
     async def _ensure_local(self) -> tuple:
         """Lazy-init local providers. Returns (brain_provider, worker_provider).
 
+        On-demand mode: if no MLX server is running, starts one (~6s cold start)
+        and auto-stops after 2 min idle to free ~10 GB GPU RAM.
+
         Tries MLX first (faster on Apple Silicon), falls back to Ollama.
         Returns (None, None) if no local provider available.
         """
-        if self._local_checked:
+        # Fast path: already have healthy providers — just touch idle timer
+        if self._local_checked and (self._mlx_brain or self._mlx_worker):
+            if self._mlx_manager:
+                self._mlx_manager.touch()
             return self._mlx_brain, self._mlx_worker
 
         async with self._local_lock:
-            if self._local_checked:
+            # Re-check after acquiring lock
+            if self._local_checked and (self._mlx_brain or self._mlx_worker):
+                if self._mlx_manager:
+                    self._mlx_manager.touch()
                 return self._mlx_brain, self._mlx_worker
+
+            # Reset stale state (server may have been idle-stopped)
+            self._mlx_brain = None
+            self._mlx_worker = None
 
             # Try MLX — check both ports, use whatever is available
             try:
@@ -285,6 +299,25 @@ class EcoRouter:
                     brain._loaded_model = _brain_model
                     self._mlx_brain = brain
                     logger.info("MLX connected on :8080 → %s", _brain_model)
+
+                # On-demand: start MLX if nothing is running
+                if not self._mlx_worker and not self._mlx_brain:
+                    if self._mlx_manager is None:
+                        from lazyclaw.llm.mlx_manager import MLXManager
+                        self._mlx_manager = MLXManager(
+                            on_demand=True,
+                            on_idle_stop=self.reset_local_check,
+                        )
+                        self._mlx_manager._worker_model = _worker_model
+
+                    logger.info("MLX on-demand: starting worker...")
+                    started = await self._mlx_manager.ensure_running()
+                    if started:
+                        worker = MLXProvider("http://127.0.0.1:8081")
+                        if await worker.health_check():
+                            worker._loaded_model = _worker_model
+                            self._mlx_worker = worker
+                            logger.info("MLX on-demand ready: %s", _worker_model)
 
                 # Single server: use one model for both roles
                 if self._mlx_worker and not self._mlx_brain:

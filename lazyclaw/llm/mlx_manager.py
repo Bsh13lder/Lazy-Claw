@@ -3,12 +3,13 @@
 Handles starting/stopping the MLX server, model loading, health checks,
 and multi-model swapping for the ECO brain+worker architecture.
 
-Two operation modes:
-1. External server: User starts mlx_lm.server manually (default)
+Three operation modes:
+1. External server: User starts mlx_lm.server manually
 2. Managed server:  MLXManager starts/stops the server process
+3. On-demand mode:  Server starts on first request, auto-stops after idle
 
-For M2 16GB: brain (Qwen3.5-9B Q4, ~5.6GB) + worker (Nanbeige Q8, ~4.2GB)
-can coexist. MLX uses unified memory efficiently.
+On-demand mode saves ~10 GB RAM on M2 16GB (GPU unified memory).
+Cold start: ~6s.  Idle timeout: 2 minutes.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ _DEFAULT_BRAIN_PORT = 8080
 _DEFAULT_WORKER_PORT = 8081
 _HEALTH_TIMEOUT = 5
 _STARTUP_TIMEOUT = 60  # seconds to wait for server to be ready
+_IDLE_TIMEOUT = 120  # seconds — auto-stop after 2 min idle (saves ~10 GB RAM)
 
 
 @dataclass(frozen=True)
@@ -68,10 +70,22 @@ class MLXManager:
         await manager.stop_all()
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_demand: bool = True,
+        on_idle_stop: asyncio.coroutines = None,
+    ) -> None:
         self._brain: MLXServerState | None = None
         self._worker: MLXServerState | None = None
         self._lock = asyncio.Lock()
+        # On-demand mode: start server when needed, stop after idle
+        self._on_demand = on_demand
+        self._idle_handle: asyncio.TimerHandle | None = None
+        # Remember model configs for on-demand restart
+        self._worker_model: str | None = None
+        self._brain_model: str | None = None
+        # Callback when idle-stop fires (e.g. ECO router resets local_checked)
+        self._on_idle_stop = on_idle_stop
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -99,28 +113,35 @@ class MLXManager:
         self, model_path: str, port: int = _DEFAULT_BRAIN_PORT
     ) -> bool:
         """Start (or restart) the brain model server."""
+        self._brain_model = model_path
         async with self._lock:
             if self._brain and self._brain.process:
                 await self._stop_server(self._brain)
 
             config = MLXServerConfig(model_path=model_path, port=port)
             self._brain = await self._start_server(config)
+            if self._brain.healthy and self._on_demand:
+                self._reset_idle_timer()
             return self._brain.healthy
 
     async def start_worker(
         self, model_path: str, port: int = _DEFAULT_WORKER_PORT
     ) -> bool:
         """Start (or restart) the worker model server."""
+        self._worker_model = model_path
         async with self._lock:
             if self._worker and self._worker.process:
                 await self._stop_server(self._worker)
 
             config = MLXServerConfig(model_path=model_path, port=port)
             self._worker = await self._start_server(config)
+            if self._worker.healthy and self._on_demand:
+                self._reset_idle_timer()
             return self._worker.healthy
 
     async def stop_all(self) -> None:
         """Stop all managed servers."""
+        self._cancel_idle_timer()
         async with self._lock:
             if self._brain:
                 await self._stop_server(self._brain)
@@ -128,6 +149,83 @@ class MLXManager:
             if self._worker:
                 await self._stop_server(self._worker)
                 self._worker = None
+
+    # ── On-demand lifecycle ────────────────────────────────────────────
+
+    def touch(self) -> None:
+        """Reset the idle timer — call this on every inference request."""
+        if self._on_demand:
+            self._reset_idle_timer()
+
+    async def ensure_running(self) -> bool:
+        """Start the server if not running (on-demand mode).
+
+        Returns True if at least one server is healthy.
+        Cold start takes ~6s on M2 for Nanbeige 3B.
+        """
+        # Already running?
+        if self._worker and self._worker.healthy:
+            self.touch()
+            return True
+        if self._brain and self._brain.healthy:
+            self.touch()
+            return True
+
+        # Start the worker (most common single-model setup)
+        if self._worker_model:
+            logger.info("On-demand: starting MLX worker (%s)...", self._worker_model)
+            return await self.start_worker(self._worker_model)
+
+        if self._brain_model:
+            logger.info("On-demand: starting MLX brain (%s)...", self._brain_model)
+            return await self.start_brain(self._brain_model)
+
+        return False
+
+    def _reset_idle_timer(self) -> None:
+        """Cancel existing timer and start a new one."""
+        self._cancel_idle_timer()
+        try:
+            loop = asyncio.get_running_loop()
+            self._idle_handle = loop.call_later(
+                _IDLE_TIMEOUT, lambda: asyncio.ensure_future(self._idle_shutdown()),
+            )
+        except RuntimeError:
+            pass  # No running loop (e.g. during tests)
+
+    def _cancel_idle_timer(self) -> None:
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+
+    async def _idle_shutdown(self) -> None:
+        """Auto-stop servers after idle timeout to free GPU RAM."""
+        # Only stop managed servers (with a process we started)
+        has_managed = (
+            (self._worker and self._worker.process)
+            or (self._brain and self._brain.process)
+        )
+        if not has_managed:
+            return
+
+        logger.info(
+            "MLX idle for %ds — stopping to free GPU RAM", _IDLE_TIMEOUT,
+        )
+        async with self._lock:
+            if self._worker and self._worker.process:
+                await self._stop_server(self._worker)
+                self._worker = None
+            if self._brain and self._brain.process:
+                await self._stop_server(self._brain)
+                self._brain = None
+
+        # Notify ECO router to reset local_checked so next request
+        # triggers on-demand start again
+        if self._on_idle_stop is not None:
+            try:
+                self._on_idle_stop()
+            except Exception:
+                pass
 
     # ── Health ────────────────────────────────────────────────────────
 

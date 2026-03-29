@@ -64,6 +64,21 @@ DEFAULT_LOOP_LIMITS: dict[str, int] = {
     "default": 3,
 }
 
+# MCP tools that do batch operations (email organize, bulk label, etc.)
+# These need higher limits because one "organize inbox" task = many calls.
+# The same-result detector still catches true stuck loops.
+_BATCH_OP_PREFIXES = ("email_", "whatsapp_", "instagram_")
+
+def _effective_limit(tool_name: str, limits: dict[str, int]) -> int:
+    """Get loop limit for a tool, with higher defaults for batch-op tools."""
+    if tool_name in limits:
+        return limits[tool_name]
+    # MCP batch tools get 10 consecutive calls before stuck
+    for prefix in _BATCH_OP_PREFIXES:
+        if tool_name.startswith(prefix):
+            return 10
+    return limits.get("default", 3)
+
 
 def detect_tool_loop(
     history: list[str],

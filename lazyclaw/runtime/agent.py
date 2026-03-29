@@ -303,6 +303,12 @@ HEAVY_TOOLS: frozenset[str] = frozenset({
     "run_command", "read_file", "write_file",
 })
 
+# MCP tool base names that should trigger fast dispatch when they appear
+# in multi-step chains (delete, move, organize = slow IMAP operations).
+_HEAVY_MCP_BASES: frozenset[str] = frozenset({
+    "email_delete", "email_move", "email_mark", "email_create_label",
+})
+
 
 def _handle_instant_command(
     message: str, team_lead: TeamLead | None, task_runner=None,
@@ -829,24 +835,21 @@ class Agent:
                 if tools:
                     kwargs["tools"] = tools
 
-                # Role routing: brain (Haiku, paid) for strategy + final answers,
-                # worker (Nanbeige, local $0) for ONLY mid-chain tool execution.
+                # Role routing: brain for strategy + final answers,
+                # worker for mid-chain tool orchestration (cheaper/local).
                 #
-                # Key insight: after tool results come back, the LLM either:
-                #   a) Calls MORE tools → worker is fine (just orchestrating tools)
-                #   b) Generates final text → MUST use brain (Nanbeige is terrible for chat)
-                #
-                # We can't know (a) vs (b) in advance, so we use brain for ALL
-                # iterations except iteration 0's tool calls. Worker is only used
-                # when explicitly requested (e.g. specialist runners).
-                # Cost: ~$0.001 more per tool chain. Worth it for quality.
+                # iteration 0: brain picks strategy + first tools
+                # iteration 1+: worker handles tool chains (just orchestrating)
+                # escalated: brain takes back over for quality
+                # last iteration hint: if previous response had tool calls and
+                #   this iteration might be the final answer, use brain.
                 iter_model = None  # Let eco_router decide based on mode + role
                 if iteration == 0:
                     _iter_role = ROLE_BRAIN      # First call: brain picks strategy + tools
                 elif _escalated:
                     _iter_role = ROLE_BRAIN      # After escalation: brain takes over
                 else:
-                    _iter_role = ROLE_BRAIN      # Always brain — quality over cost
+                    _iter_role = ROLE_WORKER     # Mid-chain: worker orchestrates tools
 
                 model_name = "brain"
                 # Show actual routing model if available
@@ -1036,14 +1039,13 @@ class Agent:
                             r"<think>.*?</think>\s*", "", _final_content, flags=re.DOTALL
                         ).strip()
 
-                    # Empty response from worker model (known Haiku issue:
-                    # 88 completion tokens consumed but content_len=0, tool_calls=0).
-                    # Retry once with brain model before giving up.
+                    # Empty response from worker model — retry with brain.
+                    # Covers: Haiku empty response bug, worker can't produce
+                    # final answer (Nanbeige bad at chat), etc.
                     if (
                         not _final_content.strip()
                         and tools
                         and not _escalated
-                        and iteration == 0
                     ):
                         logger.warning(
                             "Empty LLM response from %s (usage=%s, tools=%d) — retrying with brain model",
@@ -1070,12 +1072,24 @@ class Agent:
                 _current_tool_names = {
                     t.get("function", {}).get("name") for t in tools
                 } if tools else set()
+                def _is_heavy(tc_name: str) -> bool:
+                    """Check if a tool call is heavy (should fast-dispatch)."""
+                    if tc_name in HEAVY_TOOLS:
+                        return True
+                    # MCP tools: mcp_{uuid-with-hyphens}_{base_name}
+                    # e.g. mcp_aa828e97-7923-4189-b6e4-1f2ace89b115_email_delete
+                    if tc_name.startswith("mcp_"):
+                        for base in _HEAVY_MCP_BASES:
+                            if tc_name.endswith("_" + base):
+                                return True
+                    return False
+
                 if (
                     iteration <= 2  # Allow dispatch on first few iterations
                     and self._task_runner is not None
                     and not getattr(self, "is_background", False)  # Don't re-dispatch background tasks
                     and any(
-                        tc.name in HEAVY_TOOLS and tc.name in _current_tool_names
+                        _is_heavy(tc.name) and tc.name in _current_tool_names
                         for tc in response.tool_calls
                     )
                 ):

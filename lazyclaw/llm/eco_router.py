@@ -1,9 +1,10 @@
-"""ECO Router v4 — Simplified 2-mode architecture.
+"""ECO Router v5 — 3-mode architecture with Claude CLI.
 
 Three roles: Brain (= Team Lead), Worker, Fallback.
-Two modes:
+Three modes:
   HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
   FULL:    User-configurable brain/worker/fallback (paid, auto)
+  CLAUDE:  All roles via claude CLI ($0 — covered by subscription)
 
 All model assignments come from MODE_MODELS in model_registry.py.
 User overrides in eco_settings take priority over defaults.
@@ -44,12 +45,14 @@ logger = logging.getLogger(__name__)
 
 MODE_HYBRID = "hybrid"  # Haiku brain + Nanbeige local worker, auto-fallback
 MODE_FULL = "full"      # User-configurable brain/worker/fallback (paid)
+MODE_CLAUDE = "claude"  # All roles via claude -p CLI ($0 via subscription)
 
-# Legacy aliases — map old names to the two supported modes
+# Legacy aliases — map old names to the supported modes
 _MODE_ALIASES = {
     "hybrid": MODE_HYBRID,
     "full": MODE_FULL,
     "off": MODE_FULL,
+    "claude": MODE_CLAUDE,
 }
 
 # Old eco/local modes are disabled (require 32GB+ RAM)
@@ -60,7 +63,7 @@ DISABLED_MODE_MESSAGE = (
     "Use HYBRID for the best balance of cost and quality."
 )
 
-VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL})
+VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL, MODE_CLAUDE})
 
 # Backward-compat aliases for imports that used the old names
 MODE_ECO_ON = MODE_HYBRID      # deprecated
@@ -243,6 +246,10 @@ class EcoRouter:
 
         # Free provider keys (lazy init)
         self._free_keys: dict[str, str] | None = None
+
+        # Claude CLI provider (lazy init)
+        self._claude_cli = None
+        self._last_claude_fallback: str | None = None
 
         # Routing attribution — set after every chat() call
         self.last_routing: RoutingResult | None = None
@@ -484,6 +491,12 @@ class EcoRouter:
         if model and role not in (ROLE_BRAIN, ROLE_WORKER):
             return await self._route_paid(messages, user_id, model, **kwargs)
 
+        # Claude CLI mode — all roles go through claude -p
+        if settings.mode == MODE_CLAUDE:
+            return await self._route_claude(
+                messages, user_id, settings=settings, role=role, **kwargs
+            )
+
         if role == ROLE_BRAIN:
             return await self._route_brain(
                 messages, user_id, settings, models, **kwargs
@@ -516,6 +529,68 @@ class EcoRouter:
             reason=f"{settings.mode}: brain -> {brain_name}",
             **kwargs,
         )
+
+    # ── Claude CLI routing (all roles through claude -p) ───────────────
+
+    async def _route_claude(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings | None = None,
+        role: str = ROLE_BRAIN,
+        **kwargs,
+    ) -> LLMResponse:
+        """Route all calls through claude -p CLI ($0 via subscription).
+
+        User can set brain model via /mode brain opus|sonnet|haiku.
+        This controls the --model flag passed to claude -p.
+        """
+        # Resolve CLI model from user settings (brain_model override)
+        cli_model = "sonnet"  # default
+        if settings and settings.brain_model:
+            # Map known model names to CLI aliases
+            bm = settings.brain_model.lower()
+            if "opus" in bm:
+                cli_model = "opus"
+            elif "haiku" in bm:
+                cli_model = "haiku"
+            elif "sonnet" in bm:
+                cli_model = "sonnet"
+
+        if self._claude_cli is None:
+            from lazyclaw.llm.providers.claude_cli_provider import (
+                ClaudeCLIProvider,
+            )
+            self._claude_cli = ClaudeCLIProvider(model=cli_model)
+        else:
+            # Update model if settings changed
+            self._claude_cli._model = cli_model
+
+        self._set_routing(
+            "claude-cli", "claude_cli", is_local=False,
+            reason=f"claude: {role} -> {cli_model}",
+        )
+        self._record_usage(user_id, "free")
+
+        try:
+            response = await self._claude_cli.chat(messages, model="claude-cli", **kwargs)
+        except Exception as exc:
+            logger.warning("Claude CLI failed: %s — falling back to Sonnet", exc)
+            self._last_claude_fallback = str(exc)
+            response = await self._route_paid(
+                messages, user_id, "claude-sonnet-4-20250514",
+                reason=f"claude_cli_failed: {exc}",
+                **kwargs,
+            )
+            # Prepend fallback badge so user sees the switch
+            response.content = (
+                f"[⚡ CLI error → Sonnet fallback] {response.content}"
+            )
+            return response
+
+        self._last_claude_fallback = None
+        self._record_routing_stats("claude-cli", response.usage)
+        return response
 
     # ── Worker routing ────────────────────────────────────────────────
 
@@ -690,7 +765,8 @@ class EcoRouter:
 
         content = result.content
         if settings.show_badges:
-            mode_label = "HYBRID" if settings.mode == MODE_HYBRID else "FULL"
+            mode_labels = {MODE_HYBRID: "HYBRID", MODE_FULL: "FULL", MODE_CLAUDE: "CLAUDE"}
+            mode_label = mode_labels.get(settings.mode, settings.mode.upper())
             content = f"[{mode_label} {result.provider}] {content}"
 
         return LLMResponse(
@@ -716,6 +792,20 @@ class EcoRouter:
         """Stream chat responses. Routes based on ECO mode + role."""
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
+
+        # Claude CLI mode — use non-streaming fallback
+        if settings.mode == MODE_CLAUDE:
+            response = await self._route_claude(
+                messages, user_id, settings=settings, role=role, **kwargs
+            )
+            yield StreamChunk(
+                delta=response.content,
+                tool_calls=response.tool_calls,
+                usage=response.usage,
+                model=response.model,
+                done=True,
+            )
+            return
 
         if role == ROLE_BRAIN:
             # Brain: always paid streaming
@@ -861,6 +951,7 @@ class EcoRouter:
         mode_labels = {
             MODE_HYBRID: "HYBRID",
             MODE_FULL: "FULL",
+            MODE_CLAUDE: "CLAUDE CLI",
         }
 
         return {

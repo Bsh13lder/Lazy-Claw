@@ -331,6 +331,60 @@ async def list_tools() -> list[Tool]:
                 "required": ["email", "uids", "action"],
             },
         ),
+        Tool(
+            name="email_create_label",
+            description=(
+                "Create a new mailbox folder/label. For Gmail this creates a label. "
+                "Use simple names like 'Financial', 'Tickets', or nested like 'Work/Projects'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email account",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Label/folder name to create (e.g. 'Financial', 'Tickets')",
+                    },
+                },
+                "required": ["email", "label"],
+            },
+        ),
+        Tool(
+            name="email_label",
+            description=(
+                "Add a label to emails WITHOUT removing them from their current folder. "
+                "Unlike email_move, this KEEPS emails in INBOX (or wherever they are) "
+                "and just adds the label. Perfect for organizing Gmail without hiding emails. "
+                "Creates the label automatically if it doesn't exist. "
+                "Pass multiple comma-separated UIDs to label many emails in one call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email account",
+                    },
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated UIDs to label (from email_read/email_search results)",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Label name to add (e.g. 'Financial', 'Security'). Created if missing.",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Source folder to read UIDs from (default INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["email", "uids", "label"],
+            },
+        ),
     ]
 
 
@@ -350,6 +404,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "email_delete": _handle_delete,
         "email_move": _handle_move,
         "email_mark": _handle_mark,
+        "email_create_label": _handle_create_label,
+        "email_label": _handle_label,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -600,6 +656,41 @@ async def _handle_mark(args: dict) -> str:
     return f"Marked {count} email(s) as {action} in {folder}."
 
 
+async def _handle_create_label(args: dict) -> str:
+    addr = args["email"]
+    cfg = _configs.get(addr)
+    if not cfg:
+        return f"Account {addr} not configured. Use email_setup first."
+
+    label = args["label"]
+    if not label:
+        return "Label name cannot be empty."
+
+    result = await asyncio.to_thread(_imap_create_label_sync, cfg, label)
+    return result
+
+
+async def _handle_label(args: dict) -> str:
+    addr = args["email"]
+    cfg = _configs.get(addr)
+    if not cfg:
+        return f"Account {addr} not configured. Use email_setup first."
+
+    uids = [u.strip() for u in args["uids"].split(",") if u.strip()]
+    label = args["label"]
+    folder = args.get("folder", "INBOX")
+
+    if not uids:
+        return "No UIDs provided."
+    if not label:
+        return "Label name cannot be empty."
+
+    count = await asyncio.to_thread(
+        _imap_add_label_sync, cfg, uids, folder, label
+    )
+    return f"Labeled {count} email(s) with '{label}' (kept in {folder})."
+
+
 # ---------------------------------------------------------------------------
 # Synchronous IMAP helpers (run in thread via asyncio.to_thread)
 # ---------------------------------------------------------------------------
@@ -658,23 +749,23 @@ def _parse_message(data: bytes) -> dict:
 def _imap_read_sync(
     cfg: dict, folder: str, limit: int, unread_only: bool
 ) -> list[dict]:
-    """Read recent emails via stdlib imaplib (synchronous)."""
+    """Read recent emails via stdlib imaplib using UID commands (synchronous)."""
     imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
     try:
         imap.login(cfg["email"], cfg["password"])
         imap.select(folder, readonly=True)
 
         criterion = "UNSEEN" if unread_only else "ALL"
-        _, msg_data = imap.search(None, criterion)
-        msg_ids = msg_data[0].split()
-        if not msg_ids:
+        _, msg_data = imap.uid("SEARCH", None, criterion)
+        msg_uids = msg_data[0].split()
+        if not msg_uids:
             return []
 
         # Take the last `limit` (most recent)
-        selected = msg_ids[-limit:]
+        selected = msg_uids[-limit:]
         results = []
-        for mid in reversed(selected):
-            _, fetch_data = imap.fetch(mid, "(FLAGS RFC822)")
+        for uid in reversed(selected):
+            _, fetch_data = imap.uid("FETCH", uid, "(FLAGS RFC822)")
             if not fetch_data or fetch_data[0] is None:
                 continue
             raw = fetch_data[0][1] if isinstance(fetch_data[0], tuple) else None
@@ -682,7 +773,7 @@ def _imap_read_sync(
                 continue
             flags_raw = fetch_data[0][0] if isinstance(fetch_data[0], tuple) else b""
             parsed = _parse_message(raw)
-            parsed["uid"] = mid.decode("utf-8", errors="replace")
+            parsed["uid"] = uid.decode("utf-8", errors="replace")
             parsed["is_read"] = b"\\Seen" in flags_raw
             results.append(parsed)
 
@@ -719,22 +810,22 @@ def _build_imap_search_criteria(query: str) -> str:
 def _imap_search_sync(
     cfg: dict, query: str, folder: str, limit: int
 ) -> list[dict]:
-    """Search emails via stdlib imaplib (synchronous)."""
+    """Search emails via stdlib imaplib using UID commands (synchronous)."""
     imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
     try:
         imap.login(cfg["email"], cfg["password"])
         imap.select(folder, readonly=True)
 
         criteria = _build_imap_search_criteria(query)
-        _, msg_data = imap.search(None, criteria)
-        msg_ids = msg_data[0].split()
-        if not msg_ids:
+        _, msg_data = imap.uid("SEARCH", None, criteria)
+        msg_uids = msg_data[0].split()
+        if not msg_uids:
             return []
 
-        selected = msg_ids[-limit:]
+        selected = msg_uids[-limit:]
         results = []
-        for mid in reversed(selected):
-            _, fetch_data = imap.fetch(mid, "(FLAGS RFC822)")
+        for uid in reversed(selected):
+            _, fetch_data = imap.uid("FETCH", uid, "(FLAGS RFC822)")
             if not fetch_data or fetch_data[0] is None:
                 continue
             raw = fetch_data[0][1] if isinstance(fetch_data[0], tuple) else None
@@ -742,7 +833,7 @@ def _imap_search_sync(
                 continue
             flags_raw = fetch_data[0][0] if isinstance(fetch_data[0], tuple) else b""
             parsed = _parse_message(raw)
-            parsed["uid"] = mid.decode("utf-8", errors="replace")
+            parsed["uid"] = uid.decode("utf-8", errors="replace")
             parsed["is_read"] = b"\\Seen" in flags_raw
             results.append(parsed)
 
@@ -778,7 +869,10 @@ def _imap_folders_sync(cfg: dict) -> list[str]:
 
 
 def _imap_delete_sync(cfg: dict, uids: list[str], folder: str) -> int:
-    """Delete emails by UID — moves to Trash on Gmail, flags \\Deleted elsewhere."""
+    """Delete emails by UID — moves to Trash on Gmail, flags \\Deleted elsewhere.
+
+    Uses batch UID sets for efficiency.
+    """
     imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
     count = 0
     try:
@@ -786,18 +880,26 @@ def _imap_delete_sync(cfg: dict, uids: list[str], folder: str) -> int:
         imap.select(folder)
 
         is_gmail = "gmail" in cfg.get("imap_host", "").lower()
+        uid_set = ",".join(uids)
 
-        for uid in uids:
-            try:
-                if is_gmail:
-                    # Gmail: COPY to Trash, then remove from current folder
-                    imap.copy(uid, "[Gmail]/Trash")
-                    imap.store(uid, "+FLAGS", "(\\Deleted)")
-                else:
-                    imap.store(uid, "+FLAGS", "(\\Deleted)")
-                count += 1
-            except Exception as exc:
-                logger.warning("Failed to delete UID %s: %s", uid, exc)
+        try:
+            uid_bytes = uid_set.encode()
+            if is_gmail:
+                imap.uid("COPY", uid_bytes, "[Gmail]/Trash")
+            imap.uid("STORE", uid_bytes, "+FLAGS", "(\\Deleted)")
+            count = len(uids)
+        except Exception:
+            # Fallback: one-by-one
+            count = 0
+            for uid_str in uids:
+                try:
+                    uid_bytes = uid_str.encode()
+                    if is_gmail:
+                        imap.uid("COPY", uid_bytes, "[Gmail]/Trash")
+                    imap.uid("STORE", uid_bytes, "+FLAGS", "(\\Deleted)")
+                    count += 1
+                except Exception as exc:
+                    logger.warning("Failed to delete UID %s: %s", uid_str, exc)
 
         imap.expunge()
     finally:
@@ -811,20 +913,33 @@ def _imap_delete_sync(cfg: dict, uids: list[str], folder: str) -> int:
 def _imap_move_sync(
     cfg: dict, uids: list[str], folder: str, destination: str
 ) -> int:
-    """Move emails to a different folder via IMAP COPY + delete from source."""
+    """Move emails to a different folder via IMAP UID COPY + delete from source.
+
+    Uses batch UID sets for efficiency.
+    """
     imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
     count = 0
     try:
         imap.login(cfg["email"], cfg["password"])
         imap.select(folder)
 
-        for uid in uids:
-            try:
-                imap.copy(uid, destination)
-                imap.store(uid, "+FLAGS", "(\\Deleted)")
-                count += 1
-            except Exception as exc:
-                logger.warning("Failed to move UID %s: %s", uid, exc)
+        uid_set = ",".join(uids)
+        try:
+            uid_bytes = uid_set.encode()
+            imap.uid("COPY", uid_bytes, destination)
+            imap.uid("STORE", uid_bytes, "+FLAGS", "(\\Deleted)")
+            count = len(uids)
+        except Exception:
+            # Fallback: one-by-one
+            count = 0
+            for uid_str in uids:
+                try:
+                    uid_bytes = uid_str.encode()
+                    imap.uid("COPY", uid_bytes, destination)
+                    imap.uid("STORE", uid_bytes, "+FLAGS", "(\\Deleted)")
+                    count += 1
+                except Exception as exc:
+                    logger.warning("Failed to move UID %s: %s", uid_str, exc)
 
         imap.expunge()
     finally:
@@ -838,7 +953,7 @@ def _imap_move_sync(
 def _imap_mark_sync(
     cfg: dict, uids: list[str], folder: str, action: str
 ) -> int:
-    """Mark emails as read/unread/flagged/unflagged."""
+    """Mark emails as read/unread/flagged/unflagged using UID commands."""
     flag_map = {
         "read": ("+FLAGS", "(\\Seen)"),
         "unread": ("-FLAGS", "(\\Seen)"),
@@ -853,18 +968,93 @@ def _imap_mark_sync(
         imap.login(cfg["email"], cfg["password"])
         imap.select(folder)
 
-        for uid in uids:
+        for uid_str in uids:
             try:
-                imap.store(uid, op, flag)
+                imap.uid("STORE", uid_str.encode(), op, flag)
                 count += 1
             except Exception as exc:
-                logger.warning("Failed to mark UID %s: %s", uid, exc)
+                logger.warning("Failed to mark UID %s: %s", uid_str, exc)
     finally:
         try:
             imap.logout()
         except Exception:
             pass
     return count
+
+
+def _imap_add_label_sync(
+    cfg: dict, uids: list[str], folder: str, label: str
+) -> int:
+    """Add a label to emails via COPY — does NOT remove from source folder.
+
+    For Gmail: COPY to label = add label. Email stays in INBOX.
+    Auto-creates the label if it doesn't exist.
+    Uses batch UID set (comma-separated) for efficiency.
+    """
+    imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
+    count = 0
+    try:
+        imap.login(cfg["email"], cfg["password"])
+
+        # Auto-create label if missing (ignore ALREADYEXISTS)
+        status, resp = imap.create(label)
+        if status != "OK":
+            msg = resp[0].decode("utf-8", errors="replace") if resp else ""
+            if "ALREADYEXISTS" not in msg.upper() and "already exists" not in msg.lower():
+                logger.warning("Failed to create label '%s': %s", label, msg)
+
+        imap.select(folder)
+
+        # Batch COPY — IMAP supports comma-separated UID sets
+        uid_set = ",".join(uids)
+        try:
+            status, _ = imap.uid("COPY", uid_set.encode(), label)
+            if status == "OK":
+                count = len(uids)
+            else:
+                # Fallback: try one-by-one if batch fails
+                for uid_str in uids:
+                    try:
+                        imap.uid("COPY", uid_str.encode(), label)
+                        count += 1
+                    except Exception as exc:
+                        logger.warning("Failed to label UID %s: %s", uid_str, exc)
+        except Exception:
+            # Fallback: try one-by-one
+            for uid_str in uids:
+                try:
+                    imap.uid("COPY", uid_str.encode(), label)
+                    count += 1
+                except Exception as exc:
+                    logger.warning("Failed to label UID %s: %s", uid_str, exc)
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    return count
+
+
+def _imap_create_label_sync(cfg: dict, label: str) -> str:
+    """Create a new IMAP folder/label."""
+    imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
+    try:
+        imap.login(cfg["email"], cfg["password"])
+        status, response = imap.create(label)
+        if status == "OK":
+            return f"Created label '{label}' successfully."
+        else:
+            msg = response[0].decode("utf-8", errors="replace") if response else "Unknown error"
+            if "ALREADYEXISTS" in msg.upper() or "already exists" in msg.lower():
+                return f"Label '{label}' already exists."
+            return f"Failed to create label '{label}': {msg}"
+    except Exception as exc:
+        return f"Failed to create label '{label}': {exc}"
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ BOT_COMMANDS = [
     BotCommand("status", "\U0001f4ca Live status"),
     BotCommand("tasks", "\u26a1 Background tasks"),
     BotCommand("usage", "\U0001f4b0 Token costs"),
-    BotCommand("eco", "\U0001f331 AI mode"),
+    BotCommand("mode", "\u2699\ufe0f AI routing mode"),
     BotCommand("model", "\U0001f9e0 Show/change models"),
     BotCommand("watch", "\U0001f514 Watchers (WhatsApp/Email)"),
     BotCommand("mcp", "\U0001f50c MCP servers"),
@@ -71,7 +71,8 @@ class TelegramCommands:
         cmds = {
             "start": self._handle_start, "help": self._handle_help,
             "key": self._handle_key, "model": self._handle_model,
-            "eco": self._handle_eco, "doctor": self._handle_doctor,
+            "mode": self._handle_eco, "eco": self._handle_eco,
+            "doctor": self._handle_doctor,
             "logs": self._handle_logs, "usage": self._handle_usage,
             "tasks": self._handle_tasks, "cancel": self._handle_cancel,
             "history": self._handle_history, "wipe": self._handle_wipe,
@@ -144,7 +145,7 @@ class TelegramCommands:
                 "Send me anything to chat, or /help for commands.\n\n"
                 "\u26a1 <b>Quick setup:</b>\n"
                 "<code>/key set ANTHROPIC_API_KEY sk-ant-xxx</code>\n"
-                "<code>/eco hybrid</code>\n"
+                "<code>/mode claude</code>\n"
                 "<code>/model brain claude-sonnet-4-20250514</code>"
             )
             if not self._pinned_task:
@@ -172,7 +173,7 @@ class TelegramCommands:
             "\u2699\ufe0f <b>Setup</b>\n"
             "/key \u2014 \U0001f511 API keys <i>(auto-deletes msg)</i>\n"
             "/model \u2014 \U0001f9e0 Show/change models\n"
-            "/eco \u2014 \U0001f331 AI mode\n\n"
+            "/mode \u2014 \u2699\ufe0f AI routing mode\n\n"
             "\U0001f4ca <b>Daily</b>\n"
             "/status \u2014 Live status\n"
             "/tasks \u2014 \u26a1 Background tasks\n"
@@ -275,7 +276,7 @@ class TelegramCommands:
                 return
         await self._reply(update, "\U0001f9e0 Usage: <code>/model brain MODEL</code> or <code>/model worker MODEL</code>")
 
-    # -- /eco --------------------------------------------------------------
+    # -- /mode (alias: /eco) ------------------------------------------------
 
     async def _handle_eco(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = await self._auth(update)
@@ -283,7 +284,7 @@ class TelegramCommands:
             return
         args = context.args or []
         from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
-        from lazyclaw.llm.eco_router import normalize_mode, MODE_HYBRID, MODE_FULL, _DISABLED_MODES, DISABLED_MODE_MESSAGE
+        from lazyclaw.llm.eco_router import normalize_mode, MODE_HYBRID, MODE_FULL, MODE_CLAUDE, _DISABLED_MODES, DISABLED_MODE_MESSAGE
         from lazyclaw.llm.model_registry import get_mode_models
 
         if not args:
@@ -292,9 +293,11 @@ class TelegramCommands:
             mode = s.get("mode", "hybrid")
             icons = {
                 MODE_HYBRID: "\u2696\ufe0f", MODE_FULL: "\U0001f680",
+                MODE_CLAUDE: "\u26a1",
             }
             labels = {
                 MODE_HYBRID: "HYBRID", MODE_FULL: "FULL",
+                MODE_CLAUDE: "CLAUDE CLI",
             }
             _models = get_mode_models(mode)
             brain = s.get("brain_model") or _models["brain"]
@@ -305,7 +308,7 @@ class TelegramCommands:
             budget = s.get("monthly_paid_budget", 0)
 
             text = (
-                f"{icons.get(mode, '')} <b>ECO: {labels.get(mode, mode)}</b>\n"
+                f"{icons.get(mode, '')} <b>Mode: {labels.get(mode, mode)}</b>\n"
                 f"━━━━━━━━━━━━\n"
                 f"\U0001f9e0 Brain: <b>{brain}</b>\n"
                 f"\U0001f916 Worker: <b>{worker}</b>\n"
@@ -317,12 +320,13 @@ class TelegramCommands:
                 text += f"\U0001f4b0 Budget: ${budget:.2f}/mo\n"
             text += (
                 "\n<b>Commands:</b>\n"
-                "<code>/eco hybrid</code> — Haiku brain + local worker\n"
-                "<code>/eco full</code> — User-configured paid models\n"
-                "<code>/eco brain MODEL</code> — Set brain model\n"
-                "<code>/eco worker MODEL</code> — Set worker model\n"
-                "<code>/eco workers N</code> — Max workers (1-20)\n"
-                "<code>/eco budget N</code> — Monthly $ cap"
+                "<code>/mode hybrid</code> — Haiku brain + local worker\n"
+                "<code>/mode full</code> — User-configured paid models\n"
+                "<code>/mode claude</code> — All via Claude CLI (free)\n"
+                "<code>/mode brain MODEL</code> — Set brain model\n"
+                "<code>/mode worker MODEL</code> — Set worker model\n"
+                "<code>/mode workers N</code> — Max workers (1-20)\n"
+                "<code>/mode budget N</code> — Monthly $ cap"
             )
             await self._reply(update, text)
             return
@@ -330,7 +334,7 @@ class TelegramCommands:
         subcmd = args[0].lower()
 
         # Mode change: /eco hybrid|full (reject old eco/local modes)
-        if subcmd in ("on", "hybrid", "off", "local", "full", "eco", "eco_on"):
+        if subcmd in ("on", "hybrid", "off", "local", "full", "eco", "eco_on", "claude"):
             if subcmd in _DISABLED_MODES:
                 await self._reply(update, f"\u26a0\ufe0f {DISABLED_MODE_MESSAGE}")
                 return
@@ -338,8 +342,9 @@ class TelegramCommands:
             await update_eco_settings(self._config, user_id, {"mode": normalized})
             labels = {
                 MODE_HYBRID: "HYBRID", MODE_FULL: "FULL",
+                MODE_CLAUDE: "CLAUDE CLI",
             }
-            await self._reply(update, f"\u2705 ECO: <b>{labels.get(normalized, normalized)}</b>")
+            await self._reply(update, f"\u2705 Mode: <b>{labels.get(normalized, normalized)}</b>")
             return
 
         # Auto-fallback: /eco auto on|off
@@ -392,7 +397,7 @@ class TelegramCommands:
                 await self._reply(update, f"\u274c {e}")
             return
 
-        await self._reply(update, "\u274c Unknown. Use: <code>/eco on|hybrid|off</code>")
+        await self._reply(update, "\u274c Unknown. Use: <code>/mode hybrid|full|claude</code>")
 
     # -- /ram ---------------------------------------------------------------
 

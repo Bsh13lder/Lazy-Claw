@@ -105,7 +105,7 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         if normalized not in VALID_MODES:
             raise ValueError(
                 f"Invalid eco mode: {updates['mode']}. "
-                f"Use: hybrid, full"
+                f"Use: hybrid, full, claude"
             )
         updates["mode"] = normalized
 

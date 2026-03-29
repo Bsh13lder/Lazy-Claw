@@ -1,9 +1,10 @@
-"""Static model catalog and 2-role mode table for ECO routing.
+"""Static model catalog and role-based mode table for ECO routing.
 
-Two roles: Brain (= Team Lead), Worker, Fallback.
-Two modes:
+Three roles: Brain (= Team Lead), Worker, Fallback.
+Three modes:
   HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
   FULL:    User-configurable brain/worker/fallback (paid, auto)
+  CLAUDE:  All roles via claude CLI ($0 — covered by subscription)
 """
 
 from __future__ import annotations
@@ -40,6 +41,11 @@ MODE_MODELS: dict[str, dict[str, str]] = {
         "brain":    "claude-sonnet-4-20250514",
         "worker":   "claude-haiku-4-5-20251001",
         "fallback": "claude-opus-4-6",
+    },
+    "claude": {
+        "brain":    "claude-cli",
+        "worker":   "claude-cli",
+        "fallback": "claude-cli",
     },
 }
 
@@ -201,6 +207,21 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         max_context=262144,
         tool_calling=True,
         role="worker",
+    ),
+
+    # ── CLI — FREE (user's Claude subscription) ────────────────────────
+    "claude-cli": ModelProfile(
+        name="claude-cli",
+        display_name="Claude CLI",
+        provider="claude_cli",
+        is_local=False,
+        ram_mb=0,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\u26a1",  # ⚡
+        max_context=200000,
+        tool_calling=True,
+        role="brain",
     ),
 
     # ── MCP — FREE (user's Claude subscription) ──────────────────────

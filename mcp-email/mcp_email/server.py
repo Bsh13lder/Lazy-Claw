@@ -197,6 +197,91 @@ async def list_tools() -> list[Tool]:
                 "required": ["email"],
             },
         ),
+        Tool(
+            name="email_delete",
+            description=(
+                "Delete emails by UID(s). Moves to Trash (Gmail) or marks as deleted. "
+                "Use email_search first to find UIDs, then pass them here."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email account",
+                    },
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated UIDs to delete (from email_read/email_search results)",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Mailbox folder (default INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["email", "uids"],
+            },
+        ),
+        Tool(
+            name="email_move",
+            description=(
+                "Move emails to a different folder/label. "
+                "For Gmail: use label names like 'Important', 'INBOX', '[Gmail]/Trash', '[Gmail]/Spam'. "
+                "Use email_folders to see available folders."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email account",
+                    },
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated UIDs to move",
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": "Destination folder/label name",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Source folder (default INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["email", "uids", "destination"],
+            },
+        ),
+        Tool(
+            name="email_mark",
+            description="Mark emails as read/unread or flagged/unflagged.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email account",
+                    },
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated UIDs to mark",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "unread", "flag", "unflag"],
+                        "description": "Action to perform",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Mailbox folder (default INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["email", "uids", "action"],
+            },
+        ),
     ]
 
 
@@ -213,6 +298,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "email_read": _handle_read,
         "email_search": _handle_search,
         "email_folders": _handle_folders,
+        "email_delete": _handle_delete,
+        "email_move": _handle_move,
+        "email_mark": _handle_mark,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -408,6 +496,60 @@ async def _handle_folders(args: dict) -> str:
     return json.dumps(folders, indent=2, ensure_ascii=False)
 
 
+async def _handle_delete(args: dict) -> str:
+    addr = args["email"]
+    cfg = _configs.get(addr)
+    if not cfg:
+        return f"Account {addr} not configured. Use email_setup first."
+
+    uids = [u.strip() for u in args["uids"].split(",") if u.strip()]
+    folder = args.get("folder", "INBOX")
+
+    if not uids:
+        return "No UIDs provided."
+
+    count = await asyncio.to_thread(_imap_delete_sync, cfg, uids, folder)
+    return f"Deleted {count} email(s) from {folder}."
+
+
+async def _handle_move(args: dict) -> str:
+    addr = args["email"]
+    cfg = _configs.get(addr)
+    if not cfg:
+        return f"Account {addr} not configured. Use email_setup first."
+
+    uids = [u.strip() for u in args["uids"].split(",") if u.strip()]
+    destination = args["destination"]
+    folder = args.get("folder", "INBOX")
+
+    if not uids:
+        return "No UIDs provided."
+
+    count = await asyncio.to_thread(
+        _imap_move_sync, cfg, uids, folder, destination
+    )
+    return f"Moved {count} email(s) from {folder} to {destination}."
+
+
+async def _handle_mark(args: dict) -> str:
+    addr = args["email"]
+    cfg = _configs.get(addr)
+    if not cfg:
+        return f"Account {addr} not configured. Use email_setup first."
+
+    uids = [u.strip() for u in args["uids"].split(",") if u.strip()]
+    action = args["action"]
+    folder = args.get("folder", "INBOX")
+
+    if not uids:
+        return "No UIDs provided."
+
+    count = await asyncio.to_thread(
+        _imap_mark_sync, cfg, uids, folder, action
+    )
+    return f"Marked {count} email(s) as {action} in {folder}."
+
+
 # ---------------------------------------------------------------------------
 # Synchronous IMAP helpers (run in thread via asyncio.to_thread)
 # ---------------------------------------------------------------------------
@@ -583,6 +725,96 @@ def _imap_folders_sync(cfg: dict) -> list[str]:
             imap.logout()
         except Exception:
             pass
+
+
+def _imap_delete_sync(cfg: dict, uids: list[str], folder: str) -> int:
+    """Delete emails by UID — moves to Trash on Gmail, flags \\Deleted elsewhere."""
+    imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
+    count = 0
+    try:
+        imap.login(cfg["email"], cfg["password"])
+        imap.select(folder)
+
+        is_gmail = "gmail" in cfg.get("imap_host", "").lower()
+
+        for uid in uids:
+            try:
+                if is_gmail:
+                    # Gmail: COPY to Trash, then remove from current folder
+                    imap.copy(uid, "[Gmail]/Trash")
+                    imap.store(uid, "+FLAGS", "(\\Deleted)")
+                else:
+                    imap.store(uid, "+FLAGS", "(\\Deleted)")
+                count += 1
+            except Exception as exc:
+                logger.warning("Failed to delete UID %s: %s", uid, exc)
+
+        imap.expunge()
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    return count
+
+
+def _imap_move_sync(
+    cfg: dict, uids: list[str], folder: str, destination: str
+) -> int:
+    """Move emails to a different folder via IMAP COPY + delete from source."""
+    imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
+    count = 0
+    try:
+        imap.login(cfg["email"], cfg["password"])
+        imap.select(folder)
+
+        for uid in uids:
+            try:
+                imap.copy(uid, destination)
+                imap.store(uid, "+FLAGS", "(\\Deleted)")
+                count += 1
+            except Exception as exc:
+                logger.warning("Failed to move UID %s: %s", uid, exc)
+
+        imap.expunge()
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    return count
+
+
+def _imap_mark_sync(
+    cfg: dict, uids: list[str], folder: str, action: str
+) -> int:
+    """Mark emails as read/unread/flagged/unflagged."""
+    flag_map = {
+        "read": ("+FLAGS", "(\\Seen)"),
+        "unread": ("-FLAGS", "(\\Seen)"),
+        "flag": ("+FLAGS", "(\\Flagged)"),
+        "unflag": ("-FLAGS", "(\\Flagged)"),
+    }
+    op, flag = flag_map.get(action, ("+FLAGS", "(\\Seen)"))
+
+    imap = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"])
+    count = 0
+    try:
+        imap.login(cfg["email"], cfg["password"])
+        imap.select(folder)
+
+        for uid in uids:
+            try:
+                imap.store(uid, op, flag)
+                count += 1
+            except Exception as exc:
+                logger.warning("Failed to mark UID %s: %s", uid, exc)
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    return count
 
 
 # ---------------------------------------------------------------------------

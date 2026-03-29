@@ -545,17 +545,11 @@ class EcoRouter:
         User can set brain model via /mode brain opus|sonnet|haiku.
         This controls the --model flag passed to claude -p.
         """
-        # Resolve CLI model from user settings (brain_model override)
+        # CLI mode only supports sonnet and opus (both 4.6)
         cli_model = "sonnet"  # default
         if settings and settings.brain_model:
-            # Map known model names to CLI aliases
-            bm = settings.brain_model.lower()
-            if "opus" in bm:
+            if "opus" in settings.brain_model.lower():
                 cli_model = "opus"
-            elif "haiku" in bm:
-                cli_model = "haiku"
-            elif "sonnet" in bm:
-                cli_model = "sonnet"
 
         if self._claude_cli is None:
             from lazyclaw.llm.providers.claude_cli_provider import (

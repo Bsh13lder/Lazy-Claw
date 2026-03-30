@@ -107,6 +107,14 @@ class WatchMCPSkill(BaseSkill):
                         "If omitted, notifies on all new messages."
                     ),
                 },
+                "batch_minutes": {
+                    "type": "integer",
+                    "description": (
+                        "Accumulate messages for N minutes before sending "
+                        "one grouped notification. Default: 5 for WhatsApp, "
+                        "0 (immediate) for others. Reduces notification spam."
+                    ),
+                },
             },
             "required": ["service"],
         }
@@ -125,6 +133,9 @@ class WatchMCPSkill(BaseSkill):
         duration = params.get("duration_hours", 4)
         auto_reply = params.get("auto_reply")
         instruction = params.get("instruction", "")
+        # Default batch: 5 min for WhatsApp, 0 (immediate) for others
+        default_batch = 5 if service == "whatsapp" else 0
+        batch_min = params.get("batch_minutes", default_batch)
 
         # Build tool args
         tool_args = dict(svc["default_args"])
@@ -170,6 +181,7 @@ class WatchMCPSkill(BaseSkill):
             expires_at=expires_at,
             one_shot=one_shot,
             auto_reply=auto_reply,
+            batch_window=batch_min * 60,
         )
 
         # Create job
@@ -195,10 +207,11 @@ class WatchMCPSkill(BaseSkill):
 
         contact_str = f" from {contact}" if contact else ""
         reply_str = f"\nAuto-reply: {auto_reply}" if auto_reply else ""
+        batch_str = f"\nBatching: messages grouped every {batch_min} min" if batch_min > 0 else ""
 
         return (
             f"Watching {service}{contact_str}\n"
             f"Checking every {interval_min} minutes, {duration_str}.\n"
-            f"Notifications via Telegram. Zero token cost per check.{reply_str}\n"
+            f"Notifications via Telegram. Zero token cost per check.{reply_str}{batch_str}\n"
             f"ID: {job_id[:8]}..."
         )

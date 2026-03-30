@@ -244,6 +244,17 @@ class MCPClient:
         logger.debug("MCPClient %s calling tool %s", self._server_id, name)
         result = await self._session.call_tool(name, arguments)
 
+        # Check MCP protocol error flag first
+        if getattr(result, "isError", False):
+            error_parts = [
+                block.text for block in result.content
+                if hasattr(block, "text")
+            ]
+            error_detail = "\n".join(error_parts).strip()
+            if error_detail:
+                return f"[MCP ERROR] The tool reported an error: {error_detail}"
+            return "[MCP ERROR] The tool reported an error but provided no details."
+
         # Concatenate text content blocks into a single string
         parts: list[str] = []
         for block in result.content:
@@ -251,7 +262,16 @@ class MCPClient:
                 parts.append(block.text)
             else:
                 parts.append(str(block))
-        return "\n".join(parts)
+        text = "\n".join(parts)
+
+        # Guard against empty results that cause LLM hallucination
+        if not text.strip():
+            return (
+                "[NO DATA] The tool returned an empty result. "
+                "No information is available. Do not guess or fabricate data."
+            )
+
+        return text
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -25,6 +25,7 @@ def build_mcp_watcher_context(
     expires_at: str | None = None,
     one_shot: bool = False,
     auto_reply: str | None = None,
+    batch_window: int = 0,
 ) -> str:
     """Build a JSON context blob for an MCP watcher job.
 
@@ -37,6 +38,7 @@ def build_mcp_watcher_context(
         expires_at: ISO timestamp for expiration (None = indefinite)
         one_shot: Stop after first change detected
         auto_reply: If set, auto-reply instruction for the agent
+        batch_window: Seconds to accumulate messages before notifying (0 = immediate)
     """
     return json.dumps({
         "type": "mcp_watcher",
@@ -50,6 +52,9 @@ def build_mcp_watcher_context(
         "one_shot": one_shot,
         "instruction": instruction,
         "auto_reply": auto_reply,
+        "batch_window": batch_window,
+        "pending_batch": [],
+        "batch_started": 0,
     })
 
 
@@ -166,16 +171,64 @@ async def check_mcp_watcher(
     new_ctx["last_check"] = time.time()
 
     if not new_items:
+        # No new items — but check if pending batch should flush
+        batch_window = int(ctx.get("batch_window", 0))
+        pending = list(ctx.get("pending_batch", []))
+        batch_started = float(ctx.get("batch_started", 0))
+        if pending and batch_window > 0 and batch_started > 0:
+            elapsed = time.time() - batch_started
+            if elapsed >= batch_window:
+                # Flush the accumulated batch
+                new_ctx["pending_batch"] = []
+                new_ctx["batch_started"] = 0
+                notification = _format_notification(
+                    pending, service, ctx.get("instruction", ""),
+                )
+                logger.info(
+                    "MCP watcher %s: flushing batch of %d items (window elapsed)",
+                    service, len(pending),
+                )
+                return True, notification, new_ctx
         logger.debug("MCP watcher %s: no new items", service)
         return False, None, new_ctx
 
-    # Update seen IDs (keep last 100 to prevent unbounded growth)
+    # Update seen IDs (keep last 200 to prevent unbounded growth)
     all_ids = list(last_seen | {item["id"] for item in new_items})
-    new_ctx["last_seen_ids"] = all_ids[-100:]
+    new_ctx["last_seen_ids"] = all_ids[-200:]
 
-    # Build notification
+    # Batching: accumulate messages instead of sending immediately
+    batch_window = int(ctx.get("batch_window", 0))
+    if batch_window > 0:
+        pending = list(ctx.get("pending_batch", []))
+        batch_started = float(ctx.get("batch_started", 0))
+        pending.extend(new_items)
+        if batch_started == 0:
+            batch_started = time.time()
+        elapsed = time.time() - batch_started
+        if elapsed >= batch_window:
+            # Window elapsed — flush everything
+            new_ctx["pending_batch"] = []
+            new_ctx["batch_started"] = 0
+            notification = _format_notification(
+                pending, service, ctx.get("instruction", ""),
+            )
+            logger.info(
+                "MCP watcher %s: flushing batch of %d items",
+                service, len(pending),
+            )
+            return True, notification, new_ctx
+        else:
+            # Still accumulating — don't notify yet
+            new_ctx["pending_batch"] = pending
+            new_ctx["batch_started"] = batch_started
+            logger.info(
+                "MCP watcher %s: batching %d items (%.0fs / %ds window)",
+                service, len(pending), elapsed, batch_window,
+            )
+            return False, None, new_ctx
+
+    # No batching — notify immediately
     notification = _format_notification(new_items, service, ctx.get("instruction", ""))
-
     return True, notification, new_ctx
 
 

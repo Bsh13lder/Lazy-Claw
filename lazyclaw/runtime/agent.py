@@ -140,8 +140,12 @@ _MAX_TOOL_RESULT_CHARS = 4000
 
 
 def _extract_tool_names_from_search_result(result: str) -> list[str]:
-    """Extract tool names from search_tools result text (bold **name**: pattern)."""
-    return re.findall(r"\*\*(\w+)\*\*:", result)
+    """Extract tool names from search_tools result text (bold **name**: pattern).
+
+    Tool names may contain hyphens (UUID-prefixed MCP tools like
+    mcp_c2d0f293-ccf7-4987-a4dd-7edadc97261f_instagram_read_profile).
+    """
+    return re.findall(r"\*\*([\w-]+)\*\*:", result)
 
 
 def _compact_history(

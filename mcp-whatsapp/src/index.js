@@ -47,7 +47,7 @@ let isReady = false;
 let latestQR = null;
 const contacts = new Map(); // jid → { name, phone, notify }
 const messageStore = new Map(); // jid → [{ key, message, messageTimestamp, pushName }]
-const mutedChats = new Map(); // jid → mute expiry timestamp (0 = forever, >0 = until epoch seconds)
+const mutedChats = new Map(); // jid → mute expiry timestamp (-1 = forever, >0 = until epoch seconds)
 const MAX_MESSAGES_PER_CHAT = 100;
 
 // LID ↔ phone mapping — built from contacts + messages
@@ -57,9 +57,42 @@ const phoneToLid = new Map();
 
 const CONTACTS_FILE = path.join(DATA_DIR, "contacts.json");
 const MESSAGES_FILE = path.join(DATA_DIR, "messages.json");
+const MUTED_FILE = path.join(DATA_DIR, "muted.json");
 
 // Debounce message saves — avoid disk thrashing on burst of messages
 let _msgSaveTimer = null;
+let _muteSaveTimer = null;
+
+/**
+ * Safely convert Baileys muteEndTime to a JS number.
+ * Handles: plain number, Long object ({low, high, unsigned}), string, null.
+ * Returns: -1 (muted forever), >0 (epoch seconds), 0 (not muted).
+ *
+ * Baileys protobuf uses uint64 for muteEndTime.
+ * "Muted forever" = -1 signed → 0xFFFFFFFFFFFFFFFF unsigned → huge number.
+ * We normalize: anything > year 2100 (epoch 4102444800) → -1 (forever).
+ */
+function toMuteNumber(val) {
+  if (val == null) return 0;
+  // Long object from protobufjs
+  if (typeof val === "object" && "low" in val && "high" in val) {
+    // If high bits are set to 0xFFFFFFFF, it's -1 as uint64 → muted forever
+    if ((val.high >>> 0) === 0xFFFFFFFF) return -1;
+    // Use toNumber() if available (Long.js)
+    if (typeof val.toNumber === "function") {
+      const n = val.toNumber();
+      return n > 4102444800 ? -1 : n;
+    }
+    // Manual: high * 2^32 + low (unsigned)
+    const n = (val.high >>> 0) * 4294967296 + (val.low >>> 0);
+    return n > 4102444800 ? -1 : n;
+  }
+  const n = Number(val);
+  if (isNaN(n)) return 0;
+  // Normalize huge values (uint64 wrap of -1) to -1
+  if (n > 4102444800) return -1;
+  return n;
+}
 
 function saveContacts() {
   try {
@@ -82,6 +115,31 @@ function saveMessages() {
 function saveMessagesDebounced() {
   if (_msgSaveTimer) clearTimeout(_msgSaveTimer);
   _msgSaveTimer = setTimeout(saveMessages, 2000);
+}
+
+function saveMuted() {
+  try {
+    const obj = Object.fromEntries(mutedChats);
+    fs.writeFileSync(MUTED_FILE, JSON.stringify(obj));
+  } catch (_) {}
+}
+
+function saveMutedDebounced() {
+  if (_muteSaveTimer) clearTimeout(_muteSaveTimer);
+  _muteSaveTimer = setTimeout(saveMuted, 1000);
+}
+
+function loadMuted() {
+  try {
+    if (fs.existsSync(MUTED_FILE)) {
+      const obj = JSON.parse(fs.readFileSync(MUTED_FILE, "utf8"));
+      for (const [jid, val] of Object.entries(obj)) {
+        const n = toMuteNumber(val);
+        if (n !== 0) mutedChats.set(jid, n);
+      }
+      log(`Loaded ${mutedChats.size} muted chats from cache`);
+    }
+  } catch (_) {}
 }
 
 function loadContacts() {
@@ -403,6 +461,16 @@ async function startWhatsApp(force = false) {
         if (groupsToResolve > 0) {
           log(`Resolving ${groupsToResolve} group names in background...`);
         }
+
+        // Log muted chats for debugging
+        if (mutedChats.size > 0) {
+          const mutedNames = [...mutedChats.keys()].map((jid) => {
+            const name = contacts.get(jid)?.name || jid;
+            const val = mutedChats.get(jid);
+            return `${name} (${val === -1 ? "forever" : "until " + new Date(val * 1000).toISOString().slice(0, 16)})`;
+          });
+          log(`Muted chats (${mutedChats.size}): ${mutedNames.join(", ")}`);
+        }
       }, 10000);
     }
 
@@ -449,20 +517,28 @@ async function startWhatsApp(force = false) {
     // Also extract contacts from chats + track mute status
     for (const chat of (event.chats || [])) {
       if (!contacts.has(chat.id)) {
+        const isGroupChat = chat.id.endsWith("@g.us");
         contacts.set(chat.id, {
-          name: chat.name || extractPhone(chat.id) || chat.id.split("@")[0],
+          // For groups: use chat.name only (don't fallback to phone/JID extraction)
+          name: isGroupChat ? (chat.name || "") : (chat.name || extractPhone(chat.id) || chat.id.split("@")[0]),
           notify: "",
           phone: extractPhone(chat.id),
         });
+        // Trigger group name fetch if we have no name
+        if (isGroupChat && !chat.name) {
+          _resolveGroupName(chat.id);
+        }
       }
-      // Track mute: muteExpiration > 0 = muted until, -1 = muted forever
-      if (chat.muteExpiration || chat.mute) {
-        const muteVal = chat.muteExpiration || chat.mute || 0;
+      // Track mute — Baileys protobuf field is "muteEndTime" (uint64)
+      // Normalized: -1 = muted forever, >0 = muted until epoch seconds, 0 = not muted
+      const muteVal = toMuteNumber(chat.muteEndTime);
+      if (muteVal !== 0) {
         mutedChats.set(chat.id, muteVal);
       }
     }
     if (mutedChats.size > 0) {
-      log(`Muted chats: ${mutedChats.size}`);
+      log(`Muted chats after history sync: ${mutedChats.size}`);
+      saveMutedDebounced();
     }
     const added = contacts.size - before;
     if (added > 0) {
@@ -501,37 +577,48 @@ async function startWhatsApp(force = false) {
     for (const chat of chats) {
       const jid = chat.id;
       if (!contacts.has(jid)) {
+        const isGroupChat = jid.endsWith("@g.us");
         contacts.set(jid, {
-          name: chat.name || extractPhone(jid) || jid.split("@")[0],
+          name: isGroupChat ? (chat.name || "") : (chat.name || extractPhone(jid) || jid.split("@")[0]),
           phone: extractPhone(jid),
         });
+        if (isGroupChat && !chat.name) {
+          _resolveGroupName(jid);
+        }
       }
-      if (chat.muteExpiration || chat.mute) {
-        mutedChats.set(jid, chat.muteExpiration || chat.mute || 0);
+      const chatMuteVal = toMuteNumber(chat.muteEndTime);
+      if (chatMuteVal !== 0) {
+        mutedChats.set(jid, chatMuteVal);
+        saveMutedDebounced();
       }
     }
   });
 
-  // Track mute/unmute changes
+  // Track mute/unmute changes (from app state sync + real-time user actions)
   sock.ev.on("chats.update", (updates) => {
+    let muteChanged = false;
     for (const u of updates) {
       if (!u.id) continue;
       // Update name if provided
       if (u.name && contacts.has(u.id)) {
         contacts.get(u.id).name = u.name;
       }
-      // Update mute status
-      if (u.muteExpiration !== undefined || u.mute !== undefined) {
-        const muteVal = u.muteExpiration ?? u.mute ?? 0;
-        if (muteVal === 0 || muteVal === null) {
+      // Update mute status — use "in" check to catch both null (unmute) and values
+      // Baileys sends muteEndTime: null on unmute, muteEndTime: <number|Long> on mute
+      if ("muteEndTime" in u) {
+        const muteVal = toMuteNumber(u.muteEndTime);
+        const chatName = contacts.get(u.id)?.name || u.id;
+        if (muteVal === 0) {
           mutedChats.delete(u.id);
+          log(`Mute updated: ${chatName} → unmuted`);
         } else {
           mutedChats.set(u.id, muteVal);
+          log(`Mute updated: ${chatName} → muted (${muteVal === -1 ? "forever" : "until " + new Date(muteVal * 1000).toISOString()})`);
         }
-        const chatName = contacts.get(u.id)?.name || u.id;
-        log(`Mute updated: ${chatName} → ${muteVal === 0 ? "unmuted" : "muted"}`);
+        muteChanged = true;
       }
     }
+    if (muteChanged) saveMutedDebounced();
   });
 
   // Track message senders + store messages for reading
@@ -543,14 +630,27 @@ async function startWhatsApp(force = false) {
       const jid = msg.key.remoteJid;
       if (!jid || jid === "status@broadcast") continue;
 
-      // Update contact info
+      // Update contact info — NEVER overwrite group names with a participant's pushName
+      const isGroupJid = jid.endsWith("@g.us");
       if (!contacts.has(jid)) {
-        contacts.set(jid, {
-          name: msg.pushName || extractPhone(jid) || jid.split("@")[0],
-          notify: msg.pushName || "",
-          phone: extractPhone(jid),
-        });
-      } else if (msg.pushName) {
+        if (isGroupJid) {
+          // For groups: don't use pushName (that's the sender, not the group)
+          // Trigger lazy fetch instead
+          contacts.set(jid, {
+            name: "",
+            notify: "",
+            phone: null,
+          });
+          _resolveGroupName(jid);
+        } else {
+          contacts.set(jid, {
+            name: msg.pushName || extractPhone(jid) || jid.split("@")[0],
+            notify: msg.pushName || "",
+            phone: extractPhone(jid),
+          });
+        }
+      } else if (msg.pushName && !isGroupJid) {
+        // Only update name from pushName for direct chats, never for groups
         const c = contacts.get(jid);
         if (!c.name || c.name === c.phone) c.name = msg.pushName;
         c.notify = msg.pushName;
@@ -625,6 +725,15 @@ function _resolveGroupName(jid) {
       log(`Resolved group name: ${jid} → "${meta.subject}"`);
     }
   }).catch(() => {}).finally(() => _pendingGroupFetches.delete(jid));
+}
+
+/** Check if a chat is currently muted. */
+function _isChatMuted(jid) {
+  const muteExpiry = mutedChats.get(jid);
+  if (muteExpiry == null) return false;
+  if (muteExpiry === -1) return true; // muted forever
+  if (muteExpiry > 0) return muteExpiry > Date.now() / 1000; // muted until timestamp
+  return false; // 0 = not muted
 }
 
 function formatJid(phone) {
@@ -721,7 +830,10 @@ function _formatMsg(msg) {
 
   const jid = msg.key.remoteJid || "";
   const isGroup = jid.endsWith("@g.us");
-  let chatName = contacts.get(jid)?.name || extractPhone(jid) || jid.split("@")[0];
+  let chatName = contacts.get(jid)?.name
+    || (isGroup ? "Group" : null)  // Don't show JID fragments for groups
+    || extractPhone(jid)
+    || jid.split("@")[0];
 
   // Trigger lazy group name fetch if missing
   if (isGroup && !contacts.get(jid)?.name) {
@@ -729,8 +841,8 @@ function _formatMsg(msg) {
   }
 
   // Check if this chat is muted on WhatsApp
-  const muteExpiry = mutedChats.get(jid);
-  const isMuted = muteExpiry !== undefined && (muteExpiry < 0 || muteExpiry > Date.now() / 1000);
+  // Normalized: -1 = muted forever, >0 = muted until epoch seconds, absent/0 = not muted
+  const isMuted = _isChatMuted(jid);
 
   const result = {
     id: msg.key.id,
@@ -931,7 +1043,8 @@ async function handleRead(args) {
     for (const [jid, msgs] of messageStore) {
       if (jid === "status@broadcast") continue;
       const c = contacts.get(jid);
-      const name = c?.name || c?.notify || extractPhone(jid) || jid.split("@")[0];
+      const isGroupJid = jid.endsWith("@g.us");
+      const name = c?.name || c?.notify || (isGroupJid ? "Group" : null) || extractPhone(jid) || jid.split("@")[0];
       let latestTs = 0;
       let latestBody = "";
       let latestFrom = "";
@@ -955,12 +1068,10 @@ async function handleRead(args) {
         }
       }
       if (latestTs === 0) continue;
-      const muteExpiry = mutedChats.get(jid);
-      const isMuted = muteExpiry !== undefined && (muteExpiry < 0 || muteExpiry > Date.now() / 1000);
       chatSummary.push({
         name,
         type: jid.endsWith("@g.us") ? "group" : jid.endsWith("@lid") ? "lid" : "direct",
-        muted: isMuted,
+        muted: _isChatMuted(jid),
         last_from: latestFrom,
         last_message: (latestBody || "").slice(0, 80),
         last_time: new Date(latestTs * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC",
@@ -1054,7 +1165,7 @@ async function handleListChats(args) {
     const c = contacts.get(jid);
     const isGroup = jid.endsWith("@g.us");
     const isLid = jid.endsWith("@lid");
-    const displayName = c?.name || c?.notify || extractPhone(jid) || jid.split("@")[0];
+    const displayName = c?.name || c?.notify || (isGroup ? "Group" : null) || extractPhone(jid) || jid.split("@")[0];
 
     // Find most recent message timestamp
     let latestTs = 0;
@@ -1074,15 +1185,12 @@ async function handleListChats(args) {
       }
     }
 
-    const muteExpiry = mutedChats.get(jid);
-    const isMuted = muteExpiry !== undefined && (muteExpiry < 0 || muteExpiry > Date.now() / 1000);
-
     chatList.push({
       name: displayName,
       phone: extractPhone(jid),
       jid,
       type: isGroup ? "group" : isLid ? "lid" : "direct",
-      muted: isMuted,
+      muted: _isChatMuted(jid),
       messages_cached: msgs.length,
       last_message_time: latestTs > 0 ? new Date(latestTs * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : null,
       last_message_preview: latestPreview,
@@ -1228,6 +1336,7 @@ async function main() {
   log("mcp-whatsapp v0.3.0 (Baileys) running on stdio");
   loadContacts();
   loadMessages();
+  loadMuted();
 
   // Start WhatsApp (no browser!)
   await startWhatsApp();

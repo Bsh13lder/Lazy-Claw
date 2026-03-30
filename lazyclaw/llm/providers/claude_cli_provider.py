@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -228,7 +229,8 @@ class ClaudeCLIProvider(BaseLLMProvider):
         self._model = model
         self._active_sessions: dict[str, bool] = {}  # session_id → has_been_used
         # Warm pool: pre-spawned processes ready for immediate use
-        self._warm_procs: list[tuple[asyncio.subprocess.Process, float]] = []
+        # Each entry: (process, spawn_time, args_tuple) — args must match to reuse
+        self._warm_procs: list[tuple[asyncio.subprocess.Process, float, tuple]] = []
         self._warming: bool = False
 
     async def verify_key(self) -> bool:
@@ -314,7 +316,12 @@ class ClaudeCLIProvider(BaseLLMProvider):
         if not session_id:
             args.append("--no-session-persistence")
 
-        logger.debug("Claude CLI call: tools=%d, model=%s", len(tools), self._model)
+        logger.info("Claude CLI call: tools=%d, model=%s, prompt_len=%d chars",
+                    len(tools), self._model, len(prompt_text))
+        if tools:
+            logger.info("Claude CLI tool names: %s", [t.get("function", {}).get("name") for t in tools])
+        # Dump first 500 chars of prompt for debugging
+        logger.debug("Claude CLI prompt preview: %s", prompt_text[:500])
 
         last_error = None
         for attempt in range(_MAX_RETRIES):
@@ -323,11 +330,17 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
             try:
                 if proc is None:
+                    # Strip ANTHROPIC_API_KEY so Claude CLI uses the
+                    # subscription instead of a potentially empty API key
+                    # loaded from .env by the server process.
+                    _env = {k: v for k, v in os.environ.items()
+                            if k != "ANTHROPIC_API_KEY"}
                     proc = await asyncio.create_subprocess_exec(
                         *args,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        env=_env,
                     )
 
                 stdout, stderr = await asyncio.wait_for(
@@ -356,14 +369,18 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
             if proc.returncode != 0:
                 err = stderr.decode("utf-8", errors="replace").strip()
+                out = stdout.decode("utf-8", errors="replace").strip()
+                # Claude CLI often writes errors to stdout as JSON
+                err_detail = err or out[:500] or "(no output)"
                 if attempt < _MAX_RETRIES - 1:
                     logger.warning(
-                        "Claude CLI failed (exit %d, attempt %d/%d): %s",
-                        proc.returncode, attempt + 1, _MAX_RETRIES, err[:100],
+                        "Claude CLI failed (exit %d, attempt %d/%d): stderr=%s stdout=%s",
+                        proc.returncode, attempt + 1, _MAX_RETRIES,
+                        err[:200] or "(empty)", out[:200] or "(empty)",
                     )
                     continue
-                logger.error("Claude CLI failed (exit %d): %s", proc.returncode, err)
-                raise RuntimeError(f"Claude CLI error: {err}")
+                logger.error("Claude CLI failed (exit %d): %s", proc.returncode, err_detail)
+                raise RuntimeError(f"Claude CLI error: {err_detail}")
 
             raw = stdout.decode("utf-8", errors="replace").strip()
 
@@ -377,43 +394,60 @@ class ClaudeCLIProvider(BaseLLMProvider):
     def _grab_warm_proc(
         self, args: list[str],
     ) -> asyncio.subprocess.Process | None:
-        """Grab a pre-warmed process if one is available and alive."""
+        """Grab a pre-warmed process if one matches args and is alive.
+
+        CRITICAL: warm processes are spawned with specific CLI args
+        (--system-prompt, --tools, --model). Only stdin content changes.
+        Using a warm process spawned with different args would send the
+        prompt to a process with the WRONG system prompt — causing the
+        model to ignore tools or behave incorrectly.
+        """
         import time
         now = time.monotonic()
-        while self._warm_procs:
-            proc, spawned_at = self._warm_procs.pop(0)
+        args_key = tuple(args)
+        remaining: list[tuple[asyncio.subprocess.Process, float, tuple]] = []
+        result: asyncio.subprocess.Process | None = None
+        for proc, spawned_at, warm_args in self._warm_procs:
             age = now - spawned_at
-            if age > _WARM_EXPIRE_S:
-                # Too old — kill it
+            if age > _WARM_EXPIRE_S or proc.returncode is not None:
+                # Expired or dead — kill it
                 try:
                     proc.kill()
                 except Exception:
                     pass
                 continue
-            if proc.returncode is not None:
-                continue  # Already exited
-            logger.debug("Using pre-warmed CLI process (age: %.1fs)", age)
-            return proc
-        return None
+            if result is None and warm_args == args_key:
+                # Args match — use this one
+                logger.debug("Using pre-warmed CLI process (age: %.1fs)", age)
+                result = proc
+            else:
+                # Keep for later or different args — don't kill
+                remaining.append((proc, spawned_at, warm_args))
+        self._warm_procs = remaining
+        return result
 
     async def _pre_warm(self, args: list[str]) -> None:
         """Spawn a process in the background so it's ready for the next call.
 
         The process starts, loads claude, and blocks on stdin.read().
         When we later call proc.communicate(input=...), it gets the prompt instantly.
+        Args are stored so _grab_warm_proc only reuses matching processes.
         """
         if self._warming or len(self._warm_procs) >= _WARM_POOL_SIZE:
             return
         self._warming = True
         try:
             import time
+            _env = {k: v for k, v in os.environ.items()
+                    if k != "ANTHROPIC_API_KEY"}
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_env,
             )
-            self._warm_procs.append((proc, time.monotonic()))
+            self._warm_procs.append((proc, time.monotonic(), tuple(args)))
             logger.debug("Pre-warmed CLI process (PID %s)", proc.pid)
         except Exception as exc:
             logger.debug("Pre-warm failed: %s", exc)

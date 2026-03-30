@@ -32,8 +32,10 @@ class SearchToolsSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Search for available tools by keyword. Returns tool names and descriptions. "
-            "Call this to find what tools you can use. "
-            "Example: search_tools('browser') or search_tools('job search')"
+            "You only see ~16 base tools — use this to discover the rest. "
+            "Examples: search_tools('whatsapp'), search_tools('email'), "
+            "search_tools('instagram'), search_tools('task'), search_tools('vault'), "
+            "search_tools('job'), search_tools('mcp'), search_tools('permission')"
         )
 
     @property

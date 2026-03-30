@@ -453,9 +453,12 @@ class Agent:
             from lazyclaw.runtime.task_splitter import split_tasks, _looks_compound
 
             if _looks_compound(message):
+                logger.info("COMPOUND detected for: %s", message[:60])
                 sub_tasks = await split_tasks(
                     self.eco_router, user_id, message,
                 )
+                logger.info("COMPOUND split result: %d tasks — %s",
+                            len(sub_tasks), [(s.name, s.lane) for s in sub_tasks])
                 if len(sub_tasks) > 1:
                     # Dispatch each sub-task
                     dispatched: list[str] = []
@@ -786,15 +789,17 @@ class Agent:
             if not _wants_browser and "browser" in _history_tool_names:
                 _wants_browser = True
                 logger.info("Browser re-injected from recent history context")
-            if _wants_browser and not _channel_tools and not _survival_tools and not _task_tools_extra:
+            # Browser suppressed ONLY when channel MCP tools handle the request
+            # (WhatsApp/Instagram/Email have dedicated MCP tools — no browser needed).
+            # Task and survival tools should NEVER suppress browser — user can
+            # browse the web AND have task/job tools available simultaneously.
+            if _wants_browser and not _channel_tools:
                 _base_names.add("browser")
                 logger.info("Browser keyword detected — browser tool included")
+            elif _wants_browser and _channel_tools:
+                logger.info("Channel detected: %s → %d MCP tools, browser suppressed (MCP-first)", _matched_channels, len(_channel_tools))
             elif _channel_tools:
                 logger.info("Channel detected: %s → %d MCP tools, no browser", _matched_channels, len(_channel_tools))
-            elif _survival_tools:
-                logger.info("Survival detected: %d tools injected, browser suppressed", len(_survival_tools))
-            elif _task_tools_extra:
-                logger.info("Task detected: %d tools injected", len(_task_tools_extra))
 
             tools = [
                 schema for name in _base_names
@@ -829,6 +834,10 @@ class Agent:
                         if schema is not None:
                             tools.append(schema)
             logger.info("%s mode: %d tools for: %s", "LOCAL" if _is_local_model else "META", len(tools), message[:50])
+            if tools:
+                logger.info("Tool names sent: %s", [t.get("function", {}).get("name") for t in tools])
+            else:
+                logger.warning("ZERO tools resolved from base_names=%s — registry may be empty", _base_names)
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 
@@ -921,6 +930,8 @@ class Agent:
                 kwargs: dict = {}
                 if tools:
                     kwargs["tools"] = tools
+                logger.info("AGENTIC LOOP iter=%d: tools=%d, messages=%d",
+                            iteration, len(tools), len(messages))
 
                 # Role routing: brain for strategy + final answers,
                 # worker for mid-chain tool orchestration (cheaper/local).

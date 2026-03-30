@@ -160,7 +160,13 @@ class TelegramCommands:
 
         await self._reply(update,
             "Hey! I'm <b>Claw</b> \U0001f43e\n"
-            "Send me anything to chat, or /help for commands."
+            "Send me anything to chat, or /help for commands.\n\n"
+            "\U0001f4ac <b>Just talk naturally:</b>\n"
+            "\u2022 \"Check my WhatsApp\"\n"
+            "\u2022 \"Remind me to call mom in 2 hours\"\n"
+            "\u2022 \"Open wallapop and find me a MacBook\"\n"
+            "\u2022 \"Search for flights to London\"\n"
+            "\u2022 \"Watch my email for a reply from Amazon\""
         )
 
     # -- /help -------------------------------------------------------------
@@ -169,8 +175,17 @@ class TelegramCommands:
         if not await self._auth(update):
             return
         await self._reply(update,
-            "\U0001f43e <b>LazyClaw Commands</b>\n"
+            "\U0001f43e <b>LazyClaw</b>\n"
             "━━━━━━━━━━━━━━━━━\n\n"
+            "\U0001f4ac <b>Talk Naturally</b>\n"
+            "\u2022 Browse: <i>\"Open twitter\"</i>\n"
+            "\u2022 Messages: <i>\"Check my WhatsApp / Instagram / Email\"</i>\n"
+            "\u2022 Reminders: <i>\"Remind me in 30 min to...\"</i>\n"
+            "\u2022 Tasks: <i>\"Add task: buy groceries\"</i>\n"
+            "\u2022 Research: <i>\"Search for flights to London\"</i>\n"
+            "\u2022 Files: <i>\"What's on my desktop?\"</i>\n"
+            "\u2022 Monitor: <i>\"Watch Amazon for price drop\"</i>\n"
+            "\u2022 Memory: <i>\"Remember that my WiFi password is...\"</i>\n\n"
             "\u2699\ufe0f <b>Setup</b>\n"
             "/key \u2014 \U0001f511 API keys <i>(auto-deletes msg)</i>\n"
             "/model \u2014 \U0001f9e0 Show/change models\n"
@@ -253,7 +268,8 @@ class TelegramCommands:
     # -- /model ------------------------------------------------------------
 
     async def _handle_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._auth(update):
+        user_id = await self._auth(update)
+        if not user_id:
             return
         args = context.args or []
         if not args:

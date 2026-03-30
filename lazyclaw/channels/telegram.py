@@ -742,6 +742,12 @@ class TelegramAdapter(ChannelAdapter):
         user_id = await resolve_user_id(self._config)
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
 
+        # ── Instant mute: reply "mute" to a watcher notification ──
+        # Zero LLM calls — handle directly for instant response
+        raw_text = update.message.text or ""
+        if await self._handle_instant_mute(update, user_id, raw_text):
+            return
+
         # Launch concurrently — LaneQueue serializes per user, fast dispatch
         # returns in <2s so the queue drains quickly for heavy tasks
         import asyncio as _aio
@@ -749,6 +755,106 @@ class TelegramAdapter(ChannelAdapter):
             self._process_and_reply(update, chat_id, user_id, text),
             name=f"tg-{chat_id}-{id(text)}",
         )
+
+    async def _handle_instant_mute(
+        self, update: Update, user_id: str, raw_text: str,
+    ) -> bool:
+        """Handle instant mute/unmute commands replying to watcher notifications.
+
+        Returns True if handled (caller should stop), False otherwise.
+        Recognized triggers: "mute", "silence", "shut up", "unmute"
+        Works on reply to notification OR as standalone within 10 min of last notification.
+        """
+        import time as _time
+
+        clean = raw_text.strip().lower()
+        # Match: "mute", "mute this", "mute it", "silence", "shut up", "unmute"
+        _MUTE_TRIGGERS = {"mute", "mute this", "mute it", "silence", "silence this", "shut up", "silence it"}
+        _UNMUTE_TRIGGERS = {"unmute", "unmute this", "unmute it"}
+
+        is_mute = clean in _MUTE_TRIGGERS
+        is_unmute = clean in _UNMUTE_TRIGGERS
+        if not is_mute and not is_unmute:
+            return False
+
+        # Get the last watcher notification context
+        try:
+            from lazyclaw.heartbeat.daemon import get_last_watcher_context
+            wctx = get_last_watcher_context(user_id)
+        except Exception:
+            return False
+
+        if not wctx or wctx.get("service") != "whatsapp":
+            return False
+        if (_time.time() - wctx.get("timestamp", 0)) > 600:
+            return False  # Notification older than 10 min
+
+        chat_names = wctx.get("chat_names", [])
+        if not chat_names:
+            # Try to parse from the notification text as fallback
+            notif = wctx.get("notification", "")
+            # Pattern: "▸ 👥 GroupName" or "💬  SenderName"
+            import re
+            # Groups: "👥 GroupName" or "▸ GroupName"
+            matches = re.findall(r"[\U0001f465\u25B8]\s*(.+?)(?:\s*\(\d+\)|\s+\d{2}:\d{2}|\s*$)", notif)
+            if matches:
+                chat_names = [m.strip() for m in matches if m.strip()]
+            # Single message: "💬  SenderName  ·"
+            if not chat_names:
+                m = re.search(r"\U0001f4ac\s+(.+?)\s+[\u00b7]", notif)
+                if m:
+                    chat_names = [m.group(1).strip()]
+
+        if not chat_names:
+            await update.message.reply_text(
+                "Can't determine which chat to mute. "
+                "Try: mute <group name>"
+            )
+            return True
+
+        # If multiple chats in the notification, mute all of them
+        # (user said "mute" to the whole notification)
+        action = "unmute" if is_unmute else "mute"
+        results = []
+
+        # Find the WhatsApp MCP client
+        from lazyclaw.mcp.manager import _active_clients
+        mcp_client = None
+        for sid, c in _active_clients.items():
+            client_name = getattr(c, "name", "") or ""
+            if "whatsapp" in client_name.lower():
+                mcp_client = c
+                break
+
+        if mcp_client is None:
+            await update.message.reply_text(
+                "WhatsApp not connected. Can't mute right now."
+            )
+            return True
+
+        for chat_name in chat_names:
+            try:
+                import json
+                raw = await mcp_client.call_tool(
+                    "whatsapp_mute",
+                    {"chat": chat_name, "action": action},
+                )
+                data = json.loads(raw) if raw.strip().startswith("{") else {"result": raw}
+                muted_name = data.get("chat", chat_name)
+                results.append(muted_name)
+            except Exception as exc:
+                logger.warning("Instant mute failed for '%s': %s", chat_name, exc)
+                results.append(f"{chat_name} (failed)")
+
+        emoji = "\U0001f507" if is_mute else "\U0001f50a"
+        verb = "Muted" if is_mute else "Unmuted"
+        if len(results) == 1:
+            await update.message.reply_text(f"{emoji} {verb}: {results[0]}")
+        else:
+            names = "\n".join(f"  \u2022 {r}" for r in results)
+            await update.message.reply_text(f"{emoji} {verb}:\n{names}")
+
+        return True
 
     async def _process_and_reply(
         self, update: Update, chat_id: str, user_id: str, text: str,
@@ -795,7 +901,8 @@ class TelegramAdapter(ChannelAdapter):
                     f"{_notif}\n\n"
                     f"IMPORTANT: If user says 'reply', 'tell him', 'say yes', etc. — "
                     f"use the MCP {_svc}_send tool to send the message to the contact shown above. "
-                    f"Do NOT ask who to reply to — the contact is in the notification above."
+                    f"Do NOT ask who to reply to — the contact is in the notification above.\n"
+                    f"If user says 'mute X' with a specific group name — use whatsapp_mute tool."
                 )
         except Exception:
             pass

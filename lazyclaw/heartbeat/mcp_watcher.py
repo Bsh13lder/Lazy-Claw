@@ -188,6 +188,7 @@ async def check_mcp_watcher(
                     "MCP watcher %s: flushing batch of %d items (window elapsed)",
                     service, len(pending),
                 )
+                new_ctx["_notified_items"] = pending
                 return True, notification, new_ctx
         logger.debug("MCP watcher %s: no new items", service)
         return False, None, new_ctx
@@ -216,6 +217,7 @@ async def check_mcp_watcher(
                 "MCP watcher %s: flushing batch of %d items",
                 service, len(pending),
             )
+            new_ctx["_notified_items"] = pending
             return True, notification, new_ctx
         else:
             # Still accumulating — don't notify yet
@@ -229,6 +231,7 @@ async def check_mcp_watcher(
 
     # No batching — notify immediately
     notification = _format_notification(new_items, service, ctx.get("instruction", ""))
+    new_ctx["_notified_items"] = new_items
     return True, notification, new_ctx
 
 

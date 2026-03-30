@@ -26,14 +26,25 @@ def get_last_watcher_context(user_id: str) -> dict | None:
     return _last_watcher_context.get(user_id)
 
 
-def _store_watcher_context(user_id: str, service: str, items: list, notification: str) -> None:
-    """Store last watcher notification so agent can reference it."""
+def _store_watcher_context(
+    user_id: str,
+    service: str,
+    items: list,
+    notification: str,
+    chat_names: list[str] | None = None,
+) -> None:
+    """Store last watcher notification so agent can reference it.
+
+    chat_names: list of chat/group names mentioned in the notification,
+    used for instant mute commands without LLM parsing.
+    """
     import time
     _last_watcher_context[user_id] = {
         "service": service,
         "items": items[:5],  # Cap stored items
         "notification": notification,
         "timestamp": time.time(),
+        "chat_names": chat_names or [],
     }
 
 
@@ -495,13 +506,23 @@ class HeartbeatDaemon:
                     # Push to Telegram with reply hint
                     if self._telegram_push:
                         try:
-                            hint = "\n\nReply here to respond (I'll send it via WhatsApp)"
+                            hint = "\n\nReply to respond, or reply \"mute\" to silence this chat"
                             await self._telegram_push(f"\U0001f514 {notification}{hint}")
                         except Exception as exc:
                             logger.warning("Telegram push failed: %s", exc)
 
                     # Store last notification so agent has context for user replies
-                    _store_watcher_context(user_id, ctx.get("service", ""), [], notification)
+                    # Extract chat names from notified items for instant mute
+                    _notified = new_ctx.get("_notified_items", [])
+                    _chat_names = list({
+                        item.get("chatName") or item.get("groupName") or item.get("from", "")
+                        for item in _notified
+                        if item.get("chatName") or item.get("groupName") or item.get("from")
+                    })
+                    _store_watcher_context(
+                        user_id, ctx.get("service", ""), _notified[:5],
+                        notification, chat_names=_chat_names,
+                    )
 
                     # Auto-reply: enqueue to agent if instruction provided
                     auto_reply = ctx.get("auto_reply")

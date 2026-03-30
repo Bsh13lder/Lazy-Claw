@@ -504,8 +504,22 @@ async function startWhatsApp(force = false) {
   });
 
   // PRIMARY: Full history sync — this is where contacts come from
+  let _historyDumpDone = false;
   sock.ev.on("messaging-history.set", (event) => {
     const before = contacts.size;
+
+    // One-time dump: log first 3 group chats with ALL their fields for mute debugging
+    if (!_historyDumpDone && (event.chats || []).length > 0) {
+      _historyDumpDone = true;
+      const groups = (event.chats || []).filter((c) => c.id?.endsWith("@g.us")).slice(0, 3);
+      for (const g of groups) {
+        const fields = Object.keys(g).filter((k) => g[k] != null && k !== "messages");
+        log(`[MUTE-DEBUG] Group ${g.name || g.id} fields: ${fields.join(", ")}`);
+        if ("muteEndTime" in g) log(`[MUTE-DEBUG]   muteEndTime = ${JSON.stringify(g.muteEndTime)} (type: ${typeof g.muteEndTime})`);
+        if ("muteExpiration" in g) log(`[MUTE-DEBUG]   muteExpiration = ${JSON.stringify(g.muteExpiration)}`);
+        if ("mute" in g) log(`[MUTE-DEBUG]   mute = ${JSON.stringify(g.mute)}`);
+      }
+    }
     for (const c of (event.contacts || [])) {
       const cJid = c.jid || c.id || "";
       contacts.set(c.id, {
@@ -530,10 +544,14 @@ async function startWhatsApp(force = false) {
         }
       }
       // Track mute — Baileys protobuf field is "muteEndTime" (uint64)
-      // Normalized: -1 = muted forever, >0 = muted until epoch seconds, 0 = not muted
-      const muteVal = toMuteNumber(chat.muteEndTime);
+      // Also check all known mute field variants for safety
+      const rawMute = chat.muteEndTime ?? chat.muteExpiration ?? chat.mute ?? null;
+      const muteVal = toMuteNumber(rawMute);
       if (muteVal !== 0) {
         mutedChats.set(chat.id, muteVal);
+        // Log raw value for debugging mute sync issues
+        const chatLabel = chat.name || chat.id;
+        log(`Mute detected (history): ${chatLabel} raw=${JSON.stringify(rawMute)} → ${muteVal}`);
       }
     }
     if (mutedChats.size > 0) {
@@ -586,9 +604,11 @@ async function startWhatsApp(force = false) {
           _resolveGroupName(jid);
         }
       }
-      const chatMuteVal = toMuteNumber(chat.muteEndTime);
+      const rawUpsertMute = chat.muteEndTime ?? chat.muteExpiration ?? chat.mute ?? null;
+      const chatMuteVal = toMuteNumber(rawUpsertMute);
       if (chatMuteVal !== 0) {
         mutedChats.set(jid, chatMuteVal);
+        log(`Mute detected (upsert): ${chat.name || jid} raw=${JSON.stringify(rawUpsertMute)} → ${chatMuteVal}`);
         saveMutedDebounced();
       }
     }
@@ -603,10 +623,12 @@ async function startWhatsApp(force = false) {
       if (u.name && contacts.has(u.id)) {
         contacts.get(u.id).name = u.name;
       }
-      // Update mute status — use "in" check to catch both null (unmute) and values
-      // Baileys sends muteEndTime: null on unmute, muteEndTime: <number|Long> on mute
-      if ("muteEndTime" in u) {
-        const muteVal = toMuteNumber(u.muteEndTime);
+      // Update mute status — check all known Baileys mute field names
+      // App state sync uses muteEndTime, some versions use muteExpiration
+      const hasMuteField = "muteEndTime" in u || "muteExpiration" in u || "mute" in u;
+      if (hasMuteField) {
+        const rawUpdateMute = u.muteEndTime ?? u.muteExpiration ?? u.mute ?? null;
+        const muteVal = toMuteNumber(rawUpdateMute);
         const chatName = contacts.get(u.id)?.name || u.id;
         if (muteVal === 0) {
           mutedChats.delete(u.id);
@@ -948,6 +970,23 @@ const TOOLS = [
       required: ["to", "image_path"],
     },
   },
+  {
+    name: "whatsapp_mute",
+    description: "Mute or unmute a chat/group so the watcher skips its messages. Use when user replies 'mute' to a notification or says 'mute that group'. Also syncs mute to WhatsApp app when connected.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat: { type: "string", description: "Chat/group name or phone number to mute/unmute" },
+        action: { type: "string", enum: ["mute", "unmute"], description: "mute or unmute (default: mute)" },
+      },
+      required: ["chat"],
+    },
+  },
+  {
+    name: "whatsapp_list_muted",
+    description: "List all muted chats and groups. Shows both WhatsApp-synced and manually muted chats.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1287,6 +1326,85 @@ async function handleSendImage(args) {
   }
 }
 
+async function handleMute(args) {
+  const chatQuery = args.chat;
+  const action = args.action || "mute";
+  if (!chatQuery) return err("'chat' is required — name or phone of the chat to mute.");
+
+  // Resolve the chat/group — resolveContact handles direct chats well,
+  // but for groups we need a broader partial name search
+  let resolved = resolveContact(chatQuery);
+  if (!resolved) {
+    const q = chatQuery.toLowerCase().trim();
+    for (const [jid, c] of contacts) {
+      const name = (c.name || "").toLowerCase();
+      if (name.includes(q)) {
+        resolved = { jid, name: c.name || jid };
+        break;
+      }
+    }
+    if (!resolved) return err(`Chat '${chatQuery}' not found. Use whatsapp_list_chats to see available chats.`);
+  }
+
+  if (action === "unmute") {
+    mutedChats.delete(resolved.jid);
+    saveMuted();
+    log(`Manual unmute: ${resolved.name} (${resolved.jid})`);
+    // Also unmute on WhatsApp if connected
+    if (isReady && sock) {
+      try {
+        await sock.chatModify({ mute: null }, resolved.jid);
+        log(`WhatsApp unmute synced: ${resolved.name}`);
+        return ok({ action: "unmuted", chat: resolved.name, synced: true });
+      } catch (e) {
+        log(`WhatsApp unmute sync failed: ${e.message}`);
+        return ok({ action: "unmuted", chat: resolved.name, synced: false, note: "Unmuted locally. WhatsApp sync failed." });
+      }
+    }
+    return ok({ action: "unmuted", chat: resolved.name, synced: false, note: "Unmuted locally. Not connected to sync to WhatsApp." });
+  }
+
+  // Mute
+  mutedChats.set(resolved.jid, -1); // -1 = muted forever
+  saveMuted();
+  log(`Manual mute: ${resolved.name} (${resolved.jid})`);
+  // Also mute on WhatsApp if connected
+  if (isReady && sock) {
+    try {
+      // Mute for 1 year (effectively forever) — WhatsApp doesn't accept -1 via chatModify
+      await sock.chatModify({ mute: Date.now() + 365 * 24 * 60 * 60 * 1000 }, resolved.jid);
+      log(`WhatsApp mute synced: ${resolved.name}`);
+      return ok({ action: "muted", chat: resolved.name, synced: true });
+    } catch (e) {
+      log(`WhatsApp mute sync failed: ${e.message}`);
+      return ok({ action: "muted", chat: resolved.name, synced: false, note: "Muted locally. WhatsApp sync failed — you may still see it in the app." });
+    }
+  }
+  return ok({ action: "muted", chat: resolved.name, synced: false, note: "Muted locally. Not connected to sync to WhatsApp." });
+}
+
+async function handleListMuted() {
+  const result = [];
+  for (const [jid, val] of mutedChats) {
+    const c = contacts.get(jid);
+    const isGroup = jid.endsWith("@g.us");
+    const name = c?.name || (isGroup ? "Group" : null) || extractPhone(jid) || jid.split("@")[0];
+    result.push({
+      name,
+      jid,
+      type: isGroup ? "group" : "direct",
+      muted_until: val === -1 ? "forever" : new Date(val * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC",
+      currently_muted: _isChatMuted(jid),
+    });
+  }
+  // Sort: groups first, then by name
+  result.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "group" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return ok({ muted_chats: result, total: result.length });
+}
+
 // ---------------------------------------------------------------------------
 // MCP server
 // ---------------------------------------------------------------------------
@@ -1308,6 +1426,8 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "whatsapp_list_chats": return handleListChats(args);
     case "whatsapp_search": return handleSearch(args);
     case "whatsapp_send_image": return handleSendImage(args);
+    case "whatsapp_mute": return handleMute(args);
+    case "whatsapp_list_muted": return handleListMuted();
     default: return err(`Unknown tool: ${name}`);
   }
 });

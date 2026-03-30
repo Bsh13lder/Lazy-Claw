@@ -53,9 +53,31 @@ class GenerateSkillRequest(BaseModel):
 
 @router.get("")
 async def list_skills(user: User = Depends(get_current_user)):
-    """List all skills for the current user."""
-    skills = await list_user_skills(_config, user.id)
-    return {"skills": skills}
+    """List all skills for the current user (DB + registry)."""
+    from lazyclaw.gateway.app import _shared_registry
+
+    # User-created skills from DB
+    db_skills = await list_user_skills(_config, user.id)
+
+    # Builtin + MCP skills from the live registry
+    registry_skills: list[dict] = []
+    if _shared_registry:
+        for name, skill in _shared_registry._skills.items():
+            # Skip DB skills (already included above)
+            is_db = any(s.get("name") == name for s in db_skills)
+            if is_db:
+                continue
+            registry_skills.append({
+                "id": f"registry:{name}",
+                "name": name,
+                "description": getattr(skill, "description", ""),
+                "type": getattr(skill, "skill_type", "builtin"),
+                "skill_type": getattr(skill, "skill_type", "builtin"),
+                "enabled": True,
+                "category": getattr(skill, "category", None),
+            })
+
+    return {"skills": registry_skills + db_skills}
 
 
 @router.post("")

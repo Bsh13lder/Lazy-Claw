@@ -145,6 +145,23 @@ async def check_mcp_watcher(
     # Extract messages/items and detect new ones
     new_items = _extract_new_items(data, last_seen, service)
 
+    # Filter out muted chats — uses WhatsApp's own mute setting automatically
+    # Also supports manual muted_groups list as override
+    if service == "whatsapp":
+        manual_muted = {g.lower() for g in ctx.get("muted_groups", [])}
+        new_items = [
+            item for item in new_items
+            if not (
+                # Auto-skip: WhatsApp app has this chat muted
+                item.get("muted", False)
+                # Manual skip: user used /watch mute GroupName
+                or (manual_muted and (
+                    item.get("groupName", "").lower() in manual_muted
+                    or item.get("chatName", "").lower() in manual_muted
+                ))
+            )
+        ]
+
     new_ctx = dict(ctx)
     new_ctx["last_check"] = time.time()
 
@@ -195,6 +212,11 @@ def _extract_new_items(
                     "from": msg.get("from", "unknown"),
                     "body": msg.get("body", ""),
                     "timestamp": msg_time,
+                    "type": msg.get("type", "direct"),
+                    "groupName": msg.get("groupName", ""),
+                    "chatName": msg.get("chatName", ""),
+                    "participantName": msg.get("participantName", ""),
+                    "muted": msg.get("muted", False),
                 })
 
         return new_msgs
@@ -230,6 +252,17 @@ def _extract_new_items(
         for i, item in enumerate(items)
         if str(item.get("id", i)) not in last_seen
     ]
+
+
+def _whatsapp_display_sender(msg: dict) -> str:
+    """Format sender for display: 'Alice' for direct, 'Alice (Family Group)' for groups."""
+    is_group = msg.get("type") == "group"
+    sender = msg.get("from", "?")
+    if is_group:
+        group_name = msg.get("groupName") or msg.get("chatName") or "Group"
+        participant = msg.get("participantName") or sender
+        return f"{participant} ({group_name})"
+    return sender
 
 
 def _whatsapp_sender_name(msg: dict) -> str:
@@ -328,39 +361,48 @@ def _format_notification(
     of other chats. Not a dump of all unread messages.
     """
     if service == "whatsapp":
-        # Group by sender (already resolved names from _formatMsg)
-        by_sender: dict[str, list[dict]] = {}
+        # Group by chat (chatName for groups, sender for direct)
+        by_chat: dict[str, list[dict]] = {}
         for msg in items:
-            sender = msg.get("from", "?")
-            by_sender.setdefault(sender, []).append(msg)
+            is_group = msg.get("type") == "group"
+            chat_key = msg.get("chatName") or msg.get("groupName") or msg.get("from", "?")
+            if not is_group:
+                chat_key = msg.get("from", "?")
+            by_chat.setdefault(chat_key, []).append(msg)
 
         total = len(items)
-        chat_count = len(by_sender)
+        chat_count = len(by_chat)
         lines: list[str] = []
 
         if total == 1:
-            # ── Single message: clean and simple ──
+            # -- Single message: clean and simple --
             msg = items[0]
-            sender = msg.get("from", "?")
+            sender = _whatsapp_display_sender(msg)
             body = _whatsapp_body_preview(msg)
             t = _compact_time(msg.get("timestamp", ""))
             time_tag = f"  \u00b7  {t}" if t else ""
             lines.append(f"\U0001f4ac  {sender}{time_tag}")
             lines.append(f"\u2514 {body}")
         else:
-            # ── Multiple messages: show each sender with latest msg ──
+            # -- Multiple messages: show each chat with latest msg --
             lines.append(f"\U0001f4ac  WhatsApp  \u00b7  {total} new")
             lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-            shown = 0
-            for sender, msgs in list(by_sender.items())[:5]:
+            for chat_name, msgs in list(by_chat.items())[:5]:
                 last = msgs[-1]
                 body = _whatsapp_body_preview(last)
                 t = _compact_time(last.get("timestamp", ""))
                 count_tag = f" ({len(msgs)})" if len(msgs) > 1 else ""
                 time_tag = f"  {t}" if t else ""
-                lines.append(f"\n\u25B8 {sender}{count_tag}{time_tag}")
-                lines.append(f"  {body[:100]}")
-                shown += 1
+                is_group = last.get("type") == "group"
+                if is_group:
+                    # Show who sent in the group
+                    sender = last.get("participantName") or last.get("from", "?")
+                    label = f"\U0001f465 {chat_name}{count_tag}{time_tag}"
+                    lines.append(f"\n\u25B8 {label}")
+                    lines.append(f"  {sender}: {body[:90]}")
+                else:
+                    lines.append(f"\n\u25B8 {chat_name}{count_tag}{time_tag}")
+                    lines.append(f"  {body[:100]}")
             if chat_count > 5:
                 lines.append(f"\n  +{chat_count - 5} more chats")
 

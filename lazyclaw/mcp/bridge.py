@@ -193,10 +193,12 @@ class LazyMCPToolSkill(BaseSkill):
         # Serialize connects per server to prevent duplicate subprocesses
         async with _get_connect_lock(self._server_id):
             client = _active_clients.get(self._server_id)
-            if client is None:
+            need_connect = client is None or not client.is_connected
+            if need_connect:
                 logger.info(
-                    "Lazy-connecting MCP server %s for tool %s",
+                    "Lazy-connecting MCP server %s for tool %s (reason=%s)",
                     self._server_name, self._tool_name,
+                    "no client" if client is None else "session dead",
                 )
                 if self._is_oauth:
                     client = await connect_server_with_oauth(
@@ -208,7 +210,26 @@ class LazyMCPToolSkill(BaseSkill):
                     )
 
         touch_client(self._server_id)
-        return await client.call_tool(self._tool_name, params)
+        try:
+            return await client.call_tool(self._tool_name, params)
+        except RuntimeError as exc:
+            # Session died between the check and the call — reconnect once
+            if "not connected" not in str(exc):
+                raise
+            logger.warning(
+                "MCP %s session died mid-call, reconnecting for %s",
+                self._server_name, self._tool_name,
+            )
+            async with _get_connect_lock(self._server_id):
+                if self._is_oauth:
+                    client = await connect_server_with_oauth(
+                        self._config, self._user_id, self._server_id,
+                    )
+                else:
+                    client = await connect_server(
+                        self._config, self._user_id, self._server_id, force=True,
+                    )
+            return await client.call_tool(self._tool_name, params)
 
 
 async def register_mcp_tools_lazy(

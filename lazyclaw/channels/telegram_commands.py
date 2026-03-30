@@ -45,6 +45,7 @@ BOT_COMMANDS = [
     BotCommand("local", "\U0001f9e0 Local AI servers"),
     BotCommand("ram", "\U0001f4be RAM usage"),
     BotCommand("nuke", "\U0001f4a3 Data wipe"),
+    BotCommand("qr", "\U0001f4f1 WhatsApp QR re-link"),
 ]
 
 
@@ -84,7 +85,7 @@ class TelegramCommands:
             "survival": self._handle_survival, "profile": self._handle_profile,
             "browser": self._handle_browser, "screen": self._handle_screen,
             "local": self._handle_local,
-            "ram": self._handle_ram,
+            "ram": self._handle_ram, "qr": self._handle_qr,
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
         }
         for name, handler in cmds.items():
@@ -1127,6 +1128,80 @@ class TelegramCommands:
             await self._reply(update, f"\U0001f6d1 Stopped: <b>{match.get('name', '?')}</b>")
             return
 
+        # /watch mute GroupName — mute a group in the WhatsApp watcher
+        if subcmd == "mute":
+            group_name = " ".join(args[1:]).strip() if len(args) > 1 else ""
+            if not group_name:
+                await self._reply(update, "\U0001f507 Usage: <code>/watch mute Group Name</code>")
+                return
+            wa_watcher = next(
+                (w for w in watchers if "whatsapp" in (w.get("name") or "").lower()),
+                None,
+            )
+            if not wa_watcher:
+                await self._reply(update, "\u274c No active WhatsApp watcher. Start one with <code>/watch whatsapp</code>")
+                return
+            raw_ctx = wa_watcher.get("context", "{}")
+            try:
+                ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
+            except (ValueError, TypeError):
+                ctx = {}
+            muted = [g for g in ctx.get("muted_groups", [])]
+            if group_name.lower() not in [g.lower() for g in muted]:
+                muted.append(group_name)
+            ctx["muted_groups"] = muted
+            from lazyclaw.heartbeat.orchestrator import update_job
+            await update_job(self._config, user_id, wa_watcher["id"], context=_json.dumps(ctx))
+            await self._reply(update, f"\U0001f507 Muted: <b>{group_name}</b>\nGroup messages won't trigger notifications.")
+            return
+
+        # /watch unmute GroupName — unmute a group in the WhatsApp watcher
+        if subcmd == "unmute":
+            group_name = " ".join(args[1:]).strip() if len(args) > 1 else ""
+            if not group_name:
+                # Show currently muted groups
+                wa_watcher = next(
+                    (w for w in watchers if "whatsapp" in (w.get("name") or "").lower()),
+                    None,
+                )
+                if wa_watcher:
+                    raw_ctx = wa_watcher.get("context", "{}")
+                    try:
+                        ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
+                    except (ValueError, TypeError):
+                        ctx = {}
+                    muted = ctx.get("muted_groups", [])
+                    if muted:
+                        group_list = "\n".join(f"  \U0001f507 {g}" for g in muted)
+                        await self._reply(
+                            update,
+                            f"\U0001f507 <b>Muted groups:</b>\n{group_list}\n\n"
+                            f"Use <code>/watch unmute Group Name</code> to unmute.",
+                        )
+                    else:
+                        await self._reply(update, "\U0001f50a No muted groups.")
+                else:
+                    await self._reply(update, "\u274c No active WhatsApp watcher.")
+                return
+            wa_watcher = next(
+                (w for w in watchers if "whatsapp" in (w.get("name") or "").lower()),
+                None,
+            )
+            if not wa_watcher:
+                await self._reply(update, "\u274c No active WhatsApp watcher.")
+                return
+            raw_ctx = wa_watcher.get("context", "{}")
+            try:
+                ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
+            except (ValueError, TypeError):
+                ctx = {}
+            muted = ctx.get("muted_groups", [])
+            ctx["muted_groups"] = [g for g in muted if g.lower() != group_name.lower()]
+            from lazyclaw.heartbeat.orchestrator import update_job
+            await update_job(self._config, user_id, wa_watcher["id"], context=_json.dumps(ctx))
+            await self._reply(update, f"\U0001f50a Unmuted: <b>{group_name}</b>")
+            return
+
         # /watch whatsapp [minutes] — create a new watcher
         if subcmd in ("whatsapp", "wa", "email", "instagram", "ig"):
             service = {"wa": "whatsapp", "ig": "instagram"}.get(subcmd, subcmd)
@@ -1169,6 +1244,8 @@ class TelegramCommands:
                 "<code>/watch whatsapp</code> \u2014 watch WhatsApp (2 min)\n"
                 "<code>/watch whatsapp 1</code> \u2014 watch every 1 min\n"
                 "<code>/watch email</code> \u2014 watch Email\n"
+                "<code>/watch mute GroupName</code> \u2014 silence a group\n"
+                "<code>/watch unmute</code> \u2014 list/unmute groups\n"
                 "<code>/watch stop</code> \u2014 stop a watcher"
             )
             return
@@ -1198,17 +1275,21 @@ class TelegramCommands:
                 last_dt = _dt.fromtimestamp(last_check, tz=_tz.utc)
                 time_str = last_dt.strftime("%H:%M")
 
+            muted_count = len(ctx.get("muted_groups", []))
             details = f"every {interval}m"
             if time_str:
                 details += f" \u2022 last {time_str}"
             if seen:
                 details += f" \u2022 {seen} seen"
+            if muted_count:
+                details += f" \u2022 \U0001f507{muted_count} muted"
 
             lines.append(f"\n{icon} <b>{name}</b>")
             lines.append(f"    {details}")
 
         lines.append(
-            "\n\n\U0001f527 <code>/watch stop</code> \u2014 stop a watcher"
+            "\n\n\U0001f527 <code>/watch stop</code> \u2014 stop a watcher\n"
+            "\U0001f507 <code>/watch mute GroupName</code> \u2014 silence a group"
         )
         await self._reply(update, "\n".join(lines))
 
@@ -1413,6 +1494,92 @@ class TelegramCommands:
                 "<code>/screen vnc</code> \u2014 Start VNC remote control\n"
                 "<code>/screen stop</code> \u2014 Stop VNC session"
             )
+
+    # -- /qr — Force WhatsApp QR re-link -----------------------------------
+
+    async def _handle_qr(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        await self._reply(update, "\U0001f4f1 Forcing WhatsApp re-link...")
+
+        from lazyclaw.mcp.manager import (
+            _active_clients, list_servers, connect_server, disconnect_server,
+        )
+
+        # Find WhatsApp MCP server
+        servers = await list_servers(self._config, user_id)
+        wa_server = None
+        for s in servers:
+            if "whatsapp" in s.get("name", "").lower():
+                wa_server = s
+                break
+
+        if not wa_server:
+            await self._reply(update, "\u274c WhatsApp MCP not installed. Use <code>/mcp install mcp-whatsapp</code>")
+            return
+
+        server_id = wa_server["id"]
+
+        # Disconnect existing connection
+        if server_id in _active_clients:
+            try:
+                await disconnect_server(user_id, server_id)
+            except Exception:
+                pass
+
+        # Delete auth state so Baileys generates a fresh QR
+        import shutil
+        data_dir = self._config.data_dir / "whatsapp_sessions" / "baileys_auth"
+        if data_dir.exists():
+            shutil.rmtree(data_dir, ignore_errors=True)
+            data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Reconnect — this spawns a new process which will emit a QR event
+        # The QR gets auto-sent to Telegram via the WhatsApp MCP's built-in sender
+        try:
+            await connect_server(self._config, user_id, server_id, force=True)
+        except Exception as exc:
+            logger.warning("QR reconnect error: %s", exc)
+
+        # Wait a moment for QR to be generated and sent via Telegram
+        await asyncio.sleep(4)
+
+        # Try calling whatsapp_setup to check status
+        client = _active_clients.get(server_id)
+        if client and client.is_connected:
+            try:
+                result = await client.call_tool("whatsapp_setup", {})
+                import json
+                data = json.loads(result)
+                status = data.get("data", {}).get("status", "unknown")
+                if status == "connected":
+                    await self._reply(
+                        update,
+                        "\u2705 WhatsApp already connected — no QR needed!\n"
+                        "If you want to force a fresh QR, first unlink this device in WhatsApp → Linked Devices.",
+                    )
+                    return
+                if status == "qr_needed":
+                    await self._reply(
+                        update,
+                        "\U0001f4f2 QR code sent above as a photo — scan it now!\n\n"
+                        "<b>Steps:</b>\n"
+                        "1. Open WhatsApp on phone\n"
+                        "2. Settings → Linked Devices → Link a Device\n"
+                        "3. Scan the QR image\n\n"
+                        "\u23f3 You have ~60 seconds.",
+                    )
+                    return
+            except Exception:
+                pass
+
+        await self._reply(
+            update,
+            "\U0001f504 WhatsApp reconnecting... QR should appear as a photo above.\n"
+            "If no QR appeared, the session may still be valid — try <code>/watch whatsapp</code>.",
+        )
 
     # -- /addadmin, /removeadmin -------------------------------------------
 

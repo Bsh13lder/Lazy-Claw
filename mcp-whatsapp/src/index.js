@@ -47,6 +47,7 @@ let isReady = false;
 let latestQR = null;
 const contacts = new Map(); // jid → { name, phone, notify }
 const messageStore = new Map(); // jid → [{ key, message, messageTimestamp, pushName }]
+const mutedChats = new Map(); // jid → mute expiry timestamp (0 = forever, >0 = until epoch seconds)
 const MAX_MESSAGES_PER_CHAT = 100;
 
 // LID ↔ phone mapping — built from contacts + messages
@@ -390,6 +391,18 @@ async function startWhatsApp(force = false) {
         const phoneCount = [...contacts.keys()].filter((k) => k.endsWith("@s.whatsapp.net")).length;
         log(`After connect: ${contacts.size} contacts (${phoneCount} phone, ${lidCount} LID), ${totalMsgs} messages cached`);
         _buildLidMap();
+
+        // Resolve missing group names in background
+        let groupsToResolve = 0;
+        for (const jid of contacts.keys()) {
+          if (jid.endsWith("@g.us") && !contacts.get(jid)?.name) {
+            _resolveGroupName(jid);
+            groupsToResolve++;
+          }
+        }
+        if (groupsToResolve > 0) {
+          log(`Resolving ${groupsToResolve} group names in background...`);
+        }
       }, 10000);
     }
 
@@ -433,7 +446,7 @@ async function startWhatsApp(force = false) {
         phone: extractPhone(cJid),
       });
     }
-    // Also extract contacts from chats
+    // Also extract contacts from chats + track mute status
     for (const chat of (event.chats || [])) {
       if (!contacts.has(chat.id)) {
         contacts.set(chat.id, {
@@ -442,6 +455,14 @@ async function startWhatsApp(force = false) {
           phone: extractPhone(chat.id),
         });
       }
+      // Track mute: muteExpiration > 0 = muted until, -1 = muted forever
+      if (chat.muteExpiration || chat.mute) {
+        const muteVal = chat.muteExpiration || chat.mute || 0;
+        mutedChats.set(chat.id, muteVal);
+      }
+    }
+    if (mutedChats.size > 0) {
+      log(`Muted chats: ${mutedChats.size}`);
     }
     const added = contacts.size - before;
     if (added > 0) {
@@ -484,6 +505,31 @@ async function startWhatsApp(force = false) {
           name: chat.name || extractPhone(jid) || jid.split("@")[0],
           phone: extractPhone(jid),
         });
+      }
+      if (chat.muteExpiration || chat.mute) {
+        mutedChats.set(jid, chat.muteExpiration || chat.mute || 0);
+      }
+    }
+  });
+
+  // Track mute/unmute changes
+  sock.ev.on("chats.update", (updates) => {
+    for (const u of updates) {
+      if (!u.id) continue;
+      // Update name if provided
+      if (u.name && contacts.has(u.id)) {
+        contacts.get(u.id).name = u.name;
+      }
+      // Update mute status
+      if (u.muteExpiration !== undefined || u.mute !== undefined) {
+        const muteVal = u.muteExpiration ?? u.mute ?? 0;
+        if (muteVal === 0 || muteVal === null) {
+          mutedChats.delete(u.id);
+        } else {
+          mutedChats.set(u.id, muteVal);
+        }
+        const chatName = contacts.get(u.id)?.name || u.id;
+        log(`Mute updated: ${chatName} → ${muteVal === 0 ? "unmuted" : "muted"}`);
       }
     }
   });
@@ -559,6 +605,27 @@ async function startWhatsApp(force = false) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Pending group name fetches to avoid hammering Baileys
+const _pendingGroupFetches = new Set();
+
+/** Lazily fetch group name via groupMetadata if missing. Fire-and-forget. */
+function _resolveGroupName(jid) {
+  if (!jid.endsWith("@g.us") || !sock || !isReady) return;
+  const c = contacts.get(jid);
+  if (c && c.name) return; // Already have a name
+  if (_pendingGroupFetches.has(jid)) return; // Already fetching
+  _pendingGroupFetches.add(jid);
+  sock.groupMetadata(jid).then((meta) => {
+    if (meta && meta.subject) {
+      const existing = contacts.get(jid) || { phone: null, notify: "" };
+      existing.name = meta.subject;
+      contacts.set(jid, existing);
+      saveContacts();
+      log(`Resolved group name: ${jid} → "${meta.subject}"`);
+    }
+  }).catch(() => {}).finally(() => _pendingGroupFetches.delete(jid));
+}
 
 function formatJid(phone) {
   return phone.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
@@ -651,13 +718,47 @@ function _formatMsg(msg) {
     "[media]";
   const ts = Number(msg.messageTimestamp || 0);
   const time = ts > 0 ? new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : "unknown";
-  return {
+
+  const jid = msg.key.remoteJid || "";
+  const isGroup = jid.endsWith("@g.us");
+  let chatName = contacts.get(jid)?.name || extractPhone(jid) || jid.split("@")[0];
+
+  // Trigger lazy group name fetch if missing
+  if (isGroup && !contacts.get(jid)?.name) {
+    _resolveGroupName(jid);
+  }
+
+  // Check if this chat is muted on WhatsApp
+  const muteExpiry = mutedChats.get(jid);
+  const isMuted = muteExpiry !== undefined && (muteExpiry < 0 || muteExpiry > Date.now() / 1000);
+
+  const result = {
     id: msg.key.id,
-    from: msg.key.fromMe ? "me" : (contacts.get(msg.key.remoteJid)?.name || msg.pushName || msg.key.remoteJid),
+    from: msg.key.fromMe ? "me" : (msg.pushName || chatName),
     body,
     time,
     fromMe: msg.key.fromMe,
+    type: isGroup ? "group" : "direct",
+    chatName,
+    muted: isMuted,
   };
+
+  // For group messages: "from" = person who sent, add group context
+  if (isGroup && !msg.key.fromMe) {
+    const partJid = msg.key.participant || "";
+    // Resolve participant name: pushName → contacts → LID→phone contacts → cleaned JID
+    const partContact = contacts.get(partJid);
+    const partName = msg.pushName
+      || partContact?.name || partContact?.notify
+      || (lidToPhone.has(partJid) ? contacts.get(lidToPhone.get(partJid))?.name : "")
+      || "";
+    result.participant = partJid;
+    result.participantName = partName;
+    result.groupName = chatName;
+    result.from = partName || extractPhone(partJid) || partJid.split("@")[0].slice(-8) || chatName;
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -819,6 +920,13 @@ async function handleRead(args) {
   // No contact specified — show recent chats overview + most recent chat messages
   if (!contact) {
     // Build summary of all chats sorted by most recent
+    // Trigger lazy group name resolution for all groups with missing names
+    for (const jid of messageStore.keys()) {
+      if (jid.endsWith("@g.us") && !contacts.get(jid)?.name) {
+        _resolveGroupName(jid);
+      }
+    }
+
     const chatSummary = [];
     for (const [jid, msgs] of messageStore) {
       if (jid === "status@broadcast") continue;
@@ -847,8 +955,12 @@ async function handleRead(args) {
         }
       }
       if (latestTs === 0) continue;
+      const muteExpiry = mutedChats.get(jid);
+      const isMuted = muteExpiry !== undefined && (muteExpiry < 0 || muteExpiry > Date.now() / 1000);
       chatSummary.push({
         name,
+        type: jid.endsWith("@g.us") ? "group" : jid.endsWith("@lid") ? "lid" : "direct",
+        muted: isMuted,
         last_from: latestFrom,
         last_message: (latestBody || "").slice(0, 80),
         last_time: new Date(latestTs * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC",
@@ -962,11 +1074,15 @@ async function handleListChats(args) {
       }
     }
 
+    const muteExpiry = mutedChats.get(jid);
+    const isMuted = muteExpiry !== undefined && (muteExpiry < 0 || muteExpiry > Date.now() / 1000);
+
     chatList.push({
       name: displayName,
       phone: extractPhone(jid),
       jid,
       type: isGroup ? "group" : isLid ? "lid" : "direct",
+      muted: isMuted,
       messages_cached: msgs.length,
       last_message_time: latestTs > 0 ? new Date(latestTs * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC" : null,
       last_message_preview: latestPreview,

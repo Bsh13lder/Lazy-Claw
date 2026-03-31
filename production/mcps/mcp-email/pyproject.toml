@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-email"
+version = "0.1.0"
+description = "Email MCP server — send/read/search email via SMTP+IMAP. Works with Gmail, Outlook, any provider."
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "mcp>=1.0.0",
+    "aiosmtplib>=3.0.0",
+    "aioimaplib>=1.1.0",
+]

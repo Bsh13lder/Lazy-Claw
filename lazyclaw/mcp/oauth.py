@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html as html_mod
 import logging
 import os
 import re
@@ -268,24 +269,28 @@ async def run_oauth_flow(
             error = params.get("error", [""])[0]
             error_desc = params.get("error_description", [""])[0]
 
-            body = (
-                "<html><body style='font-family:sans-serif;text-align:center;"
-                "padding:60px;'>"
-                + (
-                    f"<h1>Authorization Failed</h1><p>{error}: {error_desc}</p>"
-                    if error
-                    else "<h1>Connected!</h1>"
+            # HTML-escape error values to prevent XSS
+            if error:
+                safe_err = html_mod.escape(error)
+                safe_desc = html_mod.escape(error_desc)
+                inner = f"<h1>Authorization Failed</h1><p>{safe_err}: {safe_desc}</p>"
+            else:
+                inner = (
+                    "<h1>Connected!</h1>"
                     "<p>You can close this tab and return to LazyClaw.</p>"
                 )
-                + "</body></html>"
+            body_str = (
+                "<html><body style='font-family:sans-serif;text-align:center;"
+                f"padding:60px;'>{inner}</body></html>"
             )
+            body_bytes = body_str.encode("utf-8")
             header = (
                 f"HTTP/1.1 200 OK\r\n"
-                f"Content-Type: text/html\r\n"
-                f"Content-Length: {len(body)}\r\n"
+                f"Content-Type: text/html; charset=utf-8\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n"
                 f"Connection: close\r\n\r\n"
             )
-            writer.write((header + body).encode())
+            writer.write(header.encode("utf-8") + body_bytes)
             await writer.drain()
             writer.close()
 

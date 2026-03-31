@@ -58,7 +58,7 @@ class ShowStatusSkill(BaseSkill):
             if cfg.anthropic_api_key:
                 providers.append("anthropic")
             lines.append(f"AI Providers: {', '.join(providers) if providers else 'none'}")
-            lines.append(f"Default Model: {cfg.default_model}")
+            lines.append(f"Brain Model: {cfg.brain_model}")
             lines.append(f"API Port: {cfg.port}")
             lines.append(f"Database: {cfg.database_dir / 'lazyclaw.db'}")
             lines.append(
@@ -215,8 +215,8 @@ class RunDoctorSkill(BaseSkill):
             else:
                 checks.append(("AI Provider", "FAIL", "No API key configured"))
 
-            # 3. Default Model
-            checks.append(("Default Model", "OK", cfg.default_model))
+            # 3. Brain Model
+            checks.append(("Brain Model", "OK", cfg.brain_model))
 
             # 4. Encryption round-trip
             try:
@@ -266,27 +266,15 @@ class RunDoctorSkill(BaseSkill):
                 except ImportError:
                     checks.append((pkg_name, "WARN", f"Not installed ({desc})"))
 
-            # 7. Free AI providers
-            try:
-                from mcp_freeride.config import (
-                    get_configured_providers,
-                    load_config as load_freeride_config,
+            # 7. Free AI providers (direct integration)
+            from lazyclaw.llm.free_providers import discover_providers
+            free_provs = discover_providers()
+            if free_provs:
+                checks.append(
+                    ("Free AI", "OK", f"Providers: {', '.join(free_provs.keys())}")
                 )
-
-                freeride_cfg = load_freeride_config()
-                free_provs = [
-                    p
-                    for p in get_configured_providers(freeride_cfg)
-                    if p != "ollama"
-                ]
-                if free_provs:
-                    checks.append(
-                        ("Free AI", "OK", f"Providers: {', '.join(free_provs)}")
-                    )
-                else:
-                    checks.append(("Free AI", "WARN", "No free API keys"))
-            except ImportError:
-                checks.append(("Free AI", "WARN", "mcp-freeride not installed"))
+            else:
+                checks.append(("Free AI", "WARN", "No free API keys"))
 
             # 8. Telegram
             if cfg.telegram_bot_token:

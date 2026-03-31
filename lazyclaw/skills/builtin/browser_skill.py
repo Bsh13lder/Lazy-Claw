@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 
 from lazyclaw.browser.browser_settings import touch_browser_activity
@@ -22,13 +23,9 @@ _cdp_backend = None
 
 # ── Shortcut mapping ────────────────────────────────────────────────────
 
+# Services with MCP connectors are EXCLUDED — agent must use MCP tools instead.
+# Only services without MCP connectors get browser shortcuts.
 _SHORTCUTS = {
-    "whatsapp": "https://web.whatsapp.com",
-    "wa": "https://web.whatsapp.com",
-    "gmail": "https://mail.google.com",
-    "mail": "https://mail.google.com",
-    "email": "https://mail.google.com",
-    "instagram": "https://www.instagram.com",
     "twitter": "https://x.com",
     "x": "https://x.com",
     "facebook": "https://www.facebook.com",
@@ -69,12 +66,24 @@ async def _get_cdp_backend(user_id: str = "default"):
 
 
 async def _get_visible_cdp_backend(user_id: str = "default"):
-    """Ensure visible Brave is running with CDP and return backend.
+    """Ensure a VISIBLE Brave is running with CDP and return backend.
 
-    - If CDP already available on port → reuse (don't kill!)
-    - If nothing running → launch visible Brave with CDP profile
+    Platform-aware:
+    - Server mode (Linux + LAZYCLAW_SERVER_MODE): starts noVNC remote session
+    - Desktop (Mac/Linux desktop): opens visible window directly
+
+    Three desktop cases:
+    1. Visible browser already on port → reuse (no-op, already on stuck page)
+    2. Headless browser on port → kill it, relaunch visible, navigate to stuck URL
+    3. Nothing running → launch visible Brave fresh
     """
+    from lazyclaw.browser.remote_takeover import is_server_mode
+
+    if is_server_mode():
+        return await _get_remote_cdp_backend(user_id)
+
     from lazyclaw.browser.cdp import find_chrome_cdp
+    from lazyclaw.browser.cdp_backend import CDPBackend, restart_browser_with_cdp
     from lazyclaw.config import load_config
 
     config = load_config()
@@ -82,41 +91,197 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
     profile_dir = str(config.database_dir / "browser_profiles" / user_id)
     global _cdp_backend
 
-    # Check if Brave is already running with CDP
     ws_url = await find_chrome_cdp(port)
     if ws_url:
-        # Already running — reuse it (preserves WhatsApp login, cookies, etc.)
-        logger.info("Brave already on CDP port %d, reusing", port)
-        from lazyclaw.browser.cdp_backend import CDPBackend
-        if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
-            _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+        # Browser already running on CDP — check if headless
+        is_headless = await _is_browser_headless(port)
+        if not is_headless:
+            # Case 1: already visible → just reuse (user can see the stuck page)
+            logger.info("Brave already visible on CDP port %d, reusing", port)
+            if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
+                _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+            return _cdp_backend
+
+        # Case 2: headless → capture URL, kill, relaunch visible
+        stuck_url: str | None = None
+        if _cdp_backend is not None:
+            try:
+                stuck_url = await _cdp_backend.current_url()
+            except Exception:
+                pass
+
+        ws_url = await restart_browser_with_cdp(
+            port=port, profile_dir=profile_dir,
+            browser_bin=config.browser_executable,
+        )
+        if not ws_url:
+            logger.error("Failed to relaunch visible browser — CDP never responded")
+        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+
+        # Give the window a moment to render before raising it
+        await asyncio.sleep(1.0)
+
+        if stuck_url:
+            try:
+                await _cdp_backend.goto(stuck_url)
+                logger.info("Visible browser opened on stuck URL: %s", stuck_url)
+            except Exception:
+                pass
         return _cdp_backend
 
-    # Nothing running — launch VISIBLE Brave with CDP profile
+    # Case 3: nothing running — launch visible Brave
     chrome_bin = config.browser_executable or "google-chrome"
     import os
+    from pathlib import Path as _Path
     os.makedirs(profile_dir, exist_ok=True)
+    ext_path = str(_Path(__file__).parent.parent.parent / "browser" / "extension")
+
+    from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
 
     await asyncio.create_subprocess_exec(
         chrome_bin,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
-        "--disable-blink-features=AutomationControlled",
+        *STEALTH_LAUNCH_ARGS,
+        f"--load-extension={ext_path}",
+        f"--disable-extensions-except={ext_path}",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
     logger.info("Launched VISIBLE Brave (port=%d, profile=%s)", port, profile_dir)
 
-    # Wait for CDP to respond (up to 10s)
     for _ in range(20):
         await asyncio.sleep(0.5)
         if await find_chrome_cdp(port):
             break
 
-    from lazyclaw.browser.cdp_backend import CDPBackend
     _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
     return _cdp_backend
+
+
+async def _is_browser_headless(port: int) -> bool:
+    """Check if the browser process on the given CDP port is headless."""
+    try:
+        # Use "--" to stop pgrep parsing the pattern as flags (starts with --)
+        proc = await asyncio.create_subprocess_exec(
+            "pgrep", "-f", "--", f"headless.*remote-debugging-port={port}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        return proc.returncode == 0 and bool(stdout.strip())
+    except Exception:
+        return False  # Can't tell — assume visible to avoid killing user's browser
+
+
+async def _raise_browser_window() -> None:
+    """Bring the Brave/Chrome window to the foreground.
+
+    macOS: osascript activate
+    Linux: wmctrl (common on X11/Wayland desktops)
+    Windows: no-op (browser launch already foregrounds)
+    """
+    import sys
+
+    try:
+        if sys.platform == "darwin":
+            # Try Brave first, fall back to Chrome
+            for app in ("Brave Browser", "Google Chrome"):
+                proc = await asyncio.create_subprocess_exec(
+                    "osascript", "-e",
+                    f'tell application "{app}" to activate',
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                rc = await proc.wait()
+                if rc == 0:
+                    return
+        elif sys.platform == "linux":
+            # wmctrl -a raises window by name (works on X11, some Wayland)
+            for name in ("Brave", "Chrome", "Chromium"):
+                proc = await asyncio.create_subprocess_exec(
+                    "wmctrl", "-a", name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                rc = await proc.wait()
+                if rc == 0:
+                    return
+    except FileNotFoundError:
+        pass  # wmctrl not installed — silently skip
+    except Exception:
+        pass
+
+
+async def _get_remote_cdp_backend(user_id: str = "default"):
+    """Start a noVNC remote session and return a CDPBackend connected to it.
+
+    Used on headless Linux servers. The browser runs on a virtual display
+    and is accessible via noVNC in the user's mobile browser.
+    """
+    from lazyclaw.browser.cdp_backend import CDPBackend
+    from lazyclaw.browser.remote_takeover import (
+        get_active_session,
+        start_remote_session,
+    )
+    from lazyclaw.config import load_config
+
+    global _cdp_backend
+    config = load_config()
+    port = getattr(config, "cdp_port", 9222)
+    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+
+    # Reuse existing remote session if active
+    existing = get_active_session(user_id)
+    if existing:
+        if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
+            _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+        return _cdp_backend
+
+    # Capture stuck URL from current headless browser
+    stuck_url: str | None = None
+    if _cdp_backend is not None:
+        try:
+            stuck_url = await _cdp_backend.current_url()
+        except Exception:
+            pass
+
+    # Kill headless browser before starting visible one on virtual display
+    try:
+        kill_proc = await asyncio.create_subprocess_exec(
+            "pkill", "-f", f"--remote-debugging-port={int(port)}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await kill_proc.wait()
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+    await start_remote_session(
+        user_id=user_id,
+        cdp_port=port,
+        profile_dir=profile_dir,
+        browser_bin=config.browser_executable,
+        stuck_url=stuck_url,
+    )
+    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+    return _cdp_backend
+
+
+async def _stop_remote_session(user_id: str = "default") -> None:
+    """Stop remote noVNC session and relaunch headless browser."""
+    from lazyclaw.browser.remote_takeover import stop_remote_session
+
+    global _cdp_backend
+
+    await stop_remote_session(user_id)
+
+    # Relaunch headless browser so the agent can continue
+    _cdp_backend = None
+    backend = await _get_cdp_backend(user_id)
+    await backend._ensure_connected()
 
 
 # ── Unified BrowserSkill ────────────────────────────────────────────────
@@ -125,11 +290,19 @@ class BrowserSkill(BaseSkill):
     """Single CDP-based tool for all browser interactions.
 
     Pure action tool — buy tickets, check in, pay bills, order from Amazon,
-    read WhatsApp/Gmail, navigate. Controls user's real visible Brave.
+    read Gmail, navigate. Controls user's real visible Brave.
     """
 
     def __init__(self, config=None) -> None:
         self._config = config
+        self._snapshot_mgr: SnapshotManager | None = None
+
+    def _get_snapshot_manager(self) -> SnapshotManager:
+        """Lazy-init snapshot manager."""
+        if self._snapshot_mgr is None:
+            from lazyclaw.browser.snapshot import SnapshotManager
+            self._snapshot_mgr = SnapshotManager()
+        return self._snapshot_mgr
 
     @property
     def name(self) -> str:
@@ -142,11 +315,11 @@ class BrowserSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Control the user's REAL Brave browser. This is the user's visible browser "
-            "on their screen. Use for reading pages, navigating, clicking, typing, "
-            "taking screenshots, listing tabs, scrolling. Supports shortcuts: "
-            "'whatsapp', 'gmail', 'instagram', 'twitter', 'facebook', 'linkedin'. "
-            "For WhatsApp, Gmail, or any logged-in site — ALWAYS use this tool."
+            "Control the user's REAL Brave browser. Visible on their screen. "
+            "Use for reading pages, navigating, clicking, typing, "
+            "taking screenshots, listing tabs, scrolling. Shortcuts: "
+            "'twitter', 'facebook', 'linkedin'. "
+            "NOT for messaging or email apps — those have dedicated MCP tools."
         )
 
     @property
@@ -161,35 +334,61 @@ class BrowserSkill(BaseSkill):
                 "action": {
                     "type": "string",
                     "enum": ["read", "open", "click", "type", "press_key", "screenshot", "tabs",
-                            "scroll", "close", "snapshot", "hover", "drag", "console_logs"],
+                            "scroll", "close", "show", "snapshot", "hover", "drag", "console_logs", "chain"],
                     "description": (
-                        "read: silently read page content (invisible, no browser window shown). "
-                        "open: OPEN visible Brave on screen. Use when user says 'open', 'show me', 'make visible'. "
-                        "click: click element by CSS selector OR natural description ('Submit button', 'Search input'). "
-                        "type: type text into element by CSS selector OR description. "
-                        "press_key: press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown). Use Enter to submit forms or send messages. "
+                        "read: get page CONTENT (text, emails, messages) — no interactive refs. Use to understand what's on the page. "
+                        "open: navigate + get content summary AND interactive refs [e1],[e2] — use for first visit to a page. "
+                        "snapshot: get interactive element refs [e1],[e2] ONLY — use before clicking/typing. No page content. "
+                        "click: click element by ref (e5) or description. Returns fresh refs if page changed. "
+                        "type: type text into element. Returns fresh refs if page changed. "
+                        "press_key: press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown). "
                         "screenshot: capture screenshot (ONLY when user asks). "
                         "tabs: list all open tabs. "
                         "scroll: scroll up or down. "
                         "close: close/hide the browser. "
-                        "snapshot: get accessibility tree — semantic page structure (roles, labels, states). Universal, works on any site. "
-                        "hover: hover over element (triggers hover states, dropdowns). "
-                        "drag: drag element from source to target (CSS selectors). "
-                        "console_logs: get browser console output (errors, warnings)."
+                        "show: make the browser window visible on screen. Use when user says 'show me', 'make visible', 'let me see'. Shows the EXISTING browser session — same tabs, same page. "
+                        "hover: hover over element. "
+                        "drag: drag element from source to target. "
+                        "console_logs: get browser console output. "
+                        "chain: execute multiple steps in one call (e.g. steps=['click e2','wait 1','click e5'])."
                     ),
                 },
                 "target": {
                     "type": "string",
                     "description": (
-                        "For read/open: URL, shortcut (whatsapp, gmail, etc), or tab query. "
-                        "For click/type/hover: CSS selector OR natural description ('Submit button', 'Search input'). "
+                        "For read/open: URL, shortcut (twitter, facebook, linkedin), or tab query. "
+                        "For click/type/hover: CSS selector OR natural description. "
                         "For drag: source CSS selector. "
                         "Leave empty for current tab."
+                    ),
+                },
+                "ref": {
+                    "type": "string",
+                    "description": (
+                        "Element ref ID from snapshot (e.g. 'e5'). PREFERRED over target for click/type/hover. "
+                        "Use snapshot first to see available refs, then click/type by ref."
                     ),
                 },
                 "text": {
                     "type": "string",
                     "description": "Text to type (for 'type' action only).",
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "For chain action: list of steps to execute sequentially. "
+                        "Examples: 'click e5', 'type e2 hello world', 'press_key Enter', "
+                        "'wait 2', 'snapshot'. Auto-snapshots after page changes."
+                    ),
+                },
+                "task_hint": {
+                    "type": "string",
+                    "description": "For snapshot: task description to filter relevant page sections (e.g. 'delete emails').",
+                },
+                "landmark": {
+                    "type": "string",
+                    "description": "For snapshot: expand only this section (navigation, main, complementary, etc).",
                 },
                 "destination": {
                     "type": "string",
@@ -199,6 +398,10 @@ class BrowserSkill(BaseSkill):
                     "type": "string",
                     "enum": ["up", "down"],
                     "description": "Scroll direction (default: down).",
+                },
+                "visible": {
+                    "type": "boolean",
+                    "description": "Force visible browser window. Use when user says 'show me', 'make visible', 'I want to see'.",
                 },
             },
             "required": ["action"],
@@ -212,7 +415,31 @@ class BrowserSkill(BaseSkill):
             return await _get_visible_cdp_backend(user_id)
         return await _get_cdp_backend(user_id)
 
+    # Services with MCP connectors — hard block browser usage
+    _MCP_SERVICES = {
+        "whatsapp": "whatsapp",
+        "wa": "whatsapp",
+        "web.whatsapp.com": "whatsapp",
+        "instagram": "instagram",
+        "ig": "instagram",
+        "instagram.com": "instagram",
+        "gmail": "email",
+        "mail": "email",
+        "email": "email",
+        "mail.google.com": "email",
+    }
+
     async def execute(self, user_id: str, params: dict) -> str | ToolResult:
+        # Hard block: redirect MCP-backed services away from browser
+        target = (params.get("target") or "").lower().strip()
+        for keyword, mcp_name in self._MCP_SERVICES.items():
+            if keyword in target:
+                return (
+                    f"STOP: Do not use browser for this. Use search_tools('{mcp_name}') "
+                    f"to find the {mcp_name}_* MCP tools instead. Browser is only for "
+                    f"services without MCP connectors, or when user explicitly says 'in browser'."
+                )
+
         # Extract optional TabContext (injected by specialist runner)
         tab_context = params.pop("_tab_context", None)
         # Background tasks should never open visible browser
@@ -239,6 +466,8 @@ class BrowserSkill(BaseSkill):
                 return await self._action_scroll(user_id, params, tab_context)
             elif action == "close":
                 return await self._action_close(user_id, params)
+            elif action == "show":
+                return await self._action_show(user_id)
             elif action == "snapshot":
                 return await self._action_snapshot(user_id, params, tab_context)
             elif action == "hover":
@@ -247,21 +476,103 @@ class BrowserSkill(BaseSkill):
                 return await self._action_drag(user_id, params, tab_context)
             elif action == "console_logs":
                 return await self._action_console_logs(user_id, params, tab_context)
+            elif action == "chain":
+                return await self._action_chain(user_id, params, tab_context)
             else:
-                return f"Unknown action: {action}. Use: read, open, click, type, screenshot, tabs, scroll, close, snapshot, hover, drag, console_logs"
+                return f"Unknown action: {action}. Use: read, open, click, type, press_key, screenshot, tabs, scroll, close, snapshot, hover, drag, console_logs, chain"
         except (ConnectionError, TimeoutError, OSError) as e:
             logger.info("browser: CDP connection lost (%s), relaunching", e)
-            # Browser died — relaunch visible and retry
+            # Browser died — relaunch headless and retry
             global _cdp_backend
             _cdp_backend = None
             try:
-                await _get_visible_cdp_backend(user_id)
+                await _get_cdp_backend(user_id)
                 return await self.execute(user_id, params)
             except Exception:
                 return await self._auto_connect_and_retry(user_id, params)
         except Exception as e:
             logger.error("browser %s failed: %s", action, e, exc_info=True)
             return f"Error: {e}"
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_actionable_elements(elements: list[dict], limit: int = 30) -> str:
+        """Format extracted actionable elements into a compact text list."""
+        hints = []
+        for el in elements[:limit]:
+            parts = [el.get("tag", "?")]
+            if el.get("ariaLabel"):
+                parts.append(f'aria-label="{el["ariaLabel"]}"')
+            if el.get("text"):
+                parts.append(f'"{el["text"][:50]}"')
+            if el.get("placeholder"):
+                parts.append(f'placeholder="{el["placeholder"]}"')
+            if el.get("name"):
+                parts.append(f'name="{el["name"]}"')
+            if el.get("type"):
+                parts.append(f'type={el["type"]}')
+            hints.append("  " + " ".join(parts))
+        return "\n".join(hints)
+
+    async def _page_context_summary(
+        self, backend, heading: str | None = None, url: str | None = None,
+    ) -> str:
+        """Take ref-ID snapshot + JS extractor content, return compact summary.
+
+        Gives the LLM both page content AND ref-IDs to act on — no need
+        for a separate snapshot call after opening a page.
+        """
+        # Page content via JS extractor (cheap, site-specific)
+        page_data = await run_extractor(backend)
+        title = page_data.get("title", "") or await backend.title()
+        page_url = url or page_data.get("url", "")
+        page_text = page_data.get("text", "")
+
+        parts = [f"{heading or ('Opened: ' + title)}\nURL: {page_url}"]
+
+        if page_text:
+            preview = page_text[:1500]
+            if len(page_text) > 1500:
+                preview += "\n... [truncated]"
+            parts.append(f"\n--- Page Content ---\n{preview}")
+
+        # Ref-ID snapshot — so LLM can immediately act with refs
+        try:
+            mgr = self._get_snapshot_manager()
+            snapshot = await mgr.take_snapshot(backend)
+            snap_text = mgr.format_snapshot(snapshot)
+            parts.append(f"\n{snap_text}")
+        except Exception:
+            # Fallback to old actionable elements if snapshot fails
+            try:
+                from lazyclaw.browser.dom_optimizer import DOMOptimizer
+                elements = await DOMOptimizer.extract_actionable(backend)
+                if elements:
+                    parts.append(
+                        "\n--- Actionable Elements ---\n"
+                        + self._format_actionable_elements(elements)
+                    )
+            except Exception:
+                pass
+
+        return "\n".join(parts)
+
+    async def _element_not_found_hint(self, backend, target: str) -> str:
+        """When an element isn't found, return actionable elements so the LLM can self-correct."""
+        from lazyclaw.browser.dom_optimizer import DOMOptimizer
+
+        try:
+            elements = await DOMOptimizer.extract_actionable(backend)
+            if elements:
+                hint_text = self._format_actionable_elements(elements, limit=25)
+                return (
+                    f"Element not found: '{target}'. "
+                    f"Here are the interactive elements on the page — pick from these:\n{hint_text}"
+                )
+        except Exception:
+            pass
+        return f"Element not found: '{target}'. Use action='snapshot' to see page structure."
 
     # ── Action handlers ─────────────────────────────────────────────────
 
@@ -273,7 +584,7 @@ class BrowserSkill(BaseSkill):
         which has cookies from previous visible sessions.
         """
         backend = await self._get_backend(user_id, tab_context)
-        target = params.get("target", "").strip()
+        target = (params.get("target") or "").strip()
 
         if target:
             if tab_context:
@@ -308,7 +619,7 @@ class BrowserSkill(BaseSkill):
         result = await run_extractor(backend)
         title = result.get("title", "")
         url = result.get("url", "")
-        text = result.get("text", "")
+        text = result.get("text", "")[:2000]  # Cap content — specialist calls snapshot for refs
         page_type = result.get("type", "generic")
 
         summary = f"Tab: {title}\nURL: {url}"
@@ -329,14 +640,20 @@ class BrowserSkill(BaseSkill):
         return summary
 
     async def _action_open(self, user_id: str, params: dict, tab_context=None) -> str:
-        """Open Brave and navigate to target. Headless in background tasks."""
-        # Background tasks use headless (user didn't ask to "show me")
-        visible = not getattr(self, "_is_background", False)
+        """Open Brave and navigate to target. Headless by default for navigation."""
+        force_visible = params.pop("visible", False)
+        is_background = getattr(self, "_is_background", False)
 
-        target = params.get("target", "").strip()
+        target = (params.get("target") or "").strip()
+
+        # No target = "show me the browser" → visible unless background
+        # With target = navigation → headless unless explicitly visible
+        visible = force_visible or (not target and not is_background)
+
         if not target:
             backend = await self._get_backend(user_id, tab_context, visible=visible)
             if visible:
+                await _raise_browser_window()
                 return "Done — Brave is open on your screen."
             return "Done — browser ready (headless)."
 
@@ -345,26 +662,30 @@ class BrowserSkill(BaseSkill):
             return f"Couldn't resolve '{target}' to a URL."
 
         backend = await self._get_backend(user_id, tab_context, visible=visible)
+        if visible:
+            await _raise_browser_window()
 
         if not tab_context:
-            # Normal mode — check if target is already open in an existing tab
-            try:
-                tab_list = await backend.tabs()
-                match = next(
-                    (t for t in tab_list
-                     if target.lower() in t.title.lower()
-                     or target.lower() in t.url.lower()
-                     or nav_url.split("//")[-1].split("/")[0] in t.url),
-                    None,
-                )
-                if match:
-                    await backend.switch_tab(match.id)
-                    return (
-                        f"Done — {match.title} is now on the user's screen in Brave. "
-                        "No screenshot needed — they can see it."
+            # Tab matching only for shortcuts (gmail, whatsapp), NOT full URLs.
+            # Full URLs always navigate — they may have different hash/search params.
+            is_full_url = target.startswith("http://") or target.startswith("https://")
+            if not is_full_url:
+                try:
+                    tab_list = await backend.tabs()
+                    match = next(
+                        (t for t in tab_list
+                         if target.lower() in t.title.lower()
+                         or target.lower() in t.url.lower()
+                         or nav_url.split("//")[-1].split("/")[0] in t.url),
+                        None,
                     )
-            except Exception:
-                pass
+                    if match:
+                        await backend.switch_tab(match.id)
+                        return await self._page_context_summary(
+                            backend, f"Switched to: {match.title}", match.url,
+                        )
+                except Exception:
+                    pass
 
         # Navigate to target (with extra wait after fresh launch)
         await asyncio.sleep(2)
@@ -375,11 +696,51 @@ class BrowserSkill(BaseSkill):
             await asyncio.sleep(3)
             await backend.goto(nav_url)
 
-        title = await backend.title()
-        result = (
-            f"Done — {title} is now open on the user's screen in Brave. "
-            "No screenshot needed — they can see it."
-        )
+        # Blank page detection — wait for content to render (SPA, JS-heavy sites)
+        for _wait in (0.5, 1.0, 2.0, 3.0):
+            try:
+                _check = await backend.evaluate(
+                    "(document.body.innerText || '').trim().length > 0 || "
+                    "document.querySelectorAll('input,button,a,[role=\"button\"]').length > 0"
+                )
+                if _check:
+                    break
+            except Exception:
+                break
+            await asyncio.sleep(_wait)
+        else:
+            # Still blank after 6.5s — auto-refresh once
+            try:
+                await backend.evaluate("location.reload()")
+                await asyncio.sleep(3)
+            except Exception:
+                pass
+
+        # Page survey — quick DOM analysis prepended to result
+        try:
+            _survey = await backend.evaluate("""(() => {
+                const inputs = document.querySelectorAll('input:not([type=hidden]),textarea,select');
+                const buttons = document.querySelectorAll('button,[type=submit],[role=button]');
+                const links = document.querySelectorAll('a[href]');
+                const forms = document.querySelectorAll('form');
+                const tables = document.querySelectorAll('table');
+                const status = document.querySelector('meta[http-equiv="status"]');
+                const title = document.title || '';
+                const textLen = (document.body.innerText || '').trim().length;
+                let pageType = 'CONTENT';
+                if (forms.length > 0 && inputs.length >= 2) pageType = 'FORM';
+                else if (inputs.length === 2 && title.toLowerCase().includes('login')) pageType = 'LOGIN';
+                else if (inputs.length === 2 && document.querySelector('[type=password]')) pageType = 'LOGIN';
+                else if (tables.length > 0) pageType = 'TABLE';
+                else if (textLen < 50 && inputs.length === 0) pageType = 'BLANK';
+                else if (links.length > 20) pageType = 'LIST';
+                return `Page: ${pageType} | ${inputs.length} inputs, ${buttons.length} buttons, ${links.length} links, ${forms.length} forms | text: ${textLen} chars`;
+            })()""")
+            _survey_line = f"[{_survey}]\n" if _survey else ""
+        except Exception:
+            _survey_line = ""
+
+        result = _survey_line + await self._page_context_summary(backend, None, nav_url)
 
         # Inject site-specific knowledge for the navigated domain
         if nav_url and self._config:
@@ -387,64 +748,115 @@ class BrowserSkill(BaseSkill):
                 from lazyclaw.browser.site_memory import recall, format_memories_for_context
                 memories = await recall(self._config, user_id, nav_url)
                 if memories:
-                    result += "\n\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
+                    result += "\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
             except Exception:
                 pass
 
         return result
 
     async def _action_click(self, user_id: str, params: dict, tab_context=None) -> str:
-        """Click an element by CSS selector OR natural description."""
-        target = params.get("target", "").strip()
-        if not target:
-            return "Target required for click (CSS selector or description like 'Submit button')."
+        """Click an element by ref ID, CSS selector, or natural description."""
+        ref = (params.get("ref") or "").strip()
+        target = (params.get("target") or "").strip()
+
+        if not ref and not target:
+            return "ref or target required for click. Use ref='e5' from snapshot, or a CSS selector/description."
 
         backend = await self._get_backend(user_id, tab_context)
+
+        # Ref-ID path (preferred) — DOM click via snapshot manager
+        if ref:
+            mgr = self._get_snapshot_manager()
+            meta = await mgr.get_ref_meta(backend, ref)
+            clicked = await mgr.perform_click(backend, ref)
+            if clicked:
+                await asyncio.sleep(random.uniform(0.2, 0.8))
+                name = meta.get("name", ref) if meta else ref
+                role = meta.get("role", "") if meta else ""
+                confirm = f"Clicked: [{ref}] {role} \"{name}\""
+                # Auto-snapshot if page changed — specialist sees updated refs immediately
+                if await mgr.is_stale(backend):
+                    snapshot = await mgr.take_snapshot(backend)
+                    return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                return confirm
+            return f"Ref '{ref}' not found or element is gone. Take a new snapshot to get fresh refs."
 
         # Detect if target is a CSS selector (has CSS-specific chars)
         # or a natural description like "Send button", "Message input"
         is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))
         if is_css:
-            await backend.click(target)
-            return f"Clicked: {target}"
+            try:
+                await backend.click(target)
+                confirm = f"Clicked: {target}"
+                mgr = self._get_snapshot_manager()
+                if await mgr.is_stale(backend):
+                    snapshot = await mgr.take_snapshot(backend)
+                    return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                return confirm
+            except (ValueError, Exception):
+                return await self._element_not_found_hint(backend, target)
 
-        # Natural description — use accessibility tree to find element
-        match = await backend.find_element_by_role(target)
-        if not match:
+        # Natural description — find + DOM click via accessibility tree
+        clicked = await backend.click_by_role(target)
+        if not clicked:
             # Fallback: try as CSS selector anyway (might be a tag name like "button")
             try:
                 await backend.click(target)
                 return f"Clicked: {target}"
             except (ValueError, Exception):
-                return f"No element found matching '{target}'. Try a CSS selector or use snapshot to see page structure."
+                return await self._element_not_found_hint(backend, target)
 
-        conn = await backend._ensure_connected()
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mousePressed", "x": match["x"], "y": match["y"],
-            "button": "left", "clickCount": 1,
-        })
-        await asyncio.sleep(0.08)
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseReleased", "x": match["x"], "y": match["y"],
-            "button": "left", "clickCount": 1,
-        })
         await asyncio.sleep(0.5)
-        return f"Clicked: {match['role']} \"{match['name']}\""
+        confirm = f"Clicked: {clicked['role']} \"{clicked['name']}\""
+        mgr = self._get_snapshot_manager()
+        if await mgr.is_stale(backend):
+            snapshot = await mgr.take_snapshot(backend)
+            return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+        return confirm
 
     async def _action_type(self, user_id: str, params: dict, tab_context=None) -> str:
-        """Type text into an element by CSS selector OR natural description."""
-        target = params.get("target", "").strip()
+        """Type text into an element by ref ID, CSS selector, or natural description."""
+        ref = (params.get("ref") or "").strip()
+        target = (params.get("target") or "").strip()
         text = params.get("text", "")
-        if not target or not text:
-            return "Both target and text required for type action."
+        if (not ref and not target) or not text:
+            return "ref (or target) and text required for type action."
 
         backend = await self._get_backend(user_id, tab_context)
+
+        # Ref-ID path — focus via snapshot manager, then type
+        if ref:
+            mgr = self._get_snapshot_manager()
+            focused = await mgr.focus_ref(backend, ref)
+            if focused:
+                conn = await backend._ensure_connected()
+                for char in text:
+                    await conn.send("Input.dispatchKeyEvent", {
+                        "type": "keyDown", "text": char, "key": char,
+                    })
+                    await conn.send("Input.dispatchKeyEvent", {
+                        "type": "keyUp", "key": char,
+                    })
+                    await asyncio.sleep(random.uniform(0.03, 0.12))
+                meta = await mgr.get_ref_meta(backend, ref)
+                name = meta.get("name", ref) if meta else ref
+                confirm = f"Typed '{text[:30]}' into [{ref}] \"{name}\""
+                if await mgr.is_stale(backend):
+                    snapshot = await mgr.take_snapshot(backend)
+                    return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                return confirm
+            return f"Ref '{ref}' not found or couldn't focus. Take a new snapshot."
 
         # Detect if target is a CSS selector (has CSS-specific chars)
         is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))
         if is_css:
             await backend.type_text(target, text)
-            return f"Typed '{text[:30]}...' into {target}"
+            confirm = f"Typed '{text[:30]}...' into {target}"
+            mgr = self._get_snapshot_manager()
+            if await mgr.is_stale(backend):
+                snapshot = await mgr.take_snapshot(backend)
+                return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+            return confirm
 
         # Natural description — find via accessibility tree, focus, then type
         match = await backend.find_element_by_role(target)
@@ -467,7 +879,12 @@ class BrowserSkill(BaseSkill):
             await conn.send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
             await conn.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
             await asyncio.sleep(0.05)
-        return f"Typed '{text[:30]}...' into {match['role']} \"{match['name']}\""
+        confirm = f"Typed '{text[:30]}...' into {match['role']} \"{match['name']}\""
+        mgr = self._get_snapshot_manager()
+        if await mgr.is_stale(backend):
+            snapshot = await mgr.take_snapshot(backend)
+            return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+        return confirm
 
     async def _action_screenshot(self, user_id: str, params: dict, tab_context=None) -> ToolResult:
         """Take a screenshot of the current tab."""
@@ -512,7 +929,7 @@ class BrowserSkill(BaseSkill):
 
     async def _action_press_key(self, user_id: str, params: dict, tab_context=None) -> str:
         """Press a keyboard key (Enter, Escape, Tab, etc)."""
-        key = params.get("target", "").strip() or params.get("text", "").strip()
+        key = (params.get("target") or params.get("text") or "").strip()
         if not key:
             return "Key name required (e.g. Enter, Escape, Tab, Backspace, ArrowDown)."
         backend = await self._get_backend(user_id, tab_context)
@@ -520,16 +937,35 @@ class BrowserSkill(BaseSkill):
         return f"Pressed: {key}"
 
     async def _action_snapshot(self, user_id: str, params: dict, tab_context=None) -> str:
-        """Get accessibility tree — semantic page structure."""
+        """Get ref-ID page snapshot — interactive elements grouped by landmark."""
+        target = (params.get("target") or "").strip()
         backend = await self._get_backend(user_id, tab_context)
-        tree = await backend.accessibility_tree()
-        url = await backend.current_url()
-        title = await backend.title()
-        return f"Page: {title}\nURL: {url}\n\nAccessibility Tree:\n{tree}"
+
+        # If target provided, navigate first (so snapshot doesn't return empty chrome://newtab)
+        if target:
+            nav_url = _query_to_url(target)
+            if nav_url:
+                try:
+                    await backend.goto(nav_url)
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass
+
+        mgr = self._get_snapshot_manager()
+        snapshot = await mgr.take_snapshot(backend)
+        task_hint = params.get("task_hint")
+        landmark_filter = params.get("landmark")
+        snap_text = mgr.format_snapshot(
+            snapshot,
+            task_hint=task_hint,
+            landmark_filter=landmark_filter,
+        )
+
+        return snap_text
 
     async def _action_hover(self, user_id: str, params: dict, tab_context=None) -> str:
         """Hover over an element."""
-        target = params.get("target", "").strip()
+        target = (params.get("target") or "").strip()
         if not target:
             return "Target (CSS selector) required for hover."
         backend = await self._get_backend(user_id, tab_context)
@@ -538,8 +974,8 @@ class BrowserSkill(BaseSkill):
 
     async def _action_drag(self, user_id: str, params: dict, tab_context=None) -> str:
         """Drag element from source to destination."""
-        source = params.get("target", "").strip()
-        dest = params.get("destination", "").strip()
+        source = (params.get("target") or "").strip()
+        dest = (params.get("destination") or "").strip()
         if not source or not dest:
             return "Both target (source selector) and destination (target selector) required for drag."
         backend = await self._get_backend(user_id, tab_context)
@@ -559,6 +995,124 @@ class BrowserSkill(BaseSkill):
             text = log.get("text", "")
             lines.append(f"[{level}] {text}")
         return "\n".join(lines)
+
+    async def _action_chain(self, user_id: str, params: dict, tab_context=None) -> str:
+        """Execute multiple steps in one call — reduces LLM round-trips."""
+        steps = params.get("steps", [])
+        if not steps or not isinstance(steps, list):
+            return "steps array required for chain action. Example: ['click e2', 'wait 1', 'click e5']"
+
+        backend = await self._get_backend(user_id, tab_context)
+        mgr = self._get_snapshot_manager()
+        results: list[str] = []
+        total = len(steps)
+
+        for i, step_str in enumerate(steps, 1):
+            if not isinstance(step_str, str) or not step_str.strip():
+                results.append(f"{i}. (empty) → skipped")
+                continue
+
+            parts = step_str.strip().split(None, 2)
+            cmd = parts[0].lower()
+            arg1 = parts[1] if len(parts) > 1 else ""
+            arg2 = parts[2] if len(parts) > 2 else ""
+
+            try:
+                if cmd == "click" and arg1:
+                    # Support both ref IDs (e5) and natural descriptions ("Select all conversations")
+                    click_target = arg1 + (" " + arg2 if arg2 else "")
+                    is_ref = bool(re.match(r'^e\d+$', arg1))
+
+                    if is_ref:
+                        # DOM click via performClick — works on all sites
+                        meta = await mgr.get_ref_meta(backend, arg1)
+                        clicked = await mgr.perform_click(backend, arg1)
+                        if not clicked:
+                            results.append(f"{i}. click {arg1} → FAILED (element gone)")
+                            break
+                        display = f"{meta.get('role', '')} \"{meta.get('name', arg1)}\"" if meta else arg1
+                    else:
+                        # Natural description click — find + DOM click
+                        clicked = await backend.click_by_role(click_target)
+                        if not clicked:
+                            try:
+                                await backend.click(click_target)
+                                results.append(f"{i}. click \"{click_target}\"")
+                                await asyncio.sleep(random.uniform(0.3, 0.8))
+                                continue
+                            except Exception:
+                                results.append(f"{i}. click \"{click_target}\" → NOT FOUND")
+                                break
+                        display = f"{clicked['role']} \"{clicked['name']}\""
+
+                    results.append(f"{i}. click {arg1 if is_ref else click_target} → {display}")
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                elif cmd == "type" and arg1 and arg2:
+                    focused = await mgr.focus_ref(backend, arg1)
+                    if not focused:
+                        results.append(f"{i}. type {arg1} → FAILED (can't focus)")
+                        break
+                    conn = await backend._ensure_connected()
+                    for char in arg2:
+                        await conn.send("Input.dispatchKeyEvent", {
+                            "type": "keyDown", "text": char, "key": char,
+                        })
+                        await conn.send("Input.dispatchKeyEvent", {
+                            "type": "keyUp", "key": char,
+                        })
+                        await asyncio.sleep(random.uniform(0.03, 0.1))
+                    results.append(f"{i}. type {arg1} \"{arg2[:30]}\"")
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+
+                elif cmd == "press_key" and arg1:
+                    await backend.press_key(arg1)
+                    results.append(f"{i}. press_key {arg1}")
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                elif cmd == "wait":
+                    secs = min(float(arg1) if arg1 else 1.0, 10.0)
+                    await asyncio.sleep(secs)
+                    results.append(f"{i}. wait {secs}s")
+
+                elif cmd == "snapshot":
+                    snapshot = await mgr.take_snapshot(backend)
+                    task_hint = arg1 if arg1 else None
+                    snap_text = mgr.format_snapshot(snapshot, task_hint=task_hint)
+                    results.append(f"{i}. snapshot ({snapshot.element_count} elements)")
+                    # Append snapshot as the last thing in output
+                    return (
+                        f"Chain ({len(results)}/{total}):\n"
+                        + "\n".join(f"  {r}" for r in results)
+                        + f"\n\n{snap_text}"
+                    )
+
+                elif cmd == "scroll":
+                    direction = arg1 if arg1 in ("up", "down") else "down"
+                    await backend.scroll(direction)
+                    results.append(f"{i}. scroll {direction}")
+                    await asyncio.sleep(0.5)
+
+                else:
+                    results.append(f"{i}. {step_str} → unknown command")
+
+            except Exception as e:
+                results.append(f"{i}. {step_str} → ERROR: {e}")
+                break
+
+        # Auto-snapshot after chain to show result
+        succeeded = len(results)
+        try:
+            snapshot = await mgr.take_snapshot(backend)
+            snap_text = mgr.format_snapshot(snapshot)
+        except Exception:
+            snap_text = "(snapshot failed)"
+
+        return (
+            f"Chain ({succeeded}/{total}):\n"
+            + "\n".join(f"  {r}" for r in results)
+            + f"\n\n{snap_text}"
+        )
 
     async def _action_close(self, user_id: str, params: dict) -> str:
         """Close/hide the browser."""
@@ -592,6 +1146,27 @@ class BrowserSkill(BaseSkill):
         except Exception as e:
             return f"Error closing browser: {e}"
 
+    async def _action_show(self, user_id: str) -> str:
+        """Make the existing browser visible without killing the session.
+
+        Switches headless → visible on the same profile dir so all tabs,
+        cookies, and the current page are preserved. Works from background
+        tasks too — user explicitly asked to see the browser.
+        """
+        try:
+            await _get_visible_cdp_backend(user_id)
+            await _raise_browser_window()
+            # Read current page to confirm what's showing
+            backend = await _get_cdp_backend(user_id)
+            try:
+                url = await backend.current_url()
+                title = await backend.title()
+                return f"Browser is now visible. Showing: {title} ({url})"
+            except Exception:
+                return "Browser is now visible on your screen."
+        except Exception as e:
+            return f"Could not make browser visible: {e}"
+
     # ── Auto-connect logic ──────────────────────────────────────────────
 
     async def _auto_connect_and_retry(self, user_id: str, params: dict) -> str:
@@ -605,7 +1180,7 @@ class BrowserSkill(BaseSkill):
         if not settings.get("cdp_approved"):
             return (
                 "I need to restart Brave with debugging enabled so I can "
-                "read your browser tabs (WhatsApp, Gmail, etc). All your "
+                "read your browser tabs. All your "
                 "tabs and logins will be preserved — just a 2-3 second "
                 "restart. Say 'yes, connect browser' to allow. I'll "
                 "remember your choice for next time."

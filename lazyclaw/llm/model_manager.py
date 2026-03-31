@@ -89,7 +89,7 @@ async def list_models(config: Config) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def get_user_model(config: Config, user_id: str, feature: str) -> str:
-    """Get user's assigned model for a feature. Falls back to config.default_model."""
+    """Get user's assigned model for a feature. Falls back to config.brain_model."""
     async with db_session(config) as db:
         row = await db.execute(
             "SELECT model_id FROM user_model_assignments WHERE user_id = ? AND feature = ?",
@@ -99,7 +99,7 @@ async def get_user_model(config: Config, user_id: str, feature: str) -> str:
 
     if result:
         return result[0]
-    return config.default_model
+    return config.brain_model
 
 
 async def set_user_model(config: Config, user_id: str, feature: str, model_id: str) -> None:

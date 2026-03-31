@@ -12,6 +12,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from lazyclaw.browser.cdp import (
@@ -50,51 +51,68 @@ class CDPBackend:
         self._conn: CDPConnection | None = None
         self._current_tab: CDPTab | None = None
         self._last_activity: float = 0.0
+        self._connect_lock = asyncio.Lock()
 
     async def _ensure_connected(self) -> CDPConnection:
         """Lazy connect: discover Chrome and connect to active tab.
 
         If no Chrome is running, auto-launches headless Chrome.
         If Chrome has no tabs, creates a new blank tab automatically.
+        Uses asyncio.Lock to prevent duplicate Chrome launches from
+        concurrent coroutines.
         """
+        # Fast path: already connected (no lock needed)
         if self._conn and self._conn.is_connected:
             self._last_activity = time.monotonic()
             return self._conn
 
-        ws_url = await find_chrome_cdp(self._port)
-        if not ws_url:
-            # Auto-launch headless Chrome instead of asking the user
-            ws_url = await self._auto_launch_chrome()
+        async with self._connect_lock:
+            # Re-check after acquiring lock (another coroutine may have connected)
+            if self._conn and self._conn.is_connected:
+                self._last_activity = time.monotonic()
+                return self._conn
+
+            ws_url = await find_chrome_cdp(self._port)
             if not ws_url:
-                raise ConnectionError(
-                    f"Could not launch Chrome with debugging port {self._port}."
-                )
+                # Auto-launch headless Chrome instead of asking the user
+                ws_url = await self._auto_launch_chrome()
+                if not ws_url:
+                    raise ConnectionError(
+                        f"Could not launch Chrome with debugging port {self._port}."
+                    )
 
-        # Connect to the first (active) page tab
-        tabs = await list_chrome_tabs(self._port)
-        page_tabs = [t for t in tabs if t.tab_type == "page"]
+            # Connect to the first (active) page tab
+            tabs = await list_chrome_tabs(self._port)
+            page_tabs = [t for t in tabs if t.tab_type == "page"]
 
-        if not page_tabs:
-            # No tabs — create one via CDP /json/new endpoint
-            logger.info("Chrome has no tabs, creating a new one")
-            page_tabs = await self._create_tab()
             if not page_tabs:
-                raise ConnectionError("Chrome has no open tabs and failed to create one.")
+                # No tabs — create one via CDP /json/new endpoint
+                logger.info("Chrome has no tabs, creating a new one")
+                page_tabs = await self._create_tab()
+                if not page_tabs:
+                    raise ConnectionError("Chrome has no open tabs and failed to create one.")
 
-        self._current_tab = page_tabs[0]
-        self._conn = CDPConnection()
-        await self._conn.connect(self._current_tab.ws_url)
+            self._current_tab = page_tabs[0]
+            self._conn = CDPConnection()
+            await self._conn.connect(self._current_tab.ws_url)
 
-        # Enable required CDP domains
-        await self._conn.send("Page.enable")
-        await self._conn.send("Runtime.enable")
+            # Enable required CDP domains
+            await self._conn.send("Page.enable")
+            await self._conn.send("Runtime.enable")
 
-        self._last_activity = time.monotonic()
-        logger.info(
-            "CDP connected to tab: %s (%s)",
-            self._current_tab.title, self._current_tab.url,
-        )
-        return self._conn
+            # Apply stealth (mobile UA, anti-detection, touch emulation)
+            try:
+                from lazyclaw.browser.stealth import apply_stealth
+                await apply_stealth(self._conn)
+            except Exception as exc:
+                logger.warning("Stealth injection failed (non-fatal): %s", exc)
+
+            self._last_activity = time.monotonic()
+            logger.info(
+                "CDP connected to tab: %s (%s)",
+                self._current_tab.title, self._current_tab.url,
+            )
+            return self._conn
 
     async def _auto_launch_chrome(self) -> str | None:
         """Launch headless browser with remote debugging. Returns CDP ws_url or None.
@@ -135,6 +153,11 @@ class CDPBackend:
             import tempfile
             profile_dir = os.path.join(tempfile.gettempdir(), "lazyclaw-cdp-profile")
 
+        # Auto-load LazyClaw ref engine extension (silent, no user prompt)
+        ext_path = str(Path(__file__).parent / "extension")
+
+        from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
+
         cmd = [
             chrome_bin,
             "--headless=new",
@@ -143,7 +166,9 @@ class CDPBackend:
             "--no-first-run",
             "--no-sandbox",
             "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
+            *STEALTH_LAUNCH_ARGS,
+            f"--load-extension={ext_path}",
+            f"--disable-extensions-except={ext_path}",
         ]
 
         try:
@@ -157,12 +182,12 @@ class CDPBackend:
                 proc.pid, self._port, profile_dir,
             )
             # Wait for Chrome to start accepting connections
-            for _ in range(15):
+            for _ in range(6):
                 await asyncio.sleep(0.5)
                 ws_url = await find_chrome_cdp(self._port)
                 if ws_url:
                     return ws_url
-            logger.warning("Chrome launched but CDP not responding after 7.5s")
+            logger.warning("Chrome launched but CDP not responding after 3s")
         except Exception as exc:
             logger.error("Failed to launch Chrome: %s", exc)
 
@@ -195,6 +220,24 @@ class CDPBackend:
 
     async def goto(self, url: str) -> None:
         conn = await self._ensure_connected()
+
+        # SPA hash navigation: if same origin but different hash/path,
+        # Page.navigate won't work (Gmail, Twitter, etc. ignore it).
+        # Use JS window.location.href instead, which SPAs do handle.
+        current = await self.current_url()
+        if _is_same_origin_nav(current, url):
+            logger.info("SPA navigation detected: %s → %s", current[:60], url[:60])
+            await conn.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"window.location.href = {_js_str(url)};",
+                    "awaitPromise": False,
+                },
+            )
+            # SPAs need time to render after hash change (Gmail: 1-2s)
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+            return
+
         await conn.send("Page.navigate", {"url": url})
         # Human-like wait for page load (0.8-1.5s)
         await asyncio.sleep(random.uniform(0.8, 1.5))
@@ -205,6 +248,15 @@ class CDPBackend:
             )
         except Exception:
             pass  # Some pages don't trigger navigation events
+
+        # Wait for DOM to settle + auto-solve Cloudflare if detected
+        try:
+            from lazyclaw.browser.stealth import detect_and_solve_cloudflare, wait_for_page_ready
+
+            await wait_for_page_ready(conn, timeout=5.0)
+            await detect_and_solve_cloudflare(conn, timeout=20.0)
+        except Exception:
+            pass
 
     async def current_url(self) -> str:
         conn = await self._ensure_connected()
@@ -264,7 +316,7 @@ class CDPBackend:
 
     async def click(self, selector: str) -> None:
         conn = await self._ensure_connected()
-        # Find element center coordinates via JS
+        # Find element center coordinates and size via JS
         js = f"""
         (() => {{
             const el = document.querySelector({_js_str(selector)});
@@ -272,7 +324,8 @@ class CDPBackend:
             const rect = el.getBoundingClientRect();
             return {{
                 x: rect.x + rect.width / 2,
-                y: rect.y + rect.height / 2
+                y: rect.y + rect.height / 2,
+                w: rect.width, h: rect.height
             }};
         }})()
         """
@@ -285,48 +338,36 @@ class CDPBackend:
             raise ValueError(f"Element not found: {selector}")
 
         x, y = coords["x"], coords["y"]
-        # Dispatch mouse events
-        # Small delay between press and release (human finger)
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mousePressed",
-            "x": x, "y": y,
-            "button": "left",
-            "clickCount": 1,
-        })
-        await asyncio.sleep(random.uniform(0.05, 0.12))
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseReleased",
-            "x": x, "y": y,
-            "button": "left",
-            "clickCount": 1,
-        })
-        # Human pause after clicking (0.2-1.5s)
-        await asyncio.sleep(random.uniform(0.2, 1.5))
+        target_size = min(coords.get("w", 20), coords.get("h", 20))
+
+        # Human-like click: Bezier movement + complete event chain
+        from lazyclaw.browser.human_input import human_click
+        await human_click(conn, x, y, target_size=target_size)
 
     async def type_text(self, selector: str, text: str) -> None:
         conn = await self._ensure_connected()
-        # Focus the element first
-        await conn.send(
+        # Find element coordinates and click to focus (human-like)
+        js = f"""
+        (() => {{
+            const el = document.querySelector({_js_str(selector)});
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}};
+        }})()
+        """
+        result = await conn.send(
             "Runtime.evaluate",
-            {
-                "expression": (
-                    f"document.querySelector({_js_str(selector)})?.focus()"
-                ),
-            },
+            {"expression": js, "returnByValue": True},
         )
-        await asyncio.sleep(random.uniform(0.1, 0.3))
-        # Type each character with human-like timing
-        for char in text:
-            await conn.send("Input.dispatchKeyEvent", {
-                "type": "keyDown",
-                "text": char,
-                "key": char,
-            })
-            await conn.send("Input.dispatchKeyEvent", {
-                "type": "keyUp",
-                "key": char,
-            })
-            await asyncio.sleep(random.uniform(0.03, 0.12))  # Human typing speed
+        coords = result.get("result", {}).get("value")
+
+        # Type with human-like keystroke timing
+        from lazyclaw.browser.human_input import human_type
+        await human_type(
+            conn, text,
+            field_x=coords["x"] if coords else None,
+            field_y=coords["y"] if coords else None,
+        )
 
     async def press_key(self, key: str) -> None:
         """Press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown, etc)."""
@@ -350,15 +391,22 @@ class CDPBackend:
         if lookup:
             key_name, text, code = lookup
         else:
-            key_name, text, code = key, key, 0
+            # Single printable char → send as text; multi-char names (e.g.
+            # "F5", "PageDown") are key identifiers, not literal text.
+            key_name = key
+            text = key if len(key) == 1 else ""
+            code = ord(key.upper()) if len(key) == 1 else 0
 
-        await conn.send("Input.dispatchKeyEvent", {
+        key_down = {
             "type": "keyDown",
             "key": key_name,
-            "text": text,
             "windowsVirtualKeyCode": code,
             "nativeVirtualKeyCode": code,
-        })
+        }
+        # CDP rejects text="" — only include when non-empty
+        if text:
+            key_down["text"] = text
+        await conn.send("Input.dispatchKeyEvent", key_down)
         await asyncio.sleep(random.uniform(0.03, 0.08))
         await conn.send("Input.dispatchKeyEvent", {
             "type": "keyUp",
@@ -369,12 +417,9 @@ class CDPBackend:
 
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         conn = await self._ensure_connected()
-        delta_y = amount if direction == "down" else -amount
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseWheel",
-            "x": 400, "y": 300,
-            "deltaX": 0, "deltaY": delta_y,
-        })
+        # Human-like scroll with momentum deceleration
+        from lazyclaw.browser.human_input import human_scroll
+        await human_scroll(conn, direction=direction, amount=amount)
 
     async def wait_for_selector(
         self, selector: str, timeout_ms: int = 5000,
@@ -557,6 +602,70 @@ class CDPBackend:
 
         return None
 
+    async def click_by_role(self, description: str) -> dict | None:
+        """Find element by role/label and click it via DOM click().
+
+        Uses the same accessibility tree search as find_element_by_role,
+        but dispatches mousedown + mouseup + click on the actual DOM element.
+        Returns {"role": str, "name": str} if clicked, None if not found.
+        """
+        conn = await self._ensure_connected()
+        await conn.send("Accessibility.enable")
+        result = await conn.send("Accessibility.getFullAXTree", {"depth": 6})
+        nodes = result.get("nodes", [])
+
+        desc_lower = description.lower()
+        best_match = None
+        best_score = 0
+
+        for node in nodes:
+            role = node.get("role", {}).get("value", "").lower()
+            name = node.get("name", {}).get("value", "").lower()
+            backend_id = node.get("backendDOMNodeId")
+            if not backend_id:
+                continue
+
+            score = 0
+            for word in desc_lower.split():
+                if word in role:
+                    score += 2
+                if word in name:
+                    score += 3
+
+            if score > best_score:
+                best_score = score
+                best_match = (node, backend_id)
+
+        if not best_match or best_score < 2:
+            return None
+
+        node, backend_id = best_match
+        try:
+            resolve_result = await conn.send(
+                "DOM.resolveNode", {"backendNodeId": backend_id}
+            )
+            object_id = resolve_result.get("object", {}).get("objectId")
+            if not object_id:
+                return None
+
+            await conn.send("Runtime.callFunctionOn", {
+                "objectId": object_id,
+                "functionDeclaration": """function() {
+                    this.scrollIntoView({block: 'center', behavior: 'instant'});
+                    this.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    this.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    this.click();
+                }""",
+            })
+            return {
+                "role": node.get("role", {}).get("value", ""),
+                "name": node.get("name", {}).get("value", ""),
+            }
+        except Exception as exc:
+            logger.debug("click_by_role failed: %s", exc)
+
+        return None
+
     # ── Console logs ────────────────────────────────────────────────
 
     async def enable_console(self) -> None:
@@ -635,16 +744,15 @@ class CDPBackend:
         if not coords:
             raise ValueError(f"Element not found: {selector}")
 
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseMoved",
-            "x": coords["x"], "y": coords["y"],
-        })
+        # Human-like Bezier movement to hover position
+        from lazyclaw.browser.human_input import human_move_to
+        await human_move_to(conn, coords["x"], coords["y"])
         await asyncio.sleep(random.uniform(0.3, 0.8))
 
     async def drag_and_drop(
         self, source_selector: str, target_selector: str
     ) -> None:
-        """Drag element from source to target."""
+        """Drag element from source to target with Bezier path."""
         conn = await self._ensure_connected()
         js = f"""
         (() => {{
@@ -668,25 +776,30 @@ class CDPBackend:
 
         sx, sy, tx, ty = coords["sx"], coords["sy"], coords["tx"], coords["ty"]
 
+        # Move to source with Bezier curve
+        from lazyclaw.browser.human_input import human_move_to, _generate_bezier_path
+        await human_move_to(conn, sx, sy)
+
+        # Press and hold
         await conn.send("Input.dispatchMouseEvent", {
-            "type": "mousePressed", "x": sx, "y": sy,
+            "type": "mousePressed", "x": round(sx), "y": round(sy),
             "button": "left", "clickCount": 1,
         })
         await asyncio.sleep(random.uniform(0.1, 0.2))
 
-        # Move in steps for natural drag
-        steps = 5
-        for i in range(1, steps + 1):
-            frac = i / steps
+        # Drag along Bezier curve to target
+        path = _generate_bezier_path(sx, sy, tx, ty)
+        for point in path:
             await conn.send("Input.dispatchMouseEvent", {
                 "type": "mouseMoved",
-                "x": sx + (tx - sx) * frac,
-                "y": sy + (ty - sy) * frac,
+                "x": round(point.x),
+                "y": round(point.y),
             })
-            await asyncio.sleep(random.uniform(0.03, 0.08))
+            await asyncio.sleep(random.uniform(0.02, 0.06))
 
+        # Release at target
         await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseReleased", "x": tx, "y": ty,
+            "type": "mouseReleased", "x": round(tx), "y": round(ty),
             "button": "left", "clickCount": 1,
         })
         await asyncio.sleep(random.uniform(0.2, 0.5))
@@ -813,11 +926,16 @@ async def restart_browser_with_cdp(
                 pass
 
     # Relaunch VISIBLE browser with CDP
+    from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
+
+    ext_path = str(Path(__file__).parent / "extension")
     cmd = [
         browser_bin,
         f"--remote-debugging-port={port}",
         "--no-first-run",
-        "--disable-blink-features=AutomationControlled",
+        *STEALTH_LAUNCH_ARGS,
+        f"--load-extension={ext_path}",
+        f"--disable-extensions-except={ext_path}",
     ]
     if profile_dir:
         cmd.append(f"--user-data-dir={profile_dir}")
@@ -845,6 +963,29 @@ async def restart_browser_with_cdp(
         logger.error("Failed to relaunch browser: %s", exc)
 
     return None
+
+
+def _is_same_origin_nav(current_url: str, new_url: str) -> bool:
+    """Check if navigation is within the same origin (SPA hash/path change).
+
+    Returns True when both URLs share the same scheme+host, meaning
+    the browser is already on this site and a JS-based navigation
+    will work better than Page.navigate for SPAs.
+    """
+    if not current_url or not new_url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        cur = urlparse(current_url)
+        nxt = urlparse(new_url)
+        # Same scheme + host = same origin
+        return (
+            cur.scheme == nxt.scheme
+            and cur.netloc == nxt.netloc
+            and cur.netloc != ""  # Don't match empty origins
+        )
+    except Exception:
+        return False
 
 
 def _js_str(s: str) -> str:

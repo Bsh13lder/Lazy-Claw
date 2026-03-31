@@ -45,34 +45,45 @@ LazyClaw takes a different approach:
 | **API keys** | Encrypted credential vault | `.env` plaintext |
 | **Conversations** | Encrypted per-user | Plaintext JSONL |
 | **Memories** | Encrypted personal facts | Plaintext markdown |
-| **Tool selection** | Per-message filtering (8-17 of 72+ tools) | All tools every turn |
-| **Cost routing** | Automatic complexity detection | Manual model config |
-| **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
-| **MCP** | Native client + server | Community plugins |
+| **Tool selection** | LLM-driven discovery via search_tools (~400 tokens) | All tools every turn (5K+ tokens) |
+| **Cost routing** | Brain/Worker model split (Sonnet + Haiku) | Manual model config |
+| **Multi-agent** | Team Lead orchestrator + inline delegation | Fire-and-forget sub-agents |
+| **MCP** | Native client + server + lazy loading + idle timeout | Community plugins |
+| **Channels** | Telegram + Instagram + WhatsApp + Email (no browser needed) | Browser-only for most |
 | **Language** | Python (largest AI ecosystem) | TypeScript |
 
 ## Quickstart
 
 ```bash
-# Clone
 git clone https://github.com/Bsh13lder/Lazy-Claw.git
 cd Lazy-Claw
-
-# Install
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-
-# Setup (interactive wizard — configures AI provider, encryption, Telegram)
-lazyclaw setup
-
-# Chat (CLI REPL)
-lazyclaw
-
-# Full server (API + Telegram + Heartbeat + Dashboard)
-lazyclaw start
+./install.sh
 ```
 
-**Requirements:** Python 3.11+, an AI provider key (OpenAI or Anthropic).
+That's it. The installer handles Python, dependencies, and setup automatically.
+
+```bash
+lazyclaw        # Chat REPL
+lazyclaw start  # Full server (API + Telegram + TUI Dashboard)
+lazyclaw setup  # Re-run setup wizard
+```
+
+<details>
+<summary><strong>Manual install</strong></summary>
+
+```bash
+git clone https://github.com/Bsh13lder/Lazy-Claw.git
+cd Lazy-Claw
+pip install pipx && pipx install --editable .
+lazyclaw setup
+```
+
+Requires: Python 3.11+, pipx, an AI provider key (OpenAI or Anthropic).
+</details>
+
+**Requirements:** Python 3.11+ (installed automatically on macOS), an AI provider key (OpenAI or Anthropic).
+
+> **For best results, use Anthropic.** Claude Haiku 4.5 as default + Sonnet 4.6 for complex tasks gives the fastest responses (2-5s) with excellent tool use. LazyClaw auto-configures the optimal model routing when it detects an Anthropic API key.
 
 ## Architecture
 
@@ -103,7 +114,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | Module | Purpose |
 |--------|---------|
 | `gateway/` | FastAPI HTTP + WebSocket entry point |
-| `runtime/` | Agent loop, tool dispatch, context builder |
+| `runtime/` | Agent loop, Team Lead, tool dispatch, context builder |
 | `queue/` | FIFO serial execution per user |
 | `skills/` | Instruction, Code (sandboxed), Plugin skills |
 | `channels/` | Telegram adapter (Discord, WhatsApp planned) |
@@ -135,7 +146,7 @@ Server-side operations (cron jobs, background tasks) derive keys from `PBKDF2(SE
 
 ### Smart Tool Selection
 
-The agent doesn't send all 72+ tools to the LLM every message. Per-message category detection identifies what's relevant (browser, computer, skills, vault, jobs, admin) and sends only 8-17 tools. **70-88% token savings** per request.
+The agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
 
 ### Multi-Agent Delegation
 
@@ -184,9 +195,11 @@ CDP-based control of the user's real Brave/Chrome browser. No separate Chromium 
 - **Shared profiles** — login once, all tools see it
 - **Brave auto-detect** — Brave > Chrome > Chromium (built-in ad blocking = cleaner pages for LLM)
 - **Human-like delays** — random 0.2-1.5s between clicks, 0.03-0.12s typing
-- **Semantic snapshots** — accessibility tree text (50KB) instead of screenshots (5MB)
-- **Page reader** — JS extractors for WhatsApp, Gmail, and generic sites
-- **Site memory** — encrypted per-domain learning with auto-cleanup
+- **Ref-ID snapshots** — interactive elements with click refs (~1-4KB) instead of full accessibility tree (50KB)
+- **Orchestrated reading** — extractors for content understanding + snapshots for interaction
+- **DOM click engine** — real JavaScript clicks (works with Gmail, React, Angular SPAs)
+- **Site memory** — encrypted per-domain learning, auto-saved from specialist experience
+- **Remote takeover** — noVNC link sent to Telegram for server-mode browser auth
 
 ## MCP
 
@@ -206,6 +219,10 @@ First-class MCP support — both client and server.
 | `mcp-vaultwhisper` | Privacy proxy — strips PII before sending to free APIs |
 | `mcp-taskai` | Task intelligence — categorize, prioritize, detect duplicates |
 | `mcp-lazydoctor` | Self-healing — lint, typecheck, test, auto-fix |
+| `mcp-instagram` | Instagram DMs, feed, posting via private mobile API. No browser needed. |
+| `mcp-whatsapp` | WhatsApp messaging via web protocol. QR auth, no API needed. |
+| `mcp-email` | Send/read/search email via SMTP+IMAP. Gmail, Outlook, any provider. |
+| `mcp-jobspy` | Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google. |
 
 ## Telegram
 
@@ -240,11 +257,15 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 |-------------|--------|
 | PBKDF2 LRU cache | 420ms → 0ms per message (4+ derivations/msg) |
 | DB connection pool | 14ms → 0.2ms per query |
-| Smart tool filter | 70-88% token reduction per request |
+| search_tools meta-tool | ~95% token reduction (4 tools upfront vs 114) |
+| Ref-ID browser snapshots | 90-95% reduction on browser output |
+| Tool result pruning | Old results compressed to 150 chars |
 | Fast chat path | Simple messages skip full context build |
 | Layered summaries | Skip 90s LLM re-summarization |
-| MCP parallel startup | 12s → ~2s for 6 servers |
-| Cost-aware routing | ~80% cost reduction (gpt-5-mini default) |
+| Lazy MCP loading | 0 subprocesses at boot, connect on first use |
+| MCP idle timeout | Auto-disconnect after 5 min inactivity |
+| Brain/Worker routing | Haiku for 90% of tasks, Sonnet for complex only |
+| Prompt caching | Static prefix first for max cache hits |
 
 ## Roadmap
 
@@ -254,11 +275,17 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] Multi-agent teams with inline delegation
 - [x] Browser automation (CDP + shared profiles)
 - [x] 72+ natural language skills
-- [ ] More channels (Discord, WhatsApp, Signal)
+- [x] Instagram, WhatsApp, Email MCP servers (no browser needed)
+- [x] Team Lead orchestrator with instant status
+- [x] Brain/Worker model routing (Sonnet + Haiku)
+- [x] Ref-ID browser snapshots (95% token reduction)
+- [x] DOM click engine (Gmail/SPA compatible)
+- [x] Lazy MCP loading with favorites + idle timeout
+- [x] Survival mode (job hunting, Upwork browser automation)
+- [ ] Remote browser takeover (noVNC via Telegram)
+- [ ] More channels (Discord, Signal, SimpleX)
 - [ ] Docker Compose (one-command deploy)
 - [ ] Flutter mobile app
-- [ ] Plugin system (LazyTasker integration)
-- [ ] Workflow builder UI
 - [ ] Post-quantum key exchange (ML-KEM)
 
 See [TODO.md](TODO.md) for the full phase plan.

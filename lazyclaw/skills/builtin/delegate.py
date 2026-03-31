@@ -8,16 +8,21 @@ agent dispatch pattern.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
 from lazyclaw.skills.base import BaseSkill
+from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.specialist import (
     BROWSER_SPECIALIST,
     CODE_SPECIALIST,
     RESEARCH_SPECIALIST,
     SpecialistConfig,
 )
+
+# prevent GC from cancelling fire-and-forget tasks
+_background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
 
 if TYPE_CHECKING:
     from lazyclaw.config import Config
@@ -56,6 +61,9 @@ class DelegateSkill(BaseSkill):
         self._eco_router = eco_router
         self._permission_checker = permission_checker
         self._callback = callback
+
+    # Specialists run multi-step browser loops — 60s default is too short
+    timeout = 300
 
     @property
     def name(self) -> str:
@@ -114,19 +122,48 @@ class DelegateSkill(BaseSkill):
             available = ", ".join(_SPECIALIST_MAP.keys())
             return f"Unknown specialist '{specialist_key}'. Available: {available}"
 
+        # ── Site knowledge: inject cached knowledge if available ──
+        # Only use EXISTING site memory — never block to run research first.
+        # The AI is smart enough to figure out websites on its own.
+        # Site knowledge is a bonus hint, not a prerequisite.
+        enriched_instruction = instruction
+        if specialist_key == "browser" and self._config:
+            site_knowledge = await self._get_cached_site_knowledge(
+                user_id, instruction,
+            )
+            if site_knowledge:
+                enriched_instruction = (
+                    f"{instruction}\n\n"
+                    f"--- Site Knowledge (hints from previous visits) ---\n{site_knowledge}"
+                )
+
         logger.info(
-            "Delegating to %s: %s", spec.display_name, instruction[:100],
+            "Delegating to %s: %s", spec.display_name, enriched_instruction[:100],
         )
 
         result = await run_specialist(
             user_id=user_id,
             specialist=spec,
-            task=instruction,
+            task=enriched_instruction,
             registry=self._registry,
             eco_router=self._eco_router,
             permission_checker=self._permission_checker,
             callback=self._callback,
         )
+
+        # Save browser learnings (delegate calls run_specialist directly,
+        # not through executor.py, so this is the only save path here)
+        if specialist_key == "browser" and len(result.step_history) >= MIN_STEPS_FOR_LEARNING:
+            bg_task = asyncio.create_task(save_browser_learnings(
+                config=self._config,
+                user_id=user_id,
+                step_history=result.step_history,
+                task=enriched_instruction,
+                success=result.success,
+                error=result.error,
+            ))
+            _background_tasks.add(bg_task)
+            bg_task.add_done_callback(_background_tasks.discard)
 
         if result.success:
             tools_note = ""
@@ -138,3 +175,65 @@ class DelegateSkill(BaseSkill):
             )
 
         return f"[{spec.display_name} failed] {result.error}"
+
+    # ── Site knowledge ─────────────────────────────────────────────
+
+    # Common domains → short names for search queries
+    # Services with MCP connectors excluded — agent uses MCP tools, not browser
+    _DOMAIN_HINTS: dict[str, str] = {
+        "twitter": "x.com",
+        "facebook": "facebook.com",
+        "linkedin": "linkedin.com",
+        "amazon": "amazon.com",
+        "youtube": "youtube.com",
+    }
+
+    async def _get_cached_site_knowledge(
+        self, user_id: str, instruction: str,
+    ) -> str:
+        """Return cached site knowledge if available. Never blocks to research.
+
+        The AI specialist is smart enough to figure out websites on its own.
+        Cached knowledge is just a bonus from previous successful visits.
+        """
+        from lazyclaw.browser.site_memory import recall, format_memories_for_context
+
+        domain = self._extract_domain(instruction)
+        if not domain:
+            return ""
+
+        try:
+            memories = await recall(self._config, user_id, f"https://{domain}/")
+            if memories:
+                knowledge = format_memories_for_context(memories)
+                logger.info(
+                    "Site knowledge for %s: %d cached hints",
+                    domain, sum(len(v) for v in memories.values()),
+                )
+                return knowledge
+        except Exception:
+            pass
+
+        return ""
+
+    def _extract_domain(self, instruction: str) -> str:
+        """Extract target domain from instruction text."""
+        lower = instruction.lower()
+
+        # Check known domain shortcuts
+        for hint, domain in self._DOMAIN_HINTS.items():
+            if hint in lower:
+                return domain
+
+        # Check for URLs in instruction
+        import re
+        url_match = re.search(r'https?://([^/\s]+)', instruction)
+        if url_match:
+            return url_match.group(1)
+
+        # Check for domain-like patterns
+        domain_match = re.search(r'([a-z0-9-]+\.[a-z]{2,})', lower)
+        if domain_match:
+            return domain_match.group(1)
+
+        return ""

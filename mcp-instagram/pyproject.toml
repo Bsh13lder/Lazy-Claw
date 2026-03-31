@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-instagram"
+version = "0.1.0"
+description = "Instagram MCP server — DMs, feed, posting via private mobile API. No browser needed."
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "mcp>=1.0.0",
+    "instagrapi>=2.0.0",
+    "pyotp>=2.9.0",
+]

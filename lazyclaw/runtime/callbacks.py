@@ -76,6 +76,18 @@ class MultiCallback:
 
     def __init__(self, *callbacks: AgentCallback) -> None:
         self._callbacks = callbacks
+        self._cancel_token = None
+
+    @property
+    def cancel_token(self):
+        return self._cancel_token
+
+    @cancel_token.setter
+    def cancel_token(self, token):
+        self._cancel_token = token
+        for cb in self._callbacks:
+            if hasattr(cb, "cancel_token"):
+                cb.cancel_token = token
 
     async def on_event(self, event: AgentEvent) -> None:
         for cb in self._callbacks:

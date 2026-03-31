@@ -110,11 +110,13 @@ Standalone MCP servers: `mcp-freeride/` (free AI router), `mcp-healthcheck/` (pr
 ## Build & Run
 
 ```bash
-pip install -e .          # Install
+./install.sh              # One-command install (Python + deps + setup)
+
+# Or manually:
+pipx install --editable . # Global install via pipx
 lazyclaw setup            # First-time setup wizard
 lazyclaw start            # Full server (FastAPI + Telegram + Heartbeat)
 lazyclaw                  # Chat REPL only
-python -m lazyclaw        # Module entry point
 ```
 
 Default port: **18789**. MCP servers run standalone via `python -m mcp_freeride` etc.
@@ -140,7 +142,10 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
 - **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
 - **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
-- **Cost-aware routing**: gpt-5-mini for ALL non-complex tasks (80% cheaper). Only "analyze/compare/debug" triggers GPT-5.
+- **ECO v3 routing**: Three modes, 3 roles (Brain=Team Lead, Worker, Fallback). ECO ON: Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission). HYBRID: same models, auto-fallback. FULL: Sonnet brain + Haiku worker + Opus fallback. All models from `MODE_MODELS` dict in `model_registry.py`. `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER).
+- **MLX backend**: `mlx_provider.py` for Apple Silicon local inference. `mlx_manager.py` manages server lifecycle. Auto `/no_think` for Qwen models. `<think>` tag stripping for Nanbeige.
+- **RAM monitor**: `ram_monitor.py` tracks system + AI model memory. `/ram` Telegram command. TUI status bar shows RAM %. Uses macOS `memory_pressure` for accurate free %.
+- **Telegram /local command**: `/local on|off|worker|brain|restart` — start/stop MLX servers, auto-switches ECO mode.
 - **Unified browser tool**: Single `browser` skill with 7 actions (read, open, click, type, screenshot, tabs, scroll). CDP-only, no Playwright.
 - **Brave browser**: Auto-detected (Brave > Chrome > Chromium). Built-in ad/tracker blocking = cleaner pages for LLM.
 - **Fast chat path**: Simple messages get last 6 messages, SOUL.md only (no capabilities/memories/tools).
@@ -156,7 +161,7 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Telegram security**: Admin chat lock (first /start claims). Unauthorized chats blocked. Screenshots auto-forwarded.
 - **Telegram retry**: `_telegram_send_with_retry()` with exponential backoff on network errors.
 - **CancellationToken**: Cooperative cancellation from CLI → agent → specialists. Double Ctrl+C support.
-- **ECO mode**: Three tiers (eco/hybrid/full) routing between free and paid AI providers.
+- **ECO mode**: Three modes (eco_on/hybrid/off). ECO ON = Haiku brain + Nanbeige workers ($0). HYBRID = same, auto-fallback. FULL = Sonnet brain + Haiku workers + Opus fallback.
 - **Token tracking**: OpenAI streaming reads usage chunk after finish_reason. Anthropic field names normalized.
 
 ## Git Commit Rules

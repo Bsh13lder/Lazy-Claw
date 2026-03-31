@@ -25,10 +25,10 @@ class WatchSiteSkill(BaseSkill):
             "Watch a website for changes. Zero token cost per check — uses "
             "JavaScript extraction directly, no LLM calls during polling. "
             "Sends notification via Telegram when a change is detected. "
-            "WhatsApp and Gmail have built-in smart extractors. Other sites "
-            "get auto-generated JS extractors. "
-            "Use when user says 'watch my WhatsApp', 'notify me when price "
-            "drops', 'monitor this page', 'alert me for new emails'."
+            "Sites get auto-generated JS extractors. "
+            "Use when user says 'notify me when price "
+            "drops', 'monitor this page'. "
+            "Do NOT use for WhatsApp, Instagram, or Email — those have MCP tools."
         )
 
     @property
@@ -39,8 +39,7 @@ class WatchSiteSkill(BaseSkill):
                 "url": {
                     "type": "string",
                     "description": (
-                        "URL to watch. Use 'whatsapp' as shortcut for "
-                        "https://web.whatsapp.com"
+                        "URL to watch. NOT for WhatsApp/Instagram/Email (use MCP tools)"
                     ),
                 },
                 "what_to_watch": {
@@ -83,11 +82,13 @@ class WatchSiteSkill(BaseSkill):
         duration = params.get("duration_hours", 2)
         custom_js = params.get("custom_js")
 
-        # Shortcuts
+        # Block MCP channels — use watch_messages skill instead
         if url.lower() in ("whatsapp", "wa"):
-            url = "https://web.whatsapp.com"
+            return "Error: Use watch_messages skill for WhatsApp monitoring, not browser watcher."
         elif url.lower() in ("gmail", "email", "mail"):
-            url = "https://mail.google.com"
+            return "Error: Use watch_messages skill for Email monitoring, not browser watcher."
+        elif url.lower() in ("instagram", "ig", "insta"):
+            return "Error: Use watch_messages skill for Instagram monitoring, not browser watcher."
 
         # Calculate expiration
         expires_at = None
@@ -152,10 +153,8 @@ class WatchSiteSkill(BaseSkill):
     async def _generate_extractor_js(self, what: str, url: str) -> str | None:
         """One-time LLM call to generate a JS extractor for unknown sites."""
         try:
-            from lazyclaw.llm.router import LLMRouter
             from lazyclaw.llm.providers.base import LLMMessage
 
-            router = LLMRouter(self._config)
             messages = [
                 LLMMessage(
                     role="system",
@@ -177,10 +176,16 @@ class WatchSiteSkill(BaseSkill):
                     ),
                 ),
             ]
-            response = await router.chat(
-                messages,
-                model=self._config.browser_model or "gpt-5-mini",
-            )
+            # Use eco_router via ROLE_WORKER (cheap), fallback to direct router
+            try:
+                from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+                from lazyclaw.llm.router import LLMRouter
+                eco = EcoRouter(self._config, LLMRouter(self._config))
+                response = await eco.chat(messages, user_id="system", role=ROLE_WORKER)
+            except Exception:
+                from lazyclaw.llm.router import LLMRouter
+                router = LLMRouter(self._config)
+                response = await router.chat(messages, model=self._config.worker_model)
             js = response.content.strip()
             # Strip markdown code blocks if present
             if js.startswith("```"):

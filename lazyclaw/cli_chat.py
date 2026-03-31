@@ -23,17 +23,12 @@ from lazyclaw.cli_dashboard import render_dashboard
 
 logger = logging.getLogger(__name__)
 
-_STATUS_KEYWORDS = {
-    "what's happening", "whats happening", "what are you doing",
-    "status", "what's going on", "whats going on", "?", "/?",
-    "what is happening", "are you working",
-}
+from lazyclaw.runtime.team_lead import TeamLead
 
 
 def is_status_query(text: str) -> bool:
     """Check if user input is a status query."""
-    lower = text.lower().strip()
-    return lower in _STATUS_KEYWORDS or lower == "/status"
+    return TeamLead.is_status_query(text)
 
 
 _side_input_task: asyncio.Task | None = None
@@ -53,6 +48,7 @@ class ChatContext:
     console: Console
     pt_session: object  # prompt_toolkit.PromptSession
     chat_session_id: str | None = None
+    team_lead: TeamLead | None = None
 
     session_usage: dict = field(default_factory=lambda: {
         "total_tokens": 0,
@@ -68,6 +64,24 @@ class ChatContext:
 # ---------------------------------------------------------------------------
 # Compact args formatter
 # ---------------------------------------------------------------------------
+
+def _error_hint(error_text: str) -> str:
+    """Return a user-friendly hint for common errors, or empty string."""
+    lower = error_text.lower()
+    if "api key" in lower or "authentication" in lower or "401" in lower:
+        return "Check API keys in .env or run /doctor"
+    if "rate limit" in lower or "429" in lower:
+        return "Rate limited. Wait a moment or try /eco hybrid"
+    if "connection" in lower or "timeout" in lower or "network" in lower:
+        return "Network issue. Check your connection"
+    if "model" in lower and ("not found" in lower or "does not exist" in lower):
+        return "Model unavailable. Try /model <name> to switch"
+    if "permission" in lower or "denied" in lower:
+        return "Permission denied. Try /allow <skill> or /permissions"
+    if "cdp" in lower or "browser" in lower or "chrome" in lower:
+        return "Browser not connected. Try /connect-browser"
+    return ""
+
 
 def _format_args_compact(args: dict) -> str:
     """Format tool arguments as compact key=value string."""
@@ -98,6 +112,7 @@ class CliCallback:
         self._console = out
         self._spinner: Status | None = None
         self._streaming = False
+        self._streamed_any = False  # True if any text was ever streamed this request
         self._paused = False
         self.total_tokens = 0
         self.prompt_tokens = 0
@@ -141,6 +156,7 @@ class CliCallback:
         self.busy = True
         self.current_phase = "preparing"
         self.started_at = time.monotonic()
+        self._streamed_any = False
         self._console.print("  [dim]Loading context...[/dim]")
         self._start_spinner(
             "  [bold cyan]\u25cf Preparing...[/bold cyan]"
@@ -178,9 +194,14 @@ class CliCallback:
         self._pending_approval = (skill_name, arguments)
         self._approval_event = asyncio.Event()
         self._approval_result = False
-        await self._approval_event.wait()
-        self._pending_approval = None
-        self._approval_event = None
+        try:
+            await self._approval_event.wait()
+        except asyncio.CancelledError:
+            # Agent was cancelled while waiting for approval
+            return False
+        finally:
+            self._pending_approval = None
+            self._approval_event = None
         return self._approval_result
 
     async def on_help_request(
@@ -239,6 +260,7 @@ class CliCallback:
             self._tool_start_times[tool_key] = time.monotonic()
             args = event.metadata.get("args", {})
             args_str = _format_args_compact(args)
+            # Show tool name + args immediately so user knows what's running
             if args_str:
                 self._console.print(
                     f"  [yellow]\u25c6 {display}[/yellow]  "
@@ -253,17 +275,17 @@ class CliCallback:
             self.current_phase = "thinking"
             tool_key = event.metadata.get("tool", display)
             start = self._tool_start_times.pop(tool_key, None)
-            dur_str = f" ({time.monotonic() - start:.1f}s)" if start else ""
+            dur_str = f"{time.monotonic() - start:.1f}s" if start else ""
 
             error = event.metadata.get("error")
             if error:
                 self._console.print(
-                    f"  [red]\u2717 {display}{dur_str} \u2014 "
+                    f"  [red]\u2717 {display} ({dur_str}) \u2014 "
                     f"{str(error)[:80]}[/red]"
                 )
             else:
                 self._console.print(
-                    f"  [green]\u2713[/green] [dim]{display}{dur_str}[/dim]"
+                    f"  [green]\u2713[/green] [dim]{display} ({dur_str})[/dim]"
                 )
 
         elif kind == "team_delegate":
@@ -360,12 +382,39 @@ class CliCallback:
                 self._console.print()
                 self._console.print("[green]\u256d\u2500 LazyClaw[/green]")
                 self._streaming = True
+                self._streamed_any = True
                 self.current_phase = "streaming"
             self._console.print(event.detail, end="", highlight=False)
 
         elif kind == "stream_done":
             if self._streaming:
-                self._console.print()
+                self._console.print()  # End the current line
+                self._streaming = False
+
+        elif kind == "background_done":
+            self._stop_spinner()
+            name = event.metadata.get("name", "?")
+            result = event.metadata.get("result", "")
+            self._console.print(
+                f"\n[green]✅ Background task '{name}' completed[/green]"
+            )
+            if result:
+                preview = result[:200]
+                if len(result) > 200:
+                    preview += "..."
+                self._console.print(f"  [dim]{preview}[/dim]")
+
+        elif kind == "background_failed":
+            self._stop_spinner()
+            name = event.metadata.get("name", "?")
+            error = event.metadata.get("error", "unknown")
+            self._console.print(
+                f"\n[red]❌ Background task '{name}' failed: {error}[/red]"
+            )
+
+        elif kind == "fast_dispatch":
+            self._stop_spinner()
+            self._console.print(f"\n[cyan]⚡ {event.detail}[/cyan]")
 
         elif kind == "approval":
             # Handled by main loop — no-op here to avoid duplicate display
@@ -393,7 +442,12 @@ def show_agent_result(console: Console, response: str, cb: CliCallback) -> None:
     cb._stop_spinner()
     console.print()
     if cb._streaming:
-        # Streaming response already printed — close the box
+        # Still streaming (no tool calls interrupted) — close the box
+        console.print("[green]\u2570\u2500[/green]")
+        cb._streaming = False
+    elif cb._streamed_any:
+        # Streaming happened earlier but was interrupted by tool calls.
+        # Final response was already streamed — just close.
         console.print("[green]\u2570\u2500[/green]")
     else:
         if response and response.strip():
@@ -416,7 +470,12 @@ def show_agent_result(console: Console, response: str, cb: CliCallback) -> None:
 
 
 def _build_cli_footer(cb: CliCallback) -> str:
-    """Build compact one-line footer from callback stats."""
+    """Build compact one-line footer with cost from callback stats.
+
+    Format: ✓ 12.4s │ 3 LLM │ 4,280 tokens │ $0.003 │ Haiku
+    """
+    from lazyclaw.llm.pricing import calculate_cost
+
     summary = cb._work_summary
     if summary:
         duration_s = summary.duration_ms / 1000
@@ -424,18 +483,50 @@ def _build_cli_footer(cb: CliCallback) -> str:
         parts.append(f"{summary.llm_calls} LLM")
         if summary.total_tokens:
             parts.append(f"{summary.total_tokens:,} tokens")
-        if summary.tools_used:
-            parts.append(", ".join(summary.tools_used))
+        # Cost from token data
+        cost = getattr(summary, "total_cost", None)
+        if cost and cost > 0:
+            parts.append(f"${cost:.4f}")
+        elif summary.total_tokens:
+            model = getattr(summary, "primary_model", "") or cb.current_model
+            est_cost = calculate_cost(
+                model,
+                getattr(summary, "prompt_tokens", summary.total_tokens // 2),
+                getattr(summary, "completion_tokens", summary.total_tokens // 2),
+            )
+            if est_cost > 0:
+                parts.append(f"~${est_cost:.4f}")
+        # Model shortname
+        model = getattr(summary, "primary_model", "") or cb.current_model
+        if model:
+            short = model.split("/")[-1].split("-")[0]
+            if "haiku" in model.lower():
+                short = "Haiku"
+            elif "sonnet" in model.lower():
+                short = "Sonnet"
+            elif "opus" in model.lower():
+                short = "Opus"
+            elif "mini" in model.lower():
+                short = "Mini"
+            elif "gpt-5" in model.lower():
+                short = "GPT-5"
+            parts.append(short)
         return " \u2502 ".join(parts)
-    # Fallback if no summary (shouldn't happen normally)
+    # Fallback if no summary
     if cb.llm_calls:
         elapsed = time.monotonic() - cb.started_at
         parts = [f"\u2713 {elapsed:.1f}s"]
         parts.append(f"{cb.llm_calls} LLM")
         if cb.total_tokens:
             parts.append(f"{cb.total_tokens:,} tokens")
-        if cb.tool_log:
-            parts.append(", ".join(cb.tool_log[-4:]))
+            cost = calculate_cost(
+                cb.current_model, cb.prompt_tokens, cb.completion_tokens,
+            )
+            if cost > 0:
+                parts.append(f"~${cost:.4f}")
+        if cb.current_model:
+            short = cb.current_model.split("/")[-1]
+            parts.append(short)
         return " \u2502 ".join(parts)
     return ""
 
@@ -550,7 +641,8 @@ async def run_chat_loop(
                             ),
                         )
                         active_callback._approval_result = approved
-                        active_callback._approval_event.set()
+                        if active_callback._approval_event is not None:
+                            active_callback._approval_event.set()
                         continue
 
                     # Check for pending help request (human-in-the-loop)
@@ -574,14 +666,22 @@ async def run_chat_loop(
                                 "  [dim]Type 'done' when finished, "
                                 "or 'skip' to move on:[/dim]"
                             )
-                        _help_answer = await loop.run_in_executor(
-                            None,
-                            lambda: con.input("  > "),
-                        )
-                        active_callback._help_result = (
-                            _help_answer.strip().lower() or "skip"
-                        )
-                        active_callback._help_event.set()
+                        # Loop until non-empty answer (prevents terminal
+                        # race conditions from auto-skipping on empty input)
+                        _help_answer = ""
+                        while not _help_answer:
+                            _help_answer = await loop.run_in_executor(
+                                None,
+                                lambda: con.input("  > "),
+                            )
+                            _help_answer = _help_answer.strip().lower()
+                        active_callback._help_result = _help_answer
+                        # Clear _pending_help BEFORE signalling the event
+                        # to prevent the main loop from re-detecting it
+                        # on the next iteration (race condition).
+                        active_callback._pending_help = None
+                        if active_callback._help_event is not None:
+                            active_callback._help_event.set()
                         continue
 
                     # Start async side-channel input via prompt_toolkit
@@ -589,6 +689,25 @@ async def run_chat_loop(
                         if not _input_hint_shown:
                             if active_callback:
                                 active_callback._stop_spinner()
+                            # Show what agent is doing above the input line
+                            phase = active_callback.current_phase if active_callback else "working"
+                            tool = active_callback.current_tool if active_callback else ""
+                            step = active_callback.current_iteration if active_callback else 0
+                            if phase == "tool" and tool:
+                                status_line = f"\u25cf {tool}"
+                            elif phase == "team" and active_callback:
+                                running = [
+                                    n for n, s in active_callback._team_specialists.items()
+                                    if s.get("status") == "running"
+                                ]
+                                status_line = f"\u25cf Team: {', '.join(running)}" if running else "\u25cf Team working"
+                            elif phase == "thinking" and step > 1:
+                                status_line = f"\u25cf Thinking (step {step})"
+                            else:
+                                status_line = f"\u25cf Working"
+                            con.print(
+                                f"  [cyan]{status_line}[/cyan]"
+                            )
                             con.print(
                                 "  [dim]\u2500\u2500\u2500 type to add context "
                                 "(Enter to send) | Ctrl+C to cancel "
@@ -601,9 +720,13 @@ async def run_chat_loop(
                                 from prompt_toolkit.formatted_text import HTML
                                 return await ctx.pt_session.prompt_async(
                                     HTML("<dim>  &gt; </dim>"),
-                                    handle_sigint=False,  # We handle SIGINT, not prompt_toolkit
+                                    handle_sigint=False,
                                 )
-                            except (EOFError, KeyboardInterrupt):
+                            except KeyboardInterrupt:
+                                nonlocal _cancel_requested
+                                _cancel_requested = True
+                                return ""
+                            except (EOFError, asyncio.CancelledError):
                                 return ""
 
                         _side_input_task = asyncio.create_task(_side_prompt())
@@ -629,7 +752,10 @@ async def run_chat_loop(
                                 )
                                 break
                             elif is_status_query(stripped):
-                                con.print(render_dashboard(active_callback))
+                                if ctx.team_lead:
+                                    con.print(ctx.team_lead.format_status())
+                                else:
+                                    con.print(render_dashboard(active_callback))
                             else:
                                 # Side channel — add to merge context
                                 if active_callback:
@@ -662,7 +788,10 @@ async def run_chat_loop(
                     except Exception as e:
                         if active_callback:
                             active_callback._stop_spinner()
-                        con.print(f"\n  [red]Error: {e}[/red]")
+                        con.print(f"\n  [red]\u2717 Error: {e}[/red]")
+                        hint = _error_hint(str(e))
+                        if hint:
+                            con.print(f"    [dim]Hint: {hint}[/dim]")
                 elif agent_task.cancelled():
                     pass
 

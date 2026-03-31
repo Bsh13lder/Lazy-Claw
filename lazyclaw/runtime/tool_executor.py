@@ -61,15 +61,18 @@ class ToolExecutor:
                 return f"{APPROVAL_PREFIX}{tool_call.name}:{args_json}"
 
         try:
+            # Per-tool timeout: skill.timeout overrides executor default
+            effective_timeout = getattr(skill, "timeout", None) or self._timeout
             result = await asyncio.wait_for(
                 skill.execute(user_id, tool_call.arguments),
-                timeout=self._timeout,
+                timeout=effective_timeout,
             )
             logger.debug("Tool %s executed successfully", tool_call.name)
             return await self._process_result(result, tool_call.name, callback)
         except asyncio.TimeoutError:
-            logger.error("Tool %s timed out after %ds", tool_call.name, self._timeout)
-            return f"Error: Tool '{tool_call.name}' timed out after {self._timeout} seconds."
+            effective_timeout = getattr(skill, "timeout", None) or self._timeout
+            logger.error("Tool %s timed out after %ds", tool_call.name, effective_timeout)
+            return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"
@@ -89,15 +92,17 @@ class ToolExecutor:
             return f"Error: Unknown tool '{tool_call.name}'"
 
         try:
+            effective_timeout = getattr(skill, "timeout", None) or self._timeout
             result = await asyncio.wait_for(
                 skill.execute(user_id, tool_call.arguments),
-                timeout=self._timeout,
+                timeout=effective_timeout,
             )
             logger.debug("Tool %s executed (approved)", tool_call.name)
             return await self._process_result(result, tool_call.name, callback)
         except asyncio.TimeoutError:
-            logger.error("Tool %s timed out after %ds", tool_call.name, self._timeout)
-            return f"Error: Tool '{tool_call.name}' timed out after {self._timeout} seconds."
+            effective_timeout = getattr(skill, "timeout", None) or self._timeout
+            logger.error("Tool %s timed out after %ds", tool_call.name, effective_timeout)
+            return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
             return f"Error executing {tool_call.name}: {e}"

@@ -23,8 +23,11 @@ MEMORY_TYPES = frozenset({
     "navigation",
     "form_map",
     "site_structure",
+    "site_research",
     "cookie_note",
     "custom",
+    "site_learning",
+    "compiled_path",
 })
 
 
@@ -237,6 +240,7 @@ def format_memories_for_context(memories: dict[str, list[dict]]) -> str:
         "site_structure": "Site Structure",
         "cookie_note": "Notes",
         "custom": "Other",
+        "site_learning": "Auto-Learned",
     }
 
     sections = []

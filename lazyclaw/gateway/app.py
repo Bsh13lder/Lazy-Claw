@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections import Counter
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -47,12 +49,41 @@ def set_registry(registry) -> None:
     _shared_registry = registry
 
 
+def _shannon_entropy(s: str) -> float:
+    """Calculate Shannon entropy of a string (bits per character)."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    length = len(s)
+    return -sum(
+        (count / length) * math.log2(count / length)
+        for count in counts.values()
+    )
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     if not _config.server_secret or len(_config.server_secret) < 32:
         raise RuntimeError(
             "SERVER_SECRET must be set and at least 32 characters. "
             "Run 'lazyclaw setup' or set SERVER_SECRET in .env"
+        )
+
+    secret = _config.server_secret
+    if len(set(secret)) == 1:
+        raise RuntimeError(
+            "SERVER_SECRET has zero entropy (all same character). "
+            "Run 'lazyclaw setup' to generate a secure secret."
+        )
+    if secret.isalpha() and secret == secret.lower():
+        raise RuntimeError(
+            "SERVER_SECRET is all lowercase letters — too weak. "
+            "Run 'lazyclaw setup' to generate a secure secret."
+        )
+    if _shannon_entropy(secret) < 3.0:
+        raise RuntimeError(
+            "SERVER_SECRET has very low entropy (< 3.0 bits/char). "
+            "Run 'lazyclaw setup' to generate a secure secret."
         )
     await init_db(_config)
     await seed_default_models(_config)

@@ -176,7 +176,15 @@ CREATE TABLE IF NOT EXISTS mcp_connections (
     transport TEXT NOT NULL,
     config TEXT NOT NULL,
     enabled INTEGER DEFAULT 1,
+    favorite INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS mcp_tool_cache (
+    server_name TEXT NOT NULL,
+    tools_json TEXT NOT NULL,
+    cached_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (server_name)
 );
 
 CREATE TABLE IF NOT EXISTS agent_jobs (
@@ -202,6 +210,33 @@ CREATE TABLE IF NOT EXISTS job_queue (
     created_at TEXT DEFAULT (datetime('now')),
     processed_at TEXT
 );
+
+-- Task manager (second brain)
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    description TEXT,
+    category TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'todo',
+    owner TEXT NOT NULL DEFAULT 'user',
+    due_date TEXT,
+    reminder_at TEXT,
+    reminder_job_id TEXT,
+    recurring TEXT,
+    tags TEXT,
+    nag_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_user_status
+ON tasks(user_id, status, due_date);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_user_reminder
+ON tasks(user_id, reminder_at);
 
 -- Permissions system
 
@@ -324,3 +359,40 @@ CREATE TABLE IF NOT EXISTS background_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_bg_tasks_user_status
 ON background_tasks(user_id, status);
+
+CREATE TABLE IF NOT EXISTS survival_gigs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    external_job_id TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    budget TEXT,
+    budget_value REAL DEFAULT 0,
+    client_name TEXT,
+    url TEXT,
+    status TEXT NOT NULL DEFAULT 'found',
+    proposal_text TEXT,
+    workspace_path TEXT,
+    deliverable_summary TEXT,
+    invoice_id TEXT,
+    amount_earned REAL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_gigs_user_status
+ON survival_gigs(user_id, status);
+
+-- Performance indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_job_queue_user_status
+ON job_queue(user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_site_memory_user_domain
+ON site_memory(user_id, domain);
+
+CREATE INDEX IF NOT EXISTS idx_channel_bindings_user
+ON channel_bindings(user_id, channel);
+
+CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date
+ON daily_logs(user_id, date DESC);

@@ -11,13 +11,18 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from lazyclaw.llm.eco_router import EcoRouter
+from lazyclaw.config import load_config
+from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.runner import SpecialistResult, run_specialist
-from lazyclaw.teams.specialist import SpecialistConfig
+from lazyclaw.teams.specialist import BROWSER_SPECIALIST, SpecialistConfig
 
 logger = logging.getLogger(__name__)
+
+# prevent GC from cancelling fire-and-forget tasks
+_background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
 
 
 @dataclass(frozen=True)
@@ -38,8 +43,14 @@ async def _run_with_timeout(
     semaphore: asyncio.Semaphore,
     callback=None,
     cancel_token=None,
+    tab_manager=None,
 ) -> SpecialistResult:
-    """Run a single specialist with timeout and semaphore control."""
+    """Run a single specialist with timeout and semaphore control.
+
+    If tab_manager is provided and the specialist is browser, acquires
+    a tab before execution and guarantees release via try/finally.
+    """
+    tab_context = None
     async with semaphore:
         if callback:
             await callback.on_event(AgentEvent(
@@ -47,6 +58,14 @@ async def _run_with_timeout(
                 {"specialist": task.specialist.name, "task": task.instruction[:100]},
             ))
         try:
+            # Acquire tab for browser specialist if TabManager is available
+            if tab_manager and task.specialist.name == BROWSER_SPECIALIST.name:
+                from lazyclaw.browser.tab_manager import TabManager
+                if isinstance(tab_manager, TabManager):
+                    tab_context = await tab_manager.acquire(
+                        "about:blank", task.specialist.name,
+                    )
+
             result = await asyncio.wait_for(
                 run_specialist(
                     user_id=user_id,
@@ -57,9 +76,25 @@ async def _run_with_timeout(
                     permission_checker=permission_checker,
                     callback=callback,
                     cancel_token=cancel_token,
+                    tab_context=tab_context,
                 ),
                 timeout=timeout,
             )
+            # Fire-and-forget: save browser learnings to site memory
+            if (
+                task.specialist.name == BROWSER_SPECIALIST.name
+                and len(result.step_history) >= MIN_STEPS_FOR_LEARNING
+            ):
+                bg_task = asyncio.create_task(save_browser_learnings(
+                    config=load_config(),
+                    user_id=user_id,
+                    step_history=result.step_history,
+                    task=task.instruction,
+                    success=result.success,
+                    error=result.error,
+                ))
+                _background_tasks.add(bg_task)
+                bg_task.add_done_callback(_background_tasks.discard)
             if callback:
                 await callback.on_event(AgentEvent(
                     "specialist_done", result.agent_name,
@@ -111,6 +146,13 @@ async def _run_with_timeout(
                      "error": str(exc)},
                 ))
             return error_result
+        finally:
+            # Guarantee tab release on timeout, cancel, or crash
+            if tab_context and tab_manager:
+                try:
+                    await tab_manager.release(tab_context.domain)
+                except Exception:
+                    logger.debug("Tab release failed for %s", task.specialist.name)
 
 
 async def execute_team(
@@ -119,15 +161,18 @@ async def execute_team(
     registry: SkillRegistry,
     eco_router: EcoRouter,
     permission_checker,
-    max_parallel: int = 3,
+    max_parallel: int = 10,
     timeout: int = 120,
     callback=None,
     cancel_token=None,
+    tab_manager=None,
 ) -> list[SpecialistResult]:
     """Run multiple specialists in parallel.
 
     Returns results in the same order as the input tasks.
     Failed or timed-out specialists return error SpecialistResults.
+    If tab_manager is provided, browser specialists get isolated tabs
+    with guaranteed release via try/finally.
     """
     if not tasks:
         return []
@@ -145,6 +190,7 @@ async def execute_team(
             semaphore=semaphore,
             callback=callback,
             cancel_token=cancel_token,
+            tab_manager=tab_manager,
         )
         for task in tasks
     ]

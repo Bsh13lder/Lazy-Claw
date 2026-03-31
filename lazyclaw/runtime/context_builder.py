@@ -6,6 +6,7 @@ Capabilities are cached (60s TTL) to avoid per-message MCP RPC overhead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -22,6 +23,9 @@ _CAPABILITIES_TTL = 60.0
 # Cache for MCP status (60s TTL)
 _mcp_cache: list[str] = []
 _mcp_cache_time: float = 0.0
+
+# Lock protecting both caches against concurrent async rebuilds
+_cache_lock = asyncio.Lock()
 
 
 async def build_context(
@@ -82,14 +86,33 @@ async def _build_capabilities_cached(
     """Build capabilities section with 60s TTL cache."""
     global _capabilities_cache, _capabilities_time
 
+    # Fast path (no lock) — return cached if still valid
     now = time.monotonic()
     if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
         return _capabilities_cache
 
-    result = await _build_capabilities_section(config, user_id, registry)
-    _capabilities_cache = result
-    _capabilities_time = now
-    return result
+    # Slow path — acquire lock with timeout to avoid deadlock from stuck MCP
+    try:
+        acquired = await asyncio.wait_for(_cache_lock.acquire(), timeout=3)
+    except asyncio.TimeoutError:
+        logger.warning("Capabilities cache lock held >3s — returning stale or empty")
+        return _capabilities_cache or ""
+    try:
+        now = time.monotonic()
+        if _capabilities_cache and (now - _capabilities_time) < _CAPABILITIES_TTL:
+            return _capabilities_cache
+        result = await asyncio.wait_for(
+            _build_capabilities_section(config, user_id, registry),
+            timeout=10,
+        )
+        _capabilities_cache = result
+        _capabilities_time = now
+        return result
+    except asyncio.TimeoutError:
+        logger.warning("_build_capabilities_section timed out (>10s)")
+        return _capabilities_cache or ""
+    finally:
+        _cache_lock.release()
 
 
 def invalidate_capabilities_cache() -> None:
@@ -135,14 +158,21 @@ async def _build_capabilities_section(
             lines.append(f"  - {mcp_line}")
         lines.append("")
 
-    # Current config
-    config_parts = [f"Model: {config.default_model}"]
-
-    eco_mode = "full"
+    # Current config — show ECO-resolved models
+    eco_mode = "hybrid"
+    _brain_display = config.brain_model
     try:
         from lazyclaw.llm.eco_settings import get_eco_settings
+        from lazyclaw.llm.model_registry import get_mode_models
         eco = await get_eco_settings(config, user_id)
-        eco_mode = eco.get("mode", "full")
+        eco_mode = eco.get("mode", "hybrid")
+        _m = get_mode_models(eco_mode)
+        _brain_display = eco.get("brain_model") or _m["brain"]
+    except Exception:
+        pass
+    config_parts = [f"Model: {_brain_display}"]
+
+    try:
         config_parts.append(f"ECO: {eco_mode}")
     except Exception:
         pass
@@ -172,21 +202,9 @@ async def _build_capabilities_section(
     except Exception:
         ollama_status = "unavailable"
 
-    lines.append(f"**Current Config:** {' | '.join(config_parts)}")
-
-    # ECO mode guide — so the agent knows how to help users
-    lines.append("")
-    lines.append("**AI Routing (ECO modes):**")
-    lines.append(f"  Current: {eco_mode.upper()} | Ollama: {ollama_status}")
-    lines.append("  - `local`: Ollama models only, $0 always. Needs: ollama + models pulled")
-    lines.append("  - `eco`: Free API providers only (Groq, Gemini, etc), $0")
-    lines.append("  - `hybrid`: Local models first, paid fallback for complex tasks")
-    lines.append("  - `full`: Always paid AI (current default)")
-    lines.append("  Change with: eco_set_mode. Install models with: ollama_install.")
-    if ollama_status == "not running":
-        lines.append("  Note: Ollama not detected. Install from https://ollama.ai")
-    elif "no models" in ollama_status:
-        lines.append("  Note: Pull models with ollama_install (e.g. qwen3:1.7b, softw8/nanbeige4.1-3b-tools)")
+    lines.append(f"**Config:** {' | '.join(config_parts)} | Ollama: {ollama_status}")
+    lines.append(f"  ECO modes: hybrid/full (current: {eco_mode}). Change: eco_set_mode")
+    lines.append("  Direct channels (no browser): Instagram, WhatsApp, Email — prefer over browser")
 
     return "\n".join(lines)
 
@@ -195,43 +213,82 @@ async def _get_mcp_status_cached(config: Config, user_id: str) -> list[str]:
     """Get MCP status with 60s TTL cache (avoids ListToolsRequest spam)."""
     global _mcp_cache, _mcp_cache_time
 
+    # Fast path (no lock)
     now = time.monotonic()
     if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
         return _mcp_cache
 
-    result = await _get_mcp_status(config, user_id)
-    _mcp_cache = result
-    _mcp_cache_time = now
-    return result
+    # Slow path — lock with timeout, rebuild
+    try:
+        await asyncio.wait_for(_cache_lock.acquire(), timeout=3)
+    except asyncio.TimeoutError:
+        logger.warning("MCP cache lock held >3s — returning stale")
+        return _mcp_cache
+    try:
+        now = time.monotonic()
+        if _mcp_cache and (now - _mcp_cache_time) < _CAPABILITIES_TTL:
+            return _mcp_cache
+        result = await asyncio.wait_for(
+            _get_mcp_status(config, user_id),
+            timeout=8,
+        )
+        _mcp_cache = result
+        _mcp_cache_time = now
+        return result
+    except asyncio.TimeoutError:
+        logger.warning("_get_mcp_status timed out (>8s)")
+        return _mcp_cache
+    finally:
+        _cache_lock.release()
 
 
 async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
     """Query connected MCP server names and tool counts (uncached)."""
     try:
+        from lazyclaw.mcp.bridge import load_cached_schemas
         from lazyclaw.mcp.manager import _active_clients, BUNDLED_MCPS
         from lazyclaw.db.connection import db_session
-
-        if not _active_clients:
-            return []
+        import json as _json
 
         async with db_session(config) as db:
             rows = await db.execute(
-                "SELECT id, name FROM mcp_connections WHERE user_id = ?",
+                "SELECT id, name, favorite FROM mcp_connections WHERE user_id = ?",
                 (user_id,),
             )
-            server_map = {row[0]: row[1] for row in await rows.fetchall()}
+            all_servers = [(row[0], row[1], bool(row[2])) for row in await rows.fetchall()]
+
+        if not all_servers:
+            return []
 
         result = []
-        for server_id, client in _active_clients.items():
-            name = server_map.get(server_id, client.name)
+        for server_id, name, is_fav in all_servers:
             desc = BUNDLED_MCPS.get(name, {}).get("description", "")
-            try:
-                tools = await client.list_tools()
-                tool_count = len(tools)
-            except Exception:
-                tool_count = 0
+
+            # Get tool count: from live client or cache
+            tool_count = 0
+            if server_id in _active_clients:
+                try:
+                    tools = await asyncio.wait_for(
+                        _active_clients[server_id].list_tools(),
+                        timeout=5,
+                    )
+                    tool_count = len(tools)
+                except (asyncio.TimeoutError, Exception):
+                    tool_count = 0
+                status = "connected"
+            else:
+                cached = await load_cached_schemas(config, name)
+                if cached:
+                    try:
+                        tool_count = len(_json.loads(cached))
+                    except Exception:
+                        pass
+                status = "idle (lazy)"
+
             entry = f"{name}: {desc}" if desc else name
-            entry += f" ({tool_count} tools)"
+            entry += f" ({tool_count} tools, {status})"
+            if is_fav:
+                entry += " [favorite]"
             result.append(entry)
 
         return result

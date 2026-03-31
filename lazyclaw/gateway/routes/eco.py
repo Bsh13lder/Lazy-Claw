@@ -18,7 +18,8 @@ class UpdateEcoRequest(BaseModel):
     monthly_paid_budget: float | None = None
     locked_provider: str | None = None
     allowed_providers: list[str] | None = None
-    task_overrides: dict[str, str] | None = None
+    free_providers: list[str] | None = None
+    preferred_free_model: str | None = None
 
 
 @router.get("/settings")
@@ -83,25 +84,14 @@ async def get_rate_limits(user: User = Depends(get_current_user)):
 @router.get("/providers")
 async def list_providers(user: User = Depends(get_current_user)):
     """List available free AI providers and their status."""
-    try:
-        from mcp_freeride.config import load_config as load_freeride_config
-        from mcp_freeride.config import get_configured_providers
+    from lazyclaw.llm.free_providers import get_provider_info
 
-        freeride_config = load_freeride_config()
-        configured = get_configured_providers(freeride_config)
-        return {
-            "success": True,
-            "data": {
-                "configured": configured,
-                "available": ["groq", "gemini", "openrouter", "together", "mistral", "huggingface", "ollama"],
-            },
-        }
-    except ImportError:
-        return {
-            "success": True,
-            "data": {
-                "configured": [],
-                "available": ["groq", "gemini", "openrouter", "together", "mistral", "huggingface", "ollama"],
-                "warning": "mcp-freeride not installed",
-            },
-        }
+    info = get_provider_info()
+    configured = [p["name"] for p in info if p["configured"]]
+    return {
+        "success": True,
+        "data": {
+            "configured": configured,
+            "all_providers": info,
+        },
+    }

@@ -1,0 +1,13 @@
+{
+  "name": "mcp-whatsapp",
+  "version": "0.2.0",
+  "description": "WhatsApp MCP server — Baileys WebSocket. No browser.",
+  "license": "MIT",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "qrcode": "^1.5.4"
+  }
+}

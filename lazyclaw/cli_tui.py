@@ -28,6 +28,7 @@ from lazyclaw.cli_server import _ActiveRequest
 from lazyclaw.config import Config
 from lazyclaw.llm.pricing import calculate_cost
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.team_lead import TeamLead
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class RequestSnapshot:
     step_total: int = 0
     trigger: str = "user"
     delegate_to: str = ""
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    step_name: str = ""
+    compact: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,10 @@ class SystemStats:
     telegram_status: str = "disconnected"
     eco_mode: str = "full"
     ollama_models: tuple[str, ...] = ()
+    # RAM monitor (ECO v2)
+    ram_system_pct: float = 0.0
+    ram_ai_mb: int = 0
+    ram_free_mb: int = 0
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -110,6 +119,78 @@ def _fmt_cost(c: float) -> str:
     return f"${c:.3f}"
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Format duration: 1.2s, 24s, 2m 14s."""
+    if seconds < 60:
+        return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}m {secs}s"
+
+
+def _fmt_time(dt: datetime | None) -> str:
+    """Format datetime as HH:MM:SS."""
+    if dt is None:
+        return ""
+    return dt.strftime("%H:%M:%S")
+
+
+def _seconds_to_human(s: int | float) -> str:
+    """Convert seconds to human-readable: 300 → '5m', 3600 → '1h'."""
+    s = int(s)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    hours = s // 3600
+    mins = (s % 3600) // 60
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
+def _cron_to_human(expr: str) -> str:
+    """Best-effort cron expression to human string."""
+    parts = expr.strip().split()
+    if len(parts) < 5:
+        return expr
+    minute, hour = parts[0], parts[1]
+    # Daily at HH:MM
+    if parts[2] == "*" and parts[3] == "*" and parts[4] == "*":
+        if minute.isdigit() and hour.isdigit():
+            return f"daily {hour}:{minute.zfill(2)}"
+    # Every N minutes: */N * * * *
+    if minute.startswith("*/") and hour == "*":
+        return f"every {minute[2:]}m"
+    return expr
+
+
+def _time_ago(iso_str: str | None) -> str:
+    """Convert ISO timestamp to 'Nm ago' or 'Nh ago'."""
+    if not iso_str:
+        return "never"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        delta = (datetime.now() - dt).total_seconds()
+        if delta < 0:
+            return "just now"
+        return _seconds_to_human(delta) + " ago"
+    except Exception:
+        return "?"
+
+
+def _time_until(iso_str: str | None) -> str:
+    """Convert ISO timestamp to 'in Nm' or 'in Nh'."""
+    if not iso_str:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        delta = (dt - datetime.now()).total_seconds()
+        if delta < 0:
+            return "overdue"
+        return _seconds_to_human(delta)
+    except Exception:
+        return "?"
+
+
 def _phase_icon(phase: str) -> tuple[str, str]:
     """Return (icon, color) for a phase."""
     return {
@@ -122,6 +203,8 @@ def _phase_icon(phase: str) -> tuple[str, str]:
         "queued": ("○", _C_IDLE),
         "done": ("✓", _C_SUCCESS),
         "error": ("✗", _C_ERROR),
+        "stuck": ("⚠", _C_ERROR),
+        "cancelled": ("✗", _C_ERROR),
     }.get(phase, ("○", _C_IDLE))
 
 
@@ -181,9 +264,15 @@ class TuiDashboard:
         self._total_tokens_out: int = 0
         self._total_cost_today: float = 0.0
         self._cost_by_model: dict[str, float] = {}
+        # Dedup: skip consecutive identical log entries
+        self._last_log_key: str = ""
+        # Per-request callback refs for cancel token access
+        self._callbacks: dict[str, _TuiRequestCallback] = {}
 
     def make_request_cb(self, chat_id: str) -> _TuiRequestCallback:
-        return _TuiRequestCallback(self, chat_id)
+        cb = _TuiRequestCallback(self, chat_id)
+        self._callbacks[chat_id] = cb
+        return cb
 
     def register_request(self, chat_id: str, message: str) -> None:
         self._active[chat_id] = _ActiveRequest(
@@ -196,8 +285,10 @@ class TuiDashboard:
 
     def unregister_request(self, chat_id: str) -> None:
         req = self._active.pop(chat_id, None)
+        self._callbacks.pop(chat_id, None)
         self._total_processed += 1
         if req:
+            req.finished_at = datetime.now()
             elapsed = time.monotonic() - req.started
             tools = len(req.tools_used)
             cost_str = _fmt_cost(req.cost_usd)
@@ -209,6 +300,15 @@ class TuiDashboard:
     def handle_event(self, chat_id: str, event: AgentEvent) -> None:
         req = self._active.get(chat_id)
         kind = event.kind
+
+        # Dedup consecutive identical log events (tool_result, tool_call)
+        if kind in ("tool_result", "tool_call"):
+            log_key = f"{chat_id}:{kind}:{event.detail}"
+            if log_key == self._last_log_key:
+                return  # Skip duplicate
+            self._last_log_key = log_key
+        else:
+            self._last_log_key = ""
 
         # Background task events may arrive after the original request was unregistered
         if not req:
@@ -227,6 +327,7 @@ class TuiDashboard:
             req.iteration = event.metadata.get("iteration", 1)
             req.step_current = event.metadata.get("iteration", 1)
             req.step_total = event.metadata.get("max_iterations", 0)
+            req.step_name = event.metadata.get("step_name", "") or "thinking"
             cost_usd = event.metadata.get("cost_usd", 0.0)
             if cost_usd:
                 req.cost_usd += cost_usd
@@ -260,6 +361,7 @@ class TuiDashboard:
         elif kind == "tool_call":
             req.phase = "tool"
             req.tools_used.append(display)
+            req.step_name = display
             self._app.post_message(LogAppended(_now(), "tool", display))
 
         elif kind == "tool_result":
@@ -276,6 +378,7 @@ class TuiDashboard:
         elif kind == "specialist_start":
             name = event.metadata.get("specialist", "?")
             req.delegate_to = name
+            req.step_name = f"delegate → {name}"
             if name in req.specialists:
                 req.specialists[name] = "running"
             self._app.post_message(LogAppended(_now(), "spec", f"{name} started"))
@@ -295,6 +398,7 @@ class TuiDashboard:
 
         elif kind == "team_merge":
             req.phase = "merging"
+            req.step_name = "merging specialist results"
 
         elif kind == "token":
             req.phase = "streaming"
@@ -330,6 +434,15 @@ class TuiDashboard:
             self.unregister_request(chat_id)
             return  # already posted snapshot + removed
 
+        elif kind == "help_needed":
+            req.phase = "stuck"
+            reason = event.metadata.get("reason", "unknown")
+            tool = event.metadata.get("tool", "?")
+            self._app.post_message(LogAppended(
+                _now(), "error",
+                f"STUCK: {reason} on {tool} — {event.detail[:60]}",
+            ))
+
         elif kind == "work_summary":
             summary = event.metadata.get("summary")
             if summary:
@@ -344,6 +457,12 @@ class TuiDashboard:
         self._app.post_message(RequestUpdated(chat_id, self._snapshot(req)))
 
     def _snapshot(self, req: _ActiveRequest) -> RequestSnapshot:
+        # Determine if card should be compact (done/error, single tool, no specialists)
+        is_terminal = req.phase in ("done", "error", "cancelled")
+        has_specialists = bool(req.specialists)
+        many_tools = len(req.tools_used) > 1
+        compact = is_terminal and not has_specialists and not many_tools
+
         return RequestSnapshot(
             chat_id=req.chat_id,
             message=req.message,
@@ -360,6 +479,10 @@ class TuiDashboard:
             step_total=req.step_total,
             trigger=req.trigger,
             delegate_to=req.delegate_to,
+            started_at=req.started_at,
+            finished_at=req.finished_at,
+            step_name=req.step_name,
+            compact=compact,
         )
 
     @property
@@ -397,6 +520,7 @@ class _TuiRequestCallback:
     def __init__(self, dashboard: TuiDashboard, chat_id: str) -> None:
         self._dashboard = dashboard
         self._chat_id = chat_id
+        self.cancel_token = None  # Set by agent.py via hasattr check
 
     async def on_event(self, event: AgentEvent) -> None:
         self._dashboard.handle_event(self._chat_id, event)
@@ -410,31 +534,59 @@ class _TuiRequestCallback:
 # ── Widgets ─────────────────────────────────────────────────────────
 
 class SystemBar(Static):
-    """Top bar showing cost + tokens + active agents."""
+    """Top bar showing model names, ECO mode, services, cost, and tokens."""
 
-    def update_stats(self, stats: SystemStats) -> None:
+    def update_stats(self, stats: SystemStats, config=None) -> None:
         cost = _fmt_cost(stats.total_cost_today)
         t_in = _fmt_tokens(stats.total_tokens_in)
         t_out = _fmt_tokens(stats.total_tokens_out)
         active_color = _C_ACTIVE if stats.active_count > 0 else _C_IDLE
 
-        # ECO mode badge
-        eco = stats.eco_mode.upper()
-        eco_color = _C_SUCCESS if eco == "LOCAL" else (_C_ACTIVE if eco == "HYBRID" else _C_IDLE)
+        # ECO mode badge — normalize display name
+        _eco_labels = {"hybrid": "HYBRID", "full": "FULL"}
+        eco = _eco_labels.get(stats.eco_mode, stats.eco_mode.upper())
+        eco_color = _C_ACTIVE if eco == "HYBRID" else _C_IDLE
 
-        # Ollama models inline
-        ollama_str = ""
-        if stats.ollama_models:
-            ollama_str = f"  │  🧠 {', '.join(stats.ollama_models)}"
+        # Model names from config
+        brain = ""
+        worker = ""
+        if config:
+            brain = getattr(config, "brain_model", "").split("/")[-1]
+            worker = getattr(config, "worker_model", "").split("/")[-1]
+
+        # Service status indicators
+        tg_dot = f"[{_C_SUCCESS}]\u2713[/{_C_SUCCESS}]" if stats.telegram_status == "connected" else f"[{_C_ERROR}]\u2717[/{_C_ERROR}]"
+        br_dot = f"[{_C_SUCCESS}]\u2713[/{_C_SUCCESS}]" if stats.browser_alive else f"[{_C_IDLE}]\u2014[/{_C_IDLE}]"
+        mcp_dot = f"[{_C_SUCCESS}]{stats.mcp_count}[/{_C_SUCCESS}]" if stats.mcp_count > 0 else f"[{_C_IDLE}]0[/{_C_IDLE}]"
+
+        # RAM — always visible on line 1
+        ram_pct = stats.ram_system_pct
+        ram_color = _C_SUCCESS if ram_pct < 70 else (_C_ACTIVE if ram_pct < 85 else _C_ERROR)
+        ram_text = f"[{ram_color}]RAM:{ram_pct:.0f}%[/{ram_color}]"
+        if stats.ram_ai_mb > 0:
+            ram_text += f"[{ram_color}](AI:{stats.ram_ai_mb}MB)[/{ram_color}]"
+
+        # Line 1: Mode + Models + RAM + Cost
+        line1_parts = [f"[{eco_color}]{eco}[/{eco_color}]"]
+        if brain:
+            line1_parts.append(f"Brain:[bold]{brain}[/bold]")
+        if worker:
+            line1_parts.append(f"Worker:[dim]{worker}[/dim]")
+        line1_parts.append(ram_text)
+        line1_parts.append(f"[{_C_COST}]{cost}[/{_C_COST}]")
+        line1_parts.append(f"\u2191{t_in} \u2193{t_out}")
+        line1_parts.append(f"[{active_color}]{stats.active_count} active[/{active_color}]")
+
+        # Line 2: Services
+        line2 = (
+            f"TG:{tg_dot}  Browser:{br_dot}"
+            f"  MCP:{mcp_dot}"
+            f"  Q:{stats.queue_depth}"
+            f"  Free:{stats.ram_free_mb}MB"
+        )
 
         self.update(Text.from_markup(
-            f" [{eco_color}]ECO:{eco}[/{eco_color}]"
-            f"{ollama_str}"
-            f"  │  [{_C_COST}]{cost} today[/{_C_COST}]"
-            f"  │  ↑{t_in} ↓{t_out}"
-            f"  │  [{active_color}]{stats.active_count} active[/{active_color}]"
-            f"  │  Q:{stats.queue_depth}"
-            f"  │  Mem:{stats.memory_mb:.0f}MB"
+            " " + "  \u2502  ".join(line1_parts) + "\n " + line2
         ))
 
 
@@ -464,7 +616,8 @@ class RequestCard(Static):
         t = Text()
         t.append("╭─ ", style=_C_BORDER)
         t.append(f"#{self._number}", style=_C_HEADER)
-        t.append(f' "{self._message}"\n')
+        safe_msg = self._message.replace("[", "\\[") if self._message else ""
+        t.append(f' "{safe_msg}"\n')
         t.append("│ ", style=_C_BORDER)
         t.append("○ queued...", style=_C_IDLE)
         t.append("\n")
@@ -473,106 +626,170 @@ class RequestCard(Static):
 
     def update_snapshot(self, snap: RequestSnapshot) -> None:
         icon, color = _phase_icon(snap.phase)
-        elapsed = f"{snap.elapsed_s:.1f}s"
         t_in = _fmt_tokens(snap.tokens_in)
         t_out = _fmt_tokens(snap.tokens_out)
         cost = _fmt_cost(snap.cost_usd)
+        duration = _fmt_duration(snap.elapsed_s)
+
+        is_cancelled = snap.phase == "cancelled"
+        is_compact = snap.compact
+
+        # Color-coded border by status
+        border_color = {
+            "done": _C_SUCCESS, "error": _C_ERROR, "stuck": _C_ERROR,
+            "queued": _C_IDLE, "cancelled": _C_IDLE,
+        }.get(snap.phase, _C_ACTIVE if snap.phase in ("thinking", "tool", "team", "streaming") else _C_BORDER)
 
         # Escape user message for Rich markup
         safe_msg = snap.message.replace("[", "\\[") if snap.message else ""
+        max_msg_len = 22 if is_compact else 50
+        display_msg = safe_msg[:max_msg_len] + "\u2026" if len(safe_msg) > max_msg_len else safe_msg
+
+        # Header — show × cancel hint for active tasks, [cancelled] badge for cancelled
+        cancel_hint = ""
+        if is_cancelled:
+            cancel_hint = f"  [{_C_ERROR}]\\[cancelled][/{_C_ERROR}]"
+        elif snap.phase not in ("done", "error"):
+            cancel_hint = f"  [dim]\u00d7[/dim]"
+
+        # Dim entire message if cancelled (strikethrough effect)
+        msg_style = "dim strike" if is_cancelled else ""
+        msg_markup = f"[{msg_style}]{display_msg}[/{msg_style}]" if msg_style else f'"{display_msg}"'
 
         # Header
         lines = [
-            f"[{_C_BORDER}]╭─[/{_C_BORDER}]"
+            f"[{border_color}]\u256d\u2500[/{border_color}]"
             f" [{_C_HEADER}]#{self._number}[/{_C_HEADER}]"
-            f' "{safe_msg}"'
+            f" {msg_markup}{cancel_hint}"
         ]
 
-        # Phase line
+        # Phase line with model shortname + step with name
         phase_label = snap.phase
-        model_str = f"  {snap.model}" if snap.model else ""
-        step_str = f"  step {snap.step_current}" if snap.step_current else ""
+        model_short = snap.model.split("/")[-1] if snap.model else ""
+        step_str = ""
+        if snap.step_current:
+            step_str = f"  step {snap.step_current}"
+            if snap.step_total:
+                step_str += f"/{snap.step_total}"
+            if snap.step_name:
+                step_str += f": {snap.step_name}"
         lines.append(
-            f"[{_C_BORDER}]│[/{_C_BORDER}]"
-            f" [{color}]{icon} {phase_label}[/{color}]{model_str}{step_str}"
+            f"[{border_color}]\u2502[/{border_color}]"
+            f" [{color}]{icon} {phase_label}[/{color}]"
+            f"  [dim]{model_short}[/dim]{step_str}"
         )
 
-        # Delegate chain
-        if snap.delegate_to:
-            lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
-                f" [{_C_SPECIALIST}]● delegate → {snap.delegate_to}[/{_C_SPECIALIST}]"
-            )
+        if not is_compact:
+            # Step name standalone (when no step_current but name exists)
+            if snap.step_name and not snap.step_current:
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" \u21b3 \"{snap.step_name}\""
+                )
 
-        # Progress bar when step_total > 0
-        if snap.step_total > 0:
-            filled = min(snap.step_current, snap.step_total)
-            bar_width = 16
-            filled_chars = int(bar_width * filled / snap.step_total)
-            empty_chars = bar_width - filled_chars
-            bar = "█" * filled_chars + "░" * empty_chars
-            lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
-                f" [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
-                f" {filled}/{snap.step_total} steps"
-            )
+            # Delegate chain
+            if snap.delegate_to:
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" [{_C_SPECIALIST}]\u25cf delegate \u2192 {snap.delegate_to}[/{_C_SPECIALIST}]"
+                )
 
-        # Tools
-        if snap.tools_used:
-            unique_tools = list(dict.fromkeys(snap.tools_used[-6:]))
-            tools_str = ", ".join(unique_tools)
-            lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
-                f" [dim]Tools: {tools_str}[/dim]"
-            )
+            # Progress bar when step_total > 0
+            if snap.step_total > 0:
+                filled = min(snap.step_current, snap.step_total)
+                bar_width = 16
+                filled_chars = int(bar_width * filled / snap.step_total)
+                empty_chars = bar_width - filled_chars
+                bar = "\u2588" * filled_chars + "\u2591" * empty_chars
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" [{_C_ACTIVE}]{bar}[/{_C_ACTIVE}]"
+                    f" {filled}/{snap.step_total} steps"
+                )
 
-        # Specialist grid
-        if snap.specialists:
-            spec_parts = []
-            for name, status in snap.specialists:
-                s_icon, s_color = {
-                    "queued": ("○", _C_IDLE),
-                    "running": ("●", _C_ACTIVE),
-                    "done": ("✓", _C_SUCCESS),
-                    "error": ("✗", _C_ERROR),
-                }.get(status, ("○", _C_IDLE))
-                spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
-            lines.append(
-                f"[{_C_BORDER}]│[/{_C_BORDER}]"
-                f"  {'  '.join(spec_parts)}"
-            )
+            # Tools
+            if snap.tools_used:
+                unique_tools = list(dict.fromkeys(snap.tools_used[-6:]))
+                tools_str = ", ".join(unique_tools)
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f" [dim]Tools: {tools_str}[/dim]"
+                )
 
-        # Token/cost/time line
+            # Specialist grid
+            if snap.specialists:
+                spec_parts = []
+                for name, status in snap.specialists:
+                    s_icon, s_color = {
+                        "queued": ("\u25cb", _C_IDLE),
+                        "running": ("\u25cf", _C_ACTIVE),
+                        "done": ("\u2713", _C_SUCCESS),
+                        "error": ("\u2717", _C_ERROR),
+                        "cancelled": ("\u2717", _C_ERROR),
+                    }.get(status, ("\u25cb", _C_IDLE))
+                    spec_parts.append(f"[{s_color}]{s_icon} {name}[/{s_color}]")
+                lines.append(
+                    f"[{border_color}]\u2502[/{border_color}]"
+                    f"  {'  '.join(spec_parts)}"
+                )
+
+        # Token/cost/time footer with wall-clock timestamps
         trigger_badge = ""
         if snap.trigger != "user":
-            trigger_badge = f" [{_C_SPECIALIST}][{snap.trigger}][/{_C_SPECIALIST}]"
+            trigger_badge = f" [{_C_SPECIALIST}]\\[{snap.trigger}][/{_C_SPECIALIST}]"
+
+        started_str = _fmt_time(snap.started_at)
+        finished_str = _fmt_time(snap.finished_at)
+        time_parts = f"[dim]{started_str}[/dim]"
+        if finished_str:
+            time_parts += f" [dim]\u2192 {finished_str}[/dim]"
+        duration_color = _C_ERROR if is_cancelled else (_C_SUCCESS if snap.phase == "done" else _C_ACTIVE)
+
         lines.append(
-            f"[{_C_BORDER}]│[/{_C_BORDER}]"
-            f" ↑{t_in} ↓{t_out}"
+            f"[{border_color}]\u2502[/{border_color}]"
+            f" \u2191{t_in} \u2193{t_out}"
             f"  [{_C_COST}]{cost}[/{_C_COST}]"
-            f"  [dim]{elapsed}[/dim]"
+            f"  {time_parts}"
+            f"  [bold {duration_color}]{duration}[/bold {duration_color}]"
             f"{trigger_badge}"
         )
 
         # Footer
-        lines.append(f"[{_C_BORDER}]╰{'─' * 44}╯[/{_C_BORDER}]")
+        horiz_line = "\u2500" * 44
+        lines.append(f"[{border_color}]\u2570{horiz_line}\u256f[/{border_color}]")
 
         self.update(Text.from_markup("\n".join(lines)))
 
 
 class JobsBar(Static):
-    """Shows active cron jobs and watchers inline."""
+    """Shows active cron jobs and watchers with timing details."""
 
     def render_jobs(self, cron_jobs: list[dict], watchers: list[dict]) -> None:
         if not cron_jobs and not watchers:
             self.update(Text.from_markup(f"  [{_C_IDLE}]No scheduled jobs[/{_C_IDLE}]"))
             return
 
-        parts: list[str] = []
-        for j in cron_jobs:
-            name = j.get("name", "?")
-            cron = j.get("cron_expression", "")
-            parts.append(f"[{_C_THINKING}]\u23f0[/{_C_THINKING}] {name} [dim]{cron}[/dim]")
+        lines: list[str] = []
+
+        # Cron jobs — title, interval, last run, next run
+        if cron_jobs:
+            cron_parts: list[str] = []
+            for j in cron_jobs:
+                name = j.get("name", "?")
+                cron_expr = j.get("cron_expression", "")
+                interval = _cron_to_human(cron_expr) if cron_expr else cron_expr
+                last_ago = _time_ago(j.get("last_run"))
+                next_in = _time_until(j.get("next_run"))
+                cron_parts.append(
+                    f"[{_C_THINKING}]\u23f0[/{_C_THINKING}]"
+                    f" [bold]{name}[/bold]"
+                    f" [dim]\u2014 {interval}"
+                    f" \u2014 last: {last_ago}"
+                    f" \u2014 next: {next_in}[/dim]"
+                )
+            lines.append("  ".join(cron_parts))
+
+        # Watchers — title, interval, last/next, prompt in quotes
         for w in watchers:
             name = w.get("name", "?")
             import json as _json
@@ -580,25 +797,77 @@ class JobsBar(Static):
                 ctx = _json.loads(w.get("context", "{}"))
             except Exception:
                 ctx = {}
-            url = ctx.get("url", "")
-            # Show just domain
-            domain = url.split("//")[-1].split("/")[0] if url else "?"
-            parts.append(f"[{_C_ACTIVE}]\u25ce[/{_C_ACTIVE}] {name} [dim]{domain}[/dim]")
+            interval_s = ctx.get("interval_seconds", 0)
+            interval_str = _seconds_to_human(interval_s) if interval_s else "?"
+            prompt = ctx.get("instruction", ctx.get("prompt", ""))
+            last_ago = _time_ago(w.get("last_run"))
+            next_in = _time_until(w.get("next_run"))
 
-        self.update(Text.from_markup("  ".join(parts)))
+            line = (
+                f"[{_C_ACTIVE}]\u25ce[/{_C_ACTIVE}]"
+                f" [bold]{name}[/bold]"
+                f" [dim]\u2014 every {interval_str}"
+                f" \u2014 last: {last_ago}"
+                f" \u2014 next: {next_in} \u2014[/dim]"
+            )
+            if prompt:
+                safe_prompt = prompt[:60].replace("[", "\\[")
+                line += f" [{_C_IDLE}]\"{safe_prompt}\"[/{_C_IDLE}]"
+            lines.append(line)
+
+        self.update(Text.from_markup("\n".join(lines)))
+
+
+class _CardRow(Horizontal):
+    """A horizontal row of request cards in the activity grid."""
+    pass
 
 
 class ActivityPanel(VerticalScroll):
-    """Scrollable panel of active request cards."""
+    """Scrollable grid panel of active request cards.
+
+    Cards are arranged in a flex-wrap grid using Horizontal rows:
+    - Complex cards (specialists or multiple tools): ~half width (2 per row)
+    - Compact completed cards (single tool, done): ~third width (3 per row)
+    """
 
     _empty_label: Static | None = None
+    _card_compactness: dict[str, bool] = {}
+    # Track which row each card belongs to
+    _card_rows: dict[str, str] = {}  # chat_id -> row_id
+    _row_counter: int = 0
 
     def on_mount(self) -> None:
+        self._card_compactness = {}
+        self._card_rows = {}
+        self._row_counter = 0
         self._empty_label = Static(
             Text.from_markup(f"  [{_C_IDLE}]No active agents[/{_C_IDLE}]"),
             id="empty-label",
         )
         self.mount(self._empty_label)
+
+    def _find_or_create_row(self, compact: bool) -> _CardRow:
+        """Find a row with room for another card, or create a new one.
+
+        Full cards: max 2 per row. Compact cards: max 3 per row.
+        """
+        max_per_row = 3 if compact else 2
+        target_class = "compact-row" if compact else "full-row"
+
+        # Try to find an existing row with room
+        for row in self.query(_CardRow):
+            if row.has_class(target_class):
+                card_count = len(row.query(RequestCard))
+                if card_count < max_per_row:
+                    return row
+
+        # Create new row
+        self._row_counter += 1
+        row_id = f"card-row-{self._row_counter}"
+        row = _CardRow(id=row_id, classes=target_class)
+        self.mount(row)
+        return row
 
     def add_request(self, chat_id: str, message: str) -> None:
         if self._empty_label:
@@ -607,20 +876,38 @@ class ActivityPanel(VerticalScroll):
         # Use unique card ID — prevents DuplicateIds crash with concurrent requests
         card_id = f"req-{chat_id}"
         try:
-            existing = self.query_one(f"#{card_id}", RequestCard)
-            # Card already exists — just update its content instead of crashing
-            existing._render_initial()
-            return
+            self.query_one(f"#{card_id}", RequestCard)
+            return  # Card already exists
         except Exception:
             pass
-        card = RequestCard(chat_id, message, id=card_id)
-        self.mount(card)
+        self._card_compactness[chat_id] = False
+        row = self._find_or_create_row(compact=False)
+        card = RequestCard(chat_id, message, id=card_id, classes="card-full")
+        row.mount(card)
+        self._card_rows[chat_id] = row.id or ""
         card.scroll_visible()
 
     def update_request(self, chat_id: str, snapshot: RequestSnapshot) -> None:
         try:
             card = self.query_one(f"#req-{chat_id}", RequestCard)
             card.update_snapshot(snapshot)
+            # Move card to appropriate row type if compactness changed
+            was_compact = self._card_compactness.get(chat_id, False)
+            if snapshot.compact != was_compact:
+                self._card_compactness[chat_id] = snapshot.compact
+                # Remove from current row, add to correct row type
+                old_row_id = self._card_rows.get(chat_id)
+                card.remove()
+                new_row = self._find_or_create_row(compact=snapshot.compact)
+                cls = "card-compact" if snapshot.compact else "card-full"
+                card.remove_class("card-full")
+                card.remove_class("card-compact")
+                card.add_class(cls)
+                new_row.mount(card)
+                self._card_rows[chat_id] = new_row.id or ""
+                # Clean up empty old row
+                if old_row_id:
+                    self._cleanup_empty_row(old_row_id)
         except Exception:
             pass
 
@@ -630,6 +917,10 @@ class ActivityPanel(VerticalScroll):
             card.remove()
         except Exception:
             pass
+        row_id = self._card_rows.pop(chat_id, None)
+        self._card_compactness.pop(chat_id, None)
+        if row_id:
+            self._cleanup_empty_row(row_id)
         # Restore empty label if no cards left
         if not self.query(RequestCard):
             self._empty_label = Static(
@@ -638,18 +929,54 @@ class ActivityPanel(VerticalScroll):
             )
             self.mount(self._empty_label)
 
+    def _cleanup_empty_row(self, row_id: str) -> None:
+        """Remove a row if it has no more cards."""
+        try:
+            row = self.query_one(f"#{row_id}", _CardRow)
+            if not row.query(RequestCard):
+                row.remove()
+        except Exception:
+            pass
+
 
 class LogPanel(RichLog):
-    """Scrollable activity feed — full width, word-wrap, auto-scroll."""
+    """Scrollable activity feed — color-coded by type, auto-scroll.
+
+    Event types get distinct colors: green=success, yellow=tool,
+    cyan=delegate, red=error. Recent entries (last 30s) are bright.
+    """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(wrap=True, **kwargs)
+        self._filter: str = "all"  # all, tools, errors, llm
+
+    def set_filter(self, filter_name: str) -> None:
+        """Set log filter: all, tools, errors, llm."""
+        self._filter = filter_name.lower()
 
     def append_entry(self, timestamp: str, kind: str, detail: str) -> None:
+        # Filter entries if a filter is active
+        if self._filter == "tools" and kind not in ("tool", "result"):
+            return
+        if self._filter == "errors" and kind not in ("error", "stuck"):
+            return
+        if self._filter == "llm" and kind not in ("llm", "done"):
+            return
+
         style = _log_style(kind)
         icon = _log_icon(kind)
+
+        # Convert markdown bold (**text**) to Rich markup, then escape brackets
+        import re as _re
+        safe_detail = _re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', detail)
+        safe_detail = safe_detail.replace("[", "\\[").replace("\\[bold]", "[bold]").replace("\\[/bold]", "[/bold]")
+
+        # Truncate long details for readability
+        if len(safe_detail) > 120:
+            safe_detail = safe_detail[:117] + "..."
+
         self.write(Text.from_markup(
-            f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {detail}"
+            f"[dim]{timestamp}[/dim] {icon} [{style}]{kind:<7}[/{style}] {safe_detail}"
         ))
         self.scroll_end(animate=False)
 
@@ -724,6 +1051,53 @@ class CostBar(Static):
         self.update(Text.from_markup("  │  ".join(parts[:2]) + "\n" + parts[-1] if len(parts) > 1 else "\n".join(parts)))
 
 
+class TeamLeadBar(Static):
+    """Live TeamLead status — shows running + recent tasks."""
+
+    def render_status(self, team_lead: TeamLead | None) -> None:
+        if team_lead is None:
+            self.update(Text.from_markup(f"[{_C_IDLE}]TeamLead: offline[/{_C_IDLE}]"))
+            return
+        active_tasks = team_lead.active_tasks
+        recent_tasks = team_lead.recent_tasks[:3]
+        if not active_tasks and not recent_tasks:
+            self.update(Text.from_markup(f"[{_C_IDLE}]All clear \u2014 no tasks[/{_C_IDLE}]"))
+            return
+
+        parts: list[str] = []
+
+        # Active tasks
+        now = time.monotonic()
+        for t in active_tasks:
+            elapsed = now - t.started_at
+            icon = "\U0001f310" if "browser" in t.name.lower() else ("\u26a1" if t.lane == "background" else "\u25cf")
+            step = f" step {t.step_count}: {t.current_step}" if t.current_step else ""
+            color = _C_ACTIVE
+            if elapsed > 60:
+                color = _C_THINKING
+            if elapsed > 120:
+                color = _C_ERROR
+            parts.append(
+                f"[{color}]{icon} {t.description[:40]} ({t.lane}, {elapsed:.0f}s){step}[/{color}]"
+            )
+
+        # Recent (last 3 for compact bar)
+        for t in recent_tasks:
+            ago = now - (t.completed_at or now)
+            icon = {
+                "done": "\u2713", "failed": "\u2717", "cancelled": "\u2014",
+            }.get(t.status, "?")
+            color = _C_SUCCESS if t.status == "done" else _C_ERROR
+            preview = t.result_preview[:30] or t.error[:30] or ""
+            if preview:
+                preview = f" \u2014 {preview}"
+            parts.append(
+                f"[{color}]{icon} {t.description[:30]} ({ago:.0f}s ago){preview}[/{color}]"
+            )
+
+        self.update(Text.from_markup("\n".join(parts)))
+
+
 class AIRoutingBar(Static):
     """AI routing panel showing per-model stats with local/paid breakdown."""
 
@@ -773,6 +1147,171 @@ class AIRoutingBar(Static):
         self.update(Text.from_markup("\n".join(lines)))
 
 
+# ── Settings Panel ──────────────────────────────────────────────────
+
+class SettingsPanel(Static):
+    """Rich 5-column settings panel matching the mockup design.
+
+    Shows toggle indicators (◉/○), select values with ▾, permission
+    colors (green=allow, yellow=ask, red=deny), and proper alignment.
+    Changes via /set commands.
+    """
+
+    def render_settings(
+        self,
+        eco: dict,
+        agent: dict,
+        browser: dict,
+        team: dict | None = None,
+        perms: dict | None = None,
+        telegram_connected: bool = False,
+        cdp_port: int = 9222,
+    ) -> None:
+        """Render settings in 5 side-by-side columns using Rich markup."""
+
+        # ── Helpers ──
+        def _toggle(on: bool, label: str = "") -> str:
+            """Render toggle: [◉ on] or [○ off]."""
+            if on:
+                return f"[{_C_SUCCESS}]◉ {label or 'on'}[/{_C_SUCCESS}]"
+            return f"[{_C_IDLE}]○ {label or 'off'}[/{_C_IDLE}]"
+
+        def _select(value: str, color: str = _C_ACTIVE) -> str:
+            """Render select: [value ▾]."""
+            return f"[{color}]{value} ▾[/{color}]"
+
+        def _perm(value: str) -> str:
+            """Render permission with auto-color."""
+            colors = {"allow": _C_SUCCESS, "ask": _C_HEADER, "deny": _C_ERROR}
+            c = colors.get(value, _C_IDLE)
+            return f"[{c}]{value} ▾[/{c}]"
+
+        def _row(label: str, value: str, width: int = 18) -> str:
+            """Render aligned setting row."""
+            padded = label.ljust(width)
+            return f"  [dim]{padded}[/dim] {value}"
+
+        def _header(title: str) -> str:
+            return f"[{_C_HEADER}][bold]{title}[/bold][/{_C_HEADER}]\n  {'─' * 24}"
+
+        # ── Extract values ──
+        mode = eco.get("mode", "hybrid")
+        mode_color = _C_ACTIVE if mode == "hybrid" else _C_IDLE
+        brain = eco.get("brain_model") or "default"
+        worker = eco.get("worker_model") or "default"
+        fallback = eco.get("fallback_model") or "default"
+        budget = eco.get("monthly_paid_budget", 5.0) or 5.0
+        auto_fb = eco.get("auto_fallback", False)
+        show_badges = eco.get("show_badges", True)
+        max_w = eco.get("max_workers", 10)
+
+        auto_del = agent.get("auto_delegate", True)
+        max_spec = agent.get("max_concurrent_specialists", 3)
+        max_ram = agent.get("max_ram_mb", 512)
+        timeout_s = agent.get("specialist_timeout_s", 120)
+
+        persistent = browser.get("persistent", "auto")
+        idle_timeout = browser.get("idle_timeout", 3600)
+
+        team = team or {}
+        team_mode = team.get("mode", "never")
+        critic_mode = team.get("critic_mode", "auto")
+
+        perms = perms or {}
+        cat = perms.get("category_defaults", {})
+
+        # ── Build columns ──
+        col1_lines = [
+            _header("AI / MODELS"),
+            _row("ECO Mode", _select(mode, mode_color)),
+            _row("Brain Model", _select(brain, "#7dcfff")),
+            _row("Worker Model", _select(worker, "#7dcfff")),
+            _row("Fallback", _select(fallback, "#ff9e64")),
+            _row("Show Badges", _toggle(show_badges)),
+            _row("Auto Fallback", _toggle(auto_fb)),
+            _row("Max Workers", f"{max_w}"),
+            _row("Budget", f"[{_C_COST}]${budget:.2f}[/{_C_COST}]"),
+        ]
+
+        col2_lines = [
+            _header("TEAMS / AGENT"),
+            _row("Team Mode", _select(team_mode)),
+            _row("Critic Mode", _select(critic_mode)),
+            _row("Auto Delegate", _toggle(auto_del)),
+            _row("Max Specialists", f"{max_spec}"),
+            _row("Max RAM (MB)", f"{max_ram}"),
+            _row("Timeout", f"{timeout_s}s"),
+        ]
+
+        col3_lines = [
+            _header("BROWSER"),
+            _row("Persistent", _select(persistent, "#ff9e64")),
+            _row("Idle Timeout", f"{idle_timeout}s"),
+            _row("CDP Port", f"{cdp_port}"),
+        ]
+
+        col4_lines = [
+            _header("PERMISSIONS"),
+            _row("General", _perm(cat.get("general", "allow"))),
+            _row("Browser", _perm(cat.get("browser", "allow"))),
+            _row("Computer", _perm(cat.get("computer", "ask"))),
+            _row("Vault", _perm(cat.get("vault", "ask"))),
+            _row("MCP / Shell", _perm(cat.get("mcp", "allow"))),
+            _row("Security", _perm(cat.get("security", "ask"))),
+        ]
+
+        tg_label = "connected" if telegram_connected else "off"
+        col5_lines = [
+            _header("CHANNELS"),
+            _row("Telegram", _toggle(telegram_connected, tg_label)),
+            _row("Discord", _toggle(False)),
+            _row("WhatsApp", _toggle(False)),
+        ]
+
+        # ── Merge columns side-by-side ──
+        # Pad each column to same height
+        all_cols = [col1_lines, col2_lines, col3_lines, col4_lines, col5_lines]
+        max_rows = max(len(c) for c in all_cols)
+        for col in all_cols:
+            while len(col) < max_rows:
+                col.append("")
+
+        # Terminal is ~120-160 chars wide. Show as 2-3 columns or stacked.
+        # For Textual Static widget, stack vertically in groups.
+        output_parts: list[str] = []
+
+        # Group 1: AI + Teams side-by-side (using ║ separator)
+        for i in range(max_rows):
+            left = col1_lines[i] if i < len(col1_lines) else ""
+            right = col2_lines[i] if i < len(col2_lines) else ""
+            # Pad left column to ~35 chars (approximate)
+            output_parts.append(f"{left}     {right}" if right else left)
+
+        output_parts.append("")  # spacer
+
+        # Group 2: Browser + Permissions + Channels
+        max_rows_2 = max(len(col3_lines), len(col4_lines), len(col5_lines))
+        for i in range(max_rows_2):
+            c3 = col3_lines[i] if i < len(col3_lines) else ""
+            c4 = col4_lines[i] if i < len(col4_lines) else ""
+            c5 = col5_lines[i] if i < len(col5_lines) else ""
+            parts = [p for p in [c3, c4, c5] if p]
+            output_parts.append("     ".join(parts))
+
+        # Footer hint
+        output_parts.append("")
+        output_parts.append(
+            f"[dim]Change via: /set eco <on|hybrid|off> │ "
+            f"/set brain <model> │ /set budget <N> │ "
+            f"/set team <on|off>[/dim]"
+        )
+        output_parts.append(
+            f"[dim]Press [{_C_HEADER}]3[/{_C_HEADER}] or Esc to return to dashboard[/dim]"
+        )
+
+        self.update(Text.from_markup("\n".join(output_parts)))
+
+
 # ── Main App ────────────────────────────────────────────────────────
 
 class LazyClawApp(App):
@@ -783,7 +1322,7 @@ class LazyClawApp(App):
         layout: grid;
         grid-size: 2;
         grid-columns: 1fr 1fr;
-        grid-rows: 3 1fr auto 1fr 3;
+        grid-rows: 3 1fr auto auto 1fr 3;
     }
 
     #system-bar {
@@ -801,10 +1340,19 @@ class LazyClawApp(App):
         border: solid $accent;
     }
 
+    #team-lead-bar {
+        column-span: 2;
+        height: auto;
+        max-height: 6;
+        padding: 0 1;
+        background: $surface;
+        border: solid #14B8A6;
+    }
+
     #jobs-bar {
         column-span: 2;
         height: auto;
-        max-height: 3;
+        max-height: 8;
         padding: 0 1;
         background: $surface;
     }
@@ -839,10 +1387,57 @@ class LazyClawApp(App):
         dock: bottom;
     }
 
+    _CardRow {
+        height: auto;
+        width: 100%;
+    }
+
+    .full-row {
+        height: auto;
+    }
+
+    .compact-row {
+        height: auto;
+    }
+
     RequestCard {
         height: auto;
-        margin: 0 0 1 0;
+        margin: 0 1 1 0;
         padding: 0;
+    }
+
+    .card-full {
+        width: 1fr;
+        min-width: 40;
+    }
+
+    .card-compact {
+        width: 1fr;
+        min-width: 26;
+    }
+
+    #settings-panel {
+        column-span: 2;
+        height: auto;
+        max-height: 100%;
+        background: $surface;
+        border: solid #565f89;
+        padding: 1 2;
+        display: none;
+        overflow-y: auto;
+    }
+
+    #settings-panel.visible {
+        display: block;
+    }
+
+    .settings-open #activity-panel,
+    .settings-open #team-lead-bar,
+    .settings-open #jobs-bar,
+    .settings-open #log-panel,
+    .settings-open #cost-bar,
+    .settings-open #ai-routing-bar {
+        display: none;
     }
     """
 
@@ -850,10 +1445,13 @@ class LazyClawApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
         Binding("slash", "focus_filter", "/Filter"),
-        Binding("tab", "focus_next", "Next Panel"),
-        Binding("1", "focus_agents", "Agents"),
+        Binding("tab", "focus_next", "Navigate"),
+        Binding("1", "focus_agents", "Activity"),
         Binding("2", "focus_logs", "Logs"),
-        Binding("c", "copy_logs", "Copy Logs"),
+        Binding("3", "toggle_settings", "Settings"),
+        Binding("escape", "close_settings", "Back", show=False),
+        Binding("x", "cancel_focused", "Cancel Task"),
+        Binding("c", "copy_logs", "Copy"),
     ]
 
     def __init__(
@@ -866,6 +1464,7 @@ class LazyClawApp(App):
         telegram_token: str | None = None,
         permission_checker=None,
         default_user_id: str = "",
+        team_lead: TeamLead | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -877,23 +1476,34 @@ class LazyClawApp(App):
         self._telegram_token = telegram_token
         self._permission_checker = permission_checker
         self._user_id = default_user_id
+        self._team_lead = team_lead
         self.dashboard = TuiDashboard(self)
         self._eco_budget: float = 5.0
         self._telegram_connected: bool = False
+        self._telegram_adapter = None
+        self._telegram_notifier = None
+        self._settings_visible: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield SystemBar(" Starting...", id="system-bar")
         yield ActivityPanel(id="activity-panel")
+        yield TeamLeadBar("  All clear", id="team-lead-bar")
         yield JobsBar("  Loading jobs...", id="jobs-bar")
         yield LogPanel(id="log-panel", highlight=True, markup=True)
         yield CostBar("", id="cost-bar")
         yield AIRoutingBar("", id="ai-routing-bar")
+        yield SettingsPanel("", id="settings-panel")
         yield Input(
             placeholder="Type message or /command...",
             id="admin-input",
             suggester=SuggestFromList(
-                ["/help", "/clear", "/status", "/history", "/jobs", "/watchers"],
+                ["/help", "/clear", "/status", "/history", "/jobs", "/watchers",
+                 "/filter all", "/filter tools", "/filter errors", "/filter llm",
+                 "/cancel", "/cancel all", "/cancel bg",
+                 "/set eco on", "/set eco hybrid", "/set eco off",
+                 "/set brain", "/set worker", "/set budget",
+                 "/settings"],
                 case_sensitive=False,
             ),
         )
@@ -947,11 +1557,27 @@ class LazyClawApp(App):
                     self._telegram_token, self._agent, self._config,
                     lane_queue=self._lane_queue,
                     server_dashboard=self.dashboard,
+                    task_runner=self._task_runner,
+                    team_lead=self._team_lead,
                 )
                 await telegram.start()
+                self._telegram_adapter = telegram
                 self._telegram_connected = True
                 logger.info("TUI: Telegram adapter started OK")
                 self._post_log("info", "Telegram bot running")
+
+                # Universal notifier — pushes done/failed/help to Telegram
+                # from ANY platform (CLI admin input, TUI, background tasks)
+                from lazyclaw.notifications.telegram_notifier import TelegramNotifier
+
+                self._telegram_notifier = TelegramNotifier(
+                    bot=telegram._app.bot,
+                    admin_chat_id_fn=lambda: telegram._admin_chat_id,
+                )
+                # Wire into TaskRunner so even tasks with no explicit callback
+                # (e.g. run_background skill) still notify Telegram
+                if self._task_runner and self._task_runner._default_callback is None:
+                    self._task_runner._default_callback = self._telegram_notifier
             else:
                 logger.warning("TUI: no telegram_token, skipping Telegram")
 
@@ -962,7 +1588,7 @@ class LazyClawApp(App):
             if self._telegram_connected and telegram:
                 _tg = telegram  # capture reference
 
-                async def _telegram_push_fn(text: str) -> None:
+                async def _telegram_push_fn(text: str, reply_markup=None) -> None:
                     # Check admin_chat_id at call time (may be set after /start)
                     chat_id = _tg._admin_chat_id
                     if not chat_id:
@@ -975,6 +1601,7 @@ class LazyClawApp(App):
                         await _telegram_send_with_retry(
                             lambda: _tg._app.bot.send_message(
                                 chat_id=int(chat_id), text=text,
+                                reply_markup=reply_markup,
                             )
                         )
                         logger.info("Telegram push sent to chat %s", chat_id)
@@ -990,6 +1617,9 @@ class LazyClawApp(App):
 
             # Persistent browser
             await self._init_persistent_browser()
+
+            # Auto-start MLX worker if HYBRID mode
+            await self._auto_start_mlx()
 
             logger.info("TUI: all services started, running uvicorn")
             self._post_log("info", f"API on http://localhost:{self._config.port}")
@@ -1024,6 +1654,64 @@ class LazyClawApp(App):
                         self._post_log("info", "Persistent browser running")
         except Exception:
             pass
+
+    async def _auto_start_mlx(self) -> None:
+        """Auto-start MLX worker server if ECO mode is HYBRID and no server running."""
+        try:
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            from lazyclaw.llm.model_registry import get_mode_models
+            from lazyclaw.llm.providers.mlx_provider import MLXProvider
+
+            eco = await get_eco_settings(self._config, self._user_id)
+            mode = eco.get("mode", "full")
+            if mode not in ("hybrid",):
+                return
+
+            # Check if MLX worker already running on :8081
+            probe = MLXProvider("http://127.0.0.1:8081")
+            if await probe.health_check():
+                self._post_log("info", "MLX worker already running on :8081")
+                return
+
+            # Check RAM — need ~4.5GB free for Nanbeige 3B Q8
+            try:
+                from lazyclaw.llm.ram_monitor import get_ram_status
+                ram = await get_ram_status()
+                free_mb = ram.headroom_mb
+                if free_mb < 2000:
+                    self._post_log(
+                        "info",
+                        f"MLX skipped — only {free_mb}MB free (need ~4.5GB)",
+                    )
+                    logger.warning(
+                        "MLX auto-start skipped: %dMB free < 2000MB threshold",
+                        free_mb,
+                    )
+                    return
+            except Exception:
+                pass  # RAM check failed, try starting anyway
+
+            # Start MLX worker
+            models = get_mode_models("hybrid")
+            worker_model = models["worker"]
+
+            from lazyclaw.llm.mlx_manager import MLXManager
+            manager = MLXManager()
+            self._post_log("info", f"Starting MLX worker ({worker_model})...")
+            logger.info("TUI: auto-starting MLX worker: %s", worker_model)
+
+            healthy = await manager.start_worker(worker_model)
+            if healthy:
+                self._post_log("info", "MLX worker running on :8081")
+                logger.info("TUI: MLX worker healthy on :8081")
+                # Store manager for graceful shutdown
+                self._mlx_manager = manager
+            else:
+                self._post_log("error", "MLX worker failed to start")
+                logger.error("TUI: MLX worker failed health check")
+        except Exception as exc:
+            logger.warning("MLX auto-start failed: %s", exc)
+            self._post_log("info", f"MLX not available: {exc}")
 
     async def _refresh_stats(self) -> None:
         """Periodic system stats refresh (every 2s)."""
@@ -1107,7 +1795,8 @@ class LazyClawApp(App):
 
             async with db_session(self._config) as db:
                 cursor = await db.execute(
-                    "SELECT job_type, name, cron_expression, context FROM agent_jobs "
+                    "SELECT job_type, name, cron_expression, context, "
+                    "last_run, next_run, instruction FROM agent_jobs "
                     "WHERE status = 'active' AND user_id = ?",
                     (self._user_id,),
                 )
@@ -1117,6 +1806,9 @@ class LazyClawApp(App):
                         "name": _dec(row[1]),
                         "cron_expression": _dec(row[2]),
                         "context": _dec(row[3]),
+                        "last_run": row[4] or "",
+                        "next_run": row[5] or "",
+                        "instruction": _dec(row[6]),
                     }
                     if job_type == "cron":
                         cron_count += 1
@@ -1153,6 +1845,19 @@ class LazyClawApp(App):
             except Exception:
                 pass
 
+            # RAM monitor — always collect, never block
+            ram_pct = 0.0
+            ram_ai = 0
+            ram_free = 0
+            try:
+                from lazyclaw.llm.ram_monitor import get_ram_status
+                ram = await get_ram_status()
+                ram_pct = ram.system_used_pct
+                ram_ai = ram.ai_total_mb
+                ram_free = ram.headroom_mb
+            except Exception as _ram_err:
+                logger.debug("RAM monitor error: %s", _ram_err)
+
             stats = SystemStats(
                 uptime_s=self.dashboard.uptime_s,
                 total_processed=self.dashboard.total_processed,
@@ -1172,6 +1877,9 @@ class LazyClawApp(App):
                 telegram_status=telegram_status,
                 eco_mode=eco_mode,
                 ollama_models=ollama_models,
+                ram_system_pct=ram_pct,
+                ram_ai_mb=ram_ai,
+                ram_free_mb=ram_free,
             )
             self.post_message(StatsRefreshed(stats))
 
@@ -1195,6 +1903,13 @@ class LazyClawApp(App):
                         eco_router.get_routing_stats(),
                         budget=self._eco_budget,
                     )
+            except Exception:
+                pass
+
+            # Update TeamLead bar (live task tracker)
+            try:
+                tl_bar = self.query_one("#team-lead-bar", TeamLeadBar)
+                tl_bar.render_status(self._team_lead)
             except Exception:
                 pass
 
@@ -1222,7 +1937,7 @@ class LazyClawApp(App):
 
     def on_stats_refreshed(self, msg: StatsRefreshed) -> None:
         bar = self.query_one("#system-bar", SystemBar)
-        bar.update_stats(msg.stats)
+        bar.update_stats(msg.stats, config=self._config)
 
     # ── Focus actions ─────────────────────────────────────────────────
 
@@ -1261,6 +1976,126 @@ class LazyClawApp(App):
             except Exception:
                 self._post_log("error", f"Copy failed: {exc}")
 
+    # ── Cancel / Settings actions ────────────────────────────────────
+
+    def action_cancel_focused(self) -> None:
+        """Cancel the first active request (x key)."""
+        active = self.dashboard._active
+        if not active:
+            self._post_log("info", "Nothing to cancel")
+            return
+        # Cancel the first non-done active request
+        for chat_id, req in list(active.items()):
+            if req.phase not in ("done", "error", "cancelled"):
+                self._cancel_request(chat_id)
+                return
+        self._post_log("info", "No active tasks to cancel")
+
+    def _cancel_request(self, chat_id: str) -> None:
+        """Cancel a single request by chat_id."""
+        req = self.dashboard._active.get(chat_id)
+        if not req:
+            return
+        name = req.message[:30]
+        # Cancel via CancellationToken (cooperative signal to agent loop)
+        cb = self.dashboard._callbacks.get(chat_id)
+        if cb and cb.cancel_token:
+            cb.cancel_token.cancel()
+        # Cancel via TeamLead
+        if self._team_lead:
+            task_id = self._team_lead.find_cancel_target(name)
+            if task_id:
+                self._team_lead.cancel(task_id)
+        # Cancel via TaskRunner (background)
+        if self._task_runner:
+            for tid, uid in list(self._task_runner._task_users.items()):
+                tname = self._task_runner._task_names.get(tid, "")
+                if chat_id in tid or name in tname:
+                    from lazyclaw.runtime.aio_helpers import fire_and_forget
+
+                    fire_and_forget(
+                        self._task_runner.cancel(tid, uid),
+                        name=f"cancel-{tid}",
+                    )
+                    break
+        # Update card to cancelled
+        req.phase = "cancelled"
+        snap = self.dashboard._snapshot(req)
+        self.post_message(RequestUpdated(chat_id, snap))
+        self._post_log("cancel", f"Cancelled: \"{name}\"")
+        # Remove after brief display
+        self.set_timer(2.0, lambda: self.dashboard.unregister_request(chat_id))
+
+    @work(name="cancel-all")
+    async def _cancel_all_active(self) -> None:
+        """Cancel all active foreground requests."""
+        active = list(self.dashboard._active.keys())
+        count = 0
+        for chat_id in active:
+            req = self.dashboard._active.get(chat_id)
+            if req and req.phase not in ("done", "error", "cancelled"):
+                self._cancel_request(chat_id)
+                count += 1
+        if count == 0:
+            self._post_log("info", "Nothing to cancel")
+        else:
+            self._post_log("cancel", f"Cancelled {count} task(s)")
+
+    @work(name="cancel-bg")
+    async def _cancel_all_bg(self) -> None:
+        """Cancel all background tasks."""
+        if self._task_runner:
+            count = await self._task_runner.cancel_all()
+            self._post_log("cancel", f"Cancelled {count} background task(s)")
+        else:
+            self._post_log("info", "No task runner available")
+
+    def action_close_settings(self) -> None:
+        """Close settings panel if open (Escape key)."""
+        if self._settings_visible:
+            self.action_toggle_settings()
+
+    def action_toggle_settings(self) -> None:
+        """Toggle settings panel — replaces dashboard panels (3 key)."""
+        panel = self.query_one("#settings-panel", SettingsPanel)
+        self._settings_visible = not self._settings_visible
+        if self._settings_visible:
+            panel.add_class("visible")
+            self.add_class("settings-open")
+            self._load_settings_panel()
+            self._post_log("info", "Settings — press 3 or Esc to return to dashboard")
+        else:
+            panel.remove_class("visible")
+            self.remove_class("settings-open")
+            self._post_log("info", "Dashboard restored")
+
+    @work(name="load-settings")
+    async def _load_settings_panel(self) -> None:
+        """Load current settings and render in the settings panel."""
+        try:
+            from lazyclaw.browser.browser_settings import get_browser_settings
+            from lazyclaw.llm.eco_settings import get_eco_settings
+            from lazyclaw.permissions.settings import get_permission_settings
+            from lazyclaw.runtime.agent_settings import get_agent_settings
+            from lazyclaw.teams.settings import get_team_settings
+
+            eco = await get_eco_settings(self._config, self._user_id)
+            agent = await get_agent_settings(self._config, self._user_id)
+            browser = await get_browser_settings(self._config, self._user_id)
+            team = await get_team_settings(self._config, self._user_id)
+            perms = await get_permission_settings(self._config, self._user_id)
+
+            panel = self.query_one("#settings-panel", SettingsPanel)
+            panel.render_settings(
+                eco, agent, browser,
+                team=team,
+                perms=perms,
+                telegram_connected=self._telegram_connected,
+                cdp_port=getattr(self._config, "cdp_port", 9222),
+            )
+        except Exception as exc:
+            self._post_log("error", f"Failed to load settings: {exc}")
+
     # ── Admin input ──────────────────────────────────────────────────
 
     @on(Input.Submitted, "#admin-input")
@@ -1293,9 +2128,32 @@ class LazyClawApp(App):
             self._show_history()
             return
 
+        if text.startswith("/filter"):
+            filter_arg = text[7:].strip().lower() or "all"
+            if filter_arg in ("all", "tools", "errors", "llm"):
+                self.query_one("#log-panel", LogPanel).set_filter(filter_arg)
+                self._post_log("info", f"Log filter: {filter_arg}")
+            else:
+                self._post_log("info", "Filters: all, tools, errors, llm")
+            return
+
+        if text.startswith("/cancel"):
+            await self._handle_cancel_command(text)
+            return
+
+        if text.startswith("/set "):
+            await self._handle_set_command(text)
+            return
+
+        if text == "/settings":
+            self.action_toggle_settings()
+            return
+
         if text in ("/help", "/"):
             self._post_log("info",
-                           "Commands: /clear /status /history /jobs /watchers /help")
+                           "Commands: /clear /status /history /jobs /watchers "
+                           "/filter <all|tools|errors|llm> "
+                           "/cancel [id|all|bg] /set <key> <value> /settings /help")
             return
 
         # Enqueue as admin message with dashboard tracking + response display
@@ -1322,7 +2180,10 @@ class LazyClawApp(App):
         self.dashboard.register_request(chat_id, text)
         try:
             from lazyclaw.runtime.callbacks import MultiCallback
-            effective_cb = MultiCallback(cb)
+            cbs = [cb]
+            if self._telegram_notifier is not None:
+                cbs.append(self._telegram_notifier)
+            effective_cb = MultiCallback(*cbs)
             response = await self._lane_queue.enqueue(
                 user_id, text, callback=effective_cb,
             )
@@ -1339,6 +2200,96 @@ class LazyClawApp(App):
         except Exception as exc:
             self._post_log("error", f"Agent error: {exc}")
             self.dashboard.unregister_request(chat_id)
+
+    async def _handle_cancel_command(self, text: str) -> None:
+        """Handle /cancel [id|all|bg] commands."""
+        arg = text[7:].strip().lower()
+
+        if not arg or arg == "all":
+            # Cancel everything
+            await self._cancel_all_active()
+            await self._cancel_all_bg()
+            return
+
+        if arg == "bg":
+            await self._cancel_all_bg()
+            return
+
+        # Try cancel by number (card number) or name
+        # First try matching against active requests
+        for chat_id, req in list(self.dashboard._active.items()):
+            if req.phase in ("done", "error", "cancelled"):
+                continue
+            # Match by card message content or partial name
+            if arg in req.message.lower() or arg in chat_id.lower():
+                self._cancel_request(chat_id)
+                return
+
+        # Try via TeamLead
+        if self._team_lead:
+            task_id = self._team_lead.find_cancel_target(arg)
+            if task_id:
+                self._team_lead.cancel(task_id)
+                if self._task_runner:
+                    await self._task_runner.cancel(task_id, self._user_id)
+                self._post_log("cancel", f"Cancelled: \"{arg}\"")
+                return
+
+        self._post_log("info", f"No match for \"{arg}\"")
+
+    async def _handle_set_command(self, text: str) -> None:
+        """Handle /set <key> <value> commands."""
+        parts = text.split(None, 2)
+        if len(parts) < 3:
+            self._post_log("info", "Usage: /set <eco|brain|worker|budget|team> <value>")
+            return
+
+        key = parts[1].lower()
+        val = parts[2].strip()
+
+        try:
+            if key == "eco":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                valid = ("hybrid", "full")
+                if val.lower() not in valid:
+                    self._post_log("info", f"ECO modes: {', '.join(valid)}")
+                    return
+                await update_eco_settings(self._config, self._user_id, {"mode": val.lower()})
+                self._post_log("info", f"ECO mode → {val.lower()}")
+
+            elif key == "brain":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                await update_eco_settings(self._config, self._user_id, {"brain_model": val})
+                self._post_log("info", f"Brain model → {val}")
+
+            elif key == "worker":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                await update_eco_settings(self._config, self._user_id, {"worker_model": val})
+                self._post_log("info", f"Worker model → {val}")
+
+            elif key == "budget":
+                from lazyclaw.llm.eco_settings import update_eco_settings
+                budget = float(val)
+                await update_eco_settings(self._config, self._user_id, {"monthly_paid_budget": budget})
+                self._eco_budget = budget
+                self._post_log("info", f"Budget → ${budget:.2f}")
+
+            elif key == "team":
+                from lazyclaw.runtime.agent_settings import update_agent_settings
+                on = val.lower() in ("on", "auto", "true", "1")
+                await update_agent_settings(self._config, self._user_id, {"auto_delegate": on})
+                self._post_log("info", f"Auto delegate → {'on' if on else 'off'}")
+
+            else:
+                self._post_log("info", f"Unknown setting: {key}. Use: eco, brain, worker, budget, team")
+                return
+
+            # Refresh settings panel if visible
+            if self._settings_visible:
+                self._load_settings_panel()
+
+        except Exception as exc:
+            self._post_log("error", f"Failed to update {key}: {exc}")
 
     async def _show_jobs(self) -> None:
         """Show active cron jobs in log panel."""
@@ -1430,6 +2381,10 @@ class LazyClawApp(App):
             await self._lane_queue.stop()
             from lazyclaw.mcp.manager import disconnect_all
             await asyncio.wait_for(disconnect_all(), timeout=3)
+            # Stop MLX server if we started it
+            mlx = getattr(self, "_mlx_manager", None)
+            if mlx:
+                await mlx.stop_all()
             from lazyclaw.db.connection import close_pool
             await close_pool()
         except Exception:
@@ -1487,6 +2442,8 @@ def _log_style(kind: str) -> str:
         "admin": _C_HEADER,
         "reply": _C_SUCCESS,
         "error": _C_ERROR,
+        "stuck": f"bold {_C_ERROR}",
+        "cancel": f"bold {_C_ERROR}",
     }.get(kind, "dim")
 
 
@@ -1504,4 +2461,6 @@ def _log_icon(kind: str) -> str:
         "admin": ">>",
         "reply": "←",
         "error": "✗",
+        "stuck": "⚠",
+        "cancel": "🛑",
     }.get(kind, "  ")

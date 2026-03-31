@@ -77,13 +77,20 @@ async def generate_code_skill(
     user_id: str,
     description: str,
     name: str | None = None,
+    eco_router=None,
 ) -> dict:
     """Use LLM to generate a code skill from description.
 
     Returns dict with id, name, code, description, parameters_schema.
     Raises SandboxError if generated code fails validation after retry.
     """
-    router = LLMRouter(config)
+    # Use eco_router if available (respects ECO mode), fallback to direct router
+    if eco_router is None:
+        from lazyclaw.llm.router import LLMRouter
+        _router = LLMRouter(config)
+        _chat = lambda msgs: _router.chat(msgs, model=config.brain_model, user_id=user_id)
+    else:
+        _chat = lambda msgs: eco_router.chat(msgs, user_id=user_id)
 
     user_prompt = f"Create a code skill that: {description}"
     if name:
@@ -95,7 +102,7 @@ async def generate_code_skill(
     ]
 
     # First attempt
-    response = await router.chat(config.default_model, messages, user_id=user_id)
+    response = await _chat(messages)
     parsed = _parse_llm_response(response.content)
 
     skill_name = name or parsed.get("name", "generated_skill")
@@ -117,7 +124,7 @@ async def generate_code_skill(
         messages.append(LLMMessage(role="assistant", content=response.content))
         messages.append(LLMMessage(role="user", content=retry_prompt))
 
-        response = await router.chat(config.default_model, messages, user_id=user_id)
+        response = await _chat(messages)
         parsed = _parse_llm_response(response.content)
 
         skill_code = parsed.get("code", skill_code)

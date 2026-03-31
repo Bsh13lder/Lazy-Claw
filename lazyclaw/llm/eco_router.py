@@ -1,14 +1,13 @@
-"""ECO Router — Smart token routing between free, local, and paid AI.
+"""ECO Router v5 — 3-mode architecture with Claude CLI.
 
-Four modes:
-- LOCAL:  Ollama only, $0 always. Brain + specialist local models.
-- ECO:    Free API providers only, $0 always. Waits if rate-limited.
-- HYBRID: Local first, paid fallback. Auto-decides per task complexity.
-- FULL:   Always paid. Maximum quality.
+Three roles: Brain (= Team Lead), Worker, Fallback.
+Three modes:
+  HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  FULL:    User-configurable brain/worker/fallback (paid, auto)
+  CLAUDE:  All roles via claude CLI ($0 — covered by subscription)
 
-Sits between agent.py and llm/router.py. For free calls, uses
-mcp-freeride's FreeRideRouter directly (as library, not MCP protocol).
-For local calls, uses OllamaProvider directly via OpenAI-compatible API.
+All model assignments come from MODE_MODELS in model_registry.py.
+User overrides in eco_settings take priority over defaults.
 """
 
 from __future__ import annotations
@@ -17,63 +16,142 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, decrypt_field
 from lazyclaw.db.connection import db_session
+from lazyclaw.llm.free_providers import (
+    PRIORITY_ORDER,
+    PROVIDER_DEFS,
+    FreeProviderResult,
+    cascade_chat,
+    discover_providers,
+    stream_chat as free_stream_chat,
+)
 from lazyclaw.llm.model_registry import (
-    BRAIN_MODEL,
-    SPECIALIST_MODEL,
+    MODE_MODELS,
+    get_mode_models,
     RoutingResult,
     get_model,
 )
-from lazyclaw.llm.providers.base import LLMMessage, LLMResponse
+from lazyclaw.llm.providers.base import LLMMessage, LLMResponse, StreamChunk
 from lazyclaw.llm.rate_limiter import RateLimiter
 from lazyclaw.llm.router import LLMRouter
 
 logger = logging.getLogger(__name__)
 
-# Task types for classification
-TASK_FREE = "free"
-TASK_PAID = "paid"
 
-# Complexity tiers for model routing (NanoClaw-inspired)
+# ── ECO Modes ─────────────────────────────────────────────────────────
+
+MODE_HYBRID = "hybrid"  # Haiku brain + Nanbeige local worker, auto-fallback
+MODE_FULL = "full"      # User-configurable brain/worker/fallback (paid)
+MODE_CLAUDE = "claude"  # All roles via claude -p CLI ($0 via subscription)
+
+# Legacy aliases — map old names to the supported modes
+_MODE_ALIASES = {
+    "hybrid": MODE_HYBRID,
+    "full": MODE_FULL,
+    "off": MODE_FULL,
+    "claude": MODE_CLAUDE,
+}
+
+# Old eco/local modes are disabled (require 32GB+ RAM)
+_DISABLED_MODES = frozenset({"local", "eco", "eco_on", "on"})
+
+DISABLED_MODE_MESSAGE = (
+    "ECO mode (local-only) requires 32GB+ RAM and is coming in a future update. "
+    "Use HYBRID for the best balance of cost and quality."
+)
+
+VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL, MODE_CLAUDE})
+
+# Backward-compat aliases for imports that used the old names
+MODE_ECO_ON = MODE_HYBRID      # deprecated
+MODE_ECO_HYBRID = MODE_HYBRID  # deprecated
+MODE_ECO_OFF = MODE_FULL       # deprecated
+
+
+def normalize_mode(mode: str) -> str:
+    """Normalize mode string to canonical form."""
+    key = mode.lower().strip()
+    if key in _DISABLED_MODES:
+        return key  # caller should check and reject
+    return _MODE_ALIASES.get(key, MODE_HYBRID)
+
+
+# ── Request role (who's asking) ───────────────────────────────────────
+
+ROLE_BRAIN = "brain"      # Chat, planning, synthesis — no tools
+ROLE_WORKER = "worker"    # Tool execution — gets tools
+
+
+# ── Complexity classification ─────────────────────────────────────────
+
 COMPLEXITY_SIMPLE = "simple"
 COMPLEXITY_STANDARD = "standard"
 COMPLEXITY_COMPLEX = "complex"
 
-# Keywords that suggest tasks suitable for free providers (low-quality OK)
-# Only truly disposable tasks — NOT conversations, NOT user-facing responses
-_FREE_PATTERNS = re.compile(
-    r"\b(categorize this|classify this|detect duplicates|"
-    r"suggest deadline|prioritize these)\b",
+_COMPLEX_PATTERNS = re.compile(
+    r"\b(analyze|compare|plan|debug|research|investigate|evaluate|"
+    r"architect|design|refactor|review|audit|benchmark|optimize|"
+    r"explain.*code|trace.*bug|root.*cause)\b",
     re.IGNORECASE,
 )
 
-# Keywords that MUST use paid (tools, complex, user-facing conversation)
-_PAID_PATTERNS = re.compile(
-    r"\b(search|browse|find online|look up|web search|remember|"
-    r"save.*memory|create.*skill|write.*code|generate.*code|"
-    r"run.*command|execute|take.*screenshot|check.*file|read.*file|"
-    r"write.*file|schedule|set.*reminder|cron|browser|open.*page|"
-    r"click|navigate|vault|credential|api.*key)\b",
+_SIMPLE_ACTION_PATTERN = re.compile(
+    r"\b(search|browse|find|create|write|run|schedule|calculate|"
+    r"check|read|remind|list|show|fetch|tell|what|where|is there|"
+    r"open|look|see|get)\b",
     re.IGNORECASE,
 )
 
+
+def classify_complexity(message: str, has_tools: bool) -> str:
+    """Fast heuristic for model tier routing. No LLM call needed."""
+    if _COMPLEX_PATTERNS.search(message):
+        return COMPLEXITY_COMPLEX
+
+    if has_tools and _SIMPLE_ACTION_PATTERN.search(message) and len(message) < 120:
+        return COMPLEXITY_SIMPLE
+
+    if not has_tools and len(message) < 100:
+        lower = message.lower().strip()
+        if len(lower) < 40 or not _SIMPLE_ACTION_PATTERN.search(lower):
+            return COMPLEXITY_SIMPLE
+
+    return COMPLEXITY_STANDARD
+
+
+def _extract_user_message(messages: list[LLMMessage]) -> str:
+    """Extract the latest user message from the conversation."""
+    for msg in reversed(messages):
+        if msg.role == "user":
+            return msg.content
+    return ""
+
+
+# ── ECO Settings ──────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class EcoSettings:
     """User's ECO mode configuration."""
 
-    mode: str = "hybrid"  # eco, hybrid, full, local
+    mode: str = MODE_HYBRID
     show_badges: bool = True
-    monthly_paid_budget: float = 0.0  # 0 = unlimited
-    locked_provider: str | None = None  # Lock to specific free provider
-    allowed_providers: list[str] | None = None  # Custom provider pool
-    task_overrides: dict[str, str] | None = None  # task_type → provider/model
-    brain_model: str | None = None       # Override brain model (None = default)
-    specialist_model: str | None = None  # Override specialist model (None = default)
+    monthly_paid_budget: float = 0.0        # 0 = unlimited
+    auto_fallback: bool = True              # Both modes auto-fallback
+    max_workers: int = 10                   # Max concurrent workers
+    brain_model: str | None = None          # Override brain (None = default)
+    worker_model: str | None = None         # Override worker (None = default)
+    fallback_model: str | None = None       # Override fallback (None = default)
+    # FULL mode user-settable overrides
+    full_brain_model: str | None = None
+    full_worker_model: str | None = None
+    full_fallback_model: str | None = None
+    locked_provider: str | None = None      # Lock to specific free provider
+    allowed_providers: list[str] | None = None
+    free_providers: list[str] | None = None
+    preferred_free_model: str | None = None
 
 
 def _parse_eco_settings(raw: str | None) -> EcoSettings:
@@ -93,19 +171,32 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
     if allowed and not isinstance(allowed, list):
         allowed = None
 
-    task_overrides = eco.get("task_overrides")
-    if task_overrides and not isinstance(task_overrides, dict):
-        task_overrides = None
+    free_providers = eco.get("free_providers")
+    if free_providers and not isinstance(free_providers, list):
+        free_providers = None
+
+    raw_mode = eco.get("mode", "hybrid")
+    mode = normalize_mode(raw_mode)
+    # Reject disabled modes — fall back to hybrid
+    if mode in _DISABLED_MODES:
+        mode = MODE_HYBRID
 
     return EcoSettings(
-        mode=eco.get("mode", "full"),
+        mode=mode,
         show_badges=eco.get("show_badges", True),
         monthly_paid_budget=float(eco.get("monthly_paid_budget", 0)),
+        auto_fallback=eco.get("auto_fallback", True),
+        max_workers=int(eco.get("max_workers", 10)),
+        brain_model=eco.get("brain_model"),
+        worker_model=eco.get("worker_model") or eco.get("specialist_model"),
+        fallback_model=eco.get("fallback_model"),
+        full_brain_model=eco.get("full_brain_model"),
+        full_worker_model=eco.get("full_worker_model"),
+        full_fallback_model=eco.get("full_fallback_model"),
         locked_provider=eco.get("locked_provider"),
         allowed_providers=allowed,
-        task_overrides=task_overrides,
-        brain_model=eco.get("brain_model"),
-        specialist_model=eco.get("specialist_model"),
+        free_providers=free_providers,
+        preferred_free_model=eco.get("preferred_free_model"),
     )
 
 
@@ -121,197 +212,196 @@ async def _load_eco_settings(config: Config, user_id: str) -> EcoSettings:
     return _parse_eco_settings(result[0])
 
 
-# Keywords that suggest complex analysis tasks (worth the best model)
-_COMPLEX_PATTERNS = re.compile(
-    r"\b(analyze|compare|plan|debug|research|investigate|evaluate|"
-    r"architect|design|refactor|review|audit|benchmark|optimize|"
-    r"explain.*code|trace.*bug|root.*cause)\b",
-    re.IGNORECASE,
-)
-
-# Simple action keywords (reused from team lead's filter)
-_SIMPLE_ACTION_PATTERN = re.compile(
-    r"\b(search|browse|find|create|write|run|schedule|calculate|"
-    r"check|read|remind|list|show|fetch|tell|what|where|is there|"
-    r"open|look|see|get)\b",
-    re.IGNORECASE,
-)
-
-
-def classify_complexity(message: str, has_tools: bool) -> str:
-    """Fast heuristic for model tier routing. No LLM call needed.
-
-    Inspired by NanoClaw's select_model(text_length, item_count).
-    """
-    if _COMPLEX_PATTERNS.search(message):
-        return COMPLEXITY_COMPLEX
-
-    # Simple tool tasks (list, check, show, read) → cheap model
-    if has_tools and _SIMPLE_ACTION_PATTERN.search(message) and len(message) < 120:
-        return COMPLEXITY_SIMPLE
-
-    if not has_tools and len(message) < 100:
-        lower = message.lower().strip()
-        if len(lower) < 40 or not _SIMPLE_ACTION_PATTERN.search(lower):
-            return COMPLEXITY_SIMPLE
-
-    return COMPLEXITY_STANDARD
-
-
-def classify_task(message: str, has_tools: bool) -> str:
-    """Classify whether a message needs free or paid AI.
-
-    Conservative — GPT-5 is the default for everything user-facing.
-    Free providers only for specific low-quality-OK tasks (categorize, dedup, etc).
-    """
-    if has_tools:
-        return TASK_PAID
-    if _PAID_PATTERNS.search(message):
-        return TASK_PAID
-    if _FREE_PATTERNS.search(message):
-        return TASK_FREE
-    # Default: GPT-5 for all conversations, greetings, questions, everything
-    return TASK_PAID
-
-
-def _extract_user_message(messages: list[LLMMessage]) -> str:
-    """Extract the latest user message from the conversation."""
-    for msg in reversed(messages):
-        if msg.role == "user":
-            return msg.content
-    return ""
-
+# ── EcoRouter ─────────────────────────────────────────────────────────
 
 class EcoRouter:
-    """Routes requests between local (Ollama), free (mcp-freeride), and paid.
+    """Routes requests between local (MLX/Ollama) and paid (Claude) providers.
+
+    Core principle: Brain never gets tools. Workers always get tools.
+    Brain decides WHAT to do. Workers execute HOW.
 
     Usage:
         eco = EcoRouter(config, paid_router)
-        response = await eco.chat(messages, user_id, tools=[...])
-        routing = eco.last_routing  # RoutingResult for attribution
+        # Brain call (no tools)
+        response = await eco.chat(messages, user_id, role="brain")
+        # Worker call (with tools)
+        response = await eco.chat(messages, user_id, role="worker", tools=[...])
+        # Check attribution
+        routing = eco.last_routing
     """
 
     def __init__(self, config: Config, paid_router: LLMRouter) -> None:
         self._config = config
         self._paid_router = paid_router
-        self._free_router = None  # Lazy init
-        self._free_router_unavailable = False  # Cache import failure
         self._rate_limiter = RateLimiter()
-        self._usage: dict[str, dict] = {}  # user_id → {"free": N, "paid": N, "local": N}
+        self._usage: dict[str, dict] = {}  # user_id → {local, free, paid}
 
-        # Ollama provider (lazy init, protected by lock)
-        self._ollama = None  # OllamaProvider | None
-        self._ollama_checked = False  # True after first health check attempt
-        self._ollama_lock = asyncio.Lock()
+        # Local providers (lazy init)
+        self._mlx_brain = None      # MLXProvider for brain
+        self._mlx_worker = None     # MLXProvider for worker
+        self._ollama = None         # OllamaProvider fallback
+        self._local_checked = False
+        self._local_lock = asyncio.Lock()
+        self._mlx_manager: Any | None = None  # MLXManager for on-demand
+
+        # Free provider keys (lazy init)
+        self._free_keys: dict[str, str] | None = None
+
+        # Claude CLI provider (lazy init)
+        self._claude_cli = None
+        self._last_claude_fallback: str | None = None
 
         # Routing attribution — set after every chat() call
         self.last_routing: RoutingResult | None = None
 
-        # Per-model stats for TUI routing panel
-        self._routing_stats: dict[str, dict] = {}  # model → {calls, tokens_in, tokens_out}
+        # Per-model stats for TUI
+        self._routing_stats: dict[str, dict] = {}
 
-    # ── Ollama provider ───────────────────────────────────────────────
+    # ── Local provider management ─────────────────────────────────────
 
-    async def _ensure_ollama(self):
-        """Lazy-init Ollama provider with health check. Returns None if down."""
-        if self._ollama is not None:
-            return self._ollama
-        if self._ollama_checked:
-            return None  # Already checked and failed
+    async def _ensure_local(self) -> tuple:
+        """Lazy-init local providers. Returns (brain_provider, worker_provider).
 
-        async with self._ollama_lock:
-            # Double-check after acquiring lock (another coroutine may have initialized)
-            if self._ollama is not None:
-                return self._ollama
-            if self._ollama_checked:
-                return None
+        On-demand mode: if no MLX server is running, starts one (~6s cold start)
+        and auto-stops after 2 min idle to free ~10 GB GPU RAM.
 
-            from lazyclaw.llm.providers.ollama_provider import OllamaProvider
-
-            provider = OllamaProvider()
-            healthy = await provider.health_check()
-            self._ollama_checked = True
-
-            if not healthy:
-                logger.warning("Ollama not available at localhost:11434 — local mode disabled")
-                return None
-
-            self._ollama = provider
-            logger.info("Ollama connected — local models available")
-            return provider
-
-    def reset_ollama_check(self) -> None:
-        """Reset Ollama health check cache (e.g. after user restarts Ollama).
-
-        Safe to call from any context — the lock protects re-init.
+        Tries MLX first (faster on Apple Silicon), falls back to Ollama.
+        Returns (None, None) if no local provider available.
         """
+        # Fast path: already have healthy providers — just touch idle timer
+        if self._local_checked and (self._mlx_brain or self._mlx_worker):
+            if self._mlx_manager:
+                self._mlx_manager.touch()
+            return self._mlx_brain, self._mlx_worker
+
+        async with self._local_lock:
+            # Re-check after acquiring lock
+            if self._local_checked and (self._mlx_brain or self._mlx_worker):
+                if self._mlx_manager:
+                    self._mlx_manager.touch()
+                return self._mlx_brain, self._mlx_worker
+
+            # Reset stale state (server may have been idle-stopped)
+            self._mlx_brain = None
+            self._mlx_worker = None
+
+            # Try MLX — check both ports, use whatever is available
+            try:
+                from lazyclaw.llm.providers.mlx_provider import MLXProvider
+
+                _eco_models = get_mode_models("hybrid")
+                _worker_model = _eco_models["worker"]
+                _brain_model = _eco_models["brain"]
+
+                # Check :8081 first (worker/nanbeige — most common for single-model)
+                worker = MLXProvider("http://127.0.0.1:8081")
+                if await worker.health_check():
+                    worker._loaded_model = _worker_model
+                    self._mlx_worker = worker
+                    logger.info("MLX connected on :8081 → %s", _worker_model)
+
+                # Check :8080 (brain — only if dual-model setup)
+                brain = MLXProvider("http://127.0.0.1:8080")
+                if await brain.health_check():
+                    brain._loaded_model = _brain_model
+                    self._mlx_brain = brain
+                    logger.info("MLX connected on :8080 → %s", _brain_model)
+
+                # On-demand: start MLX if nothing is running
+                if not self._mlx_worker and not self._mlx_brain:
+                    if self._mlx_manager is None:
+                        from lazyclaw.llm.mlx_manager import MLXManager
+                        self._mlx_manager = MLXManager(
+                            on_demand=True,
+                            on_idle_stop=self.reset_local_check,
+                        )
+                        self._mlx_manager._worker_model = _worker_model
+
+                    logger.info("MLX on-demand: starting worker...")
+                    started = await self._mlx_manager.ensure_running()
+                    if started:
+                        worker = MLXProvider("http://127.0.0.1:8081")
+                        if await worker.health_check():
+                            worker._loaded_model = _worker_model
+                            self._mlx_worker = worker
+                            logger.info("MLX on-demand ready: %s", _worker_model)
+
+                # Single server: use one model for both roles
+                if self._mlx_worker and not self._mlx_brain:
+                    self._mlx_brain = self._mlx_worker
+                    logger.info("MLX single-model: nanbeige serves brain + worker")
+                elif self._mlx_brain and not self._mlx_worker:
+                    self._mlx_worker = self._mlx_brain
+                    logger.info("MLX single-model: brain serves both roles")
+            except Exception as exc:
+                logger.debug("MLX not available: %s", exc)
+
+            # Ollama fallback (if MLX not available)
+            if not self._mlx_brain:
+                try:
+                    from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+                    ollama = OllamaProvider()
+                    if await ollama.health_check():
+                        self._ollama = ollama
+                        logger.info("Ollama connected (MLX not available)")
+                except Exception as exc:
+                    logger.debug("Ollama not available: %s", exc)
+
+            self._local_checked = True
+            return self._mlx_brain, self._mlx_worker
+
+    def reset_local_check(self) -> None:
+        """Reset local provider detection (after user installs/restarts)."""
+        self._mlx_brain = None
+        self._mlx_worker = None
         self._ollama = None
-        self._ollama_checked = False
+        self._local_checked = False
 
-    # ── Free router (mcp-freeride) ────────────────────────────────────
+    # ── Free provider management ──────────────────────────────────────
 
-    def _get_free_router(self):
-        """Lazy-init the free router from mcp-freeride."""
-        if self._free_router is not None:
-            return self._free_router
-        if self._free_router_unavailable:
-            return None
-        try:
-            from mcp_freeride.config import load_config as load_freeride_config
-            from mcp_freeride.router import FreeRideRouter
+    def _get_free_keys(self) -> dict[str, str]:
+        """Discover and cache free provider API keys from env."""
+        if self._free_keys is None:
+            self._free_keys = discover_providers()
+            if self._free_keys:
+                logger.info("Free providers: %s", ", ".join(self._free_keys))
+        return self._free_keys
 
-            freeride_config = load_freeride_config()
-            self._free_router = FreeRideRouter(freeride_config)
-            return self._free_router
-        except ImportError:
-            self._free_router_unavailable = True
-            logger.warning("mcp-freeride not installed, ECO mode unavailable")
-            return None
+    def _get_provider_order(self, settings: EcoSettings) -> list[str]:
+        """Ordered list of free providers to try."""
+        keys = self._get_free_keys()
+        if not keys:
+            return []
 
-    async def _ensure_free_router(self):
-        """Lazy-init free router + load apihunter providers (async)."""
-        if self._free_router is not None:
-            return self._free_router
+        if settings.locked_provider and settings.locked_provider in keys:
+            return [settings.locked_provider]
 
-        # Use sync init first
-        router = self._get_free_router()
-        if router is None:
-            return None
+        if settings.free_providers:
+            return [p for p in settings.free_providers if p in keys]
 
-        # Then async-load apihunter providers
-        try:
-            count = await router.load_apihunter_providers_async()
-            if count > 0:
-                logger.info("Loaded %d providers from apihunter", count)
-        except Exception:
-            logger.debug("Failed to load apihunter providers", exc_info=True)
+        return [p for p in PRIORITY_ORDER if p in keys]
 
-        # Also refresh Ollama models
-        try:
-            await router.refresh_ollama()
-        except Exception:
-            logger.debug("Failed to refresh Ollama models", exc_info=True)
+    def refresh_free_keys(self) -> None:
+        """Re-scan env vars for free provider keys."""
+        self._free_keys = None
 
-        return router
+    # ── Message conversion (for free/local providers) ─────────────────
 
-    # ── Message conversion ────────────────────────────────────────────
+    @staticmethod
+    def _convert_to_dicts(messages: list[LLMMessage]) -> list[dict]:
+        """Convert LLMMessages to OpenAI-format dicts.
 
-    def _convert_to_dicts(self, messages: list[LLMMessage]) -> list[dict]:
-        """Convert LLMMessage list to OpenAI-format dicts for free router.
-
-        Free APIs don't support tool roles, so we convert tool context
-        into plain user/assistant messages to preserve conversation flow.
+        Free/local providers without native tool support get tool
+        messages converted to plain text.
         """
         result = []
         for msg in messages:
             if msg.role == "tool":
-                # Preserve tool results as user context
                 result.append({
                     "role": "user",
                     "content": f"[Tool result: {msg.content}]",
                 })
             elif msg.tool_calls:
-                # Convert tool-calling assistant message to plain text
                 parts = []
                 if msg.content:
                     parts.append(msg.content)
@@ -326,9 +416,9 @@ class EcoRouter:
     # ── Usage tracking ────────────────────────────────────────────────
 
     def _record_usage(self, user_id: str, route: str) -> None:
-        """Track usage stats per user. Route: 'free', 'paid', or 'local'."""
+        """Track usage stats. Route: 'local', 'free', or 'paid'."""
         if user_id not in self._usage:
-            self._usage[user_id] = {"free": 0, "paid": 0, "local": 0}
+            self._usage[user_id] = {"local": 0, "free": 0, "paid": 0}
         self._usage[user_id][route] = self._usage[user_id].get(route, 0) + 1
 
     def _record_routing_stats(self, model: str, usage: dict | None) -> None:
@@ -341,6 +431,40 @@ class EcoRouter:
             stats["tokens_in"] += usage.get("prompt_tokens", 0)
             stats["tokens_out"] += usage.get("completion_tokens", 0)
 
+    def _set_routing(
+        self, model: str, provider: str, is_local: bool, reason: str
+    ) -> None:
+        """Set last_routing attribution."""
+        self.last_routing = RoutingResult(
+            model=model, provider=provider, is_local=is_local, reason=reason,
+        )
+
+    # ── Resolve models for current mode ─────────────────────────────
+
+    def _resolve_models(self, settings: EcoSettings) -> dict[str, str]:
+        """Get brain/worker/fallback model IDs for the current mode.
+
+        HYBRID: defaults from MODE_MODELS, generic overrides apply.
+        FULL: full_*_model overrides take priority, then generic overrides,
+              then MODE_MODELS defaults.
+        """
+        defaults = get_mode_models(settings.mode)
+        if settings.mode == MODE_FULL:
+            return {
+                "brain": settings.full_brain_model or settings.brain_model or defaults["brain"],
+                "worker": settings.full_worker_model or settings.worker_model or defaults["worker"],
+                "fallback": settings.full_fallback_model or settings.fallback_model or defaults["fallback"],
+            }
+        return {
+            "brain": settings.brain_model or defaults["brain"],
+            "worker": settings.worker_model or defaults["worker"],
+            "fallback": settings.fallback_model or defaults["fallback"],
+        }
+
+    def _is_auto_fallback(self, settings: EcoSettings) -> bool:
+        """Both HYBRID and FULL always auto-fallback."""
+        return True
+
     # ── Main chat router ──────────────────────────────────────────────
 
     async def chat(
@@ -348,359 +472,305 @@ class EcoRouter:
         messages: list[LLMMessage],
         user_id: str,
         model: str | None = None,
+        role: str = ROLE_BRAIN,
         **kwargs,
     ) -> LLMResponse:
-        """Route chat to local, free, or paid based on ECO mode settings."""
+        """Route chat based on ECO mode and request role.
+
+        Args:
+            messages: Conversation messages.
+            user_id: User ID for settings lookup.
+            model: Explicit model override (bypasses routing).
+            role: ROLE_BRAIN or ROLE_WORKER.
+            **kwargs: tools, tool_choice, temperature, etc.
+        """
         settings = await _load_eco_settings(self._config, user_id)
-        has_tools = bool(kwargs.get("tools"))
+        models = self._resolve_models(settings)
 
-        if settings.mode == "local":
-            return await self._route_local(messages, user_id, settings, has_tools, **kwargs)
+        # Explicit model override — bypass routing
+        if model and role not in (ROLE_BRAIN, ROLE_WORKER):
+            return await self._route_paid(messages, user_id, model, **kwargs)
 
-        if settings.mode == "full":
-            return await self._route_full(messages, user_id, model, has_tools, **kwargs)
+        # Claude CLI mode — all roles go through claude -p
+        if settings.mode == MODE_CLAUDE:
+            return await self._route_claude(
+                messages, user_id, settings=settings, role=role, **kwargs
+            )
 
-        if settings.mode == "eco":
-            return await self._route_eco(messages, user_id, settings, has_tools, **kwargs)
+        if role == ROLE_BRAIN:
+            return await self._route_brain(
+                messages, user_id, settings, models, **kwargs
+            )
 
-        if settings.mode == "hybrid":
-            return await self._route_hybrid(messages, user_id, settings, model, has_tools, **kwargs)
+        if role == ROLE_WORKER:
+            return await self._route_worker(
+                messages, user_id, settings, models, **kwargs
+            )
 
-        # Unknown mode, fall back to paid
-        self._record_usage(user_id, "paid")
-        self.last_routing = RoutingResult(
-            model=model or self._config.default_model,
-            provider="openai", is_local=False, reason="unknown_mode -> paid",
-        )
-        return await self._paid_router.chat(messages, model=model, user_id=user_id, **kwargs)
-
-    # ── FULL mode ─────────────────────────────────────────────────────
-
-    async def _route_full(
-        self,
-        messages: list[LLMMessage],
-        user_id: str,
-        model: str | None,
-        has_tools: bool,
-        **kwargs,
-    ) -> LLMResponse:
-        """FULL mode: always paid, complexity-based model selection."""
-        self._record_usage(user_id, "paid")
-
-        effective_model = model
-        if effective_model is None:
-            # GPT-5 for all tasks — better tool decisions, reliable execution
-            effective_model = self._config.smart_model
-            logger.info("FULL mode -> %s", effective_model)
-
-        # Infer provider for attribution
-        provider = "openai"
-        if effective_model and effective_model.startswith("claude-"):
-            provider = "anthropic"
-
-        self.last_routing = RoutingResult(
-            model=effective_model or self._config.default_model,
-            provider=provider,
-            is_local=False,
-            reason=f"full: {effective_model}",
+        # Unknown role — default to brain
+        return await self._route_brain(
+            messages, user_id, settings, models, **kwargs
         )
 
-        response = await self._paid_router.chat(
-            messages, model=effective_model, user_id=user_id, **kwargs
-        )
-        self._record_routing_stats(
-            effective_model or self._config.default_model,
-            response.usage,
-        )
-        return response
+    # ── Brain routing (same for all modes — just picks the right model)
 
-    # ── LOCAL mode ────────────────────────────────────────────────────
-
-    async def _route_local(
+    async def _route_brain(
         self,
         messages: list[LLMMessage],
         user_id: str,
         settings: EcoSettings,
-        has_tools: bool,
+        models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """LOCAL mode: Ollama only, $0 always. Brain for simple, specialist for tools."""
-        from lazyclaw.llm.providers.ollama_provider import OllamaUnavailableError
+        """Brain: paid API (Haiku in HYBRID, user-configured in FULL)."""
+        brain_name = models["brain"]
+        return await self._route_paid(
+            messages, user_id, brain_name,
+            reason=f"{settings.mode}: brain -> {brain_name}",
+            **kwargs,
+        )
 
-        ollama = await self._ensure_ollama()
-        if not ollama:
-            logger.warning("LOCAL: Ollama unavailable, falling back to paid")
-            # Fall back to paid so the agent can still help (e.g. answer questions,
-            # help user install Ollama, use ollama_install skill)
-            self.last_routing = RoutingResult(
-                model=self._config.fast_model,
-                provider="openai",
-                is_local=False,
-                reason="local_fallback: ollama_unavailable",
+    # ── Claude CLI routing (all roles through claude -p) ───────────────
+
+    async def _route_claude(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings | None = None,
+        role: str = ROLE_BRAIN,
+        **kwargs,
+    ) -> LLMResponse:
+        """Route all calls through claude -p CLI ($0 via subscription).
+
+        User can set brain model via /mode brain opus|sonnet|haiku.
+        This controls the --model flag passed to claude -p.
+        """
+        # CLI mode only supports sonnet and opus (both 4.6)
+        cli_model = "sonnet"  # default
+        if settings and settings.brain_model:
+            if "opus" in settings.brain_model.lower():
+                cli_model = "opus"
+
+        if self._claude_cli is None:
+            from lazyclaw.llm.providers.claude_cli_provider import (
+                ClaudeCLIProvider,
             )
-            self._record_usage(user_id, "paid")
-            return await self._paid_router.chat(
-                messages, model=self._config.fast_model, user_id=user_id, **kwargs
-            )
-
-        user_message = _extract_user_message(messages)
-        complexity = classify_complexity(user_message, has_tools)
-
-        # User-configurable models (fall back to defaults from model_registry)
-        brain = settings.brain_model or BRAIN_MODEL
-        specialist = settings.specialist_model or SPECIALIST_MODEL
-
-        # Determine model order: brain first for non-tool tasks, specialist for tools
-        if has_tools:
-            models_to_try = [specialist, brain]
-        elif complexity == COMPLEXITY_SIMPLE:
-            models_to_try = [brain]
+            self._claude_cli = ClaudeCLIProvider(model=cli_model)
         else:
-            # Standard/complex without tools: try brain first (faster), specialist if fails
-            models_to_try = [brain, specialist]
+            # Update model if settings changed
+            self._claude_cli._model = cli_model
 
-        for model in models_to_try:
-            reason = f"local: {complexity} -> {model.split('/')[-1]}"
-            self.last_routing = RoutingResult(
-                model=model, provider="ollama", is_local=True, reason=reason,
+        self._set_routing(
+            "claude-cli", "claude_cli", is_local=False,
+            reason=f"claude: {role} -> {cli_model}",
+        )
+        self._record_usage(user_id, "free")
+
+        try:
+            response = await self._claude_cli.chat(messages, model="claude-cli", **kwargs)
+        except Exception as exc:
+            logger.warning("Claude CLI failed: %s — falling back to Sonnet", exc)
+            self._last_claude_fallback = str(exc)
+            response = await self._route_paid(
+                messages, user_id, "claude-sonnet-4-20250514",
+                reason=f"claude_cli_failed: {exc}",
+                **kwargs,
             )
-
-            local_kwargs = dict(kwargs)
-            if model == brain:
-                local_kwargs.pop("tools", None)
-                local_kwargs.pop("tool_choice", None)
-
-            try:
-                self._record_usage(user_id, "local")
-                response = await ollama.chat(messages, model=model, **local_kwargs)
-                self._record_routing_stats(model, response.usage)
-                return response
-            except OllamaUnavailableError as exc:
-                logger.warning("LOCAL: Model %s failed: %s", model, exc)
-                # Don't reset ollama check on model errors (400/404) —
-                # only reset on connection errors so we don't spam reconnects
-                if "Cannot connect" in str(exc):
-                    self.reset_ollama_check()
-                continue  # Try next model
-
-        # All local models failed — fall back to paid
-        logger.warning("LOCAL: All local models failed, falling back to paid")
-        self.last_routing = RoutingResult(
-            model=self._config.fast_model,
-            provider="openai",
-            is_local=False,
-            reason="local_fallback: all_models_failed",
-        )
-        self._record_usage(user_id, "paid")
-        return await self._paid_router.chat(
-            messages, model=self._config.fast_model, user_id=user_id, **kwargs
-        )
-
-    # ── HYBRID mode ───────────────────────────────────────────────────
-
-    async def _route_hybrid(
-        self,
-        messages: list[LLMMessage],
-        user_id: str,
-        settings: EcoSettings,
-        model: str | None,
-        has_tools: bool,
-        **kwargs,
-    ) -> LLMResponse:
-        """HYBRID mode: try local first, then free APIs, then paid."""
-        from lazyclaw.llm.providers.ollama_provider import OllamaUnavailableError
-
-        user_message = _extract_user_message(messages)
-        complexity = classify_complexity(user_message, has_tools)
-
-        # User-configurable models
-        brain = settings.brain_model or BRAIN_MODEL
-        specialist = settings.specialist_model or SPECIALIST_MODEL
-
-        # Priority 1: Simple chat without tools → brain model (local, free)
-        if complexity == COMPLEXITY_SIMPLE and not has_tools:
-            ollama = await self._ensure_ollama()
-            if ollama:
-                self.last_routing = RoutingResult(
-                    model=brain, provider="ollama", is_local=True,
-                    reason="hybrid: simple_chat -> brain",
-                )
-                self._record_usage(user_id, "local")
-                kwargs_no_tools = dict(kwargs)
-                kwargs_no_tools.pop("tools", None)
-                kwargs_no_tools.pop("tool_choice", None)
-                try:
-                    response = await ollama.chat(messages, model=brain, **kwargs_no_tools)
-                    self._record_routing_stats(brain, response.usage)
-                    return response
-                except OllamaUnavailableError as exc:
-                    logger.info("HYBRID: Local brain failed: %s", exc)
-                    if "Cannot connect" in str(exc):
-                        self.reset_ollama_check()
-
-        # Priority 2: Standard/simple+tools → specialist model (local, free)
-        if complexity in (COMPLEXITY_SIMPLE, COMPLEXITY_STANDARD):
-            ollama = await self._ensure_ollama()
-            if ollama:
-                self.last_routing = RoutingResult(
-                    model=specialist, provider="ollama", is_local=True,
-                    reason=f"hybrid: {complexity} -> specialist",
-                )
-                self._record_usage(user_id, "local")
-                try:
-                    response = await ollama.chat(messages, model=specialist, **kwargs)
-                    self._record_routing_stats(specialist, response.usage)
-                    return response
-                except OllamaUnavailableError as exc:
-                    logger.info("HYBRID: Local specialist failed: %s", exc)
-                    if "Cannot connect" in str(exc):
-                        self.reset_ollama_check()
-
-        # Priority 3: Check task overrides for free API routing
-        task_type = classify_task(user_message, has_tools)
-        if settings.task_overrides:
-            for pattern, _override_provider in settings.task_overrides.items():
-                if pattern.lower() in user_message.lower():
-                    task_type = TASK_FREE
-                    break
-
-        if task_type == TASK_FREE:
-            free_router = await self._ensure_free_router()
-            if free_router:
-                model_hint = None
-                if settings.locked_provider:
-                    model_hint = settings.locked_provider + "/"
-
-                try:
-                    dict_messages = self._convert_to_dicts(messages)
-                    result = await free_router.chat(dict_messages, model_hint)
-                    provider = result.get("provider", "free")
-                    self._rate_limiter.record_request(provider)
-                    self._record_usage(user_id, "free")
-                    self.last_routing = RoutingResult(
-                        model=result.get("model", "free"),
-                        provider=provider,
-                        is_local=False,
-                        reason="hybrid: free_api",
-                    )
-
-                    content = result["content"]
-                    if settings.show_badges:
-                        badge = f"[ECO {result.get('provider', '?')}/{result.get('model', '?')}] "
-                        content = badge + content
-
-                    return LLMResponse(
-                        content=content,
-                        model=result.get("model", "free"),
-                        usage={"provider": provider, "eco_mode": "hybrid_free"},
-                    )
-                except Exception:
-                    logger.info("HYBRID: Free failed, falling back to paid")
-
-        # Priority 4: Paid path (complex tasks or all local/free failed)
-        effective_model = model or self._config.fast_model
-        provider = "openai"
-        if effective_model.startswith("claude-"):
-            provider = "anthropic"
-
-        self.last_routing = RoutingResult(
-            model=effective_model, provider=provider, is_local=False,
-            reason=f"hybrid: {complexity} -> paid",
-        )
-        self._record_usage(user_id, "paid")
-        response = await self._paid_router.chat(
-            messages, model=effective_model, user_id=user_id, **kwargs
-        )
-        self._record_routing_stats(effective_model, response.usage)
-
-        if settings.show_badges and response.content:
-            response = LLMResponse(
-                content=f"[PAID {response.model}] {response.content}",
-                model=response.model,
-                usage=response.usage,
-                tool_calls=response.tool_calls,
+            # Prepend fallback badge so user sees the switch
+            response.content = (
+                f"[⚡ CLI error → Sonnet fallback] {response.content}"
             )
+            return response
+
+        self._last_claude_fallback = None
+        self._record_routing_stats("claude-cli", response.usage)
         return response
 
-    # ── ECO mode ──────────────────────────────────────────────────────
+    # ── Worker routing ────────────────────────────────────────────────
 
-    async def _route_eco(
+    async def _route_worker(
         self,
         messages: list[LLMMessage],
         user_id: str,
         settings: EcoSettings,
-        has_tools: bool,
+        models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """ECO mode: free only, wait if rate-limited, never paid."""
-        free_router = await self._ensure_free_router()
-        if not free_router:
-            self.last_routing = RoutingResult(
-                model="none", provider="free", is_local=False, reason="eco: no_providers",
-            )
-            return LLMResponse(
-                content=(
-                    "ECO mode is enabled but no free AI providers are configured.\n\n"
-                    "Quick setup (pick any — all are free):\n"
-                    "\u2022 Groq (fastest): https://console.groq.com \u2192 Get API Key \u2192 add GROQ_API_KEY to .env\n"
-                    "\u2022 Gemini: https://aistudio.google.com/apikey \u2192 add GEMINI_API_KEY to .env\n"
-                    "\u2022 OpenRouter: https://openrouter.ai/keys \u2192 add OPENROUTER_API_KEY to .env\n"
-                    "\u2022 HuggingFace: https://huggingface.co/settings/tokens \u2192 add HF_API_KEY to .env\n\n"
-                    "Then restart LazyClaw. Or switch to paid mode: /eco full"
-                ),
-                model="none",
+        """Worker: local first (HYBRID), paid (FULL), fallback cascade."""
+        worker_name = models["worker"]
+        worker_profile = get_model(worker_name)
+        is_local_worker = worker_profile and worker_profile.is_local
+
+        # FULL mode: worker is paid (Haiku) — go straight to API
+        if not is_local_worker:
+            return await self._route_paid(
+                messages, user_id, worker_name,
+                reason=f"{settings.mode}: worker -> {worker_name}",
+                **kwargs,
             )
 
-        # Build model hint from locked_provider or task override
-        model_hint = None
-        if settings.locked_provider:
-            model_hint = settings.locked_provider + "/"
-
-        # Wait for rate limit capacity (ECO = patient, never paid)
-        max_wait_rounds = 6  # Max ~3 minutes total
-        for attempt in range(max_wait_rounds):
+        # HYBRID: try local Nanbeige first
+        _, worker_provider = await self._ensure_local()
+        provider = worker_provider or self._ollama
+        if provider:
             try:
-                dict_messages = self._convert_to_dicts(messages)
-                result = await asyncio.wait_for(
-                    free_router.chat(dict_messages, model_hint),
-                    timeout=15,
-                )
-                provider = result.get("provider", "free")
-                self._rate_limiter.record_request(provider)
-                self._record_usage(user_id, "free")
-                self.last_routing = RoutingResult(
-                    model=result.get("model", "free"),
-                    provider=provider,
-                    is_local=False,
-                    reason="eco: free_only",
-                )
-
-                content = result["content"]
-                if settings.show_badges:
-                    badge = f"[ECO {result.get('provider', '?')}/{result.get('model', '?')}] "
-                    content = badge + content
-
-                return LLMResponse(
-                    content=content,
-                    model=result.get("model", "free"),
-                    usage={"provider": provider, "eco_mode": "eco"},
+                return await self._call_local(
+                    provider, messages, worker_name, user_id,
+                    reason=f"{settings.mode}: worker -> {worker_name}",
+                    **kwargs,
                 )
             except Exception as exc:
-                logger.warning("ECO provider error: %s", exc)
-                if "All" in str(exc) and attempt < max_wait_rounds - 1:
-                    wait = 30
-                    logger.info("ECO: All providers busy, waiting %ds (attempt %d)", wait, attempt + 1)
-                    await asyncio.sleep(wait)
-                    continue
-                raise
+                logger.warning("%s worker failed: %s — trying free", settings.mode, exc)
 
-        self.last_routing = RoutingResult(
-            model="none", provider="free", is_local=False, reason="eco: all_rate_limited",
+        # Local failed — try free providers
+        free_resp = await self._try_free(messages, user_id, settings, **kwargs)
+        if free_resp:
+            return free_resp
+
+        # All free exhausted — fallback
+        return await self._fallback(
+            messages, user_id, settings, models,
+            reason=f"{settings.mode}: worker_failed",
+            **kwargs,
         )
+
+    # ── Paid call helper ──────────────────────────────────────────────
+
+    async def _route_paid(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        model: str,
+        reason: str = "paid",
+        **kwargs,
+    ) -> LLMResponse:
+        """Route to paid provider (Claude/OpenAI)."""
+        provider = "anthropic" if model.startswith("claude-") else "openai"
+        self._set_routing(model, provider, is_local=False, reason=reason)
+        self._record_usage(user_id, "paid")
+
+        response = await self._paid_router.chat(
+            messages, model=model, user_id=user_id, **kwargs
+        )
+        self._record_routing_stats(model, response.usage)
+        return response
+
+    # ── Local call helper ─────────────────────────────────────────────
+
+    async def _call_local(
+        self,
+        provider,
+        messages: list[LLMMessage],
+        model: str,
+        user_id: str,
+        reason: str = "local",
+        **kwargs,
+    ) -> LLMResponse:
+        """Call a local provider (MLX or Ollama).
+
+        On failure, resets local cache and raises so caller can fallback.
+        """
+        provider_name = "mlx"
+        if hasattr(provider, '_base_url'):
+            base = getattr(provider, '_base_url', '')
+            if "8080" in base or "8081" in base:
+                provider_name = "mlx"
+        elif hasattr(provider, 'health_check') and not hasattr(provider, '_loaded_model'):
+            provider_name = "ollama"
+
+        self._set_routing(model, provider_name, is_local=True, reason=reason)
+        self._record_usage(user_id, "local")
+
+        try:
+            response = await asyncio.wait_for(
+                provider.chat(messages, model=model, **kwargs),
+                timeout=120,  # 2min max for local models
+            )
+            self._record_routing_stats(model, response.usage)
+            return response
+        except asyncio.TimeoutError:
+            logger.warning("Local model %s timed out (>120s) — resetting cache", model)
+            self.reset_local_check()
+            raise
+        except Exception as exc:
+            logger.warning("Local model %s failed: %s — resetting cache", model, exc)
+            # Reset so next call re-detects servers (maybe one crashed)
+            self.reset_local_check()
+            raise
+
+    # ── Fallback (local failed → paid with permission) ────────────────
+
+    async def _fallback(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        models: dict[str, str],
+        reason: str = "fallback",
+        **kwargs,
+    ) -> LLMResponse:
+        """Fallback to paid when local/worker fails. Always auto-fallback."""
+        fallback_name = models["fallback"]
+        logger.info("Auto-fallback to %s: %s", fallback_name, reason)
+        return await self._route_paid(
+            messages, user_id, fallback_name,
+            reason=f"auto_fallback: {reason}",
+            **kwargs,
+        )
+
+    # ── Free provider helper ──────────────────────────────────────────
+
+    async def _try_free(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings,
+        **kwargs,
+    ) -> LLMResponse | None:
+        """Try free providers. Returns None if all fail."""
+        keys = self._get_free_keys()
+        if not keys:
+            return None
+
+        order = self._get_provider_order(settings)
+        available = [p for p in order if self._rate_limiter.has_capacity(p)]
+        if not available:
+            return None
+
+        dict_messages = self._convert_to_dicts(messages)
+
+        try:
+            result = await cascade_chat(
+                messages=dict_messages,
+                provider_order=available,
+                api_keys=keys,
+                preferred_model=settings.preferred_free_model,
+            )
+        except RuntimeError:
+            return None
+
+        self._rate_limiter.record_request(result.provider)
+        self._record_usage(user_id, "free")
+        self._set_routing(
+            result.model, result.provider, is_local=False,
+            reason=f"free: {result.provider}/{result.model}",
+        )
+        self._record_routing_stats(result.model, result.usage)
+
+        content = result.content
+        if settings.show_badges:
+            mode_labels = {MODE_HYBRID: "HYBRID", MODE_FULL: "FULL", MODE_CLAUDE: "CLAUDE"}
+            mode_label = mode_labels.get(settings.mode, settings.mode.upper())
+            content = f"[{mode_label} {result.provider}] {content}"
+
         return LLMResponse(
-            content="All free AI providers are currently rate-limited. "
-            "Please try again in a few minutes, or switch to HYBRID mode.",
-            model="none",
+            content=content,
+            model=result.model,
+            usage={
+                **result.usage,
+                "provider": result.provider,
+                "eco_mode": settings.mode,
+            },
         )
 
     # ── Streaming ─────────────────────────────────────────────────────
@@ -710,22 +780,17 @@ class EcoRouter:
         messages: list[LLMMessage],
         user_id: str,
         model: str | None = None,
+        role: str = ROLE_BRAIN,
         **kwargs,
     ):
-        """Stream chat responses.
-
-        Paid path supports true streaming. Local/ECO/hybrid free paths
-        fall back to non-streaming and yield a single chunk.
-        """
-        from lazyclaw.llm.providers.base import StreamChunk
-        from lazyclaw.llm.providers.ollama_provider import OllamaUnavailableError
-
+        """Stream chat responses. Routes based on ECO mode + role."""
         settings = await _load_eco_settings(self._config, user_id)
+        models = self._resolve_models(settings)
 
-        # LOCAL mode: non-streaming single chunk
-        if settings.mode == "local":
-            response = await self._route_local(
-                messages, user_id, settings, bool(kwargs.get("tools")), **kwargs
+        # Claude CLI mode — use non-streaming fallback
+        if settings.mode == MODE_CLAUDE:
+            response = await self._route_claude(
+                messages, user_id, settings=settings, role=role, **kwargs
             )
             yield StreamChunk(
                 delta=response.content,
@@ -736,168 +801,72 @@ class EcoRouter:
             )
             return
 
-        # FULL mode: true streaming via paid provider
-        if settings.mode == "full":
-            # Set routing attribution for full mode
-            effective_model = model
-            if effective_model is None:
-                effective_model = self._config.smart_model
-            provider = "openai"
-            if effective_model and effective_model.startswith("claude-"):
-                provider = "anthropic"
-            self.last_routing = RoutingResult(
-                model=effective_model or self._config.default_model,
-                provider=provider, is_local=False,
-                reason=f"full_stream: {effective_model}",
-            )
+        if role == ROLE_BRAIN:
+            # Brain: always paid streaming
+            brain_name = models["brain"]
             self._record_usage(user_id, "paid")
+            provider = "anthropic" if brain_name.startswith("claude-") else "openai"
+            self._set_routing(
+                brain_name, provider, is_local=False,
+                reason=f"{settings.mode}_stream: brain",
+            )
             async for chunk in self._paid_router.stream_chat(
-                messages, model=effective_model, user_id=user_id, **kwargs
+                messages, model=brain_name, user_id=user_id, **kwargs
             ):
                 yield chunk
             return
 
-        # HYBRID mode: try local first, then free, then paid streaming
-        if settings.mode == "hybrid":
-            has_tools = bool(kwargs.get("tools"))
-            user_message = _extract_user_message(messages)
-            complexity = classify_complexity(user_message, has_tools)
-            brain = settings.brain_model or BRAIN_MODEL
-            specialist = settings.specialist_model or SPECIALIST_MODEL
+        # Worker streaming
+        worker_name = models["worker"]
+        worker_profile = get_model(worker_name)
+        is_local_worker = worker_profile and worker_profile.is_local
 
-            # Try local brain for simple chat
-            if complexity == COMPLEXITY_SIMPLE and not has_tools:
-                ollama = await self._ensure_ollama()
-                if ollama:
-                    try:
-                        kwargs_no_tools = dict(kwargs)
-                        kwargs_no_tools.pop("tools", None)
-                        kwargs_no_tools.pop("tool_choice", None)
-                        response = await ollama.chat(messages, model=brain, **kwargs_no_tools)
-                        self.last_routing = RoutingResult(
-                            model=brain, provider="ollama", is_local=True,
-                            reason="hybrid_stream: simple -> brain",
-                        )
-                        self._record_usage(user_id, "local")
-                        self._record_routing_stats(brain, response.usage)
-                        yield StreamChunk(
-                            delta=response.content,
-                            tool_calls=response.tool_calls,
-                            usage=response.usage,
-                            model=response.model,
-                            done=True,
-                        )
-                        return
-                    except OllamaUnavailableError:
-                        logger.info("HYBRID stream: brain failed, falling through")
-
-            # Try local specialist for standard tasks
-            if complexity in (COMPLEXITY_SIMPLE, COMPLEXITY_STANDARD):
-                ollama = await self._ensure_ollama()
-                if ollama:
-                    try:
-                        response = await ollama.chat(messages, model=specialist, **kwargs)
-                        self.last_routing = RoutingResult(
-                            model=specialist, provider="ollama", is_local=True,
-                            reason=f"hybrid_stream: {complexity} -> specialist",
-                        )
-                        self._record_usage(user_id, "local")
-                        self._record_routing_stats(specialist, response.usage)
-                        yield StreamChunk(
-                            delta=response.content,
-                            tool_calls=response.tool_calls,
-                            usage=response.usage,
-                            model=response.model,
-                            done=True,
-                        )
-                        return
-                    except OllamaUnavailableError:
-                        logger.info("HYBRID stream: specialist failed, falling through")
-
-        # ECO/HYBRID free path
-        if settings.mode in ("eco", "hybrid"):
-            has_tools = bool(kwargs.get("tools"))
-            user_message = _extract_user_message(messages)
-            use_free = settings.mode == "eco" or classify_task(user_message, has_tools) == TASK_FREE
-
-            if use_free:
-                free_router = await self._ensure_free_router()
-                if free_router:
-                    try:
-                        dict_messages = self._convert_to_dicts(messages)
-                        result = await asyncio.wait_for(
-                            free_router.chat(dict_messages, None),
-                            timeout=15,
-                        )
-                        provider = result.get("provider", "free")
-                        self._rate_limiter.record_request(provider)
-                        self._record_usage(user_id, "free")
-                        self.last_routing = RoutingResult(
-                            model=result.get("model", "free"),
-                            provider=provider,
-                            is_local=False,
-                            reason=f"{settings.mode}_stream: free",
-                        )
-
-                        content = result["content"]
-                        if settings.show_badges:
-                            badge = f"[ECO {provider}/{result.get('model', '?')}] "
-                            content = badge + content
-
-                        yield StreamChunk(
-                            delta=content,
-                            model=result.get("model", "free"),
-                            usage={"provider": provider, "eco_mode": settings.mode},
-                            done=True,
-                        )
-                        return
-                    except Exception as exc:
-                        logger.warning("ECO streaming failed: %s", exc, exc_info=True)
-                        if settings.mode == "eco":
-                            yield StreamChunk(
-                                delta="Free AI providers unavailable. Try: set eco hybrid",
-                                model="none",
-                                done=True,
-                            )
-                            return
-                        logger.info("HYBRID: Free failed, falling back to paid streaming")
-
-        # Paid streaming fallback
-        self._record_usage(user_id, "paid")
-        effective_model = model or self._config.fast_model
-        provider = "openai"
-        if effective_model.startswith("claude-"):
-            provider = "anthropic"
-        self.last_routing = RoutingResult(
-            model=effective_model, provider=provider, is_local=False,
-            reason="paid_stream_fallback",
-        )
-
-        badge_prefix = ""
-        if settings.show_badges and settings.mode == "hybrid":
-            badge_prefix = "[PAID] "
-
-        first_chunk = True
-        async for chunk in self._paid_router.stream_chat(
-            messages, model=model, user_id=user_id, **kwargs
-        ):
-            if first_chunk and badge_prefix and chunk.delta:
-                yield StreamChunk(
-                    delta=badge_prefix + chunk.delta,
-                    tool_calls=chunk.tool_calls,
-                    usage=chunk.usage,
-                    model=chunk.model,
-                    done=chunk.done,
-                )
-                first_chunk = False
-            else:
+        # FULL mode: paid worker streaming
+        if not is_local_worker:
+            self._record_usage(user_id, "paid")
+            provider = "anthropic" if worker_name.startswith("claude-") else "openai"
+            self._set_routing(
+                worker_name, provider, is_local=False,
+                reason=f"{settings.mode}_stream: worker",
+            )
+            async for chunk in self._paid_router.stream_chat(
+                messages, model=worker_name, user_id=user_id, **kwargs
+            ):
                 yield chunk
+            return
+
+        # HYBRID: local worker streaming (Nanbeige)
+        _, worker_provider = await self._ensure_local()
+        provider = worker_provider or self._ollama
+        if provider:
+            try:
+                async for chunk in provider.stream_chat(
+                    messages, model=worker_name, **kwargs
+                ):
+                    yield chunk
+                self._record_usage(user_id, "local")
+                self._set_routing(
+                    worker_name, "mlx", is_local=True,
+                    reason=f"{settings.mode}_stream: worker",
+                )
+                return
+            except Exception as exc:
+                logger.warning("Local worker stream failed: %s", exc)
+
+        # Fallback
+        response = await self._fallback(
+            messages, user_id, settings, models,
+            reason=f"{settings.mode}_stream_fallback", **kwargs,
+        )
+        yield StreamChunk(
+            delta=response.content, model=response.model, done=True,
+        )
 
     # ── Stats ─────────────────────────────────────────────────────────
 
     def get_usage(self, user_id: str) -> dict:
         """Get usage stats for a user."""
-        stats = self._usage.get(user_id, {"free": 0, "paid": 0, "local": 0})
+        stats = self._usage.get(user_id, {"local": 0, "free": 0, "paid": 0})
         local = stats.get("local", 0)
         free = stats.get("free", 0)
         paid = stats.get("paid", 0)
@@ -907,8 +876,8 @@ class EcoRouter:
             "free_count": free,
             "paid_count": paid,
             "total": total,
-            "local_percentage": round(local / total * 100, 1) if total > 0 else 0,
-            "free_percentage": round(free / total * 100, 1) if total > 0 else 0,
+            "local_percentage": round((local + free) / total * 100, 1) if total > 0 else 0,
+            "paid_percentage": round(paid / total * 100, 1) if total > 0 else 0,
         }
 
     def get_routing_stats(self) -> dict:
@@ -948,3 +917,47 @@ class EcoRouter:
     def get_rate_limit_status(self) -> dict:
         """Get current rate limit status for all providers."""
         return self._rate_limiter.get_status()
+
+    def get_free_provider_status(self) -> list[dict]:
+        """Get status of all free providers."""
+        from lazyclaw.llm.free_providers import get_provider_info
+
+        info = get_provider_info()
+        rate_status = self._rate_limiter.get_status()
+
+        for item in info:
+            name = item["name"]
+            rs = rate_status.get(name, {})
+            item["rate_limit_used"] = rs.get("minute_used", 0)
+            item["rate_limit_max"] = rs.get("minute_max", 0)
+            item["has_capacity"] = rs.get("has_capacity", True)
+        return info
+
+    async def get_mode_display(self, user_id: str) -> dict:
+        """Get current mode info for display in Telegram/TUI."""
+        settings = await _load_eco_settings(self._config, user_id)
+        models = self._resolve_models(settings)
+
+        brain_provider, worker_provider = await self._ensure_local()
+        mlx_available = brain_provider is not None
+        ollama_available = self._ollama is not None
+
+        mode_labels = {
+            MODE_HYBRID: "HYBRID",
+            MODE_FULL: "FULL",
+            MODE_CLAUDE: "CLAUDE CLI",
+        }
+
+        return {
+            "mode": settings.mode,
+            "mode_label": mode_labels.get(settings.mode, settings.mode),
+            "brain_model": models["brain"],
+            "worker_model": models["worker"],
+            "fallback_model": models["fallback"],
+            "max_workers": settings.max_workers,
+            "auto_fallback": self._is_auto_fallback(settings),
+            "mlx_available": mlx_available,
+            "ollama_available": ollama_available,
+            "free_providers": list(self._get_free_keys().keys()),
+            "usage": self.get_usage(user_id),
+        }

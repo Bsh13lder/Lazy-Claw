@@ -6,12 +6,30 @@ through conversation. Uses the existing heartbeat daemon for execution.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_watcher_context(raw: str) -> dict:
+    """Parse watcher context JSON, returning empty dict on failure.
+
+    Context is decrypted by list_jobs/_row_to_dict before reaching here,
+    but may still be encrypted if decryption failed or field is raw.
+    """
+    if not raw:
+        return {}
+    # Skip encrypted values (decryption should have happened in list_jobs)
+    if isinstance(raw, str) and raw.startswith("enc:"):
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 class ScheduleJobSkill(BaseSkill):
@@ -120,13 +138,11 @@ class SetReminderSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Set a one-time reminder that fires at a specific time. "
-            "Convert the user's request to an ISO datetime. Examples: "
-            "'in 2 hours' → calculate from now, "
-            "'at 5pm' → today at 17:00, "
-            "'tomorrow at 9am' → next day at 09:00. "
-            "The reminder will be delivered via Telegram (if connected) "
-            "and also shown in the chat. After firing, it auto-deletes."
+            "Set a one-time reminder. PREFER add_task for reminders — it supports "
+            "relative times (+10m, +1h) and has Telegram buttons (Done/Snooze). "
+            "Only use set_reminder for cron-job-style reminders without task tracking. "
+            "Accepts relative times: '+10m', '+1h', '+2h30m', '+1d'. "
+            "Also accepts ISO datetime for specific times."
         )
 
     @property
@@ -145,9 +161,10 @@ class SetReminderSkill(BaseSkill):
                 "remind_at": {
                     "type": "string",
                     "description": (
-                        "When to fire the reminder in ISO 8601 format "
-                        "(e.g. '2026-03-17T17:00:00'). "
-                        "Calculate this from the user's request."
+                        "When to fire the reminder. Accepts RELATIVE times: "
+                        "'+10m' (10 min), '+1h' (1 hour), '+2h30m', '+1d'. "
+                        "ALWAYS use relative format for 'in X minutes/hours'. "
+                        "Also accepts ISO 8601 (e.g. '2026-03-17T17:00:00') for specific times."
                     ),
                 },
             },
@@ -155,6 +172,8 @@ class SetReminderSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        import re
+        from datetime import timedelta
         from lazyclaw.heartbeat.orchestrator import create_job
 
         message = params.get("message", "").strip()
@@ -163,21 +182,35 @@ class SetReminderSkill(BaseSkill):
         if not message or not remind_at:
             return "Missing required fields: message and remind_at."
 
-        # Validate the datetime
-        try:
-            dt = datetime.fromisoformat(remind_at)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt <= datetime.now(timezone.utc):
-                return (
-                    f"Reminder time '{remind_at}' is in the past. "
-                    f"Please set a future time."
-                )
-        except ValueError:
-            return (
-                f"Invalid datetime format: '{remind_at}'. "
-                f"Use ISO 8601 format (e.g. '2026-03-17T17:00:00')."
+        # Parse relative time: +10m, +1h, +2h30m, +1d
+        _rel_re = re.compile(
+            r"^\+?\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$",
+            re.IGNORECASE,
+        )
+        _rel_match = _rel_re.match(remind_at)
+        if _rel_match and any(_rel_match.groups()):
+            days = int(_rel_match.group(1) or 0)
+            hours = int(_rel_match.group(2) or 0)
+            minutes = int(_rel_match.group(3) or 0)
+            dt = datetime.now(timezone.utc) + timedelta(
+                days=days, hours=hours, minutes=minutes,
             )
+        else:
+            # Validate ISO datetime
+            try:
+                dt = datetime.fromisoformat(remind_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt <= datetime.now(timezone.utc):
+                    return (
+                        f"Reminder time '{remind_at}' is in the past. "
+                        f"Please set a future time."
+                    )
+            except ValueError:
+                return (
+                    f"Invalid time: '{remind_at}'. "
+                    f"Use '+10m', '+1h', or ISO 8601 format."
+                )
 
         try:
             job_id = await create_job(
@@ -260,6 +293,31 @@ class ListJobsSkill(BaseSkill):
                 lines.append(f"  {status_icon} {name}")
                 lines.append(f"    Type: Reminder (one-time)")
                 lines.append(f"    Fires: {next_run}")
+            elif job_type == "watcher":
+                # Watcher jobs store state in context JSON, not DB fields
+                ctx = _parse_watcher_context(job.get("context", "{}"))
+                interval_sec = ctx.get("check_interval", 120)
+                interval_min = int(interval_sec) // 60
+                last_check = ctx.get("last_check", 0)
+                service = ctx.get("service", "?")
+                seen_count = len(ctx.get("last_seen_ids", []))
+                expires = ctx.get("expires_at", "")
+
+                if last_check and last_check > 0:
+                    last_dt = datetime.fromtimestamp(last_check, tz=timezone.utc)
+                    last_str = last_dt.strftime("%Y-%m-%d %H:%M UTC")
+                else:
+                    last_str = "never"
+
+                expires_str = ""
+                if expires:
+                    expires_str = f"\n    Expires: {expires[:19]} UTC"
+
+                lines.append(f"  {status_icon} {name}")
+                lines.append(f"    Type: MCP Watcher ({service})")
+                lines.append(f"    Check every: {interval_min} min")
+                lines.append(f"    Last check: {last_str}")
+                lines.append(f"    Seen messages: {seen_count}{expires_str}")
             else:
                 cron = job.get("cron_expression", "?")
                 last_run = job.get("last_run", "never")

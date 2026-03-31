@@ -10,6 +10,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import time
 
 import telegram.error
@@ -63,6 +64,19 @@ _STATUS_DELAY_S = 2.0
 
 # Typing indicator interval
 _TYPING_INTERVAL_S = 4.0
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove common markdown formatting for plain-text Telegram messages."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
+    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+    return text
 
 
 class _TelegramCallback:
@@ -424,10 +438,31 @@ class _TelegramCallback:
 
         elif kind == "background_done":
             task_name = event.metadata.get("name", "")
-            result = event.metadata.get("result", "")
+            result = _strip_markdown(event.metadata.get("result", ""))
             if len(result) > 3000:
                 result = result[:3000] + "\n\n[truncated]"
-            text = f"\u2705 Background task '{task_name}' done\n\n{result}"
+
+            # Stats line
+            stats_parts: list[str] = []
+            _dur = event.metadata.get("duration_ms")
+            if _dur is not None:
+                _s = _dur / 1000
+                stats_parts.append(f"{_s:.0f}s" if _s < 60 else f"{_s / 60:.1f}m")
+            _tok = event.metadata.get("total_tokens")
+            if _tok:
+                stats_parts.append(f"{_tok:,} tokens")
+            _calls = event.metadata.get("llm_calls")
+            if _calls:
+                stats_parts.append(f"{_calls} LLM calls")
+            _cost = event.metadata.get("total_cost")
+            if _cost and _cost > 0:
+                stats_parts.append(f"${_cost:.4f}")
+            _tools = event.metadata.get("tools_used")
+            if _tools:
+                stats_parts.append(f"tools: {', '.join(_tools)}")
+            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
+
+            text = f"\u2705 Background task '{task_name}' done{stats_line}\n\n{result}"
             try:
                 await _telegram_send_with_retry(
                     lambda: self._bot.send_message(
@@ -455,6 +490,27 @@ class _TelegramCallback:
             # Signal dispatch complete so adapter can clean up
             self.dispatched = False
             self.busy = False
+
+        elif kind == "help_response":
+            # Forward noVNC remote takeover URL to the user
+            novnc_url = event.metadata.get("novnc_url")
+            if novnc_url:
+                context = event.metadata.get("stuck_context", "Browser control needed")
+                is_http = novnc_url.startswith("http://")
+                text = f"\U0001f510 Need help: {context}\n\nTap to take control:\n{novnc_url}"
+                if is_http:
+                    text += "\n\n\u26a0\ufe0f Connection is not encrypted (HTTP). Use on trusted network only."
+                try:
+                    await _telegram_send_with_retry(
+                        lambda: self._bot.send_message(
+                            chat_id=self._chat_id, text=text,
+                        )
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to send noVNC URL to chat %s: %s",
+                        self._chat_id, exc,
+                    )
 
         elif kind == "work_summary":
             # Store summary for footer — don't send separately
@@ -530,16 +586,34 @@ def _is_status_query(text: str) -> bool:
     return lower in _STATUS_KEYWORDS or lower == "/status"
 
 
+async def resolve_user_id(config) -> str:
+    """Resolve the primary user_id from database. Shared by adapter + commands."""
+    from lazyclaw.db.connection import db_session
+    try:
+        async with db_session(config) as db:
+            cursor = await db.execute(
+                "SELECT id FROM users ORDER BY created_at LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return "default"
+
+
 class TelegramAdapter(ChannelAdapter):
     def __init__(
         self, token: str, agent: Agent, config: Config, lane_queue=None,
-        server_dashboard=None,
+        server_dashboard=None, task_runner=None, team_lead=None,
     ) -> None:
         self._token = token
         self._agent = agent
         self._config = config
         self._lane_queue = lane_queue
         self._server_dashboard = server_dashboard
+        self._task_runner = task_runner
+        self._team_lead = team_lead
         self._app = None
         # Track active callback per chat for status queries
         self._active_callbacks: dict[str, _TelegramCallback] = {}
@@ -553,10 +627,23 @@ class TelegramAdapter(ChannelAdapter):
 
     async def start(self) -> None:
         self._app = ApplicationBuilder().token(self._token).build()
-        self._app.add_handler(CommandHandler("start", self._handle_start))
+
+        # Register all admin slash commands (instant, no LLM)
+        from lazyclaw.channels.telegram_commands import TelegramCommands
+        self._commands = TelegramCommands(
+            adapter=self,
+            config=self._config,
+            agent=self._agent,
+            task_runner=self._task_runner,
+            team_lead=self._team_lead,
+        )
+        self._commands.register(self._app)
+
+        # /status still handled here (needs access to active callbacks)
         self._app.add_handler(
             CommandHandler("status", self._handle_status_cmd),
         )
+        # Text messages → agent (must be AFTER command handlers)
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
@@ -565,6 +652,14 @@ class TelegramAdapter(ChannelAdapter):
         await self._app.start()
         await self._app.updater.start_polling()
         logger.info("Telegram adapter started")
+
+        # Register "/" autocomplete menu with Telegram (must be after start)
+        try:
+            from lazyclaw.channels.telegram_commands import BOT_COMMANDS
+            await self._app.bot.set_my_commands(BOT_COMMANDS)
+            logger.info("Telegram command menu registered (%d commands)", len(BOT_COMMANDS))
+        except Exception as exc:
+            logger.debug("Could not set bot commands menu: %s", exc)
 
     async def stop(self) -> None:
         if self._app is None:
@@ -610,6 +705,13 @@ class TelegramAdapter(ChannelAdapter):
         if not text:
             return
 
+        # If user replied to a specific message, include the quoted text as context
+        # so the agent knows what the user is responding to
+        if update.message.reply_to_message and update.message.reply_to_message.text:
+            quoted = update.message.reply_to_message.text.strip()
+            if quoted:
+                text = f"[Replying to: {quoted[:500]}]\n\n{text}"
+
         # Security: only allow admin/authorized chats
         if not self._is_allowed(chat_id):
             logger.warning("Unauthorized Telegram message from chat %s", chat_id)
@@ -637,19 +739,14 @@ class TelegramAdapter(ChannelAdapter):
             return
 
         # Resolve actual user_id from database (not hardcoded "default")
-        from lazyclaw.db.connection import db_session
-        user_id = "default"
-        try:
-            async with db_session(self._config) as db:
-                cursor = await db.execute(
-                    "SELECT id FROM users ORDER BY created_at LIMIT 1"
-                )
-                row = await cursor.fetchone()
-                if row:
-                    user_id = row[0]
-        except Exception:
-            pass
+        user_id = await resolve_user_id(self._config)
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
+
+        # ── Instant mute: reply "mute" to a watcher notification ──
+        # Zero LLM calls — handle directly for instant response
+        raw_text = update.message.text or ""
+        if await self._handle_instant_mute(update, user_id, raw_text):
+            return
 
         # Launch concurrently — LaneQueue serializes per user, fast dispatch
         # returns in <2s so the queue drains quickly for heavy tasks
@@ -658,6 +755,106 @@ class TelegramAdapter(ChannelAdapter):
             self._process_and_reply(update, chat_id, user_id, text),
             name=f"tg-{chat_id}-{id(text)}",
         )
+
+    async def _handle_instant_mute(
+        self, update: Update, user_id: str, raw_text: str,
+    ) -> bool:
+        """Handle instant mute/unmute commands replying to watcher notifications.
+
+        Returns True if handled (caller should stop), False otherwise.
+        Recognized triggers: "mute", "silence", "shut up", "unmute"
+        Works on reply to notification OR as standalone within 10 min of last notification.
+        """
+        import time as _time
+
+        clean = raw_text.strip().lower()
+        # Match: "mute", "mute this", "mute it", "silence", "shut up", "unmute"
+        _MUTE_TRIGGERS = {"mute", "mute this", "mute it", "silence", "silence this", "shut up", "silence it"}
+        _UNMUTE_TRIGGERS = {"unmute", "unmute this", "unmute it"}
+
+        is_mute = clean in _MUTE_TRIGGERS
+        is_unmute = clean in _UNMUTE_TRIGGERS
+        if not is_mute and not is_unmute:
+            return False
+
+        # Get the last watcher notification context
+        try:
+            from lazyclaw.heartbeat.daemon import get_last_watcher_context
+            wctx = get_last_watcher_context(user_id)
+        except Exception:
+            return False
+
+        if not wctx or wctx.get("service") != "whatsapp":
+            return False
+        if (_time.time() - wctx.get("timestamp", 0)) > 600:
+            return False  # Notification older than 10 min
+
+        chat_names = wctx.get("chat_names", [])
+        if not chat_names:
+            # Try to parse from the notification text as fallback
+            notif = wctx.get("notification", "")
+            # Pattern: "▸ 👥 GroupName" or "💬  SenderName"
+            import re
+            # Groups: "👥 GroupName" or "▸ GroupName"
+            matches = re.findall(r"[\U0001f465\u25B8]\s*(.+?)(?:\s*\(\d+\)|\s+\d{2}:\d{2}|\s*$)", notif)
+            if matches:
+                chat_names = [m.strip() for m in matches if m.strip()]
+            # Single message: "💬  SenderName  ·"
+            if not chat_names:
+                m = re.search(r"\U0001f4ac\s+(.+?)\s+[\u00b7]", notif)
+                if m:
+                    chat_names = [m.group(1).strip()]
+
+        if not chat_names:
+            await update.message.reply_text(
+                "Can't determine which chat to mute. "
+                "Try: mute <group name>"
+            )
+            return True
+
+        # If multiple chats in the notification, mute all of them
+        # (user said "mute" to the whole notification)
+        action = "unmute" if is_unmute else "mute"
+        results = []
+
+        # Find the WhatsApp MCP client
+        from lazyclaw.mcp.manager import _active_clients
+        mcp_client = None
+        for sid, c in _active_clients.items():
+            client_name = getattr(c, "name", "") or ""
+            if "whatsapp" in client_name.lower():
+                mcp_client = c
+                break
+
+        if mcp_client is None:
+            await update.message.reply_text(
+                "WhatsApp not connected. Can't mute right now."
+            )
+            return True
+
+        for chat_name in chat_names:
+            try:
+                import json
+                raw = await mcp_client.call_tool(
+                    "whatsapp_mute",
+                    {"chat": chat_name, "action": action},
+                )
+                data = json.loads(raw) if raw.strip().startswith("{") else {"result": raw}
+                muted_name = data.get("chat", chat_name)
+                results.append(muted_name)
+            except Exception as exc:
+                logger.warning("Instant mute failed for '%s': %s", chat_name, exc)
+                results.append(f"{chat_name} (failed)")
+
+        emoji = "\U0001f507" if is_mute else "\U0001f50a"
+        verb = "Muted" if is_mute else "Unmuted"
+        if len(results) == 1:
+            await update.message.reply_text(f"{emoji} {verb}: {results[0]}")
+        else:
+            names = "\n".join(f"  \u2022 {r}" for r in results)
+            await update.message.reply_text(f"{emoji} {verb}:\n{names}")
+
+        return True
 
     async def _process_and_reply(
         self, update: Update, chat_id: str, user_id: str, text: str,
@@ -691,6 +888,25 @@ class TelegramAdapter(ChannelAdapter):
             f"\u2014 screenshots are auto-forwarded to this chat.]"
         )
 
+        # Inject last watcher notification context so agent knows who messaged
+        try:
+            from lazyclaw.heartbeat.daemon import get_last_watcher_context
+            import time as _time
+            _wctx = get_last_watcher_context(user_id)
+            if _wctx and (_time.time() - _wctx.get("timestamp", 0)) < 600:  # within 10 min
+                _svc = _wctx["service"]
+                _notif = _wctx.get("notification", "")
+                channel_context += (
+                    f"\n\n[RECENT {_svc.upper()} NOTIFICATION — user is likely replying to this]\n"
+                    f"{_notif}\n\n"
+                    f"IMPORTANT: If user says 'reply', 'tell him', 'say yes', etc. — "
+                    f"use the MCP {_svc}_send tool to send the message to the contact shown above. "
+                    f"Do NOT ask who to reply to — the contact is in the notification above.\n"
+                    f"If user says 'mute X' with a specific group name — use whatsapp_mute tool."
+                )
+        except Exception:
+            pass
+
         try:
             logger.debug("Telegram: awaiting agent response for chat %s", chat_id)
             if self._lane_queue:
@@ -714,6 +930,7 @@ class TelegramAdapter(ChannelAdapter):
             await callback._stop_typing()
             await callback._delete_status()
 
+            response = _strip_markdown(response)
             footer = callback._build_footer()
             full_response = f"{response}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
 
@@ -768,39 +985,6 @@ class TelegramAdapter(ChannelAdapter):
                     self._server_dashboard.unregister_request(request_id)
             # else: fast dispatch — background task still running,
             # dashboard card stays visible until background_done/failed
-
-    async def _handle_start(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        chat_id = str(update.effective_chat.id)
-
-        # First /start claims admin
-        if not self._admin_chat_id:
-            self._admin_chat_id = chat_id
-            self._allowed_chats.add(chat_id)
-            logger.info("Telegram admin claimed by chat %s", chat_id)
-            await update.message.reply_text(
-                "\U0001f512 Admin locked to this chat.\n\n"
-                "Hey! I'm Claw, your AI assistant.\n"
-                "Send me a message to chat.\n"
-                "While I'm working, type /status or \"what's happening\" "
-                "to see progress with specialist details."
-            )
-            return
-
-        if chat_id not in self._allowed_chats:
-            logger.warning("Unauthorized /start from chat %s", chat_id)
-            await update.message.reply_text(
-                "\U0001f512 Not authorized. This bot is locked to another chat."
-            )
-            return
-
-        await update.message.reply_text(
-            "Hey! I'm Claw, your AI assistant.\n\n"
-            "Send me a message to chat.\n"
-            "While I'm working, type /status or \"what's happening\" "
-            "to see progress with specialist details."
-        )
 
     async def send_message(
         self, external_user_id: str, message: OutboundMessage,

@@ -160,7 +160,7 @@ class BrowserApproveConnectSkill(BaseSkill):
         if ws_url:
             return (
                 "Browser restarted with debugging enabled. I can now read "
-                "any open tab (WhatsApp, Gmail, etc). This permission is "
+                "any open tab. This permission is "
                 "saved — I'll auto-connect next time."
             )
         return "Failed to restart browser. Check if Brave is installed."

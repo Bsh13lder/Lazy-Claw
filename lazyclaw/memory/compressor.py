@@ -22,8 +22,10 @@ from lazyclaw.memory.summarizer import summarize_chunk
 
 logger = logging.getLogger(__name__)
 
-# Number of recent messages to keep in full detail
-WINDOW_SIZE = 20
+# Number of recent messages to keep in full detail.
+# Tool-heavy sessions generate ~3 messages per exchange (assistant + tool + result),
+# so 10 messages ≈ 3-4 recent exchanges. Daily logs cover older context.
+WINDOW_SIZE = 10
 
 # Skip expensive LLM summarization if older chunk is smaller than this
 # (just truncate instead — saves 15-20s per message)
@@ -54,7 +56,12 @@ async def compress_history(
 
         existing = await get_daily_log(config, user_id, yesterday)
         if not existing:
-            asyncio.create_task(_background_daily_summary(config, user_id, yesterday))
+            from lazyclaw.runtime.aio_helpers import fire_and_forget
+
+            fire_and_forget(
+                _background_daily_summary(config, user_id, yesterday),
+                name=f"daily-summary-{user_id}-{yesterday}",
+            )
     except Exception:
         pass  # Don't block message processing
 

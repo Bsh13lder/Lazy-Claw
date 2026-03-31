@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from rich.console import Console
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from lazyclaw.config import Config
@@ -26,7 +26,7 @@ async def show_status(config: Config, user_id: str) -> None:
     if config.anthropic_api_key:
         providers.append("anthropic")
     cfg_table.add_row("AI Providers", ", ".join(providers) if providers else "[red]none[/red]")
-    cfg_table.add_row("Default Model", config.default_model)
+    cfg_table.add_row("Brain Model", config.brain_model)
     cfg_table.add_row("API Port", str(config.port))
     cfg_table.add_row("Database", str(config.database_dir / "lazyclaw.db"))
     cfg_table.add_row("Telegram", "[green]configured[/green]" if config.telegram_bot_token else "[dim]not set[/dim]")
@@ -94,7 +94,7 @@ async def show_status(config: Config, user_id: str) -> None:
     async with db_session(config) as db:
         try:
             mcp_rows = await db.execute(
-                "SELECT name, transport, enabled FROM mcp_connections WHERE user_id = ?",
+                "SELECT name, transport, enabled, favorite FROM mcp_connections WHERE user_id = ?",
                 (user_id,),
             )
             mcp_servers = await mcp_rows.fetchall()
@@ -108,9 +108,15 @@ async def show_status(config: Config, user_id: str) -> None:
 
     if mcp_servers:
         for row in mcp_servers:
-            name, transport, enabled = row[0], row[1], row[2]
-            status = "[green]enabled[/green]" if enabled else "[dim]disabled[/dim]"
-            mcp_table.add_row(name, transport or "stdio", status)
+            name, transport, enabled, fav = row[0], row[1], row[2], row[3]
+            parts = []
+            if enabled:
+                parts.append("[green]enabled[/green]")
+            else:
+                parts.append("[dim]disabled[/dim]")
+            if fav:
+                parts.append("[yellow]fav[/yellow]")
+            mcp_table.add_row(name, transport or "stdio", " ".join(parts))
     else:
         mcp_table.add_row("[dim]none configured[/dim]", "", "")
 
@@ -249,38 +255,277 @@ async def show_compression(config: Config, user_id: str) -> None:
 
 
 async def show_mcp(config: Config, user_id: str) -> None:
-    """Show configured MCP servers with details."""
-    from lazyclaw.crypto.encryption import decrypt, derive_server_key
-    from lazyclaw.db.connection import db_session
+    """Show configured MCP servers with favorites, connection status, and tool counts."""
+    from lazyclaw.mcp.bridge import load_cached_schemas
+    from lazyclaw.mcp.manager import BUNDLED_MCPS, _active_clients, list_servers
 
-    async with db_session(config) as db:
-        try:
-            rows = await db.execute(
-                "SELECT id, name, transport, config, enabled "
-                "FROM mcp_connections WHERE user_id = ? ORDER BY name",
-                (user_id,),
-            )
-            servers = await rows.fetchall()
-        except Exception:
-            servers = []
+    try:
+        servers = await list_servers(config, user_id)
+    except Exception:
+        servers = []
 
     if not servers:
         console.print("[dim]No MCP servers configured.[/dim]")
-        console.print("[dim]Use the API (POST /api/mcp/servers) or lazyclaw start to manage MCP servers.[/dim]")
+        console.print("[dim]Use /mcp add <name> or ask the agent to add one.[/dim]")
         return
 
     table = Table(title="MCP Servers", style="cyan")
-    table.add_column("ID", style="dim", max_width=12)
+    table.add_column("", width=1)  # Star for favorites
     table.add_column("Name", style="bold")
-    table.add_column("Transport")
-    table.add_column("Status")
+    table.add_column("Status", width=12)
+    table.add_column("Tools", justify="right", width=5)
+    table.add_column("Type", width=10)
+    table.add_column("Description", max_width=40)
 
-    for row in servers:
-        sid, name, transport, _config_enc, enabled = row[0], row[1], row[2], row[3], row[4]
-        status = "[green]enabled[/green]" if enabled else "[dim]disabled[/dim]"
-        table.add_row(sid[:12] + "..." if sid else "", name, transport or "stdio", status)
+    # Sort: favorites first, then by name
+    sorted_servers = sorted(servers, key=lambda s: (not s.get("favorite"), s["name"]))
+
+    for s in sorted_servers:
+        star = "[yellow]*[/yellow]" if s.get("favorite") else " "
+        name = s["name"]
+
+        # Connection status
+        if s["id"] in _active_clients:
+            status = "[green]connected[/green]"
+        else:
+            status = "[dim]idle[/dim]"
+
+        # Tool count from cache
+        tool_count = ""
+        cached = await load_cached_schemas(config, name)
+        if cached:
+            import json as _json
+            try:
+                tool_count = str(len(_json.loads(cached)))
+            except Exception:
+                tool_count = "?"
+        elif s["id"] in _active_clients:
+            try:
+                tools = await _active_clients[s["id"]].list_tools()
+                tool_count = str(len(tools))
+            except Exception:
+                tool_count = "?"
+
+        # Type label
+        if s.get("favorite"):
+            type_label = "[yellow]favorite[/yellow]"
+        else:
+            type_label = "[dim]installed[/dim]"
+
+        # Description from BUNDLED_MCPS or config
+        desc = BUNDLED_MCPS.get(name, {}).get("description", "")
+        if not desc:
+            desc = s.get("config", {}).get("description", "")
+
+        table.add_row(star, name, status, tool_count, type_label, desc)
 
     console.print(table)
+    console.print()
+    console.print("[dim]Use /mcp fav <name> to add favorites, /mcp help for all commands[/dim]")
+
+
+MCP_HELP = """\
+[bold]MCP Server Commands:[/bold]
+  /mcp                Show all servers with status
+  /mcp fav <name>     Add to favorites (starts at boot)
+  /mcp unfav <name>   Remove from favorites (lazy-load)
+  /mcp connect <name> Manually connect now
+  /mcp disconnect <n> Manually disconnect
+  /mcp add <name|url> Install a new MCP server
+  /mcp remove <name>  Uninstall an MCP server
+  /mcp help           Show this help"""
+
+
+async def mcp_command(config: Config, user_id: str, args: str) -> None:
+    """Handle /mcp subcommands."""
+    parts = args.strip().split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else ""
+    target = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd in ("", "list"):
+        await show_mcp(config, user_id)
+        return
+
+    if subcmd == "help":
+        console.print(MCP_HELP)
+        return
+
+    if subcmd == "fav":
+        if not target:
+            console.print("[yellow]Usage: /mcp fav <server-name>[/yellow]")
+            return
+        from lazyclaw.mcp.manager import (
+            BUNDLED_MCPS,
+            connect_server,
+            connect_server_with_oauth,
+            list_servers,
+            set_favorite,
+        )
+
+        servers = await list_servers(config, user_id)
+        server = _find_mcp_by_name(servers, target)
+        if not server:
+            _print_mcp_not_found(target, servers)
+            return
+
+        await set_favorite(config, user_id, server["name"], True)
+        console.print(f"[green]Added '{server['name']}' to favorites.[/green]")
+
+        if not server.get("connected"):
+            console.print(f"[dim]Connecting {server['name']}...[/dim]")
+            try:
+                info = BUNDLED_MCPS.get(server["name"], {})
+                if info.get("oauth"):
+                    await connect_server_with_oauth(config, user_id, server["id"])
+                else:
+                    await connect_server(config, user_id, server["id"])
+                console.print(f"[green]Connected.[/green]")
+            except Exception as exc:
+                console.print(f"[red]Failed to connect: {exc}[/red]")
+        return
+
+    if subcmd == "unfav":
+        if not target:
+            console.print("[yellow]Usage: /mcp unfav <server-name>[/yellow]")
+            return
+        from lazyclaw.mcp.manager import list_servers, set_favorite
+
+        servers = await list_servers(config, user_id)
+        server = _find_mcp_by_name(servers, target)
+        if not server:
+            _print_mcp_not_found(target, servers)
+            return
+
+        await set_favorite(config, user_id, server["name"], False)
+        console.print(
+            f"[green]Removed '{server['name']}' from favorites. "
+            f"Will lazy-load on next startup.[/green]"
+        )
+        return
+
+    if subcmd == "connect":
+        if not target:
+            console.print("[yellow]Usage: /mcp connect <server-name>[/yellow]")
+            return
+        from lazyclaw.mcp.manager import (
+            BUNDLED_MCPS,
+            connect_server,
+            connect_server_with_oauth,
+            list_servers,
+        )
+
+        servers = await list_servers(config, user_id)
+        server = _find_mcp_by_name(servers, target)
+        if not server:
+            _print_mcp_not_found(target, servers)
+            return
+
+        console.print(f"[dim]Connecting {server['name']}...[/dim]")
+        try:
+            info = BUNDLED_MCPS.get(server["name"], {})
+            if info.get("oauth"):
+                await connect_server_with_oauth(config, user_id, server["id"])
+            else:
+                await connect_server(config, user_id, server["id"])
+            console.print(f"[green]Connected to '{server['name']}'.[/green]")
+        except Exception as exc:
+            console.print(f"[red]Failed to connect: {exc}[/red]")
+        return
+
+    if subcmd == "disconnect":
+        if not target:
+            console.print("[yellow]Usage: /mcp disconnect <server-name>[/yellow]")
+            return
+        from lazyclaw.mcp.manager import disconnect_server, list_servers
+
+        servers = await list_servers(config, user_id)
+        server = _find_mcp_by_name(servers, target)
+        if not server:
+            _print_mcp_not_found(target, servers)
+            return
+
+        if not server.get("connected"):
+            console.print(f"[yellow]'{server['name']}' is not connected.[/yellow]")
+            return
+
+        await disconnect_server(user_id, server["id"])
+        console.print(f"[green]Disconnected '{server['name']}'.[/green]")
+        return
+
+    if subcmd == "add":
+        if not target:
+            console.print("[yellow]Usage: /mcp add <server-name or URL>[/yellow]")
+            return
+        from lazyclaw.mcp.manager import add_server, BUNDLED_MCPS, list_servers
+
+        # Check if it's a known bundled name
+        if target.lower() in BUNDLED_MCPS:
+            console.print(f"[yellow]'{target}' is bundled and auto-registered at startup.[/yellow]")
+            return
+
+        # Check if already registered
+        servers = await list_servers(config, user_id)
+        existing = _find_mcp_by_name(servers, target)
+        if existing:
+            console.print(f"[yellow]'{existing['name']}' is already registered.[/yellow]")
+            return
+
+        # URL-based add
+        if target.startswith("https://"):
+            from urllib.parse import urlparse
+            parsed = urlparse(target)
+            name = parsed.netloc.replace(".", "-")
+            transport = "streamable_http"
+            server_config = {"url": target}
+            sid = await add_server(config, user_id, name, transport, server_config)
+            console.print(f"[green]Added remote MCP '{name}' (id={sid[:12]}...)[/green]")
+        else:
+            console.print(
+                f"[yellow]Unknown MCP '{target}'. "
+                f"Provide an HTTPS URL or a known bundled name.[/yellow]"
+            )
+        return
+
+    if subcmd == "remove":
+        if not target:
+            console.print("[yellow]Usage: /mcp remove <server-name>[/yellow]")
+            return
+        from lazyclaw.mcp.manager import list_servers, remove_server
+
+        servers = await list_servers(config, user_id)
+        server = _find_mcp_by_name(servers, target)
+        if not server:
+            _print_mcp_not_found(target, servers)
+            return
+
+        deleted = await remove_server(config, user_id, server["id"])
+        if deleted:
+            console.print(f"[green]Removed '{server['name']}'.[/green]")
+        else:
+            console.print(f"[red]Failed to remove '{server['name']}'.[/red]")
+        return
+
+    console.print(f"[yellow]Unknown subcommand '{subcmd}'. Try /mcp help[/yellow]")
+
+
+def _find_mcp_by_name(servers: list[dict], name: str) -> dict | None:
+    """Find an MCP server by name (case-insensitive, supports partial match)."""
+    name_lower = name.lower()
+    for s in servers:
+        if s["name"].lower() == name_lower:
+            return s
+    for s in servers:
+        if name_lower in s["name"].lower():
+            return s
+    return None
+
+
+def _print_mcp_not_found(name: str, servers: list[dict]) -> None:
+    available = ", ".join(s["name"] for s in servers) or "none"
+    console.print(
+        f"[yellow]No MCP server matching '{name}'. "
+        f"Available: {available}[/yellow]"
+    )
 
 
 async def clear_history(config: Config, user_id: str) -> None:
@@ -308,6 +553,160 @@ async def clear_history(config: Config, user_id: str) -> None:
         await db.commit()
 
     console.print(f"[green]Cleared {deleted} messages.[/green]")
+
+
+async def nuke_account(config: Config, user_id: str) -> None:
+    """Selective account data wipe with confirmation checklist."""
+    from lazyclaw.db.connection import db_session
+
+    categories = [
+        ("1", "Conversations", [
+            ("agent_messages", "user_id"),
+            ("agent_chat_sessions", "user_id"),
+            ("message_summaries", "user_id"),
+        ]),
+        ("2", "Memories", [
+            ("personal_memory", "user_id"),
+            ("site_memory", "user_id"),
+        ]),
+        ("3", "Daily summaries", [
+            ("daily_logs", "user_id"),
+        ]),
+        ("4", "Vault (passwords & API keys)", [
+            ("credential_vault", "user_id"),
+        ]),
+        ("5", "Custom skills", [
+            ("skills", "user_id"),
+        ]),
+        ("6", "Browser history", [
+            ("browser_task_logs", "_browser_task_join"),
+            ("browser_tasks", "user_id"),
+        ]),
+        ("7", "Background tasks", [
+            ("background_tasks", "user_id"),
+        ]),
+        ("8", "Jobs & queue", [
+            ("agent_jobs", "user_id"),
+            ("job_queue", "user_id"),
+        ]),
+        ("9", "Traces & replays", [
+            ("agent_traces", "user_id"),
+            ("trace_shares", "user_id"),
+        ]),
+        ("10", "Team messages & custom specialists", [
+            ("agent_team_messages", "user_id"),
+            ("specialists", "_specialists_custom"),
+        ]),
+        ("11", "Approvals & audit log", [
+            ("approval_requests", "user_id"),
+            ("audit_log", "user_id"),
+        ]),
+        ("12", "MCP connections", [
+            ("mcp_connections", "user_id"),
+        ]),
+    ]
+
+    console.print("\n[bold red]Account Data Wipe[/bold red]\n")
+    console.print("Select what to delete:\n")
+    for num, label, _tables in categories:
+        console.print(f"  [cyan]{num:>2}[/cyan] — {label}")
+    console.print(f"  [cyan] A[/cyan] — [bold]Everything above[/bold]")
+    console.print()
+
+    choice = Prompt.ask("Enter numbers (e.g. 1,4,7) or A for all", default="")
+    if not choice:
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    selected = {s.strip().upper() for s in choice.split(",")}
+    all_nums = {cat[0] for cat in categories}
+    if "A" in selected:
+        selected = all_nums
+
+    invalid = selected - all_nums
+    if invalid:
+        console.print(f"[yellow]Unknown selection: {', '.join(invalid)}[/yellow]")
+        return
+
+    chosen = [cat for cat in categories if cat[0] in selected]
+    if not chosen:
+        console.print("[dim]Nothing selected.[/dim]")
+        return
+
+    # Single transaction: count, confirm, delete
+    async with db_session(config) as db:
+        # Show what will be deleted with row counts
+        console.print("\n[bold]Will delete:[/bold]")
+        for _num, label, tables in chosen:
+            total = 0
+            for table, col in tables:
+                try:
+                    if col == "_browser_task_join":
+                        row = await db.execute(
+                            "SELECT COUNT(*) FROM browser_task_logs "
+                            "WHERE task_id IN ("
+                            "SELECT id FROM browser_tasks WHERE user_id = ?)",
+                            (user_id,),
+                        )
+                    elif col == "_specialists_custom":
+                        row = await db.execute(
+                            "SELECT COUNT(*) FROM specialists "
+                            "WHERE user_id = ? AND is_builtin = 0",
+                            (user_id,),
+                        )
+                    else:
+                        row = await db.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE {col} = ?",
+                            (user_id,),
+                        )
+                    count = (await row.fetchone())[0]
+                    total += count
+                except Exception:
+                    console.print(f"  [yellow]{table}: not found — skipping[/yellow]")
+            console.print(f"  [red]{label}[/red]: {total} records")
+
+        # Vault warning
+        if any(cat[0] == "4" for cat in chosen):
+            console.print(
+                "\n[bold yellow]Warning:[/bold yellow] This will delete all stored "
+                "passwords and API keys. You'll need to re-enter them."
+            )
+
+        console.print()
+        confirm = Prompt.ask("Type 'DELETE' to confirm", default="")
+        if confirm != "DELETE":
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+        # Execute all deletions
+        deleted_total = 0
+        for _num, _label, tables in chosen:
+            for table, col in tables:
+                try:
+                    if col == "_browser_task_join":
+                        result = await db.execute(
+                            "DELETE FROM browser_task_logs "
+                            "WHERE task_id IN ("
+                            "SELECT id FROM browser_tasks WHERE user_id = ?)",
+                            (user_id,),
+                        )
+                    elif col == "_specialists_custom":
+                        result = await db.execute(
+                            "DELETE FROM specialists "
+                            "WHERE user_id = ? AND is_builtin = 0",
+                            (user_id,),
+                        )
+                    else:
+                        result = await db.execute(
+                            f"DELETE FROM {table} WHERE {col} = ?",
+                            (user_id,),
+                        )
+                    deleted_total += result.rowcount
+                except Exception:
+                    pass  # Already warned during count phase
+        await db.commit()
+
+    console.print(f"\n[green]Deleted {deleted_total} records.[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +848,8 @@ async def run_doctor(config: Config, user_id: str) -> None:
     else:
         checks.append(("AI Provider", "[red]FAIL[/red]", "No API key configured"))
 
-    # 3. Default Model
-    checks.append(("Default Model", "[green]OK[/green]", config.default_model))
+    # 3. Brain Model
+    checks.append(("Brain Model", "[green]OK[/green]", config.brain_model))
 
     # 4. Encryption
     try:
@@ -498,19 +897,15 @@ async def run_doctor(config: Config, user_id: str) -> None:
             checks.append((pkg_name, "[yellow]WARN[/yellow]", f"Not installed ({description})"))
             missing_mcps.append(pkg_name)
 
-    # 6b. Free AI providers
-    try:
-        from mcp_freeride.config import load_config as load_freeride_config
-        from mcp_freeride.config import get_configured_providers
-        freeride_config = load_freeride_config()
-        free_providers = [p for p in get_configured_providers(freeride_config) if p != "ollama"]
-        if free_providers:
-            checks.append(("Free AI", "[green]OK[/green]", f"Providers: {', '.join(free_providers)}"))
-        else:
-            checks.append(("Free AI", "[yellow]WARN[/yellow]",
-                "No free API keys. Get one free: https://console.groq.com → GROQ_API_KEY"))
-    except ImportError:
-        checks.append(("Free AI", "[yellow]WARN[/yellow]", "mcp-freeride not installed"))
+    # 6b. Free AI providers (direct integration, no mcp-freeride needed)
+    from lazyclaw.llm.free_providers import discover_providers
+    free_providers = discover_providers()
+    if free_providers:
+        names = ", ".join(free_providers.keys())
+        checks.append(("Free AI", "[green]OK[/green]", f"Providers: {names}"))
+    else:
+        checks.append(("Free AI", "[yellow]WARN[/yellow]",
+            "No free API keys. Get one free: https://console.groq.com \u2192 GROQ_API_KEY"))
 
     # 7. Telegram
     if config.telegram_bot_token:

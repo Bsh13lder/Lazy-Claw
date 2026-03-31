@@ -11,6 +11,7 @@ interface NavShellProps {
 const PAGE_META: Record<Page, { label: string; description: string }> = {
   chat: { label: "Chat", description: "Conversation with your agent" },
   overview: { label: "Overview", description: "System health & activity" },
+  hub: { label: "Skill Hub", description: "Browse and manage skills" },
   skills: { label: "Skills", description: "Manage agent tools" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
   mcp: { label: "MCP", description: "Server integrations" },

@@ -2,15 +2,234 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { Job } from "../api";
 import Modal from "../components/Modal";
-import { useToast } from "../context/ToastContext";
-import { useInterval } from "../hooks/useInterval";
-import { ListSkeleton } from "../components/Skeleton";
+
+/* ── Helpers ─────────────────────────────────────────────── */
+
+function relativeTime(iso: string): string {
+  const now = Date.now();
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+
+  const diffMs = then - now;
+  const absDiff = Math.abs(diffMs);
+  const future = diffMs > 0;
+
+  if (absDiff < 60_000) return "just now";
+
+  const minutes = Math.floor(absDiff / 60_000);
+  if (minutes < 60) {
+    const label = `${minutes}m`;
+    return future ? `in ${label}` : `${label} ago`;
+  }
+
+  const hours = Math.floor(absDiff / 3_600_000);
+  if (hours < 24) {
+    const label = `${hours}h`;
+    return future ? `in ${label}` : `${label} ago`;
+  }
+
+  const days = Math.floor(absDiff / 86_400_000);
+  if (days < 30) {
+    const label = `${days}d`;
+    return future ? `in ${label}` : `${label} ago`;
+  }
+
+  const months = Math.floor(days / 30);
+  const label = `${months}mo`;
+  return future ? `in ${label}` : `${label} ago`;
+}
+
+type StatusKey = "active" | "paused" | "completed" | "failed";
+
+interface StatusConfig {
+  readonly dot: string;
+  readonly badge: string;
+  readonly badgeText: string;
+  readonly label: string;
+}
+
+const STATUS_MAP: Record<StatusKey, StatusConfig> = {
+  active: {
+    dot: "bg-cyan live-pulse",
+    badge: "bg-cyan-soft text-cyan",
+    badgeText: "Running",
+    label: "active",
+  },
+  paused: {
+    dot: "bg-amber",
+    badge: "bg-amber-soft text-amber",
+    badgeText: "Paused",
+    label: "paused",
+  },
+  completed: {
+    dot: "bg-green-400",
+    badge: "bg-green-400/10 text-green-400",
+    badgeText: "Completed",
+    label: "completed",
+  },
+  failed: {
+    dot: "bg-error",
+    badge: "bg-error-soft text-error",
+    badgeText: "Failed",
+    label: "failed",
+  },
+};
+
+const FALLBACK_STATUS: StatusConfig = {
+  dot: "bg-text-muted",
+  badge: "bg-bg-hover text-text-muted",
+  badgeText: "Unknown",
+  label: "unknown",
+};
+
+function getStatusConfig(status: string): StatusConfig {
+  return STATUS_MAP[status as StatusKey] ?? FALLBACK_STATUS;
+}
+
+/* ── Icons ───────────────────────────────────────────────── */
+
+function PlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <rect x="6" y="4" width="4" height="16" rx="1" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14" />
+    </svg>
+  );
+}
+
+function ClockIcon({ className }: { readonly className?: string }) {
+  return (
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+
+/* ── Job Card ────────────────────────────────────────────── */
+
+interface JobCardProps {
+  readonly job: Job;
+  readonly onPause: (id: string) => void;
+  readonly onResume: (id: string) => void;
+  readonly onDelete: (id: string) => void;
+}
+
+function JobCard({ job, onPause, onResume, onDelete }: JobCardProps) {
+  const cfg = getStatusConfig(job.status);
+
+  return (
+    <div className="px-4 py-4 rounded-xl bg-bg-secondary border border-border card-hover transition-colors">
+      <div className="flex items-start justify-between gap-3">
+        {/* Left content */}
+        <div className="min-w-0 flex-1">
+          {/* Status badge + name */}
+          <div className="flex items-center gap-2.5 mb-1.5">
+            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium ${cfg.badge}`}>
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dot}`} />
+              {cfg.badgeText}
+            </span>
+            <p className="text-sm font-medium text-text-primary truncate">{job.name}</p>
+          </div>
+
+          {/* Instruction */}
+          <p className="text-xs text-text-muted truncate mb-2">{job.instruction}</p>
+
+          {/* Metadata row */}
+          <div className="flex items-center gap-4 text-[11px] text-text-muted">
+            {job.cron_expression && (
+              <span className="font-mono bg-bg-hover px-1.5 py-0.5 rounded text-text-secondary">
+                {job.cron_expression}
+              </span>
+            )}
+            {job.last_run && (
+              <span>Last: {relativeTime(job.last_run)}</span>
+            )}
+            {job.next_run && (
+              <span>Next: {relativeTime(job.next_run)}</span>
+            )}
+          </div>
+        </div>
+
+        {/* Quick actions */}
+        <div className="flex items-center gap-1 shrink-0">
+          {job.status === "active" && (
+            <>
+              <button
+                onClick={() => onResume(job.id)}
+                title="Run Now"
+                className="p-1.5 rounded-lg text-text-muted hover:text-accent hover:bg-bg-hover transition-colors"
+              >
+                <PlayIcon />
+              </button>
+              <button
+                onClick={() => onPause(job.id)}
+                title="Pause"
+                className="p-1.5 rounded-lg text-text-muted hover:text-amber hover:bg-bg-hover transition-colors"
+              >
+                <PauseIcon />
+              </button>
+            </>
+          )}
+          {job.status === "paused" && (
+            <button
+              onClick={() => onResume(job.id)}
+              title="Resume"
+              className="p-1.5 rounded-lg text-text-muted hover:text-accent hover:bg-bg-hover transition-colors"
+            >
+              <PlayIcon />
+            </button>
+          )}
+          <button
+            onClick={() => onDelete(job.id)}
+            title="Delete"
+            className="p-1.5 rounded-lg text-text-muted hover:text-error hover:bg-bg-hover transition-colors"
+          >
+            <TrashIcon />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Empty State ─────────────────────────────────────────── */
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 text-center">
+      <ClockIcon className="text-text-muted mb-4 opacity-40" />
+      <h2 className="text-sm font-medium text-text-secondary mb-1">No jobs scheduled</h2>
+      <p className="text-xs text-text-muted max-w-xs">
+        Create cron or one-off jobs to automate tasks
+      </p>
+    </div>
+  );
+}
+
+/* ── Page ─────────────────────────────────────────────────── */
 
 export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const toast = useToast();
 
   // Create form
   const [cName, setCName] = useState("");
@@ -21,18 +240,19 @@ export default function Jobs() {
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
       const data = await api.listJobs();
       setJobs(Array.isArray(data) ? data : []);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to load jobs");
+      setError(err instanceof Error ? err.message : "Failed to load jobs");
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
-  useInterval(load, 60_000);
 
   const handleCreate = async () => {
     if (!cName.trim() || !cInstruction.trim()) return;
@@ -48,93 +268,80 @@ export default function Jobs() {
       });
       setShowCreate(false);
       setCName(""); setCInstruction(""); setCCron(""); setCContext("");
-      toast.success("Job created");
       load();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create job");
+      setError(err instanceof Error ? err.message : "Failed to create job");
     } finally {
       setSaving(false);
     }
   };
 
   const handlePause = async (id: string) => {
-    try { await api.pauseJob(id); toast.success("Job paused"); load(); } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to pause job");
-    }
+    try { await api.pauseJob(id); load(); } catch { /* handled by next load */ }
   };
-
   const handleResume = async (id: string) => {
-    try { await api.resumeJob(id); toast.success("Job resumed"); load(); } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to resume job");
-    }
+    try { await api.resumeJob(id); load(); } catch { /* handled by next load */ }
   };
-
   const handleDelete = async (id: string) => {
-    try { await api.deleteJob(id); toast.success("Job deleted"); load(); } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to delete job");
-    }
+    try { await api.deleteJob(id); load(); } catch { /* handled by next load */ }
   };
-
-  const statusColor = (s: string) => {
-    if (s === "active") return "bg-accent";
-    if (s === "paused") return "bg-yellow-500";
-    if (s === "completed") return "bg-cyan";
-    return "bg-text-muted";
-  };
-
-  if (loading) return <ListSkeleton rows={4} />;
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="max-w-5xl mx-auto px-6 py-8 animate-fade-in">
+        {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-lg font-semibold text-text-primary">Jobs</h1>
             <p className="text-sm text-text-muted">{jobs.length} total</p>
           </div>
           <div className="flex gap-2">
-            <button onClick={() => setShowCreate(true)} className="text-xs text-accent hover:text-accent-dim px-3 py-1.5 rounded-lg border border-accent/30 hover:bg-accent-soft transition-colors">
+            <button
+              onClick={() => setShowCreate(true)}
+              className="text-xs text-accent hover:text-accent-dim px-3 py-1.5 rounded-lg border border-accent/30 hover:bg-accent-soft transition-colors"
+            >
               + Create job
             </button>
-            <button onClick={load} className="text-xs text-text-muted hover:text-text-secondary px-3 py-1.5 rounded-lg border border-border hover:bg-bg-hover transition-colors">
+            <button
+              onClick={load}
+              className="text-xs text-text-muted hover:text-text-secondary px-3 py-1.5 rounded-lg border border-border hover:bg-bg-hover transition-colors"
+            >
               Refresh
             </button>
           </div>
         </div>
 
-        {jobs.length === 0 && (
-          <div className="text-center py-12 text-text-muted text-sm">No jobs yet. Create cron or one-off jobs.</div>
+        {/* Loading */}
+        {loading && (
+          <div className="flex items-center gap-2 text-text-muted text-sm py-8 justify-center">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner">
+              <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+            </svg>
+            Loading jobs...
+          </div>
         )}
 
-        {jobs.length > 0 && (
+        {/* Error */}
+        {error && (
+          <div className="px-4 py-3 rounded-xl bg-error-soft border border-error/15 text-error text-sm mb-4">
+            {error}
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!loading && !error && jobs.length === 0 && <EmptyState />}
+
+        {/* Job list */}
+        {!loading && !error && jobs.length > 0 && (
           <div className="space-y-2">
             {jobs.map((job) => (
-              <div key={job.id} className="px-4 py-4 rounded-xl bg-bg-secondary border border-border hover:border-border-light transition-colors">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${statusColor(job.status)}`} />
-                      <p className="text-sm font-medium text-text-primary truncate">{job.name}</p>
-                    </div>
-                    <p className="text-xs text-text-muted truncate">{job.instruction}</p>
-                    <div className="flex items-center gap-4 mt-2 text-[11px] text-text-muted">
-                      {job.cron_expression && <span className="font-mono">cron: {job.cron_expression}</span>}
-                      <span>status: {job.status}</span>
-                      {job.last_run && <span>last: {new Date(job.last_run).toLocaleString()}</span>}
-                      {job.next_run && <span>next: {new Date(job.next_run).toLocaleString()}</span>}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {job.status === "active" && (
-                      <button onClick={() => handlePause(job.id)} className="text-xs text-text-muted hover:text-yellow-400 px-2 py-1 rounded-lg hover:bg-bg-hover transition-colors">Pause</button>
-                    )}
-                    {job.status === "paused" && (
-                      <button onClick={() => handleResume(job.id)} className="text-xs text-text-muted hover:text-accent px-2 py-1 rounded-lg hover:bg-bg-hover transition-colors">Resume</button>
-                    )}
-                    <button onClick={() => handleDelete(job.id)} className="text-xs text-text-muted hover:text-error px-2 py-1 rounded-lg hover:bg-bg-hover transition-colors">Delete</button>
-                  </div>
-                </div>
-              </div>
+              <JobCard
+                key={job.id}
+                job={job}
+                onPause={handlePause}
+                onResume={handleResume}
+                onDelete={handleDelete}
+              />
             ))}
           </div>
         )}

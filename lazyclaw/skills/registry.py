@@ -343,3 +343,11 @@ class SkillRegistry:
         self.register(StartGigSkill(config=config, registry=self))
         self.register(SubmitDeliverableSkill(config=config, registry=self))
         self.register(InvoiceClientSkill(config=config, registry=self))
+
+        # TodoWrite — real-time task plan tracking (mandatory for 3+ step tasks)
+        from lazyclaw.skills.builtin.todo_write import TodoWriteSkill
+        self.register(TodoWriteSkill(config=config))
+
+    def get_skill(self, name: str) -> "BaseSkill | None":
+        """Get a registered skill instance by name."""
+        return self._skills.get(name)

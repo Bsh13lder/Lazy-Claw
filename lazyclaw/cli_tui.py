@@ -245,6 +245,12 @@ class StatsRefreshed(Message):
         self.stats = stats
 
 
+class TodosUpdated(Message):
+    def __init__(self, todos: list) -> None:
+        super().__init__()
+        self.todos = todos
+
+
 # ── TuiDashboard (bridge: agent events → Textual messages) ─────────
 
 class TuiDashboard:
@@ -1098,6 +1104,53 @@ class TeamLeadBar(Static):
         self.update(Text.from_markup("\n".join(parts)))
 
 
+class TodoWidget(Static):
+    """Real-time task checklist showing agent plan progress.
+
+    [ ] pending   [→] in_progress (shown prominently)   [✓] completed
+    Hidden when the list is empty. Updates via TodosUpdated message.
+    """
+
+    def render_todos(self, todos: list) -> None:
+        if not todos:
+            self.display = False
+            return
+
+        self.display = True
+        lines: list[str] = []
+
+        # Count for header
+        completed = sum(1 for t in todos if t.status == "completed")
+        in_prog = [t for t in todos if t.status == "in_progress"]
+        header = (
+            f"[{_C_HEADER}][bold]Tasks[/bold][/{_C_HEADER}]"
+            f"  [{_C_IDLE}]{completed}/{len(todos)} done[/{_C_IDLE}]"
+        )
+        if in_prog:
+            header += (
+                f"  [{_C_ACTIVE}]→ {in_prog[0].active_form}[/{_C_ACTIVE}]"
+            )
+        lines.append(header)
+
+        # Individual rows
+        for t in todos:
+            status = getattr(t, "status", "pending")
+            content = getattr(t, "content", "")
+            active_form = getattr(t, "active_form", content)
+            if status == "completed":
+                icon = f"[{_C_SUCCESS}][✓][/{_C_SUCCESS}]"
+                text = f"[dim]{content}[/dim]"
+            elif status == "in_progress":
+                icon = f"[{_C_ACTIVE}][→][/{_C_ACTIVE}]"
+                text = f"[bold {_C_ACTIVE}]{active_form}[/bold {_C_ACTIVE}]"
+            else:
+                icon = f"[{_C_IDLE}][ ][/{_C_IDLE}]"
+                text = content
+            lines.append(f"  {icon} {text}")
+
+        self.update(Text.from_markup("\n".join(lines)))
+
+
 class AIRoutingBar(Static):
     """AI routing panel showing per-model stats with local/paid breakdown."""
 
@@ -1349,6 +1402,20 @@ class LazyClawApp(App):
         border: solid #14B8A6;
     }
 
+    #todo-widget {
+        column-span: 2;
+        height: auto;
+        max-height: 12;
+        padding: 0 1;
+        background: $surface;
+        border: solid #6366F1;
+        display: none;
+    }
+
+    #todo-widget.visible {
+        display: block;
+    }
+
     #jobs-bar {
         column-span: 2;
         height: auto;
@@ -1433,6 +1500,7 @@ class LazyClawApp(App):
 
     .settings-open #activity-panel,
     .settings-open #team-lead-bar,
+    .settings-open #todo-widget,
     .settings-open #jobs-bar,
     .settings-open #log-panel,
     .settings-open #cost-bar,
@@ -1484,11 +1552,27 @@ class LazyClawApp(App):
         self._telegram_notifier = None
         self._settings_visible: bool = False
 
+        # TodoManager — task plan tracking, persisted per user
+        from lazyclaw.runtime.todo_manager import get_todo_manager
+        self.todo_manager = get_todo_manager(config.database_dir, default_user_id)
+        self.todo_manager.add_listener(
+            lambda todos: self.post_message(TodosUpdated(todos))
+        )
+        # Inject TodoManager into TodoWriteSkill so it notifies the TUI
+        try:
+            from lazyclaw.skills.builtin.todo_write import TodoWriteSkill
+            skill = registry.get("todo_write") if registry else None
+            if isinstance(skill, TodoWriteSkill):
+                skill._todo_manager = self.todo_manager
+        except Exception:
+            pass
+
     def compose(self) -> ComposeResult:
         yield Header()
         yield SystemBar(" Starting...", id="system-bar")
         yield ActivityPanel(id="activity-panel")
         yield TeamLeadBar("  All clear", id="team-lead-bar")
+        yield TodoWidget("", id="todo-widget")
         yield JobsBar("  Loading jobs...", id="jobs-bar")
         yield LogPanel(id="log-panel", highlight=True, markup=True)
         yield CostBar("", id="cost-bar")
@@ -1938,6 +2022,19 @@ class LazyClawApp(App):
     def on_stats_refreshed(self, msg: StatsRefreshed) -> None:
         bar = self.query_one("#system-bar", SystemBar)
         bar.update_stats(msg.stats, config=self._config)
+
+    def on_todos_updated(self, msg: TodosUpdated) -> None:
+        try:
+            widget = self.query_one("#todo-widget", TodoWidget)
+            widget.render_todos(msg.todos)
+            # Toggle visible CSS class so the border shows only when populated
+            has_todos = bool(msg.todos)
+            if has_todos:
+                widget.add_class("visible")
+            else:
+                widget.remove_class("visible")
+        except Exception:
+            pass
 
     # ── Focus actions ─────────────────────────────────────────────────
 

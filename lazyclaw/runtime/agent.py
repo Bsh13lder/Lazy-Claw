@@ -18,6 +18,7 @@ from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallba
 from lazyclaw.runtime.events import (
     FAST_DISPATCH, INSTANT_COMMAND,
     HELP_NEEDED, HELP_RESPONSE,
+    COMPACTION_BOUNDARY,
 )
 from lazyclaw.runtime.team_lead import TeamLead
 from lazyclaw.runtime.stuck_detector import detect_stuck
@@ -942,6 +943,50 @@ class Agent:
                 if iteration > 0:
                     keep_n = 1 if iteration >= 3 else 2
                     messages = _prune_old_tool_results(messages, keep_last_n=keep_n)
+
+                # ── Token-based context compaction ────────────────────
+                # Check estimated token count before every LLM call.
+                # If above 80% of the model's context limit, summarise
+                # older turns with a fast model to free headroom.
+                if needs_tools:
+                    from lazyclaw.memory.context_compactor import (
+                        estimate_tokens,
+                        get_context_limit,
+                        compact_messages as _compact_messages,
+                        COMPACTION_THRESHOLD,
+                    )
+                    _model_name = (
+                        self.eco_router.last_routing.model
+                        if self.eco_router and self.eco_router.last_routing
+                        else None
+                    )
+                    _ctx_limit = get_context_limit(_model_name)
+                    _est_tokens = estimate_tokens(messages, tools)
+                    if _est_tokens > int(_ctx_limit * COMPACTION_THRESHOLD):
+                        _compact_result = await _compact_messages(
+                            self.eco_router, self.config, user_id,
+                            messages,
+                            tools=tools,
+                            current_turn=iteration,
+                        )
+                        if _compact_result.did_compact:
+                            messages = list(_compact_result.messages)
+                            await cb.on_event(AgentEvent(
+                                COMPACTION_BOUNDARY,
+                                (
+                                    f"Context compacted at iteration {iteration}: "
+                                    f"{_compact_result.before_tokens:,} → "
+                                    f"{_compact_result.after_tokens:,} tokens "
+                                    f"({_compact_result.turns_compacted} older turns summarised)"
+                                ),
+                                {
+                                    "iteration": iteration,
+                                    "before_tokens": _compact_result.before_tokens,
+                                    "after_tokens": _compact_result.after_tokens,
+                                    "context_limit": _ctx_limit,
+                                    "turns_compacted": _compact_result.turns_compacted,
+                                },
+                            ))
 
                 # ── Browser action planner injection ──────────────────
                 # At iteration 0, if this looks like a browser task, ask

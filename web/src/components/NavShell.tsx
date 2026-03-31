@@ -8,10 +8,20 @@ interface NavShellProps {
   children: React.ReactNode;
 }
 
-const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
+const PAGE_META: Record<Page, { label: string; description: string }> = {
+  chat: { label: "Chat", description: "Conversation with your agent" },
+  overview: { label: "Overview", description: "System health & activity" },
+  skills: { label: "Skills", description: "Manage agent tools" },
+  jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
+  mcp: { label: "MCP", description: "Server integrations" },
+  memory: { label: "Memory", description: "Personal facts & logs" },
+  vault: { label: "Vault", description: "Encrypted credentials" },
+  settings: { label: "Settings", description: "Agent configuration" },
+};
+
+const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
   {
     page: "chat",
-    label: "Chat",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -20,7 +30,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "overview",
-    label: "Overview",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -32,7 +41,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "skills",
-    label: "Skills",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
@@ -41,7 +49,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "jobs",
-    label: "Jobs",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <circle cx="12" cy="12" r="10" />
@@ -51,7 +58,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "mcp",
-    label: "MCP",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
@@ -60,7 +66,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "memory",
-    label: "Memory",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z" />
@@ -70,7 +75,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "vault",
-    label: "Vault",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <rect x="3" y="11" width="18" height="11" rx="2" />
@@ -80,7 +84,6 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
   {
     page: "settings",
-    label: "Settings",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <circle cx="12" cy="12" r="3" />
@@ -92,11 +95,12 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
 
 export default function NavShell({ activePage, onNavigate, children }: NavShellProps) {
   const { user, logout } = useAuth();
+  const meta = PAGE_META[activePage];
 
   return (
     <div className="h-screen flex bg-bg-primary">
       {/* Left nav rail */}
-      <nav className="w-14 bg-bg-secondary border-r border-border flex flex-col items-center py-3 shrink-0">
+      <nav className="w-[56px] md:w-[60px] bg-bg-secondary border-r border-border flex flex-col items-center py-3 shrink-0">
         {/* Logo */}
         <button
           onClick={() => onNavigate("overview")}
@@ -110,21 +114,27 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
         </button>
 
         {/* Nav items */}
-        <div className="flex-1 flex flex-col gap-1">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.page}
-              onClick={() => onNavigate(item.page)}
-              title={item.label}
-              className={`p-2 rounded-lg transition-colors ${
-                activePage === item.page
-                  ? "bg-bg-hover text-text-primary"
-                  : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
-              }`}
-            >
-              {item.icon}
-            </button>
-          ))}
+        <div className="flex-1 flex flex-col gap-0.5">
+          {NAV_ITEMS.map((item) => {
+            const isActive = activePage === item.page;
+            return (
+              <button
+                key={item.page}
+                onClick={() => onNavigate(item.page)}
+                title={PAGE_META[item.page].label}
+                className={`relative p-2 rounded-lg transition-all duration-150 ${
+                  isActive
+                    ? "bg-bg-hover text-text-primary"
+                    : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+                }`}
+              >
+                {isActive && (
+                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 bg-accent rounded-r-full" />
+                )}
+                {item.icon}
+              </button>
+            );
+          })}
         </div>
 
         {/* Bottom: user avatar + logout */}
@@ -151,10 +161,27 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
         </div>
       </nav>
 
-      {/* Main content */}
-      <main className="flex-1 min-w-0 overflow-hidden">
-        {children}
-      </main>
+      {/* Main content area */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        {/* Page header bar */}
+        {activePage !== "chat" && (
+          <header className="shrink-0 px-6 py-3 border-b border-border bg-bg-secondary/50 backdrop-blur-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-text-muted text-xs">LazyClaw</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-placeholder">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+              <span className="text-sm font-medium text-text-primary">{meta.label}</span>
+              <span className="text-xs text-text-muted ml-2 hidden sm:inline">{meta.description}</span>
+            </div>
+          </header>
+        )}
+
+        {/* Page content */}
+        <main className="flex-1 min-w-0 overflow-hidden">
+          {children}
+        </main>
+      </div>
     </div>
   );
 }

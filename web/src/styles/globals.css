@@ -11,7 +11,10 @@
   --color-accent-soft: rgba(16, 185, 129, 0.15);
   --color-accent-dim: #059669;
   --color-cyan: #06b6d4;
+  --color-cyan-soft: rgba(6, 182, 212, 0.15);
   --color-cyan-dim: #0891b2;
+  --color-amber: #f59e0b;
+  --color-amber-soft: rgba(245, 158, 11, 0.15);
   --color-border: #2f2f2f;
   --color-border-light: #3a3a3a;
   --color-text-primary: #ececec;
@@ -156,6 +159,15 @@ html, body {
   animation: pulse-dot 1.4s ease-in-out infinite;
 }
 
+/* Live pulse — green glow for real-time indicators */
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
+  50% { box-shadow: 0 0 0 4px rgba(16, 185, 129, 0); }
+}
+.live-pulse {
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
 /* Fade in */
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(8px); }
@@ -165,7 +177,71 @@ html, body {
   animation: fade-in 0.3s ease-out;
 }
 
+/* Staggered fade in for lists */
+.animate-fade-in-1 { animation: fade-in 0.3s ease-out 0.05s both; }
+.animate-fade-in-2 { animation: fade-in 0.3s ease-out 0.1s both; }
+.animate-fade-in-3 { animation: fade-in 0.3s ease-out 0.15s both; }
+.animate-fade-in-4 { animation: fade-in 0.3s ease-out 0.2s both; }
+
+/* Card hover lift */
+.card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Progress bar fill animation */
+@keyframes bar-fill {
+  from { width: 0; }
+}
+.animate-bar-fill {
+  animation: bar-fill 0.8s ease-out;
+}
+
 /* Smooth sidebar transition */
 .sidebar-transition {
   transition: width 0.2s ease, transform 0.2s ease;
+}
+
+/* Toggle switch */
+.toggle-switch {
+  width: 36px;
+  height: 20px;
+  background: var(--color-bg-tertiary);
+  border-radius: 10px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  border: 1px solid var(--color-border);
+}
+.toggle-switch.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease;
+}
+.toggle-switch.active::after {
+  transform: translateX(16px);
+}
+
+/* Shimmer loading placeholder */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, var(--color-bg-tertiary) 25%, var(--color-bg-hover) 50%, var(--color-bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
 }

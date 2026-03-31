@@ -11,6 +11,12 @@ import logging
 import random
 import re
 
+from lazyclaw.browser.action_verifier import (
+    ActionVerifier,
+    capture_state,
+    capture_state_fresh,
+    capture_error_text,
+)
 from lazyclaw.browser.browser_settings import touch_browser_activity
 from lazyclaw.browser.page_reader import run_extractor, _detect_page_type
 from lazyclaw.runtime.tool_result import Attachment, ToolResult
@@ -296,6 +302,7 @@ class BrowserSkill(BaseSkill):
     def __init__(self, config=None) -> None:
         self._config = config
         self._snapshot_mgr: SnapshotManager | None = None
+        self._verifier = ActionVerifier()
 
     def _get_snapshot_manager(self) -> SnapshotManager:
         """Lazy-init snapshot manager."""
@@ -687,6 +694,14 @@ class BrowserSkill(BaseSkill):
                 except Exception:
                     pass
 
+        # Capture state before navigation for post-action verification
+        mgr = self._get_snapshot_manager()
+        _before_state = None
+        try:
+            _before_state = await capture_state(backend, mgr)
+        except Exception:
+            pass
+
         # Navigate to target (with extra wait after fresh launch)
         await asyncio.sleep(2)
         try:
@@ -752,6 +767,18 @@ class BrowserSkill(BaseSkill):
             except Exception:
                 pass
 
+        # Post-action verification — append semantic outcome to result
+        if _before_state is not None:
+            try:
+                _error_text = await capture_error_text(backend)
+                _after_state = await capture_state_fresh(backend, self._get_snapshot_manager())
+                _vr = self._verifier.verify(
+                    _before_state, _after_state, "open", error_text=_error_text,
+                )
+                result += f"\n\n{_vr.format('Opened')}"
+            except Exception:
+                pass
+
         return result
 
     async def _action_click(self, user_id: str, params: dict, tab_context=None) -> str:
@@ -767,6 +794,12 @@ class BrowserSkill(BaseSkill):
         # Ref-ID path (preferred) — DOM click via snapshot manager
         if ref:
             mgr = self._get_snapshot_manager()
+            # Capture before-state for verification
+            _before_state = None
+            try:
+                _before_state = await capture_state(backend, mgr, target_ref=ref)
+            except Exception:
+                pass
             meta = await mgr.get_ref_meta(backend, ref)
             clicked = await mgr.perform_click(backend, ref)
             if clicked:
@@ -777,7 +810,19 @@ class BrowserSkill(BaseSkill):
                 # Auto-snapshot if page changed — specialist sees updated refs immediately
                 if await mgr.is_stale(backend):
                     snapshot = await mgr.take_snapshot(backend)
-                    return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                    confirm = f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                # Post-action verification
+                if _before_state is not None:
+                    try:
+                        _error_text = await capture_error_text(backend)
+                        _after_state = await capture_state_fresh(backend, mgr, target_ref=ref)
+                        _vr = self._verifier.verify(
+                            _before_state, _after_state, "click",
+                            target_ref=ref, error_text=_error_text,
+                        )
+                        confirm += f"\n{_vr.format(f'Clicked [{ref}]')}"
+                    except Exception:
+                        pass
                 return confirm
             return f"Ref '{ref}' not found or element is gone. Take a new snapshot to get fresh refs."
 
@@ -827,6 +872,12 @@ class BrowserSkill(BaseSkill):
         # Ref-ID path — focus via snapshot manager, then type
         if ref:
             mgr = self._get_snapshot_manager()
+            # Capture before-state for verification
+            _before_state = None
+            try:
+                _before_state = await capture_state(backend, mgr, target_ref=ref)
+            except Exception:
+                pass
             focused = await mgr.focus_ref(backend, ref)
             if focused:
                 conn = await backend._ensure_connected()
@@ -843,7 +894,19 @@ class BrowserSkill(BaseSkill):
                 confirm = f"Typed '{text[:30]}' into [{ref}] \"{name}\""
                 if await mgr.is_stale(backend):
                     snapshot = await mgr.take_snapshot(backend)
-                    return f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                    confirm = f"{confirm}\n\n{mgr.format_snapshot(snapshot)}"
+                # Post-action verification
+                if _before_state is not None:
+                    try:
+                        _error_text = await capture_error_text(backend)
+                        _after_state = await capture_state_fresh(backend, mgr, target_ref=ref)
+                        _vr = self._verifier.verify(
+                            _before_state, _after_state, "type",
+                            target_ref=ref, error_text=_error_text,
+                        )
+                        confirm += f"\n{_vr.format(f'Typed into [{ref}]')}"
+                    except Exception:
+                        pass
                 return confirm
             return f"Ref '{ref}' not found or couldn't focus. Take a new snapshot."
 
@@ -933,8 +996,28 @@ class BrowserSkill(BaseSkill):
         if not key:
             return "Key name required (e.g. Enter, Escape, Tab, Backspace, ArrowDown)."
         backend = await self._get_backend(user_id, tab_context)
+        mgr = self._get_snapshot_manager()
+        # Capture before-state for verification
+        _before_state = None
+        try:
+            _before_state = await capture_state(backend, mgr)
+        except Exception:
+            pass
         await backend.press_key(key)
-        return f"Pressed: {key}"
+        result = f"Pressed: {key}"
+        # Post-action verification
+        if _before_state is not None:
+            try:
+                await asyncio.sleep(0.3)  # brief wait for page to react
+                _error_text = await capture_error_text(backend)
+                _after_state = await capture_state_fresh(backend, mgr)
+                _vr = self._verifier.verify(
+                    _before_state, _after_state, "press_key", error_text=_error_text,
+                )
+                result += f"\n{_vr.format(f'Pressed {key}')}"
+            except Exception:
+                pass
+        return result
 
     async def _action_snapshot(self, user_id: str, params: dict, tab_context=None) -> str:
         """Get ref-ID page snapshot — interactive elements grouped by landmark."""

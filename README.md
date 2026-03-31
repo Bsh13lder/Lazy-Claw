@@ -31,7 +31,7 @@
 
 **LazyClaw** is an open-source AI agent platform where every piece of user data is encrypted with AES-256-GCM before it touches disk. Conversations, memories, skills, credentials, scheduled jobs — all encrypted. The server never sees plaintext.
 
-Built in Python. Native MCP. Multi-agent delegation. Cost-aware routing. Browser automation via CDP. Telegram integration. 72+ skills discoverable at runtime.
+Built in Python. Native MCP. Multi-agent delegation. Cost-aware routing. Browser automation via CDP. Telegram + WhatsApp + Instagram + Email. 101 skills discoverable at runtime. Web UI included.
 
 ## Why LazyClaw?
 
@@ -45,11 +45,12 @@ LazyClaw takes a different approach:
 | **API keys** | Encrypted credential vault | `.env` plaintext |
 | **Conversations** | Encrypted per-user | Plaintext JSONL |
 | **Memories** | Encrypted personal facts | Plaintext markdown |
-| **Tool selection** | LLM-driven discovery via search_tools (~400 tokens) | All tools every turn (5K+ tokens) |
+| **Tool selection** | Smart discovery via search_tools (~400 tokens) | All tools every turn (5K+ tokens) |
 | **Cost routing** | Brain/Worker model split (Sonnet + Haiku) | Manual model config |
-| **Multi-agent** | Team Lead orchestrator + inline delegation | Fire-and-forget sub-agents |
-| **MCP** | Native client + server + lazy loading + idle timeout | Community plugins |
-| **Channels** | Telegram + Instagram + WhatsApp + Email (no browser needed) | Browser-only for most |
+| **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
+| **MCP** | Native client + server + 10 bundled servers | Community plugins |
+| **Channels** | Telegram + WhatsApp + Instagram + Email MCPs | Browser-only for most |
+| **Web UI** | React control panel (8 pages) | Varies |
 | **Language** | Python (largest AI ecosystem) | TypeScript |
 
 ## Quickstart
@@ -102,7 +103,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
                               ┌──────────────┼──────────────┐
                               ▼              ▼              ▼
                         Skill Registry   Browser (CDP)   MCP Bridge
-                        72+ skills       Brave/Chrome    6 MCP servers
+                        101 skills       Brave/Chrome    10 MCP servers
                               │              │              │
                               ▼              ▼              ▼
                         Code Sandbox    Shared Profile   External Tools
@@ -116,8 +117,8 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `gateway/` | FastAPI HTTP + WebSocket entry point |
 | `runtime/` | Agent loop, Team Lead, tool dispatch, context builder |
 | `queue/` | FIFO serial execution per user |
-| `skills/` | Instruction, Code (sandboxed), Plugin skills |
-| `channels/` | Telegram adapter (Discord, WhatsApp planned) |
+| `skills/` | 101 skills — Instruction, Code (sandboxed), Plugin |
+| `channels/` | Telegram adapter + WhatsApp/Instagram/Email via MCP |
 | `browser/` | CDP browser control, page reader, site memory |
 | `computer/` | Native subprocess + remote WebSocket connector |
 | `memory/` | Encrypted facts, history, compression |
@@ -146,7 +147,7 @@ Server-side operations (cron jobs, background tasks) derive keys from `PBKDF2(SE
 
 ### Smart Tool Selection
 
-The agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
+101 registered skills, but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
 
 ### Multi-Agent Delegation
 
@@ -176,17 +177,16 @@ Allow/ask/deny per skill category. Inline approval flow — agent pauses, asks u
 
 ## ECO Mode
 
-Three-tier cost routing — the agent automatically picks the right model per message:
+Two-tier cost routing with brain/worker model split:
 
-| Mode | Behavior | Cost |
-|------|----------|------|
-| **ECO** | Free providers only (Groq, Gemini, Ollama). Never touches paid. | $0 |
-| **HYBRID** | Simple tasks → free, complex → paid. Automatic per-message. | Low |
-| **FULL** | Always paid. Maximum quality. | Normal |
+| Mode | Brain | Worker | Fallback | Cost |
+|------|-------|--------|----------|------|
+| **HYBRID** (default) | Haiku 4.5 | Nanbeige 3B (local, $0) | Haiku 4.5 | Low |
+| **FULL** | User-settable (Sonnet) | User-settable (Haiku) | User-settable (Opus) | Normal |
 
-Complexity detection uses regex heuristics (no extra LLM call). Default: `gpt-5-mini` for everything, `gpt-5` only for analyze/compare/debug tasks. **~80% cost reduction** vs always-paid.
+The brain handles orchestration, workers handle simple tasks. Complexity detection uses regex heuristics (no extra LLM call). User-configurable model assignments and monthly budget caps.
 
-User-configurable provider pools, per-task AI assignment, and monthly budget caps.
+Also supports **Claude CLI mode** — route all LLM calls through `claude -p` for $0 cost (covered by Claude Code subscription).
 
 ## Browser
 
@@ -205,7 +205,7 @@ CDP-based control of the user's real Brave/Chrome browser. No separate Chromium 
 
 First-class MCP support — both client and server.
 
-**As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 6 servers instead of 12s sequential).
+**As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 10 servers instead of sequential). Auto-install from Telegram via `/mcp install`.
 
 **As server:** Expose LazyClaw tools to any MCP-compatible client via SSE.
 
@@ -239,6 +239,26 @@ Bot: You have 3 unread messages from Alex, Mom, and the team group...
 
 While the agent works, type `/status` or "what's happening" to see live progress.
 
+## Web UI
+
+React control panel at `localhost:3000` with 8 pages:
+
+- **Chat** — Full agent conversation with markdown rendering
+- **Overview** — System dashboard
+- **Skills** — Browse, create, edit, delete skills
+- **Jobs** — Cron job management (create, pause, resume)
+- **MCP** — Server management (connect, disconnect, install)
+- **Memory** — Personal memories + daily logs
+- **Vault** — Encrypted credential management
+- **Settings** — ECO mode, model config, system settings
+
+```bash
+cd web && npm install && npm run dev   # Development
+cd web && npm run build                # Production build
+```
+
+Dark theme, mobile responsive. Connects to the same gateway API as Telegram and CLI.
+
 ## CLI
 
 Interactive REPL with rich formatting, history, and 30+ slash commands:
@@ -257,7 +277,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 |-------------|--------|
 | PBKDF2 LRU cache | 420ms → 0ms per message (4+ derivations/msg) |
 | DB connection pool | 14ms → 0.2ms per query |
-| search_tools meta-tool | ~95% token reduction (4 tools upfront vs 114) |
+| search_tools meta-tool | ~95% token reduction (4 tools upfront vs 101) |
 | Ref-ID browser snapshots | 90-95% reduction on browser output |
 | Tool result pruning | Old results compressed to 150 chars |
 | Fast chat path | Simple messages skip full context build |
@@ -270,22 +290,25 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 ## Roadmap
 
 - [x] Phases 1-10: Foundation through Session Replay
-- [x] MCP ecosystem (6 servers)
-- [x] ECO mode with complexity routing
+- [x] 10 bundled MCP servers (freeride, healthcheck, apihunter, vaultwhisper, taskai, lazydoctor, instagram, whatsapp, email, jobspy)
+- [x] ECO mode — HYBRID (Haiku brain + Nanbeige worker) and FULL (user-settable)
 - [x] Multi-agent teams with inline delegation
-- [x] Browser automation (CDP + shared profiles)
-- [x] 72+ natural language skills
+- [x] Browser automation (CDP + shared profiles + DOM click engine)
+- [x] 101 skills discoverable at runtime
+- [x] React Web UI control panel (8 pages)
+- [x] Claude CLI provider ($0 routing via claude -p)
 - [x] Instagram, WhatsApp, Email MCP servers (no browser needed)
-- [x] Team Lead orchestrator with instant status
+- [x] WhatsApp mute from Telegram (reply "mute")
+- [x] MCP auto-install from Telegram (/mcp install)
 - [x] Brain/Worker model routing (Sonnet + Haiku)
 - [x] Ref-ID browser snapshots (95% token reduction)
-- [x] DOM click engine (Gmail/SPA compatible)
 - [x] Lazy MCP loading with favorites + idle timeout
-- [x] Survival mode (job hunting, Upwork browser automation)
-- [ ] Remote browser takeover (noVNC via Telegram)
+- [x] Survival mode (job hunting, browser automation)
+- [ ] WebSocket streaming for real-time Web UI chat
+- [ ] Skill Hub — universal skill/MCP registry (cross-framework)
 - [ ] More channels (Discord, Signal, SimpleX)
 - [ ] Docker Compose (one-command deploy)
-- [ ] Flutter mobile app
+- [ ] LazyTasker mobile app integration
 - [ ] Post-quantum key exchange (ML-KEM)
 
 See [TODO.md](TODO.md) for the full phase plan.
@@ -294,10 +317,10 @@ See [TODO.md](TODO.md) for the full phase plan.
 
 ```
 lazyclaw/
-├── gateway/        # FastAPI HTTP + WS
+├── gateway/        # FastAPI HTTP + WS (60+ endpoints)
 ├── runtime/        # Agent loop, context, tools
 ├── queue/          # Lane-based FIFO queue
-├── skills/         # Skill system + 72+ builtins
+├── skills/         # 101 skills — Instruction, Code, Plugin
 ├── channels/       # Telegram adapter
 ├── browser/        # CDP browser control
 ├── computer/       # Native subprocess + connector
@@ -311,12 +334,17 @@ lazyclaw/
 ├── llm/            # Multi-provider router + ECO
 └── db/             # aiosqlite + connection pool
 
-mcp-freeride/       # Free AI router MCP server
+web/                # React control panel (8 pages)
+mcp-freeride/       # Free AI router
 mcp-healthcheck/    # Provider health monitor
 mcp-apihunter/      # API discovery engine
 mcp-vaultwhisper/   # PII privacy proxy
 mcp-taskai/         # Task intelligence
 mcp-lazydoctor/     # Self-healing agent
+mcp-instagram/      # Instagram DMs, feed, posting (20 tools)
+mcp-whatsapp/       # WhatsApp messaging + mute (12 tools)
+mcp-email/          # Email via SMTP+IMAP (11 tools)
+mcp-jobspy/         # Job search aggregation
 ```
 
 ## Contributing

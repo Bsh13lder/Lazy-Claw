@@ -620,17 +620,26 @@ class Agent:
                     _matched_channels.append(channel)
 
             # Re-inject channel tools if the LAST assistant response used them
-            # (conversation continuity — "connect instagram" → "login" → "read DMs")
+            # AND the user's message looks like a continuation (reply words, short msg).
+            # Without the continuation check, one-shot tool calls (e.g. mute from
+            # a notification reply) make channel tools "sticky" for all future messages.
             if not _matched_channels:
-                for msg in history[-2:]:  # Only last 2 messages (immediate context)
-                    if msg.role == "assistant" and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            tname = tc.name.lower()
-                            for channel in _CHANNEL_KEYWORDS:
-                                if channel in tname and channel not in _matched_channels:
-                                    _matched_channels.append(channel)
-                if _matched_channels:
-                    logger.info("Channel tools re-injected (conversation continuity): %s", _matched_channels)
+                _continuation_signals = {
+                    "reply", "tell", "say", "send", "forward", "yes", "no",
+                    "ok", "read", "check", "show", "open", "next", "more",
+                }
+                _words = set(_msg_lower.split())
+                _looks_like_continuation = bool(_words & _continuation_signals) or len(_msg_lower) < 40
+                if _looks_like_continuation:
+                    for msg in history[-2:]:  # Only last 2 messages (immediate context)
+                        if msg.role == "assistant" and msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                tname = tc.name.lower()
+                                for channel in _CHANNEL_KEYWORDS:
+                                    if channel in tname and channel not in _matched_channels:
+                                        _matched_channels.append(channel)
+                    if _matched_channels:
+                        logger.info("Channel tools re-injected (conversation continuity): %s", _matched_channels)
 
             # Find MCP tools for matched channels
             _channel_tools: list = []
@@ -1568,12 +1577,19 @@ class Agent:
                                 len(discovered), ", ".join(discovered),
                             )
 
-                # ── Terminal task tools: force text response next iteration ──
-                # After add_task, complete_task, delete_task — the job is done.
-                # Inject a stop signal so the LLM responds with text, not more tools.
+                # ── Terminal tools: force text response next iteration ──
+                # After these tools, the job is done. Inject a stop signal so
+                # the LLM responds with a brief confirmation, not more tools.
                 _TERMINAL_TOOLS = frozenset({
+                    # Task management
                     "add_task", "complete_task", "delete_task", "update_task",
                     "daily_briefing", "list_tasks", "work_todos",
+                    # Messaging platforms (one-shot actions)
+                    "whatsapp_send", "whatsapp_mute", "whatsapp_list_muted",
+                    "whatsapp_send_image",
+                    "instagram_send", "instagram_like", "instagram_comment",
+                    "instagram_follow", "instagram_unfollow",
+                    "email_send",
                 })
                 if response and response.tool_calls:
                     _terminal_used = any(

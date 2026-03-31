@@ -109,6 +109,33 @@
 
 **Verification**: "remind me in 5 minutes drink water" → add_task with +5m → heartbeat fires → Telegram push with buttons → Done marks complete with timestamp.
 
+## React Web UI ✅ COMPLETE
+- [x] **W.1 Vite + React 19 + TypeScript** — `web/`: Full build pipeline, Tailwind CSS.
+- [x] **W.2 Auth** — Login/register with session cookie auth.
+- [x] **W.3 Chat Page** — Agent chat with markdown rendering, message history.
+- [x] **W.4 Overview** — Dashboard overview page.
+- [x] **W.5 Skills Panel** — Browse, create, edit, delete skills.
+- [x] **W.6 Jobs Panel** — Cron jobs CRUD, pause/resume.
+- [x] **W.7 MCP Panel** — Server management, connect/disconnect.
+- [x] **W.8 Memory Panel** — Personal memories, daily logs.
+- [x] **W.9 Vault Panel** — Credential management.
+- [x] **W.10 Settings Panel** — ECO mode, model config, system settings.
+
+**Verification**: `cd web && npm run dev` → full control panel at localhost:3000.
+
+## Claude CLI Provider ✅ COMPLETE
+- [x] **CLI.1 Provider** — `lazyclaw/llm/providers/claude_cli_provider.py`: Routes LLM calls through `claude -p` ($0 cost).
+- [x] **CLI.2 Warm Pool** — Pre-warmed subprocess for instant responses.
+- [x] **CLI.3 Stdin Piping** — Prompt via stdin (not CLI args) to avoid shell escaping.
+- [x] **CLI.4 Session Persistence** — `--session-id` / `--resume` for multi-turn context.
+
+## MCP Channel Servers ✅ COMPLETE
+- [x] **MC.1 WhatsApp MCP** — `mcp-whatsapp/`: 12 tools including mute/unmute, group detection, QR auth.
+- [x] **MC.2 Instagram MCP** — `mcp-instagram/`: 20 tools (DMs, feed, stories, reels, carousel, follow/unfollow). Anti-ban fingerprinting.
+- [x] **MC.3 Email MCP** — `mcp-email/`: 11 tools (send, read, search, delete, move, mark, labels). Gmail/Outlook/any IMAP.
+- [x] **MC.4 MCP Auto-Install** — `/mcp install NAME` from Telegram auto-installs + connects bundled servers.
+- [x] **MC.5 Telegram Mute Integration** — Reply "mute" to WhatsApp notifications to silence chats.
+
 ## Future: CLI Client Mode
 - [ ] **`lazyclaw chat`** — Thin REPL client that connects to running `lazyclaw start` server via HTTP API (port 18789). Tasks go through the same lane queue → show on TUI dashboard. Server runs in terminal 1, REPL in terminal 2. Both share agent, queue, browser, watchers. Great for testing.
 
@@ -405,6 +432,32 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 **Context**: Current stack (AES-256-GCM + PBKDF2-HMAC-SHA256 + bcrypt) is already quantum-resistant — symmetric/hash-based crypto only faces Grover's quadratic speedup (256→128-bit, still infeasible). PQC is only needed for key exchange when the Flutter app establishes encrypted channels. CRQC timeline: ~2031-2035. NIST standards finalized Aug 2024.
 
 **Verification**: Flutter app uses hybrid PQC key exchange. Data-at-rest encryption remains AES-256-GCM (already quantum-safe).
+
+---
+
+## 🚀 PUBLIC LAUNCH CHECKLIST (48 hours — deadline: April 1, 2026)
+
+### MUST DO (launch blockers)
+- [ ] **L.1 README rewrite** — Update skill count (101), MCP count (10), add Web UI section, fix ECO mode (HYBRID+FULL only), add WhatsApp/Instagram/Email MCPs to table.
+- [ ] **L.2 WebSocket streaming** — Add `/ws/agent/chat` for real-time chat in Web UI. Currently blocking POST only.
+- [ ] **L.3 Fix silent exceptions** — 130+ `except: pass` blocks need logging. Makes debugging impossible.
+- [ ] **L.4 .gitignore check** — Verify: .env, *.db, __pycache__, .venv/, node_modules/, web/dist/ all ignored.
+- [ ] **L.5 Clean personal data** — Remove any personal data, test DB files, or local paths from repo.
+- [ ] **L.6 install.sh test** — Verify one-command install works on fresh machine.
+- [ ] **L.7 LICENSE** — Verify MIT license file exists and is correct.
+
+### SHOULD DO (first week)
+- [ ] **L.8 Config extraction** — Move hardcoded timeouts/ports to config.py with env var overrides.
+- [ ] **L.9 Skill Hub** — Universal skill/MCP registry (cross-framework, works with OpenClaw too).
+- [ ] **L.10 Discord channel** — Second native channel adapter after Telegram.
+- [ ] **L.11 CHANGELOG.md** — Create initial changelog for v1.0.
+
+### NICE TO HAVE (first month)
+- [ ] **L.12 Test suite** — At minimum: crypto, auth, skill registry, agent basic flow.
+- [ ] **L.13 Docker Compose** — One-command containerized deployment.
+- [ ] **L.14 LazyTasker integration** — Connect Flutter app as first-class mobile client.
+- [ ] **L.15 Voice input** — Whisper transcription for Telegram voice messages.
+- [ ] **L.16 Web UI dashboard** — Extend with real-time agent status, cost tracking.
 
 ## Done
 - Phase 1 (Foundation): ✅ COMPLETE — Crypto, DB, config, LLM router, agent, gateway, CLI wizard, auth, model manager

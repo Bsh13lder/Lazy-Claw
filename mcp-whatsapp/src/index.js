@@ -1331,11 +1331,40 @@ async function handleMute(args) {
   const action = args.action || "mute";
   if (!chatQuery) return err("'chat' is required — name or phone of the chat to mute.");
 
-  // Resolve the chat/group — resolveContact handles direct chats well,
-  // but for groups we need a broader partial name search
-  let resolved = resolveContact(chatQuery);
+  // Resolve the chat/group — for mute, prefer group matches over person matches
+  // because "mute Salah Surf Casting" almost certainly means the group, not a person
+  const q = chatQuery.toLowerCase().trim();
+
+  // First pass: look for exact group name match (@g.us)
+  let resolved = null;
+  for (const [jid, c] of contacts) {
+    if (!jid.endsWith("@g.us")) continue;
+    const name = (c.name || "").toLowerCase();
+    if (name === q) {
+      resolved = { jid, name: c.name || jid };
+      break;
+    }
+  }
+
+  // Second pass: partial group name match
   if (!resolved) {
-    const q = chatQuery.toLowerCase().trim();
+    for (const [jid, c] of contacts) {
+      if (!jid.endsWith("@g.us")) continue;
+      const name = (c.name || "").toLowerCase();
+      if (name.includes(q) || q.includes(name)) {
+        resolved = { jid, name: c.name || jid };
+        break;
+      }
+    }
+  }
+
+  // Third pass: fall back to resolveContact (persons + all contacts)
+  if (!resolved) {
+    resolved = resolveContact(chatQuery);
+  }
+
+  // Last resort: broad partial search
+  if (!resolved) {
     for (const [jid, c] of contacts) {
       const name = (c.name || "").toLowerCase();
       if (name.includes(q)) {

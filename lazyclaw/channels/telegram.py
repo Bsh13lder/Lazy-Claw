@@ -888,21 +888,40 @@ class TelegramAdapter(ChannelAdapter):
             f"\u2014 screenshots are auto-forwarded to this chat.]"
         )
 
-        # Inject last watcher notification context so agent knows who messaged
+        # Inject last watcher notification context ONLY when user is replying
+        # to a notification (via Telegram reply) or explicitly mentions the channel.
+        # Without this guard, the LLM sees notification context on every message
+        # within 10 min and starts calling channel tools unprompted.
+        _is_reply_to_notification = (
+            update.message.reply_to_message
+            and update.message.reply_to_message.from_user
+            and update.message.reply_to_message.from_user.is_bot
+        )
+        _msg_lower = text.lower()
+        _mentions_channel = any(
+            kw in _msg_lower
+            for kws in (["whatsapp", "wa "], ["instagram", "insta", "ig "], ["email", "gmail", "mail"])
+            for kw in kws
+        )
         try:
             from lazyclaw.heartbeat.daemon import get_last_watcher_context
             import time as _time
             _wctx = get_last_watcher_context(user_id)
-            if _wctx and (_time.time() - _wctx.get("timestamp", 0)) < 600:  # within 10 min
+            if (
+                _wctx
+                and (_time.time() - _wctx.get("timestamp", 0)) < 600  # within 10 min
+                and (_is_reply_to_notification or _mentions_channel)
+            ):
                 _svc = _wctx["service"]
                 _notif = _wctx.get("notification", "")
                 channel_context += (
-                    f"\n\n[RECENT {_svc.upper()} NOTIFICATION — user is likely replying to this]\n"
+                    f"\n\n[RECENT {_svc.upper()} NOTIFICATION — user is replying to this]\n"
                     f"{_notif}\n\n"
                     f"IMPORTANT: If user says 'reply', 'tell him', 'say yes', etc. — "
                     f"use the MCP {_svc}_send tool to send the message to the contact shown above. "
                     f"Do NOT ask who to reply to — the contact is in the notification above.\n"
-                    f"If user says 'mute X' with a specific group name — use whatsapp_mute tool."
+                    f"If user says 'mute X' with a specific group name — use whatsapp_mute tool.\n"
+                    f"Do NOT call other channel tools unless the user explicitly asks."
                 )
         except Exception:
             pass

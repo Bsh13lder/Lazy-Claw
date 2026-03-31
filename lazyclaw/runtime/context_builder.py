@@ -32,19 +32,43 @@ async def build_context(
     config: Config,
     user_id: str,
     registry=None,
+    channel_id: str | None = None,
+    project_id: str | None = None,
 ) -> str:
-    """Build system prompt with personality + capabilities + memories."""
+    """Build system prompt with personality + capabilities + memories.
+
+    Args:
+        config: App config.
+        user_id: Current user identifier.
+        registry: Skill registry (for capabilities section).
+        channel_id: Active channel (loads CHANNEL memory layer when provided).
+        project_id: Active project (loads PROJECT memory layer when provided).
+    """
     personality = load_personality()
 
     # 1. Capabilities (cached 60s)
     capabilities = await _build_capabilities_cached(config, user_id, registry)
 
-    # 2. Personal memories
+    # 2. Multi-layer memory context (Global → Project → Channel → User)
+    #    Injected before activity logs so layered context informs interpretation
+    #    of recent events. Synchronous file I/O — fast for small markdown files.
+    layer_context = ""
+    try:
+        from lazyclaw.memory.layers import load_session_context
+        layer_context = load_session_context(
+            config, user_id,
+            channel_id=channel_id,
+            project_id=project_id,
+        )
+    except Exception:
+        pass
+
+    # 3. Personal memories (DB-backed encrypted facts — backward compat)
     from lazyclaw.memory.personal import get_memories
 
     memories = await get_memories(config, user_id, limit=10)
 
-    # 3. Recent activity (daily/weekly logs — agent's "diary")
+    # 4. Recent activity (daily/weekly logs — agent's "diary")
     activity_section = ""
     try:
         from lazyclaw.memory.daily_log import list_daily_logs
@@ -63,10 +87,12 @@ async def build_context(
     except Exception:
         pass
 
-    # Combine sections
+    # Combine sections — layered context between capabilities and activity
     sections = [personality]
     if capabilities:
         sections.append(capabilities)
+    if layer_context:
+        sections.append(layer_context)
     if activity_section:
         sections.append(activity_section)
     if memories:

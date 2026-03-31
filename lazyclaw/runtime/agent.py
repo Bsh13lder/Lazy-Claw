@@ -910,6 +910,23 @@ class Agent:
                     )
                 )
 
+        # ── TAOR: Three-Phase loop setup (Plan → Execute → Verify) ───────
+        # Pure functions imported here to keep top-level imports clean.
+        from lazyclaw.runtime.taor import (
+            detect_effort, make_plan_prompt, verify_response, EffortLevel,
+        )
+        _effort = detect_effort(message, has_tools=needs_tools)
+        # Number of verify+correction passes after the execute phase.
+        # LOW → 0 (skip entirely), MEDIUM → 1, HIGH → 2, MAX → 3.
+        _taor_verify_passes = {
+            EffortLevel.LOW: 0,
+            EffortLevel.MEDIUM: 1,
+            EffortLevel.HIGH: 2,
+            EffortLevel.MAX: 3,
+        }[_effort]
+        _taor_retry_context: str | None = None  # Set on verify failure for replan
+        logger.info("TAOR: effort=%s verify_passes=%d", _effort, _taor_verify_passes)
+
         # Agentic loop — brain decides when to stop, safety cap prevents runaway
         max_iterations = self.config.max_tool_iterations
         _nudge_at = int(max_iterations * 0.8)  # Nudge LLM at 80% of cap
@@ -998,6 +1015,28 @@ class Agent:
                     from dataclasses import replace as _dc_replace
                     _plan_state = _dc_replace(_plan_state, plan_injected=True)
                     logger.info("Browser action planner: injected planning prompt")
+
+                # ── TAOR Phase 1: PLAN ────────────────────────────────────
+                # For non-LOW effort tasks, inject a Claude-optimized XML
+                # planning prompt so the model decomposes the task and
+                # identifies required tools before taking action.
+                # Leverages Claude's strong XML structured reasoning.
+                # On verify-retry, _taor_retry_context carries failure context
+                # so the model adjusts its approach.
+                if (
+                    iteration == 0
+                    and _effort != EffortLevel.LOW
+                    and tools
+                    and needs_tools
+                ):
+                    _taor_plan = make_plan_prompt(
+                        message, _effort, _taor_retry_context,
+                    )
+                    messages.append(LLMMessage(role="system", content=_taor_plan))
+                    logger.info(
+                        "TAOR Plan phase injected (effort=%s, retry=%s)",
+                        _effort, _taor_retry_context is not None,
+                    )
 
                 kwargs: dict = {}
                 if tools:
@@ -1727,6 +1766,69 @@ class Agent:
             if _delegate_registered and self.registry:
                 self.registry.unregister("delegate")
             return "Operation cancelled."
+
+        # ── TAOR Phase 3: VERIFY ──────────────────────────────────────
+        # After the execute phase, verify the final response with lightweight
+        # heuristic checks (no LLM call). On failure, inject failure context
+        # and make one correction LLM call, then re-verify. Repeats up to
+        # _taor_verify_passes times. LOW effort skips this entirely.
+        #
+        # The correction call uses ROLE_BRAIN (Claude) and explicitly instructs
+        # text-only response — no tool calls. This keeps it cheap and fast.
+        if _taor_verify_passes > 0 and needs_tools and all_new_messages:
+            from lazyclaw.llm.providers.base import LLMResponse as _LLMRespV
+            for _taor_v in range(_taor_verify_passes):
+                _taor_last = all_new_messages[-1]
+                _taor_final = _taor_last.content or ""
+                _taor_ok, _taor_reason = verify_response(
+                    message, _taor_final, _tool_results, _effort,
+                )
+                if _taor_ok:
+                    logger.info("TAOR verify passed on attempt %d", _taor_v + 1)
+                    break
+                # Last attempt — log and proceed with best-effort response.
+                if _taor_v == _taor_verify_passes - 1:
+                    logger.info(
+                        "TAOR verify: %d passes exhausted, using last response",
+                        _taor_verify_passes,
+                    )
+                    break
+                logger.info(
+                    "TAOR verify failed (pass %d/%d): %s",
+                    _taor_v + 1, _taor_verify_passes, _taor_reason,
+                )
+                _taor_retry_context = _taor_reason
+                await cb.on_event(AgentEvent(
+                    "taor_verify_retry",
+                    f"Self-checking response (attempt {_taor_v + 2})",
+                    {"reason": _taor_reason, "attempt": _taor_v + 1},
+                ))
+                # Inject correction directive — text-only, no tools.
+                _correction_directive = (
+                    "[SELF-VERIFICATION FAILED: "
+                    f"{_taor_reason} "
+                    "Provide a corrected, complete response that addresses "
+                    "this issue. Respond with text only — do NOT call any tools.]"
+                )
+                messages.append(LLMMessage(role="assistant", content=_taor_final))
+                messages.append(LLMMessage(role="user", content=_correction_directive))
+                try:
+                    _corr_resp = await self.eco_router.chat(
+                        messages, user_id=user_id, role=ROLE_BRAIN,
+                    )
+                    if _corr_resp.content and _corr_resp.content.strip():
+                        _corrected = _corr_resp.content
+                        all_new_messages.append(
+                            LLMMessage(role="assistant", content=_corrected)
+                        )
+                        await cb.on_event(AgentEvent(
+                            "token", _corrected,
+                            {"model": _corr_resp.model, "taor_correction": True},
+                        ))
+                        await cb.on_event(AgentEvent("stream_done", "", {}))
+                except Exception as _ve:
+                    logger.warning("TAOR verify correction call failed: %s", _ve)
+                    break
 
         # ── Post-loop: persist + cleanup (guarded by finally) ─────────
         content = ""

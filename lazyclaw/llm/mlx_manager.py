@@ -1,15 +1,15 @@
 """MLX Model Manager — lifecycle management for mlx_lm.server.
 
-Handles starting/stopping the MLX server, model loading, health checks,
-and multi-model swapping for the ECO brain+worker architecture.
+DEPRECATED: Ollama 0.19+ includes a native MLX backend and manages model
+processes automatically. Use `ollama serve` + OllamaProvider instead.
 
-Three operation modes:
-1. External server: User starts mlx_lm.server manually
-2. Managed server:  MLXManager starts/stops the server process
-3. On-demand mode:  Server starts on first request, auto-stops after idle
+This module is kept for backward compatibility only. It will be removed
+in a future release after the Ollama migration is fully validated.
 
-On-demand mode saves ~10 GB RAM on M2 16GB (GPU unified memory).
-Cold start: ~6s.  Idle timeout: 2 minutes.
+Legacy architecture (replaced by Ollama):
+  - External server: User starts mlx_lm.server manually
+  - Managed server:  MLXManager starts/stops the server process
+  - On-demand mode:  Server starts on first request, auto-stops after idle
 """
 
 from __future__ import annotations

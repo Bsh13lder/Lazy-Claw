@@ -422,47 +422,54 @@ class TelegramCommands:
     # -- /local ---------------------------------------------------------------
 
     async def _handle_local(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage local Ollama worker for HYBRID mode.
+
+        Ollama 0.19+ includes a native MLX backend for Apple Silicon —
+        it handles model loading, memory management, and auto-swap automatically.
+        We just need to start/stop the ollama serve process and pull the model.
+
+        /local [on|off|status|restart]
+        """
         user_id = await self._auth(update)
         if not user_id:
             return
         args = context.args or []
-        from lazyclaw.llm.mlx_manager import MLXManager
-        from lazyclaw.llm.model_registry import BRAIN_MODEL, WORKER_MODEL
-        from lazyclaw.llm.eco_settings import get_eco_settings
 
-        # Get or create MLX manager (singleton on eco_router)
+        from lazyclaw.llm.model_registry import WORKER_MODEL
+        from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
+        from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+
         eco_router = getattr(self._agent, "eco_router", None)
         if not eco_router:
             await self._reply(update, "\u274c No eco_router available")
             return
 
-        # Lazy-init MLX manager on eco_router
-        if not hasattr(eco_router, "_mlx_manager"):
-            eco_router._mlx_manager = MLXManager()
-        manager = eco_router._mlx_manager
+        settings = await get_eco_settings(self._config, user_id)
+        worker_model = settings.get("worker_model") or WORKER_MODEL  # nanbeige4.1:3b
 
-        if not args:
-            # Show status
-            status = await manager.check_health()
-            brain = status["brain"]
-            worker = status["worker"]
+        subcmd = args[0].lower() if args else "status"
 
-            b_icon = "\u2705" if brain["healthy"] else "\u274c"
-            w_icon = "\u2705" if worker["healthy"] else "\u274c"
-            b_model = brain["model"] or "not running"
-            w_model = worker["model"] or "not running"
-            b_port = brain["port"] or 8080
-            w_port = worker["port"] or 8081
+        if subcmd == "status" or not args:
+            ollama = OllamaProvider()
+            is_running = await ollama.health_check()
+            running_models = await ollama.list_running() if is_running else []
 
-            # RAM info
+            o_icon = "\u2705" if is_running else "\u274c"
             from lazyclaw.llm.ram_monitor import get_ram_status
             ram = await get_ram_status()
 
             text = (
-                "\U0001f9e0 <b>Local AI Servers</b>\n"
+                "\U0001f9e0 <b>Local Ollama Worker</b>\n"
                 "━━━━━━━━━━━━\n"
-                f"{b_icon} Brain: <b>{b_model}</b> (:{b_port})\n"
-                f"{w_icon} Worker: <b>{w_model}</b> (:{w_port})\n"
+                f"{o_icon} Ollama: <b>{'running' if is_running else 'stopped'}</b>\n"
+            )
+            if running_models:
+                for m in running_models:
+                    text += f"\u2022 {m['name']} ({m['size_mb']}MB loaded)\n"
+            else:
+                text += f"\U0001f4e6 Model: {worker_model} (not loaded)\n"
+
+            text += (
                 f"\n\U0001f4be RAM: {ram.system_used_pct:.0f}% used"
             )
             if ram.ai_total_mb > 0:
@@ -471,112 +478,113 @@ class TelegramCommands:
 
             text += (
                 "\n\n<b>Commands:</b>\n"
-                "<code>/local on</code> — Start brain + worker\n"
-                "<code>/local off</code> — Stop all servers\n"
-                "<code>/local brain</code> — Start brain only\n"
-                "<code>/local worker</code> — Worker only (hybrid mode)\n"
-                "<code>/local stop brain</code> — Stop brain, keep worker\n"
-                "<code>/local stop worker</code> — Stop worker, keep brain\n"
-                "<code>/local restart</code> — Restart all"
+                "<code>/local on</code> — Start Ollama + pull model\n"
+                "<code>/local off</code> — Stop Ollama\n"
+                "<code>/local restart</code> — Restart Ollama\n"
+                "<code>/local status</code> — Show this status"
             )
             await self._reply(update, text)
             return
 
-        subcmd = args[0].lower()
-
-        # Get user's configured models
-        settings = await get_eco_settings(self._config, user_id)
-        brain_model = settings.get("brain_model") or BRAIN_MODEL
-        worker_model = settings.get("worker_model") or WORKER_MODEL
-
         if subcmd in ("on", "start"):
-            # ECO mode: brain is Haiku (API), only start worker locally.
-            # Starting both on 16GB M2 causes OOM (Qwen 9B + Nanbeige 3B).
-            await self._reply(update, "\u23f3 Starting local worker server...")
+            await self._reply(update, "\u23f3 Starting Ollama worker...")
+            import shutil
+            import asyncio as _aio
 
-            w_ok = await manager.start_worker(worker_model)
-
-            # Reset eco_router's local provider cache so it discovers the new server
-            eco_router.reset_local_check()
-
-            lines = []
-            lines.append(f"{'✅' if w_ok else '❌'} Worker: {worker_model.split('/')[-1]}")
-            lines.append(f"ℹ️ Brain: {brain_model.split('/')[-1]} (API — no local server needed)")
-
-            if w_ok:
-                from lazyclaw.llm.eco_settings import update_eco_settings
-                await update_eco_settings(self._config, user_id, {"mode": "hybrid"})
-                lines.append("\n\U0001f389 Worker running! Auto-switched to <b>HYBRID</b> (Haiku brain + local worker)")
-            else:
-                lines.append(
-                    "\n\u274c Both failed. Is mlx-lm installed?\n"
-                    "<code>pip install mlx-lm</code>"
-                )
-
-            await self._reply(update, "\n".join(lines))
-            return
-
-        if subcmd in ("off", "stop") and len(args) == 1:
-            await manager.stop_all()
-            eco_router.reset_local_check()
-            await self._reply(update, "\u2705 Local AI servers stopped.")
-            return
-
-        # /local stop brain | /local stop worker
-        if subcmd == "stop" and len(args) > 1:
-            target = args[1].lower()
-            if target == "brain" and hasattr(manager, '_brain') and manager._brain:
-                await manager._stop_server(manager._brain)
-                manager._brain = None
-                eco_router.reset_local_check()
-                await self._reply(update, "\u2705 Brain stopped. Worker still running.")
-                return
-            if target == "worker" and hasattr(manager, '_worker') and manager._worker:
-                await manager._stop_server(manager._worker)
-                manager._worker = None
-                eco_router.reset_local_check()
-                await self._reply(update, "\u2705 Worker stopped. Brain still running.")
-                return
-            await self._reply(update, "\u274c Use: <code>/local stop brain</code> or <code>/local stop worker</code>")
-            return
-
-        if subcmd == "brain":
-            await self._reply(update, f"\u23f3 Starting brain: {brain_model.split('/')[-1]}...")
-            ok = await manager.start_brain(brain_model)
-            eco_router.reset_local_check()
-            icon = "\u2705" if ok else "\u274c"
-            await self._reply(update, f"{icon} Brain: {'running' if ok else 'failed'}")
-            return
-
-        if subcmd == "worker":
-            # Worker-only = hybrid mode (Sonnet brain + local nanbeige workers)
-            await self._reply(update, f"\u23f3 Starting worker: {worker_model.split('/')[-1]}...")
-            ok = await manager.start_worker(worker_model)
-            eco_router.reset_local_check()
-            if ok:
-                # Auto-suggest hybrid mode
-                from lazyclaw.llm.eco_settings import update_eco_settings
-                await update_eco_settings(self._config, user_id, {"mode": "hybrid"})
+            if not shutil.which("ollama"):
                 await self._reply(
                     update,
-                    f"\u2705 Worker running: {worker_model.split('/')[-1]}\n"
-                    f"\u2696\ufe0f Auto-switched to <b>HYBRID</b> mode\n"
-                    f"(Sonnet brain + local worker)"
+                    "\u274c Ollama not installed.\n"
+                    "Install: <a href='https://ollama.com'>ollama.com</a>\n"
+                    "Then run: <code>ollama pull nanbeige4.1:3b</code>"
                 )
-            else:
-                await self._reply(update, "\u274c Worker failed to start")
+                return
+
+            # Start ollama serve in background (idempotent — ignores if already running)
+            proc = await _aio.create_subprocess_exec(
+                "ollama", "serve",
+                stdout=_aio.subprocess.DEVNULL,
+                stderr=_aio.subprocess.DEVNULL,
+            )
+            # Give it a moment to start
+            await _aio.sleep(2)
+
+            # Check it's up
+            ollama = OllamaProvider()
+            if not await ollama.health_check():
+                await self._reply(update, "\u274c Ollama failed to start. Check system logs.")
+                return
+
+            # Pull model if not already present
+            running = await ollama.list_running()
+            model_loaded = any(m["name"].startswith(worker_model.split(":")[0]) for m in running)
+            if not model_loaded:
+                await self._reply(update, f"\u23f3 Pulling <b>{worker_model}</b> (first time may take a few minutes)...")
+                pull_proc = await _aio.create_subprocess_exec(
+                    "ollama", "pull", worker_model,
+                    stdout=_aio.subprocess.PIPE,
+                    stderr=_aio.subprocess.PIPE,
+                )
+                _, stderr = await pull_proc.communicate()
+                if pull_proc.returncode != 0:
+                    err = stderr.decode()[:200] if stderr else "unknown error"
+                    await self._reply(update, f"\u274c Pull failed: {err}")
+                    return
+
+            eco_router.reset_local_check()
+            await update_eco_settings(self._config, user_id, {"mode": "hybrid"})
+            await self._reply(
+                update,
+                f"\u2705 Ollama running with <b>{worker_model}</b>\n"
+                f"\u2696\ufe0f Auto-switched to <b>HYBRID</b> mode\n"
+                f"(Sonnet 4.6 brain + local Nanbeige worker)"
+            )
+            return
+
+        if subcmd in ("off", "stop"):
+            import asyncio as _aio
+            stop = await _aio.create_subprocess_exec(
+                "pkill", "-f", "ollama serve",
+                stdout=_aio.subprocess.DEVNULL,
+                stderr=_aio.subprocess.DEVNULL,
+            )
+            await stop.wait()
+            eco_router.reset_local_check()
+            await self._reply(update, "\u2705 Ollama stopped.")
             return
 
         if subcmd == "restart":
-            await self._reply(update, "\u23f3 Restarting local worker...")
-            await manager.stop_all()
-            w_ok = await manager.start_worker(worker_model)
+            await self._reply(update, "\u23f3 Restarting Ollama...")
+            import asyncio as _aio
+            import shutil
+            if not shutil.which("ollama"):
+                await self._reply(update, "\u274c Ollama not installed.")
+                return
+            stop = await _aio.create_subprocess_exec(
+                "pkill", "-f", "ollama serve",
+                stdout=_aio.subprocess.DEVNULL,
+                stderr=_aio.subprocess.DEVNULL,
+            )
+            await stop.wait()
+            await _aio.sleep(1)
+            await _aio.create_subprocess_exec(
+                "ollama", "serve",
+                stdout=_aio.subprocess.DEVNULL,
+                stderr=_aio.subprocess.DEVNULL,
+            )
+            await _aio.sleep(2)
+            ollama = OllamaProvider()
+            ok = await ollama.health_check()
             eco_router.reset_local_check()
-            w = "\u2705" if w_ok else "\u274c"
-            await self._reply(update, f"{w} Worker: {worker_model.split('/')[-1]}\nℹ️ Brain: API (no local server)\n\n\u2705 Restarted!")
+            icon = "\u2705" if ok else "\u274c"
+            await self._reply(
+                update,
+                f"{icon} Ollama {'running' if ok else 'failed to start'}\n"
+                f"\U0001f4e6 Worker: {worker_model}"
+            )
             return
 
-        await self._reply(update, "\u274c Use: <code>/local on|off|restart|brain|worker</code>")
+        await self._reply(update, "\u274c Use: <code>/local on|off|restart|status</code>")
 
     # -- /ram ---------------------------------------------------------------
 

@@ -93,6 +93,9 @@ class SystemStats:
     telegram_status: str = "disconnected"
     eco_mode: str = "full"
     ollama_models: tuple[str, ...] = ()
+    # Active model names for status bar display
+    brain_model_name: str = ""   # e.g. "Sonnet 4.6" or last routing display name
+    worker_model_name: str = ""  # e.g. "nanbeige4.1:3b" or "Haiku 4.5"
     # RAM monitor (ECO v2)
     ram_system_pct: float = 0.0
     ram_ai_mb: int = 0
@@ -549,16 +552,13 @@ class SystemBar(Static):
         active_color = _C_ACTIVE if stats.active_count > 0 else _C_IDLE
 
         # ECO mode badge — normalize display name
-        _eco_labels = {"hybrid": "HYBRID", "full": "FULL"}
+        _eco_labels = {"hybrid": "HYBRID", "full": "FULL", "claude": "CLI"}
         eco = _eco_labels.get(stats.eco_mode, stats.eco_mode.upper())
-        eco_color = _C_ACTIVE if eco == "HYBRID" else _C_IDLE
+        eco_color = _C_ACTIVE if eco == "HYBRID" else (_C_THINKING if eco == "CLI" else _C_IDLE)
 
-        # Model names from config
-        brain = ""
-        worker = ""
-        if config:
-            brain = getattr(config, "brain_model", "").split("/")[-1]
-            worker = getattr(config, "worker_model", "").split("/")[-1]
+        # Model names from active routing (populated by _collect_stats)
+        brain = stats.brain_model_name
+        worker = stats.worker_model_name
 
         # Service status indicators
         tg_dot = f"[{_C_SUCCESS}]\u2713[/{_C_SUCCESS}]" if stats.telegram_status == "connected" else f"[{_C_ERROR}]\u2717[/{_C_ERROR}]"
@@ -1910,13 +1910,24 @@ class LazyClawApp(App):
 
             telegram_status = "connected" if self._telegram_connected else "disconnected"
 
-            # ECO mode + Ollama models for header
+            # ECO mode + Ollama models + active model names for header
             eco_mode = "full"
             ollama_models: tuple[str, ...] = ()
+            brain_model_name = ""
+            worker_model_name = ""
             try:
                 from lazyclaw.llm.eco_settings import get_eco_settings
+                from lazyclaw.llm.model_registry import get_mode_models, get_model
                 eco = await get_eco_settings(self._config, self._user_id)
                 eco_mode = eco.get("mode", "full")
+                # Resolve default model names for current mode
+                mode_models = get_mode_models(eco_mode)
+                brain_id = eco.get("brain_model") or mode_models.get("brain", "")
+                worker_id = eco.get("worker_model") or mode_models.get("worker", "")
+                brain_profile = get_model(brain_id)
+                worker_profile = get_model(worker_id)
+                brain_model_name = brain_profile.display_name if brain_profile else brain_id.split("/")[-1]
+                worker_model_name = worker_profile.display_name if worker_profile else worker_id.split(":")[0]
             except Exception:
                 pass
             try:
@@ -1926,6 +1937,9 @@ class LazyClawApp(App):
                     if ollama:
                         running = await ollama.list_running()
                         ollama_models = tuple(m["name"] for m in running)
+                        # Override worker display name if Ollama has models loaded
+                        if running:
+                            worker_model_name = running[0]["name"]
             except Exception:
                 pass
 
@@ -1961,6 +1975,8 @@ class LazyClawApp(App):
                 telegram_status=telegram_status,
                 eco_mode=eco_mode,
                 ollama_models=ollama_models,
+                brain_model_name=brain_model_name,
+                worker_model_name=worker_model_name,
                 ram_system_pct=ram_pct,
                 ram_ai_mb=ram_ai,
                 ram_free_mb=ram_free,

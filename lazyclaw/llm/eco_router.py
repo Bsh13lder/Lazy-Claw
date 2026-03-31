@@ -262,93 +262,85 @@ class EcoRouter:
     async def _ensure_local(self) -> tuple:
         """Lazy-init local providers. Returns (brain_provider, worker_provider).
 
-        On-demand mode: if no MLX server is running, starts one (~6s cold start)
-        and auto-stops after 2 min idle to free ~10 GB GPU RAM.
+        HYBRID mode uses Ollama as the primary local worker (nanbeige4.1:3b).
+        Ollama delegates model management to its own server — no manual process
+        lifecycle needed. MLX is checked as a secondary option for any users
+        still running the legacy mlx_lm.server setup.
 
-        Tries MLX first (faster on Apple Silicon), falls back to Ollama.
         Returns (None, None) if no local provider available.
         """
-        # Fast path: already have healthy providers — just touch idle timer
-        if self._local_checked and (self._mlx_brain or self._mlx_worker):
-            if self._mlx_manager:
-                self._mlx_manager.touch()
-            return self._mlx_brain, self._mlx_worker
+        # Fast path: already checked and Ollama is up
+        if self._local_checked and self._ollama:
+            return None, self._ollama
 
         async with self._local_lock:
-            # Re-check after acquiring lock
-            if self._local_checked and (self._mlx_brain or self._mlx_worker):
-                if self._mlx_manager:
-                    self._mlx_manager.touch()
-                return self._mlx_brain, self._mlx_worker
+            if self._local_checked and self._ollama:
+                return None, self._ollama
 
-            # Reset stale state (server may have been idle-stopped)
+            # Reset stale state
             self._mlx_brain = None
             self._mlx_worker = None
 
-            # Try MLX — check both ports, use whatever is available
+            # Primary: Ollama (handles Nanbeige4.1:3b via native MLX backend)
             try:
-                from lazyclaw.llm.providers.mlx_provider import MLXProvider
-
-                _eco_models = get_mode_models("hybrid")
-                _worker_model = _eco_models["worker"]
-                _brain_model = _eco_models["brain"]
-
-                # Check :8081 first (worker/nanbeige — most common for single-model)
-                worker = MLXProvider("http://127.0.0.1:8081")
-                if await worker.health_check():
-                    worker._loaded_model = _worker_model
-                    self._mlx_worker = worker
-                    logger.info("MLX connected on :8081 → %s", _worker_model)
-
-                # Check :8080 (brain — only if dual-model setup)
-                brain = MLXProvider("http://127.0.0.1:8080")
-                if await brain.health_check():
-                    brain._loaded_model = _brain_model
-                    self._mlx_brain = brain
-                    logger.info("MLX connected on :8080 → %s", _brain_model)
-
-                # On-demand: start MLX if nothing is running
-                if not self._mlx_worker and not self._mlx_brain:
-                    if self._mlx_manager is None:
-                        from lazyclaw.llm.mlx_manager import MLXManager
-                        self._mlx_manager = MLXManager(
-                            on_demand=True,
-                            on_idle_stop=self.reset_local_check,
-                        )
-                        self._mlx_manager._worker_model = _worker_model
-
-                    logger.info("MLX on-demand: starting worker...")
-                    started = await self._mlx_manager.ensure_running()
-                    if started:
-                        worker = MLXProvider("http://127.0.0.1:8081")
-                        if await worker.health_check():
-                            worker._loaded_model = _worker_model
-                            self._mlx_worker = worker
-                            logger.info("MLX on-demand ready: %s", _worker_model)
-
-                # Single server: use one model for both roles
-                if self._mlx_worker and not self._mlx_brain:
-                    self._mlx_brain = self._mlx_worker
-                    logger.info("MLX single-model: nanbeige serves brain + worker")
-                elif self._mlx_brain and not self._mlx_worker:
-                    self._mlx_worker = self._mlx_brain
-                    logger.info("MLX single-model: brain serves both roles")
+                from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+                ollama = OllamaProvider()
+                if await ollama.health_check():
+                    self._ollama = ollama
+                    logger.info("Ollama connected — nanbeige4.1:3b worker ready")
             except Exception as exc:
-                logger.debug("MLX not available: %s", exc)
+                logger.debug("Ollama not available: %s", exc)
 
-            # Ollama fallback (if MLX not available)
-            if not self._mlx_brain:
+            # Secondary: legacy MLX direct servers (deprecated, for backward compat)
+            if not self._ollama:
                 try:
-                    from lazyclaw.llm.providers.ollama_provider import OllamaProvider
-                    ollama = OllamaProvider()
-                    if await ollama.health_check():
-                        self._ollama = ollama
-                        logger.info("Ollama connected (MLX not available)")
+                    from lazyclaw.llm.providers.mlx_provider import MLXProvider  # noqa: deprecated
+
+                    _eco_models = get_mode_models("hybrid")
+                    _worker_model = _eco_models["worker"]
+                    _brain_model = _eco_models["brain"]
+
+                    worker = MLXProvider("http://127.0.0.1:8081")
+                    if await worker.health_check():
+                        worker._loaded_model = _worker_model
+                        self._mlx_worker = worker
+                        logger.info("MLX (legacy) on :8081 → %s", _worker_model)
+
+                    brain = MLXProvider("http://127.0.0.1:8080")
+                    if await brain.health_check():
+                        brain._loaded_model = _brain_model
+                        self._mlx_brain = brain
+                        logger.info("MLX (legacy) on :8080 → %s", _brain_model)
+
+                    if self._mlx_worker and not self._mlx_brain:
+                        self._mlx_brain = self._mlx_worker
+                    elif self._mlx_brain and not self._mlx_worker:
+                        self._mlx_worker = self._mlx_brain
                 except Exception as exc:
-                    logger.debug("Ollama not available: %s", exc)
+                    logger.debug("MLX not available: %s", exc)
 
             self._local_checked = True
+            # Return: (brain, worker) — Ollama serves worker role
+            if self._ollama:
+                return None, self._ollama
             return self._mlx_brain, self._mlx_worker
+
+    async def _ensure_ollama(self):
+        """Return the Ollama provider if available, else None.
+
+        Used by the TUI to show Ollama model status. Never raises.
+        """
+        try:
+            from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+            if self._ollama is None:
+                candidate = OllamaProvider()
+                if await candidate.health_check():
+                    self._ollama = candidate
+            elif not await self._ollama.health_check():
+                self._ollama = None
+            return self._ollama
+        except Exception:
+            return None
 
     def reset_local_check(self) -> None:
         """Reset local provider detection (after user installs/restarts)."""
@@ -572,7 +564,7 @@ class EcoRouter:
             logger.warning("Claude CLI failed: %s — falling back to Sonnet", exc)
             self._last_claude_fallback = str(exc)
             response = await self._route_paid(
-                messages, user_id, "claude-sonnet-4-20250514",
+                messages, user_id, "claude-sonnet-4-6-20250514",
                 reason=f"claude_cli_failed: {exc}",
                 **kwargs,
             )
@@ -670,13 +662,14 @@ class EcoRouter:
 
         On failure, resets local cache and raises so caller can fallback.
         """
-        provider_name = "mlx"
-        if hasattr(provider, '_base_url'):
-            base = getattr(provider, '_base_url', '')
-            if "8080" in base or "8081" in base:
-                provider_name = "mlx"
-        elif hasattr(provider, 'health_check') and not hasattr(provider, '_loaded_model'):
+        # Detect provider type by class name (avoids circular imports)
+        provider_class = type(provider).__name__
+        if provider_class == "OllamaProvider":
             provider_name = "ollama"
+        elif provider_class == "MLXProvider":
+            provider_name = "mlx"
+        else:
+            provider_name = "local"
 
         self._set_routing(model, provider_name, is_local=True, reason=reason)
         self._record_usage(user_id, "local")

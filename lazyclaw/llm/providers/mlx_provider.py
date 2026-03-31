@@ -1,13 +1,15 @@
 """MLX provider — Apple Silicon native local model inference.
 
-Uses mlx_lm.server's OpenAI-compatible /v1/chat/completions endpoint.
-2-5x faster prompt processing and 30-50% faster generation than Ollama
-on Apple M-series chips. Designed for the ECO mode brain+worker setup.
+DEPRECATED: Ollama 0.19+ includes a native MLX backend for Apple Silicon and
+handles model loading, memory management, and process lifecycle automatically.
+Use OllamaProvider (ollama_provider.py) with nanbeige4.1:3b instead.
 
-Requires: pip install mlx-lm
-Server:   mlx_lm.server --model <model> --port 8080
+This file is kept for backward compatibility with any users still running
+mlx_lm.server manually. It will be removed in a future release.
 
-The server can also be managed programmatically via MLXManager.
+Legacy usage (manual server required):
+  pip install mlx-lm
+  mlx_lm.server --model <model> --port 8080
 """
 
 from __future__ import annotations

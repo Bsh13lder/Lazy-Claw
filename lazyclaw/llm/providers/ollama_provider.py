@@ -3,12 +3,17 @@
 Uses Ollama's /v1/chat/completions endpoint (OpenAI-compatible format).
 Tool calling format is identical to OpenAI — no special handling needed.
 All errors are caught gracefully; Ollama being down never crashes the agent.
+
+Think-tag handling:
+  - Nanbeige: outputs <think>...</think> inline in content — stripped here.
+  - Qwen models: /no_think prefix injected into system prompt to suppress thinking.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 
 import httpx
 
@@ -24,6 +29,20 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "http://localhost:11434"
 _CHAT_TIMEOUT = 300  # seconds (first model load can be slow on 8GB RAM)
 _HEALTH_TIMEOUT = 5  # seconds
+
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+_NO_THINK_PREFIX = "/no_think\nRespond directly without thinking tags.\n"
+
+# Models that output <think> tags and need them stripped
+_THINK_TAG_MODELS = frozenset({"nanbeige4.1:3b", "nanbeige4.1"})
+
+# Models that accept /no_think prefix to suppress thinking entirely
+_NO_THINK_MODELS = frozenset({"qwen3.5:9b", "qwen3:0.6b", "qwen3:1.7b", "qwen3.5"})
+
+
+def _strip_think_tags(content: str) -> str:
+    """Remove <think>...</think> blocks from model output."""
+    return _THINK_RE.sub("", content).strip()
 
 
 class OllamaUnavailableError(Exception):
@@ -118,13 +137,29 @@ class OllamaProvider(BaseLLMProvider):
     async def chat(
         self, messages: list[LLMMessage], model: str, **kwargs
     ) -> LLMResponse:
-        """Call Ollama with OpenAI-compatible chat completions."""
+        """Call Ollama with OpenAI-compatible chat completions.
+
+        Think-mode control:
+          - Qwen models: /no_think injected into system prompt (suppress thinking)
+          - Nanbeige: <think> tags stripped from response content
+        """
         tools = kwargs.pop("tools", None)
         tool_choice = kwargs.pop("tool_choice", None)
 
+        serialized = [self._serialize_message(m) for m in messages]
+
+        # Inject /no_think for Qwen models to suppress reasoning output
+        model_base = model.split(":")[0] if ":" in model else model
+        if model in _NO_THINK_MODELS or model_base in _NO_THINK_MODELS:
+            sys_parts = [m["content"] for m in serialized if m.get("role") == "system"]
+            non_sys = [m for m in serialized if m.get("role") != "system"]
+            sys_content = "\n".join(sys_parts) if sys_parts else "You are a helpful assistant."
+            sys_content = _NO_THINK_PREFIX + sys_content
+            serialized = [{"role": "system", "content": sys_content}] + non_sys
+
         payload: dict = {
             "model": model,
-            "messages": [self._serialize_message(m) for m in messages],
+            "messages": serialized,
             "stream": False,
         }
         if tools:
@@ -196,8 +231,15 @@ class OllamaProvider(BaseLLMProvider):
                     )
                 )
 
+        content = message.get("content") or ""
+
+        # Strip <think>...</think> tags — Nanbeige and other thinking models
+        # output these inline when thinking mode is not suppressed via /no_think
+        if "<think>" in content:
+            content = _strip_think_tags(content)
+
         return LLMResponse(
-            content=message.get("content") or "",
+            content=content,
             model=data.get("model", model),
             usage=usage,
             tool_calls=parsed_tool_calls,

@@ -26,6 +26,7 @@ from lazyclaw.gateway.routes.permissions import router as permissions_router
 from lazyclaw.gateway.routes.teams import router as teams_router
 from lazyclaw.gateway.routes.compression import router as compression_router
 from lazyclaw.gateway.routes.replay import router as replay_router
+from lazyclaw.gateway.routes.chat_ws import ws_chat_router, set_chat_ws_deps
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,14 @@ def set_lane_queue(queue) -> None:
     """Called by cli.py to inject the shared LaneQueue."""
     global _lane_queue
     _lane_queue = queue
+    set_chat_ws_deps(queue, _shared_registry)
 
 
 def set_registry(registry) -> None:
     """Called by cli.py to inject the shared SkillRegistry (with MCP tools)."""
     global _shared_registry
     _shared_registry = registry
+    set_chat_ws_deps(_lane_queue, registry)
 
 
 def _shannon_entropy(s: str) -> float:
@@ -127,6 +130,7 @@ app.include_router(permissions_router)
 app.include_router(teams_router)
 app.include_router(compression_router)
 app.include_router(replay_router)
+app.include_router(ws_chat_router)
 
 
 class ChatRequest(BaseModel):

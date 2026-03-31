@@ -1314,6 +1314,26 @@ class Agent:
                         tool_call_id=sc.id,
                     ))
 
+                # ── Parallel pre-execution for read-only tools ─────────────
+                # Identify read-only tools that are not already in the cache.
+                # Run them concurrently via execute_batch(), then use the
+                # pre-computed results in the sequential loop below.
+                # State-modifying tools always run sequentially in the loop.
+                _pre_executed: dict[str, tuple[str, int]] = {}  # tc.id → (result, duration_ms)
+                _ro_to_batch: list[ToolCall] = []
+                for _btc in _tool_calls_to_run:
+                    _bkey = f"{_btc.name}:{json.dumps(_btc.arguments, sort_keys=True)}"
+                    if _bkey not in _tool_call_cache:
+                        _skill = self.registry.get(_btc.name) if self.registry else None
+                        if _skill and getattr(_skill, "read_only", False):
+                            _ro_to_batch.append(_btc)
+                if len(_ro_to_batch) > 1:
+                    _batch_outcomes = await self.executor.execute_batch(
+                        _ro_to_batch, user_id, callback=cb,
+                    )
+                    for _btc, _bres, _bdur, _bgroup in _batch_outcomes:
+                        _pre_executed[_btc.id] = (_bres, _bdur)
+
                 # Execute each tool call
                 for tc in _tool_calls_to_run:
                     _display = self.registry.get_display_name(tc.name) if self.registry else tc.name
@@ -1335,6 +1355,10 @@ class Agent:
                     if _cache_key in _tool_call_cache:
                         result = _tool_call_cache[_cache_key]
                         logger.info("Tool %s cache hit (skipped re-execution)", tc.name)
+                    elif tc.id in _pre_executed:
+                        # Already executed in parallel batch above
+                        result, _dur_ms = _pre_executed[tc.id]
+                        logger.debug("Tool %s used parallel pre-execution result (%dms)", tc.name, _dur_ms)
                     else:
                         result = await self.executor.execute(tc, user_id, callback=cb)
 

@@ -1,33 +1,39 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { McpServer } from "../api";
+import { useToast } from "../context/ToastContext";
+import { useInterval } from "../hooks/useInterval";
+import { ListSkeleton } from "../components/Skeleton";
 
 export default function Mcp() {
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const data = await api.listMcpServers();
       setServers(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load MCP servers");
+      toast.error(err instanceof Error ? err.message : "Failed to load MCP servers");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { load(); }, [load]);
+  useInterval(load, 60_000);
 
   const handleReconnect = async (id: string) => {
-    try { await api.reconnectMcp(id); load(); } catch { /* ignore */ }
+    try { await api.reconnectMcp(id); toast.success("Reconnecting..."); load(); } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to reconnect");
+    }
   };
 
   const handleDisconnect = async (id: string) => {
-    try { await api.disconnectMcp(id); load(); } catch { /* ignore */ }
+    try { await api.disconnectMcp(id); toast.success("Disconnected"); load(); } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to disconnect");
+    }
   };
 
   const statusColor = (s: string) => {
@@ -36,6 +42,8 @@ export default function Mcp() {
     if (s === "error") return "bg-error";
     return "bg-text-muted";
   };
+
+  if (loading) return <ListSkeleton rows={3} />;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -50,28 +58,13 @@ export default function Mcp() {
           </button>
         </div>
 
-        {loading && (
-          <div className="flex items-center gap-2 text-text-muted text-sm py-8 justify-center">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner">
-              <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
-            </svg>
-            Loading MCP servers...
-          </div>
-        )}
-
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-error-soft border border-error/15 text-error text-sm mb-4">
-            {error}
-          </div>
-        )}
-
-        {!loading && !error && servers.length === 0 && (
+        {servers.length === 0 && (
           <div className="text-center py-12 text-text-muted text-sm">
             No MCP servers configured. Add servers via chat or the API.
           </div>
         )}
 
-        {!loading && !error && servers.length > 0 && (
+        {servers.length > 0 && (
           <div className="space-y-2">
             {servers.map((server) => (
               <div

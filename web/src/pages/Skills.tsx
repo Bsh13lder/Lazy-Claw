@@ -2,14 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { Skill } from "../api";
 import Modal from "../components/Modal";
+import { useToast } from "../context/ToastContext";
+import { useInterval } from "../hooks/useInterval";
+import { ListSkeleton } from "../components/Skeleton";
 
 export default function Skills() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
+  const toast = useToast();
 
   // Create form state
   const [cType, setCType] = useState<"instruction" | "code">("instruction");
@@ -24,19 +27,18 @@ export default function Skills() {
   const [generating, setGenerating] = useState(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const data = await api.listSkills();
       setSkills(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load skills");
+      toast.error(err instanceof Error ? err.message : "Failed to load skills");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { load(); }, [load]);
+  useInterval(load, 60_000);
 
   const handleCreate = async () => {
     if (!cName.trim() || !cDesc.trim() || !cBody.trim()) return;
@@ -52,9 +54,10 @@ export default function Skills() {
       await api.createSkill(body);
       setShowCreate(false);
       setCName(""); setCDesc(""); setCBody("");
+      toast.success("Skill created");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create skill");
+      toast.error(err instanceof Error ? err.message : "Failed to create skill");
     } finally {
       setSaving(false);
     }
@@ -67,17 +70,26 @@ export default function Skills() {
       await api.generateSkill({ description: gDesc.trim(), name: gName.trim() || undefined });
       setShowGenerate(false);
       setGDesc(""); setGName("");
+      toast.success("Skill generated");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to generate skill");
+      toast.error(err instanceof Error ? err.message : "Failed to generate skill");
     } finally {
       setGenerating(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    try { await api.deleteSkill(id); setSkills((prev) => prev.filter((s) => s.id !== id)); } catch { /* */ }
+    try {
+      await api.deleteSkill(id);
+      setSkills((prev) => prev.filter((s) => s.id !== id));
+      toast.success("Skill deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete skill");
+    }
   };
+
+  if (loading) return <ListSkeleton rows={6} />;
 
   const filtered = skills.filter(
     (s) =>
@@ -121,45 +133,32 @@ export default function Skills() {
           className="w-full mb-6 px-4 py-2.5 rounded-xl bg-bg-secondary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light transition-colors"
         />
 
-        {loading && (
-          <div className="flex items-center gap-2 text-text-muted text-sm py-8 justify-center">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner"><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" /></svg>
-            Loading skills...
-          </div>
-        )}
-
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-error-soft border border-error/15 text-error text-sm mb-4">{error}</div>
-        )}
-
-        {!loading && !error && (
-          <div className="space-y-6">
-            {Object.entries(byType).map(([type, items]) => (
-              <div key={type}>
-                <h2 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
-                  {type} ({items.length})
-                </h2>
-                <div className="space-y-1">
-                  {items.map((skill) => (
-                    <div key={skill.id} className="flex items-center gap-3 px-4 py-3 rounded-xl bg-bg-secondary border border-border hover:border-border-light transition-colors group">
-                      <div className={`w-2 h-2 rounded-full shrink-0 ${skill.enabled ? "bg-accent" : "bg-text-muted"}`} />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-text-primary truncate">{skill.name}</p>
-                        {skill.description && <p className="text-xs text-text-muted truncate mt-0.5">{skill.description}</p>}
-                      </div>
-                      <span className="text-[10px] text-text-muted px-2 py-0.5 rounded-full bg-bg-tertiary shrink-0">{skill.category ?? type}</span>
-                      {skill.skill_type !== "builtin" && skill.skill_type !== "mcp" && (
-                        <button onClick={() => handleDelete(skill.id)} className="text-xs text-text-muted hover:text-error px-2 py-1 rounded-lg hover:bg-bg-hover transition-colors opacity-0 group-hover:opacity-100">
-                          Delete
-                        </button>
-                      )}
+        <div className="space-y-6">
+          {Object.entries(byType).map(([type, items]) => (
+            <div key={type}>
+              <h2 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
+                {type} ({items.length})
+              </h2>
+              <div className="space-y-1">
+                {items.map((skill) => (
+                  <div key={skill.id} className="flex items-center gap-3 px-4 py-3 rounded-xl bg-bg-secondary border border-border hover:border-border-light transition-colors group">
+                    <div className={`w-2 h-2 rounded-full shrink-0 ${skill.enabled ? "bg-accent" : "bg-text-muted"}`} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-text-primary truncate">{skill.name}</p>
+                      {skill.description && <p className="text-xs text-text-muted truncate mt-0.5">{skill.description}</p>}
                     </div>
-                  ))}
-                </div>
+                    <span className="text-[10px] text-text-muted px-2 py-0.5 rounded-full bg-bg-tertiary shrink-0">{skill.category ?? type}</span>
+                    {skill.skill_type !== "builtin" && skill.skill_type !== "mcp" && (
+                      <button onClick={() => handleDelete(skill.id)} className="text-xs text-text-muted hover:text-error px-2 py-1 rounded-lg hover:bg-bg-hover transition-colors opacity-0 group-hover:opacity-100">
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Create skill modal */}

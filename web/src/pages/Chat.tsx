@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { sendMessage } from "../api";
 import MessageBubble from "../components/MessageBubble";
 import ChatInput from "../components/ChatInput";
+import { useToast } from "../context/ToastContext";
 
 interface Message {
   role: "user" | "assistant";
@@ -23,6 +24,7 @@ export default function Chat() {
   const [activeId, setActiveId] = useState(() => sessions[0].id);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const toast = useToast();
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? sessions[0];
 
@@ -57,6 +59,7 @@ export default function Chat() {
         }));
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : "Something went wrong";
+        toast.error(errMsg);
         updateSession(sid, (s) => ({
           ...s,
           messages: [...s.messages, { role: "assistant", content: `**Error:** ${errMsg}` }],
@@ -65,7 +68,7 @@ export default function Chat() {
         setLoading(false);
       }
     },
-    [activeId, updateSession],
+    [activeId, updateSession, toast],
   );
 
   const handleNewChat = () => {

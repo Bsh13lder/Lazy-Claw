@@ -1,41 +1,51 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { Memory as MemoryItem, DailyLog } from "../api";
+import { useToast } from "../context/ToastContext";
+import { useInterval } from "../hooks/useInterval";
+import { ListSkeleton } from "../components/Skeleton";
 
 export default function Memory() {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [logs, setLogs] = useState<DailyLog[]>([]);
   const [selectedLog, setSelectedLog] = useState<DailyLog | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState<string | null>(null);
   const [tab, setTab] = useState<"personal" | "daily">("personal");
+  const toast = useToast();
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const [mem, lg] = await Promise.allSettled([api.listMemories(), api.listDailyLogs()]);
       setMemories(mem.status === "fulfilled" ? (Array.isArray(mem.value) ? mem.value : []) : []);
       setLogs(lg.status === "fulfilled" ? (Array.isArray(lg.value) ? lg.value : []) : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load");
+      toast.error(err instanceof Error ? err.message : "Failed to load memory");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { load(); }, [load]);
+  useInterval(load, 60_000);
 
   const handleDeleteMemory = async (id: string) => {
-    try { await api.deleteMemory(id); setMemories((prev) => prev.filter((m) => m.id !== id)); } catch { /* */ }
+    try {
+      await api.deleteMemory(id);
+      setMemories((prev) => prev.filter((m) => m.id !== id));
+      toast.success("Memory deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete memory");
+    }
   };
 
   const handleViewLog = async (date: string) => {
     try {
       const log = await api.getDailyLog(date);
       setSelectedLog(log);
-    } catch { /* */ }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load log");
+    }
   };
 
   const handleGenerateLog = async (date: string) => {
@@ -43,14 +53,26 @@ export default function Memory() {
     try {
       const result = await api.generateDailyLog(date);
       setSelectedLog({ date, summary: result.summary });
+      toast.success("Log generated");
       load();
-    } catch { /* */ }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to generate log");
+    }
     setGenerating(null);
   };
 
   const handleDeleteLog = async (date: string) => {
-    try { await api.deleteDailyLog(date); setLogs((prev) => prev.filter((l) => l.date !== date)); if (selectedLog?.date === date) setSelectedLog(null); } catch { /* */ }
+    try {
+      await api.deleteDailyLog(date);
+      setLogs((prev) => prev.filter((l) => l.date !== date));
+      if (selectedLog?.date === date) setSelectedLog(null);
+      toast.success("Log deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete log");
+    }
   };
+
+  if (loading) return <ListSkeleton rows={5} />;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -78,18 +100,7 @@ export default function Memory() {
           ))}
         </div>
 
-        {loading && (
-          <div className="flex items-center gap-2 text-text-muted text-sm py-8 justify-center">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner"><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" /></svg>
-            Loading...
-          </div>
-        )}
-
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-error-soft border border-error/15 text-error text-sm mb-4">{error}</div>
-        )}
-
-        {!loading && !error && tab === "personal" && (
+        {tab === "personal" && (
           <div className="space-y-1">
             {memories.length === 0 && <p className="text-sm text-text-muted text-center py-8">No personal memories yet. The agent learns facts about you over time.</p>}
             {memories.map((m) => (
@@ -107,7 +118,7 @@ export default function Memory() {
           </div>
         )}
 
-        {!loading && !error && tab === "daily" && (
+        {tab === "daily" && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Log list */}
             <div className="space-y-1">

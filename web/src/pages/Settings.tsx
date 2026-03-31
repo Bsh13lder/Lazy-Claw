@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { EcoSettings, EcoUsage, EcoProvider, RateLimits, TeamSettings, Specialist, PermissionSettings } from "../api";
+import { useToast } from "../context/ToastContext";
+import { SettingsSkeleton } from "../components/Skeleton";
 
 export default function Settings() {
   const [eco, setEco] = useState<EcoSettings | null>(null);
@@ -12,9 +14,9 @@ export default function Settings() {
   const [perms, setPerms] = useState<PermissionSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<"eco" | "teams" | "permissions">("eco");
+  const toast = useToast();
 
   const load = useCallback(async () => {
-    setLoading(true);
     const results = await Promise.allSettled([
       api.getEcoSettings(),
       api.getEcoUsage(),
@@ -38,17 +40,16 @@ export default function Settings() {
   useEffect(() => { load(); }, [load]);
 
   const handleEcoMode = async (mode: string) => {
-    try { const updated = await api.updateEcoSettings({ mode }); setEco(updated); } catch { /* */ }
+    try {
+      const updated = await api.updateEcoSettings({ mode });
+      setEco(updated);
+      toast.success(`ECO mode set to ${mode.toUpperCase()}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update ECO mode");
+    }
   };
 
-  if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center text-text-muted text-sm">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner mr-2"><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" /></svg>
-        Loading settings...
-      </div>
-    );
-  }
+  if (loading) return <SettingsSkeleton />;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -150,7 +151,7 @@ export default function Settings() {
             <section className="bg-bg-secondary border border-border rounded-xl p-5">
               <h2 className="text-sm font-semibold text-text-primary mb-1">Team Settings</h2>
               <div className="flex gap-6 mt-3 text-xs text-text-muted">
-                <span>Mode: <span className="text-text-primary">{team?.mode ?? "—"}</span></span>
+                <span>Mode: <span className="text-text-primary">{team?.mode ?? "\u2014"}</span></span>
                 <span>Critic: <span className="text-text-primary">{team?.critic_mode ? "on" : "off"}</span></span>
                 <span>Max parallel: <span className="text-text-primary">{team?.max_parallel ?? 0}</span></span>
               </div>

@@ -11,6 +11,7 @@ interface NavShellProps {
 const PAGE_META: Record<Page, { label: string; description: string }> = {
   chat: { label: "Chat", description: "Conversation with your agent" },
   overview: { label: "Overview", description: "System health & activity" },
+  hub: { label: "Skill Hub", description: "Browse & discover skills" },
   skills: { label: "Skills", description: "Manage agent tools" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
   mcp: { label: "MCP", description: "Server integrations" },
@@ -41,7 +42,6 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
   },
   {
     page: "hub",
-    label: "Skill Hub",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <rect x="3" y="3" width="7" height="9" rx="1" />

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "../api";
 import type { Memory as MemoryItem, DailyLog } from "../api";
+import { useToast } from "../context/ToastContext";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -102,6 +103,7 @@ function SpinnerIcon({ className = "w-4 h-4" }: { className?: string }) {
 /* ------------------------------------------------------------------ */
 
 export default function Memory() {
+  const toast = useToast();
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [logs, setLogs] = useState<DailyLog[]>([]);
   const [selectedLog, setSelectedLog] = useState<DailyLog | null>(null);
@@ -152,11 +154,13 @@ export default function Memory() {
   /* -- handlers ---------------------------------------------------- */
 
   const handleDeleteMemory = async (id: string) => {
+    if (!window.confirm("Delete this memory?")) return;
     try {
       await api.deleteMemory(id);
       setMemories((prev) => prev.filter((m) => m.id !== id));
-    } catch {
-      /* silent */
+      toast.success("Memory deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete memory");
     }
   };
 
@@ -164,8 +168,8 @@ export default function Memory() {
     try {
       const log = await api.getDailyLog(date);
       setSelectedLog(log);
-    } catch {
-      /* silent */
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load log");
     }
   };
 
@@ -174,20 +178,23 @@ export default function Memory() {
     try {
       const result = await api.generateDailyLog(date);
       setSelectedLog({ date, summary: result.summary });
+      toast.success("Daily log generated");
       load();
-    } catch {
-      /* silent */
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to generate log");
     }
     setGenerating(null);
   };
 
   const handleDeleteLog = async (date: string) => {
+    if (!window.confirm(`Delete log for ${date}?`)) return;
     try {
       await api.deleteDailyLog(date);
       setLogs((prev) => prev.filter((l) => l.date !== date));
       if (selectedLog?.date === date) setSelectedLog(null);
-    } catch {
-      /* silent */
+      toast.success("Log deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete log");
     }
   };
 

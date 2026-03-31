@@ -9,6 +9,8 @@ import type {
   Specialist,
   PermissionSettings,
 } from "../api";
+import { useToast } from "../context/ToastContext";
+import Modal from "../components/Modal";
 
 // ── Tab types ──────────────────────────────────────────────────────────────
 
@@ -66,6 +68,24 @@ function SpinnerIcon() {
   );
 }
 
+function PlusIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    </svg>
+  );
+}
+
 // ── Tab definitions ────────────────────────────────────────────────────────
 
 const TABS: readonly TabDef[] = [
@@ -88,20 +108,28 @@ const MODE_CARDS: readonly ModeDef[] = [
   { mode: "full", name: "FULL", description: "Premium models" },
 ] as const;
 
+const TEAM_MODES = ["single", "parallel", "sequential"] as const;
+
+const PERMISSION_LEVELS = ["allow", "ask", "deny"] as const;
+
 // ── Permission badge ───────────────────────────────────────────────────────
 
-function PermissionBadge({ level }: { readonly level: string }) {
+function PermissionBadge({ level, onClick }: { readonly level: string; readonly onClick?: () => void }) {
   const styles =
     level === "allow"
-      ? "bg-accent-soft text-accent"
+      ? "bg-accent-soft text-accent border border-accent/20"
       : level === "deny"
-        ? "bg-error-soft text-error"
-        : "bg-amber-soft text-amber";
+        ? "bg-error-soft text-error border border-error/20"
+        : "bg-amber-soft text-amber border border-amber/20";
 
   return (
-    <span className={`text-[10px] font-medium px-2.5 py-0.5 rounded-full ${styles}`}>
+    <button
+      onClick={onClick}
+      className={`text-[10px] font-medium px-2.5 py-0.5 rounded-full transition-opacity ${styles} ${onClick ? "hover:opacity-80 cursor-pointer" : "cursor-default"}`}
+      title={onClick ? "Click to cycle: allow → ask → deny" : undefined}
+    >
       {level}
-    </span>
+    </button>
   );
 }
 
@@ -122,6 +150,20 @@ function SectionHeading({
   );
 }
 
+// ── Toggle switch ──────────────────────────────────────────────────────────
+
+function Toggle({ on, onChange, disabled }: { on: boolean; onChange: () => void; disabled?: boolean }) {
+  return (
+    <button
+      onClick={onChange}
+      disabled={disabled}
+      className={`relative inline-flex w-9 h-5 rounded-full transition-colors shrink-0 ${on ? "bg-accent" : "bg-bg-hover border border-border"} ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+    >
+      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
+    </button>
+  );
+}
+
 // ── ECO Tab ────────────────────────────────────────────────────────────────
 
 function EcoTab({
@@ -130,15 +172,43 @@ function EcoTab({
   providers,
   rateLimits,
   onModeChange,
+  onSettingsUpdate,
 }: {
   readonly eco: EcoSettings | null;
   readonly usage: EcoUsage | null;
   readonly providers: readonly EcoProvider[];
   readonly rateLimits: RateLimits | null;
   readonly onModeChange: (mode: string) => void;
+  readonly onSettingsUpdate: (updates: Partial<EcoSettings>) => Promise<void>;
 }) {
+  const [budget, setBudget] = useState(String(eco?.monthly_paid_budget ?? "0"));
+  const [savingBudget, setSavingBudget] = useState(false);
+  const toast = useToast();
+
+  // Keep budget in sync when eco loads
+  useEffect(() => {
+    if (eco) setBudget(String(eco.monthly_paid_budget));
+  }, [eco]);
+
   const freeRatio = usage && usage.total > 0 ? (usage.free_count / usage.total) * 100 : 0;
   const paidRatio = usage && usage.total > 0 ? (usage.paid_count / usage.total) * 100 : 0;
+
+  const handleBudgetSave = async () => {
+    const val = parseFloat(budget);
+    if (Number.isNaN(val) || val < 0) {
+      toast.error("Invalid budget value");
+      return;
+    }
+    setSavingBudget(true);
+    try {
+      await onSettingsUpdate({ monthly_paid_budget: val });
+      toast.success("Budget updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update budget");
+    } finally {
+      setSavingBudget(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -166,11 +236,7 @@ function EcoTab({
                     <CheckIcon />
                   </span>
                 )}
-                <span
-                  className={`text-sm font-semibold ${
-                    isActive ? "text-accent" : "text-text-primary"
-                  }`}
-                >
+                <span className={`text-sm font-semibold ${isActive ? "text-accent" : "text-text-primary"}`}>
                   {card.name}
                 </span>
                 <span className="text-xs text-text-muted">{card.description}</span>
@@ -178,12 +244,54 @@ function EcoTab({
             );
           })}
         </div>
-        {eco && (
-          <p className="mt-4 text-xs text-text-muted">
-            Monthly budget: <span className="text-text-secondary font-medium">${eco.monthly_paid_budget}</span>
-          </p>
-        )}
       </section>
+
+      {/* Budget + badges */}
+      {eco && (
+        <section className="bg-bg-secondary border border-border rounded-xl p-5">
+          <SectionHeading title="Budget & Display" />
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-text-secondary mb-1.5">Monthly paid budget ($)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={budget}
+                    onChange={(e) => setBudget(e.target.value)}
+                    className="w-32 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light"
+                  />
+                  <button
+                    onClick={handleBudgetSave}
+                    disabled={savingBudget}
+                    className="px-3 py-2 text-xs text-accent border border-accent/30 rounded-lg hover:bg-accent-soft disabled:opacity-40 transition-colors"
+                  >
+                    {savingBudget ? "Saving..." : "Save"}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center justify-between py-2 border-t border-border">
+              <div>
+                <p className="text-sm text-text-primary">Show cost badges</p>
+                <p className="text-xs text-text-muted">Display free/paid indicators in chat</p>
+              </div>
+              <Toggle
+                on={eco.show_badges}
+                onChange={async () => {
+                  try {
+                    await onSettingsUpdate({ show_badges: !eco.show_badges });
+                  } catch {
+                    toast.error("Failed to update");
+                  }
+                }}
+              />
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Usage stats with progress bar */}
       {usage && (
@@ -207,21 +315,14 @@ function EcoTab({
               <p className="text-lg font-semibold text-accent">{usage.free_percentage}%</p>
             </div>
           </div>
-          {/* Progress bar */}
           <div className="space-y-1.5">
             <div className="flex justify-between text-[10px] text-text-muted">
               <span>Free ({freeRatio.toFixed(0)}%)</span>
               <span>Paid ({paidRatio.toFixed(0)}%)</span>
             </div>
             <div className="h-2 rounded-full bg-bg-hover overflow-hidden flex">
-              <div
-                className="h-full bg-accent rounded-l-full transition-all"
-                style={{ width: `${freeRatio}%` }}
-              />
-              <div
-                className="h-full bg-amber transition-all"
-                style={{ width: `${paidRatio}%` }}
-              />
+              <div className="h-full bg-accent rounded-l-full transition-all" style={{ width: `${freeRatio}%` }} />
+              <div className="h-full bg-amber transition-all" style={{ width: `${paidRatio}%` }} />
             </div>
           </div>
         </section>
@@ -233,21 +334,10 @@ function EcoTab({
           <SectionHeading title="Providers" />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {providers.map((p) => (
-              <div
-                key={p.name}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-bg-hover"
-              >
-                <span
-                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                    p.configured ? "bg-accent" : "bg-text-muted opacity-40"
-                  }`}
-                />
+              <div key={p.name} className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-bg-hover">
+                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${p.configured ? "bg-accent" : "bg-text-muted opacity-40"}`} />
                 <span className="text-sm text-text-primary flex-1 truncate">{p.name}</span>
-                <span
-                  className={`text-[10px] shrink-0 ${
-                    p.configured ? "text-accent" : "text-text-muted"
-                  }`}
-                >
+                <span className={`text-[10px] shrink-0 ${p.configured ? "text-accent" : "text-text-muted"}`}>
                   {p.configured ? "configured" : "not configured"}
                 </span>
               </div>
@@ -293,82 +383,195 @@ function EcoTab({
 function TeamsTab({
   team,
   specialists,
+  onTeamUpdate,
+  onSpecialistDelete,
+  onSpecialistCreate,
 }: {
   readonly team: TeamSettings | null;
   readonly specialists: readonly Specialist[];
+  readonly onTeamUpdate: (updates: Partial<TeamSettings>) => Promise<void>;
+  readonly onSpecialistDelete: (name: string) => Promise<void>;
+  readonly onSpecialistCreate: (body: { name: string; description: string; system_prompt?: string }) => Promise<void>;
 }) {
+  const toast = useToast();
+  const [saving, setSaving] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newPrompt, setNewPrompt] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const [maxParallel, setMaxParallel] = useState(String(team?.max_parallel ?? 3));
+
+  useEffect(() => {
+    if (team) setMaxParallel(String(team.max_parallel));
+  }, [team]);
+
+  const handleTeamChange = async (updates: Partial<TeamSettings>) => {
+    const key = Object.keys(updates)[0];
+    setSaving(key);
+    try {
+      await onTeamUpdate(updates);
+      toast.success("Team settings updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update");
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const handleMaxParallelSave = async () => {
+    const val = parseInt(maxParallel, 10);
+    if (Number.isNaN(val) || val < 1) {
+      toast.error("Invalid value");
+      return;
+    }
+    await handleTeamChange({ max_parallel: val });
+  };
+
+  const handleDelete = async (name: string) => {
+    try {
+      await onSpecialistDelete(name);
+      toast.success(`Specialist "${name}" removed`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to remove");
+    }
+  };
+
+  const handleCreate = async () => {
+    if (!newName.trim() || !newDesc.trim()) return;
+    setCreating(true);
+    try {
+      await onSpecialistCreate({
+        name: newName.trim(),
+        description: newDesc.trim(),
+        system_prompt: newPrompt.trim() || undefined,
+      });
+      setShowCreate(false);
+      setNewName(""); setNewDesc(""); setNewPrompt("");
+      toast.success("Specialist created");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Team settings */}
       <section className="bg-bg-secondary border border-border rounded-xl p-5">
         <SectionHeading title="Team Settings" />
         <div className="space-y-3">
+          {/* Mode selector */}
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="text-sm text-text-primary">Mode</p>
               <p className="text-xs text-text-muted">Execution strategy for specialist teams</p>
             </div>
-            <span className="text-sm text-text-secondary font-medium px-3 py-1 bg-bg-hover rounded-lg">
-              {team?.mode ?? "---"}
-            </span>
+            <div className="flex gap-1">
+              {TEAM_MODES.map((m) => (
+                <button
+                  key={m}
+                  onClick={() => handleTeamChange({ mode: m })}
+                  disabled={saving === "mode"}
+                  className={`px-3 py-1 text-xs rounded-lg border transition-colors ${
+                    team?.mode === m
+                      ? "border-accent bg-accent-soft text-accent"
+                      : "border-border text-text-muted hover:bg-bg-hover"
+                  } disabled:opacity-50`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="border-t border-border" />
 
+          {/* Critic mode */}
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="text-sm text-text-primary">Critic Mode</p>
               <p className="text-xs text-text-muted">Review specialist outputs before returning</p>
             </div>
-            <div className={`toggle-switch ${team?.critic_mode ? "active" : ""}`}>
-              <div className="toggle-knob" />
-            </div>
+            <Toggle
+              on={team?.critic_mode ?? false}
+              onChange={() => handleTeamChange({ critic_mode: !(team?.critic_mode) })}
+              disabled={saving === "critic_mode"}
+            />
           </div>
 
           <div className="border-t border-border" />
 
+          {/* Max parallel */}
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="text-sm text-text-primary">Max Parallel</p>
               <p className="text-xs text-text-muted">Concurrent specialist limit</p>
             </div>
-            <span className="text-sm text-text-secondary font-medium px-3 py-1 bg-bg-hover rounded-lg">
-              {team?.max_parallel ?? 0}
-            </span>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value={maxParallel}
+                onChange={(e) => setMaxParallel(e.target.value)}
+                className="w-16 px-2 py-1 text-sm text-center rounded-lg bg-bg-hover border border-border text-text-primary focus:outline-none focus:border-border-light"
+              />
+              <button
+                onClick={handleMaxParallelSave}
+                disabled={saving === "max_parallel"}
+                className="text-xs text-accent border border-accent/30 px-2 py-1 rounded-lg hover:bg-accent-soft disabled:opacity-40 transition-colors"
+              >
+                Save
+              </button>
+            </div>
           </div>
         </div>
       </section>
 
       {/* Specialists */}
       <section className="bg-bg-secondary border border-border rounded-xl p-5">
-        <SectionHeading
-          title={`Specialists (${specialists.length})`}
-          subtitle="Available specialist roles for delegation"
-        />
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">Specialists ({specialists.length})</h2>
+            <p className="text-xs text-text-muted mt-0.5">Available specialist roles for delegation</p>
+          </div>
+          <button
+            onClick={() => setShowCreate(true)}
+            className="flex items-center gap-1.5 text-xs text-accent border border-accent/30 px-3 py-1.5 rounded-lg hover:bg-accent-soft transition-colors"
+          >
+            <PlusIcon />
+            Add
+          </button>
+        </div>
+
         {specialists.length > 0 ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {specialists.map((s) => (
               <div
                 key={s.name}
-                className="card-hover flex items-start gap-3 px-4 py-3 rounded-xl border border-border bg-bg-hover"
+                className="group flex items-start gap-3 px-4 py-3 rounded-xl border border-border bg-bg-hover card-hover"
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-sm font-medium text-text-primary">{s.name}</span>
-                    <span
-                      className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                        s.builtin
-                          ? "bg-cyan-soft text-cyan"
-                          : "bg-accent-soft text-accent"
-                      }`}
-                    >
+                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${s.builtin ? "bg-cyan-soft text-cyan" : "bg-accent-soft text-accent"}`}>
                       {s.builtin ? "builtin" : "custom"}
                     </span>
                   </div>
-                  {s.description && (
-                    <p className="text-xs text-text-muted line-clamp-2">{s.description}</p>
-                  )}
+                  {s.description && <p className="text-xs text-text-muted line-clamp-2">{s.description}</p>}
                 </div>
+                {!s.builtin && (
+                  <button
+                    onClick={() => handleDelete(s.name)}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-text-muted hover:text-error hover:bg-bg-hover transition-all"
+                    title="Remove specialist"
+                  >
+                    <TrashIcon />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -376,6 +579,43 @@ function TeamsTab({
           <p className="text-xs text-text-muted py-4 text-center">No specialists loaded</p>
         )}
       </section>
+
+      {/* Create specialist modal */}
+      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Add Specialist">
+        <div className="space-y-3">
+          <input
+            type="text"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="Specialist name (e.g. researcher)"
+            className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+          />
+          <input
+            type="text"
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+            placeholder="Description"
+            className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+          />
+          <textarea
+            value={newPrompt}
+            onChange={(e) => setNewPrompt(e.target.value)}
+            placeholder="System prompt (optional)"
+            rows={4}
+            className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light resize-y"
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-sm text-text-muted rounded-lg hover:bg-bg-hover transition-colors">Cancel</button>
+            <button
+              onClick={handleCreate}
+              disabled={creating || !newName.trim() || !newDesc.trim()}
+              className="px-4 py-2 text-sm bg-accent text-bg-primary rounded-lg hover:opacity-90 disabled:opacity-30 transition-opacity"
+            >
+              {creating ? "Creating..." : "Create"}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -384,9 +624,13 @@ function TeamsTab({
 
 function PermissionsTab({
   perms,
+  onPermsUpdate,
 }: {
   readonly perms: PermissionSettings | null;
+  readonly onPermsUpdate: (updates: Partial<PermissionSettings>) => Promise<void>;
 }) {
+  const toast = useToast();
+
   if (!perms) {
     return (
       <p className="text-sm text-text-muted text-center py-12">
@@ -398,23 +642,71 @@ function PermissionsTab({
   const categoryEntries = Object.entries(perms.category_defaults);
   const overrideEntries = Object.entries(perms.skill_overrides);
 
+  const cycleLevel = (current: string): string => {
+    const idx = PERMISSION_LEVELS.indexOf(current as typeof PERMISSION_LEVELS[number]);
+    return PERMISSION_LEVELS[(idx + 1) % PERMISSION_LEVELS.length];
+  };
+
+  const handleCategoryChange = async (cat: string, current: string) => {
+    const next = cycleLevel(current);
+    try {
+      await onPermsUpdate({
+        ...perms,
+        category_defaults: { ...perms.category_defaults, [cat]: next },
+      });
+      toast.success(`${cat}: ${next}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update");
+    }
+  };
+
+  const handleOverrideChange = async (skill: string, current: string) => {
+    const next = cycleLevel(current);
+    try {
+      await onPermsUpdate({
+        ...perms,
+        skill_overrides: { ...perms.skill_overrides, [skill]: next },
+      });
+      toast.success(`${skill}: ${next}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update");
+    }
+  };
+
+  const [timeoutVal, setTimeoutVal] = useState(String(perms.auto_approve_timeout));
+  const [savingTimeout, setSavingTimeout] = useState(false);
+
+  const handleTimeoutSave = async () => {
+    const val = parseInt(timeoutVal, 10);
+    if (Number.isNaN(val) || val < 0) {
+      toast.error("Invalid timeout value");
+      return;
+    }
+    setSavingTimeout(true);
+    try {
+      await onPermsUpdate({ ...perms, auto_approve_timeout: val });
+      toast.success("Timeout updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update");
+    } finally {
+      setSavingTimeout(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Category defaults */}
       <section className="bg-bg-secondary border border-border rounded-xl p-5">
         <SectionHeading
           title="Category Defaults"
-          subtitle="Default permission level per skill category"
+          subtitle="Click a badge to cycle: allow → ask → deny"
         />
         {categoryEntries.length > 0 ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             {categoryEntries.map(([cat, level]) => (
-              <div
-                key={cat}
-                className="flex items-center justify-between px-3 py-2.5 rounded-lg bg-bg-hover"
-              >
+              <div key={cat} className="flex items-center justify-between px-3 py-2.5 rounded-lg bg-bg-hover">
                 <span className="text-sm text-text-primary truncate mr-2">{cat}</span>
-                <PermissionBadge level={level} />
+                <PermissionBadge level={level} onClick={() => handleCategoryChange(cat, level)} />
               </div>
             ))}
           </div>
@@ -428,16 +720,13 @@ function PermissionsTab({
         <section className="bg-bg-secondary border border-border rounded-xl p-5">
           <SectionHeading
             title="Skill Overrides"
-            subtitle="Per-skill permission overrides"
+            subtitle="Per-skill permission overrides — click to change"
           />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             {overrideEntries.map(([skill, level]) => (
-              <div
-                key={skill}
-                className="flex items-center justify-between px-3 py-2.5 rounded-lg bg-bg-hover"
-              >
+              <div key={skill} className="flex items-center justify-between px-3 py-2.5 rounded-lg bg-bg-hover">
                 <span className="text-sm text-text-primary font-mono truncate mr-2">{skill}</span>
-                <PermissionBadge level={level} />
+                <PermissionBadge level={level} onClick={() => handleOverrideChange(skill, level)} />
               </div>
             ))}
           </div>
@@ -449,13 +738,25 @@ function PermissionsTab({
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-text-primary">Auto-approve Timeout</h2>
-            <p className="text-xs text-text-muted mt-0.5">
-              Seconds before pending permissions auto-deny
-            </p>
+            <p className="text-xs text-text-muted mt-0.5">Seconds before pending permissions auto-deny</p>
           </div>
-          <span className="text-sm text-text-secondary font-medium px-3 py-1 bg-bg-hover rounded-lg">
-            {perms.auto_approve_timeout}s
-          </span>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min="0"
+              value={timeoutVal}
+              onChange={(e) => setTimeoutVal(e.target.value)}
+              className="w-20 px-2 py-1 text-sm text-center rounded-lg bg-bg-hover border border-border text-text-primary focus:outline-none focus:border-border-light"
+            />
+            <span className="text-xs text-text-muted">s</span>
+            <button
+              onClick={handleTimeoutSave}
+              disabled={savingTimeout}
+              className="text-xs text-accent border border-accent/30 px-2 py-1 rounded-lg hover:bg-accent-soft disabled:opacity-40 transition-colors"
+            >
+              Save
+            </button>
+          </div>
         </div>
       </section>
     </div>
@@ -465,6 +766,7 @@ function PermissionsTab({
 // ── Main Settings page ─────────────────────────────────────────────────────
 
 export default function Settings() {
+  const toast = useToast();
   const [eco, setEco] = useState<EcoSettings | null>(null);
   const [usage, setUsage] = useState<EcoUsage | null>(null);
   const [providers, setProviders] = useState<EcoProvider[]>([]);
@@ -505,9 +807,37 @@ export default function Settings() {
     try {
       const updated = await api.updateEcoSettings({ mode });
       setEco(updated);
-    } catch {
-      /* network error — eco state unchanged */
+      toast.success(`Switched to ${mode.toUpperCase()} mode`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update mode");
     }
+  }, [toast]);
+
+  const handleEcoSettingsUpdate = useCallback(async (updates: Partial<EcoSettings>) => {
+    const updated = await api.updateEcoSettings(updates);
+    setEco(updated);
+  }, []);
+
+  const handleTeamUpdate = useCallback(async (updates: Partial<TeamSettings>) => {
+    const updated = await api.updateTeamSettings(updates);
+    setTeam(updated);
+  }, []);
+
+  const handleSpecialistDelete = useCallback(async (name: string) => {
+    await api.deleteSpecialist(name);
+    setSpecialists((prev) => prev.filter((s) => s.name !== name));
+  }, []);
+
+  const handleSpecialistCreate = useCallback(async (body: { name: string; description: string; system_prompt?: string }) => {
+    await api.createSpecialist(body);
+    // Reload specialists to get full data
+    const updated = await api.listSpecialists();
+    setSpecialists(Array.isArray(updated) ? updated : []);
+  }, []);
+
+  const handlePermsUpdate = useCallback(async (updates: Partial<PermissionSettings>) => {
+    const updated = await api.updatePermissionSettings(updates);
+    setPerms(updated);
   }, []);
 
   if (loading) {
@@ -525,9 +855,7 @@ export default function Settings() {
         {/* Header */}
         <div className="mb-6">
           <h1 className="text-lg font-semibold text-text-primary mb-1">Settings</h1>
-          <p className="text-sm text-text-muted">
-            Agent configuration, cost control, and permissions
-          </p>
+          <p className="text-sm text-text-muted">Agent configuration, cost control, and permissions</p>
         </div>
 
         {/* Tabs */}
@@ -559,10 +887,21 @@ export default function Settings() {
             providers={providers}
             rateLimits={rateLimits}
             onModeChange={handleEcoMode}
+            onSettingsUpdate={handleEcoSettingsUpdate}
           />
         )}
-        {tab === "teams" && <TeamsTab team={team} specialists={specialists} />}
-        {tab === "permissions" && <PermissionsTab perms={perms} />}
+        {tab === "teams" && (
+          <TeamsTab
+            team={team}
+            specialists={specialists}
+            onTeamUpdate={handleTeamUpdate}
+            onSpecialistDelete={handleSpecialistDelete}
+            onSpecialistCreate={handleSpecialistCreate}
+          />
+        )}
+        {tab === "permissions" && (
+          <PermissionsTab perms={perms} onPermsUpdate={handlePermsUpdate} />
+        )}
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import * as api from "../api";
 import Modal from "../components/Modal";
+import { useToast } from "../context/ToastContext";
 
 /* ------------------------------------------------------------------ */
 /*  Key type classification                                           */
@@ -186,12 +187,14 @@ function CredentialCard({
 /* ------------------------------------------------------------------ */
 
 export default function Vault() {
+  const toast = useToast();
   const [keys, setKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
+  const [showValue, setShowValue] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -219,20 +222,24 @@ export default function Vault() {
       setShowAdd(false);
       setNewKey("");
       setNewValue("");
+      setShowValue(false);
+      toast.success("Credential saved");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save credential");
+      toast.error(err instanceof Error ? err.message : "Failed to save credential");
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (key: string) => {
+    if (!window.confirm(`Delete credential "${key}"?`)) return;
     try {
       await api.deleteVaultKey(key);
       setKeys((prev) => prev.filter((k) => k !== key));
-    } catch {
-      /* silent */
+      toast.success("Credential deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete");
     }
   };
 
@@ -336,13 +343,33 @@ export default function Vault() {
           </div>
           <div>
             <label className="block text-xs font-medium text-text-secondary mb-1.5">Value</label>
-            <input
-              type="password"
-              value={newValue}
-              onChange={(e) => setNewValue(e.target.value)}
-              placeholder="sk-..."
-              className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
-            />
+            <div className="relative">
+              <input
+                type={showValue ? "text" : "password"}
+                value={newValue}
+                onChange={(e) => setNewValue(e.target.value)}
+                placeholder="sk-..."
+                className="w-full px-4 py-2.5 pr-10 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+              />
+              <button
+                type="button"
+                onClick={() => setShowValue((v) => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+                title={showValue ? "Hide value" : "Show value"}
+              >
+                {showValue ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
           <p className="text-[11px] text-text-muted">Value will be encrypted with AES-256-GCM before storage.</p>
           <div className="flex justify-end gap-2 pt-2">

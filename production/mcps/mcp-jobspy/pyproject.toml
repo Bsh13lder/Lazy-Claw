@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-jobspy"
+version = "0.1.0"
+description = "Job search MCP server — wraps python-jobspy for multi-platform job scraping"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "mcp>=1.0.0",
+    "python-jobspy>=1.1.0",
+]

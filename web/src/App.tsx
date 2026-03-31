@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
 import Chat from "./pages/Chat";
 import Overview from "./pages/Overview";
+import SkillHub from "./pages/SkillHub";
 import Skills from "./pages/Skills";
 import Jobs from "./pages/Jobs";
 import Mcp from "./pages/Mcp";
@@ -34,6 +35,7 @@ function AppContent() {
     switch (page) {
       case "chat": return <Chat />;
       case "overview": return <Overview />;
+      case "hub": return <SkillHub />;
       case "skills": return <Skills />;
       case "jobs": return <Jobs />;
       case "mcp": return <Mcp />;

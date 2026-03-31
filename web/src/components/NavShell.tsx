@@ -1,6 +1,6 @@
 import { useAuth } from "../context/AuthContext";
 
-export type Page = "chat" | "overview" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
+export type Page = "chat" | "overview" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -27,6 +27,18 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
         <rect x="14" y="3" width="7" height="7" rx="1" />
         <rect x="3" y="14" width="7" height="7" rx="1" />
         <rect x="14" y="14" width="7" height="7" rx="1" />
+      </svg>
+    ),
+  },
+  {
+    page: "hub",
+    label: "Skill Hub",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <rect x="3" y="3" width="7" height="9" rx="1" />
+        <rect x="14" y="3" width="7" height="5" rx="1" />
+        <rect x="14" y="12" width="7" height="9" rx="1" />
+        <rect x="3" y="16" width="7" height="5" rx="1" />
       </svg>
     ),
   },

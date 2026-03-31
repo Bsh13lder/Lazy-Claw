@@ -1,0 +1,1894 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LazyClaw Skill Hub — AI Agent Marketplace</title>
+  <meta name="description" content="Discover, install, and create AI agent skills for LazyClaw. 101+ community and built-in skills with E2E encryption and sandboxed execution." />
+  <meta property="og:title" content="LazyClaw Skill Hub" />
+  <meta property="og:description" content="The open-source AI agent skill marketplace with security-first design." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0d0d0d;
+      --bg2:         #111111;
+      --bg3:         #161616;
+      --border:      rgba(255,255,255,0.07);
+      --border-hi:   rgba(16,185,129,0.35);
+      --text:        #e4e4e7;
+      --muted:       #71717a;
+      --em:          #10b981;
+      --em-dark:     #059669;
+      --cy:          #06b6d4;
+      --cy-dark:     #0891b2;
+      --radius:      12px;
+      --radius-lg:   18px;
+      --shadow:      0 4px 24px rgba(0,0,0,0.6);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    button { cursor: pointer; font: inherit; border: none; background: none; }
+    img { display: block; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg2); }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--em); }
+
+    /* ── Animations ── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(24px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes shimmer {
+      0%   { background-position: -200% center; }
+      100% { background-position: 200% center; }
+    }
+    @keyframes pulse-ring {
+      0%   { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16,185,129,0.5); }
+      70%  { transform: scale(1);    box-shadow: 0 0 0 10px rgba(16,185,129,0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0px); }
+      50%       { transform: translateY(-8px); }
+    }
+    @keyframes gradientShift {
+      0%   { background-position: 0% 50%; }
+      50%  { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    @keyframes orb-drift {
+      0%   { transform: translate(0, 0) scale(1); }
+      33%  { transform: translate(40px, -20px) scale(1.05); }
+      66%  { transform: translate(-20px, 30px) scale(0.97); }
+      100% { transform: translate(0, 0) scale(1); }
+    }
+
+    /* ── Nav ── */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 clamp(16px, 5vw, 64px);
+      height: 64px;
+      background: rgba(13,13,13,0.85);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+    .nav-logo-icon {
+      width: 30px;
+      height: 30px;
+      background: linear-gradient(135deg, var(--em), var(--cy));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .nav-links a {
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      color: var(--muted);
+      transition: color 0.2s, background 0.2s;
+    }
+    .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .nav-links a.active { color: var(--em); }
+    .nav-cta {
+      padding: 8px 18px;
+      border-radius: 8px;
+      background: var(--em);
+      color: #000;
+      font-size: 0.875rem;
+      font-weight: 600;
+      transition: background 0.2s, transform 0.15s;
+    }
+    .nav-cta:hover { background: #0d9e6e; transform: translateY(-1px); }
+
+    @media (max-width: 640px) {
+      .nav-links { display: none; }
+    }
+
+    /* ── Hero ── */
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(60px, 10vw, 120px) clamp(16px, 5vw, 64px) clamp(60px, 8vw, 100px);
+      text-align: center;
+    }
+    .hero-bg {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.18;
+      animation: orb-drift 18s ease-in-out infinite;
+    }
+    .orb-1 { width: 500px; height: 500px; background: var(--em); top: -150px; left: -100px; animation-delay: 0s; }
+    .orb-2 { width: 400px; height: 400px; background: var(--cy); top: -50px; right: -80px; animation-delay: -6s; }
+    .orb-3 { width: 300px; height: 300px; background: #8b5cf6; bottom: -100px; left: 40%; animation-delay: -12s; }
+    .hero-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(16,185,129,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(16,185,129,0.04) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: radial-gradient(ellipse at center, black 20%, transparent 70%);
+    }
+    .hero-content {
+      position: relative;
+      z-index: 2;
+      max-width: 800px;
+      margin: 0 auto;
+      animation: fadeUp 0.7s ease both;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 100px;
+      border: 1px solid var(--border-hi);
+      background: rgba(16,185,129,0.08);
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--em);
+      margin-bottom: 24px;
+      letter-spacing: 0.03em;
+    }
+    .hero-badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--em);
+      animation: pulse-ring 2s ease-out infinite;
+    }
+    .hero h1 {
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1.05;
+      margin-bottom: 20px;
+    }
+    .gradient-text {
+      background: linear-gradient(135deg, var(--em) 0%, var(--cy) 50%, #8b5cf6 100%);
+      background-size: 200% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: gradientShift 4s ease infinite;
+    }
+    .hero-sub {
+      font-size: clamp(1rem, 2.5vw, 1.2rem);
+      color: var(--muted);
+      max-width: 520px;
+      margin: 0 auto 36px;
+      line-height: 1.7;
+    }
+    .hero-search {
+      position: relative;
+      max-width: 560px;
+      margin: 0 auto 28px;
+    }
+    .hero-search input {
+      width: 100%;
+      padding: 16px 56px 16px 52px;
+      border-radius: var(--radius-lg);
+      border: 1.5px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+      backdrop-filter: blur(12px);
+    }
+    .hero-search input::placeholder { color: var(--muted); }
+    .hero-search input:focus {
+      border-color: var(--em);
+      background: rgba(16,185,129,0.05);
+      box-shadow: 0 0 0 3px rgba(16,185,129,0.12), 0 8px 32px rgba(0,0,0,0.4);
+    }
+    .search-icon {
+      position: absolute;
+      left: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted);
+      width: 22px;
+      height: 22px;
+      pointer-events: none;
+    }
+    .search-kbd {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 0.7rem;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 2px 6px;
+      pointer-events: none;
+    }
+    .hero-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn-primary {
+      padding: 12px 28px;
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, var(--em), #0891b2);
+      color: #000;
+      font-weight: 700;
+      font-size: 0.95rem;
+      transition: transform 0.15s, box-shadow 0.2s, opacity 0.2s;
+      box-shadow: 0 4px 20px rgba(16,185,129,0.35);
+    }
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 28px rgba(16,185,129,0.45);
+    }
+    .btn-secondary {
+      padding: 12px 28px;
+      border-radius: var(--radius);
+      border: 1.5px solid var(--border);
+      color: var(--text);
+      font-weight: 600;
+      font-size: 0.95rem;
+      background: rgba(255,255,255,0.04);
+      transition: border-color 0.2s, background 0.2s, transform 0.15s;
+    }
+    .btn-secondary:hover {
+      border-color: var(--em);
+      background: rgba(16,185,129,0.06);
+      transform: translateY(-2px);
+    }
+    .hero-stats {
+      display: flex;
+      gap: 32px;
+      justify-content: center;
+      margin-top: 48px;
+      flex-wrap: wrap;
+    }
+    .hero-stat {
+      text-align: center;
+    }
+    .hero-stat-num {
+      font-size: 1.8rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      background: linear-gradient(135deg, var(--em), var(--cy));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero-stat-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* ── Section wrapper ── */
+    .section {
+      padding: clamp(40px, 6vw, 80px) clamp(16px, 5vw, 64px);
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .section-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 28px;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .section-title {
+      font-size: clamp(1.3rem, 3vw, 1.75rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+    .section-link {
+      font-size: 0.875rem;
+      color: var(--em);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: gap 0.2s;
+    }
+    .section-link:hover { gap: 8px; }
+
+    /* ── Category chips ── */
+    .category-bar {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: none;
+      margin-bottom: 36px;
+    }
+    .category-bar::-webkit-scrollbar { display: none; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 100px;
+      border: 1.5px solid var(--border);
+      background: rgba(255,255,255,0.03);
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--muted);
+      white-space: nowrap;
+      transition: all 0.2s;
+      cursor: pointer;
+    }
+    .chip:hover { color: var(--text); border-color: rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); }
+    .chip.active {
+      color: #000;
+      background: var(--em);
+      border-color: var(--em);
+      font-weight: 600;
+    }
+    .chip-icon { font-size: 14px; }
+
+    /* ── Featured grid ── */
+    .featured-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    /* ── Skill card ── */
+    .card {
+      position: relative;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s, background 0.2s;
+      animation: fadeUp 0.5s ease both;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(16,185,129,0.06) 0%, transparent 60%);
+      opacity: 0;
+      transition: opacity 0.3s;
+      border-radius: inherit;
+      pointer-events: none;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(16,185,129,0.2);
+      border-color: rgba(16,185,129,0.25);
+    }
+    .card:hover::before { opacity: 1; }
+
+    .card.featured {
+      border-color: rgba(16,185,129,0.2);
+      background: linear-gradient(145deg, rgba(16,185,129,0.05) 0%, var(--bg2) 60%);
+    }
+    .card.featured .card-icon {
+      width: 52px;
+      height: 52px;
+      font-size: 26px;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 14px;
+      gap: 12px;
+    }
+    .card-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .card-badges {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: 100px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .badge-builtin  { background: rgba(16,185,129,0.15); color: var(--em); }
+    .badge-community { background: rgba(6,182,212,0.15); color: var(--cy); }
+    .badge-mcp      { background: rgba(139,92,246,0.15); color: #a78bfa; }
+    .badge-code     { background: rgba(245,158,11,0.15); color: #fbbf24; }
+    .badge-featured { background: linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.2)); color: var(--em); }
+
+    .card-name {
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 6px;
+    }
+    .card-desc {
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.55;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .card-category {
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .card-installs {
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .card-installs svg { width: 13px; height: 13px; }
+
+    /* ── Skills grid ── */
+    .skills-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    /* ── Empty state ── */
+    .empty-state {
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--muted);
+    }
+    .empty-state-icon { font-size: 3rem; margin-bottom: 16px; }
+    .empty-state h3 { font-size: 1.2rem; font-weight: 600; margin-bottom: 8px; color: var(--text); }
+
+    /* ── Security section ── */
+    .security-section {
+      background: linear-gradient(135deg, rgba(16,185,129,0.04) 0%, rgba(6,182,212,0.04) 100%);
+      border: 1px solid rgba(16,185,129,0.12);
+      border-radius: var(--radius-lg);
+      padding: clamp(32px, 5vw, 60px) clamp(24px, 5vw, 60px);
+      margin: 0 clamp(16px, 5vw, 64px) clamp(40px, 6vw, 80px);
+    }
+    .security-inner {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .security-header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+    .security-eyebrow {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--em);
+      margin-bottom: 12px;
+    }
+    .security-header h2 {
+      font-size: clamp(1.5rem, 3.5vw, 2.2rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 14px;
+    }
+    .security-header p {
+      color: var(--muted);
+      max-width: 520px;
+      margin: 0 auto;
+      font-size: 1rem;
+    }
+    .security-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 20px;
+    }
+    .sec-card {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .sec-card:hover {
+      border-color: rgba(16,185,129,0.25);
+      background: rgba(16,185,129,0.04);
+    }
+    .sec-icon {
+      font-size: 28px;
+      margin-bottom: 12px;
+    }
+    .sec-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .sec-desc {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .competitor-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 10px;
+      font-size: 0.75rem;
+      color: var(--em);
+      opacity: 0.8;
+    }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .modal-overlay.open {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .modal {
+      background: var(--bg2);
+      border: 1px solid rgba(16,185,129,0.2);
+      border-radius: var(--radius-lg);
+      width: 100%;
+      max-width: 600px;
+      max-height: 90vh;
+      overflow-y: auto;
+      transform: scale(0.95) translateY(16px);
+      transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .modal-overlay.open .modal { transform: scale(1) translateY(0); }
+    .modal-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: 28px 28px 20px;
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+    .modal-title-group { display: flex; align-items: center; gap: 16px; }
+    .modal-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      flex-shrink: 0;
+    }
+    .modal-name { font-size: 1.3rem; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px; }
+    .modal-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      background: rgba(255,255,255,0.05);
+      font-size: 1.1rem;
+      transition: color 0.2s, background 0.2s;
+      flex-shrink: 0;
+    }
+    .modal-close:hover { color: var(--text); background: rgba(255,255,255,0.1); }
+    .modal-body { padding: 24px 28px; }
+    .modal-desc { color: var(--muted); line-height: 1.7; margin-bottom: 24px; }
+    .modal-section-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .modal-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .meta-item {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .meta-label { font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; }
+    .meta-value { font-size: 0.9rem; font-weight: 600; }
+    .modal-examples { margin-bottom: 24px; }
+    .example-item {
+      display: flex;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.875rem;
+    }
+    .example-item:last-child { border-bottom: none; }
+    .example-bullet { color: var(--em); font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+    .install-box {
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(16,185,129,0.2);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .install-cmd {
+      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 0.875rem;
+      color: var(--em);
+    }
+    .copy-btn {
+      padding: 6px 14px;
+      border-radius: 7px;
+      background: rgba(16,185,129,0.12);
+      color: var(--em);
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid rgba(16,185,129,0.2);
+      transition: background 0.2s, transform 0.15s;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { background: rgba(16,185,129,0.22); transform: scale(1.03); }
+    .copy-btn.copied { background: rgba(16,185,129,0.3); }
+    .modal-footer {
+      display: flex;
+      gap: 10px;
+      padding: 0 28px 28px;
+      flex-wrap: wrap;
+    }
+    .btn-install {
+      flex: 1;
+      min-width: 140px;
+      padding: 12px 20px;
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, var(--em), var(--cy));
+      color: #000;
+      font-weight: 700;
+      font-size: 0.9rem;
+      text-align: center;
+      transition: opacity 0.2s, transform 0.15s;
+    }
+    .btn-install:hover { opacity: 0.9; transform: translateY(-1px); }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: clamp(40px, 5vw, 60px) clamp(16px, 5vw, 64px) clamp(24px, 4vw, 40px);
+      margin-top: auto;
+    }
+    .footer-inner {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .footer-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 40px;
+      flex-wrap: wrap;
+    }
+    .footer-brand { max-width: 280px; }
+    .footer-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.05rem;
+      margin-bottom: 12px;
+    }
+    .footer-tagline { font-size: 0.875rem; color: var(--muted); line-height: 1.6; }
+    .footer-links-group { display: flex; gap: 48px; flex-wrap: wrap; }
+    .footer-col h4 {
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+    .footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+    .footer-col li a {
+      font-size: 0.875rem;
+      color: var(--muted);
+      transition: color 0.2s;
+    }
+    .footer-col li a:hover { color: var(--em); }
+    .footer-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+    }
+    .footer-copy { font-size: 0.8rem; color: var(--muted); }
+    .footer-badges { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .license-badge {
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
+    .built-badge {
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .built-badge span { color: var(--text); }
+
+    /* ── Result count ── */
+    .result-count {
+      font-size: 0.875rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+    .result-count strong { color: var(--text); }
+
+    /* ── Divider ── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 0 clamp(16px, 5vw, 64px);
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Nav ── -->
+<nav>
+  <div class="nav-logo">
+    <div class="nav-logo-icon">🦞</div>
+    LazyClaw
+  </div>
+  <div class="nav-links">
+    <a href="#skills" class="active">Skill Hub</a>
+    <a href="https://github.com/lazyclaw/lazyclaw">GitHub</a>
+    <a href="#">Docs</a>
+    <a href="#">Discord</a>
+  </div>
+  <a href="https://github.com/lazyclaw/lazyclaw" class="nav-cta">Get Started</a>
+</nav>
+
+<!-- ── Hero ── -->
+<section class="hero">
+  <div class="hero-bg">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+    <div class="hero-grid"></div>
+  </div>
+  <div class="hero-content">
+    <div class="hero-badge">
+      <div class="hero-badge-dot"></div>
+      101+ Skills Available
+    </div>
+    <h1>
+      The <span class="gradient-text">Skill Hub</span><br />
+      for AI Agents
+    </h1>
+    <p class="hero-sub">
+      Discover, install, and create AI agent skills for LazyClaw.
+      Every skill is security-scanned, sandboxed, and E2E encrypted.
+    </p>
+    <div class="hero-search">
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input type="text" id="heroSearch" placeholder="Search 101+ skills…" autocomplete="off" />
+      <span class="search-kbd">⌘K</span>
+    </div>
+    <div class="hero-buttons">
+      <button class="btn-primary" onclick="document.getElementById('browse').scrollIntoView({behavior:'smooth'})">
+        Browse Skills
+      </button>
+      <a href="https://github.com/lazyclaw/lazyclaw" class="btn-secondary">
+        View on GitHub
+      </a>
+    </div>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <div class="hero-stat-num">101+</div>
+        <div class="hero-stat-label">Total Skills</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-num">11</div>
+        <div class="hero-stat-label">Categories</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-num">AES-256</div>
+        <div class="hero-stat-label">E2E Encrypted</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-num">MIT</div>
+        <div class="hero-stat-label">Open Source</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── Featured ── -->
+<div class="section" id="featured">
+  <div class="section-header">
+    <h2 class="section-title">⭐ Featured Skills</h2>
+    <a class="section-link" href="#browse">View all →</a>
+  </div>
+  <div class="featured-grid" id="featuredGrid"></div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ── Browse ── -->
+<div class="section" id="browse">
+  <div class="section-header">
+    <h2 class="section-title">Browse All Skills</h2>
+  </div>
+
+  <!-- Category chips -->
+  <div class="category-bar" id="categoryBar"></div>
+
+  <p class="result-count" id="resultCount"></p>
+
+  <!-- Grid -->
+  <div class="skills-grid" id="skillsGrid"></div>
+</div>
+
+<!-- ── Security ── -->
+<section class="security-section">
+  <div class="security-inner">
+    <div class="security-header">
+      <div class="security-eyebrow">Security First</div>
+      <h2>Every skill is built for trust</h2>
+      <p>Unlike other agent marketplaces, LazyClaw enforces security at every layer — from installation to execution.</p>
+    </div>
+    <div class="security-grid">
+      <div class="sec-card">
+        <div class="sec-icon">🔐</div>
+        <div class="sec-title">AES-256-GCM Encryption</div>
+        <div class="sec-desc">All skill data, configurations, and outputs are encrypted at rest. The server never sees your plaintext.</div>
+        <div class="competitor-note">✓ Unlike OpenClaw's plaintext storage</div>
+      </div>
+      <div class="sec-card">
+        <div class="sec-icon">📦</div>
+        <div class="sec-title">Sandboxed Execution</div>
+        <div class="sec-desc">Code skills run in isolated Python sandboxes with restricted imports. No skill can access another user's data.</div>
+        <div class="competitor-note">✓ Fully isolated per-user execution</div>
+      </div>
+      <div class="sec-card">
+        <div class="sec-icon">🔍</div>
+        <div class="sec-title">Security Scanning</div>
+        <div class="sec-desc">Every community skill is scanned for malicious patterns, data exfiltration, and unsafe system calls before listing.</div>
+        <div class="competitor-note">✓ Automated vulnerability detection</div>
+      </div>
+      <div class="sec-card">
+        <div class="sec-icon">🛡️</div>
+        <div class="sec-title">Permission Model</div>
+        <div class="sec-desc">Three-tier allow/ask/deny permissions per skill. You decide exactly what each skill is allowed to do.</div>
+        <div class="competitor-note">✓ Granular per-tool control</div>
+      </div>
+      <div class="sec-card">
+        <div class="sec-icon">🔑</div>
+        <div class="sec-title">Encrypted Credential Vault</div>
+        <div class="sec-desc">API keys and secrets are stored in an encrypted vault — never in plaintext .env files that any process can read.</div>
+        <div class="competitor-note">✓ Zero plaintext secrets on disk</div>
+      </div>
+      <div class="sec-card">
+        <div class="sec-icon">👤</div>
+        <div class="sec-title">Complete User Isolation</div>
+        <div class="sec-desc">Every database query is scoped by user_id. No cross-user data access is architecturally possible.</div>
+        <div class="competitor-note">✓ Hard data boundary enforcement</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Footer ── -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <div class="footer-logo">
+          <div class="nav-logo-icon" style="width:28px;height:28px;font-size:14px">🦞</div>
+          LazyClaw
+        </div>
+        <p class="footer-tagline">Open-source E2E encrypted AI agent platform. The Python-native alternative to OpenClaw.</p>
+      </div>
+      <div class="footer-links-group">
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul>
+            <li><a href="#">Skill Hub</a></li>
+            <li><a href="#">Documentation</a></li>
+            <li><a href="#">Changelog</a></li>
+            <li><a href="#">Roadmap</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Community</h4>
+          <ul>
+            <li><a href="#">GitHub</a></li>
+            <li><a href="#">Discord</a></li>
+            <li><a href="#">Telegram</a></li>
+            <li><a href="#">Contributing</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <ul>
+            <li><a href="#">Create a Skill</a></li>
+            <li><a href="#">MCP Integration</a></li>
+            <li><a href="#">API Reference</a></li>
+            <li><a href="#">Security Policy</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p class="footer-copy">© 2025 LazyClaw contributors. All rights reserved.</p>
+      <div class="footer-badges">
+        <span class="license-badge">MIT License</span>
+        <span class="built-badge">Built with <span>Claude</span></span>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- ── Modal ── -->
+<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <div class="modal-title-group">
+        <div class="modal-icon" id="mIcon"></div>
+        <div>
+          <div class="modal-name" id="mName"></div>
+          <div class="card-badges" id="mBadges"></div>
+        </div>
+      </div>
+      <button class="modal-close" onclick="closeModal(null)">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-desc" id="mDesc"></p>
+      <div class="modal-section-title">Details</div>
+      <div class="modal-meta" id="mMeta"></div>
+      <div class="modal-section-title">Example uses</div>
+      <div class="modal-examples" id="mExamples"></div>
+      <div class="modal-section-title">Install</div>
+      <div class="install-box">
+        <code class="install-cmd" id="mInstallCmd"></code>
+        <button class="copy-btn" id="copyBtn" onclick="copyInstall()">Copy</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-install" onclick="copyInstall()">📥 Copy Install Command</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ─── Data ─── */
+const CATEGORIES = [
+  { id: 'all',          label: 'All',          icon: '⚡' },
+  { id: 'browser',      label: 'Browser',      icon: '🌐' },
+  { id: 'automation',   label: 'Automation',   icon: '🤖' },
+  { id: 'communication',label: 'Communication',icon: '📡' },
+  { id: 'data',         label: 'Data',         icon: '🧠' },
+  { id: 'development',  label: 'Development',  icon: '🛠️' },
+  { id: 'productivity', label: 'Productivity', icon: '📋' },
+  { id: 'finance',      label: 'Finance',      icon: '💰' },
+  { id: 'utilities',    label: 'Utilities',    icon: '🔧' },
+  { id: 'integrations', label: 'Integrations', icon: '🔌' },
+  { id: 'ai',           label: 'AI/ML',        icon: '🧬' },
+];
+
+// icon bg colors per category
+const CAT_COLORS = {
+  browser:      'rgba(16,185,129,0.15)',
+  automation:   'rgba(6,182,212,0.15)',
+  communication:'rgba(139,92,246,0.15)',
+  data:         'rgba(245,158,11,0.15)',
+  development:  'rgba(59,130,246,0.15)',
+  productivity: 'rgba(236,72,153,0.15)',
+  finance:      'rgba(34,197,94,0.15)',
+  utilities:    'rgba(107,114,128,0.15)',
+  integrations: 'rgba(249,115,22,0.15)',
+  ai:           'rgba(168,85,247,0.15)',
+};
+const CAT_ICON_COLOR = {
+  browser:       '#10b981',
+  automation:    '#06b6d4',
+  communication: '#a78bfa',
+  data:          '#fbbf24',
+  development:   '#60a5fa',
+  productivity:  '#f472b6',
+  finance:       '#4ade80',
+  utilities:     '#9ca3af',
+  integrations:  '#fb923c',
+  ai:            '#c084fc',
+};
+
+const SKILLS = [
+  /* ─── Browser ─── */
+  {
+    slug: 'browser-control',
+    name: 'Browser Control',
+    icon: '🌐',
+    category: 'browser',
+    type: 'builtin',
+    installs: '12.4k',
+    featured: true,
+    desc: 'Full browser automation via Chrome DevTools Protocol. Read pages, click elements, type text, take screenshots, manage tabs, and scroll — all without Playwright.',
+    longDesc: 'Unified browser skill with 7 actions (read, open, click, type, screenshot, tabs, scroll). Uses CDP directly for maximum speed and reliability. Auto-detects Brave > Chrome > Chromium. Launches headless automatically; switches to visible mode for user-facing tasks. Shares browser profiles with real login sessions — log in once, all skills see your cookies. Human-like delays built in.',
+    examples: ['Open https://news.ycombinator.com and summarize the top 10 posts', 'Click the login button and type my credentials', 'Take a screenshot of my dashboard', 'Read the page and extract all product prices'],
+    version: '2.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'web-search',
+    name: 'Web Search',
+    icon: '🔍',
+    category: 'browser',
+    type: 'builtin',
+    installs: '9.8k',
+    featured: false,
+    desc: 'Search the web and retrieve structured results. Supports multiple search engines with smart result filtering.',
+    longDesc: 'Performs web searches and returns clean, structured results. Automatically filters ads and low-quality results. Can search Google, Bing, DuckDuckGo, or Brave Search. Returns titles, URLs, snippets, and metadata in a parseable format for the agent.',
+    examples: ['Search for "best Python async libraries 2025"', 'Find recent news about OpenAI', 'Look up the current price of Bitcoin'],
+    version: '1.4.2',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'site-memory',
+    name: 'Site Memory',
+    icon: '🗺️',
+    category: 'browser',
+    type: 'builtin',
+    installs: '3.2k',
+    featured: false,
+    desc: 'Remember site-specific facts, login flows, and DOM selectors. Never re-discover the same element twice.',
+    longDesc: 'Stores site-specific knowledge encrypted per user. Remembers which CSS selectors work for which sites, successful login flows, and site-specific quirks. The browser automatically consults site memory before attempting new interactions — making subsequent visits dramatically faster.',
+    examples: ['Remember the login flow for my banking site', 'Save the selector for the download button on this page', 'What do I know about github.com?'],
+    version: '1.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+  {
+    slug: 'browser-persistence',
+    name: 'Browser Persistence',
+    icon: '⚙️',
+    category: 'browser',
+    type: 'builtin',
+    installs: '2.1k',
+    featured: false,
+    desc: 'Manage browser session persistence modes: off, auto, or always-on. Control how long browser contexts live.',
+    longDesc: 'Three modes: off (fresh context per task), auto (reuse if recent), on (persistent session). Shared browser profiles under browser_profiles/{user_id}/ use the system browser — cookies, extensions, and logins carry over between sessions.',
+    examples: ['Turn on persistent browser mode', 'Clear my browser session', 'Set browser to auto mode'],
+    version: '1.0.3',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+
+  /* ─── Automation ─── */
+  {
+    slug: 'job-scheduler',
+    name: 'Job Scheduler',
+    icon: '⏰',
+    category: 'automation',
+    type: 'builtin',
+    installs: '7.3k',
+    featured: true,
+    desc: 'Schedule recurring tasks with cron expressions. Runs in the background and pushes results via Telegram.',
+    longDesc: 'Create, list, pause, and delete scheduled jobs. Supports full cron syntax plus human-friendly shortcuts ("every morning", "every 2 hours"). Jobs run as background agents with full tool access. Results are pushed to your Telegram. All job data is encrypted at rest.',
+    examples: ['Check my email inbox every morning at 8am', 'Run a portfolio value check every hour', 'Alert me if any of my sites go down'],
+    version: '2.0.1',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'background-tasks',
+    name: 'Background Tasks',
+    icon: '🔄',
+    category: 'automation',
+    type: 'builtin',
+    installs: '5.6k',
+    featured: false,
+    desc: 'Spawn background agents for long-running tasks. Get notified via Telegram when complete.',
+    longDesc: 'The run_background skill spawns an independent agent process that can use all tools including browser, search, and code execution. The foreground agent returns immediately; the background agent runs to completion and pushes a result notification. Supports task cancellation.',
+    examples: ['Research competitors in the background while I continue chatting', 'Download and process this large dataset in the background', 'Monitor this webpage for changes'],
+    version: '1.3.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'event-watcher',
+    name: 'Event Watcher',
+    icon: '👁️',
+    category: 'automation',
+    type: 'builtin',
+    installs: '2.8k',
+    featured: false,
+    desc: 'Watch for events — price drops, site changes, RSS updates, file modifications — and trigger actions.',
+    longDesc: 'Register watchers that poll for changes and fire actions when triggered. Watchers run as lightweight background processes. Each watcher can run an arbitrary skill when its condition is met. Supports webhooks, file changes, URL content diffs, and custom Python predicates.',
+    examples: ['Alert me when BTC drops below $60k', 'Watch this job listing page for new posts', 'Run a backup when a new file appears in my Downloads folder'],
+    version: '1.1.4',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'computer-control',
+    name: 'Computer Control',
+    icon: '🖥️',
+    category: 'automation',
+    type: 'builtin',
+    installs: '4.1k',
+    featured: false,
+    desc: 'Native OS-level automation via subprocess and WebSocket connector. Run commands, manage files, control apps.',
+    longDesc: 'General computer/OS interaction skill with local subprocess support and optional remote WebSocket connector. Can run shell commands, manage files and directories, interact with GUI applications via accessibility APIs, and connect to remote machines. All operations are permission-gated.',
+    examples: ['Open my notes app and create a new note', 'Run my test suite and report failures', 'Compress and archive my project folder', 'Connect to my remote dev server'],
+    version: '1.5.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+
+  /* ─── Communication ─── */
+  {
+    slug: 'team-delegate',
+    name: 'Team Delegate',
+    icon: '🤝',
+    category: 'communication',
+    type: 'builtin',
+    installs: '6.1k',
+    featured: true,
+    desc: 'Delegate tasks to specialist agents (browser, research, code) inline. No extra LLM call — pure delegation.',
+    longDesc: 'The delegate skill lets the main agent hand off to a specialist without a separate team lead LLM round-trip. Specialists available: browser specialist (CDP expert), research specialist (web search + summarization), code specialist (writes and runs Python). The delegate result returns inline to the main context.',
+    examples: ['Research the top 5 competitors for my product', 'Have the code specialist write and test a data parser', 'Delegate browser login to the browser specialist'],
+    version: '1.2.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'team-management',
+    name: 'Team Management',
+    icon: '👥',
+    category: 'communication',
+    type: 'builtin',
+    installs: '3.4k',
+    featured: false,
+    desc: 'Coordinate multi-agent teams for parallel task execution. Control max agents, RAM limits, and auto-delegation.',
+    longDesc: 'Manage the parallel specialist pool. Set maximum concurrent agents, RAM limits per agent, and toggle auto-delegation (let the agent decide when to parallelize). Monitor active agents and their resource usage. Supports specialist customization via SOUL.md injection.',
+    examples: ['Run 3 research tasks in parallel', 'Set max agents to 5 for this session', 'Show me what specialists are currently running'],
+    version: '1.0.1',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+  {
+    slug: 'telegram-integration',
+    name: 'Telegram Integration',
+    icon: '✈️',
+    category: 'communication',
+    type: 'builtin',
+    installs: '8.9k',
+    featured: false,
+    desc: 'Full Telegram bot integration with push notifications, file forwarding, and admin lock for security.',
+    longDesc: 'Native Telegram adapter with full bot API support. First /start claims admin lock — unauthorized chats are blocked. Screenshots and file results are auto-forwarded. Supports /local, /eco, /ram, and custom commands. Retry with exponential backoff on network errors. Inline keyboard support for confirmations.',
+    examples: ['Send me a daily briefing at 9am via Telegram', 'Forward screenshots of my browser sessions', 'Notify me when my background task finishes'],
+    version: '3.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+
+  /* ─── Data ─── */
+  {
+    slug: 'memory-save',
+    name: 'Memory Save',
+    icon: '💾',
+    category: 'data',
+    type: 'builtin',
+    installs: '11.2k',
+    featured: false,
+    desc: 'Store encrypted personal facts, preferences, and context that persist across sessions.',
+    longDesc: 'Save arbitrary facts in an encrypted personal knowledge base. Memories are AES-256-GCM encrypted before storage. Support for semantic tagging, importance scoring, and expiry dates. Memories are injected into the agent context at session start — the agent remembers everything you\'ve told it.',
+    examples: ['Remember that I prefer concise responses', 'Save my home address for future tasks', 'Note that my main project is LazyClaw'],
+    version: '2.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'memory-recall',
+    name: 'Memory Recall',
+    icon: '🔮',
+    category: 'data',
+    type: 'builtin',
+    installs: '10.8k',
+    featured: false,
+    desc: 'Retrieve stored memories by keyword, tag, or semantic similarity. Surfaces the most relevant context.',
+    longDesc: 'Semantic search over your encrypted memory store. Supports keyword search, tag-based filtering, and fuzzy matching. Returns memories ranked by relevance and recency. The agent automatically recalls context when you start tasks — no manual querying needed.',
+    examples: ['What do you remember about my work schedule?', 'Find everything related to my Python projects', 'Recall my dietary preferences'],
+    version: '2.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'memory-manager',
+    name: 'Memory Manager',
+    icon: '🗃️',
+    category: 'data',
+    type: 'builtin',
+    installs: '4.7k',
+    featured: false,
+    desc: 'Browse, edit, and delete stored memories and daily conversation logs. Full memory lifecycle management.',
+    longDesc: 'Administrative interface for the memory system. List all memories with metadata, view decrypted content, delete individual memories or bulk-clear by tag/date. Browse daily conversation summaries generated by the layered summary system. Export memories to JSON.',
+    examples: ['Show me all my saved memories', 'Delete everything related to my old job', 'List my conversation summaries from last week'],
+    version: '1.5.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'session-replay',
+    name: 'Session Replay',
+    icon: '⏮️',
+    category: 'data',
+    type: 'builtin',
+    installs: '1.9k',
+    featured: false,
+    desc: 'Record session traces and replay them. Generate shareable replay tokens for debugging and demos.',
+    longDesc: 'Records full session traces including all tool calls, LLM responses, and timing data. Replays can be played back step-by-step or at full speed. Generate shareable tokens for sharing sessions with collaborators. Useful for debugging complex multi-agent workflows and creating demos.',
+    examples: ['Record my next session for debugging', 'Replay the browser automation session from yesterday', 'Generate a shareable link for this demo'],
+    version: '1.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+
+  /* ─── Development ─── */
+  {
+    slug: 'skill-creator',
+    name: 'Skill Creator',
+    icon: '⚗️',
+    category: 'development',
+    type: 'builtin',
+    installs: '5.4k',
+    featured: false,
+    desc: 'Create custom skills in natural language or Python. Instantly available in your agent session.',
+    longDesc: 'Three skill types: Instruction (natural language steps — no coding), Code (sandboxed Python with pip support), and Plugin (install from the Skill Hub). Instruction skills are described in plain English; the agent figures out how to execute them. Code skills run in isolated Python sandboxes. All custom skills are encrypted and tied to your user account.',
+    examples: ['Create a skill that summarizes my daily emails', 'Write a Python skill that parses CSV files', 'Create a skill to send weekly reports'],
+    version: '2.2.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'mcp-bridge',
+    name: 'MCP Bridge',
+    icon: '🔌',
+    category: 'development',
+    type: 'builtin',
+    installs: '4.2k',
+    featured: true,
+    desc: 'Connect any MCP server and register its tools as first-class LazyClaw skills. Native MCP client + server.',
+    longDesc: 'Full MCP (Model Context Protocol) client and server implementation. Connect external MCP servers and all their tools appear in your skill registry automatically. Run parallel startup with asyncio.gather — connects all servers simultaneously in ~2s instead of 12s sequential. Also exposes LazyClaw\'s own skills as an MCP server for other agents.',
+    examples: ['Connect the GitHub MCP server', 'List all tools from my connected MCP servers', 'Add the Notion MCP server to my toolkit'],
+    version: '2.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'mcp-monitor',
+    name: 'MCP Monitor',
+    icon: '📡',
+    category: 'development',
+    type: 'builtin',
+    installs: '1.3k',
+    featured: false,
+    desc: 'Monitor connected MCP servers, check health, and restart failed connections automatically.',
+    longDesc: 'Real-time monitoring of all connected MCP servers. Check connection status, response latency, and tool availability. Automatically reconnects to failed servers with exponential backoff. Set alerts for specific servers going offline. View detailed logs per server.',
+    examples: ['Show me the status of all MCP servers', 'Restart the GitHub MCP connection', 'Alert me if my Notion server disconnects'],
+    version: '1.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+  {
+    slug: 'tool-discovery',
+    name: 'Tool Discovery',
+    icon: '🔬',
+    category: 'development',
+    type: 'builtin',
+    installs: '3.1k',
+    featured: false,
+    desc: 'Discover all available skills in your current session. Smart category-based filtering for token efficiency.',
+    longDesc: 'Lists all registered skills with their descriptions, parameters, and permission levels. Per-message category detection sends only relevant tools to the LLM — 8-17 tools instead of 71. This provides 70-88% token savings on every message. Supports filtering by category, type, and permission level.',
+    examples: ['What tools do I have available?', 'Show me all browser-related skills', 'List skills I created myself'],
+    version: '1.2.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+
+  /* ─── Productivity ─── */
+  {
+    slug: 'task-manager',
+    name: 'Task Manager',
+    icon: '✅',
+    category: 'productivity',
+    type: 'builtin',
+    installs: '8.4k',
+    featured: false,
+    desc: 'Encrypted task management with nagging reminders, relative time, and both user and agent task lists.',
+    longDesc: 'Full task lifecycle: create, list, complete, delete. Supports relative time ("remind me in 2 hours"), absolute dates, and recurring intervals. Separate user and agent task lists. Nagging reminders escalate if tasks are overdue. All tasks encrypted at rest. Integrates with the job scheduler for automated follow-ups.',
+    examples: ['Add "Review pull requests" to my todo list', 'Remind me to take a break in 90 minutes', 'What tasks are due today?'],
+    version: '1.4.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'get-time',
+    name: 'Time & Date',
+    icon: '🕐',
+    category: 'productivity',
+    type: 'builtin',
+    installs: '6.7k',
+    featured: false,
+    desc: 'Get current time, date, timezone conversions, and relative time calculations.',
+    longDesc: 'Provides accurate time and date information with full timezone support. Calculate time differences, convert between timezones, find next occurrence of a day/time, and compute relative times ("3 weeks from next Tuesday"). Uses system clock — no external API needed.',
+    examples: ['What time is it in Tokyo right now?', 'How many days until Christmas?', 'Convert 3pm EST to my local timezone'],
+    version: '1.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Nov 2024',
+  },
+  {
+    slug: 'calculator',
+    name: 'Calculator',
+    icon: '🧮',
+    category: 'productivity',
+    type: 'builtin',
+    installs: '5.9k',
+    featured: false,
+    desc: 'Mathematical calculations with full expression support, unit conversions, and financial formulas.',
+    longDesc: 'Safe expression evaluator supporting arithmetic, algebra, statistics, unit conversions, and common financial formulas (compound interest, mortgage, ROI). No eval() — uses a proper expression parser. Supports variables for multi-step calculations.',
+    examples: ['What is 15% tip on a $127.50 bill?', 'Convert 5000 square feet to square meters', 'Calculate monthly payments on a $400k mortgage at 6.5%'],
+    version: '1.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Dec 2024',
+  },
+  {
+    slug: 'session-management',
+    name: 'Session Management',
+    icon: '🔗',
+    category: 'productivity',
+    type: 'builtin',
+    installs: '2.3k',
+    featured: false,
+    desc: 'Manage chat sessions — list, switch, clear history, and export conversation logs.',
+    longDesc: 'Full session lifecycle management. Create named sessions for different projects, switch between them, clear individual or all history, and export conversations as Markdown or JSON. Session history is encrypted. Supports automatic session archiving after inactivity.',
+    examples: ['Start a new session called "Project Alpha"', 'Export my conversation history from this week', 'Clear the chat history for this session'],
+    version: '1.0.2',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+
+  /* ─── Finance ─── */
+  {
+    slug: 'credential-vault',
+    name: 'Credential Vault',
+    icon: '🏦',
+    category: 'finance',
+    type: 'builtin',
+    installs: '7.8k',
+    featured: false,
+    desc: 'Encrypted API key and secret storage. AES-256-GCM protected. Never stored in plaintext .env files.',
+    longDesc: 'Store API keys, passwords, tokens, and secrets in an AES-256-GCM encrypted vault. PBKDF2 key derivation with 100,000 iterations. Keys are never written to disk unencrypted. Skills request credentials by name — they never see your raw secrets unless explicitly granted. Supports credential rotation and expiry alerts.',
+    examples: ['Store my OpenAI API key securely', 'Add my GitHub personal access token', 'Rotate my Stripe secret key'],
+    version: '2.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'payment-processor',
+    name: 'Payment Processor',
+    icon: '💳',
+    category: 'finance',
+    type: 'builtin',
+    installs: '1.8k',
+    featured: false,
+    desc: 'Process payments, check balances, and manage subscriptions via connected payment providers.',
+    longDesc: 'Integrates with Stripe, PayPal, and crypto payment providers via the Credential Vault. Create payment links, check account balances, list recent transactions, issue refunds, and manage subscriptions. All API calls use credentials from the encrypted vault — never hardcoded.',
+    examples: ['Create a payment link for $99', 'Check my Stripe account balance', 'List all payments from this month'],
+    version: '1.0.1',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+  {
+    slug: 'invoice-generator',
+    name: 'Invoice Generator',
+    icon: '📄',
+    category: 'finance',
+    type: 'builtin',
+    installs: '2.6k',
+    featured: false,
+    desc: 'Generate professional PDF invoices from conversations. Tracks payment status and sends reminders.',
+    longDesc: 'Part of the Survival Mode suite. Generate branded PDF invoices from natural language descriptions. Track payment status, send reminders, and log income. Supports multiple clients, currencies, and tax rates. Invoices are stored encrypted and can be emailed directly.',
+    examples: ['Create an invoice for 20 hours of development at $150/hour', 'Send a payment reminder for invoice #2024-001', 'List all unpaid invoices'],
+    version: '1.2.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'gig-manager',
+    name: 'Gig Platform Manager',
+    icon: '💼',
+    category: 'finance',
+    type: 'builtin',
+    installs: '3.1k',
+    featured: false,
+    desc: 'Manage freelance gigs on Upwork, Fiverr, and Toptal. Track proposals, earnings, and client communications.',
+    longDesc: 'Part of the Survival Mode suite for autonomous income generation. Manages profiles across freelance platforms, tracks active proposals, monitors message threads, and aggregates earnings. Works with the Auto Job Apply skill to submit proposals automatically within set parameters.',
+    examples: ['Check my pending proposals on Upwork', 'What\'s my total earnings this month across platforms?', 'Update my Fiverr profile description'],
+    version: '1.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+
+  /* ─── Utilities ─── */
+  {
+    slug: 'eco-mode',
+    name: 'ECO Mode Manager',
+    icon: '⚡',
+    category: 'utilities',
+    type: 'builtin',
+    installs: '6.3k',
+    featured: false,
+    desc: 'Switch between ECO, Hybrid, and Full AI modes. ECO mode uses Haiku brain + local Nanbeige workers at near-zero cost.',
+    longDesc: 'Three routing modes: ECO ON (Haiku brain + Nanbeige local workers at $0 + Sonnet fallback with permission), HYBRID (same models, auto-fallback), FULL (Sonnet brain + Haiku workers + Opus fallback). PBKDF2 LRU cache reduces key derivation from 420ms to 0ms. Complexity routing automatically picks the right model tier.',
+    examples: ['Switch to ECO mode to save costs', 'Enable Hybrid mode for this session', 'What\'s my current LLM spend this month?'],
+    version: '3.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'provider-manager',
+    name: 'Provider Switcher',
+    icon: '🔀',
+    category: 'utilities',
+    type: 'builtin',
+    installs: '3.7k',
+    featured: false,
+    desc: 'Switch between LLM providers: Anthropic, OpenAI, Ollama, MLX local, and more. Hot-swap mid-session.',
+    longDesc: 'Multi-provider router with hot-swapping support. Supported providers: Anthropic (Claude), OpenAI (GPT-4o, o3), Ollama (local), MLX (Apple Silicon), and any OpenAI-compatible endpoint. Per-conversation provider selection. Credentials pulled from the encrypted vault. Token usage tracked per provider.',
+    examples: ['Switch to GPT-4o for this task', 'Use my local Ollama model', 'Show my token usage by provider this week'],
+    version: '2.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'system-status',
+    name: 'System Monitor',
+    icon: '📊',
+    category: 'utilities',
+    type: 'builtin',
+    installs: '4.5k',
+    featured: false,
+    desc: 'Monitor system health: RAM usage, CPU, AI model memory, disk space, and LazyClaw service status.',
+    longDesc: 'Comprehensive system monitoring with real-time metrics. RAM monitor tracks system + AI model memory using macOS memory_pressure for accurate free%. CPU and disk metrics included. LazyClaw service health (gateway, queue, channels). Metrics accessible via /ram Telegram command and TUI status bar.',
+    examples: ['Check my system RAM usage', 'Is the LazyClaw server healthy?', 'How much memory is my local AI model using?'],
+    version: '1.3.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'agent-limits',
+    name: 'Agent Limits',
+    icon: '🎛️',
+    category: 'utilities',
+    type: 'builtin',
+    installs: '2.0k',
+    featured: false,
+    desc: 'Control parallel specialist behavior: max agents, RAM limits, and auto-delegation toggle.',
+    longDesc: 'Fine-grained control over the multi-agent pool. Set maximum concurrent agents per session, per-agent RAM limits, and toggle auto-delegation (agent decides when to parallelize). Monitor active agents and kill runaway processes. All limits persist per user session.',
+    examples: ['Set max parallel agents to 3', 'Disable auto-delegation for this session', 'Kill all background agents'],
+    version: '1.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Nov 2024',
+  },
+  {
+    slug: 'permission-manager',
+    name: 'Permission Manager',
+    icon: '🛡️',
+    category: 'utilities',
+    type: 'builtin',
+    installs: '3.3k',
+    featured: false,
+    desc: 'Manage tool permissions with three tiers: allow, ask, deny. Full audit log of all permission decisions.',
+    longDesc: 'Three-tier permission system applied to every skill execution. allow: auto-executes, ask: prompts for confirmation, deny: blocked with explanation. Permissions are persistent per skill per user. Full audit log of all permission grants and denials. Bulk permission management for skill categories.',
+    examples: ['Set browser_control to always ask before opening URLs', 'Deny all finance skills in this session', 'Show my permission audit log'],
+    version: '1.1.0',
+    author: 'LazyClaw Core',
+    updated: 'Jan 2025',
+  },
+
+  /* ─── Integrations ─── */
+  {
+    slug: 'github-mcp',
+    name: 'GitHub MCP',
+    icon: '🐙',
+    category: 'integrations',
+    type: 'mcp',
+    installs: '6.8k',
+    featured: false,
+    desc: 'Full GitHub integration via MCP: issues, PRs, code search, commits, and repository management.',
+    longDesc: 'Connects the official GitHub MCP server to LazyClaw\'s skill registry. Exposes 30+ GitHub tools including issue creation/management, PR review, code search, commit history, repository cloning, and GitHub Actions monitoring. Authentication via encrypted vault token.',
+    examples: ['List my open pull requests', 'Search for Python asyncio patterns in my repos', 'Create a GitHub issue for this bug'],
+    version: '1.0.0',
+    author: 'Community',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'notion-mcp',
+    name: 'Notion MCP',
+    icon: '📝',
+    category: 'integrations',
+    type: 'mcp',
+    installs: '4.4k',
+    featured: false,
+    desc: 'Read and write Notion pages, databases, and blocks. Sync your knowledge base with your AI agent.',
+    longDesc: 'Bridges the Notion MCP server into LazyClaw. Create, read, update pages and databases. Query databases with filters, append blocks, manage page properties. Perfect for using your Notion workspace as agent memory or output storage.',
+    examples: ['Add a page to my Notion project tracker', 'Read my weekly review template', 'Search my Notion for notes on machine learning'],
+    version: '1.0.0',
+    author: 'Community',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'linear-mcp',
+    name: 'Linear MCP',
+    icon: '🔷',
+    category: 'integrations',
+    type: 'mcp',
+    installs: '2.9k',
+    featured: false,
+    desc: 'Manage Linear issues, projects, and cycles. Let your agent triage bugs and update ticket status.',
+    longDesc: 'Full Linear project management via MCP bridge. Create and update issues, assign to team members, set priority and status, browse cycles and projects. Useful for letting the agent automatically create bug reports from error logs or update ticket status based on code changes.',
+    examples: ['Create a Linear issue for this performance bug', 'What issues are in the current cycle?', 'Move ticket LZ-243 to In Progress'],
+    version: '1.0.0',
+    author: 'Community',
+    updated: 'Feb 2025',
+  },
+
+  /* ─── AI/ML ─── */
+  {
+    slug: 'ollama-manager',
+    name: 'Local AI Manager',
+    icon: '🧬',
+    category: 'ai',
+    type: 'builtin',
+    installs: '4.9k',
+    featured: false,
+    desc: 'Manage local AI models via Ollama. Pull, run, and switch models without cloud API costs.',
+    longDesc: 'Full Ollama management interface. Pull models, list available models, check VRAM usage, start/stop model servers, and set default models per task type. Integrates with ECO mode — Ollama models can serve as the free worker tier. Automatic model recommendation based on task complexity.',
+    examples: ['Pull llama3.2:3b for fast local inference', 'What Ollama models do I have installed?', 'Use Mistral 7B for my coding tasks'],
+    version: '1.2.0',
+    author: 'LazyClaw Core',
+    updated: 'Feb 2025',
+  },
+  {
+    slug: 'mlx-manager',
+    name: 'MLX Manager',
+    icon: '🍎',
+    category: 'ai',
+    type: 'builtin',
+    installs: '2.2k',
+    featured: false,
+    desc: 'Manage Apple Silicon MLX models for on-device inference. Auto no_think for Qwen, think-tag stripping for Nanbeige.',
+    longDesc: 'Manages the MLX inference server lifecycle on Apple Silicon. Starts/stops model servers, monitors memory usage, handles model loading and unloading. Auto-injects /no_think for Qwen models. Strips <think> tags from Nanbeige output. Use with /local command in Telegram: on|off|worker|brain|restart.',
+    examples: ['Start the MLX server with Nanbeige', 'Switch to MLX brain mode for deep reasoning', 'What\'s my MLX model\'s memory usage?'],
+    version: '1.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+  {
+    slug: 'auto-job-apply',
+    name: 'Auto Job Apply',
+    icon: '🚀',
+    category: 'finance',
+    type: 'builtin',
+    installs: '5.7k',
+    featured: false,
+    desc: 'Automatically search and apply to jobs matching your profile. Part of Survival Mode for autonomous income.',
+    longDesc: 'The centerpiece of Survival Mode. Searches job boards (LinkedIn, Indeed, Remotive, WeWorkRemotely), scores matches against your profile, generates tailored cover letters, and submits applications. Human-in-the-loop mode asks for approval before each application. Full application log with status tracking.',
+    examples: ['Apply to remote Python developer jobs over $120k', 'Search for freelance AI consulting gigs', 'Review my pending job applications'],
+    version: '2.0.0',
+    author: 'LazyClaw Core',
+    updated: 'Mar 2025',
+  },
+];
+
+/* ─── State ─── */
+let activeCategory = 'all';
+let searchQuery = '';
+let openSkill = null;
+
+/* ─── Init ─── */
+document.addEventListener('DOMContentLoaded', () => {
+  renderCategories();
+  renderFeatured();
+  renderSkills();
+  bindSearch();
+  bindKeyboard();
+});
+
+/* ─── Categories ─── */
+function renderCategories() {
+  const bar = document.getElementById('categoryBar');
+  bar.innerHTML = CATEGORIES.map(c => `
+    <button class="chip ${c.id === 'all' ? 'active' : ''}" data-cat="${c.id}" onclick="setCategory('${c.id}')">
+      <span class="chip-icon">${c.icon}</span>${c.label}
+    </button>
+  `).join('');
+}
+
+function setCategory(id) {
+  activeCategory = id;
+  document.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c.dataset.cat === id));
+  renderSkills();
+  document.getElementById('browse').scrollIntoView({ behavior: 'smooth' });
+}
+
+/* ─── Filtering ─── */
+function getFiltered() {
+  return SKILLS.filter(s => {
+    const matchCat = activeCategory === 'all' || s.category === activeCategory;
+    const q = searchQuery.toLowerCase();
+    const matchSearch = !q || s.name.toLowerCase().includes(q) || s.desc.toLowerCase().includes(q) || s.category.includes(q);
+    return matchCat && matchSearch;
+  });
+}
+
+/* ─── Featured ─── */
+function renderFeatured() {
+  const featured = SKILLS.filter(s => s.featured);
+  document.getElementById('featuredGrid').innerHTML = featured.map((s, i) => cardHTML(s, true, i * 80)).join('');
+}
+
+/* ─── Skills grid ─── */
+function renderSkills() {
+  const filtered = getFiltered();
+  const grid = document.getElementById('skillsGrid');
+  const count = document.getElementById('resultCount');
+  count.innerHTML = `Showing <strong>${filtered.length}</strong> skill${filtered.length !== 1 ? 's' : ''}`;
+  if (!filtered.length) {
+    grid.innerHTML = `
+      <div class="empty-state" style="grid-column:1/-1">
+        <div class="empty-state-icon">🔭</div>
+        <h3>No skills found</h3>
+        <p>Try a different search term or category.</p>
+      </div>`;
+    return;
+  }
+  grid.innerHTML = filtered.map((s, i) => cardHTML(s, false, i * 40)).join('');
+}
+
+/* ─── Card HTML ─── */
+function cardHTML(s, isFeatured, delay) {
+  const bg = CAT_COLORS[s.category] || 'rgba(255,255,255,0.08)';
+  const typeBadge = {
+    builtin:   '<span class="badge badge-builtin">⚡ Built-in</span>',
+    community: '<span class="badge badge-community">🌐 Community</span>',
+    mcp:       '<span class="badge badge-mcp">🔌 MCP</span>',
+    code:      '<span class="badge badge-code">🐍 Code</span>',
+  }[s.type] || '';
+
+  return `
+    <div class="card${isFeatured ? ' featured' : ''}" onclick="openModal('${s.slug}')" style="animation-delay:${delay}ms">
+      <div class="card-header">
+        <div class="card-icon" style="background:${bg}">${s.icon}</div>
+        <div class="card-badges">${typeBadge}${isFeatured ? '<span class="badge badge-featured">⭐ Featured</span>' : ''}</div>
+      </div>
+      <div class="card-name">${s.name}</div>
+      <div class="card-desc">${s.desc}</div>
+      <div class="card-footer">
+        <div class="card-category">${catLabel(s.category)}</div>
+        <div class="card-installs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3m0 12-4-4m4 4 4-4M2 17l.621 2.485A2 2 0 0 0 4.561 21h14.878a2 2 0 0 0 1.94-1.515L22 17"/></svg>
+          ${s.installs}
+        </div>
+      </div>
+    </div>`;
+}
+
+function catLabel(id) {
+  const c = CATEGORIES.find(c => c.id === id);
+  return c ? `${c.icon} ${c.label}` : id;
+}
+
+/* ─── Modal ─── */
+function openModal(slug) {
+  const s = SKILLS.find(s => s.slug === slug);
+  if (!s) return;
+  openSkill = s;
+
+  const bg = CAT_COLORS[s.category] || 'rgba(255,255,255,0.08)';
+  document.getElementById('mIcon').style.background = bg;
+  document.getElementById('mIcon').textContent = s.icon;
+  document.getElementById('mName').textContent = s.name;
+
+  const typeBadge = {
+    builtin:   '<span class="badge badge-builtin">⚡ Built-in</span>',
+    community: '<span class="badge badge-community">🌐 Community</span>',
+    mcp:       '<span class="badge badge-mcp">🔌 MCP</span>',
+    code:      '<span class="badge badge-code">🐍 Code</span>',
+  }[s.type] || '';
+  document.getElementById('mBadges').innerHTML = typeBadge;
+  document.getElementById('mDesc').textContent = s.longDesc;
+
+  document.getElementById('mMeta').innerHTML = `
+    <div class="meta-item"><div class="meta-label">Version</div><div class="meta-value">${s.version}</div></div>
+    <div class="meta-item"><div class="meta-label">Author</div><div class="meta-value">${s.author}</div></div>
+    <div class="meta-item"><div class="meta-label">Updated</div><div class="meta-value">${s.updated}</div></div>
+    <div class="meta-item"><div class="meta-label">Installs</div><div class="meta-value">${s.installs}</div></div>
+  `;
+
+  document.getElementById('mExamples').innerHTML = s.examples.map(e => `
+    <div class="example-item">
+      <span class="example-bullet">›</span>
+      <span>${e}</span>
+    </div>`).join('');
+
+  document.getElementById('mInstallCmd').textContent = `lazyclaw skills install ${s.slug}`;
+  document.getElementById('copyBtn').textContent = 'Copy';
+  document.getElementById('copyBtn').classList.remove('copied');
+
+  document.getElementById('modalOverlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modalOverlay')) return;
+  document.getElementById('modalOverlay').classList.remove('open');
+  document.body.style.overflow = '';
+  openSkill = null;
+}
+
+function copyInstall() {
+  if (!openSkill) return;
+  const cmd = `lazyclaw skills install ${openSkill.slug}`;
+  navigator.clipboard.writeText(cmd).then(() => {
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+/* ─── Search ─── */
+function bindSearch() {
+  const input = document.getElementById('heroSearch');
+  input.addEventListener('input', e => {
+    searchQuery = e.target.value;
+    renderSkills();
+    if (searchQuery) document.getElementById('browse').scrollIntoView({ behavior: 'smooth' });
+  });
+}
+
+function bindKeyboard() {
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      document.getElementById('heroSearch').focus();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    if (e.key === 'Escape') closeModal(null);
+  });
+}
+</script>
+</body>
+</html>

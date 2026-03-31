@@ -21,6 +21,14 @@ from lazyclaw.runtime.events import (
 )
 from lazyclaw.runtime.team_lead import TeamLead
 from lazyclaw.runtime.stuck_detector import detect_stuck
+from lazyclaw.browser.action_planner import (
+    ActionPlannerState,
+    PlanStatus,
+    evaluate_action_result,
+    make_plan_injection_prompt,
+    parse_plan_from_response,
+    should_inject_plan,
+)
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -911,6 +919,10 @@ class Agent:
         _escalated = False  # True after auto-escalation to brain_model
         _escalation_iter = 0  # Iteration when escalation happened
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
+        # Browser action planner — ephemeral per-conversation, not persisted
+        _plan_state = ActionPlannerState(
+            plan_injected=not should_inject_plan(message, []),
+        )
 
         response = None
         iteration = 0
@@ -930,6 +942,17 @@ class Agent:
                 if iteration > 0:
                     keep_n = 1 if iteration >= 3 else 2
                     messages = _prune_old_tool_results(messages, keep_last_n=keep_n)
+
+                # ── Browser action planner injection ──────────────────
+                # At iteration 0, if this looks like a browser task, ask
+                # the brain LLM to output a plan JSON before acting.
+                # No extra LLM call — plan + first action in one response.
+                if iteration == 0 and not _plan_state.plan_injected and tools:
+                    _plan_prompt = make_plan_injection_prompt(message)
+                    messages.append(LLMMessage(role="system", content=_plan_prompt))
+                    from dataclasses import replace as _dc_replace
+                    _plan_state = _dc_replace(_plan_state, plan_injected=True)
+                    logger.info("Browser action planner: injected planning prompt")
 
                 kwargs: dict = {}
                 if tools:
@@ -1073,6 +1096,20 @@ class Agent:
                      "completion": completion_tokens, "model": response.model,
                      "eco_mode": eco_mode},
                 ))
+
+                # ── Parse browsing plan from LLM response ─────────────
+                # If the planner injected a prompt, try to extract the JSON
+                # plan block from the response content (no extra LLM call).
+                if (
+                    response.content
+                    and _plan_state.plan is None
+                    and response.tool_calls
+                    and any(tc.name == "browser" for tc in response.tool_calls)
+                ):
+                    _parsed_plan = parse_plan_from_response(response.content)
+                    if _parsed_plan is not None:
+                        from dataclasses import replace as _dc_replace
+                        _plan_state = _dc_replace(_plan_state, plan=_parsed_plan)
 
                 # Debug: log tool state
                 logger.info(
@@ -1379,6 +1416,33 @@ class Agent:
                     _tool_results.append(
                         result if isinstance(result, str) else str(result)
                     )
+
+                    # ── Browser action planner: evaluate result ────────
+                    # Track plan progress after every browser call.
+                    # REPLAN → inject fallback hint.
+                    # ESCALATE → let the stuck detector handle it (don't inject).
+                    if tc.name == "browser" and _plan_state.plan is not None:
+                        _result_str = result if isinstance(result, str) else str(result)
+                        _plan_decision = evaluate_action_result(
+                            _plan_state,
+                            tc.arguments.get("action", ""),
+                            _result_str,
+                        )
+                        from dataclasses import replace as _dc_replace
+                        _plan_state = _dc_replace(
+                            _plan_state,
+                            plan=_plan_decision.new_state.plan,
+                            browser_call_count=_plan_decision.new_state.browser_call_count,
+                            consecutive_failures=_plan_decision.new_state.consecutive_failures,
+                        )
+                        if (
+                            _plan_decision.status in (PlanStatus.CONTINUE, PlanStatus.REPLAN)
+                            and _plan_decision.system_message
+                        ):
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=_plan_decision.system_message,
+                            ))
 
                     # Dynamic schema injection: after search_tools returns,
                     # inject discovered tool schemas so LLM can call them next iteration

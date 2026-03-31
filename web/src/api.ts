@@ -105,7 +105,6 @@ export interface PermissionSettings {
 
 class ApiError extends Error {
   status: number;
-
   constructor(message: string, status: number) {
     super(message);
     this.name = "ApiError";
@@ -225,6 +224,22 @@ export const deleteJob = (id: string) =>
 
 export const listMcpServers = () =>
   request<{ servers: McpServer[] }>("/api/mcp/servers").then((r) => r.servers);
+
+export const addMcpServer = (body: {
+  name: string;
+  transport: "stdio" | "sse" | "streamable_http";
+  config: Record<string, unknown>;
+}) =>
+  request<{ id: string; status: string }>("/api/mcp/servers", { method: "POST", body: JSON.stringify(body) });
+
+export const getMcpServer = (id: string) =>
+  request<McpServer>(`/api/mcp/servers/${id}`);
+
+export const removeMcpServer = (id: string) =>
+  request<{ status: string }>(`/api/mcp/servers/${id}`, { method: "DELETE" });
+
+export const connectMcp = (id: string) =>
+  request<{ status: string }>(`/api/mcp/servers/${id}/connect`, { method: "POST" });
 
 export const reconnectMcp = (id: string) =>
   request<void>(`/api/mcp/servers/${id}/reconnect`, { method: "POST" });

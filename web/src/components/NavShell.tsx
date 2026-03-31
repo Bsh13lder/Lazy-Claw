@@ -1,9 +1,16 @@
-import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
-const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
+export type Page = "chat" | "overview" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
+
+interface NavShellProps {
+  activePage: Page;
+  onNavigate: (page: Page) => void;
+  children: React.ReactNode;
+}
+
+const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   {
-    to: "/chat",
+    page: "chat",
     label: "Chat",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -12,7 +19,7 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/overview",
+    page: "overview",
     label: "Overview",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -24,7 +31,19 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/skills",
+    page: "hub",
+    label: "Skill Hub",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <rect x="3" y="3" width="7" height="9" rx="1" />
+        <rect x="14" y="3" width="7" height="5" rx="1" />
+        <rect x="14" y="12" width="7" height="9" rx="1" />
+        <rect x="3" y="16" width="7" height="5" rx="1" />
+      </svg>
+    ),
+  },
+  {
+    page: "skills",
     label: "Skills",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -33,7 +52,7 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/jobs",
+    page: "jobs",
     label: "Jobs",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -43,7 +62,7 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/mcp",
+    page: "mcp",
     label: "MCP",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -52,7 +71,7 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/memory",
+    page: "memory",
     label: "Memory",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -62,7 +81,7 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/vault",
+    page: "vault",
     label: "Vault",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -72,7 +91,7 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    to: "/settings",
+    page: "settings",
     label: "Settings",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -83,13 +102,8 @@ const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
   },
 ];
 
-interface NavShellProps {
-  children: React.ReactNode;
-}
-
-export default function NavShell({ children }: NavShellProps) {
+export default function NavShell({ activePage, onNavigate, children }: NavShellProps) {
   const { user, logout } = useAuth();
-  const navigate = useNavigate();
 
   return (
     <div className="h-screen flex bg-bg-primary">
@@ -97,7 +111,7 @@ export default function NavShell({ children }: NavShellProps) {
       <nav className="w-14 bg-bg-secondary border-r border-border flex flex-col items-center py-3 shrink-0">
         {/* Logo */}
         <button
-          onClick={() => navigate("/overview")}
+          onClick={() => onNavigate("overview")}
           className="mb-4 p-1.5 rounded-lg hover:bg-bg-hover transition-colors"
           title="LazyClaw"
         >
@@ -110,20 +124,18 @@ export default function NavShell({ children }: NavShellProps) {
         {/* Nav items */}
         <div className="flex-1 flex flex-col gap-1">
           {NAV_ITEMS.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
+            <button
+              key={item.page}
+              onClick={() => onNavigate(item.page)}
               title={item.label}
-              className={({ isActive }) =>
-                `p-2 rounded-lg transition-colors ${
-                  isActive
-                    ? "bg-bg-hover text-text-primary"
-                    : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
-                }`
-              }
+              className={`p-2 rounded-lg transition-colors ${
+                activePage === item.page
+                  ? "bg-bg-hover text-text-primary"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+              }`}
             >
               {item.icon}
-            </NavLink>
+            </button>
           ))}
         </div>
 

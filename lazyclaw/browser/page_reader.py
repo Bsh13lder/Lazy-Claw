@@ -240,6 +240,80 @@ JS_WHATSAPP = """
 }
 """
 
+JS_PAGE_ANALYSIS = """
+() => {
+    const title = document.title || '';
+    const url = location.href;
+
+    // ── Page type detection from DOM ────────────────────────────────────
+    const inputs = document.querySelectorAll('input:not([type=hidden]),textarea,select');
+    const hasPassword = !!document.querySelector('input[type=password]');
+    const hasSubmit = !!document.querySelector('button[type=submit],[type=submit],[role=button]');
+    const mainLinks = document.querySelectorAll('main a[href], [role=main] a[href], #content a[href], article a[href]');
+    const alerts = document.querySelectorAll('[role=alert],[class*=error],[class*=Error],[class*=alert],[class*=Alert]');
+    const titleLower = title.toLowerCase();
+    const bodyText = (document.body?.innerText || '').toLowerCase().substring(0, 500);
+
+    let pageType = 'other';
+    if (hasPassword && hasSubmit) {
+        pageType = 'login';
+    } else if (inputs.length >= 3) {
+        pageType = 'form';
+    } else if (mainLinks.length >= 5) {
+        const linkTexts = Array.from(mainLinks).slice(0, 10).map(a => a.textContent.trim());
+        const avgLen = linkTexts.reduce((s, t) => s + t.length, 0) / (linkTexts.length || 1);
+        pageType = avgLen < 80 ? 'search_results' : 'list';
+    } else if (/\\b(error|not found|403|404|500)\\b/.test(titleLower)) {
+        pageType = 'error';
+    } else if (alerts.length > 0 && /\\b(error|invalid|failed)\\b/.test(bodyText)) {
+        pageType = 'error';
+    } else if (/\\b(success|confirmed|thank you|order placed|payment accepted)\\b/.test(bodyText)) {
+        pageType = 'confirmation';
+    } else if (document.querySelector('article, [role=article]')) {
+        pageType = 'article';
+    }
+
+    // ── Landmark summary ────────────────────────────────────────────────
+    const landmarks = {};
+    const landmarkSels = {
+        main: 'main,[role=main],#content,.content',
+        nav: 'nav,[role=navigation]',
+        form: 'form',
+        list: 'ul,ol,[role=list]',
+    };
+    for (const [name, sel] of Object.entries(landmarkSels)) {
+        const els = document.querySelectorAll(sel);
+        if (els.length) {
+            let count = 0;
+            els.forEach(el => { count += el.querySelectorAll('a,button,input,select,textarea,[role=button]').length; });
+            landmarks[name] = count;
+        }
+    }
+    const landmarkStr = Object.entries(landmarks)
+        .filter(([, c]) => c > 0)
+        .map(([n, c]) => n + ': ' + c + ' elements')
+        .join(', ') || 'none detected';
+
+    // ── Alert text ──────────────────────────────────────────────────────
+    let alertText = 'None';
+    if (alerts.length > 0) {
+        const msgs = Array.from(alerts)
+            .map(el => el.textContent.trim().substring(0, 100))
+            .filter(t => t.length > 0)
+            .slice(0, 3);
+        if (msgs.length) alertText = msgs.join(' | ');
+    }
+
+    return {
+        title: title,
+        url: url,
+        page_type: pageType,
+        landmarks: landmarkStr,
+        alerts: alertText,
+    };
+}
+"""
+
 # ── Extractors map ───────────────────────────────────────────────────────
 
 EXTRACTORS = {
@@ -330,3 +404,30 @@ async def run_extractor(backend, url: str | None = None) -> dict:
         "(() => document.body?.innerText?.substring(0, 5000) || '')()"
     )
     return {"title": title, "text": text or "", "url": url, "type": "fallback"}
+
+
+async def detect_page_context(backend) -> dict:
+    """Run JS_PAGE_ANALYSIS on the current page to get structured context.
+
+    Returns a dict with:
+        title (str), url (str), page_type (str), landmarks (str), alerts (str)
+
+    page_type is one of: login | form | search_results | list | error |
+                          confirmation | article | other
+
+    Falls back to {"title": "", "url": "", "page_type": "other",
+                    "landmarks": "none detected", "alerts": "None"} on error.
+    """
+    try:
+        result = await backend.evaluate(f"({JS_PAGE_ANALYSIS})()")
+        if isinstance(result, dict) and result.get("page_type"):
+            return result
+    except Exception as exc:
+        logger.debug("detect_page_context failed: %s", exc)
+    return {
+        "title": "",
+        "url": "",
+        "page_type": "other",
+        "landmarks": "none detected",
+        "alerts": "None",
+    }

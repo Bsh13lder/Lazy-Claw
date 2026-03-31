@@ -523,13 +523,30 @@ class BrowserSkill(BaseSkill):
         Gives the LLM both page content AND ref-IDs to act on — no need
         for a separate snapshot call after opening a page.
         """
+        from lazyclaw.browser.page_reader import detect_page_context
+
+        # Structured page context header — helps the LLM understand what it's looking at
+        ctx = await detect_page_context(backend)
+        page_type = ctx.get("page_type", "other")
+        landmarks = ctx.get("landmarks", "none detected")
+        alerts = ctx.get("alerts", "None")
+
         # Page content via JS extractor (cheap, site-specific)
         page_data = await run_extractor(backend)
-        title = page_data.get("title", "") or await backend.title()
-        page_url = url or page_data.get("url", "")
+        title = page_data.get("title", "") or ctx.get("title", "") or await backend.title()
+        page_url = url or page_data.get("url", "") or ctx.get("url", "")
         page_text = page_data.get("text", "")
 
-        parts = [f"{heading or ('Opened: ' + title)}\nURL: {page_url}"]
+        header = (
+            f"📍 Page: {title}\n"
+            f"🔗 URL: {page_url}\n"
+            f"📄 Type: {page_type}\n"
+            f"🎯 Key sections: {landmarks}\n"
+            f"⚠️ Alerts: {alerts}"
+        )
+        parts = [header]
+        if heading:
+            parts.insert(0, heading)
 
         if page_text:
             preview = page_text[:1500]

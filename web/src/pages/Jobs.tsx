@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { Job } from "../api";
 import Modal from "../components/Modal";
+import { useToast } from "../context/ToastContext";
 
 /* ── Helpers ─────────────────────────────────────────────── */
 
@@ -226,6 +227,7 @@ function EmptyState() {
 /* ── Page ─────────────────────────────────────────────────── */
 
 export default function Jobs() {
+  const toast = useToast();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -268,22 +270,42 @@ export default function Jobs() {
       });
       setShowCreate(false);
       setCName(""); setCInstruction(""); setCCron(""); setCContext("");
+      toast.success("Job created");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create job");
+      toast.error(err instanceof Error ? err.message : "Failed to create job");
     } finally {
       setSaving(false);
     }
   };
 
   const handlePause = async (id: string) => {
-    try { await api.pauseJob(id); load(); } catch { /* handled by next load */ }
+    try {
+      await api.pauseJob(id);
+      toast.success("Job paused");
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to pause job");
+    }
   };
   const handleResume = async (id: string) => {
-    try { await api.resumeJob(id); load(); } catch { /* handled by next load */ }
+    try {
+      await api.resumeJob(id);
+      toast.success("Job resumed");
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to resume job");
+    }
   };
   const handleDelete = async (id: string) => {
-    try { await api.deleteJob(id); load(); } catch { /* handled by next load */ }
+    if (!window.confirm("Delete this job?")) return;
+    try {
+      await api.deleteJob(id);
+      toast.success("Job deleted");
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete job");
+    }
   };
 
   return (

@@ -168,7 +168,7 @@ export default function SkillHub() {
     if (skill.skill_type === "builtin" || skill.skill_type === "mcp") return;
     setTogglingIds((prev) => new Set(prev).add(skill.id));
     try {
-      await api.updateSkill(skill.id, {});
+      await api.updateSkill(skill.id, { enabled: !skill.enabled });
       setSkills((prev) =>
         prev.map((s) => (s.id === skill.id ? { ...s, enabled: !s.enabled } : s)),
       );

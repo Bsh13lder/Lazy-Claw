@@ -180,6 +180,7 @@ export const updateSkill = (id: string, body: {
   description?: string;
   instruction?: string;
   code?: string;
+  enabled?: boolean;
 }) =>
   request<{ status: string }>(`/api/skills/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 
@@ -307,16 +308,43 @@ export const getEcoRateLimits = () =>
 export const getTeamSettings = () =>
   request<{ success: boolean; data: TeamSettings }>("/api/teams/settings").then((r) => r.data);
 
+export const updateTeamSettings = (updates: Partial<TeamSettings>) =>
+  request<{ success: boolean; data: TeamSettings }>("/api/teams/settings", {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  }).then((r) => r.data);
+
 export const listSpecialists = () =>
   request<{ success: boolean; data: Specialist[] }>("/api/teams/specialists").then((r) => r.data);
+
+export const createSpecialist = (body: { name: string; description: string; system_prompt?: string }) =>
+  request<{ success: boolean }>("/api/teams/specialists", { method: "POST", body: JSON.stringify(body) });
+
+export const deleteSpecialist = (name: string) =>
+  request<{ success: boolean }>(`/api/teams/specialists/${encodeURIComponent(name)}`, { method: "DELETE" });
 
 // ── Permissions ────────────────────────────────────────────────────────────
 
 export const getPermissionSettings = () =>
   request<{ success: boolean; data: PermissionSettings }>("/api/permissions/settings").then((r) => r.data);
 
+export const updatePermissionSettings = (updates: Partial<PermissionSettings>) =>
+  request<{ success: boolean; data: PermissionSettings }>("/api/permissions/settings", {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  }).then((r) => r.data);
+
 export const listSkillPermissions = () =>
   request<{ success: boolean; data: Record<string, unknown>[] }>("/api/permissions/skills").then((r) => r.data);
+
+export const setSkillPermission = (skillName: string, level: string) =>
+  request<void>(`/api/permissions/skills/${encodeURIComponent(skillName)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ level }),
+  });
+
+export const removeSkillPermission = (skillName: string) =>
+  request<void>(`/api/permissions/skills/${encodeURIComponent(skillName)}`, { method: "DELETE" });
 
 export const listPendingApprovals = () =>
   request<{ success: boolean; data: Record<string, unknown>[] }>("/api/permissions/approvals").then((r) => r.data);

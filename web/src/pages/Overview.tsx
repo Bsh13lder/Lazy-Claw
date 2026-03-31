@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
 import type { Job, McpServer } from "../api";
+import { useAuth } from "../context/AuthContext";
+import type { Page } from "../components/NavShell";
 
 /* ── Types ──────────────────────────────────────────────────────────── */
 
@@ -176,7 +178,8 @@ function buildActivity(jobs: Job[], mcpServers: McpServer[]): ActivityItem[] {
 
 /* ── Main component ──────────────────────────────────────────────── */
 
-export default function Overview() {
+export default function Overview({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const { user } = useAuth();
   const [health, setHealth] = useState<HealthData>({
     gateway: "loading",
     version: "...",
@@ -247,6 +250,14 @@ export default function Overview() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
+
+        {/* ── Welcome banner ────────────────────────────────────── */}
+        <div className="animate-fade-in">
+          <h1 className="text-xl font-semibold text-text-primary">
+            Welcome back{user?.display_name ?? user?.username ? `, ${user.display_name ?? user.username}` : ""}
+          </h1>
+          <p className="text-sm text-text-muted mt-0.5">Here's what's happening with your agent.</p>
+        </div>
 
         {/* ── System health banner ──────────────────────────────── */}
         <div className="animate-fade-in">
@@ -404,6 +415,7 @@ export default function Overview() {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <QuickAction
               label="New Chat"
+              onClick={() => onNavigate("chat")}
               icon={
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -411,15 +423,18 @@ export default function Overview() {
               }
             />
             <QuickAction
-              label="Run Job"
+              label="Jobs"
+              onClick={() => onNavigate("jobs")}
               icon={
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <polygon points="5 3 19 12 5 21 5 3" />
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
                 </svg>
               }
             />
             <QuickAction
               label="Add Skill"
+              onClick={() => onNavigate("hub")}
               icon={
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <line x1="12" y1="5" x2="12" y2="19" />
@@ -429,6 +444,7 @@ export default function Overview() {
             />
             <QuickAction
               label="Add Credential"
+              onClick={() => onNavigate("vault")}
               icon={
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <rect x="3" y="11" width="18" height="11" rx="2" />
@@ -443,9 +459,12 @@ export default function Overview() {
   );
 }
 
-function QuickAction({ label, icon }: { label: string; icon: React.ReactNode }) {
+function QuickAction({ label, icon, onClick }: { label: string; icon: React.ReactNode; onClick: () => void }) {
   return (
-    <button className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-bg-secondary border border-border text-text-secondary hover:text-text-primary hover:border-border-light card-hover transition-colors text-sm">
+    <button
+      onClick={onClick}
+      className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-bg-secondary border border-border text-text-secondary hover:text-text-primary hover:border-border-light card-hover transition-colors text-sm"
+    >
       <span className="text-text-muted">{icon}</span>
       {label}
     </button>

@@ -34,7 +34,7 @@ function AppContent() {
   const pageComponent = (() => {
     switch (page) {
       case "chat": return <Chat />;
-      case "overview": return <Overview />;
+      case "overview": return <Overview onNavigate={setPage} />;
       case "hub": return <SkillHub />;
       case "skills": return <Skills />;
       case "jobs": return <Jobs />;

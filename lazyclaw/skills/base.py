@@ -31,6 +31,16 @@ class BaseSkill(ABC):
         return "allow"
 
     @property
+    def read_only(self) -> bool:
+        """Whether this skill only reads data and never modifies state.
+
+        Read-only skills (search, fetch, recall, status checks) are safe to
+        execute concurrently. State-modifying skills (write, send, delete,
+        create) must run sequentially. Defaults to False (conservative).
+        """
+        return False
+
+    @property
     @abstractmethod
     def parameters_schema(self) -> dict:
         """JSON Schema for the skill's parameters."""

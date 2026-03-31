@@ -7,6 +7,10 @@ class MemoryRecallSkill(BaseSkill):
         self._config = config
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def category(self) -> str:
         return "memory"
 

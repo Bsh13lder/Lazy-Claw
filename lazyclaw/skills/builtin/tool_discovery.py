@@ -21,6 +21,10 @@ class SearchToolsSkill(BaseSkill):
         self._registry = registry
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "search_tools"
 

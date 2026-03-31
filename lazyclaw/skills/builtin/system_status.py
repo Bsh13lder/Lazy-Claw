@@ -20,6 +20,10 @@ class ShowStatusSkill(BaseSkill):
         self._config = config
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def category(self) -> str:
         return "system"
 
@@ -166,6 +170,10 @@ class ShowStatusSkill(BaseSkill):
 class RunDoctorSkill(BaseSkill):
     def __init__(self, config=None):
         self._config = config
+
+    @property
+    def read_only(self) -> bool:
+        return True
 
     @property
     def category(self) -> str:
@@ -319,6 +327,10 @@ class ShowUsageSkill(BaseSkill):
         self._config = config
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def category(self) -> str:
         return "system"
 
@@ -406,6 +418,10 @@ class ShowUsageSkill(BaseSkill):
 class ShowLogsSkill(BaseSkill):
     def __init__(self, config=None):
         self._config = config
+
+    @property
+    def read_only(self) -> bool:
+        return True
 
     @property
     def category(self) -> str:

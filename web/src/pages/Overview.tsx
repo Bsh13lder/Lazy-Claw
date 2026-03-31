@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
+import { useToast } from "../context/ToastContext";
+import { useInterval } from "../hooks/useInterval";
+import { OverviewSkeleton } from "../components/Skeleton";
 
 interface HealthStatus {
   gateway: "ok" | "error" | "loading";
@@ -33,51 +36,63 @@ function Card({ title, value, sub, icon }: { title: string; value: string | numb
   );
 }
 
+const INITIAL_STATUS: HealthStatus = {
+  gateway: "loading",
+  version: "...",
+  skills: 0,
+  jobs: 0,
+  mcpServers: 0,
+  memories: 0,
+  ecoMode: "...",
+  pendingApprovals: 0,
+};
+
 export default function Overview() {
-  const [status, setStatus] = useState<HealthStatus>({
-    gateway: "loading",
-    version: "...",
-    skills: 0,
-    jobs: 0,
-    mcpServers: 0,
-    memories: 0,
-    ecoMode: "...",
-    pendingApprovals: 0,
-  });
+  const [status, setStatus] = useState<HealthStatus>(INITIAL_STATUS);
+  const [loaded, setLoaded] = useState(false);
+  const toast = useToast();
 
-  useEffect(() => {
-    async function load() {
-      const results = await Promise.allSettled([
-        api.healthCheck(),
-        api.listSkills(),
-        api.listJobs(),
-        api.listMcpServers(),
-        api.listMemories(),
-        api.getEcoSettings(),
-        api.listPendingApprovals(),
-      ]);
+  const load = useCallback(async () => {
+    const results = await Promise.allSettled([
+      api.healthCheck(),
+      api.listSkills(),
+      api.listJobs(),
+      api.listMcpServers(),
+      api.listMemories(),
+      api.getEcoSettings(),
+      api.listPendingApprovals(),
+    ]);
 
-      const health = results[0].status === "fulfilled" ? results[0].value : null;
-      const skills = results[1].status === "fulfilled" ? results[1].value : [];
-      const jobs = results[2].status === "fulfilled" ? results[2].value : [];
-      const mcp = results[3].status === "fulfilled" ? results[3].value : [];
-      const memories = results[4].status === "fulfilled" ? results[4].value : [];
-      const eco = results[5].status === "fulfilled" ? results[5].value : null;
-      const approvals = results[6].status === "fulfilled" ? results[6].value : [];
+    const health = results[0].status === "fulfilled" ? results[0].value : null;
+    const skills = results[1].status === "fulfilled" ? results[1].value : [];
+    const jobs = results[2].status === "fulfilled" ? results[2].value : [];
+    const mcp = results[3].status === "fulfilled" ? results[3].value : [];
+    const memories = results[4].status === "fulfilled" ? results[4].value : [];
+    const eco = results[5].status === "fulfilled" ? results[5].value : null;
+    const approvals = results[6].status === "fulfilled" ? results[6].value : [];
 
-      setStatus({
-        gateway: health ? "ok" : "error",
-        version: health?.version ?? "unknown",
-        skills: Array.isArray(skills) ? skills.length : 0,
-        jobs: Array.isArray(jobs) ? jobs.length : 0,
-        mcpServers: Array.isArray(mcp) ? mcp.length : 0,
-        memories: Array.isArray(memories) ? memories.length : 0,
-        ecoMode: eco?.mode ?? "unknown",
-        pendingApprovals: Array.isArray(approvals) ? approvals.length : 0,
-      });
+    // Show toast if gateway went down (only after initial load)
+    if (loaded && !health && status.gateway === "ok") {
+      toast.error("Gateway connection lost");
     }
-    load();
-  }, []);
+
+    setStatus({
+      gateway: health ? "ok" : "error",
+      version: health?.version ?? "unknown",
+      skills: Array.isArray(skills) ? skills.length : 0,
+      jobs: Array.isArray(jobs) ? jobs.length : 0,
+      mcpServers: Array.isArray(mcp) ? mcp.length : 0,
+      memories: Array.isArray(memories) ? memories.length : 0,
+      ecoMode: eco?.mode ?? "unknown",
+      pendingApprovals: Array.isArray(approvals) ? approvals.length : 0,
+    });
+    setLoaded(true);
+  }, [loaded, status.gateway, toast]);
+
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useInterval(load, 30_000);
+
+  if (!loaded) return <OverviewSkeleton />;
 
   return (
     <div className="h-full overflow-y-auto">

@@ -1,28 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import Modal from "../components/Modal";
+import { useToast } from "../context/ToastContext";
+import { ListSkeleton } from "../components/Skeleton";
 
 export default function Vault() {
   const [keys, setKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
   const [saving, setSaving] = useState(false);
+  const toast = useToast();
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const data = await api.listVaultKeys();
       setKeys(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load vault");
+      toast.error(err instanceof Error ? err.message : "Failed to load vault");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -34,17 +34,26 @@ export default function Vault() {
       setShowAdd(false);
       setNewKey("");
       setNewValue("");
+      toast.success("Credential saved");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save credential");
+      toast.error(err instanceof Error ? err.message : "Failed to save credential");
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (key: string) => {
-    try { await api.deleteVaultKey(key); setKeys((prev) => prev.filter((k) => k !== key)); } catch { /* */ }
+    try {
+      await api.deleteVaultKey(key);
+      setKeys((prev) => prev.filter((k) => k !== key));
+      toast.success("Credential deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete credential");
+    }
   };
+
+  if (loading) return <ListSkeleton rows={3} />;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -64,18 +73,7 @@ export default function Vault() {
           </div>
         </div>
 
-        {loading && (
-          <div className="flex items-center gap-2 text-text-muted text-sm py-8 justify-center">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner"><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" /></svg>
-            Loading vault...
-          </div>
-        )}
-
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-error-soft border border-error/15 text-error text-sm mb-4">{error}</div>
-        )}
-
-        {!loading && !error && keys.length === 0 && (
+        {keys.length === 0 && (
           <div className="text-center py-12">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-text-muted mx-auto mb-3">
               <rect x="3" y="11" width="18" height="11" rx="2" />
@@ -86,7 +84,7 @@ export default function Vault() {
           </div>
         )}
 
-        {!loading && !error && keys.length > 0 && (
+        {keys.length > 0 && (
           <div className="space-y-1">
             {keys.map((key) => (
               <div key={key} className="flex items-center gap-3 px-4 py-3 rounded-xl bg-bg-secondary border border-border hover:border-border-light transition-colors">

@@ -2,12 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
 import type { Job } from "../api";
 import Modal from "../components/Modal";
+import { useToast } from "../context/ToastContext";
+import { useInterval } from "../hooks/useInterval";
+import { ListSkeleton } from "../components/Skeleton";
 
 export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const toast = useToast();
 
   // Create form
   const [cName, setCName] = useState("");
@@ -18,19 +21,18 @@ export default function Jobs() {
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const data = await api.listJobs();
       setJobs(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load jobs");
+      toast.error(err instanceof Error ? err.message : "Failed to load jobs");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => { load(); }, [load]);
+  useInterval(load, 60_000);
 
   const handleCreate = async () => {
     if (!cName.trim() || !cInstruction.trim()) return;
@@ -46,17 +48,32 @@ export default function Jobs() {
       });
       setShowCreate(false);
       setCName(""); setCInstruction(""); setCCron(""); setCContext("");
+      toast.success("Job created");
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create job");
+      toast.error(err instanceof Error ? err.message : "Failed to create job");
     } finally {
       setSaving(false);
     }
   };
 
-  const handlePause = async (id: string) => { try { await api.pauseJob(id); load(); } catch { /* */ } };
-  const handleResume = async (id: string) => { try { await api.resumeJob(id); load(); } catch { /* */ } };
-  const handleDelete = async (id: string) => { try { await api.deleteJob(id); load(); } catch { /* */ } };
+  const handlePause = async (id: string) => {
+    try { await api.pauseJob(id); toast.success("Job paused"); load(); } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to pause job");
+    }
+  };
+
+  const handleResume = async (id: string) => {
+    try { await api.resumeJob(id); toast.success("Job resumed"); load(); } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to resume job");
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try { await api.deleteJob(id); toast.success("Job deleted"); load(); } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete job");
+    }
+  };
 
   const statusColor = (s: string) => {
     if (s === "active") return "bg-accent";
@@ -64,6 +81,8 @@ export default function Jobs() {
     if (s === "completed") return "bg-cyan";
     return "bg-text-muted";
   };
+
+  if (loading) return <ListSkeleton rows={4} />;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -83,22 +102,11 @@ export default function Jobs() {
           </div>
         </div>
 
-        {loading && (
-          <div className="flex items-center gap-2 text-text-muted text-sm py-8 justify-center">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner"><path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" /></svg>
-            Loading jobs...
-          </div>
-        )}
-
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-error-soft border border-error/15 text-error text-sm mb-4">{error}</div>
-        )}
-
-        {!loading && !error && jobs.length === 0 && (
+        {jobs.length === 0 && (
           <div className="text-center py-12 text-text-muted text-sm">No jobs yet. Create cron or one-off jobs.</div>
         )}
 
-        {!loading && !error && jobs.length > 0 && (
+        {jobs.length > 0 && (
           <div className="space-y-2">
             {jobs.map((job) => (
               <div key={job.id} className="px-4 py-4 rounded-xl bg-bg-secondary border border-border hover:border-border-light transition-colors">

@@ -1,16 +1,9 @@
+import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
-export type Page = "chat" | "overview" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
-
-interface NavShellProps {
-  activePage: Page;
-  onNavigate: (page: Page) => void;
-  children: React.ReactNode;
-}
-
-const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
+const NAV_ITEMS: { to: string; label: string; icon: React.ReactNode }[] = [
   {
-    page: "chat",
+    to: "/chat",
     label: "Chat",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -19,7 +12,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "overview",
+    to: "/overview",
     label: "Overview",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -31,7 +24,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "skills",
+    to: "/skills",
     label: "Skills",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -40,7 +33,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "jobs",
+    to: "/jobs",
     label: "Jobs",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -50,7 +43,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "mcp",
+    to: "/mcp",
     label: "MCP",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -59,7 +52,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "memory",
+    to: "/memory",
     label: "Memory",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -69,7 +62,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "vault",
+    to: "/vault",
     label: "Vault",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -79,7 +72,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    page: "settings",
+    to: "/settings",
     label: "Settings",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -90,8 +83,13 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ReactNode }[] = [
   },
 ];
 
-export default function NavShell({ activePage, onNavigate, children }: NavShellProps) {
+interface NavShellProps {
+  children: React.ReactNode;
+}
+
+export default function NavShell({ children }: NavShellProps) {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
 
   return (
     <div className="h-screen flex bg-bg-primary">
@@ -99,7 +97,7 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
       <nav className="w-14 bg-bg-secondary border-r border-border flex flex-col items-center py-3 shrink-0">
         {/* Logo */}
         <button
-          onClick={() => onNavigate("overview")}
+          onClick={() => navigate("/overview")}
           className="mb-4 p-1.5 rounded-lg hover:bg-bg-hover transition-colors"
           title="LazyClaw"
         >
@@ -112,18 +110,20 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
         {/* Nav items */}
         <div className="flex-1 flex flex-col gap-1">
           {NAV_ITEMS.map((item) => (
-            <button
-              key={item.page}
-              onClick={() => onNavigate(item.page)}
+            <NavLink
+              key={item.to}
+              to={item.to}
               title={item.label}
-              className={`p-2 rounded-lg transition-colors ${
-                activePage === item.page
-                  ? "bg-bg-hover text-text-primary"
-                  : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
-              }`}
+              className={({ isActive }) =>
+                `p-2 rounded-lg transition-colors ${
+                  isActive
+                    ? "bg-bg-hover text-text-primary"
+                    : "text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+                }`
+              }
             >
               {item.icon}
-            </button>
+            </NavLink>
           ))}
         </div>
 

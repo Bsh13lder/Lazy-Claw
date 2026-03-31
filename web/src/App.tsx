@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { ToastProvider } from "./context/ToastContext";
 import Login from "./pages/Login";
 import Chat from "./pages/Chat";
 import Overview from "./pages/Overview";
@@ -9,11 +10,10 @@ import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
 import Vault from "./pages/Vault";
 import Settings from "./pages/Settings";
-import NavShell, { type Page } from "./components/NavShell";
+import NavShell from "./components/NavShell";
 
 function AppContent() {
   const { user, loading } = useAuth();
-  const [page, setPage] = useState<Page>("overview");
 
   if (loading) {
     return (
@@ -30,23 +30,19 @@ function AppContent() {
 
   if (!user) return <Login />;
 
-  const pageComponent = (() => {
-    switch (page) {
-      case "chat": return <Chat />;
-      case "overview": return <Overview />;
-      case "skills": return <Skills />;
-      case "jobs": return <Jobs />;
-      case "mcp": return <Mcp />;
-      case "memory": return <Memory />;
-      case "vault": return <Vault />;
-      case "settings": return <Settings />;
-      default: return <Overview />;
-    }
-  })();
-
   return (
-    <NavShell activePage={page} onNavigate={setPage}>
-      {pageComponent}
+    <NavShell>
+      <Routes>
+        <Route path="/overview" element={<Overview />} />
+        <Route path="/chat" element={<Chat />} />
+        <Route path="/skills" element={<Skills />} />
+        <Route path="/jobs" element={<Jobs />} />
+        <Route path="/mcp" element={<Mcp />} />
+        <Route path="/memory" element={<Memory />} />
+        <Route path="/vault" element={<Vault />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="/overview" replace />} />
+      </Routes>
     </NavShell>
   );
 }
@@ -54,7 +50,9 @@ function AppContent() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppContent />
+      <ToastProvider>
+        <AppContent />
+      </ToastProvider>
     </AuthProvider>
   );
 }

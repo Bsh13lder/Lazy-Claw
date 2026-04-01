@@ -11,7 +11,8 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.replay.models import (
     CRITIC_REVIEW,
@@ -43,7 +44,7 @@ class TraceRecorder:
     def __init__(self, config: Config, user_id: str) -> None:
         self._config = config
         self._user_id = user_id
-        self._key = derive_server_key(config.server_secret, user_id)
+        self._key: bytes | None = None
         self._session_id = str(uuid4())
         self._sequence = 0
 
@@ -56,6 +57,8 @@ class TraceRecorder:
     ) -> None:
         """Store a trace entry. Fire-and-forget — never raises."""
         try:
+            if self._key is None:
+                self._key = await get_user_dek(self._config, self._user_id)
             self._sequence += 1
             entry_id = str(uuid4())
             encrypted_content = encrypt(content, self._key)

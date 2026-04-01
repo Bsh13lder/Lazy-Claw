@@ -16,7 +16,8 @@ from uuid import uuid4
 
 from lazyclaw.runtime.team_lead import TeamLead
 
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt, decrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
 
@@ -135,7 +136,7 @@ class TaskRunner:
         task_name = name or _short_name(instruction, task_id)
 
         # Store in DB (encrypted)
-        key = derive_server_key(self._config.server_secret, user_id)
+        key = await get_user_dek(self._config, user_id)
         encrypted_instruction = encrypt(instruction, key)
 
         async with db_session(self._config) as db:
@@ -182,7 +183,7 @@ class TaskRunner:
 
         # Fall back to default notifier so background tasks ALWAYS notify
         callback = callback or self._default_callback
-        key = derive_server_key(self._config.server_secret, user_id)
+        key = await get_user_dek(self._config, user_id)
         task_name = self._task_names.get(task_id, task_id[:8])
         _status = "done"
 
@@ -348,7 +349,7 @@ class TaskRunner:
 
     async def list_all(self, user_id: str, limit: int = 20) -> list[dict]:
         """List all tasks from DB (running + completed + failed)."""
-        key = derive_server_key(self._config.server_secret, user_id)
+        key = await get_user_dek(self._config, user_id)
 
         async with db_session(self._config) as db:
             rows = await db.execute(

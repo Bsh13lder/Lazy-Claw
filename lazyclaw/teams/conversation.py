@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ async def store_message(
     content: str,
 ) -> str:
     """Store an encrypted team message. Returns the message ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     msg_id = str(uuid4())
     encrypted_content = encrypt(content, key)
 
@@ -62,7 +63,7 @@ async def get_session(
     config: Config, user_id: str, team_session_id: str
 ) -> list[TeamMessage]:
     """Get all messages in a team session, decrypted."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute(

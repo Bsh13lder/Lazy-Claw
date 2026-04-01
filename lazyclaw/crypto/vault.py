@@ -1,16 +1,27 @@
+"""Encrypted credential vault.
+
+Stores API keys, tokens, and other secrets encrypted with the user's DEK.
+Uses AAD to bind each credential to its user and key name, preventing
+ciphertext swapping attacks.
+"""
+
 from __future__ import annotations
+
 from uuid import uuid4
+
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.encryption import decrypt, encrypt, is_encrypted, user_aad
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
 
 async def set_credential(config: Config, user_id: str, key: str, value: str) -> None:
     """Store or update an encrypted credential."""
-    enc_key = derive_server_key(config.server_secret, user_id)
-    encrypted_value = encrypt(value, enc_key)
+    dek = await get_user_dek(config, user_id)
+    aad = user_aad(user_id, f"vault:{key}")
+    encrypted_value = encrypt(value, dek, aad)
+
     async with db_session(config) as db:
-        # Upsert: try update first, insert if not exists
         existing = await db.execute(
             "SELECT id FROM credential_vault WHERE user_id = ? AND key = ?",
             (user_id, key),
@@ -31,17 +42,25 @@ async def set_credential(config: Config, user_id: str, key: str, value: str) -> 
 
 async def get_credential(config: Config, user_id: str, key: str) -> str | None:
     """Get a decrypted credential value. Returns None if not found."""
-    enc_key = derive_server_key(config.server_secret, user_id)
+    dek = await get_user_dek(config, user_id)
+
     async with db_session(config) as db:
         row = await db.execute(
             "SELECT value FROM credential_vault WHERE user_id = ? AND key = ?",
             (user_id, key),
         )
         result = await row.fetchone()
+
     if not result:
         return None
+
     value = result[0]
-    return decrypt(value, enc_key) if value.startswith("enc:") else value
+    if not is_encrypted(value):
+        return value
+
+    # v2 tokens have AAD; v1 tokens don't (decrypt handles both)
+    aad = user_aad(user_id, f"vault:{key}")
+    return decrypt(value, dek, aad)
 
 
 async def delete_credential(config: Config, user_id: str, key: str) -> bool:

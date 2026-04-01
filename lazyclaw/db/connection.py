@@ -39,6 +39,7 @@ async def init_db(config: Config) -> None:
         migrations = [
             ("users", "role", "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"),
             ("users", "settings", "ALTER TABLE users ADD COLUMN settings TEXT DEFAULT '{}'"),
+            ("users", "encrypted_dek", "ALTER TABLE users ADD COLUMN encrypted_dek TEXT"),
             ("mcp_connections", "favorite", "ALTER TABLE mcp_connections ADD COLUMN favorite INTEGER DEFAULT 0"),
             ("users", "password_encrypted_dek", "ALTER TABLE users ADD COLUMN password_encrypted_dek TEXT"),
             ("users", "recovery_encrypted_dek", "ALTER TABLE users ADD COLUMN recovery_encrypted_dek TEXT"),

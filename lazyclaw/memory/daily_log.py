@@ -6,7 +6,8 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, decrypt_field, derive_server_key, encrypt, is_encrypted
+from lazyclaw.crypto.encryption import decrypt, decrypt_field, encrypt, is_encrypted
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ async def save_daily_log(
     key_events: str | None = None,
 ) -> str:
     """Upsert daily log (one per user per day). Returns log ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     encrypted_summary = encrypt(summary, key)
     encrypted_events = encrypt(key_events, key) if key_events else None
 
@@ -57,7 +58,7 @@ async def save_daily_log(
 
 async def get_daily_log(config: Config, user_id: str, date: str) -> dict | None:
     """Get a specific daily log by date. Returns dict or None."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         row = await db.execute(
@@ -81,7 +82,7 @@ async def get_daily_log(config: Config, user_id: str, date: str) -> dict | None:
 
 async def list_daily_logs(config: Config, user_id: str, limit: int = 30) -> list[dict]:
     """List recent daily logs, newest first."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute(
@@ -123,7 +124,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
     from lazyclaw.llm.router import LLMRouter
     from lazyclaw.llm.providers.base import LLMMessage
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     # Fetch day's messages
     async with db_session(config) as db:

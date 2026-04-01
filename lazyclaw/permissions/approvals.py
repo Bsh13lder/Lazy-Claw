@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.permissions.models import ApprovalRequest
 
@@ -52,7 +53,7 @@ async def create_approval(
     expires_at = (now + timedelta(seconds=timeout_seconds)).isoformat()
 
     # Encrypt arguments
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     args_str = json.dumps(arguments) if arguments else "{}"
     encrypted_args = encrypt(args_str, key)
 

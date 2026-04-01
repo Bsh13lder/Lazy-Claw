@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, derive_server_key, is_encrypted
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.heartbeat.cron import calculate_next_run, is_due
 
@@ -129,7 +130,7 @@ class HeartbeatDaemon:
         """Load active jobs for a user and enqueue any that are due."""
         from lazyclaw.heartbeat import orchestrator
 
-        key = derive_server_key(self._config.server_secret, user_id)
+        key = await get_user_dek(self._config, user_id)
 
         # Check cron jobs (recurring)
         async with db_session(self._config) as db:
@@ -336,7 +337,7 @@ class HeartbeatDaemon:
         )
         from lazyclaw.heartbeat.orchestrator import delete_job, update_job
 
-        key = derive_server_key(self._config.server_secret, user_id)
+        key = await get_user_dek(self._config, user_id)
 
         # Fetch active watchers
         async with db_session(self._config) as db:
@@ -441,7 +442,7 @@ class HeartbeatDaemon:
         )
         from lazyclaw.heartbeat.orchestrator import delete_job, update_job
 
-        key = derive_server_key(self._config.server_secret, user_id)
+        key = await get_user_dek(self._config, user_id)
 
         async with db_session(self._config) as db:
             cursor = await db.execute(
@@ -567,7 +568,7 @@ class HeartbeatDaemon:
             user_ids = [r[0] for r in await cursor.fetchall()]
 
         for user_id in user_ids:
-            key = derive_server_key(self._config.server_secret, user_id)
+            key = await get_user_dek(self._config, user_id)
 
             async with db_session(self._config) as db:
                 cursor = await db.execute(

@@ -9,7 +9,8 @@ from typing import Any
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, derive_server_key, encrypt
+from lazyclaw.crypto.encryption import decrypt, encrypt
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -404,7 +405,7 @@ async def add_server(
     server_config: dict,
 ) -> str:
     """Add an MCP server connection. Returns the server ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     server_id = str(uuid4())
     encrypted_config = encrypt(json.dumps(server_config), key)
     async with db_session(config) as db:
@@ -435,7 +436,7 @@ async def remove_server(config: Config, user_id: str, server_id: str) -> bool:
 
 async def list_servers(config: Config, user_id: str) -> list[dict]:
     """List all MCP server connections for a user with decrypted configs."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, name, transport, config, enabled, created_at, favorite "
@@ -463,7 +464,7 @@ async def list_servers(config: Config, user_id: str) -> list[dict]:
 
 async def get_server(config: Config, user_id: str, server_id: str) -> dict | None:
     """Get a single MCP server connection with decrypted config."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         row = await db.execute(
             "SELECT id, name, transport, config, enabled, created_at "
@@ -634,7 +635,7 @@ async def connect_with_bearer(
     }
 
     # Persist updated config to DB so reconnects preserve auth
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     encrypted_config = encrypt(json.dumps(updated_config), key)
     async with db_session(config) as db:
         await db.execute(
@@ -704,7 +705,7 @@ async def auto_register_bundled_mcps(
 
     Returns list of newly registered server names.
     """
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     registered: list[str] = []
 
     # Get existing server names for this user

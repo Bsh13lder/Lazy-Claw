@@ -46,6 +46,7 @@ BOT_COMMANDS = [
     BotCommand("ram", "\U0001f4be RAM usage"),
     BotCommand("nuke", "\U0001f4a3 Data wipe"),
     BotCommand("qr", "\U0001f4f1 WhatsApp QR re-link"),
+    BotCommand("recovery", "\U0001f510 Recovery phrase"),
 ]
 
 
@@ -86,6 +87,7 @@ class TelegramCommands:
             "browser": self._handle_browser, "screen": self._handle_screen,
             "local": self._handle_local,
             "ram": self._handle_ram, "qr": self._handle_qr,
+            "recovery": self._handle_recovery,
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
         }
         for name, handler in cmds.items():
@@ -1589,6 +1591,42 @@ class TelegramCommands:
             "\U0001f504 WhatsApp reconnecting... QR should appear as a photo above.\n"
             "If no QR appeared, the session may still be valid — try <code>/watch whatsapp</code>.",
         )
+
+    # -- /recovery ---------------------------------------------------------
+
+    async def _handle_recovery(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate or regenerate the account recovery phrase.
+
+        Usage:
+          /recovery            — explain the feature
+          /recovery generate   — generate a new phrase (sends privately, auto-deletes in 60s)
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        if not context.args or context.args[0] != "generate":
+            await self._reply(update,
+                "\U0001f510 <b>Recovery Phrase</b>\n\n"
+                "A recovery phrase lets you regain access to your account if you forget your password.\n\n"
+                "To generate or regenerate your phrase, run:\n"
+                "<code>/recovery generate</code>\n\n"
+                "\u26a0\ufe0f You will be prompted to confirm your password via DM.\n"
+                "\u26a0\ufe0f The phrase is shown <b>once</b> and auto-deletes after 60 seconds.\n"
+                "\u26a0\ufe0f Generating a new phrase invalidates the previous one."
+            )
+            return
+
+        # Prompt for password (can't be passed in command for security)
+        await self._reply(update,
+            "\U0001f510 <b>Recovery phrase generation</b>\n\n"
+            "Reply with your current password to generate a recovery phrase.\n\n"
+            "<b>Send it as a reply to this message</b> — your password message will be "
+            "deleted immediately after use.\n\n"
+            "\u26a0\ufe0f If you use Telegram in a group, move to a private chat with the bot first."
+        )
+        # Store pending recovery state on the adapter so the next message is handled
+        self._adapter._pending_recovery.add(user_id)
 
     # -- /addadmin, /removeadmin -------------------------------------------
 

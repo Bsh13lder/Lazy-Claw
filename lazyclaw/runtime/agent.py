@@ -1687,10 +1687,17 @@ class Agent:
                              "needs_browser": _stuck_signal.needs_browser},
                         ))
 
-                        # Ask user for help — waits indefinitely
-                        _help_response = await cb.on_help_request(
-                            _stuck_signal.context, _stuck_signal.needs_browser,
-                        )
+                        # Ask user for help — timeout after 5 minutes
+                        try:
+                            _help_response = await asyncio.wait_for(
+                                cb.on_help_request(
+                                    _stuck_signal.context, _stuck_signal.needs_browser,
+                                ),
+                                timeout=300.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.info("Help request timed out after 5 min, auto-skipping")
+                            _help_response = "skip"
 
                         if _help_response == "skip":
                             all_new_messages.append(LLMMessage(
@@ -1723,10 +1730,17 @@ class Agent:
                                         {"novnc_url": _remote.url,
                                          "stuck_context": _stuck_signal.context},
                                     ))
-                                    _done_resp = await cb.on_help_request(
-                                        "Say 'done' when you're finished.",
-                                        False,
-                                    )
+                                    try:
+                                        _done_resp = await asyncio.wait_for(
+                                            cb.on_help_request(
+                                                "Say 'done' when you're finished.",
+                                                False,
+                                            ),
+                                            timeout=600.0,  # 10 min for browser handoff
+                                        )
+                                    except asyncio.TimeoutError:
+                                        logger.info("Browser handoff timed out after 10 min")
+                                        _done_resp = "skip"
                                     # Cleanup: stop noVNC, relaunch headless
                                     await _stop_remote_session(user_id)
                                 else:
@@ -1738,10 +1752,17 @@ class Agent:
                                         "Browser is visible. Take over and say 'done' when finished.",
                                         {},
                                     ))
-                                    _done_resp = await cb.on_help_request(
-                                        "Browser is open on your screen. Say 'done' when you're finished.",
-                                        False,
-                                    )
+                                    try:
+                                        _done_resp = await asyncio.wait_for(
+                                            cb.on_help_request(
+                                                "Browser is open on your screen. Say 'done' when you're finished.",
+                                                False,
+                                            ),
+                                            timeout=600.0,  # 10 min for browser handoff
+                                        )
+                                    except asyncio.TimeoutError:
+                                        logger.info("Browser handoff timed out after 10 min")
+                                        _done_resp = "skip"
 
                                 if _done_resp == "skip":
                                     all_new_messages.append(LLMMessage(

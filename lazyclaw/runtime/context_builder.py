@@ -8,12 +8,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
 from lazyclaw.config import Config
 from lazyclaw.runtime.personality import load_personality
 
 logger = logging.getLogger(__name__)
+
+# Patterns that indicate error/debug details — strip from activity summaries
+# to prevent the LLM from hallucinating about past technical issues.
+_ERROR_NOISE_RE = re.compile(
+    r"((?:HTTP\s*)?\b[45]\d{2}\b"        # HTTP 401, 500, etc.
+    r"|error|exception|traceback"
+    r"|unauthorized|forbidden"
+    r"|rate.?limit|timeout"
+    r"|failed|failure|crashed"
+    r"|stack.?trace|ECONNREFUSED"
+    r"|api.?key|credentials?.?issue)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_activity_summary(summary: str) -> str:
+    """Remove error/debug noise from activity summaries.
+
+    Sentences mentioning HTTP errors, stack traces, auth failures, etc.
+    are stripped so the LLM doesn't hallucinate about past issues.
+    """
+    if not summary:
+        return ""
+    # Split into sentences, keep only clean ones
+    sentences = re.split(r"(?<=[.!?])\s+", summary)
+    clean = [s for s in sentences if not _ERROR_NOISE_RE.search(s)]
+    return " ".join(clean).strip()
 
 # Cache for capabilities section (60s TTL)
 _capabilities_cache: str = ""
@@ -69,6 +97,8 @@ async def build_context(
     memories = await get_memories(config, user_id, limit=10)
 
     # 4. Recent activity (daily/weekly logs — agent's "diary")
+    # Summaries are sanitized to remove error details that could cause
+    # the LLM to hallucinate about past issues (e.g. "401 errors").
     activity_section = ""
     try:
         from lazyclaw.memory.daily_log import list_daily_logs
@@ -77,13 +107,17 @@ async def build_context(
         if recent_logs:
             log_lines = []
             for log in reversed(recent_logs):  # oldest first
+                summary = _sanitize_activity_summary(log.get("summary", ""))
+                if not summary:
+                    continue
                 if log["date"].endswith("_week"):
-                    log_lines.append(f"**Week of {log['date'][:10]}:** {log['summary'][:250]}")
+                    log_lines.append(f"**Week of {log['date'][:10]}:** {summary[:250]}")
                 elif log["date"].endswith("_month"):
-                    log_lines.append(f"**Month {log['date'][:7]}:** {log['summary'][:200]}")
+                    log_lines.append(f"**Month {log['date'][:7]}:** {summary[:200]}")
                 else:
-                    log_lines.append(f"**{log['date']}:** {log['summary'][:150]}")
-            activity_section = "## Recent Activity\n" + "\n".join(log_lines)
+                    log_lines.append(f"**{log['date']}:** {summary[:150]}")
+            if log_lines:
+                activity_section = "## Recent Activity\n" + "\n".join(log_lines)
     except Exception:
         pass
 

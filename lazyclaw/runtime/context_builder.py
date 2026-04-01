@@ -61,7 +61,7 @@ async def build_context(
             project_id=project_id,
         )
     except Exception:
-        pass
+        logger.debug("Failed to load session context layers", exc_info=True)
 
     # 3. Personal memories (DB-backed encrypted facts — backward compat)
     from lazyclaw.memory.personal import get_memories
@@ -85,7 +85,7 @@ async def build_context(
                     log_lines.append(f"**{log['date']}:** {log['summary'][:150]}")
             activity_section = "## Recent Activity\n" + "\n".join(log_lines)
     except Exception:
-        pass
+        logger.debug("Failed to load daily activity logs", exc_info=True)
 
     # Combine sections — layered context between capabilities and activity
     sections = [personality]
@@ -195,20 +195,20 @@ async def _build_capabilities_section(
         _m = get_mode_models(eco_mode)
         _brain_display = eco.get("brain_model") or _m["brain"]
     except Exception:
-        pass
+        logger.debug("Failed to load ECO settings for capabilities section", exc_info=True)
     config_parts = [f"Model: {_brain_display}"]
 
     try:
         config_parts.append(f"ECO: {eco_mode}")
     except Exception:
-        pass
+        logger.debug("Failed to append ECO mode to config parts", exc_info=True)
 
     try:
         from lazyclaw.teams.settings import get_team_settings
         team = await get_team_settings(config, user_id)
         config_parts.append(f"Team: {team.get('mode', 'never')}")
     except Exception:
-        pass
+        logger.debug("Failed to load team settings for capabilities section", exc_info=True)
 
     # Ollama status (for local/hybrid modes)
     ollama_status = ""
@@ -308,7 +308,7 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
                     try:
                         tool_count = len(_json.loads(cached))
                     except Exception:
-                        pass
+                        logger.debug("Failed to parse cached MCP schema for %s", name, exc_info=True)
                 status = "idle (lazy)"
 
             entry = f"{name}: {desc}" if desc else name

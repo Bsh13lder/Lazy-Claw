@@ -58,8 +58,8 @@ def get_context_limit(model_name: str | None) -> int:
         profile = get_model(model_name)
         if profile and profile.max_context:
             return profile.max_context
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to look up model context limit for %r, using default: %s", model_name, exc)
     return _DEFAULT_CONTEXT_LIMIT
 
 

@@ -528,7 +528,7 @@ class Agent:
             _eco = await _get_eco(self.config, user_id)
             _is_local_model = _eco.get("mode") == MODE_ECO_ON
         except Exception:
-            pass
+            logger.debug("Failed to load eco settings for local model check", exc_info=True)
 
         # Decide upfront: does this message need tools?
         needs_tools_early = self.registry is not None and _wants_any_tools(message)

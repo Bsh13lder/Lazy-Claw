@@ -113,8 +113,8 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
         if _cdp_backend is not None:
             try:
                 stuck_url = await _cdp_backend.current_url()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to get current URL before browser restart: %s", exc)
 
         ws_url = await restart_browser_with_cdp(
             port=port, profile_dir=profile_dir,
@@ -131,8 +131,8 @@ async def _get_visible_cdp_backend(user_id: str = "default"):
             try:
                 await _cdp_backend.goto(stuck_url)
                 logger.info("Visible browser opened on stuck URL: %s", stuck_url)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to restore stuck URL after browser restart: %s", exc)
         return _cdp_backend
 
     # Case 3: nothing running — launch visible Brave
@@ -216,8 +216,8 @@ async def _raise_browser_window() -> None:
                     return
     except FileNotFoundError:
         pass  # wmctrl not installed — silently skip
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("wmctrl window raise failed: %s", exc)
 
 
 async def _get_remote_cdp_backend(user_id: str = "default"):
@@ -250,8 +250,8 @@ async def _get_remote_cdp_backend(user_id: str = "default"):
     if _cdp_backend is not None:
         try:
             stuck_url = await _cdp_backend.current_url()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to get current URL before remote session: %s", exc)
 
     # Kill headless browser before starting visible one on virtual display
     try:
@@ -262,8 +262,8 @@ async def _get_remote_cdp_backend(user_id: str = "default"):
         )
         await kill_proc.wait()
         await asyncio.sleep(0.5)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("pkill before remote session failed (may already be gone): %s", exc)
 
     await start_remote_session(
         user_id=user_id,
@@ -577,8 +577,8 @@ class BrowserSkill(BaseSkill):
                         "\n--- Actionable Elements ---\n"
                         + self._format_actionable_elements(elements)
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("DOMOptimizer.extract_actionable failed: %s", exc)
 
         return "\n".join(parts)
 
@@ -594,8 +594,8 @@ class BrowserSkill(BaseSkill):
                     f"Element not found: '{target}'. "
                     f"Here are the interactive elements on the page — pick from these:\n{hint_text}"
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("DOMOptimizer.extract_actionable failed in element hint: %s", exc)
         return f"Element not found: '{target}'. Use action='snapshot' to see page structure."
 
     # ── Action handlers ─────────────────────────────────────────────────
@@ -708,16 +708,16 @@ class BrowserSkill(BaseSkill):
                         return await self._page_context_summary(
                             backend, f"Switched to: {match.title}", match.url,
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Tab switch by title match failed: %s", exc)
 
         # Capture state before navigation for post-action verification
         mgr = self._get_snapshot_manager()
         _before_state = None
         try:
             _before_state = await capture_state(backend, mgr)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to capture pre-navigation state: %s", exc)
 
         # Navigate to target (with extra wait after fresh launch)
         await asyncio.sleep(2)
@@ -738,15 +738,15 @@ class BrowserSkill(BaseSkill):
                 if _check:
                     break
             except Exception:
-                break
+                break  # intentional: JS eval failed — page not ready, break and continue
             await asyncio.sleep(_wait)
         else:
             # Still blank after 6.5s — auto-refresh once
             try:
                 await backend.evaluate("location.reload()")
                 await asyncio.sleep(3)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Page reload on blank detection failed: %s", exc)
 
         # Page survey — quick DOM analysis prepended to result
         try:
@@ -769,7 +769,8 @@ class BrowserSkill(BaseSkill):
                 return `Page: ${pageType} | ${inputs.length} inputs, ${buttons.length} buttons, ${links.length} links, ${forms.length} forms | text: ${textLen} chars`;
             })()""")
             _survey_line = f"[{_survey}]\n" if _survey else ""
-        except Exception:
+        except Exception as exc:
+            logger.debug("Page survey JS eval failed: %s", exc)
             _survey_line = ""
 
         result = _survey_line + await self._page_context_summary(backend, None, nav_url)
@@ -781,8 +782,8 @@ class BrowserSkill(BaseSkill):
                 memories = await recall(self._config, user_id, nav_url)
                 if memories:
                     result += "\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to inject site knowledge after navigation: %s", exc)
 
         # Post-action verification — append semantic outcome to result
         if _before_state is not None:
@@ -793,8 +794,8 @@ class BrowserSkill(BaseSkill):
                     _before_state, _after_state, "open", error_text=_error_text,
                 )
                 result += f"\n\n{_vr.format('Opened')}"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Post-open verification failed: %s", exc)
 
         return result
 
@@ -815,8 +816,8 @@ class BrowserSkill(BaseSkill):
             _before_state = None
             try:
                 _before_state = await capture_state(backend, mgr, target_ref=ref)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to capture pre-click state: %s", exc)
             meta = await mgr.get_ref_meta(backend, ref)
             clicked = await mgr.perform_click(backend, ref)
             if clicked:
@@ -838,8 +839,8 @@ class BrowserSkill(BaseSkill):
                             target_ref=ref, error_text=_error_text,
                         )
                         confirm += f"\n{_vr.format(f'Clicked [{ref}]')}"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Post-click verification failed: %s", exc)
                 return confirm
             return f"Ref '{ref}' not found or element is gone. Take a new snapshot to get fresh refs."
 
@@ -893,8 +894,8 @@ class BrowserSkill(BaseSkill):
             _before_state = None
             try:
                 _before_state = await capture_state(backend, mgr, target_ref=ref)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to capture pre-type state: %s", exc)
             focused = await mgr.focus_ref(backend, ref)
             if focused:
                 conn = await backend._ensure_connected()
@@ -922,8 +923,8 @@ class BrowserSkill(BaseSkill):
                             target_ref=ref, error_text=_error_text,
                         )
                         confirm += f"\n{_vr.format(f'Typed into [{ref}]')}"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Post-type verification failed: %s", exc)
                 return confirm
             return f"Ref '{ref}' not found or couldn't focus. Take a new snapshot."
 
@@ -1018,8 +1019,8 @@ class BrowserSkill(BaseSkill):
         _before_state = None
         try:
             _before_state = await capture_state(backend, mgr)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to capture pre-key-press state: %s", exc)
         await backend.press_key(key)
         result = f"Pressed: {key}"
         # Post-action verification
@@ -1032,8 +1033,8 @@ class BrowserSkill(BaseSkill):
                     _before_state, _after_state, "press_key", error_text=_error_text,
                 )
                 result += f"\n{_vr.format(f'Pressed {key}')}"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Post-key-press verification failed: %s", exc)
         return result
 
     async def _action_snapshot(self, user_id: str, params: dict, tab_context=None) -> str:
@@ -1048,8 +1049,8 @@ class BrowserSkill(BaseSkill):
                 try:
                     await backend.goto(nav_url)
                     await asyncio.sleep(3)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Navigation before snapshot failed: %s", exc)
 
         mgr = self._get_snapshot_manager()
         snapshot = await mgr.take_snapshot(backend)

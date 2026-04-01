@@ -596,7 +596,7 @@ async def run_chat_loop(
                 loop.add_signal_handler(_sig.SIGINT, _sigint_handler)
                 _signal_installed = True
             except (NotImplementedError, OSError, AttributeError):
-                pass
+                pass  # intentional: signal handling not available on this platform
 
             _input_hint_shown = False
 
@@ -809,14 +809,14 @@ async def run_chat_loop(
                         import signal as _sig
                         loop.remove_signal_handler(_sig.SIGINT)
                     except (NotImplementedError, OSError):
-                        pass
+                        pass  # intentional: signal removal not available on this platform
                 # Cancel side-channel prompt if still waiting
                 if _side_input_task is not None and not _side_input_task.done():
                     _side_input_task.cancel()
                     try:
                         await _side_input_task
                     except (asyncio.CancelledError, Exception):
-                        pass
+                        pass  # intentional: cancelled task cleanup, exception is expected
                 _side_input_task = None
 
             agent_task = None
@@ -869,5 +869,5 @@ async def run_chat_loop(
     from lazyclaw.mcp.manager import disconnect_all
     try:
         await asyncio.wait_for(disconnect_all(), timeout=3)
-    except (Exception, KeyboardInterrupt, asyncio.CancelledError):
-        pass
+    except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
+        logger.debug("MCP cleanup on shutdown failed: %s", exc)

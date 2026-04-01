@@ -7,7 +7,11 @@ from cli_admin.py so results are plain-text strings (no Rich tables).
 
 from __future__ import annotations
 
+import logging
+
 from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +95,8 @@ class ShowStatusSkill(BaseSkill):
                             await db.execute("SELECT COUNT(*) FROM skills")
                         ).fetchone()
                     )[0]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to count user skills from DB: %s", exc)
 
                 counts: dict[str, int] = {}
                 for label, query in [

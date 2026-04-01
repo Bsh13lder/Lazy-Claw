@@ -212,9 +212,9 @@ class MCPClient:
                 try:
                     await self._ctx_task
                 except (asyncio.CancelledError, Exception):
-                    pass
+                    pass  # intentional: cancelled task cleanup, exception is expected
             except (asyncio.CancelledError, Exception):
-                pass
+                pass  # intentional: cancelled task cleanup, exception is expected
             self._ctx_task = None
 
         # Fallback: kill child process if context cleanup missed it

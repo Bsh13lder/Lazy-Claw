@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserSetPersistentSkill(BaseSkill):
@@ -107,8 +111,8 @@ class BrowserSetPersistentSkill(BaseSkill):
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.wait()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("pkill browser process failed (may already be gone): %s", exc)
 
 
 class BrowserApproveConnectSkill(BaseSkill):

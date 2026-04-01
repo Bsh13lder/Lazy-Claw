@@ -35,3 +35,8 @@ mcp-lazydoctor/node_modules/
 
 .vscode/
 mcp-whatsapp/node_modules/
+
+# Web UI build artifacts
+web/dist/
+web/node_modules/
+node_modules/

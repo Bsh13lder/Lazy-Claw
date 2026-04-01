@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
 
 _OLLAMA_BASE = "http://localhost:11434"
 
@@ -140,8 +144,8 @@ class OllamaInstallSkill(BaseSkill):
                             last_status = status
                         if data.get("error"):
                             return f"Error pulling '{model}': {data['error']}"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to parse Ollama streaming JSON line: %s", exc)
 
             if "success" in last_status.lower():
                 return f"Model '{model}' installed successfully. Use it with ECO local/hybrid mode."

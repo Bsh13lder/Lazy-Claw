@@ -77,6 +77,7 @@ class HeartbeatDaemon:
         try:
             await asyncio.shield(self._task)
         except (asyncio.CancelledError, Exception):
+            # Intentional: swallow cancellation/shutdown errors when stopping the daemon
             pass
         self._task = None
         logger.info("HeartbeatDaemon stopped")
@@ -310,7 +311,7 @@ class HeartbeatDaemon:
         try:
             await backend.close()
         except Exception:
-            pass
+            logger.warning("Failed to close background CDP backend", exc_info=True)
         if temp_dir:
             # Kill the background headless if we launched one
             bg_port = getattr(self._config, "cdp_port", 9222) + 1
@@ -322,7 +323,7 @@ class HeartbeatDaemon:
                 )
                 await proc.wait()
             except Exception:
-                pass
+                logger.warning("Failed to pkill background headless browser on port %d", bg_port, exc_info=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def _check_watchers(self, user_id: str) -> None:
@@ -625,7 +626,7 @@ class HeartbeatDaemon:
                                     if is_encrypted(_enc_cat) else _enc_cat
                                 )
                 except Exception:
-                    pass
+                    logger.warning("Failed to load task category/priority for reminder notification", exc_info=True)
 
                 # Format local time
                 _local_time = ""
@@ -636,7 +637,7 @@ class HeartbeatDaemon:
                     _local_now = now.astimezone(_local_tz)
                     _local_time = _local_now.strftime("%H:%M")
                 except Exception:
-                    pass
+                    logger.warning("Failed to format local time for reminder notification", exc_info=True)
 
                 # Build notification text
                 _pri_icon = {"urgent": "\U0001f534", "high": "\U0001f7e0", "medium": "", "low": "\U0001f7e2"}.get(_priority, "")
@@ -765,9 +766,10 @@ class HeartbeatDaemon:
                                         try:
                                             os.kill(int(parts[1]), signal.SIGTERM)
                                         except (ProcessLookupError, ValueError):
+                                            # Intentional: process may have exited before SIGTERM
                                             pass
                         except Exception:
-                            pass
+                            logger.warning("Failed to send SIGTERM to idle browser process on port %d", port, exc_info=True)
                     elif not browser_alive and (idle < timeout or has_watchers or has_bg_tasks):
                         # Browser died but still needed — restart
                         await self._launch_browser(user_id, port)

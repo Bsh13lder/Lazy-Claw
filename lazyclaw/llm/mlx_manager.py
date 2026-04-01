@@ -225,7 +225,7 @@ class MLXManager:
             try:
                 self._on_idle_stop()
             except Exception:
-                pass
+                logger.warning("on_idle_stop callback raised an exception", exc_info=True)
 
     # ── Health ────────────────────────────────────────────────────────
 
@@ -406,7 +406,7 @@ class MLXManager:
                     if resp.status_code == 200:
                         return True
             except Exception:
-                pass
+                logger.debug("MLX server health check attempt failed, retrying...", exc_info=True)
             await asyncio.sleep(1)
 
         return False

@@ -263,7 +263,7 @@ async def take_desktop_screenshot() -> bytes | None:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            logger.warning("Could not remove temporary screenshot file %s", tmp)
     return None
 
 
@@ -297,6 +297,7 @@ async def start_macos_remote_session(user_id: str) -> RemoteSession:
                 s.connect(("localhost", vnc_port))
                 vnc_ok = True
         except (OSError, ConnectionRefusedError):
+            # Intentional: connection failure means Screen Sharing is not active
             pass
 
         if not vnc_ok:
@@ -412,6 +413,7 @@ async def _start_xvfb(display_num: int) -> asyncio.subprocess.Process:
         try:
             proc.kill()
         except ProcessLookupError:
+            # Intentional: process may have already exited before we kill it
             pass
         raise RuntimeError(f"Xvfb failed to bind display :{display_num}")
     logger.debug("Xvfb started on :%d (pid=%d)", display_num, proc.pid)
@@ -544,4 +546,5 @@ async def _auto_timeout(user_id: str) -> None:
         # stop_remote_session is idempotent — safe even if already stopped
         await stop_remote_session(user_id)
     except asyncio.CancelledError:
+        # Intentional: task was cancelled (e.g., session stopped early), cleanup already done
         pass

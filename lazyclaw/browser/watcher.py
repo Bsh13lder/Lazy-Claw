@@ -197,7 +197,7 @@ def _build_notification(
                 old_data = json.loads(last_value)
                 old_text = old_data.get("text", "")
             except (json.JSONDecodeError, TypeError):
-                pass
+                logger.warning("Could not parse previous watcher value as JSON; treating as empty")
 
         # Find new lines (messages that weren't in the previous check)
         old_lines = set(old_text.split("\n"))

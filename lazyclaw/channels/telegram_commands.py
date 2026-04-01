@@ -1223,7 +1223,7 @@ class TelegramCommands:
                 try:
                     interval_min = max(1, int(args[1]))
                 except ValueError:
-                    pass
+                    logger.warning("Invalid watcher interval %r, using default %d min", args[1], interval_min)
 
             # Check if already watching this service
             already = any(service in (w.get("name") or "").lower() for w in watchers)
@@ -1540,7 +1540,7 @@ class TelegramCommands:
             try:
                 await disconnect_server(user_id, server_id)
             except Exception:
-                pass
+                logger.warning("Failed to disconnect WhatsApp server %s before reconnect", server_id, exc_info=True)
 
         # Delete auth state so Baileys generates a fresh QR
         import shutil
@@ -1586,7 +1586,7 @@ class TelegramCommands:
                     )
                     return
             except Exception:
-                pass
+                logger.warning("Failed to check WhatsApp status after QR reconnect", exc_info=True)
 
         await self._reply(
             update,
@@ -1823,7 +1823,7 @@ class TelegramCommands:
                 try:
                     await self._update_pinned(chat_id, msg_id)
                 except Exception:
-                    pass
+                    logger.warning("Failed to refresh pinned status for chat %s", chat_id, exc_info=True)
 
     async def _update_pinned(self, chat_id: str, msg_id: int) -> None:
         from lazyclaw.llm.model_registry import get_mode_models
@@ -1834,7 +1834,7 @@ class TelegramCommands:
             _eco = await get_eco_settings(self._config, self._admin_user_id or "")
             _mode = _eco.get("mode", "hybrid")
         except Exception:
-            pass
+            logger.warning("Failed to read ECO settings for pinned status; using default mode", exc_info=True)
         _models = get_mode_models(_mode)
         lines = [
             "\U0001f43e <b>LazyClaw Status</b>",
@@ -1846,7 +1846,7 @@ class TelegramCommands:
             from lazyclaw.mcp.manager import _active_clients
             lines.append(f"\U0001f50c MCP: {len(_active_clients)} connected")
         except Exception:
-            pass
+            logger.warning("Failed to read MCP active clients for pinned status", exc_info=True)
         if self._team_lead:
             n = len(self._team_lead.active_tasks)
             lines.append(f"\u26a1 Tasks: {n} running")
@@ -1858,4 +1858,4 @@ class TelegramCommands:
                 text="\n".join(lines), parse_mode="HTML",
             )
         except Exception:
-            pass
+            logger.warning("Failed to edit pinned status message for chat %s", chat_id, exc_info=True)

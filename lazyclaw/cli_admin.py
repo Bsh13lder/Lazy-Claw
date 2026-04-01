@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from lazyclaw.config import Config
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -48,7 +52,7 @@ async def show_status(config: Config, user_id: str) -> None:
         try:
             user_skills = (await (await db.execute("SELECT COUNT(*) FROM skills")).fetchone())[0]
         except Exception:
-            pass
+            logger.warning("Could not count user skills from DB", exc_info=True)
 
         counts = {}
         for label, query in [

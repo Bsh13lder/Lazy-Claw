@@ -67,6 +67,7 @@ _CHAT_ONLY_PATTERN = re.compile(
 # Base tools always sent — everything the brain needs to work
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
+    "dispatch_subagents",
     "browser",
     "read_file", "write_file", "run_command", "list_directory",
     "connect_mcp_server", "disconnect_mcp_server",
@@ -635,6 +636,7 @@ class Agent:
         # Register delegate skill — lets the agent dispatch to specialists
         # inline (NanoClaw pattern: no separate team lead LLM call)
         _delegate_registered = False
+        _dispatch_registered = False
         if self.registry is not None:
             from lazyclaw.skills.builtin.delegate import DelegateSkill
 
@@ -647,6 +649,17 @@ class Agent:
             )
             self.registry.register(delegate_skill)
             _delegate_registered = True
+
+            from lazyclaw.skills.builtin.dispatch import DispatchSubagentsSkill
+
+            dispatch_skill = DispatchSubagentsSkill(
+                config=self.config,
+                registry=self.registry,
+                eco_router=self.eco_router,
+                permission_checker=self.executor._checker if self.executor else None,
+            )
+            self.registry.register(dispatch_skill)
+            _dispatch_registered = True
 
         # Initialize channel state (used by tool nudge later, must exist for all paths)
         _matched_channels: list[str] = []
@@ -1943,6 +1956,8 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Cancelled", {}))
             if _delegate_registered and self.registry:
                 self.registry.unregister("delegate")
+            if _dispatch_registered and self.registry:
+                self.registry.unregister("dispatch_subagents")
             return "Operation cancelled."
 
         # ── TAOR Phase 3: VERIFY ──────────────────────────────────────
@@ -2107,8 +2122,10 @@ class Agent:
 
             await cb.on_event(AgentEvent("done", "Response ready", {}))
 
-            # Clean up delegate skill to avoid stale callback references
+            # Clean up per-message skills to avoid stale callback references
             if _delegate_registered and self.registry:
                 self.registry.unregister("delegate")
+            if _dispatch_registered and self.registry:
+                self.registry.unregister("dispatch_subagents")
 
         return content

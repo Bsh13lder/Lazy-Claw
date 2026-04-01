@@ -34,9 +34,15 @@ _HIGH_EFFORT = re.compile(
 
 # Patterns that indicate a simple lookup / informational request.
 _LOW_EFFORT = re.compile(
-    r"^(what|who|when|where|why|how\s+does|how\s+do\s+i|tell\s+me|"
-    r"explain|show\s+me|list|get|find|search|look\s+up|check|status|"
-    r"is\s+there|are\s+there)\b",
+    r"^(what|who|when|where|why|how\s+does|how\s+do\s+i|how\s+is|how\s+are|"
+    r"how'?s|tell\s+me|explain|show\s+me|list|get|find|search|look\s+up|"
+    r"check|status|is\s+there|are\s+there)\b",
+    re.IGNORECASE,
+)
+
+# Greeting prefix followed by a real request — strip the greeting for effort detection.
+_GREETING_PREFIX = re.compile(
+    r"^(he+y+|hi+|hello|yo+|sup|hola|hey+\s+there)\s+",
     re.IGNORECASE,
 )
 
@@ -56,6 +62,12 @@ def detect_effort(message: str, has_tools: bool = True) -> EffortLevel:
         return EffortLevel.LOW
 
     stripped = message.strip()
+
+    # Strip greeting prefix so "heyy how is going X" → "how is going X"
+    _no_greeting = _GREETING_PREFIX.sub("", stripped).strip()
+    if _no_greeting:
+        stripped = _no_greeting
+
     word_count = len(stripped.split())
 
     # Short messages with no complex intent → LOW

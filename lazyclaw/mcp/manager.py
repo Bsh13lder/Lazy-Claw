@@ -97,6 +97,7 @@ BUNDLED_MCPS = {
         "module": "mcp_instagram",
         "description": "Instagram DMs, feed, posting — no browser (private mobile API)",
         "optional": True,
+        "persistent": True,  # Keep connected — tools must be in registry for keyword detection
     },
     "mcp-whatsapp": {
         "node": "mcp-whatsapp/src/index.js",
@@ -108,6 +109,7 @@ BUNDLED_MCPS = {
         "module": "mcp_email",
         "description": "Send/read/search email via SMTP+IMAP — Gmail, Outlook, any provider",
         "optional": True,
+        "persistent": True,  # Keep connected — tools must be in registry for keyword detection
     },
 }
 

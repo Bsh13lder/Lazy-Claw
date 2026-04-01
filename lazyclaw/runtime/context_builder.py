@@ -29,18 +29,41 @@ _ERROR_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Technical implementation details that confuse the LLM when injected
+# into context. The agent parrots "PBKDF2 cache" etc. when user asks
+# "how is going" because these look like relevant recent events.
+_TECH_NOISE_RE = re.compile(
+    r"(PBKDF2|AES.?256|GCM|HMAC|SHA.?256|bcrypt"
+    r"|LRU\s*cache|connection\s*pool|WAL\s*mode"
+    r"|asyncio|aiosqlite|uvicorn|FastAPI"
+    r"|CDP|Playwright|langchain"
+    r"|refactor|dead\s*code|cleanup"
+    r"|token\s*sav|token\s*reduc|token\s*optim"
+    r"|parallel\s*startup|startup\s*time"
+    r"|ms\s*→|s\s*→|0ms|0\.2ms|14ms|420ms"
+    r"|context\s*window|prompt\s*cach"
+    r"|system\s*prompt|tool\s*schema"
+    r"|commit|merge|branch|git\b"
+    r"|MCP\s*(bridge|server|client|parallel))",
+    re.IGNORECASE,
+)
+
 
 def _sanitize_activity_summary(summary: str) -> str:
-    """Remove error/debug noise from activity summaries.
+    """Remove error/debug and technical implementation noise from activity summaries.
 
-    Sentences mentioning HTTP errors, stack traces, auth failures, etc.
-    are stripped so the LLM doesn't hallucinate about past issues.
+    Sentences mentioning HTTP errors, stack traces, auth failures, or
+    internal implementation details (caching, crypto, refactoring) are
+    stripped so the LLM doesn't hallucinate about past technical issues.
     """
     if not summary:
         return ""
     # Split into sentences, keep only clean ones
     sentences = re.split(r"(?<=[.!?])\s+", summary)
-    clean = [s for s in sentences if not _ERROR_NOISE_RE.search(s)]
+    clean = [
+        s for s in sentences
+        if not _ERROR_NOISE_RE.search(s) and not _TECH_NOISE_RE.search(s)
+    ]
     return " ".join(clean).strip()
 
 # Cache for capabilities section (60s TTL)
@@ -244,23 +267,25 @@ async def _build_capabilities_section(
     except Exception:
         logger.debug("Failed to load team settings for capabilities section", exc_info=True)
 
-    # Ollama status (for local/hybrid modes)
+    # Ollama status — only check in hybrid mode (uses local models).
+    # Skip in claude/full modes to avoid connection spam when Ollama isn't running.
     ollama_status = ""
-    try:
-        from lazyclaw.llm.providers.ollama_provider import OllamaProvider
-        provider = OllamaProvider()
-        if await provider.health_check():
-            running = await provider.list_running()
-            if running:
-                model_names = [m["name"] for m in running]
-                ollama_status = f"running ({', '.join(model_names)})"
+    if eco_mode == "hybrid":
+        try:
+            from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+            provider = OllamaProvider()
+            if await provider.health_check():
+                running = await provider.list_running()
+                if running:
+                    model_names = [m["name"] for m in running]
+                    ollama_status = f"running ({', '.join(model_names)})"
+                else:
+                    ollama_status = "running (no models loaded)"
             else:
-                ollama_status = "running (no models loaded)"
-        else:
-            ollama_status = "not running"
-        await provider.close()
-    except Exception:
-        ollama_status = "unavailable"
+                ollama_status = "not running"
+            await provider.close()
+        except Exception:
+            ollama_status = "unavailable"
 
     lines.append(f"**Config:** {' | '.join(config_parts)} | Ollama: {ollama_status}")
     lines.append(f"  ECO modes: hybrid/full (current: {eco_mode}). Change: eco_set_mode")

@@ -600,9 +600,18 @@ async def _handle_read_profile(args: dict) -> list[TextContent]:
     if mgr is None:
         return _text(f"No session for @{username}. Run instagram_setup first.")
 
-    info = await asyncio.to_thread(
-        mgr.client.user_info_by_username, target_username, False
-    )
+    # Self-query: use user_info(own_pk) for fresh authoritative data.
+    # user_info_by_username returns public-facing cached data that can be stale.
+    is_self = target_username.lower().strip("@") == username.lower()
+    if is_self:
+        own_pk = mgr.client.user_id
+        info = await asyncio.to_thread(mgr.client.user_info, own_pk)
+    else:
+        # Force fresh fetch (use_cache=False)
+        info = await asyncio.to_thread(
+            mgr.client.user_info_by_username, target_username, False
+        )
+
     profile = {
         "username": str(getattr(info, "username", "")),
         "full_name": str(getattr(info, "full_name", "")),
@@ -610,6 +619,10 @@ async def _handle_read_profile(args: dict) -> list[TextContent]:
         "followers": getattr(info, "follower_count", 0),
         "following": getattr(info, "following_count", 0),
         "posts_count": getattr(info, "media_count", 0),
+        "is_private": getattr(info, "is_private", False),
+        "is_verified": getattr(info, "is_verified", False),
+        "external_url": str(getattr(info, "external_url", "") or ""),
+        "category": str(getattr(info, "category_name", "") or ""),
         "profile_pic_url": str(getattr(info, "profile_pic_url", "")),
     }
     return _text(json.dumps(profile))

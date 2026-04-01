@@ -329,17 +329,32 @@ class EcoRouter:
         """Return the Ollama provider if available, else None.
 
         Used by the TUI to show Ollama model status. Never raises.
+        Caches the result — only re-checks after reset_local_check().
         """
+        if self._ollama is not None:
+            return self._ollama
+        # Only try once per reset cycle to avoid health check spam.
+        # After reset_local_check(), _ollama_checked resets to False.
+        if getattr(self, "_ollama_checked", False):
+            return None
         try:
+            import asyncio as _aio
             from lazyclaw.llm.providers.ollama_provider import OllamaProvider
-            if self._ollama is None:
-                candidate = OllamaProvider()
-                if await candidate.health_check():
-                    self._ollama = candidate
-            elif not await self._ollama.health_check():
-                self._ollama = None
+            candidate = OllamaProvider()
+            try:
+                is_healthy = await _aio.wait_for(
+                    candidate.health_check(), timeout=3.0,
+                )
+            except _aio.TimeoutError:
+                is_healthy = False
+            if is_healthy:
+                self._ollama = candidate
+            else:
+                await candidate.close()
+            self._ollama_checked = True
             return self._ollama
         except Exception:
+            self._ollama_checked = True
             return None
 
     def reset_local_check(self) -> None:
@@ -347,6 +362,7 @@ class EcoRouter:
         self._mlx_brain = None
         self._mlx_worker = None
         self._ollama = None
+        self._ollama_checked = False
         self._local_checked = False
 
     # ── Free provider management ──────────────────────────────────────
@@ -514,13 +530,27 @@ class EcoRouter:
         models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """Brain: paid API (Haiku in HYBRID, user-configured in FULL)."""
+        """Brain: paid API (Haiku in HYBRID, user-configured in FULL).
+
+        Falls back to Claude CLI on auth errors (401) — prevents dead
+        agent when API key is expired but Claude subscription works.
+        """
         brain_name = models["brain"]
-        return await self._route_paid(
-            messages, user_id, brain_name,
-            reason=f"{settings.mode}: brain -> {brain_name}",
-            **kwargs,
-        )
+        try:
+            return await self._route_paid(
+                messages, user_id, brain_name,
+                reason=f"{settings.mode}: brain -> {brain_name}",
+                **kwargs,
+            )
+        except Exception as exc:
+            if "401" in str(exc) or "authentication" in str(exc).lower():
+                logger.warning(
+                    "Paid brain 401 — falling back to Claude CLI: %s", exc,
+                )
+                return await self._route_claude(
+                    messages, user_id, settings=settings, **kwargs,
+                )
+            raise
 
     # ── Claude CLI routing (all roles through claude -p) ───────────────
 
@@ -561,18 +591,34 @@ class EcoRouter:
         try:
             response = await self._claude_cli.chat(messages, model="claude-cli", **kwargs)
         except Exception as exc:
-            logger.warning("Claude CLI failed: %s — falling back to Sonnet", exc)
+            logger.warning("Claude CLI failed: %s", exc)
             self._last_claude_fallback = str(exc)
-            response = await self._route_paid(
-                messages, user_id, "claude-sonnet-4-6-20250514",
-                reason=f"claude_cli_failed: {exc}",
-                **kwargs,
-            )
-            # Prepend fallback badge so user sees the switch
-            response.content = (
-                f"[⚡ CLI error → Sonnet fallback] {response.content}"
-            )
-            return response
+            # Only fall back to paid API if the key is actually valid.
+            # When in pure claude mode, the API key is often expired/absent —
+            # falling back would just produce a 401 error.
+            try:
+                response = await self._route_paid(
+                    messages, user_id, "claude-sonnet-4-6-20250514",
+                    reason=f"claude_cli_failed: {exc}",
+                    **kwargs,
+                )
+                response.content = (
+                    f"[⚡ CLI error → Sonnet fallback] {response.content}"
+                )
+                return response
+            except Exception as paid_exc:
+                if "401" in str(paid_exc) or "authentication" in str(paid_exc).lower():
+                    logger.warning("Paid fallback also failed (401) — returning CLI error")
+                    # Return a helpful error instead of raw 401
+                    return LLMResponse(
+                        content=(
+                            f"Claude CLI timed out and the API key is invalid. "
+                            f"Try again or check your connection. (CLI error: {exc})"
+                        ),
+                        model="error",
+                        tool_calls=[],
+                    )
+                raise
 
         self._last_claude_fallback = None
         self._record_routing_stats("claude-cli", response.usage)
@@ -593,13 +639,25 @@ class EcoRouter:
         worker_profile = get_model(worker_name)
         is_local_worker = worker_profile and worker_profile.is_local
 
-        # FULL mode: worker is paid (Haiku) — go straight to API
+        # FULL mode: worker is paid (Haiku) — go straight to API.
+        # Falls back to Claude CLI on auth errors (401).
         if not is_local_worker:
-            return await self._route_paid(
-                messages, user_id, worker_name,
-                reason=f"{settings.mode}: worker -> {worker_name}",
-                **kwargs,
-            )
+            try:
+                return await self._route_paid(
+                    messages, user_id, worker_name,
+                    reason=f"{settings.mode}: worker -> {worker_name}",
+                    **kwargs,
+                )
+            except Exception as exc:
+                if "401" in str(exc) or "authentication" in str(exc).lower():
+                    logger.warning(
+                        "Paid worker 401 — falling back to Claude CLI: %s", exc,
+                    )
+                    return await self._route_claude(
+                        messages, user_id, settings=settings, role=ROLE_WORKER,
+                        **kwargs,
+                    )
+                raise
 
         # HYBRID: try local Nanbeige first
         _, worker_provider = await self._ensure_local()
@@ -795,7 +853,8 @@ class EcoRouter:
             return
 
         if role == ROLE_BRAIN:
-            # Brain: always paid streaming
+            # Brain: always paid streaming.
+            # Falls back to Claude CLI on auth errors (401).
             brain_name = models["brain"]
             self._record_usage(user_id, "paid")
             provider = "anthropic" if brain_name.startswith("claude-") else "openai"
@@ -803,10 +862,28 @@ class EcoRouter:
                 brain_name, provider, is_local=False,
                 reason=f"{settings.mode}_stream: brain",
             )
-            async for chunk in self._paid_router.stream_chat(
-                messages, model=brain_name, user_id=user_id, **kwargs
-            ):
-                yield chunk
+            try:
+                async for chunk in self._paid_router.stream_chat(
+                    messages, model=brain_name, user_id=user_id, **kwargs
+                ):
+                    yield chunk
+            except Exception as exc:
+                if "401" in str(exc) or "authentication" in str(exc).lower():
+                    logger.warning(
+                        "Paid stream 401 — falling back to Claude CLI: %s", exc,
+                    )
+                    response = await self._route_claude(
+                        messages, user_id, settings=settings, role=role, **kwargs,
+                    )
+                    yield StreamChunk(
+                        delta=response.content,
+                        tool_calls=response.tool_calls,
+                        usage=response.usage,
+                        model=response.model,
+                        done=True,
+                    )
+                else:
+                    raise
             return
 
         # Worker streaming
@@ -814,7 +891,8 @@ class EcoRouter:
         worker_profile = get_model(worker_name)
         is_local_worker = worker_profile and worker_profile.is_local
 
-        # FULL mode: paid worker streaming
+        # FULL mode: paid worker streaming.
+        # Falls back to Claude CLI on auth errors (401).
         if not is_local_worker:
             self._record_usage(user_id, "paid")
             provider = "anthropic" if worker_name.startswith("claude-") else "openai"
@@ -822,10 +900,29 @@ class EcoRouter:
                 worker_name, provider, is_local=False,
                 reason=f"{settings.mode}_stream: worker",
             )
-            async for chunk in self._paid_router.stream_chat(
-                messages, model=worker_name, user_id=user_id, **kwargs
-            ):
-                yield chunk
+            try:
+                async for chunk in self._paid_router.stream_chat(
+                    messages, model=worker_name, user_id=user_id, **kwargs
+                ):
+                    yield chunk
+            except Exception as exc:
+                if "401" in str(exc) or "authentication" in str(exc).lower():
+                    logger.warning(
+                        "Paid worker stream 401 — falling back to CLI: %s", exc,
+                    )
+                    response = await self._route_claude(
+                        messages, user_id, settings=settings, role=ROLE_WORKER,
+                        **kwargs,
+                    )
+                    yield StreamChunk(
+                        delta=response.content,
+                        tool_calls=response.tool_calls,
+                        usage=response.usage,
+                        model=response.model,
+                        done=True,
+                    )
+                else:
+                    raise
             return
 
         # HYBRID: local worker streaming (Nanbeige)

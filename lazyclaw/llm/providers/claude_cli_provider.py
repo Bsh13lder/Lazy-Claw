@@ -54,6 +54,7 @@ CRITICAL RULES:
 - Do NOT output any text before the first [TOOL_CALL] when calling tools
 - If you don't need any tools, respond with plain text only (no tags)
 - ONLY use tools listed below. Do NOT invent tool names.
+- NEVER report numbers, stats, or data from memory or previous messages. If the user asks for live data (follower counts, message counts, status), you MUST call a tool. If no tool exists for it, say "I don't have a tool to check that" — NEVER guess or repeat old numbers.
 
 ### Tool Definitions
 
@@ -67,16 +68,42 @@ def _derive_session_id(user_id: str, context_id: str) -> str:
     return str(uuid.UUID(h[:32]))
 
 
-def _serialize_tools(tools: list[dict]) -> str:
-    """Serialize OpenAI-format tool dicts into a compact text block."""
+# MCP UUID prefix pattern: mcp_<uuid>_<tool_name>
+_MCP_UUID_RE = re.compile(r"^mcp_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_")
+
+
+def _shorten_tool_name(name: str) -> str:
+    """Strip UUID prefix from MCP tool names for cleaner prompts.
+
+    mcp_c2d0f293-ccf7-4987-a4dd-7edadc97261f_instagram_read_profile
+    → instagram_read_profile
+
+    Non-MCP tools pass through unchanged.
+    """
+    return _MCP_UUID_RE.sub("", name)
+
+
+def _serialize_tools(tools: list[dict]) -> tuple[str, dict[str, str]]:
+    """Serialize OpenAI-format tool dicts into a compact text block.
+
+    Returns (serialized_text, short_to_full_name_map).
+    MCP tool names are shortened (UUID prefix stripped) to reduce
+    prompt bloat and help the LLM pick the right tool.
+    """
     lines: list[str] = []
+    name_map: dict[str, str] = {}  # short_name → full_name
+
     for tool in tools:
         func = tool.get("function", {})
-        name = func.get("name", "unknown")
+        full_name = func.get("name", "unknown")
+        short_name = _shorten_tool_name(full_name)
         desc = func.get("description", "")
         params = func.get("parameters", {})
         props = params.get("properties", {})
         required = params.get("required", [])
+
+        if short_name != full_name:
+            name_map[short_name] = full_name
 
         param_lines: list[str] = []
         for pname, pdef in props.items():
@@ -85,13 +112,13 @@ def _serialize_tools(tools: list[dict]) -> str:
             req = " (required)" if pname in required else ""
             param_lines.append(f"    - {pname}: {ptype}{req} — {pdesc}")
 
-        lines.append(f"**{name}** — {desc}")
+        lines.append(f"**{short_name}** — {desc}")
         if param_lines:
             lines.append("  Parameters:")
             lines.extend(param_lines)
         lines.append("")
 
-    return "\n".join(lines)
+    return "\n".join(lines), name_map
 
 
 def _serialize_messages(messages: list[LLMMessage]) -> str:
@@ -282,7 +309,12 @@ class ClaudeCLIProvider(BaseLLMProvider):
         # built-in tools (Read, Edit, Bash) from leaking into responses.
         # SOUL.md and capabilities are already in the prompt text as
         # [System Context] blocks via _serialize_messages().
+        # Name map for reversing short MCP names back to full UUID names.
+        # Stored on instance so _parse_response can access it.
+        self._tool_name_map: dict[str, str] = {}
+
         if tools:
+            _tools_text, self._tool_name_map = _serialize_tools(tools)
             tool_system = (
                 "You are LazyClaw, an AI agent. The user's instructions "
                 "and your capabilities are in the [System Context] blocks "
@@ -292,7 +324,7 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 "Agent, or any Claude Code tool. They do NOT exist. "
                 "ONLY call tools from the list below.\n\n"
                 + _TOOL_CALLING_INSTRUCTIONS
-                + _serialize_tools(tools)
+                + _tools_text
             )
             args.extend(["--system-prompt", tool_system])
         else:
@@ -463,6 +495,13 @@ class ClaudeCLIProvider(BaseLLMProvider):
             # Fallback: treat as plain text
             logger.warning("Claude CLI returned non-JSON, treating as text")
             remaining, tool_calls = _parse_tool_calls(raw)
+            # Reverse-map short MCP names
+            _nmap = getattr(self, "_tool_name_map", {})
+            if tool_calls and _nmap:
+                tool_calls = [
+                    ToolCall(id=tc.id, name=_nmap.get(tc.name, tc.name), arguments=tc.arguments)
+                    for tc in tool_calls
+                ]
             return LLMResponse(
                 content=remaining,
                 model=f"claude-cli ({self._model})",
@@ -493,6 +532,18 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
         # Check for tool calls in the result text
         remaining, tool_calls = _parse_tool_calls(result_text)
+
+        # Reverse-map short MCP names back to full UUID names
+        _nmap = getattr(self, "_tool_name_map", {})
+        if tool_calls and _nmap:
+            tool_calls = [
+                ToolCall(
+                    id=tc.id,
+                    name=_nmap.get(tc.name, tc.name),
+                    arguments=tc.arguments,
+                )
+                for tc in tool_calls
+            ]
 
         if tool_calls:
             logger.info(

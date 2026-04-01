@@ -1930,18 +1930,20 @@ class LazyClawApp(App):
                 worker_model_name = worker_profile.display_name if worker_profile else worker_id.split(":")[0]
             except Exception as exc:
                 logger.debug("Failed to load ECO model names for stats bar: %s", exc)
-            try:
-                eco_router = getattr(self._agent, "eco_router", None)
-                if eco_router:
-                    ollama = await eco_router._ensure_ollama()
-                    if ollama:
-                        running = await ollama.list_running()
-                        ollama_models = tuple(m["name"] for m in running)
-                        # Override worker display name if Ollama has models loaded
-                        if running:
-                            worker_model_name = running[0]["name"]
-            except Exception as exc:
-                logger.debug("Failed to get Ollama model names for stats bar: %s", exc)
+            # Only poll Ollama if in hybrid mode (uses local models).
+            # In claude/full modes Ollama is unused — skip to avoid log spam.
+            if eco_mode == "hybrid":
+                try:
+                    eco_router = getattr(self._agent, "eco_router", None)
+                    if eco_router:
+                        ollama = await eco_router._ensure_ollama()
+                        if ollama:
+                            running = await ollama.list_running()
+                            ollama_models = tuple(m["name"] for m in running)
+                            if running:
+                                worker_model_name = running[0]["name"]
+                except Exception as exc:
+                    logger.debug("Failed to get Ollama model names for stats bar: %s", exc)
 
             # RAM monitor — always collect, never block
             ram_pct = 0.0

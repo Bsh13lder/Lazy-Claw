@@ -93,6 +93,23 @@ _CHANNEL_KEYWORDS: dict[str, list[str]] = {
     "email": ["email", "gmail", "mail", "inbox"],
 }
 
+# Channel tool suffixes to include for simple status/read queries.
+# Full tool set only injected when message indicates action intent.
+_CHANNEL_CORE_SUFFIXES = frozenset({
+    "_status", "_setup", "_read", "_read_dms", "_read_profile",
+    "_read_feed", "_list_chats", "_search", "_send", "_send_dm",
+    "_reply_dm",
+})
+
+# Keywords that indicate the user wants to DO something (not just check status).
+# When absent, only core channel tools are injected to reduce tool count.
+# Matched with word boundaries to prevent "followers" matching "follow".
+_CHANNEL_ACTION_RE = re.compile(
+    r"\b(post|send|reply|follow|unfollow|like|unlike|comment|story|reel|"
+    r"carousel|delete|move|mark|mute|unmute|forward|image|photo|label)\b",
+    re.IGNORECASE,
+)
+
 # Task manager keywords → inject task skills directly
 _TASK_KEYWORDS = frozenset({
     # Core task words
@@ -237,6 +254,32 @@ def _compact_history(
         return [compact_msg] + recent
 
     return recent
+
+
+# Error patterns in assistant messages that should be stripped from history.
+# These cause the LLM to reference past errors ("looks like there were auth
+# errors earlier") instead of responding to the current message.
+_HISTORY_ERROR_RE = re.compile(
+    r"(Sorry, an error occurred|Error code: [45]\d{2}|"
+    r"authentication_error|invalid x-api-key|"
+    r"AuthenticationError|rate_limit_error)",
+    re.IGNORECASE,
+)
+
+
+def _filter_error_messages(history: list[LLMMessage]) -> list[LLMMessage]:
+    """Remove assistant messages that are just error dumps.
+
+    Returns new list (immutable pattern).
+    """
+    result = []
+    skip_next_user = False
+    for msg in history:
+        if msg.role == "assistant" and msg.content and _HISTORY_ERROR_RE.search(msg.content):
+            skip_next_user = False  # Don't skip user messages
+            continue  # Drop the error assistant message
+        result.append(msg)
+    return result
 
 
 def _prune_old_tool_results(
@@ -442,6 +485,7 @@ class Agent:
             cb.cancel_token = cancel_token
 
         logger.info("process_message START: user=%s msg=%s", user_id[:8], message[:40])
+        self._nudged_tool_use = False  # Reset per-message nudge flag
 
         # Instant commands — no LLM call needed
         instant = _handle_instant_command(message, self._team_lead, self._task_runner, user_id)
@@ -612,12 +656,18 @@ class Agent:
         if needs_tools:
             from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
 
-            # Detect channel keywords → find matching MCP tools
+            # Detect channel keywords → find matching MCP tools.
+            # Skip channel injection for planning/strategy questions where
+            # "email" / "instagram" are topics, not tool-use targets.
             _msg_lower = message.lower()
+            _planning_words = {"how to", "strategy", "plan", "market", "reach",
+                               "steps", "approach", "idea", "advice", "suggest"}
+            _is_planning = any(pw in _msg_lower for pw in _planning_words)
             _matched_channels: list[str] = []
-            for channel, keywords in _CHANNEL_KEYWORDS.items():
-                if any(kw in _msg_lower for kw in keywords):
-                    _matched_channels.append(channel)
+            if not _is_planning:
+                for channel, keywords in _CHANNEL_KEYWORDS.items():
+                    if any(kw in _msg_lower for kw in keywords):
+                        _matched_channels.append(channel)
 
             # Re-inject channel tools if the LAST assistant response used them
             # AND the user's message looks like a continuation (reply words, short msg).
@@ -641,8 +691,11 @@ class Agent:
                     if _matched_channels:
                         logger.info("Channel tools re-injected (conversation continuity): %s", _matched_channels)
 
-            # Find MCP tools for matched channels
+            # Find MCP tools for matched channels.
+            # Simple queries (status, read) get only core tools to reduce
+            # tool count (51→~25). Action queries get the full set.
             _channel_tools: list = []
+            _wants_action = bool(_CHANNEL_ACTION_RE.search(_msg_lower))
             if _matched_channels:
                 for tool_info in self.registry.list_mcp_tools():
                     func = tool_info.get("function", {})
@@ -650,6 +703,12 @@ class Agent:
                     tdesc = func.get("description", "").lower()
                     for ch in _matched_channels:
                         if ch in tname or ch in tdesc:
+                            # Filter: only core suffixes unless action intent
+                            if not _wants_action:
+                                _base_name = tname.rsplit("_", 1)[-1] if "_" in tname else tname
+                                _has_core = any(tname.endswith(s) for s in _CHANNEL_CORE_SUFFIXES)
+                                if not _has_core:
+                                    break
                             schema = self.registry.get_tool_schema(func.get("name", ""))
                             if schema is not None:
                                 _channel_tools.append(schema)
@@ -799,8 +858,16 @@ class Agent:
                         len(_survival_tools),
                     )
 
-            # Build base tools + conditionally add browser
+            # Build base tools + conditionally add browser.
+            # When channel MCP tools dominate, trim base set to reduce noise.
             _base_names = set(_BASE_TOOL_NAMES)
+            if _channel_tools and not _wants_tasks and not _wants_survival:
+                # Drop heavy tools irrelevant for messaging queries
+                _base_names -= {
+                    "run_command", "write_file", "read_file", "list_directory",
+                    "watch_site", "connect_mcp_server", "disconnect_mcp_server",
+                }
+                logger.info("Channel-focused: trimmed base tools to %d", len(_base_names))
 
             # Browser only when user explicitly asks (keyword match)
             _wants_browser = any(kw in _msg_lower for kw in _BROWSER_KEYWORDS)
@@ -863,11 +930,13 @@ class Agent:
         else:
             logger.info("No tools — fast chat path for: %s", message[:50])
 
-        # Build context — keep recent messages, compact old ones
+        # Build context — keep recent messages, compact old ones.
+        # Filter error messages so LLM doesn't reference past failures.
+        _clean_history = _filter_error_messages(history)
         if needs_tools:
-            chat_history = _compact_history(history, keep_recent=4)
+            chat_history = _compact_history(_clean_history, keep_recent=4)
         else:
-            chat_history = _strip_tool_messages(history)
+            chat_history = _strip_tool_messages(_clean_history)
             if len(chat_history) > 6:
                 chat_history = chat_history[-6:]
 
@@ -1226,11 +1295,28 @@ class Agent:
                         tool_calls=[],
                     )
 
-                # Filter out hallucinated tool calls for tools not in the current list
+                # Filter out hallucinated tool calls for tools not in the current list.
+                # If a tool is not in the sent set but exists in the full registry,
+                # dynamically inject it (the LLM remembered it from history).
                 if tools and response.tool_calls:
                     _valid_names = {
                         t.get("function", {}).get("name") for t in tools
                     }
+                    # Before dropping, try to inject missing tools from registry
+                    _injected_count = 0
+                    for tc in response.tool_calls:
+                        if tc.name not in _valid_names and self.registry:
+                            _schema = self.registry.get_tool_schema(tc.name)
+                            if _schema is not None:
+                                tools.append(_schema)
+                                _valid_names.add(tc.name)
+                                _injected_count += 1
+                    if _injected_count:
+                        logger.info(
+                            "Late-injected %d tools from registry (LLM remembered from history)",
+                            _injected_count,
+                        )
+
                     _valid_calls = [
                         tc for tc in response.tool_calls if tc.name in _valid_names
                     ]
@@ -1265,6 +1351,33 @@ class Agent:
 
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""
+
+                    # Nudge: if iteration 0 returned text-only but channel
+                    # tools were available, the LLM likely repeated old data
+                    # from history instead of calling the tool. Force retry once.
+                    if (
+                        iteration == 0
+                        and _matched_channels
+                        and tools
+                        and not getattr(self, "_nudged_tool_use", False)
+                    ):
+                        self._nudged_tool_use = True
+                        _channel_tool_names = [
+                            t.get("function", {}).get("name", "")
+                            for t in tools
+                            if any(ch in t.get("function", {}).get("name", "").lower()
+                                   for ch in _matched_channels)
+                        ][:3]
+                        _nudge = (
+                            "[SYSTEM: You answered from memory without calling any tool. "
+                            "Your data may be stale. Use one of these tools to get LIVE data: "
+                            f"{', '.join(_channel_tool_names)}. "
+                            "Call the tool NOW — do not repeat old numbers.]"
+                        )
+                        messages.append(LLMMessage(role="assistant", content=_final_content))
+                        messages.append(LLMMessage(role="user", content=_nudge))
+                        logger.warning("Nudging tool use: LLM skipped tools for channel query")
+                        continue
 
                     # Strip <think>...</think> tags from local models (Nanbeige)
                     if "<think>" in _final_content:

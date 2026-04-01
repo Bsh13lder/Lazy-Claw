@@ -48,6 +48,12 @@ HELP_RESPONSE = "help_response"
 # Context management
 COMPACTION_BOUNDARY = "compaction_boundary"
 
+# Browser transparency (Session 6)
+BROWSER_PLAN = "browser_plan"          # plan created/updated: {goal, steps, current_step}
+BROWSER_ACTION = "browser_action"      # before each browser call: {action, target, step_number, total_steps}
+BROWSER_VERIFY = "browser_verify"      # after verification: {action, succeeded, evidence}
+BROWSER_PROGRESS = "browser_progress"  # research progress: {sources_checked, requirements_met, gaps}
+
 ALL_EVENT_KINDS = frozenset({
     LLM_CALL, TOKENS, TOOL_CALL, TOOL_RESULT, STREAM_DONE, TOKEN,
     APPROVAL, DONE, CANCELLED,
@@ -57,6 +63,7 @@ ALL_EVENT_KINDS = frozenset({
     FAST_DISPATCH, SPECIALIST_WAITING, SPECIALIST_TAB_ACQUIRED, INSTANT_COMMAND,
     HELP_NEEDED, HELP_RESPONSE,
     COMPACTION_BOUNDARY,
+    BROWSER_PLAN, BROWSER_ACTION, BROWSER_VERIFY, BROWSER_PROGRESS,
 })
 
 

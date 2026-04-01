@@ -58,7 +58,7 @@ def detect_captcha(tool_result: str) -> StuckSignal | None:
 # Note: same-result detector catches the real stuck case (identical results).
 # Tool loop detector only catches mindless repetition of the same tool.
 DEFAULT_LOOP_LIMITS: dict[str, int] = {
-    "browser": 8,  # Browser workflows need steps, but 20 was too many — cap at 8
+    "browser": 5,  # Browser workflows need steps — cap at 5 (was 8, but graduated recovery kicks in sooner)
     "web_search": 6,  # Research needs 3-5 searches then synthesis
     "list_directory": 3,  # Directory listing should not loop
     "default": 3,
@@ -213,6 +213,104 @@ def detect_same_result(
     )
 
 
+# ── No-progress detection (uses action verifier output) ───────────────
+
+# The action_verifier appends "→ FAILED:" or "→ SUCCESS:" to browser results.
+# If the last 2 browser results both contain a failure signal, the agent isn't
+# making progress — trigger stuck before reaching the loop limit.
+_VERIFIER_FAILED_MARKER = "→ FAILED:"
+_VERIFIER_SUCCESS_MARKER = "→ SUCCESS:"
+_NO_PROGRESS_THRESHOLD = 2
+
+
+def detect_no_progress(
+    tool_history: list[str],
+    tool_results: list[str],
+) -> StuckSignal | None:
+    """Detect when the last N browser actions all returned FAILED verification.
+
+    Requires at least _NO_PROGRESS_THRESHOLD browser results with the
+    verifier's FAILED marker. Triggers stuck earlier than the loop limit.
+    """
+    if len(tool_history) < _NO_PROGRESS_THRESHOLD or len(tool_results) < _NO_PROGRESS_THRESHOLD:
+        return None
+
+    # Collect the most recent browser results (in order)
+    failed_streak = 0
+    for i in range(len(tool_history) - 1, -1, -1):
+        if i >= len(tool_results):
+            break
+        if tool_history[i] != "browser":
+            break  # Non-browser tool interrupts the streak
+        result = tool_results[i]
+        if _VERIFIER_FAILED_MARKER in result:
+            failed_streak += 1
+        elif _VERIFIER_SUCCESS_MARKER in result:
+            break  # A success interrupts the failure streak
+        # No verifier output (old snapshot/read actions) — don't count
+
+    if failed_streak >= _NO_PROGRESS_THRESHOLD:
+        return StuckSignal(
+            reason="no_progress",
+            tool_name="browser",
+            context=(
+                f"Last {failed_streak} browser actions failed verification. "
+                f"The page isn't responding as expected."
+            ),
+            needs_browser=True,
+        )
+    return None
+
+
+# ── Hallucinated element detection ───────────────────────────────────
+
+# Phrases in browser results indicating the agent tried to click/type a ref
+# that doesn't exist. Repeating this is a hallucination loop.
+_HALLUCINATED_REF_PHRASES = (
+    "ref not found", "element not found", "no element with ref",
+    "invalid ref", "ref does not exist", "unknown ref",
+    "not in snapshot", "ref not in",
+)
+_HALLUCINATION_THRESHOLD = 2
+
+
+def detect_hallucinated_element(
+    tool_history: list[str],
+    tool_results: list[str],
+) -> StuckSignal | None:
+    """Detect when the agent repeatedly tries to interact with non-existent refs.
+
+    After 2+ consecutive browser calls that return "ref not found"-style errors,
+    force a fresh snapshot so the agent sees the real page state.
+    """
+    if len(tool_history) < _HALLUCINATION_THRESHOLD or len(tool_results) < _HALLUCINATION_THRESHOLD:
+        return None
+
+    hallucination_streak = 0
+    for i in range(len(tool_history) - 1, -1, -1):
+        if i >= len(tool_results):
+            break
+        if tool_history[i] != "browser":
+            break
+        result_lower = tool_results[i].lower()
+        if any(phrase in result_lower for phrase in _HALLUCINATED_REF_PHRASES):
+            hallucination_streak += 1
+        else:
+            break
+
+    if hallucination_streak >= _HALLUCINATION_THRESHOLD:
+        return StuckSignal(
+            reason="hallucinated_element",
+            tool_name="browser",
+            context=(
+                f"Tried to interact with non-existent refs {hallucination_streak} times. "
+                f"Take a fresh snapshot to see current page elements."
+            ),
+            needs_browser=False,
+        )
+    return None
+
+
 # ── Convenience: run all detectors ───────────────────────────────────
 
 def detect_stuck(
@@ -229,6 +327,16 @@ def detect_stuck(
         signal = detect_captcha(last_result)
         if signal:
             return signal
+
+    # Hallucinated element: agent keeps clicking refs that don't exist
+    signal = detect_hallucinated_element(tool_history, tool_results)
+    if signal:
+        return signal
+
+    # No progress: last N browser actions all failed verification
+    signal = detect_no_progress(tool_history, tool_results)
+    if signal:
+        return signal
 
     # Repeated errors
     signal = detect_repeated_errors(tool_history, tool_results)

@@ -512,6 +512,64 @@ class _TelegramCallback:
                         self._chat_id, exc,
                     )
 
+        elif kind == "browser_plan":
+            # Show the browsing plan as a brief message
+            goal = event.metadata.get("goal", event.detail)
+            steps = event.metadata.get("steps", [])
+            steps_text = "\n".join(
+                f"{i + 1}. {s}" for i, s in enumerate(steps[:5])
+            )
+            text = f"\U0001f3af Plan: {goal}"
+            if steps_text:
+                text += f"\n{steps_text}"
+            try:
+                await _telegram_send_with_retry(
+                    lambda: self._bot.send_message(
+                        chat_id=self._chat_id, text=text,
+                    )
+                )
+            except Exception as exc:
+                logger.debug("Failed to send browser_plan: %s", exc)
+
+        elif kind == "browser_action":
+            action = event.metadata.get("action", "")
+            target = event.metadata.get("target", "")
+            step_n = event.metadata.get("step_number", 0)
+            total = event.metadata.get("total_steps", 0)
+            step_info = f" (step {step_n}/{total})" if total else ""
+            label = f"Browser: {action}"
+            if target:
+                label += f" {target[:60]}"
+            label += step_info
+            self.current_phase = "browser"
+            self.current_tool = label
+            self.tool_log.append(f"\U0001f310 {label}")
+            await self._update_status()
+
+        elif kind == "browser_verify":
+            succeeded = event.metadata.get("succeeded", True)
+            evidence = event.metadata.get("evidence", event.detail)
+            if succeeded:
+                self.tool_log.append(f"\u2705 {evidence[:80]}")
+            else:
+                self.tool_log.append(f"\u274c {evidence[:80]}")
+            await self._update_status()
+
+        elif kind == "browser_progress":
+            met = event.metadata.get("requirements_met", 0)
+            total = event.metadata.get("total_requirements", 0)
+            sources = event.metadata.get("sources_checked", 0)
+            gaps = event.metadata.get("gaps", [])
+            status = event.metadata.get("status", "gathering")
+            if total:
+                label = f"\U0001f4ca Research: {met}/{total} found, {sources} source(s)"
+            else:
+                label = f"\U0001f4ca Research: {sources} source(s) checked"
+            if gaps and status == "gathering":
+                label += f" — still need: {', '.join(gaps[:2])}"
+            self.tool_log.append(label)
+            await self._update_status()
+
         elif kind == "work_summary":
             # Store summary for footer — don't send separately
             self._work_summary = event.metadata.get("summary")

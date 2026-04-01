@@ -20,6 +20,7 @@ from lazyclaw.runtime.events import (
     FAST_DISPATCH, INSTANT_COMMAND,
     HELP_NEEDED, HELP_RESPONSE,
     COMPACTION_BOUNDARY,
+    BROWSER_PLAN, BROWSER_ACTION, BROWSER_VERIFY, BROWSER_PROGRESS,
 )
 from lazyclaw.runtime.team_lead import TeamLead
 from lazyclaw.runtime.stuck_detector import detect_stuck
@@ -1019,10 +1020,29 @@ class Agent:
         _escalated = False  # True after auto-escalation to brain_model
         _escalation_iter = 0  # Iteration when escalation happened
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
+        # Graduated escalation level: 0=normal, 1=soft nudge, 2=brain escalation
+        # Level 3 (give up) triggers when stuck is detected at level 2.
+        _escalation_level: int = 0
         # Browser action planner — ephemeral per-conversation, not persisted
         _plan_state = ActionPlannerState(
             plan_injected=not should_inject_plan(message, []),
         )
+        # Research strategy — tracks requirements + sources for research tasks
+        from lazyclaw.browser.research_strategy import (
+            ResearchStrategy, ResearchStatus,
+            is_research_task, make_requirements_prompt,
+            parse_requirements_from_response, note_source,
+            make_progress_message as _make_research_progress,
+        )
+        _research_state: ResearchStrategy | None = (
+            ResearchStrategy(
+                query=message,
+                info_requirements=(),
+                sources_checked=(),
+                gaps=(),
+            ) if is_research_task(message) else None
+        )
+        _research_prompt_injected = False
 
         response = None
         iteration = 0
@@ -1097,6 +1117,20 @@ class Agent:
                     from dataclasses import replace as _dc_replace
                     _plan_state = _dc_replace(_plan_state, plan_injected=True)
                     logger.info("Browser action planner: injected planning prompt")
+
+                # ── Research strategy requirements injection ──────────────
+                # At iteration 0, if this is a research task, ask the LLM to
+                # list what information it needs before starting to browse.
+                if (
+                    iteration == 0
+                    and not _research_prompt_injected
+                    and _research_state is not None
+                    and tools
+                ):
+                    _research_prompt = make_requirements_prompt(_research_state.query)
+                    messages.append(LLMMessage(role="system", content=_research_prompt))
+                    _research_prompt_injected = True
+                    logger.info("Research strategy: injected requirements prompt")
 
                 # ── TAOR Phase 1: PLAN ────────────────────────────────────
                 # For non-LOW effort tasks, inject a Claude-optimized XML
@@ -1276,6 +1310,33 @@ class Agent:
                     if _parsed_plan is not None:
                         from dataclasses import replace as _dc_replace
                         _plan_state = _dc_replace(_plan_state, plan=_parsed_plan)
+                        await cb.on_event(AgentEvent(
+                            BROWSER_PLAN,
+                            f"Plan: {_parsed_plan.goal}",
+                            {
+                                "goal": _parsed_plan.goal,
+                                "steps": [s.description for s in _parsed_plan.steps],
+                                "current_step": _parsed_plan.current_step,
+                            },
+                        ))
+
+                # ── Parse research requirements from first response ────────
+                # If research mode is active and requirements not yet set,
+                # extract the JSON array the LLM should have output.
+                if (
+                    _research_state is not None
+                    and not _research_state.info_requirements
+                    and response.content
+                    and iteration == 0
+                ):
+                    _reqs = parse_requirements_from_response(response.content)
+                    if _reqs:
+                        from dataclasses import replace as _dc_replace
+                        _research_state = _dc_replace(
+                            _research_state,
+                            info_requirements=tuple(_reqs),
+                            gaps=tuple(_reqs),
+                        )
 
                 # Debug: log tool state
                 logger.info(
@@ -1552,6 +1613,33 @@ class Agent:
                         "tool_call", _display,
                         {"tool": tc.name, "display_name": _display, "args": tc.arguments},
                     ))
+                    # Emit browser-specific action event for transparency
+                    if tc.name == "browser":
+                        _br_action = tc.arguments.get("action", "")
+                        _br_target = (
+                            tc.arguments.get("url", "")
+                            or tc.arguments.get("ref", "")
+                            or tc.arguments.get("query", "")
+                            or tc.arguments.get("text", "")
+                        )
+                        _br_step = (
+                            (_plan_state.plan.current_step + 1)
+                            if _plan_state.plan else 0
+                        )
+                        _br_total = (
+                            len(_plan_state.plan.steps)
+                            if _plan_state.plan else 0
+                        )
+                        await cb.on_event(AgentEvent(
+                            BROWSER_ACTION,
+                            f"Browser: {_br_action}",
+                            {
+                                "action": _br_action,
+                                "target": _br_target[:100],
+                                "step_number": _br_step,
+                                "total_steps": _br_total,
+                            },
+                        ))
                     await recorder.record_tool_call(tc.name, tc.arguments)
                     # Inject background flag so browser uses headless
                     if getattr(self, "is_background", False) and tc.name == "browser":
@@ -1678,6 +1766,70 @@ class Agent:
                                 content=_plan_decision.system_message,
                             ))
 
+                    # ── BROWSER_VERIFY: parse and emit verification result ─
+                    if tc.name == "browser":
+                        _res_for_verify = result if isinstance(result, str) else str(result)
+                        _verify_succeeded: bool | None = None
+                        _verify_evidence = ""
+                        if "→ SUCCESS:" in _res_for_verify:
+                            _verify_succeeded = True
+                            _idx = _res_for_verify.find("→ SUCCESS:")
+                            _verify_evidence = _res_for_verify[_idx + 10:].split("\n")[0].strip()[:120]
+                        elif "→ FAILED:" in _res_for_verify:
+                            _verify_succeeded = False
+                            _idx = _res_for_verify.find("→ FAILED:")
+                            _verify_evidence = _res_for_verify[_idx + 9:].split("\n")[0].strip()[:120]
+                        if _verify_succeeded is not None:
+                            await cb.on_event(AgentEvent(
+                                BROWSER_VERIFY,
+                                _verify_evidence,
+                                {
+                                    "action": tc.arguments.get("action", ""),
+                                    "succeeded": _verify_succeeded,
+                                    "evidence": _verify_evidence,
+                                },
+                            ))
+
+                    # ── Research strategy: update per-source ──────────────
+                    # After each browser or web_search result, record the source
+                    # and inject a progress hint so the LLM knows when to stop.
+                    if tc.name in ("browser", "web_search") and _research_state is not None:
+                        _res_str = result if isinstance(result, str) else str(result)
+                        _src_url = (
+                            tc.arguments.get("url", "")
+                            or tc.arguments.get("query", "")
+                        )
+                        from dataclasses import replace as _dc_replace
+                        _research_state = note_source(
+                            _research_state,
+                            url=_src_url,
+                            title="",
+                            tool_result=_res_str,
+                        )
+                        _progress_msg = _make_research_progress(_research_state)
+                        if _progress_msg:
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=_progress_msg,
+                            ))
+                        logger.debug(
+                            "Research state: sources=%d status=%s gaps=%d",
+                            _research_state.sources_count,
+                            _research_state.status.value,
+                            len(_research_state.gaps),
+                        )
+                        await cb.on_event(AgentEvent(
+                            BROWSER_PROGRESS,
+                            f"Research: {_research_state.requirements_met_count}/{len(_research_state.info_requirements)} found",
+                            {
+                                "sources_checked": _research_state.sources_count,
+                                "requirements_met": _research_state.requirements_met_count,
+                                "total_requirements": len(_research_state.info_requirements),
+                                "gaps": list(_research_state.gaps[:3]),
+                                "status": _research_state.status.value,
+                            },
+                        ))
+
                     # Dynamic schema injection: after search_tools returns,
                     # inject discovered tool schemas so LLM can call them next iteration
                     if tc.name == "search_tools" and self.registry:
@@ -1753,29 +1905,52 @@ class Agent:
                             "Stuck detected: %s (%s)", _stuck_signal.reason, _stuck_signal.context,
                         )
 
-                        # Auto-escalate: switch to brain model + inject decision prompt.
-                        # Sonnet decides: try a DIFFERENT approach (tool call) or give up (text response).
-                        # If it responds with text → loop breaks naturally at the "no tool_calls" check.
-                        if not _escalated:
-                            _escalated = True
+                        # ── Graduated recovery (3 levels) ─────────────────────
+                        # Level 1 (soft): read + try different approach, no model switch
+                        # Level 2 (medium): switch to brain, demand strategy change
+                        # Level 3 (hard): give up / ask user for help
+                        if _escalation_level == 0:
+                            _escalation_level = 1
+                            logger.info(
+                                "Stuck level 1 (soft nudge): %s", _stuck_signal.reason
+                            )
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=(
+                                    f"⚠ Not making progress: {_stuck_signal.context}\n\n"
+                                    f"Before your next action:\n"
+                                    f"1. Use action='read' to understand what's currently on the page.\n"
+                                    f"2. Use action='snapshot' to see available elements.\n"
+                                    f"Then try a DIFFERENT approach — not the same action again."
+                                ),
+                            ))
+                            _tool_call_history.clear()
+                            _tool_results.clear()
+                            continue
+
+                        elif _escalation_level == 1:
+                            _escalation_level = 2
+                            _escalated = True  # triggers brain model in routing
                             _escalation_iter = iteration
-                            logger.info("Auto-escalating to brain model (via eco_router)")
+                            logger.info(
+                                "Stuck level 2 (strategy change, brain escalation): %s",
+                                _stuck_signal.reason,
+                            )
                             await cb.on_event(AgentEvent(
                                 "llm_call",
                                 "Escalating to brain model...",
                                 {"escalation": True},
                             ))
-                            # Inject corrective nudge — force different approach
                             messages.append(LLMMessage(
                                 role="system",
                                 content=(
-                                    f"⚠ STUCK: {_stuck_signal.context}\n\n"
-                                    f"STOP repeating the same action. You MUST choose ONE:\n"
-                                    f"1. Use web_search to RESEARCH how to accomplish this task — find the right URL, steps, or workaround\n"
+                                    f"⚠ STRATEGY CHANGE REQUIRED: {_stuck_signal.context}\n\n"
+                                    f"The previous approach failed twice. You MUST choose ONE:\n"
+                                    f"1. Use web_search to RESEARCH how to accomplish this — find the right URL, steps, or workaround\n"
                                     f"2. Try a COMPLETELY DIFFERENT approach (different URL, different button, different strategy)\n"
-                                    f"3. Use action='read' to understand what's actually on the page before clicking\n"
-                                    f"4. If the task is truly impossible right now, STOP and explain what went wrong (text only, no tool call)\n\n"
-                                    f"Do NOT call the same tool with similar arguments. Do NOT ask the user to do it themselves."
+                                    f"3. If the page requires login or human interaction, say so explicitly\n"
+                                    f"4. If the task is truly impossible right now, STOP and explain what went wrong (text only)\n\n"
+                                    f"Describe what you've tried, why it failed, and what you'll try differently."
                                 ),
                             ))
                             _tool_call_history.clear()
@@ -1784,7 +1959,7 @@ class Agent:
                             _iter_role = ROLE_BRAIN
                             continue
 
-                        # Sonnet also got stuck — give up.
+                        # Level 3: brain also stuck — give up.
                         # Background agents: break immediately (can't ask user).
                         # Foreground agents: ask user for help.
                         if getattr(self, "is_background", False):

@@ -26,6 +26,7 @@ from lazyclaw.gateway.routes.permissions import router as permissions_router
 from lazyclaw.gateway.routes.teams import router as teams_router
 from lazyclaw.gateway.routes.compression import router as compression_router
 from lazyclaw.gateway.routes.replay import router as replay_router
+from lazyclaw.gateway.routes.recovery import router as recovery_router
 from lazyclaw.gateway.routes.chat_ws import ws_chat_router, set_chat_ws_deps
 from lazyclaw.llm.model_manager import seed_default_models
 
@@ -130,6 +131,7 @@ app.include_router(permissions_router)
 app.include_router(teams_router)
 app.include_router(compression_router)
 app.include_router(replay_router)
+app.include_router(recovery_router)
 app.include_router(ws_chat_router)
 
 

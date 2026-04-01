@@ -16,6 +16,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import Config, load_config
+from lazyclaw.crypto.recovery import (
+    derive_password_wrapping_key,
+    generate_master_key,
+    generate_mnemonic,
+    mnemonic_to_recovery_key,
+    unwrap_master_key,
+    wrap_master_key,
+)
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -63,11 +71,25 @@ async def register_user(
     username: str,
     password: str,
     display_name: str | None = None,
-) -> User:
-    """Create a new user with bcrypt hash and random encryption_salt."""
+) -> tuple[User, str]:
+    """Create a new user with bcrypt hash, random encryption_salt, and recovery phrase.
+
+    Returns (User, recovery_phrase). The recovery phrase is shown ONCE at
+    registration and never stored in plaintext — store the master_key wrapped
+    under the recovery key instead.
+    """
     user_id = str(uuid4())
     salt = secrets.token_urlsafe(16)
     pw_hash = hash_password(password)
+
+    # Generate a random master key (DEK) and wrap it two ways
+    master_key = generate_master_key()
+    pw_wrapping_key = derive_password_wrapping_key(password, salt)
+    password_encrypted_dek = wrap_master_key(master_key, pw_wrapping_key)
+
+    phrase = generate_mnemonic()
+    recovery_key = mnemonic_to_recovery_key(phrase, user_id)
+    recovery_encrypted_dek = wrap_master_key(master_key, recovery_key)
 
     async with db_session(config) as db:
         existing = await db.execute(
@@ -82,14 +104,24 @@ async def register_user(
         role = "admin" if count_result and count_result[0] == 0 else "user"
 
         await db.execute(
-            "INSERT INTO users (id, username, password_hash, encryption_salt, display_name, role) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, username, pw_hash, salt, display_name, role),
+            "INSERT INTO users "
+            "(id, username, password_hash, encryption_salt, display_name, role, "
+            "password_encrypted_dek, recovery_encrypted_dek) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, username, pw_hash, salt, display_name, role,
+             password_encrypted_dek, recovery_encrypted_dek),
         )
         await db.commit()
 
     logger.info("Registered user %s (%s) with role %s", username, user_id, role)
-    return User(id=user_id, username=username, display_name=display_name, encryption_salt=salt, role=role)
+    user = User(
+        id=user_id,
+        username=username,
+        display_name=display_name,
+        encryption_salt=salt,
+        role=role,
+    )
+    return user, phrase
 
 
 async def authenticate_user(config: Config, username: str, password: str) -> User | None:
@@ -115,6 +147,151 @@ async def authenticate_user(config: Config, username: str, password: str) -> Use
         encryption_salt=result[3],
         role=result[5],
     )
+
+
+# ---------------------------------------------------------------------------
+# Recovery phrase operations
+# ---------------------------------------------------------------------------
+
+async def generate_recovery_for_user(
+    config: Config,
+    user_id: str,
+    password: str,
+) -> str:
+    """Generate (or regenerate) a recovery phrase for an existing user.
+
+    Requires the current password to derive the password wrapping key.
+    Returns the new phrase ONCE — it is never stored in plaintext.
+
+    For users created before this feature (no password_encrypted_dek),
+    we generate a master_key from the password-derived key so that the
+    recovery phrase can always unlock the account via account recovery.
+    """
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT password_hash, encryption_salt, password_encrypted_dek "
+            "FROM users WHERE id = ?",
+            (user_id,),
+        )
+        result = await row.fetchone()
+
+    if not result:
+        raise ValueError("User not found")
+
+    pw_hash, salt, stored_pw_dek = result[0], result[1], result[2]
+
+    if not verify_password(password, pw_hash):
+        raise PermissionError("Invalid password")
+
+    pw_wrapping_key = derive_password_wrapping_key(password, salt)
+
+    if stored_pw_dek:
+        # Unwrap existing master key — keep it stable across phrase rotations
+        master_key = unwrap_master_key(stored_pw_dek, pw_wrapping_key)
+    else:
+        # Legacy user: use the password-derived key AS the master key
+        master_key = pw_wrapping_key
+        # Also store it wrapped so future password changes work
+        new_pw_dek = wrap_master_key(master_key, pw_wrapping_key)
+        async with db_session(config) as db:
+            await db.execute(
+                "UPDATE users SET password_encrypted_dek = ? WHERE id = ?",
+                (new_pw_dek, user_id),
+            )
+            await db.commit()
+
+    phrase = generate_mnemonic()
+    recovery_key = mnemonic_to_recovery_key(phrase, user_id)
+    recovery_encrypted_dek = wrap_master_key(master_key, recovery_key)
+
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE users SET recovery_encrypted_dek = ? WHERE id = ?",
+            (recovery_encrypted_dek, user_id),
+        )
+        await db.commit()
+
+    logger.info("Recovery phrase (re)generated for user %s", user_id)
+    return phrase
+
+
+async def recover_account(
+    config: Config,
+    username: str,
+    phrase: str,
+    new_password: str,
+) -> User:
+    """Recover an account using a recovery phrase and set a new password.
+
+    Flow:
+      1. Derive recovery_key from phrase + user_id
+      2. Decrypt recovery_encrypted_dek → master_key
+      3. Hash new password, re-wrap master_key with new password key
+      4. Update password_hash + password_encrypted_dek in DB
+      5. Return authenticated User
+    """
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT id, username, encryption_salt, display_name, role, recovery_encrypted_dek "
+            "FROM users WHERE username = ?",
+            (username,),
+        )
+        result = await row.fetchone()
+
+    if not result:
+        raise ValueError("User not found")
+
+    user_id, uname, salt, display_name, role, recovery_enc_dek = (
+        result[0], result[1], result[2], result[3], result[4], result[5],
+    )
+
+    if not recovery_enc_dek:
+        raise ValueError(
+            "No recovery phrase has been set for this account. "
+            "Log in and use /api/auth/generate-recovery to create one."
+        )
+
+    recovery_key = mnemonic_to_recovery_key(phrase, user_id)
+    try:
+        master_key = unwrap_master_key(recovery_enc_dek, recovery_key)
+    except Exception:
+        raise ValueError("Invalid recovery phrase")
+
+    new_pw_hash = hash_password(new_password)
+    new_pw_wrapping_key = derive_password_wrapping_key(new_password, salt)
+    new_pw_dek = wrap_master_key(master_key, new_pw_wrapping_key)
+
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE users SET password_hash = ?, password_encrypted_dek = ? WHERE id = ?",
+            (new_pw_hash, new_pw_dek, user_id),
+        )
+        await db.commit()
+
+    logger.info("Account recovered for user %s (%s)", uname, user_id)
+    return User(
+        id=user_id,
+        username=uname,
+        display_name=display_name,
+        encryption_salt=salt,
+        role=role,
+    )
+
+
+async def get_recovery_phrase_for_user(
+    config: Config,
+    user_id: str,
+    password: str,
+) -> str | None:
+    """Return the stored recovery phrase for display to an authenticated user.
+
+    Since we don't store the phrase in plaintext, we cannot retrieve it after
+    generation. This function returns None always — callers should direct users
+    to regenerate via generate_recovery_for_user() instead.
+
+    Kept as a hook for future hardware-key or server-side escrow implementations.
+    """
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +439,7 @@ async def register(body: RegisterRequest, request: Request, response: Response):
             )
 
     try:
-        user = await register_user(_config, body.username, body.password, body.display_name)
+        user, recovery_phrase = await register_user(_config, body.username, body.password, body.display_name)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -275,7 +452,17 @@ async def register(body: RegisterRequest, request: Request, response: Response):
         samesite="lax",
         max_age=720 * 3600,
     )
-    return {"id": user.id, "username": user.username, "display_name": user.display_name, "role": user.role}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+        "recovery_phrase": recovery_phrase,
+        "recovery_notice": (
+            "IMPORTANT: Save your recovery phrase in a safe place. "
+            "It will NEVER be shown again. Use it to recover your account if you forget your password."
+        ),
+    }
 
 
 @auth_router.post("/login")

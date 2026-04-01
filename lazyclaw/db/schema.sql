@@ -7,7 +7,9 @@ CREATE TABLE IF NOT EXISTS users (
     personality_file TEXT DEFAULT 'personality/SOUL.md',
     settings TEXT DEFAULT '{}',
     role TEXT NOT NULL DEFAULT 'user',
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    password_encrypted_dek TEXT,
+    recovery_encrypted_dek TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (

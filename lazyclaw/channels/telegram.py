@@ -618,6 +618,8 @@ class TelegramAdapter(ChannelAdapter):
         # Track active callback per chat for status queries
         self._active_callbacks: dict[str, _TelegramCallback] = {}
         self._pending_messages: dict[str, list[str]] = {}
+        # user_ids awaiting a password message for recovery phrase generation
+        self._pending_recovery: set[str] = set()
         # Admin chat_id — first chat to /start becomes admin
         # Set via TELEGRAM_ADMIN_CHAT env var, or auto-set on first /start
         self._admin_chat_id: str | None = os.environ.get("TELEGRAM_ADMIN_CHAT")
@@ -742,6 +744,17 @@ class TelegramAdapter(ChannelAdapter):
         user_id = await resolve_user_id(self._config)
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
 
+        # ── Recovery phrase: intercept password message ──
+        if user_id in self._pending_recovery:
+            self._pending_recovery.discard(user_id)
+            # Delete the password message immediately for security
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            await self._handle_recovery_password(update, user_id, text)
+            return
+
         # ── Instant mute: reply "mute" to a watcher notification ──
         # Zero LLM calls — handle directly for instant response
         raw_text = update.message.text or ""
@@ -755,6 +768,57 @@ class TelegramAdapter(ChannelAdapter):
             self._process_and_reply(update, chat_id, user_id, text),
             name=f"tg-{chat_id}-{id(text)}",
         )
+
+    async def _handle_recovery_password(
+        self, update: Update, user_id: str, password: str,
+    ) -> None:
+        """Generate a recovery phrase using the provided password.
+
+        The phrase is sent as a temporary message that self-destructs after 60 s.
+        """
+        from lazyclaw.gateway.auth import generate_recovery_for_user
+
+        chat_id = str(update.effective_chat.id)
+        try:
+            phrase = await generate_recovery_for_user(self._config, user_id, password)
+        except PermissionError:
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c Incorrect password. Recovery phrase not generated.",
+                parse_mode="HTML",
+            )
+            return
+        except Exception as exc:
+            logger.warning("Recovery generation failed for user %s: %s", user_id, exc)
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=f"\u274c Failed to generate recovery phrase: {exc}",
+                parse_mode="HTML",
+            )
+            return
+
+        words = phrase.split()
+        numbered = "\n".join(f"{i+1}. <code>{w}</code>" for i, w in enumerate(words))
+        msg = await self._app.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "\U0001f510 <b>Your Recovery Phrase</b>\n\n"
+                f"{numbered}\n\n"
+                "\u26a0\ufe0f <b>Write these 12 words down and store them safely offline.</b>\n"
+                "\u26a0\ufe0f This message will be deleted in 60 seconds.\n"
+                "\u26a0\ufe0f This phrase will NOT be shown again."
+            ),
+            parse_mode="HTML",
+        )
+        # Schedule deletion of the phrase message after 60 seconds
+        import asyncio as _aio
+        async def _delete_later():
+            await _aio.sleep(60)
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        _aio.create_task(_delete_later(), name=f"recovery-delete-{user_id}")
 
     async def _handle_instant_mute(
         self, update: Update, user_id: str, raw_text: str,

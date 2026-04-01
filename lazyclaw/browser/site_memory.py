@@ -12,7 +12,8 @@ import uuid
 from urllib.parse import urlparse
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, decrypt_field, encrypt_field
+from lazyclaw.crypto.encryption import decrypt_field, encrypt_field
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ async def remember(
         raise ValueError(f"Invalid memory type: {memory_type}. Must be one of {MEMORY_TYPES}")
 
     domain = urlparse(url).hostname or url
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     enc_title = encrypt_field(title, key)
     enc_content = encrypt_field(json.dumps(content), key)
     memory_id = str(uuid.uuid4())
@@ -93,7 +94,7 @@ async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]
     Returns dict grouped by memory_type.
     """
     domain = urlparse(url).hostname or url
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute_fetchall(
@@ -137,7 +138,7 @@ async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]
 
 async def recall_all(config: Config, user_id: str) -> list[dict]:
     """Get all site memories for a user (management UI)."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute_fetchall(
@@ -200,7 +201,7 @@ async def mark_failed(
 ) -> None:
     """Increment fail count for a memory. Auto-deletes if fail > success + 2."""
     domain = urlparse(url).hostname or url
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute_fetchall(

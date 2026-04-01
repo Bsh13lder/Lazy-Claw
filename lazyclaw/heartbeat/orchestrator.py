@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, derive_server_key, encrypt, is_encrypted
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import decrypt, encrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.heartbeat.cron import calculate_next_run
 
@@ -65,7 +66,7 @@ async def create_job(
     context: str | None = None,
 ) -> str:
     """Create a new agent job. Returns the job ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     job_id = str(uuid4())
 
     encrypted_name = encrypt(name, key)
@@ -102,7 +103,7 @@ async def update_job(
     if not fields:
         return False
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []
     params: list = []
 
@@ -142,7 +143,7 @@ async def delete_job(config: Config, user_id: str, job_id: str) -> bool:
 
 async def list_jobs(config: Config, user_id: str) -> list[dict]:
     """List all jobs for a user, decrypted."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         cursor = await db.execute(
@@ -157,7 +158,7 @@ async def list_jobs(config: Config, user_id: str) -> list[dict]:
 
 async def get_job(config: Config, user_id: str, job_id: str) -> dict | None:
     """Get a single job by ID, decrypted."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         cursor = await db.execute(

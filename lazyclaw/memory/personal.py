@@ -1,7 +1,8 @@
 from __future__ import annotations
 from uuid import uuid4
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
 
@@ -13,7 +14,7 @@ async def save_memory(
     importance: int = 5,
 ) -> str:
     """Save a memory. Returns the memory ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     memory_id = str(uuid4())
     encrypted = encrypt(content, key)
     async with db_session(config) as db:
@@ -30,7 +31,7 @@ async def get_memories(
     config: Config, user_id: str, limit: int = 20
 ) -> list[dict]:
     """Get memories ordered by importance desc. Returns list of dicts with id, type, content, importance."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, memory_type, content, importance, created_at FROM personal_memory "

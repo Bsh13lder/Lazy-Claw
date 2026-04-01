@@ -234,7 +234,7 @@ class RunDoctorSkill(BaseSkill):
             try:
                 from lazyclaw.crypto.encryption import decrypt, derive_server_key, encrypt
 
-                test_key = derive_server_key(cfg.server_secret, "doctor-test")
+                test_key = derive_server_key(cfg.server_secret, "doctor-test")  # diagnostic only
                 encrypted = encrypt("health-check", test_key)
                 decrypted = decrypt(encrypted, test_key)
                 if decrypted == "health-check":
@@ -354,12 +354,13 @@ class ShowUsageSkill(BaseSkill):
         if not self._config:
             return "Error: Not configured"
         try:
-            from lazyclaw.crypto.encryption import decrypt, derive_server_key
+            from lazyclaw.crypto.encryption import decrypt
+            from lazyclaw.crypto.key_manager import get_user_dek
             from lazyclaw.db.connection import db_session
 
             import json
 
-            key = derive_server_key(self._config.server_secret, user_id)
+            key = await get_user_dek(self._config, user_id)
 
             async with db_session(self._config) as db:
                 cursor = await db.execute(
@@ -459,11 +460,12 @@ class ShowLogsSkill(BaseSkill):
         if not self._config:
             return "Error: Not configured"
         try:
-            from lazyclaw.crypto.encryption import decrypt, derive_server_key
+            from lazyclaw.crypto.encryption import decrypt
+            from lazyclaw.crypto.key_manager import get_user_dek
             from lazyclaw.db.connection import db_session
 
             limit = params.get("limit", 20)
-            key = derive_server_key(self._config.server_secret, user_id)
+            key = await get_user_dek(self._config, user_id)
 
             async with db_session(self._config) as db:
                 cursor = await db.execute(

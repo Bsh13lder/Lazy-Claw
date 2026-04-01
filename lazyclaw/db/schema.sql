@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     encryption_salt TEXT NOT NULL,
+    encrypted_dek TEXT,
     display_name TEXT,
     personality_file TEXT DEFAULT 'personality/SOUL.md',
     settings TEXT DEFAULT '{}',

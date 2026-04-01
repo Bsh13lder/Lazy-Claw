@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,7 @@ async def save_specialist(
     if specialist.name in builtin_names:
         raise ValueError(f"Name '{specialist.name}' conflicts with a built-in specialist")
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     record_id = str(uuid4())
 
     encrypted_name = encrypt(specialist.name, key)
@@ -203,7 +204,7 @@ async def save_specialist(
 async def load_specialists(config: Config, user_id: str) -> list[SpecialistConfig]:
     """Load all specialists: built-in + user-defined (decrypted)."""
     result = list(BUILTIN_SPECIALISTS)
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute(
@@ -257,7 +258,7 @@ async def delete_specialist(config: Config, user_id: str, name: str) -> bool:
     if any(s.name == name for s in BUILTIN_SPECIALISTS):
         raise ValueError("Cannot delete a built-in specialist")
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     # Find the record by decrypting names
     async with db_session(config) as db:

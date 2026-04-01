@@ -12,7 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, derive_server_key, encrypt, is_encrypted
+from lazyclaw.crypto.encryption import decrypt, encrypt, is_encrypted
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ async def create_task(
     tags: list[str] | None = None,
 ) -> dict:
     """Create a new task. Returns the full task dict (decrypted)."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     task_id = str(uuid4())
 
     enc_title = encrypt(title, key)
@@ -129,7 +130,7 @@ async def list_tasks(
     bucket: "today" | "upcoming" | "someday" | None (all)
     owner: "user" | "agent" | None (all)
     """
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     today_str = date.today().isoformat()
 
     where_clauses = ["user_id = ?"]
@@ -179,7 +180,7 @@ async def get_task(
     config: Config, user_id: str, task_id: str
 ) -> dict | None:
     """Get a single task by ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         cursor = await db.execute(
@@ -201,7 +202,7 @@ async def update_task(
     if not fields:
         return False
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []
     params: list = []
 

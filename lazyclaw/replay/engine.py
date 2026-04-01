@@ -6,7 +6,8 @@ import json
 import logging
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import decrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.replay.models import TraceEntry, TraceSession
 
@@ -50,7 +51,7 @@ async def get_trace(
     config: Config, user_id: str, trace_session_id: str
 ) -> list[TraceEntry]:
     """Load all entries for a trace session, decrypted."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         rows = await db.execute(

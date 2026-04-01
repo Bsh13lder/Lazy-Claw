@@ -13,7 +13,8 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.llm.eco_router import EcoRouter
 from lazyclaw.llm.providers.base import LLMMessage
@@ -47,7 +48,7 @@ async def compress_history(
     import asyncio
     from datetime import date, timedelta
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     # Auto-trigger: summarize yesterday if not done yet (fire-and-forget)
     yesterday = (date.today() - timedelta(days=1)).isoformat()
@@ -238,7 +239,7 @@ async def _load_existing_summary(
 
     from_id = older_messages[0]["id"]
     to_id = older_messages[-1]["id"]
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         # Exact match first
@@ -283,7 +284,7 @@ async def _store_summary(
     content: str,
 ) -> str:
     """Store an encrypted summary. Returns the summary ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     summary_id = str(uuid4())
     encrypted = encrypt(content, key)
 

@@ -5,7 +5,8 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.skills.instruction import InstructionSkill
 from lazyclaw.skills.registry import SkillRegistry
@@ -22,7 +23,7 @@ async def create_instruction_skill(
     instruction: str,
 ) -> str:
     """Create a new instruction skill and store it encrypted in the DB."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     skill_id = str(uuid4())
     encrypted_name = encrypt(name, key)
     encrypted_instruction = encrypt(instruction, key)
@@ -46,7 +47,7 @@ async def create_code_skill(
     parameters_schema: dict | None = None,
 ) -> str:
     """Create a new code skill and store it encrypted in the DB."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     skill_id = str(uuid4())
     encrypted_name = encrypt(name, key)
     encrypted_code = encrypt(code, key)
@@ -64,7 +65,7 @@ async def create_code_skill(
 
 async def get_skill_by_id(config: Config, user_id: str, skill_id: str) -> dict | None:
     """Get a skill by ID, scoped to user."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         row = await db.execute(
             "SELECT id, name, description, skill_type, instruction, code, parameters_schema "
@@ -98,7 +99,7 @@ async def get_skill_by_id(config: Config, user_id: str, skill_id: str) -> dict |
 
 async def update_skill(config: Config, user_id: str, skill_id: str, **fields) -> bool:
     """Update skill fields. Encrypts name, instruction, and code."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     # Map field names to encrypted values
     updates = {}
@@ -142,7 +143,7 @@ async def delete_user_skill_by_id(config: Config, user_id: str, skill_id: str) -
 
 async def list_user_skills(config: Config, user_id: str) -> list[dict]:
     """List all skills for a user (decrypted names)."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, name, description, skill_type FROM skills "
@@ -166,7 +167,7 @@ async def list_user_skills(config: Config, user_id: str) -> list[dict]:
 
 async def delete_user_skill(config: Config, user_id: str, skill_name: str) -> bool:
     """Delete a user skill by name."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, name FROM skills WHERE user_id = ?",
@@ -198,7 +199,7 @@ async def load_user_skills(
     registry: SkillRegistry,
 ) -> int:
     """Load all user skills (instruction + code) from DB into the registry. Returns count loaded."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT name, description, instruction, skill_type, code, parameters_schema "

@@ -8,7 +8,8 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import derive_server_key, encrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.permissions.models import AuditEntry
 
@@ -62,7 +63,7 @@ async def log_action(
         # Encrypt result summary if present
         encrypted_summary = None
         if result_summary:
-            key = derive_server_key(config.server_secret, user_id)
+            key = await get_user_dek(config, user_id)
             truncated = _truncate_result(result_summary)
             encrypted_summary = encrypt(truncated, key)
 

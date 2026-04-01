@@ -611,9 +611,10 @@ class TelegramCommands:
         except Exception as e:
             checks.append(f"\u274c DB: FAIL ({e})")
         try:
-            from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
-            k = derive_server_key(user_id)
-            assert decrypt(k, encrypt(k, "test")) == "test"
+            from lazyclaw.crypto.encryption import encrypt, decrypt
+            from lazyclaw.crypto.key_manager import get_user_dek
+            k = await get_user_dek(self._config, user_id)
+            assert decrypt(encrypt("test", k), k) == "test"
             checks.append("\u2705 Encryption: OK")
         except Exception as e:
             checks.append(f"\u274c Encryption: FAIL ({e})")
@@ -838,8 +839,9 @@ class TelegramCommands:
             return
         try:
             from lazyclaw.db.connection import db_session
-            from lazyclaw.crypto.encryption import derive_server_key, decrypt
-            key = derive_server_key(user_id)
+            from lazyclaw.crypto.key_manager import get_user_dek
+            from lazyclaw.crypto.encryption import decrypt
+            key = await get_user_dek(self._config, user_id)
             async with db_session(self._config) as db:
                 cursor = await db.execute(
                     "SELECT role, content FROM agent_messages "

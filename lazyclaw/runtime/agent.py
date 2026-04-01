@@ -11,7 +11,8 @@ from lazyclaw.config import Config
 from lazyclaw.llm.router import LLMRouter
 from lazyclaw.llm.eco_router import EcoRouter, ROLE_BRAIN, ROLE_WORKER
 from lazyclaw.llm.providers.base import LLMMessage, ToolCall
-from lazyclaw.crypto.encryption import derive_server_key, encrypt, decrypt
+from lazyclaw.crypto.key_manager import get_user_dek
+from lazyclaw.crypto.encryption import encrypt, decrypt
 from lazyclaw.db.connection import db_session
 
 from lazyclaw.runtime.callbacks import AgentEvent, CancellationToken, NullCallback
@@ -450,7 +451,7 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Response ready", {}))
             return instant
 
-        key = derive_server_key(self.config.server_secret, user_id)
+        key = await get_user_dek(self.config, user_id)
         _start_time = time.monotonic()
         _all_tools_used: list[str] = []
 

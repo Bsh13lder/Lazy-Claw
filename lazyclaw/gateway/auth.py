@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import Config, load_config
+from lazyclaw.crypto.key_manager import clear_user_dek, create_user_dek
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,9 @@ async def register_user(
             (user_id, username, pw_hash, salt, display_name, role),
         )
         await db.commit()
+
+    # Generate and store encrypted DEK (envelope encryption)
+    await create_user_dek(config, user_id, salt)
 
     logger.info("Registered user %s (%s) with role %s", username, user_id, role)
     return User(id=user_id, username=username, display_name=display_name, encryption_salt=salt, role=role)
@@ -304,6 +308,10 @@ async def login(body: LoginRequest, request: Request, response: Response):
 async def logout(request: Request, response: Response):
     session_id = request.cookies.get("session_id")
     if session_id:
+        # Clear cached DEK before destroying session
+        user = await get_session_user(_config, session_id)
+        if user:
+            clear_user_dek(user.id)
         await delete_session(_config, session_id)
     response.delete_cookie(
         "session_id",

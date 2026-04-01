@@ -3,7 +3,7 @@
 States: found → applied → hired → working → review → delivered → invoiced → paid
 Also: rejected, needs_work (loops back to working).
 
-All user-facing fields encrypted at rest via derive_server_key().
+All user-facing fields encrypted at rest via get_user_dek().
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
+from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import (
     decrypt,
-    derive_server_key,
     encrypt,
     is_encrypted,
 )
@@ -113,7 +113,7 @@ async def create_gig(
     proposal_text: str = "",
 ) -> str:
     """Create a new gig record. Returns the gig ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     gig_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
@@ -150,7 +150,7 @@ async def update_gig_status(
         logger.warning("Invalid gig status: %s", new_status)
         return False
 
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
     now = datetime.now(timezone.utc).isoformat()
 
     # Build SET clause from extra fields
@@ -183,7 +183,7 @@ async def update_gig_status(
 
 async def get_gig(config: Config, user_id: str, gig_id: str) -> Gig | None:
     """Load a single gig by ID."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     async with db_session(config) as db:
         cursor = await db.execute(
@@ -203,7 +203,7 @@ async def list_gigs(
     limit: int = 50,
 ) -> list[Gig]:
     """List gigs for a user, optionally filtered by status."""
-    key = derive_server_key(config.server_secret, user_id)
+    key = await get_user_dek(config, user_id)
 
     query = f"SELECT {GIG_SELECT} FROM survival_gigs WHERE user_id = ?"
     params: list = [user_id]

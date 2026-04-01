@@ -601,7 +601,7 @@ async def _handle_read_profile(args: dict) -> list[TextContent]:
         return _text(f"No session for @{username}. Run instagram_setup first.")
 
     info = await asyncio.to_thread(
-        mgr.client.user_info_by_username, target_username
+        mgr.client.user_info_by_username, target_username, False
     )
     profile = {
         "username": str(getattr(info, "username", "")),

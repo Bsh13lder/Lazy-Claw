@@ -107,8 +107,8 @@ class TelegramNotifier:
                             chat_id=int(chat_id), text=msg,
                         )
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to notify Telegram about CLI help request: %s", exc)
         return "skip"
 
     # ── Formatting ───────────────────────────────────────────────────

@@ -107,7 +107,10 @@ class MultiCallback:
                 if await cb.on_approval_request(skill_name, arguments):
                     return True
             except Exception:
-                pass
+                _null_logger.warning(
+                    "MultiCallback: %s.on_approval_request failed",
+                    type(cb).__name__, exc_info=True,
+                )
         return False
 
     async def on_help_request(

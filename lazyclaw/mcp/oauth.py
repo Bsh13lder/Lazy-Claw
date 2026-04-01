@@ -368,8 +368,8 @@ async def run_oauth_flow(
         if backend and target_id:
             try:
                 await backend.close_tab(target_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("OAuth tab close failed (cleanup only): %s", exc)
 
     # 8. Exchange code for tokens
     token_data = await _exchange_code(

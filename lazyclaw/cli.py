@@ -149,7 +149,7 @@ async def run_agent(config: Config) -> None:
         if seeded:
             console.print(f"[green]\u2713[/green] Seeded {seeded} providers into apihunter")
     except Exception:
-        pass
+        pass  # intentional: apihunter is optional, not installed in all setups
 
     # Auto-register + connect bundled MCP servers
     from lazyclaw.mcp.manager import connect_and_register_bundled_mcps
@@ -168,7 +168,7 @@ async def run_agent(config: Config) -> None:
         if eco_mode:
             console.print(f"[green]\u2713[/green] ECO mode: {eco_mode}")
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("ECO mode auto-detect failed", exc_info=True)
 
     permission_checker = PermissionChecker(config, registry)
 
@@ -478,8 +478,8 @@ async def _restart_server() -> None:
     try:
         from lazyclaw.mcp.manager import disconnect_all
         await disconnect_all()
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).debug("MCP cleanup failed during restart: %s", exc)
 
     # Re-exec the current process with same args
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -523,7 +523,7 @@ async def _install_mcps() -> None:
             skipped += 1
             continue
         except ImportError:
-            pass
+            pass  # intentional: module not yet installed, that's the point of this check
 
         # Try local directory first
         pkg_path = root / pkg_dir
@@ -889,7 +889,7 @@ async def _chat_loop() -> None:
         if seeded:
             logging.getLogger(__name__).info("Seeded %d providers into apihunter", seeded)
     except Exception:
-        pass
+        pass  # intentional: apihunter is optional, not installed in all setups
 
     # Auto-register + connect bundled MCP servers
     from lazyclaw.mcp.manager import connect_and_register_bundled_mcps
@@ -905,7 +905,7 @@ async def _chat_loop() -> None:
     try:
         eco_mode = await auto_detect_eco_mode(config, user_id)
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("ECO mode auto-detect failed", exc_info=True)
 
     checker = PermissionChecker(config, registry)
 
@@ -1031,9 +1031,9 @@ def main(ctx: click.Context) -> None:
         try:
             asyncio.run(_chat_loop())
         except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
-            pass  # Clean exit
+            pass  # intentional: clean exit signals, no traceback needed
         except Exception:
-            pass  # Don't show tracebacks on exit
+            pass  # intentional: suppress tracebacks on exit to keep clean UX
         finally:
             # Kill any lingering MCP subprocesses
             try:
@@ -1041,8 +1041,8 @@ def main(ctx: click.Context) -> None:
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(asyncio.wait_for(disconnect_all(), timeout=2))
                 loop.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("MCP cleanup on exit failed: %s", exc)
 
 
 @main.command()
@@ -1245,5 +1245,5 @@ def start() -> None:
             loop = asyncio.new_event_loop()
             loop.run_until_complete(asyncio.wait_for(disconnect_all(), timeout=2))
             loop.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("MCP cleanup on chat exit failed: %s", exc)

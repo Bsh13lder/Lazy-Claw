@@ -885,7 +885,7 @@ class ActivityPanel(VerticalScroll):
             self.query_one(f"#{card_id}", RequestCard)
             return  # Card already exists
         except Exception:
-            pass
+            pass  # intentional: NoMatches expected when card doesn't exist yet
         self._card_compactness[chat_id] = False
         row = self._find_or_create_row(compact=False)
         card = RequestCard(chat_id, message, id=card_id, classes="card-full")
@@ -914,15 +914,15 @@ class ActivityPanel(VerticalScroll):
                 # Clean up empty old row
                 if old_row_id:
                     self._cleanup_empty_row(old_row_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to update request card for %s: %s", chat_id, exc)
 
     def remove_request(self, chat_id: str) -> None:
         try:
             card = self.query_one(f"#req-{chat_id}", RequestCard)
             card.remove()
         except Exception:
-            pass
+            pass  # intentional: NoMatches expected if card was never registered
         row_id = self._card_rows.pop(chat_id, None)
         self._card_compactness.pop(chat_id, None)
         if row_id:
@@ -942,7 +942,7 @@ class ActivityPanel(VerticalScroll):
             if not row.query(RequestCard):
                 row.remove()
         except Exception:
-            pass
+            pass  # intentional: NoMatches expected if row was already removed
 
 
 class LogPanel(RichLog):
@@ -1565,7 +1565,7 @@ class LazyClawApp(App):
             if isinstance(skill, TodoWriteSkill):
                 skill._todo_manager = self.todo_manager
         except Exception:
-            pass
+            pass  # intentional: todo_write skill is optional
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1610,7 +1610,7 @@ class LazyClawApp(App):
             eco = await get_eco_settings(self._config, self._user_id)
             self._eco_budget = eco.get("monthly_paid_budget", 5.0) or 5.0
         except Exception:
-            pass
+            logger.debug("Failed to load ECO budget setting", exc_info=True)
 
     @work(exclusive=True, name="services")
     async def _launch_services(self) -> None:
@@ -1736,8 +1736,8 @@ class LazyClawApp(App):
                     ws_url = await backend._auto_launch_chrome()
                     if ws_url:
                         self._post_log("info", "Persistent browser running")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Persistent browser setup failed: %s", exc)
 
     async def _auto_start_mlx(self) -> None:
         """Auto-start MLX worker server if ECO mode is HYBRID and no server running."""
@@ -1773,7 +1773,7 @@ class LazyClawApp(App):
                     )
                     return
             except Exception:
-                pass  # RAM check failed, try starting anyway
+                pass  # intentional: RAM check failed, try starting MLX anyway
 
             # Start MLX worker
             models = get_mode_models("hybrid")
@@ -1820,8 +1820,8 @@ class LazyClawApp(App):
                 stdout, _ = await proc.communicate()
                 extra_mb = float(stdout.decode().strip() or "0")
                 mem_mb += extra_mb
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to measure browser/ollama memory: %s", exc)
 
             queue_depth = sum(
                 q.qsize() for q in self._lane_queue._lanes.values()
@@ -1833,8 +1833,8 @@ class LazyClawApp(App):
             try:
                 from lazyclaw.mcp.manager import _active_clients
                 mcp_count = len(_active_clients)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to count active MCP clients: %s", exc)
 
             # Browser
             port = getattr(self._config, "cdp_port", 9222)
@@ -1852,8 +1852,8 @@ class LazyClawApp(App):
                             if resp.status == 200:
                                 tabs = await resp.json()
                                 browser_tabs = len(tabs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to count browser tabs: %s", exc)
 
             user_id = self._user_id
             browser_cfg = await get_browser_settings(self._config, user_id)
@@ -1906,7 +1906,7 @@ class LazyClawApp(App):
                 jobs_bar = self.query_one("#jobs-bar", JobsBar)
                 jobs_bar.render_jobs(cron_jobs_list, watchers_list)
             except Exception:
-                pass
+                pass  # intentional: NoMatches if jobs bar not yet mounted
 
             telegram_status = "connected" if self._telegram_connected else "disconnected"
 
@@ -1928,8 +1928,8 @@ class LazyClawApp(App):
                 worker_profile = get_model(worker_id)
                 brain_model_name = brain_profile.display_name if brain_profile else brain_id.split("/")[-1]
                 worker_model_name = worker_profile.display_name if worker_profile else worker_id.split(":")[0]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to load ECO model names for stats bar: %s", exc)
             try:
                 eco_router = getattr(self._agent, "eco_router", None)
                 if eco_router:
@@ -1940,8 +1940,8 @@ class LazyClawApp(App):
                         # Override worker display name if Ollama has models loaded
                         if running:
                             worker_model_name = running[0]["name"]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to get Ollama model names for stats bar: %s", exc)
 
             # RAM monitor — always collect, never block
             ram_pct = 0.0
@@ -1992,7 +1992,7 @@ class LazyClawApp(App):
                     budget=self._eco_budget,
                 )
             except Exception:
-                pass
+                pass  # intentional: NoMatches if cost bar not yet mounted
 
             # Update AI routing bar (from eco_router stats)
             try:
@@ -2004,17 +2004,17 @@ class LazyClawApp(App):
                         budget=self._eco_budget,
                     )
             except Exception:
-                pass
+                pass  # intentional: NoMatches if routing bar not yet mounted
 
             # Update TeamLead bar (live task tracker)
             try:
                 tl_bar = self.query_one("#team-lead-bar", TeamLeadBar)
                 tl_bar.render_status(self._team_lead)
             except Exception:
-                pass
+                pass  # intentional: NoMatches if team-lead bar not yet mounted
 
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("_refresh_stats failed: %s", exc)
 
     # ── Message handlers ─────────────────────────────────────────────
 
@@ -2050,7 +2050,7 @@ class LazyClawApp(App):
             else:
                 widget.remove_class("visible")
         except Exception:
-            pass
+            pass  # intentional: NoMatches if todo widget not yet mounted
 
     # ── Focus actions ─────────────────────────────────────────────────
 
@@ -2442,7 +2442,7 @@ class LazyClawApp(App):
             try:
                 ctx = json.loads(w.get("context", "{}"))
             except Exception:
-                pass
+                pass  # intentional: context may be empty or malformed, default {} is fine
             url = ctx.get("url", "?")
             self._post_log("info", f"  {w.get('name', '?')} | {url}")
 
@@ -2500,8 +2500,8 @@ class LazyClawApp(App):
                 await mlx.stop_all()
             from lazyclaw.db.connection import close_pool
             await close_pool()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Cleanup on quit failed: %s", exc)
         self.exit()
 
     async def _persist_daily_cost(self) -> None:

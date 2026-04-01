@@ -79,6 +79,6 @@ async def close_pool() -> None:
         try:
             await conn.close()
             logger.debug("Closed pooled DB connection: %s", db_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to close pooled DB connection %s: %s", db_path, exc)
     _pool.clear()

@@ -193,8 +193,8 @@ def _to_llm_messages(messages: list[dict]) -> list[LLMMessage]:
                     ToolCall(id=tc["id"], name=tc["name"], arguments=tc["arguments"])
                     for tc in tc_list
                 ]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                logger.debug("Failed to parse tool_calls metadata, skipping: %s", exc)
 
         result.append(LLMMessage(
             role=m["role"],

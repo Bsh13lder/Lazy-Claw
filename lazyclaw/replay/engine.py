@@ -109,7 +109,7 @@ async def get_trace_by_token(
             if datetime.now(timezone.utc) > exp:
                 return None
         except ValueError:
-            pass
+            pass  # intentional: malformed expires_at timestamp, treat as not expired
 
     entries = await get_trace(config, user_id, trace_session_id)
     return entries, user_id

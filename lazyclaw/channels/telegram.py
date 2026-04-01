@@ -135,11 +135,11 @@ class _TelegramCallback:
                             chat_id=self._chat_id,
                             action=ChatAction.TYPING,
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Typing indicator send failed: %s", exc)
                     await asyncio.sleep(_TYPING_INTERVAL_S)
             except asyncio.CancelledError:
-                pass
+                pass  # intentional: typing keepalive cancelled on stop
 
         self._typing_task = asyncio.create_task(_keepalive())
 
@@ -150,7 +150,7 @@ class _TelegramCallback:
             try:
                 await self._typing_task
             except (asyncio.CancelledError, Exception):
-                pass
+                pass  # intentional: cancelled task cleanup, exception is expected
         self._typing_task = None
 
     # ── Delayed status message ────────────────────────────────────────
@@ -166,7 +166,7 @@ class _TelegramCallback:
                 if self.busy:
                     await self._update_status(force=True)
             except asyncio.CancelledError:
-                pass
+                pass  # intentional: delay cancelled if response arrived quickly
 
         self._status_delay_task = asyncio.create_task(_delayed_send())
 
@@ -269,8 +269,8 @@ class _TelegramCallback:
                     chat_id=self._chat_id, text=text,
                 )
             self._last_edit_time = now
-        except Exception:
-            pass  # Telegram edit can fail if text unchanged
+        except Exception as exc:
+            logger.debug("Status message edit failed (ok if text unchanged): %s", exc)
 
     async def _delete_status(self) -> None:
         """Delete the status message."""
@@ -278,8 +278,8 @@ class _TelegramCallback:
         if self._status_msg:
             try:
                 await self._status_msg.delete()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Status message delete failed: %s", exc)
             self._status_msg = None
 
     # ── Footer builder ────────────────────────────────────────────────
@@ -469,8 +469,8 @@ class _TelegramCallback:
                         chat_id=self._chat_id, text=text,
                     )
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to send background_done notification: %s", exc)
             # Signal dispatch complete so adapter can clean up
             self.dispatched = False
             self.busy = False
@@ -485,8 +485,8 @@ class _TelegramCallback:
                         chat_id=self._chat_id, text=text,
                     )
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to send background_failed notification: %s", exc)
             # Signal dispatch complete so adapter can clean up
             self.dispatched = False
             self.busy = False

@@ -59,7 +59,7 @@ def _parse_llm_response(content: str) -> dict:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        pass
+        pass  # intentional: fallback to brace-search extraction below
 
     # Try to find JSON object in the text
     brace_match = re.search(r"\{.*\}", content, re.DOTALL)
@@ -67,7 +67,7 @@ def _parse_llm_response(content: str) -> dict:
         try:
             return json.loads(brace_match.group(0))
         except json.JSONDecodeError:
-            pass
+            pass  # intentional: both parse attempts failed, raise ValueError below
 
     raise ValueError("Could not parse JSON from LLM response")
 

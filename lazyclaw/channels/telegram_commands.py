@@ -226,8 +226,8 @@ class TelegramCommands:
             return
         try:
             await update.message.delete()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to delete /key message (may already be gone): %s", exc)
 
         args = context.args or []
         user_id = await self._resolve_user(chat_id)
@@ -620,7 +620,8 @@ class TelegramCommands:
         try:
             from lazyclaw.mcp.manager import _active_clients
             checks.append(f"\u2705 MCP: {len(_active_clients)} connected")
-        except Exception:
+        except Exception as exc:
+            logger.debug("MCP status check failed: %s", exc)
             checks.append("\u26a0\ufe0f MCP: unavailable")
         checks.append(f"\u2705 Telegram: OK")
         await self._reply(update, "\U0001fa7a <b>Diagnostics</b>\n━━━━━━━━━━━━\n" + "\n".join(checks))
@@ -715,8 +716,8 @@ class TelegramCommands:
                                 )]
                             )
                     sections.append("\n".join(task_lines))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to list task runner tasks: %s", exc)
 
         # Watcher jobs (WhatsApp, Email, etc.)
         try:

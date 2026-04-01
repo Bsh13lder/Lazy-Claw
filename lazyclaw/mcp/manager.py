@@ -161,7 +161,7 @@ async def install_bundled_mcp(name: str) -> tuple[bool, str]:
                 importlib.import_module(info["module"])
                 return True, f"{mcp_key} is already installed"
             except ImportError:
-                pass
+                pass  # intentional: module not yet installed — that's the whole point of this check
 
             pip_cmd = [sys.executable, "-m", "pip", "install"]
             pkg_path = root / mcp_key

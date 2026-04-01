@@ -211,8 +211,8 @@ class DelegateSkill(BaseSkill):
                     domain, sum(len(v) for v in memories.values()),
                 )
                 return knowledge
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to load site knowledge for domain: %s", exc)
 
         return ""
 

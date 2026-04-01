@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderListSkill(BaseSkill):
@@ -217,8 +221,8 @@ class ProviderScanSkill(BaseSkill):
                     for entry in entries[:20]:
                         model_count = len(entry.models) if entry.models else 0
                         lines.append(f"  - {entry.name} ({model_count} models)")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to list active providers from apihunter: %s", exc)
 
             return "\n".join(lines)
         except ImportError:

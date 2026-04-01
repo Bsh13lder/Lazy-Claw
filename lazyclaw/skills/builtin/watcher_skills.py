@@ -341,7 +341,7 @@ class ListWatchersSkill(BaseSkill):
             try:
                 ctx = json.loads(w.get("context", "{}"))
             except (json.JSONDecodeError, TypeError):
-                pass
+                pass  # intentional: malformed context JSON, default {} is fine
 
             interval = ctx.get("check_interval", 300) // 60
             expires = ctx.get("expires_at", "never")

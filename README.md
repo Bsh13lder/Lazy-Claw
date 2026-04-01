@@ -132,8 +132,9 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 Every piece of user content is encrypted before storage. The server never holds plaintext.
 
 ```
-Registration → random salt per user
-Key derivation → PBKDF2(password, salt, 100K iterations, SHA-256) → AES-256 key
+Registration → random salt + BIP-39 recovery phrase per user
+Key derivation → PBKDF2(password, salt, 600K iterations, SHA-256) → per-user DEK
+Envelope encryption → DEK stored encrypted with server master key
 Storage format → enc:v1:<base64-nonce>:<base64-ciphertext>
 ```
 
@@ -141,7 +142,9 @@ Storage format → enc:v1:<base64-nonce>:<base64-ciphertext>
 
 **Plaintext** (needed for queries): IDs, timestamps, status flags, cron expressions, domain names.
 
-Server-side operations (cron jobs, background tasks) derive keys from `PBKDF2(SERVER_SECRET + user_id, fixed_salt)` — the server secret never leaves memory.
+**Recovery phrase:** A BIP-39 mnemonic is generated at registration. Users can re-derive their key from the phrase if they forget their password — the server never stores the plaintext key.
+
+Server-side operations (cron jobs, background tasks) derive keys from `PBKDF2(SERVER_SECRET + user_id, fixed_salt, 600K)` — the server secret never leaves memory.
 
 ## Features
 
@@ -181,12 +184,14 @@ Two-tier cost routing with brain/worker model split:
 
 | Mode | Brain | Worker | Fallback | Cost |
 |------|-------|--------|----------|------|
-| **HYBRID** (default) | Haiku 4.5 | Nanbeige 3B (local, $0) | Haiku 4.5 | Low |
-| **FULL** | User-settable (Sonnet) | User-settable (Haiku) | User-settable (Opus) | Normal |
+| **HYBRID** (default) | Haiku 4.5 | Nanbeige 3B (Ollama MLX, $0) | Haiku 4.5 | Low |
+| **FULL** | Sonnet 4.6 | Haiku 4.5 | Opus | Normal |
 
 The brain handles orchestration, workers handle simple tasks. Complexity detection uses regex heuristics (no extra LLM call). User-configurable model assignments and monthly budget caps.
 
 Also supports **Claude CLI mode** — route all LLM calls through `claude -p` for $0 cost (covered by Claude Code subscription).
+
+**Agent Skills compatible** — skills written in Claude Code agent format (YAML + markdown) can be imported directly via `lazyclaw skill import`.
 
 ## Browser
 
@@ -205,7 +210,7 @@ CDP-based control of the user's real Brave/Chrome browser. No separate Chromium 
 
 First-class MCP support — both client and server.
 
-**As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 10 servers instead of sequential). Auto-install from Telegram via `/mcp install`.
+**As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 10 servers instead of sequential). Auto-install from Telegram via `/mcp install`. Works with n8n MCP Server Trigger — expose n8n workflows as agent tools ([integration guide](docs/integrations/n8n.md)).
 
 **As server:** Expose LazyClaw tools to any MCP-compatible client via SSE.
 
@@ -304,6 +309,11 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] Ref-ID browser snapshots (95% token reduction)
 - [x] Lazy MCP loading with favorites + idle timeout
 - [x] Survival mode (job hunting, browser automation)
+- [x] TAOR loop with parallel tool execution
+- [x] Per-user DEK with envelope encryption (600K PBKDF2 iterations)
+- [x] BIP-39 recovery phrase at registration
+- [x] Agent Skills compatibility (import Claude Code skills)
+- [x] n8n integration via MCP Server Trigger
 - [ ] WebSocket streaming for real-time Web UI chat
 - [ ] Skill Hub — universal skill/MCP registry (cross-framework)
 - [ ] More channels (Discord, Signal, SimpleX)

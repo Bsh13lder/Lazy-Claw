@@ -542,6 +542,9 @@ async function startWhatsApp(force = false) {
         if (isGroupChat && !chat.name) {
           _resolveGroupName(chat.id);
         }
+      } else if (chat.name && !contacts.get(chat.id).name) {
+        // Update existing contact that has no name yet (e.g. group first seen via messages.upsert)
+        contacts.get(chat.id).name = chat.name;
       }
       // Track mute — Baileys protobuf field is "muteEndTime" (uint64)
       // Also check all known mute field variants for safety
@@ -603,6 +606,9 @@ async function startWhatsApp(force = false) {
         if (isGroupChat && !chat.name) {
           _resolveGroupName(jid);
         }
+      } else if (chat.name && !contacts.get(jid).name) {
+        // Update existing contact that has no name yet
+        contacts.get(jid).name = chat.name;
       }
       const rawUpsertMute = chat.muteEndTime ?? chat.muteExpiration ?? chat.mute ?? null;
       const chatMuteVal = toMuteNumber(rawUpsertMute);
@@ -751,7 +757,10 @@ function _resolveGroupName(jid) {
 
 /** Check if a chat is currently muted. */
 function _isChatMuted(jid) {
-  const muteExpiry = mutedChats.get(jid);
+  // Normalize JID before lookup — message remoteJid may include session suffix
+  // (e.g. "34664476256:18@s.whatsapp.net") while mutedChats keys are normalized
+  const normalizedJid = normalizeJid(jid);
+  const muteExpiry = mutedChats.get(normalizedJid);
   if (muteExpiry == null) return false;
   if (muteExpiry === -1) return true; // muted forever
   if (muteExpiry > 0) return muteExpiry > Date.now() / 1000; // muted until timestamp

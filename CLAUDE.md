@@ -102,6 +102,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Teams** | `teams/` | Specialists (browser, research, code) + delegate skill + parallel execution |
 | **Replay** | `replay/` | Session trace recording, playback, shareable tokens |
 | **Task Runner** | `runtime/task_runner.py` | Background parallel task execution with Telegram push notifications |
+| **TAOR Loop** | `runtime/taor.py` | Think-Act-Observe-Reflect agent loop with parallel tool execution |
 
 Supporting: `llm/` (multi-provider router + ECO mode + complexity routing), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool).
 
@@ -126,9 +127,11 @@ Default port: **18789**. MCP servers run standalone via `python -m mcp_freeride`
 All user content encrypted before storage. Server never sees plaintext.
 
 - Registration generates random `encryption_salt` per user
-- Key derivation: `PBKDF2(password, salt, 100k iterations, SHA-256)` -> AES-256
+- Key derivation: `PBKDF2(password, salt, 600k iterations, SHA-256)` → per-user DEK (Data Encryption Key)
+- Envelope encryption: DEK itself stored encrypted with server master key
 - Storage format: `enc:v1:<base64-nonce>:<base64-ciphertext>`
-- Server-side key for daemon ops: `PBKDF2(SERVER_SECRET + user_id, fixed_salt, 100k)`
+- Server-side key for daemon ops: `PBKDF2(SERVER_SECRET + user_id, fixed_salt, 600k)`
+- **Recovery phrase**: BIP-39 mnemonic generated at registration — user can re-derive their key
 - **Encrypted**: conversations, memory, skills, vault, jobs, channel configs
 - **Plaintext** (needed for queries): IDs, timestamps, status, cron expressions, domains
 
@@ -142,7 +145,7 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
 - **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
 - **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
-- **ECO v3 routing**: Three modes, 3 roles (Brain=Team Lead, Worker, Fallback). ECO ON: Haiku brain + Nanbeige worker ($0) + Sonnet fallback (ask permission). HYBRID: same models, auto-fallback. FULL: Sonnet brain + Haiku worker + Opus fallback. All models from `MODE_MODELS` dict in `model_registry.py`. `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER).
+- **ECO v3 routing**: Three modes, 3 roles (Brain=Team Lead, Worker, Fallback). ECO ON: Haiku 4.5 brain + Nanbeige worker ($0) + Sonnet fallback (ask permission). HYBRID: same, auto-fallback to Haiku 4.5 on local failure; Nanbeige via Ollama MLX. FULL: Sonnet 4.6 brain + Haiku 4.5 worker + Opus fallback. All models from `MODE_MODELS` dict in `model_registry.py`. `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER).
 - **MLX backend**: `mlx_provider.py` for Apple Silicon local inference. `mlx_manager.py` manages server lifecycle. Auto `/no_think` for Qwen models. `<think>` tag stripping for Nanbeige.
 - **RAM monitor**: `ram_monitor.py` tracks system + AI model memory. `/ram` Telegram command. TUI status bar shows RAM %. Uses macOS `memory_pressure` for accurate free %.
 - **Telegram /local command**: `/local on|off|worker|brain|restart` — start/stop MLX servers, auto-switches ECO mode.
@@ -163,6 +166,11 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **CancellationToken**: Cooperative cancellation from CLI → agent → specialists. Double Ctrl+C support.
 - **ECO mode**: Three modes (eco_on/hybrid/off). ECO ON = Haiku brain + Nanbeige workers ($0). HYBRID = same, auto-fallback. FULL = Sonnet brain + Haiku workers + Opus fallback.
 - **Token tracking**: OpenAI streaming reads usage chunk after finish_reason. Anthropic field names normalized.
+- **TAOR loop**: Think-Act-Observe-Reflect cycle in `taor.py`. Parallel tool execution via `asyncio.gather`. Tools run concurrently when independent; results merged before next think step.
+- **Context compaction**: 5-layer memory stack — live messages → sliding window (15 msgs full) → daily summary → weekly rollup → long-term facts. Each layer injected into context at build time. Never re-summarizes mid-session.
+- **5-layer memory**: Conversation history, compressed summaries, daily logs, weekly rollups, encrypted personal facts. All layers merged in `context_builder.py`.
+- **TodoWrite widget**: TUI task list rendered live in status bar. Agent marks items complete via `todo_write` tool during execution. User sees progress without interrupting the agent.
+- **Agent Skills compatibility**: Skills authored in Claude Code agent format (YAML frontmatter + markdown body) are importable via `lazyclaw skill import`. LazyClaw parses the skill description and maps it to an Instruction skill automatically.
 
 ## Git Commit Rules
 

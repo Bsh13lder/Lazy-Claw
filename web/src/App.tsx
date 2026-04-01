@@ -42,7 +42,7 @@ function AppContent() {
       case "memory": return <Memory />;
       case "vault": return <Vault />;
       case "settings": return <Settings />;
-      default: return <Overview />;
+      default: return <Overview onNavigate={setPage} />;
     }
   })();
 

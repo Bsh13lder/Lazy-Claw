@@ -647,6 +647,9 @@ class Agent:
             self.registry.register(delegate_skill)
             _delegate_registered = True
 
+        # Initialize channel state (used by tool nudge later, must exist for all paths)
+        _matched_channels: list[str] = []
+
         # Meta-tool pattern: send only base tools (search_tools, memory, delegate).
         # LLM discovers other tools on demand via search_tools → schemas injected dynamically.
         # Channel detection: if message mentions whatsapp/instagram/email, prefer MCP tools over browser.

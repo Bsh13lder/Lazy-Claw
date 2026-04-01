@@ -23,6 +23,7 @@
   <a href="#eco-mode">ECO Mode</a> &bull;
   <a href="#browser">Browser</a> &bull;
   <a href="#mcp">MCP</a> &bull;
+  <a href="#integrations">Integrations</a> &bull;
   <a href="#telegram">Telegram</a> &bull;
   <a href="#roadmap">Roadmap</a>
 </p>
@@ -49,6 +50,7 @@ LazyClaw takes a different approach:
 | **Cost routing** | Brain/Worker model split (Sonnet + Haiku) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
 | **MCP** | Native client + server + 10 bundled servers | Community plugins |
+| **Integrations** | Activepieces (450+ apps, self-hosted, MIT) via MCP | Manual API wiring |
 | **Channels** | Telegram + WhatsApp + Instagram + Email MCPs | Browser-only for most |
 | **Web UI** | React control panel (8 pages) | Varies |
 | **Language** | Python (largest AI ecosystem) | TypeScript |
@@ -210,7 +212,7 @@ CDP-based control of the user's real Brave/Chrome browser. No separate Chromium 
 
 First-class MCP support — both client and server.
 
-**As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 10 servers instead of sequential). Auto-install from Telegram via `/mcp install`. Works with n8n MCP Server Trigger — expose n8n workflows as agent tools ([integration guide](docs/integrations/n8n.md)).
+**As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 10 servers instead of sequential). Auto-install from Telegram via `/mcp install`. Works with Activepieces MCP — expose 450+ app automations as agent tools ([integration guide](docs/integrations/activepieces.md)).
 
 **As server:** Expose LazyClaw tools to any MCP-compatible client via SSE.
 
@@ -228,6 +230,31 @@ First-class MCP support — both client and server.
 | `mcp-whatsapp` | WhatsApp messaging via web protocol. QR auth, no API needed. |
 | `mcp-email` | Send/read/search email via SMTP+IMAP. Gmail, Outlook, any provider. |
 | `mcp-jobspy` | Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google. |
+
+## Integrations
+
+### Activepieces — 450+ App Automations
+
+> **LazyClaw + Activepieces = encrypted AI agent with 450+ app integrations, fully self-hosted.**
+
+[Activepieces](https://activepieces.com) is a self-hosted, MIT-licensed automation platform (open-source Zapier alternative) with 450+ app connectors. Connect it to LazyClaw via MCP and the agent gains instant access to every integration: Slack, Google Sheets, Notion, Airtable, GitHub, Stripe, HubSpot, and hundreds more.
+
+**Quick start:**
+
+```bash
+docker compose -f docker-compose.activepieces.yml up -d
+```
+
+Then connect from LazyClaw:
+
+```
+You: connect to Activepieces
+Bot: ✅ Connected — 450+ app automations available as tools
+```
+
+See [docs/integrations/activepieces.md](docs/integrations/activepieces.md) for the full setup guide including webhook triggers, flow examples, and two-way communication patterns.
+
+---
 
 ## Telegram
 
@@ -313,7 +340,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] Per-user DEK with envelope encryption (600K PBKDF2 iterations)
 - [x] BIP-39 recovery phrase at registration
 - [x] Agent Skills compatibility (import Claude Code skills)
-- [x] n8n integration via MCP Server Trigger
+- [x] Activepieces integration (450+ app automations via MCP, self-hosted, MIT)
 - [ ] WebSocket streaming for real-time Web UI chat
 - [ ] Skill Hub — universal skill/MCP registry (cross-framework)
 - [ ] More channels (Discord, Signal, SimpleX)

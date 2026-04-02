@@ -158,9 +158,10 @@ _SURVIVAL_TOOL_NAMES = frozenset({
 })
 
 # n8n workflow automation — TIGHT keywords only to avoid false positives
+# "watch for" removed — overlaps with watch_messages/watch_site in _BASE_TOOL_NAMES
 _N8N_KEYWORDS = frozenset({
     "n8n", "automate", "automation", "every day at", "every morning",
-    "when i get", "automatically", "watch for", "set up a flow",
+    "when i get", "automatically", "set up a flow",
     "recurring", "auto post", "workflow",
 })
 
@@ -904,6 +905,16 @@ class Agent:
                         "n8n/automation keywords detected — %d n8n tools injected",
                         len(_n8n_tools),
                     )
+                # n8n wins over raw channel MCP tools — suppress channel injection
+                # to avoid ambiguous tool sets (e.g. "automate email notifications"
+                # matching both email MCP and n8n).
+                if _matched_channels:
+                    logger.info(
+                        "n8n detected with channel keywords %s — suppressing channel injection",
+                        _matched_channels,
+                    )
+                    _matched_channels = []
+                    _channel_tools = []
 
             # Build base tools + conditionally add browser.
             # When channel MCP tools dominate, trim base set to reduce noise.

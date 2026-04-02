@@ -3,6 +3,7 @@ services:
     build: .
     container_name: lazyclaw
     restart: unless-stopped
+    mem_limit: 1g
     ports:
       - "18789:18789"
     env_file: .env
@@ -16,6 +17,7 @@ services:
       dockerfile: Dockerfile
     container_name: lazyclaw-web
     restart: unless-stopped
+    mem_limit: 256m
     ports:
       - "3001:80"
 
@@ -23,6 +25,7 @@ services:
     image: n8nio/n8n:latest
     container_name: lazyclaw-n8n
     restart: unless-stopped
+    mem_limit: 1g
     ports:
       - "5678:5678"
     environment:

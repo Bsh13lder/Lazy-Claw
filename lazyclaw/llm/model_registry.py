@@ -34,15 +34,15 @@ class ModelProfile:
 MODE_MODELS: dict[str, dict[str, str]] = {
     "hybrid": {
         # Sonnet 4.6 brain (paid) + Nanbeige via Ollama (free local worker)
-        "brain":    "claude-sonnet-4-20250514",
+        "brain":    "claude-sonnet-4-6-20250514",
         "worker":   "nanbeige4.1:3b",
         "fallback": "claude-haiku-4-5-20251001",
     },
     "full": {
         # All-Claude paid tier: Sonnet brain + Haiku workers
-        "brain":    "claude-sonnet-4-20250514",
+        "brain":    "claude-sonnet-4-6-20250514",
         "worker":   "claude-haiku-4-5-20251001",
-        "fallback": "claude-sonnet-4-20250514",
+        "fallback": "claude-sonnet-4-6-20250514",
     },
     "claude": {
         "brain":    "claude-cli",
@@ -64,7 +64,7 @@ def get_mode_models(mode: str) -> dict[str, str]:
 # ── Backward-compat aliases (used by imports, remove later) ──────────
 # Note: HYBRID brain is now Sonnet 4.6 (paid API), worker is Ollama Nanbeige
 
-BRAIN_MODEL = MODE_MODELS["hybrid"]["brain"]     # claude-sonnet-4-20250514
+BRAIN_MODEL = MODE_MODELS["hybrid"]["brain"]     # claude-sonnet-4-6-20250514
 WORKER_MODEL = MODE_MODELS["hybrid"]["worker"]   # nanbeige4.1:3b (Ollama)
 FALLBACK_MODEL = MODE_MODELS["hybrid"]["fallback"]
 PAID_BRAIN_MODEL = MODE_MODELS["full"]["brain"]
@@ -243,8 +243,8 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
     ),
 
     # ── PAID — Claude (fallback + ECO OFF) ────────────────────────────
-    "claude-sonnet-4-20250514": ModelProfile(
-        name="claude-sonnet-4-20250514",
+    "claude-sonnet-4-6-20250514": ModelProfile(
+        name="claude-sonnet-4-6-20250514",
         display_name="Sonnet 4.6",
         provider="anthropic",
         is_local=False,

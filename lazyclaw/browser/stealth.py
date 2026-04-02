@@ -309,7 +309,7 @@ async def _wait_for_resolution(conn, timeout: float = 20.0) -> bool:
                 return True
 
         except Exception:
-            pass
+            logger.warning("Error while polling Cloudflare challenge status", exc_info=True)
 
         await asyncio.sleep(interval)
         elapsed += interval

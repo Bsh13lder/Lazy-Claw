@@ -142,7 +142,7 @@ class CDPBackend:
             await kill_proc.wait()
             await asyncio.sleep(0.5)
         except Exception:
-            pass
+            logger.warning("Failed to kill existing browser process on port %d", self._port, exc_info=True)
 
         # Use shared profile dir (same as Playwright) for cookie sharing,
         # or fall back to a persistent temp dir
@@ -256,7 +256,7 @@ class CDPBackend:
             await wait_for_page_ready(conn, timeout=5.0)
             await detect_and_solve_cloudflare(conn, timeout=20.0)
         except Exception:
-            pass
+            logger.warning("Page ready / Cloudflare detection failed after navigation", exc_info=True)
 
     async def current_url(self) -> str:
         conn = await self._ensure_connected()
@@ -910,7 +910,7 @@ async def restart_browser_with_cdp(
             )
             await proc.wait()
         except Exception:
-            pass
+            logger.warning("Failed to pkill browser process matching %r", pattern, exc_info=True)
 
     await asyncio.sleep(1.5)  # Wait for graceful shutdown
 
@@ -923,7 +923,7 @@ async def restart_browser_with_cdp(
                 if os.path.exists(lock_path) or os.path.islink(lock_path):
                     os.unlink(lock_path)
             except OSError:
-                pass
+                logger.warning("Could not remove stale profile lock %s", lock_path)
 
     # Relaunch VISIBLE browser with CDP
     from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS

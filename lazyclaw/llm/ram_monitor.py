@@ -194,7 +194,7 @@ def _get_model_name_for_port(port: int) -> str | None:
                 name = name.replace("-", " ").strip()
                 return name
     except Exception:
-        pass
+        logger.warning("Failed to get MLX model name from process list", exc_info=True)
     return None
 
 
@@ -210,6 +210,7 @@ async def _get_total_ram() -> int:
         stdout, _ = await result.communicate()
         return int(stdout.strip()) // (1024 * 1024)
     except Exception:
+        logger.warning("Failed to get total RAM via sysctl", exc_info=True)
         return 0
 
 
@@ -282,7 +283,7 @@ async def _get_ram_breakdown(total: int) -> dict[str, int]:
             "cached_mb": _to_mb(cached_pages),
         }
     except Exception:
-        pass
+        logger.warning("Failed to parse vm_stat output for RAM breakdown", exc_info=True)
 
     # Fallback: memory_pressure percentage (no breakdown)
     try:
@@ -299,7 +300,7 @@ async def _get_ram_breakdown(total: int) -> dict[str, int]:
                 free_pct = int(pct_str)
                 return {**zeroes, "available_mb": total * free_pct // 100}
     except Exception:
-        pass
+        logger.warning("Failed to parse memory_pressure output for RAM breakdown fallback", exc_info=True)
 
     return zeroes
 
@@ -315,7 +316,7 @@ def _get_process_rss(pid: int) -> int:
             # ps reports RSS in KB
             return int(result.stdout.strip()) // 1024
     except Exception:
-        pass
+        logger.warning("Failed to get RSS for pid %d via ps", pid, exc_info=True)
     return 0
 
 
@@ -331,7 +332,7 @@ async def _get_process_rss_by_port(port: int) -> int:
         if pids and pids[0]:
             return _get_process_rss(int(pids[0]))
     except Exception:
-        pass
+        logger.warning("Failed to get RSS for process on port %d", port, exc_info=True)
     return 0
 
 
@@ -350,7 +351,7 @@ async def _get_process_rss_by_name(name: str) -> int:
                 total += _get_process_rss(int(pid_str.strip()))
         return total
     except Exception:
-        pass
+        logger.warning("Failed to get RSS for process %r by name", name, exc_info=True)
     return 0
 
 

@@ -159,6 +159,7 @@ class CDPConnection:
             try:
                 await self._listener_task
             except asyncio.CancelledError:
+                # Intentional: task was cancelled as part of close()
                 pass
             self._listener_task = None
 
@@ -166,7 +167,7 @@ class CDPConnection:
             try:
                 await self._ws.close()
             except Exception:
-                pass
+                logger.warning("Failed to cleanly close CDP WebSocket", exc_info=True)
             self._ws = None
 
         # Resolve any pending futures with error
@@ -199,6 +200,7 @@ class CDPConnection:
                 # handlers later if needed (e.g., Page.loadEventFired)
 
         except asyncio.CancelledError:
+            # Intentional: listener task cancelled during close()
             pass
         except Exception as exc:
             logger.debug("CDP listener error: %s", exc)

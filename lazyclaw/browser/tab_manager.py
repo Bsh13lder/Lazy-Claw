@@ -256,7 +256,7 @@ class TabManager:
                 try:
                     await old_lease.context.close()
                 except Exception:
-                    pass
+                    logger.warning("Failed to close evicted tab context for domain %s", oldest_domain, exc_info=True)
                 return await self._create_and_lease(url, domain, specialist_id)
 
             raise RuntimeError(
@@ -274,7 +274,7 @@ class TabManager:
                 try:
                     await lease.context.close()
                 except Exception:
-                    pass
+                    logger.warning("Failed to close tab context for domain %s during release", domain, exc_info=True)
                 self._leases.pop(domain, None)
                 for fut in self._waiters.pop(domain, []):
                     if not fut.done():
@@ -321,7 +321,7 @@ class TabManager:
                 try:
                     await lease.context.close()
                 except Exception:
-                    pass
+                    logger.warning("Failed to close tab context during TabManager cleanup", exc_info=True)
             self._leases.clear()
             for futs in self._waiters.values():
                 for fut in futs:

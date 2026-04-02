@@ -293,7 +293,7 @@ async def complete_task(
                 try:
                     tags = json.loads(task["tags"])
                 except (json.JSONDecodeError, TypeError):
-                    pass
+                    logger.warning("Could not parse tags JSON for task %r; skipping tags", task.get("title"))
 
             await create_task(
                 config, user_id,

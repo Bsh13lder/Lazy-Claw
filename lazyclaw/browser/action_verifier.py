@@ -351,18 +351,18 @@ async def capture_state(
         try:
             url = await backend.current_url() or ""
         except Exception:
-            pass
+            logger.warning("Failed to get current URL from CDP backend", exc_info=True)
         try:
             title = await backend.title() or ""
         except Exception:
-            pass
+            logger.warning("Failed to get page title from CDP backend", exc_info=True)
 
     # Content hash: one CDP evaluate() — cheap and reliable
     content_text = ""
     try:
         content_text = await backend.evaluate(_JS_CONTENT_TEXT) or ""
     except Exception:
-        pass
+        logger.warning("Failed to evaluate content text JS for state capture", exc_info=True)
 
     return BrowserState(
         url=url,
@@ -393,11 +393,11 @@ async def capture_state_fresh(
     try:
         url = await backend.current_url() or ""
     except Exception:
-        pass
+        logger.warning("Failed to get current URL for fresh state capture", exc_info=True)
     try:
         title = await backend.title() or ""
     except Exception:
-        pass
+        logger.warning("Failed to get page title for fresh state capture", exc_info=True)
 
     # Element counts from current snapshot (may be fresh after action methods took one)
     snap = snapshot_manager.current
@@ -414,7 +414,7 @@ async def capture_state_fresh(
     try:
         content_text = await backend.evaluate(_JS_CONTENT_TEXT) or ""
     except Exception:
-        pass
+        logger.warning("Failed to evaluate content text JS for fresh state capture", exc_info=True)
 
     return BrowserState(
         url=url,

@@ -195,7 +195,7 @@ def _extract_json_objects(raw: str) -> list[dict]:
                             obj = json.loads(cleaned[start : j + 1])
                             objects.append(obj)
                         except json.JSONDecodeError:
-                            pass
+                            logger.debug("Skipping malformed JSON object in Claude CLI output at offset %d", start)
                         i = j + 1
                         break
             else:
@@ -384,7 +384,7 @@ class ClaudeCLIProvider(BaseLLMProvider):
                     proc.kill()
                     await proc.wait()
                 except Exception:
-                    pass
+                    logger.warning("Failed to kill timed-out Claude CLI process", exc_info=True)
                 if attempt < _MAX_RETRIES - 1:
                     logger.warning(
                         "Claude CLI timed out after %ds (attempt %d/%d), retrying...",
@@ -446,7 +446,7 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 try:
                     proc.kill()
                 except Exception:
-                    pass
+                    logger.warning("Failed to kill expired warm Claude CLI process", exc_info=True)
                 continue
             if result is None and warm_args == args_key:
                 # Args match — use this one

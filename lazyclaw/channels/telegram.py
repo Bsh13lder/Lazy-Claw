@@ -656,7 +656,7 @@ async def resolve_user_id(config) -> str:
             if row:
                 return row[0]
     except Exception:
-        pass
+        logger.warning("Failed to resolve primary user_id from DB", exc_info=True)
     return "default"
 
 
@@ -809,7 +809,7 @@ class TelegramAdapter(ChannelAdapter):
             try:
                 await update.message.delete()
             except Exception:
-                pass
+                logger.warning("Failed to delete recovery password message for user %s", user_id)
             await self._handle_recovery_password(update, user_id, text)
             return
 
@@ -875,7 +875,7 @@ class TelegramAdapter(ChannelAdapter):
             try:
                 await msg.delete()
             except Exception:
-                pass
+                logger.warning("Failed to auto-delete recovery phrase message for user %s", user_id)
         _aio.create_task(_delete_later(), name=f"recovery-delete-{user_id}")
 
     async def _handle_instant_mute(
@@ -1046,7 +1046,7 @@ class TelegramAdapter(ChannelAdapter):
                     f"Do NOT call other channel tools unless the user explicitly asks."
                 )
         except Exception:
-            pass
+            logger.warning("Failed to inject watcher channel context for user %s", user_id, exc_info=True)
 
         try:
             logger.debug("Telegram: awaiting agent response for chat %s", chat_id)

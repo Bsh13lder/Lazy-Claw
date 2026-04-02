@@ -157,6 +157,18 @@ _SURVIVAL_TOOL_NAMES = frozenset({
     "start_gig", "submit_deliverable", "invoice_client",
 })
 
+# n8n workflow automation — TIGHT keywords only to avoid false positives
+_N8N_KEYWORDS = frozenset({
+    "n8n", "automate", "automation", "every day at", "every morning",
+    "when i get", "automatically", "watch for", "set up a flow",
+    "recurring", "auto post", "workflow",
+})
+
+_N8N_TOOL_NAMES = frozenset({
+    "n8n_status", "n8n_list_workflows", "n8n_create_workflow",
+    "n8n_manage_workflow", "n8n_run_workflow", "n8n_list_executions",
+})
+
 # Channel name → bundled MCP server name (for on-demand connect)
 _CHANNEL_TO_MCP: dict[str, str] = {
     "whatsapp": "mcp-whatsapp",
@@ -876,6 +888,23 @@ class Agent:
                         len(_survival_tools),
                     )
 
+            # n8n automation keyword detection → inject n8n tools
+            _n8n_tools: list = []
+            _wants_n8n = any(kw in _msg_lower for kw in _N8N_KEYWORDS)
+            if not _wants_n8n and _history_tool_names & _N8N_TOOL_NAMES:
+                _wants_n8n = True
+                logger.info("n8n tools re-injected from recent history context")
+            if _wants_n8n:
+                for nname in _N8N_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(nname)
+                    if schema is not None:
+                        _n8n_tools.append(schema)
+                if _n8n_tools:
+                    logger.info(
+                        "n8n/automation keywords detected — %d n8n tools injected",
+                        len(_n8n_tools),
+                    )
+
             # Build base tools + conditionally add browser.
             # When channel MCP tools dominate, trim base set to reduce noise.
             _base_names = set(_BASE_TOOL_NAMES)
@@ -925,6 +954,12 @@ class Agent:
             for st in _survival_tools:
                 if st.get("function", {}).get("name") not in _existing_names:
                     tools.append(st)
+
+            # Add n8n tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for nt in _n8n_tools:
+                if nt.get("function", {}).get("name") not in _existing_names:
+                    tools.append(nt)
 
             # Include favorite MCP tools
             _fav_prefixes = tuple(

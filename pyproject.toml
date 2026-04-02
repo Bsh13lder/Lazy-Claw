@@ -34,13 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 telegram = []
 discord = ["discord.py>=2.3.0"]
-eco = [
-    "mcp-freeride @ file:mcp-freeride",
-    "mcp-healthcheck @ file:mcp-healthcheck",
-    "mcp-apihunter @ file:mcp-apihunter",
-    "mcp-vaultwhisper @ file:mcp-vaultwhisper",
-    "mcp-taskai @ file:mcp-taskai",
-]
+eco = []
 voice = ["openai-whisper>=20231117"]
 local = ["llama-cpp-python>=0.2.0"]
 all = ["lazyclaw[telegram,discord,voice,eco]"]

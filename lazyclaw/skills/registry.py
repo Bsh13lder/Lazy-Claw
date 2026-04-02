@@ -215,6 +215,19 @@ class SkillRegistry:
         self.register(OllamaDeleteSkill(config=config))
         self.register(OllamaShowSkill(config=config))
 
+        # n8n workflow automation skills
+        from lazyclaw.skills.builtin.n8n_management import (
+            N8nStatusSkill, N8nListWorkflowsSkill, N8nCreateWorkflowSkill,
+            N8nManageWorkflowSkill, N8nRunWorkflowSkill, N8nListExecutionsSkill,
+        )
+
+        self.register(N8nStatusSkill(config=config))
+        self.register(N8nListWorkflowsSkill(config=config))
+        self.register(N8nCreateWorkflowSkill(config=config))
+        self.register(N8nManageWorkflowSkill(config=config))
+        self.register(N8nRunWorkflowSkill(config=config))
+        self.register(N8nListExecutionsSkill(config=config))
+
         # System status skills
         from lazyclaw.skills.builtin.system_status import (
             ShowStatusSkill, RunDoctorSkill, ShowUsageSkill,

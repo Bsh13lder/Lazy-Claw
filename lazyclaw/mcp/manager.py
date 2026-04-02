@@ -112,6 +112,12 @@ BUNDLED_MCPS = {
         "optional": True,
         "persistent": True,  # Keep connected — tools must be in registry for keyword detection
     },
+    "n8n": {
+        "module": "n8n_mcp_server",
+        "description": "n8n workflow automation — raw REST API access for advanced operations",
+        "optional": True,
+        "env": {"N8N_HOST": "http://lazyclaw-n8n:5678"},
+    },
 }
 
 # -- Install locks (prevent concurrent installs of same MCP) -------------------

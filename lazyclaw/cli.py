@@ -211,6 +211,10 @@ async def run_agent(config: Config) -> None:
     from lazyclaw.gateway.app import set_lane_queue
     set_lane_queue(lane_queue)
 
+    # Wire activity dashboard deps
+    from lazyclaw.gateway.routes.activity import set_activity_deps
+    set_activity_deps(team_lead, task_runner)
+
     # ── Textual TUI Dashboard ────────────────────────────────────────
     # Full interactive terminal: live agent activity, system overview,
     # scrollable logs, admin input. Replaces the old Rich Live panel.

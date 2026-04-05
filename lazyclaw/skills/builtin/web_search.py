@@ -356,12 +356,12 @@ def _format_serpapi_results(data: dict, search_type: str) -> str:
         if not lines:
             return "No flights found."
 
-        # Add booking links
+        # Add booking links (HTML format for Telegram embedded links)
         links: list[str] = []
 
-        # Official airline website
+        # Official airline booking URLs with date parameters
         airline_urls = {
-            "Wizz Air": f"https://wizzair.com/en-gb/flights/{dep_id.lower()}-{arr_id.lower()}",
+            "Wizz Air": f"https://wizzair.com/en-gb/booking/select-flight/{dep_id}/{arr_id}/{out_date}/null/1/0/0/null",
             "Ryanair": f"https://www.ryanair.com/gb/en/trip/flights/select?adults=1&dateOut={out_date}&origin={dep_id}&destination={arr_id}",
             "easyJet": f"https://www.easyjet.com/en/booking/select?origin={dep_id}&destination={arr_id}&outbound={out_date}",
             "Vueling": f"https://www.vueling.com/en/booking/select?origin={dep_id}&destination={arr_id}&outbound={out_date}",
@@ -376,21 +376,13 @@ def _format_serpapi_results(data: dict, search_type: str) -> str:
         for airline_name in seen_airlines:
             url = airline_urls.get(airline_name)
             if url:
-                links.append(f"  {airline_name} official: {url}")
+                links.append(f'  <a href="{url}">Book on {airline_name}</a>')
 
-        # Google Flights link
+        # Google Flights link (most reliable)
         google_url = data.get("search_metadata", {}).get("google_flights_url", "")
-        if google_url:
-            links.append(f"  Google Flights: {google_url}")
-        else:
-            links.append(
-                f"  Google Flights: https://www.google.com/travel/flights?q=flights+from+{dep_id}+to+{arr_id}+on+{out_date}"
-            )
-
-        # Skyscanner link
-        links.append(
-            f"  Skyscanner: https://www.skyscanner.net/transport/flights/{dep_id.lower()}/{arr_id.lower()}/{out_date.replace('-', '')[2:8]}/"
-        )
+        if not google_url:
+            google_url = f"https://www.google.com/travel/flights?q=flights+from+{dep_id}+to+{arr_id}+on+{out_date}"
+        links.append(f'  <a href="{google_url}">Search on Google Flights</a>')
 
         lines.append("\nBook here:")
         lines.extend(links)

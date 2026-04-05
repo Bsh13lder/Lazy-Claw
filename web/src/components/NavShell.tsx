@@ -1,6 +1,6 @@
 import { useAuth } from "../context/AuthContext";
 
-export type Page = "chat" | "overview" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
+export type Page = "chat" | "overview" | "activity" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -11,6 +11,7 @@ interface NavShellProps {
 const PAGE_META: Record<Page, { label: string; description: string }> = {
   chat: { label: "Chat", description: "Conversation with your agent" },
   overview: { label: "Overview", description: "System health & activity" },
+  activity: { label: "Activity", description: "Live agent & task monitor" },
   hub: { label: "Skill Hub", description: "Discover & install skills" },
   skills: { label: "Skills", description: "Manage agent tools" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
@@ -37,6 +38,14 @@ const NAV_ITEMS: { page: Page; label?: string; icon: React.ReactNode }[] = [
         <rect x="14" y="3" width="7" height="7" rx="1" />
         <rect x="3" y="14" width="7" height="7" rx="1" />
         <rect x="14" y="14" width="7" height="7" rx="1" />
+      </svg>
+    ),
+  },
+  {
+    page: "activity",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
       </svg>
     ),
   },

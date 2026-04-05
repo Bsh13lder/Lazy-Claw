@@ -12,6 +12,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.specialist import (
@@ -140,6 +141,17 @@ class DelegateSkill(BaseSkill):
         logger.info(
             "Delegating to %s: %s", spec.display_name, enriched_instruction[:100],
         )
+
+        # Notify user immediately before blocking on specialist
+        if self._callback:
+            await self._callback.on_event(AgentEvent(
+                "team_delegate",
+                spec.display_name,
+                {
+                    "specialist": specialist_key,
+                    "instruction": enriched_instruction[:120],
+                },
+            ))
 
         result = await run_specialist(
             user_id=user_id,

@@ -387,6 +387,44 @@ CREATE TABLE IF NOT EXISTS survival_gigs (
 CREATE INDEX IF NOT EXISTS idx_gigs_user_status
 ON survival_gigs(user_id, status);
 
+-- Pipeline (generic CRM/deals)
+
+CREATE TABLE IF NOT EXISTS pipeline_contacts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    phone TEXT,
+    email TEXT,
+    notes TEXT,
+    stage TEXT NOT NULL DEFAULT 'new',
+    tags TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_contacts_user
+ON pipeline_contacts(user_id, stage);
+
+CREATE TABLE IF NOT EXISTS pipeline_deals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    contact_id TEXT NOT NULL REFERENCES pipeline_contacts(id),
+    title TEXT NOT NULL,
+    description TEXT,
+    amount REAL DEFAULT 0,
+    currency TEXT DEFAULT 'EUR',
+    stage TEXT NOT NULL DEFAULT 'inquiry',
+    data TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_deals_user
+ON pipeline_deals(user_id, stage);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_deals_contact
+ON pipeline_deals(user_id, contact_id);
+
 -- Performance indexes for common query patterns
 CREATE INDEX IF NOT EXISTS idx_job_queue_user_status
 ON job_queue(user_id, status);

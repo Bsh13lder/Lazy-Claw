@@ -355,6 +355,31 @@ export const approveRequest = (id: string) =>
 export const denyRequest = (id: string) =>
   request<void>(`/api/permissions/approvals/${id}/deny`, { method: "POST" });
 
+// ── Activity ──────────────────────────────────────────────────────────────
+
+export interface AgentTask {
+  task_id: string;
+  name: string;
+  description: string;
+  lane: string;
+  status: string;
+  elapsed_s?: number;
+  current_step?: string;
+  step_count?: number;
+  duration_s?: number | null;
+  result_preview?: string;
+  error?: string | null;
+}
+
+export interface AgentStatus {
+  active: AgentTask[];
+  background: AgentTask[];
+  recent: AgentTask[];
+}
+
+export const getAgentStatus = () =>
+  request<AgentStatus>("/api/agents/status");
+
 // ── Replay ─────────────────────────────────────────────────────────────────
 
 export const listTraces = () =>

@@ -79,6 +79,28 @@ def _strip_markdown(text: str) -> str:
     return text
 
 
+def _has_html_links(text: str) -> bool:
+    """Check if text contains HTML anchor tags."""
+    return '<a href="' in text
+
+
+def _prepare_html(text: str) -> str:
+    """Escape HTML entities in text but preserve <a> tags for Telegram HTML mode."""
+    # Extract <a> tags and replace with placeholders
+    _link_re = re.compile(r'<a\s+href="[^"]*">[^<]*</a>')
+    placeholders: list[str] = []
+    def _save_link(m: re.Match) -> str:
+        placeholders.append(m.group(0))
+        return f"\x00LINK{len(placeholders) - 1}\x00"
+    text = _link_re.sub(_save_link, text)
+    # Escape HTML entities in the remaining text
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Restore <a> tags
+    for i, link in enumerate(placeholders):
+        text = text.replace(f"\x00LINK{i}\x00", link)
+    return text
+
+
 class _TelegramCallback:
     """Tracks agent status, sends typing indicator and one edited status message.
 
@@ -376,8 +398,12 @@ class _TelegramCallback:
 
         elif kind == "team_delegate":
             self.current_phase = "team"
-            self.specialists_active.append(event.detail)
-            await self._update_status()
+            _task_preview = event.metadata.get("instruction", "")
+            _label = event.detail
+            if _task_preview:
+                _label = f"{event.detail}\n\U0001f4cb {_task_preview}"
+            self.specialists_active.append(_label)
+            await self._update_status(force=True)
 
         elif kind == "team_start":
             self.current_phase = "team"
@@ -463,10 +489,15 @@ class _TelegramCallback:
             stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
 
             text = f"\u2705 Background task '{task_name}' done{stats_line}\n\n{result}"
+            _bg_html = _has_html_links(text)
+            if _bg_html:
+                text = _prepare_html(text)
+            _bg_pm = "HTML" if _bg_html else None
             try:
                 await _telegram_send_with_retry(
                     lambda: self._bot.send_message(
                         chat_id=self._chat_id, text=text,
+                        parse_mode=_bg_pm,
                     )
                 )
             except Exception as exc:
@@ -1073,12 +1104,21 @@ class TelegramAdapter(ChannelAdapter):
 
             response = _strip_markdown(response)
             footer = callback._build_footer()
+
+            # Use HTML parse_mode when response contains embedded links
+            use_html = _has_html_links(response)
+            if use_html:
+                response = _prepare_html(response)
+            parse_mode = "HTML" if use_html else None
+
             full_response = f"{response}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
 
             # Split long messages (4096 char limit), footer on last chunk
             if len(full_response) <= 4096:
                 await _telegram_send_with_retry(
-                    lambda: update.message.reply_text(full_response)
+                    lambda: update.message.reply_text(
+                        full_response, parse_mode=parse_mode,
+                    )
                 )
             else:
                 # Send response chunks, footer on last one
@@ -1090,11 +1130,15 @@ class TelegramAdapter(ChannelAdapter):
                         # Last chunk gets footer
                         chunk_with_footer = f"{chunk}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
                         await _telegram_send_with_retry(
-                            lambda c=chunk_with_footer: update.message.reply_text(c)
+                            lambda c=chunk_with_footer: update.message.reply_text(
+                                c, parse_mode=parse_mode,
+                            )
                         )
                     else:
                         await _telegram_send_with_retry(
-                            lambda c=chunk: update.message.reply_text(c)
+                            lambda c=chunk: update.message.reply_text(
+                                c, parse_mode=parse_mode,
+                            )
                         )
             logger.debug("Telegram: reply sent to chat %s", chat_id)
 

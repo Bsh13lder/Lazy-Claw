@@ -48,6 +48,7 @@ BOT_COMMANDS = [
     BotCommand("qr", "\U0001f4f1 WhatsApp QR re-link"),
     BotCommand("recovery", "\U0001f510 Recovery phrase"),
     BotCommand("search", "\U0001f50d Search provider"),
+    BotCommand("resetpass", "\U0001f510 Reset web UI password"),
 ]
 
 
@@ -89,6 +90,7 @@ class TelegramCommands:
             "local": self._handle_local,
             "ram": self._handle_ram, "qr": self._handle_qr,
             "recovery": self._handle_recovery,
+            "resetpass": self._handle_resetpass,
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
             "search": self._handle_search,
         }
@@ -1669,6 +1671,63 @@ class TelegramCommands:
         )
         # Store pending recovery state on the adapter so the next message is handled
         self._adapter._pending_recovery.add(user_id)
+
+    # -- /resetpass ----------------------------------------------------------
+
+    async def _handle_resetpass(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reset web UI password from Telegram (admin-only, no old password needed).
+
+        Usage: /resetpass <new_password>
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        chat_id = str(update.effective_chat.id)
+        if chat_id != self._adapter._admin_chat_id:
+            await self._reply(update, "\U0001f451 Only the primary admin can reset passwords.")
+            return
+
+        if not context.args:
+            await self._reply(update,
+                "\U0001f510 <b>Reset Web UI Password</b>\n\n"
+                "Usage: <code>/resetpass &lt;new_password&gt;</code>\n\n"
+                "This resets your web dashboard login password.\n"
+                "No old password needed — Telegram admin access is your proof of identity."
+            )
+            return
+
+        new_password = " ".join(context.args)
+        if len(new_password) < 4:
+            await self._reply(update, "\u26a0\ufe0f Password too short (min 4 characters).")
+            return
+
+        try:
+            from lazyclaw.gateway.auth import hash_password
+            from lazyclaw.db.connection import db_session
+
+            pw_hash = hash_password(new_password)
+            async with db_session(self._config) as db:
+                await db.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (pw_hash, user_id),
+                )
+                await db.commit()
+
+            # Delete the command message (contains password in plaintext)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+
+            await self._reply(update,
+                "\u2705 <b>Password reset!</b>\n\n"
+                "You can now log in at the web dashboard with your new password.\n"
+                "Username: <code>blck</code>"
+            )
+        except Exception as exc:
+            logger.error("Password reset failed: %s", exc)
+            await self._reply(update, f"\u274c Password reset failed: {exc}")
 
     # -- /addadmin, /removeadmin -------------------------------------------
 

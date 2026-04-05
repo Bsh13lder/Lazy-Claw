@@ -186,6 +186,23 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.watch_mcp import WatchMCPSkill
         self.register(WatchMCPSkill(config=config))
 
+        # Pipeline / CRM skills (generic contacts + deals)
+        from lazyclaw.skills.builtin.pipeline import (
+            PipelineAddContactSkill, PipelineListContactsSkill,
+            PipelineUpdateContactSkill, PipelineDeleteContactSkill,
+            PipelineAddDealSkill, PipelineListDealsSkill,
+            PipelineUpdateDealSkill, PipelineDeleteDealSkill,
+        )
+
+        self.register(PipelineAddContactSkill(config=config))
+        self.register(PipelineListContactsSkill(config=config))
+        self.register(PipelineUpdateContactSkill(config=config))
+        self.register(PipelineDeleteContactSkill(config=config))
+        self.register(PipelineAddDealSkill(config=config))
+        self.register(PipelineListDealsSkill(config=config))
+        self.register(PipelineUpdateDealSkill(config=config))
+        self.register(PipelineDeleteDealSkill(config=config))
+
         # AI management skills (ECO mode, providers, Ollama)
         from lazyclaw.skills.builtin.eco_management import (
             EcoSetModeSkill, EcoShowStatusSkill, EcoSetProviderSkill,

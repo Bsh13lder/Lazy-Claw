@@ -47,6 +47,7 @@ BOT_COMMANDS = [
     BotCommand("nuke", "\U0001f4a3 Data wipe"),
     BotCommand("qr", "\U0001f4f1 WhatsApp QR re-link"),
     BotCommand("recovery", "\U0001f510 Recovery phrase"),
+    BotCommand("search", "\U0001f50d Search provider"),
 ]
 
 
@@ -89,6 +90,7 @@ class TelegramCommands:
             "ram": self._handle_ram, "qr": self._handle_qr,
             "recovery": self._handle_recovery,
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
+            "search": self._handle_search,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -1701,6 +1703,44 @@ class TelegramCommands:
         await update.message.reply_text(
             f"\U0001f451 Remove admin <code>{target}</code>?",
             reply_markup=keyboard, parse_mode="HTML",
+        )
+
+    # -- /search -----------------------------------------------------------
+
+    async def _handle_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Switch search provider or show usage.
+
+        Usage:
+          /search           — show current provider + usage
+          /search serper    — switch to Serper.dev
+          /search serpapi   — switch to SerpAPI
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        from lazyclaw.skills.builtin.web_search import (
+            get_active_provider,
+            get_search_usage,
+            set_active_provider,
+        )
+
+        if context.args:
+            arg = context.args[0].lower()
+            if arg in ("serper", "serpapi"):
+                msg = set_active_provider(arg)
+                await self._reply(update, f"\U0001f50d {msg}")
+                return
+            await self._reply(update, "\u2753 Usage: <code>/search serper</code> or <code>/search serpapi</code>")
+            return
+
+        provider = get_active_provider()
+        usage = get_search_usage()
+        await self._reply(update,
+            f"\U0001f50d <b>Search Provider</b>\n\n"
+            f"Active: <b>{provider}</b>\n"
+            f"Usage this month: {usage.status()}\n\n"
+            f"Switch: <code>/search serper</code> or <code>/search serpapi</code>"
         )
 
     # -- Callback query handler (inline keyboards) -------------------------

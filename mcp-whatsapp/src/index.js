@@ -260,31 +260,25 @@ const LOCK_FILE = path.join(DATA_DIR, "whatsapp.lock");
 
 function acquireLock() {
   try {
-    // Check if another process holds the lock
     if (fs.existsSync(LOCK_FILE)) {
       const lockData = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
       const age = Date.now() - lockData.time;
-      // Lock is stale if older than 30s (process probably crashed)
-      if (age < 30000) {
+      // Lock is stale if older than 60s (refresh is every 30s, so 60s = missed 2 refreshes)
+      if (age >= 60000) {
+        log(`Lock is stale (${Math.round(age / 1000)}s old) — taking over`);
+      } else {
         const otherPid = lockData.pid;
-        // Check if process is still alive
+        // Check if the locking process is still alive
         try {
           process.kill(otherPid, 0);
-          // Process alive — check if it's orphaned (ppid=1)
-          try {
-            const { execSync } = require("child_process");
-            const ppid = execSync(`ps -o ppid= -p ${otherPid}`, { timeout: 2000 }).toString().trim();
-            if (ppid === "1") {
-              // Orphaned zombie — kill it and take over
-              log(`Killing orphaned WhatsApp process (pid=${otherPid}, ppid=1)`);
-              try { process.kill(otherPid, "SIGTERM"); } catch (_) {}
-            } else {
-              return false; // Legitimate process holds the lock
-            }
-          } catch (_) {
-            return false; // Can't check ppid — assume legitimate
+          // Alive — check if it's us (shouldn't be) or a different process
+          if (otherPid !== process.pid) {
+            return false; // Legitimate process holds the lock
           }
-        } catch (_) { /* dead — take over */ }
+        } catch (_) {
+          // Process dead — take over
+          log(`Lock holder (pid=${otherPid}) is dead — taking over`);
+        }
       }
     }
     fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, time: Date.now() }));

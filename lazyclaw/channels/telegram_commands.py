@@ -150,7 +150,7 @@ class TelegramCommands:
                 "\u26a1 <b>Quick setup:</b>\n"
                 "<code>/key set ANTHROPIC_API_KEY sk-ant-xxx</code>\n"
                 "<code>/mode claude</code>\n"
-                "<code>/model brain claude-sonnet-4-20250514</code>"
+                "<code>/model brain claude-sonnet-4-6</code>"
             )
             if not self._pinned_task:
                 self._pinned_task = asyncio.create_task(self._pinned_refresh_loop())
@@ -930,11 +930,13 @@ class TelegramCommands:
                 for s in servers:
                     sname = s.get("name", "?")
                     sid = s["id"]
-                    fav = "\u2b50" if s.get("favorite") else "  "
+                    fav = "\u2b50 " if s.get("favorite") else ""
                     is_connected = sid in _active_clients
-                    status = "\u2705" if is_connected else "\u26aa"
+                    # Green = connected, Blue = installed/idle
+                    status = "\U0001f7e2" if is_connected else "\U0001f535"
                     desc = BUNDLED_MCPS.get(sname, {}).get("description", "")
-                    lines.append(f"{fav} {status} <b>{sname}</b>")
+                    state_label = "online" if is_connected else "idle"
+                    lines.append(f"{fav}{status} <b>{sname}</b>  <i>({state_label})</i>")
                     if desc:
                         lines.append(f"      <i>{desc[:60]}</i>")
 
@@ -960,6 +962,7 @@ class TelegramCommands:
             lines.append(
                 "\U0001f527 <b>Commands:</b>\n"
                 "<code>/mcp install NAME</code>\n"
+                "<code>/mcp install all</code>\n"
                 "<code>/mcp connect NAME</code>\n"
                 "<code>/mcp disconnect NAME</code>\n"
                 "<code>/mcp fav NAME</code>  \u2022  <code>/mcp unfav NAME</code>"
@@ -970,11 +973,29 @@ class TelegramCommands:
         subcmd = args[0].lower()
         name = " ".join(args[1:]) if len(args) > 1 else ""
 
-        # -- /mcp install NAME ------------------------------------------------
+        # -- /mcp install all | /mcp install NAME ----------------------------
         if subcmd == "install":
+            # /mcp install all — batch install every bundled MCP
+            if name.lower() == "all":
+                await self._reply(update, "\u23f3 Installing all bundled MCPs...")
+                results: list[str] = []
+                for mcp_key in BUNDLED_MCPS:
+                    try:
+                        ok, msg = await install_bundled_mcp(mcp_key)
+                        icon = "\u2705" if ok else "\u274c"
+                        results.append(f"{icon} <b>{mcp_key}</b> — {msg}")
+                    except Exception as e:
+                        results.append(f"\u274c <b>{mcp_key}</b> — {e}")
+                await auto_register_bundled_mcps(self._config, user_id)
+                await self._reply(update, "\n".join(results))
+                return
+
             if not name:
                 await self._reply(
-                    update, "\U0001f50c Usage: <code>/mcp install NAME</code>"
+                    update,
+                    "\U0001f50c Usage:\n"
+                    "<code>/mcp install NAME</code>\n"
+                    "<code>/mcp install all</code>",
                 )
                 return
             mcp_name = _resolve_mcp_name(name)
@@ -1007,6 +1028,23 @@ class TelegramCommands:
                     )
             except Exception as e:
                 await self._reply(update, f"\u274c Install failed: {e}")
+            return
+
+        # -- /mcp connect all --------------------------------------------------
+        if subcmd == "connect" and name.lower() == "all":
+            servers = await list_servers(self._config, user_id)
+            results: list[str] = []
+            for s in servers:
+                if s["id"] in _active_clients:
+                    results.append(f"\U0001f7e2 <b>{s['name']}</b> — already online")
+                    continue
+                try:
+                    await connect_server(self._config, user_id, s["id"])
+                    results.append(f"\U0001f7e2 <b>{s['name']}</b> — connected")
+                except Exception as e:
+                    err_msg = str(e)[:50]
+                    results.append(f"\u274c <b>{s['name']}</b> — {err_msg}")
+            await self._reply(update, "\n".join(results) if results else "No servers to connect.")
             return
 
         if not name:

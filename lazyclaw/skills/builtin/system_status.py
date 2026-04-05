@@ -537,7 +537,7 @@ class SetModelSkill(BaseSkill):
                     "type": "string",
                     "description": (
                         "Model name (e.g., 'gpt-4o', "
-                        "'claude-sonnet-4-20250514', 'o3-mini')"
+                        "'claude-sonnet-4-6', 'o3-mini')"
                     ),
                 },
             },

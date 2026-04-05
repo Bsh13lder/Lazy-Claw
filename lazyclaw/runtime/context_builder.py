@@ -144,8 +144,14 @@ async def build_context(
     except Exception:
         logger.debug("Failed to load daily activity logs", exc_info=True)
 
+    # Inject current date so the LLM knows what year/day it is
+    from datetime import datetime, timezone
+
+    now_utc = datetime.now(timezone.utc)
+    date_section = f"## Current date\nToday is {now_utc.strftime('%A, %B %d, %Y')} (UTC)."
+
     # Combine sections — layered context between capabilities and activity
-    sections = [personality]
+    sections = [personality, date_section]
     if capabilities:
         sections.append(capabilities)
     if layer_context:

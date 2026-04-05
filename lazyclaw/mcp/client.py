@@ -308,6 +308,11 @@ class MCPClient:
             command == sys.executable
             or os.path.realpath(command) == os.path.realpath(sys.executable)
         )
+        # If stored command is a python interpreter that no longer exists
+        # (e.g. registered on macOS, now running in Docker), use current one
+        if not is_current_python and base_cmd.startswith("python") and not os.path.isfile(command):
+            command = sys.executable
+            is_current_python = True
         if not is_current_python and base_cmd not in _ALLOWED_MCP_COMMANDS:
             raise ValueError(
                 f"MCP command '{command}' is not allowed. "
@@ -315,9 +320,25 @@ class MCPClient:
                 f"or the current Python interpreter."
             )
 
+        # Fix stale file paths in args (e.g. node script registered on macOS,
+        # now running in Docker). Re-resolve relative to current project root.
+        args = list(self._config.get("args", []))
+        for i, arg in enumerate(args):
+            if arg.endswith(".js") and not os.path.isfile(arg):
+                # Try resolving from project root (lazyclaw/mcp/../../)
+                from lazyclaw.mcp.manager import BUNDLED_MCPS
+                for info in BUNDLED_MCPS.values():
+                    if "node" in info and os.path.basename(arg) == os.path.basename(info["node"]):
+                        resolved = os.path.abspath(os.path.join(
+                            os.path.dirname(__file__), "..", "..", info["node"],
+                        ))
+                        if os.path.isfile(resolved):
+                            args[i] = resolved
+                        break
+
         params = StdioServerParameters(
             command=command,
-            args=self._config.get("args", []),
+            args=args,
             env=child_env,
         )
         # Log MCP stderr to file

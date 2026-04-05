@@ -92,6 +92,9 @@ def _detect_browser() -> str:
     candidates = [
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",  # macOS Brave
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS Chrome
+        "/usr/bin/chromium",         # Debian/Ubuntu/Docker
+        "/usr/bin/chromium-browser", # Alpine/older Debian
+        "/usr/bin/google-chrome",    # Google Chrome on Linux
     ]
     import shutil
 

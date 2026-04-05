@@ -497,14 +497,15 @@ async def _install_mcps() -> None:
     import subprocess
     import sys
 
+    from lazyclaw.mcp.manager import BUNDLED_MCPS
+
     root = get_project_root()
     github_repo = "https://github.com/Bsh13lder/Lazy-Claw.git"
+    # Build from BUNDLED_MCPS — install all Python module-based servers
     mcp_packages = {
-        "mcp-freeride": "mcp_freeride",
-        "mcp-healthcheck": "mcp_healthcheck",
-        "mcp-apihunter": "mcp_apihunter",
-        "mcp-vaultwhisper": "mcp_vaultwhisper",
-        "mcp-taskai": "mcp_taskai",
+        name: info["module"]
+        for name, info in BUNDLED_MCPS.items()
+        if "module" in info
     }
 
     console.print("[bold cyan]Installing bundled MCP servers...[/bold cyan]")
@@ -793,11 +794,9 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (2.50, 10.0),
     "gpt-4.1": (3.00, 12.0),
     "gpt-4.1-mini": (0.40, 1.60),
-    "claude-sonnet-4-20250514": (3.00, 15.0),
-    "claude-sonnet-4-6-20250627": (3.00, 15.0),
+    "claude-sonnet-4-6": (3.00, 15.0),
     "claude-haiku-4-5-20251001": (1.00, 5.0),
-    "claude-opus-4-5-20250410": (5.00, 25.0),
-    "claude-opus-4-6-20250625": (5.00, 25.0),
+    "claude-opus-4-6": (5.00, 25.0),
 }
 
 # EUR/USD exchange rate (approximate)
@@ -1117,7 +1116,7 @@ def setup() -> None:
             save_env("OPENAI_API_KEY", api_key.strip())
         else:
             save_env("ANTHROPIC_API_KEY", api_key.strip())
-            save_env("DEFAULT_MODEL", "claude-sonnet-4-20250514")
+            save_env("DEFAULT_MODEL", "claude-sonnet-4-6")
 
     console.print()
 

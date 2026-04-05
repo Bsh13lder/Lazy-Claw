@@ -598,7 +598,7 @@ class EcoRouter:
             # falling back would just produce a 401 error.
             try:
                 response = await self._route_paid(
-                    messages, user_id, "claude-sonnet-4-6-20250514",
+                    messages, user_id, "claude-sonnet-4-6",
                     reason=f"claude_cli_failed: {exc}",
                     **kwargs,
                 )

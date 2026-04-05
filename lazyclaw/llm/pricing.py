@@ -13,14 +13,9 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "gpt-4.1-mini": {"input": 0.0004, "output": 0.0016},
     "gpt-4.1": {"input": 0.002, "output": 0.008},
     # Anthropic — https://docs.anthropic.com/en/docs/about-claude/pricing
-    "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},
-    "claude-sonnet-4-6-20250514": {"input": 0.003, "output": 0.015},
-    "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
-    "claude-opus-4-20250514": {"input": 0.005, "output": 0.025},
-    "claude-opus-4-5-20250410": {"input": 0.005, "output": 0.025},
-    "claude-opus-4-6-20250625": {"input": 0.005, "output": 0.025},
-    "claude-opus-4-6": {"input": 0.005, "output": 0.025},
     "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
+    "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
+    "claude-opus-4-6": {"input": 0.005, "output": 0.025},
     # Local MLX models — $0 always
     "mlx-community/Qwen3.5-4B-4bit": {"input": 0.0, "output": 0.0},
     "mlx-community/Qwen3.5-9B-MLX-4bit": {"input": 0.0, "output": 0.0},

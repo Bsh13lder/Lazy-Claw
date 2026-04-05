@@ -29,7 +29,7 @@ DEFAULT_MODELS = [
     {"model_id": "gpt-4o", "display_name": "GPT-4o", "provider": "openai", "is_default": 0},
     {"model_id": "gpt-4.1-mini", "display_name": "GPT-4.1 Mini", "provider": "openai", "is_default": 0},
     {"model_id": "gpt-4.1", "display_name": "GPT-4.1", "provider": "openai", "is_default": 0},
-    {"model_id": "claude-sonnet-4-20250514", "display_name": "Claude Sonnet 4", "provider": "anthropic", "is_default": 0},
+    {"model_id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6", "provider": "anthropic", "is_default": 0},
     {"model_id": "claude-haiku-4-5-20251001", "display_name": "Claude Haiku 4.5", "provider": "anthropic", "is_default": 0},
 ]
 

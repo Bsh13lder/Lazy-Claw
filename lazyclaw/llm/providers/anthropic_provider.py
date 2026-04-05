@@ -91,7 +91,7 @@ class AnthropicProvider(BaseLLMProvider):
         tool_choice = kwargs.pop("tool_choice", None)
 
         if not model:
-            model = "claude-sonnet-4-20250514"
+            model = "claude-sonnet-4-6"
 
         create_kwargs: dict = {
             "model": model,
@@ -154,7 +154,7 @@ class AnthropicProvider(BaseLLMProvider):
         tool_choice = kwargs.pop("tool_choice", None)
 
         if not model:
-            model = "claude-sonnet-4-20250514"
+            model = "claude-sonnet-4-6"
 
         create_kwargs: dict = {
             "model": model,
@@ -254,7 +254,7 @@ class AnthropicProvider(BaseLLMProvider):
     async def verify_key(self) -> bool:
         try:
             await self._client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 messages=[{"role": "user", "content": "hi"}],
                 max_tokens=1,
             )

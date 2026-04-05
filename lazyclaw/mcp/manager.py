@@ -113,7 +113,8 @@ BUNDLED_MCPS = {
         "persistent": True,  # Keep connected — tools must be in registry for keyword detection
     },
     "n8n": {
-        "module": "n8n_mcp_server",
+        "module": "n8n_mcp",
+        "pip_name": "n8n-mcp-server",
         "description": "n8n workflow automation — raw REST API access for advanced operations",
         "optional": True,
         "env": {"N8N_HOST": "http://lazyclaw-n8n:5678"},
@@ -195,6 +196,29 @@ async def install_bundled_mcp(name: str) -> tuple[bool, str]:
                     if proc.returncode == 0:
                         importlib.invalidate_caches()
                         return True, f"Installed {mcp_key}"
+
+            # PyPI package name fallback (e.g. n8n-mcp-server)
+            pip_name = info.get("pip_name")
+            if pip_name:
+                proc = await asyncio.create_subprocess_exec(
+                    *pip_cmd, pip_name, "-q",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=120,
+                    )
+                except asyncio.TimeoutError:
+                    if proc.returncode is None:
+                        proc.kill()
+                    await proc.wait()
+                    return False, f"Install timed out for {mcp_key}"
+                else:
+                    if proc.returncode == 0:
+                        importlib.invalidate_caches()
+                        return True, f"Installed {mcp_key}"
+                    # Fall through to GitHub fallback
 
             # GitHub fallback
             pip_url = f"git+{github_repo}#subdirectory={mcp_key}"
@@ -833,8 +857,30 @@ async def connect_and_register_bundled_mcps(
         register_mcp_tools_lazy,
     )
 
-    # Step 1: ensure DB entries exist
+    # Step 1: ensure DB entries exist for all users
     await auto_register_bundled_mcps(config, user_id)
+    # Also register for every other user (e.g. Telegram user != CLI default)
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT id FROM users WHERE id != ?", (user_id,),
+        )
+        other_users = [row[0] for row in await rows.fetchall()]
+    for other_uid in other_users:
+        try:
+            await auto_register_bundled_mcps(config, other_uid)
+            # Sync favorites: if primary user has a favorite, set it for others too
+            async with db_session(config) as db:
+                await db.execute(
+                    "UPDATE mcp_connections SET favorite = 1 "
+                    "WHERE user_id = ? AND name IN ("
+                    "  SELECT name FROM mcp_connections "
+                    "  WHERE user_id = ? AND favorite = 1"
+                    ")",
+                    (other_uid, user_id),
+                )
+                await db.commit()
+        except Exception:
+            logger.debug("MCP auto-register skipped for user %s", other_uid)
 
     # Step 2: query all enabled bundled MCPs with favorite status
     async with db_session(config) as db:

@@ -34,15 +34,15 @@ class ModelProfile:
 MODE_MODELS: dict[str, dict[str, str]] = {
     "hybrid": {
         # Sonnet 4.6 brain (paid) + Nanbeige via Ollama (free local worker)
-        "brain":    "claude-sonnet-4-6-20250514",
+        "brain":    "claude-sonnet-4-6",
         "worker":   "nanbeige4.1:3b",
         "fallback": "claude-haiku-4-5-20251001",
     },
     "full": {
         # All-Claude paid tier: Sonnet brain + Haiku workers
-        "brain":    "claude-sonnet-4-6-20250514",
+        "brain":    "claude-sonnet-4-6",
         "worker":   "claude-haiku-4-5-20251001",
-        "fallback": "claude-sonnet-4-6-20250514",
+        "fallback": "claude-sonnet-4-6",
     },
     "claude": {
         "brain":    "claude-cli",
@@ -64,7 +64,7 @@ def get_mode_models(mode: str) -> dict[str, str]:
 # ── Backward-compat aliases (used by imports, remove later) ──────────
 # Note: HYBRID brain is now Sonnet 4.6 (paid API), worker is Ollama Nanbeige
 
-BRAIN_MODEL = MODE_MODELS["hybrid"]["brain"]     # claude-sonnet-4-6-20250514
+BRAIN_MODEL = MODE_MODELS["hybrid"]["brain"]     # claude-sonnet-4-6
 WORKER_MODEL = MODE_MODELS["hybrid"]["worker"]   # nanbeige4.1:3b (Ollama)
 FALLBACK_MODEL = MODE_MODELS["hybrid"]["fallback"]
 PAID_BRAIN_MODEL = MODE_MODELS["full"]["brain"]
@@ -243,28 +243,14 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
     ),
 
     # ── PAID — Claude (fallback + ECO OFF) ────────────────────────────
-    "claude-sonnet-4-6-20250514": ModelProfile(
-        name="claude-sonnet-4-6-20250514",
+    "claude-sonnet-4-6": ModelProfile(
+        name="claude-sonnet-4-6",
         display_name="Sonnet 4.6",
         provider="anthropic",
         is_local=False,
         ram_mb=0,
         cost_input=3.0,      # $3/M input
         cost_output=15.0,     # $15/M output
-        icon="\U0001f4ab",    # 💫
-        max_context=200000,
-        tool_calling=True,
-        role="brain",
-    ),
-    # Legacy alias — kept for backward compatibility with stored user settings
-    "claude-sonnet-4-20250514": ModelProfile(
-        name="claude-sonnet-4-20250514",
-        display_name="Sonnet 4 (legacy)",
-        provider="anthropic",
-        is_local=False,
-        ram_mb=0,
-        cost_input=3.0,
-        cost_output=15.0,
         icon="\U0001f4ab",    # 💫
         max_context=200000,
         tool_calling=True,

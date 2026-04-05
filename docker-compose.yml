@@ -3,7 +3,8 @@ services:
     build: .
     container_name: lazyclaw
     restart: unless-stopped
-    mem_limit: 1g
+    mem_limit: 2g
+    shm_size: '1gb'
     ports:
       - "18789:18789"
     env_file: .env

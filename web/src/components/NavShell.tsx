@@ -149,6 +149,22 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
           })}
         </div>
 
+        {/* External: n8n */}
+        <a
+          href="http://localhost:5678"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="n8n Workflows"
+          className="p-2 rounded-lg text-text-muted hover:bg-bg-hover hover:text-text-secondary transition-all duration-150"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <circle cx="6" cy="12" r="3" />
+            <circle cx="18" cy="6" r="3" />
+            <circle cx="18" cy="18" r="3" />
+            <path d="M9 12h3l3-6M12 12l3 6" />
+          </svg>
+        </a>
+
         {/* Bottom: user avatar + logout */}
         <div className="flex flex-col items-center gap-2 mt-2">
           <div

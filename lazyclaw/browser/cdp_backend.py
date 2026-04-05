@@ -166,6 +166,7 @@ class CDPBackend:
             "--no-first-run",
             "--no-sandbox",
             "--disable-gpu",
+            "--disable-dev-shm-usage",
             *STEALTH_LAUNCH_ARGS,
             f"--load-extension={ext_path}",
             f"--disable-extensions-except={ext_path}",
@@ -175,19 +176,29 @@ class CDPBackend:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
             logger.info(
                 "Launched headless Chrome (pid=%d, port=%d, profile=%s)",
                 proc.pid, self._port, profile_dir,
             )
             # Wait for Chrome to start accepting connections
-            for _ in range(6):
+            for i in range(6):
                 await asyncio.sleep(0.5)
+                # Check if process died (zombie reaping)
+                if proc.returncode is not None:
+                    stderr_bytes = await proc.stderr.read() if proc.stderr else b""
+                    stderr_tail = stderr_bytes[-500:].decode("utf-8", errors="replace")
+                    logger.error(
+                        "Chrome exited with code %d after %.1fs. stderr: %s",
+                        proc.returncode, (i + 1) * 0.5, stderr_tail,
+                    )
+                    break
                 ws_url = await find_chrome_cdp(self._port)
                 if ws_url:
                     return ws_url
-            logger.warning("Chrome launched but CDP not responding after 3s")
+            else:
+                logger.warning("Chrome launched but CDP not responding after 3s")
         except Exception as exc:
             logger.error("Failed to launch Chrome: %s", exc)
 

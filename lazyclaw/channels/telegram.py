@@ -472,41 +472,43 @@ class _TelegramCallback:
             self.current_phase = "dispatched"
 
         elif kind == "background_done":
-            task_name = event.metadata.get("name", "")
-            result = _strip_markdown(event.metadata.get("result", ""))
-            if len(result) > 3000:
-                result = result[:3000] + "\n\n[truncated]"
+            import html as _html
+            from lazyclaw.notifications.telegram_notifier import (
+                _format_stats_html,
+                _format_tools_html,
+            )
 
-            # Stats line
-            stats_parts: list[str] = []
-            _dur = event.metadata.get("duration_ms")
-            if _dur is not None:
-                _s = _dur / 1000
-                stats_parts.append(f"{_s:.0f}s" if _s < 60 else f"{_s / 60:.1f}m")
-            _tok = event.metadata.get("total_tokens")
-            if _tok:
-                stats_parts.append(f"{_tok:,} tokens")
-            _calls = event.metadata.get("llm_calls")
-            if _calls:
-                stats_parts.append(f"{_calls} LLM calls")
-            _cost = event.metadata.get("total_cost")
-            if _cost and _cost > 0:
-                stats_parts.append(f"${_cost:.4f}")
-            _tools = event.metadata.get("tools_used")
-            if _tools:
-                stats_parts.append(f"tools: {', '.join(_tools)}")
-            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
+            meta = event.metadata or {}
+            task_name = _html.escape(meta.get("name", ""))
+            result = _strip_markdown(meta.get("result", ""))
+            preview = _html.escape(result[:2000])
+            if len(result) > 2000:
+                preview += "\n[truncated]"
 
-            text = f"\u2705 Background task '{task_name}' done{stats_line}\n\n{result}"
-            _bg_html = _has_html_links(text)
-            if _bg_html:
-                text = _prepare_html(text)
-            _bg_pm = "HTML" if _bg_html else None
+            stats_line = _format_stats_html(meta)
+            tools_line = _format_tools_html(meta)
+            models = meta.get("models_used")
+            model_line = ""
+            if models:
+                model_line = "Model: " + ", ".join(_html.escape(m) for m in models)
+
+            lines = [f"[done] <b>Background '{task_name}' done</b>"]
+            if stats_line:
+                lines.append(stats_line)
+            if model_line:
+                lines.append(model_line)
+            if tools_line:
+                lines.append(tools_line)
+            if preview:
+                lines.append("")
+                lines.append(f"<pre>{preview}</pre>")
+
+            text = "\n".join(lines)
             try:
                 await _telegram_send_with_retry(
                     lambda: self._bot.send_message(
                         chat_id=self._chat_id, text=text,
-                        parse_mode=_bg_pm,
+                        parse_mode="HTML",
                     )
                 )
             except Exception as exc:
@@ -516,13 +518,20 @@ class _TelegramCallback:
             self.busy = False
 
         elif kind == "background_failed":
-            task_name = event.metadata.get("name", "")
-            error = event.metadata.get("error", "unknown error")
-            text = f"\u274c Background task '{task_name}' failed: {error[:200]}"
+            import html as _html
+
+            meta = event.metadata or {}
+            task_name = _html.escape(meta.get("name", ""))
+            error = _html.escape(meta.get("error", "unknown error")[:300])
+            text = (
+                f"[error] <b>Background '{task_name}' failed</b>\n\n"
+                f"<pre>{error}</pre>"
+            )
             try:
                 await _telegram_send_with_retry(
                     lambda: self._bot.send_message(
                         chat_id=self._chat_id, text=text,
+                        parse_mode="HTML",
                     )
                 )
             except Exception as exc:

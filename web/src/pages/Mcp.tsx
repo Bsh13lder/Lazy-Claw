@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api";
-import type { McpServer } from "../api";
+import type { McpServer, McpTool } from "../api";
 import Modal from "../components/Modal";
 
 // ── Transport options ─────────────────────────────────────────────────────
@@ -37,6 +37,10 @@ export default function Mcp() {
   const [reconnectingAll, setReconnectingAll] = useState(false);
   const [actionIds, setActionIds] = useState<Set<string>>(new Set());
 
+  // Tools cache per server
+  const [toolsCache, setToolsCache] = useState<Record<string, McpTool[]>>({});
+  const [toolsLoading, setToolsLoading] = useState<Set<string>>(new Set());
+
   // Add server modal
   const [showAdd, setShowAdd] = useState(false);
   const [addName, setAddName] = useState("");
@@ -69,6 +73,26 @@ export default function Mcp() {
       if (active) next.add(id); else next.delete(id);
       return next;
     });
+  };
+
+  const handleExpand = async (serverId: string) => {
+    if (expandedId === serverId) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(serverId);
+    // Fetch real tools if not cached
+    if (!toolsCache[serverId]) {
+      setToolsLoading((prev) => new Set([...prev, serverId]));
+      try {
+        const tools = await api.getMcpServerTools(serverId);
+        setToolsCache((prev) => ({ ...prev, [serverId]: tools }));
+      } catch {
+        setToolsCache((prev) => ({ ...prev, [serverId]: [] }));
+      } finally {
+        setToolsLoading((prev) => { const next = new Set(prev); next.delete(serverId); return next; });
+      }
+    }
   };
 
   const handleReconnect = async (id: string) => {
@@ -254,7 +278,7 @@ export default function Mcp() {
                   {/* Server header */}
                   <div
                     className="px-4 py-4 cursor-pointer"
-                    onClick={() => setExpandedId(expanded ? null : server.id)}
+                    onClick={() => handleExpand(server.id)}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
@@ -337,29 +361,38 @@ export default function Mcp() {
                         <p className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
                           Tools ({server.tool_count})
                         </p>
-                        {server.tool_count === 0 ? (
+                        {toolsLoading.has(server.id) ? (
+                          <div className="flex items-center gap-2 text-text-muted text-xs py-2">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spinner">
+                              <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+                            </svg>
+                            Loading tools...
+                          </div>
+                        ) : (toolsCache[server.id] ?? []).length === 0 ? (
                           <p className="text-xs text-text-muted py-2">No tools registered</p>
                         ) : (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                            {Array.from({ length: Math.min(server.tool_count, 20) }, (_, i) => (
+                            {(toolsCache[server.id] ?? []).map((tool) => (
                               <div
-                                key={i}
-                                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg-tertiary"
+                                key={tool.name}
+                                className="flex items-start gap-2 px-3 py-2 rounded-lg bg-bg-tertiary"
                               >
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-cyan-400 shrink-0">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-cyan-400 shrink-0 mt-0.5">
                                   <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                                 </svg>
-                                <span className="text-xs text-text-secondary font-mono truncate">
-                                  tool_{i + 1}
-                                </span>
+                                <div className="min-w-0">
+                                  <span className="text-xs text-text-secondary font-mono truncate block">
+                                    {tool.name}
+                                  </span>
+                                  {tool.description && (
+                                    <span className="text-[10px] text-text-muted line-clamp-1">
+                                      {tool.description}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             ))}
                           </div>
-                        )}
-                        {server.tool_count > 20 && (
-                          <p className="text-[10px] text-text-muted mt-2">
-                            + {server.tool_count - 20} more tools
-                          </p>
                         )}
                       </div>
                     </div>

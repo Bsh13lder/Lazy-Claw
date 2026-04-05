@@ -391,14 +391,22 @@ function TeamsTab({
   readonly specialists: readonly Specialist[];
   readonly onTeamUpdate: (updates: Partial<TeamSettings>) => Promise<void>;
   readonly onSpecialistDelete: (name: string) => Promise<void>;
-  readonly onSpecialistCreate: (body: { name: string; description: string; system_prompt?: string }) => Promise<void>;
+  readonly onSpecialistCreate: (body: {
+    name: string;
+    display_name: string;
+    system_prompt: string;
+    allowed_skills: string[];
+    preferred_model?: string;
+  }) => Promise<void>;
 }) {
   const toast = useToast();
   const [saving, setSaving] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
-  const [newDesc, setNewDesc] = useState("");
+  const [newDisplayName, setNewDisplayName] = useState("");
   const [newPrompt, setNewPrompt] = useState("");
+  const [newSkills, setNewSkills] = useState("");
+  const [newModel, setNewModel] = useState("");
   const [creating, setCreating] = useState(false);
 
   const [maxParallel, setMaxParallel] = useState(String(team?.max_parallel ?? 3));
@@ -439,16 +447,19 @@ function TeamsTab({
   };
 
   const handleCreate = async () => {
-    if (!newName.trim() || !newDesc.trim()) return;
+    if (!newName.trim() || !newDisplayName.trim() || !newPrompt.trim()) return;
     setCreating(true);
     try {
+      const skills = newSkills.split(",").map((s) => s.trim()).filter(Boolean);
       await onSpecialistCreate({
         name: newName.trim(),
-        description: newDesc.trim(),
-        system_prompt: newPrompt.trim() || undefined,
+        display_name: newDisplayName.trim(),
+        system_prompt: newPrompt.trim(),
+        allowed_skills: skills.length > 0 ? skills : ["*"],
+        preferred_model: newModel.trim() || undefined,
       });
       setShowCreate(false);
-      setNewName(""); setNewDesc(""); setNewPrompt("");
+      setNewName(""); setNewDisplayName(""); setNewPrompt(""); setNewSkills(""); setNewModel("");
       toast.success("Specialist created");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to create");
@@ -561,7 +572,12 @@ function TeamsTab({
                       {s.builtin ? "builtin" : "custom"}
                     </span>
                   </div>
-                  {s.description && <p className="text-xs text-text-muted line-clamp-2">{s.description}</p>}
+                  {s.display_name && s.display_name !== s.name && (
+                    <p className="text-xs text-text-secondary">{s.display_name}</p>
+                  )}
+                  {s.preferred_model && (
+                    <p className="text-[10px] text-text-muted">Model: {s.preferred_model}</p>
+                  )}
                 </div>
                 {!s.builtin && (
                   <button
@@ -583,32 +599,61 @@ function TeamsTab({
       {/* Create specialist modal */}
       <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Add Specialist">
         <div className="space-y-3">
-          <input
-            type="text"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="Specialist name (e.g. researcher)"
-            className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
-          />
-          <input
-            type="text"
-            value={newDesc}
-            onChange={(e) => setNewDesc(e.target.value)}
-            placeholder="Description"
-            className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
-          />
-          <textarea
-            value={newPrompt}
-            onChange={(e) => setNewPrompt(e.target.value)}
-            placeholder="System prompt (optional)"
-            rows={4}
-            className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light resize-y"
-          />
+          <div>
+            <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">Name (ID)</label>
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="e.g. researcher"
+              className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">Display Name</label>
+            <input
+              type="text"
+              value={newDisplayName}
+              onChange={(e) => setNewDisplayName(e.target.value)}
+              placeholder="e.g. Research Specialist"
+              className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">System Prompt</label>
+            <textarea
+              value={newPrompt}
+              onChange={(e) => setNewPrompt(e.target.value)}
+              placeholder="Instructions for this specialist..."
+              rows={4}
+              className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light resize-y"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">Allowed Skills (comma-separated, * for all)</label>
+            <input
+              type="text"
+              value={newSkills}
+              onChange={(e) => setNewSkills(e.target.value)}
+              placeholder="web_search, browse_web or * for all"
+              className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">Preferred Model (optional)</label>
+            <input
+              type="text"
+              value={newModel}
+              onChange={(e) => setNewModel(e.target.value)}
+              placeholder="e.g. claude-sonnet-4-6-20250514"
+              className="w-full px-4 py-2.5 rounded-xl bg-bg-tertiary border border-border text-sm text-text-primary font-mono placeholder:text-text-placeholder focus:outline-none focus:border-border-light"
+            />
+          </div>
           <div className="flex justify-end gap-2 pt-2">
             <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-sm text-text-muted rounded-lg hover:bg-bg-hover transition-colors">Cancel</button>
             <button
               onClick={handleCreate}
-              disabled={creating || !newName.trim() || !newDesc.trim()}
+              disabled={creating || !newName.trim() || !newDisplayName.trim() || !newPrompt.trim()}
               className="px-4 py-2 text-sm bg-accent text-bg-primary rounded-lg hover:opacity-90 disabled:opacity-30 transition-opacity"
             >
               {creating ? "Creating..." : "Create"}
@@ -828,9 +873,14 @@ export default function Settings() {
     setSpecialists((prev) => prev.filter((s) => s.name !== name));
   }, []);
 
-  const handleSpecialistCreate = useCallback(async (body: { name: string; description: string; system_prompt?: string }) => {
+  const handleSpecialistCreate = useCallback(async (body: {
+    name: string;
+    display_name: string;
+    system_prompt: string;
+    allowed_skills: string[];
+    preferred_model?: string;
+  }) => {
     await api.createSpecialist(body);
-    // Reload specialists to get full data
     const updated = await api.listSpecialists();
     setSpecialists(Array.isArray(updated) ? updated : []);
   }, []);

@@ -1,0 +1,7 @@
+/* Hide Chat beta from n8n sidebar */
+a[href*="/chat"],
+a[href$="/chat"],
+[data-test-id="mainSidebar-chat"],
+.el-menu-item[title="Chat"] {
+  display: none !important;
+}

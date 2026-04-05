@@ -2288,11 +2288,25 @@ class Agent:
                 rows.append((msg_id, user_id, chat_session_id, msg.role, encrypted_content, tool_name, metadata))
 
             async with db_session(self.config) as db:
+                # Ensure chat session row exists (upsert)
+                if chat_session_id:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO agent_chat_sessions (id, user_id) VALUES (?, ?)",
+                        (chat_session_id, user_id),
+                    )
                 await db.executemany(
                     "INSERT INTO agent_messages (id, user_id, chat_session_id, role, content, tool_name, metadata) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
+                # Update message count
+                if chat_session_id:
+                    await db.execute(
+                        "UPDATE agent_chat_sessions SET message_count = "
+                        "(SELECT COUNT(*) FROM agent_messages WHERE chat_session_id = ?) "
+                        "WHERE id = ?",
+                        (chat_session_id, chat_session_id),
+                    )
                 await db.commit()
 
             # Record and return the final assistant message content

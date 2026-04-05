@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { ChatProvider } from "./context/ChatContext";
 import Login from "./pages/Login";
-import Chat from "./pages/Chat";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
 import SkillHub from "./pages/SkillHub";
@@ -32,7 +32,7 @@ function AppContent() {
 
   if (!user) return <Login />;
 
-  const otherPage = (() => {
+  const pageContent = (() => {
     switch (page) {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
@@ -43,18 +43,16 @@ function AppContent() {
       case "memory": return <Memory />;
       case "vault": return <Vault />;
       case "settings": return <Settings />;
-      default: return null;
+      default: return <Overview onNavigate={setPage} />;
     }
   })();
 
   return (
-    <NavShell activePage={page} onNavigate={setPage}>
-      {/* Chat stays mounted always — hidden when not active */}
-      <div className={page === "chat" ? "h-full" : "hidden"}>
-        <Chat />
-      </div>
-      {page !== "chat" && otherPage}
-    </NavShell>
+    <ChatProvider>
+      <NavShell activePage={page} onNavigate={setPage}>
+        {pageContent}
+      </NavShell>
+    </ChatProvider>
   );
 }
 

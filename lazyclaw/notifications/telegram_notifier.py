@@ -10,6 +10,7 @@ Skips all noisy intermediate events (tool_call, token, etc.).
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from typing import Any, Callable
@@ -35,6 +36,35 @@ def _strip_markdown(text: str) -> str:
     # Bullet points: - text → • text
     text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
     return text
+
+
+def _format_stats_html(meta: dict) -> str:
+    """Build an HTML stats line from event metadata."""
+    parts: list[str] = []
+    duration_ms = meta.get("duration_ms")
+    if duration_ms is not None:
+        secs = duration_ms / 1000
+        parts.append(f"{secs:.0f}s" if secs < 60 else f"{secs / 60:.1f}m")
+    tokens = meta.get("total_tokens")
+    if tokens:
+        parts.append(f"{tokens:,} tok")
+    llm_calls = meta.get("llm_calls")
+    if llm_calls:
+        parts.append(f"{llm_calls} calls")
+    cost = meta.get("total_cost")
+    if cost and cost > 0:
+        parts.append(f"${cost:.4f}")
+    return " | ".join(parts)
+
+
+def _format_tools_html(meta: dict) -> str:
+    """Format tools used as a compact HTML line."""
+    tools = meta.get("tools_used")
+    if not tools:
+        return ""
+    tool_list = ", ".join(html.escape(t) for t in tools[:8])
+    extra = f" +{len(tools) - 8} more" if len(tools) > 8 else ""
+    return f"Tools: <i>{tool_list}{extra}</i>"
 
 
 class TelegramNotifier:
@@ -69,7 +99,7 @@ class TelegramNotifier:
         if not chat_id or not self._bot:
             return
 
-        text = self._format(event)
+        text, parse_mode = self._format(event)
         if not text:
             return
 
@@ -77,7 +107,11 @@ class TelegramNotifier:
             from lazyclaw.channels.telegram import _telegram_send_with_retry
 
             await _telegram_send_with_retry(
-                lambda: self._bot.send_message(chat_id=int(chat_id), text=text)
+                lambda: self._bot.send_message(
+                    chat_id=int(chat_id),
+                    text=text,
+                    parse_mode=parse_mode,
+                )
             )
         except Exception as exc:
             logger.debug("TelegramNotifier send failed: %s", exc)
@@ -97,14 +131,15 @@ class TelegramNotifier:
                 try:
                     from lazyclaw.channels.telegram import _telegram_send_with_retry
 
-                    msg = f"\U0001f198 Agent stuck: {context}"
+                    ctx = html.escape(context[:300])
+                    msg = f"<b>Agent needs help</b>\n\n{ctx}"
                     if needs_browser:
-                        msg += "\n\nBrowser handoff requested — reply in CLI/TUI."
+                        msg += "\n\n<i>Browser handoff requested — reply in CLI/TUI.</i>"
                     else:
-                        msg += "\n\nWaiting for help in CLI/TUI."
+                        msg += "\n\n<i>Waiting for help in CLI/TUI.</i>"
                     await _telegram_send_with_retry(
                         lambda: self._bot.send_message(
-                            chat_id=int(chat_id), text=msg,
+                            chat_id=int(chat_id), text=msg, parse_mode="HTML",
                         )
                     )
                 except Exception as exc:
@@ -113,12 +148,13 @@ class TelegramNotifier:
 
     # ── Formatting ───────────────────────────────────────────────────
 
-    def _format(self, event: Any) -> str | None:
+    def _format(self, event: Any) -> tuple[str | None, str | None]:
+        """Return (text, parse_mode) or (None, None) if event should be skipped."""
         kind = event.kind
 
         if kind == "work_summary":
             self._work_summary = event.metadata.get("summary")
-            return None
+            return None, None
 
         if kind == "done":
             summary = self._work_summary
@@ -127,68 +163,67 @@ class TelegramNotifier:
             stats_parts: list[str] = []
             result_preview = ""
             if summary is not None:
-                dur = getattr(summary, "duration_ms", None)
-                if dur is not None:
-                    secs = dur / 1000
-                    stats_parts.append(f"{secs:.0f}s" if secs < 60 else f"{secs / 60:.1f}m")
-                calls = getattr(summary, "llm_calls", None)
-                if calls:
-                    stats_parts.append(f"{calls} LLM calls")
-                tokens = getattr(summary, "total_tokens", None)
-                if tokens:
-                    stats_parts.append(f"{tokens:,} tokens")
-                cost = getattr(summary, "total_cost", None)
-                if cost and cost > 0:
-                    stats_parts.append(f"${cost:.4f}")
-                tools = getattr(summary, "tools_used", None)
-                if tools:
-                    stats_parts.append(f"tools: {', '.join(tools)}")
+                meta = {}
+                for attr in ("duration_ms", "llm_calls", "total_tokens", "total_cost", "tools_used"):
+                    val = getattr(summary, attr, None)
+                    if val is not None:
+                        meta[attr] = val
+                stats_line = _format_stats_html(meta)
+                tools_line = _format_tools_html(meta)
                 preview = getattr(summary, "result_preview", None)
                 if preview:
-                    result_preview = f"\n\n{_strip_markdown(preview)}"
+                    result_preview = html.escape(_strip_markdown(preview)[:500])
 
-            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
-            return f"\u2705 Task complete{stats_line}{result_preview}"
+                lines = ["[done] <b>Task complete</b>"]
+                if stats_line:
+                    lines.append(stats_line)
+                if tools_line:
+                    lines.append(tools_line)
+                if result_preview:
+                    lines.append("")
+                    lines.append(f"<pre>{result_preview}</pre>")
+                return "\n".join(lines), "HTML"
+
+            return "[done] <b>Task complete</b>", "HTML"
 
         if kind == "background_done":
-            name = event.metadata.get("name", "")
-            result = _strip_markdown(event.metadata.get("result", ""))
-            preview = result[:500]
+            meta = event.metadata or {}
+            name = html.escape(meta.get("name", ""))
+            result = _strip_markdown(meta.get("result", ""))
+            preview = html.escape(result[:500])
             if len(result) > 500:
-                preview += "\n\n[truncated]"
+                preview += "\n[truncated]"
 
-            # Stats line from work_summary (if available)
-            stats_parts: list[str] = []
-            duration_ms = event.metadata.get("duration_ms")
-            if duration_ms is not None:
-                secs = duration_ms / 1000
-                stats_parts.append(f"{secs:.0f}s" if secs < 60 else f"{secs / 60:.1f}m")
-            tokens = event.metadata.get("total_tokens")
-            if tokens:
-                stats_parts.append(f"{tokens:,} tokens")
-            llm_calls = event.metadata.get("llm_calls")
-            if llm_calls:
-                stats_parts.append(f"{llm_calls} LLM calls")
-            cost = event.metadata.get("total_cost")
-            if cost and cost > 0:
-                stats_parts.append(f"${cost:.4f}")
-            models = event.metadata.get("models_used")
+            stats_line = _format_stats_html(meta)
+            tools_line = _format_tools_html(meta)
+            models = meta.get("models_used")
+            model_line = ""
             if models:
-                stats_parts.append(", ".join(models))
-            tools = event.metadata.get("tools_used")
-            if tools:
-                stats_parts.append(f"tools: {', '.join(tools)}")
+                model_line = "Model: " + ", ".join(html.escape(m) for m in models)
 
-            stats_line = f"\n{' | '.join(stats_parts)}" if stats_parts else ""
-            return f"\u2705 Background '{name}' done{stats_line}\n\n{preview}"
+            lines = [f"[done] <b>Background '{name}' done</b>"]
+            if stats_line:
+                lines.append(stats_line)
+            if model_line:
+                lines.append(model_line)
+            if tools_line:
+                lines.append(tools_line)
+            if preview:
+                lines.append("")
+                lines.append(f"<pre>{preview}</pre>")
+            return "\n".join(lines), "HTML"
 
         if kind == "background_failed":
-            name = event.metadata.get("name", "")
-            error = _strip_markdown(event.metadata.get("error", ""))[:200]
-            return f"\u274c Background '{name}' failed: {error}"
+            meta = event.metadata or {}
+            name = html.escape(meta.get("name", ""))
+            error = html.escape(_strip_markdown(meta.get("error", ""))[:300])
+            return (
+                f"[error] <b>Background '{name}' failed</b>\n\n"
+                f"<pre>{error}</pre>"
+            ), "HTML"
 
         if kind == "help_needed":
-            detail = _strip_markdown(event.detail or "")
-            return f"\U0001f198 Agent stuck: {detail}\n\nReply in CLI/TUI to help."
+            detail = html.escape(_strip_markdown(event.detail or "")[:300])
+            return f"[help] <b>Agent stuck</b>\n\n{detail}\n\n<i>Reply in CLI/TUI to help.</i>", "HTML"
 
-        return None
+        return None, None

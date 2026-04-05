@@ -39,8 +39,23 @@ services:
       - N8N_SECURE_COOKIE=false
       # API access for LazyClaw integration
       - N8N_PUBLIC_API_DISABLED=false
+      # Hide AI/Agent features — LazyClaw is the AI brain, n8n is workflow-only
+      - N8N_AI_ENABLED=false
+      - N8N_AI_ASSISTANT_ENABLED=false
+      - N8N_HIDE_USAGE_PAGE=true
+      - N8N_TEMPLATES_ENABLED=false
+      # Remove all LangChain/AI nodes from palette (agents, chat, LLMs)
+      - 'NODES_EXCLUDE=["@n8n/n8n-nodes-langchain"]'
+      # Disable AI chat beta and assistant
+      - N8N_PERSONALIZATION_SURVEY_ENABLED=false
+      - N8N_AI_CHAT_ENABLED=false
+      - N8N_FEATURE_AI_ENABLED=false
+      - 'N8N_EDITOR_SETTINGS={"aiAssistant":{"enabled":false},"aiChat":{"enabled":false}}'
     volumes:
       - n8n_data:/home/node/.n8n
+      - ./n8n-custom/hide-chat.css:/tmp/hide-chat.css:ro
+      - ./n8n-custom/start.sh:/tmp/start.sh:ro
+    entrypoint: ["tini", "--", "/bin/sh", "/tmp/start.sh"]
 
 volumes:
   n8n_data:

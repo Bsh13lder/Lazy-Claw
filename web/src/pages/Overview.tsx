@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as api from "../api";
 import type { AgentStatus, Job, McpServer } from "../api";
 import { useAuth } from "../context/AuthContext";
+import { useChat } from "../context/ChatContext";
 import type { Page } from "../components/NavShell";
 
 /* ── Types ──────────────────────────────────────────────────────────── */
@@ -266,6 +267,7 @@ function buildActivity(jobs: Job[], mcpServers: McpServer[]): ActivityItem[] {
 /* ── Main component ──────────────────────────────────────────────── */
 
 export default function Overview({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const { createSession } = useChat();
   const { user } = useAuth();
   const [health, setHealth] = useState<HealthData>({
     gateway: "loading",
@@ -368,7 +370,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-text-primary">{gatewayLabel}</p>
               <p className="text-[11px] text-text-muted mt-0.5">
-                v{health.version} &middot; {uptime} &middot; Telegram connected &middot; {health.connectedMcp}/{health.mcpServers} MCP servers
+                v{health.version} &middot; {uptime} &middot; {health.connectedMcp}/{health.mcpServers} MCP servers
               </p>
             </div>
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-bg-tertiary">
@@ -520,7 +522,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <QuickAction
               label="New Chat"
-              onClick={() => onNavigate("chat")}
+              onClick={() => createSession()}
               icon={
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />

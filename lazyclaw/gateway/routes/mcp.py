@@ -109,3 +109,44 @@ async def reconnect_server(server_id: str, user: User = Depends(get_current_user
 
     await reconnect_server(_config, user.id, server_id)
     return {"status": "reconnected"}
+
+
+@router.get("/servers/{server_id}/tools")
+async def get_server_tools(server_id: str, user: User = Depends(get_current_user)):
+    """Return actual tool names for an MCP server from the tool cache."""
+    import json
+    from lazyclaw.db.connection import db_session
+
+    async with db_session(_config) as db:
+        # Get server name from server_id
+        row = await db.execute(
+            "SELECT name FROM mcp_connections WHERE id = ? AND user_id = ?",
+            (server_id, user.id),
+        )
+        result = await row.fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Server not found")
+
+        server_name = result[0]
+
+        # Get cached tools
+        row = await db.execute(
+            "SELECT tools_json FROM mcp_tool_cache WHERE server_name = ?",
+            (server_name,),
+        )
+        cache = await row.fetchone()
+        if not cache:
+            return {"tools": []}
+
+        try:
+            tools = json.loads(cache[0])
+        except (json.JSONDecodeError, TypeError):
+            return {"tools": []}
+
+    return {
+        "tools": [
+            {"name": t.get("name", ""), "description": t.get("description", "")}
+            for t in tools
+            if isinstance(t, dict)
+        ]
+    }

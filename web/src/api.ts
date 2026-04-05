@@ -90,8 +90,11 @@ export interface TeamSettings {
 
 export interface Specialist {
   name: string;
-  description: string;
-  system_prompt?: string;
+  display_name: string;
+  system_prompt: string;
+  allowed_skills: string[];
+  preferred_model: string | null;
+  is_builtin: boolean;
   builtin: boolean;
 }
 
@@ -99,6 +102,27 @@ export interface PermissionSettings {
   category_defaults: Record<string, string>;
   skill_overrides: Record<string, string>;
   auto_approve_timeout: number;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  tool_name: string | null;
+  tool_calls: { name: string; args: Record<string, unknown>; result?: string }[] | null;
+  created_at: string;
+}
+
+export interface McpTool {
+  name: string;
+  description: string;
 }
 
 // ── Request helper ─────────────────────────────────────────────────────────
@@ -154,6 +178,35 @@ export const getMe = () =>
 
 export const sendMessage = (message: string) =>
   request<{ response: string }>("/api/agent/chat", { method: "POST", body: JSON.stringify({ message }) });
+
+// ── Chat Sessions ─────────────────────────────────────────────────────────
+
+export const listChatSessions = () =>
+  request<{ sessions: ChatSession[] }>("/api/chat/sessions").then((r) => r.sessions);
+
+export const createChatSession = (title = "New Chat") =>
+  request<{ id: string; title: string }>("/api/chat/sessions", {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
+
+export const updateChatSession = (id: string, updates: { title?: string; archived?: boolean }) =>
+  request<{ status: string }>(`/api/chat/sessions/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+
+export const deleteChatSession = (id: string) =>
+  request<{ status: string }>(`/api/chat/sessions/${id}`, { method: "DELETE" });
+
+export const getSessionMessages = (sessionId: string, opts?: { limit?: number; before?: string }) => {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.before) params.set("before", opts.before);
+  const qs = params.toString();
+  return request<{ messages: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages${qs ? `?${qs}` : ""}`)
+    .then((r) => r.messages);
+};
 
 // ── Health ─────────────────────────────────────────────────────────────────
 
@@ -248,6 +301,9 @@ export const reconnectMcp = (id: string) =>
 export const disconnectMcp = (id: string) =>
   request<void>(`/api/mcp/servers/${id}/disconnect`, { method: "POST" });
 
+export const getMcpServerTools = (id: string) =>
+  request<{ tools: McpTool[] }>(`/api/mcp/servers/${id}/tools`).then((r) => r.tools);
+
 // ── Memory ─────────────────────────────────────────────────────────────────
 
 export const listMemories = () =>
@@ -317,7 +373,13 @@ export const updateTeamSettings = (updates: Partial<TeamSettings>) =>
 export const listSpecialists = () =>
   request<{ success: boolean; data: Specialist[] }>("/api/teams/specialists").then((r) => r.data);
 
-export const createSpecialist = (body: { name: string; description: string; system_prompt?: string }) =>
+export const createSpecialist = (body: {
+  name: string;
+  display_name: string;
+  system_prompt: string;
+  allowed_skills: string[];
+  preferred_model?: string;
+}) =>
   request<{ success: boolean }>("/api/teams/specialists", { method: "POST", body: JSON.stringify(body) });
 
 export const deleteSpecialist = (name: string) =>

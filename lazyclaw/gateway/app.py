@@ -28,6 +28,7 @@ from lazyclaw.gateway.routes.compression import router as compression_router
 from lazyclaw.gateway.routes.replay import router as replay_router
 from lazyclaw.gateway.routes.recovery import router as recovery_router
 from lazyclaw.gateway.routes.activity import router as activity_router, set_activity_deps
+from lazyclaw.gateway.routes.webhook import router as webhook_router, set_webhook_deps
 from lazyclaw.gateway.routes.chat_ws import ws_chat_router, set_chat_ws_deps
 from lazyclaw.llm.model_manager import seed_default_models
 
@@ -134,6 +135,7 @@ app.include_router(compression_router)
 app.include_router(replay_router)
 app.include_router(recovery_router)
 app.include_router(activity_router)
+app.include_router(webhook_router)
 app.include_router(ws_chat_router)
 
 

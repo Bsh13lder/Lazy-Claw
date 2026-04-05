@@ -215,6 +215,12 @@ async def run_agent(config: Config) -> None:
     from lazyclaw.gateway.routes.activity import set_activity_deps
     set_activity_deps(team_lead, task_runner)
 
+    # Wire webhook endpoint (n8n → LazyClaw)
+    from lazyclaw.channels.telegram import resolve_user_id as _resolve_uid
+    from lazyclaw.gateway.routes.webhook import set_webhook_deps
+    _default_uid = await _resolve_uid(config)
+    set_webhook_deps(lane_queue, _default_uid)
+
     # ── Textual TUI Dashboard ────────────────────────────────────────
     # Full interactive terminal: live agent activity, system overview,
     # scrollable logs, admin input. Replaces the old Rich Live panel.

@@ -32,9 +32,8 @@ function AppContent() {
 
   if (!user) return <Login />;
 
-  const pageComponent = (() => {
+  const otherPage = (() => {
     switch (page) {
-      case "chat": return <Chat />;
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
       case "hub": return <SkillHub />;
@@ -44,13 +43,17 @@ function AppContent() {
       case "memory": return <Memory />;
       case "vault": return <Vault />;
       case "settings": return <Settings />;
-      default: return <Overview onNavigate={setPage} />;
+      default: return null;
     }
   })();
 
   return (
     <NavShell activePage={page} onNavigate={setPage}>
-      {pageComponent}
+      {/* Chat stays mounted always — hidden when not active */}
+      <div className={page === "chat" ? "h-full" : "hidden"}>
+        <Chat />
+      </div>
+      {page !== "chat" && otherPage}
     </NavShell>
   );
 }

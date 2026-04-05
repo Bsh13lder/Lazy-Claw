@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
-import type { Job, McpServer } from "../api";
+import type { AgentStatus, Job, McpServer } from "../api";
 import { useAuth } from "../context/AuthContext";
 import type { Page } from "../components/NavShell";
 
@@ -136,6 +136,93 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   );
 }
 
+/* ── Live Agent Status ─────────────────────────────────────────── */
+
+const LANE_STYLE: Record<string, string> = {
+  foreground: "bg-blue-900/30 text-blue-400",
+  background: "bg-purple-900/30 text-purple-400",
+  specialist: "bg-orange-900/30 text-orange-400",
+};
+
+const STATUS_STYLE: Record<string, string> = {
+  running: "bg-accent-soft text-accent",
+  done: "bg-green-900/30 text-green-400",
+  failed: "bg-red-900/30 text-red-400",
+  cancelled: "bg-yellow-900/30 text-yellow-400",
+};
+
+function AgentStatusPanel({ agentStatus }: { agentStatus: AgentStatus | null }) {
+  if (!agentStatus) return null;
+
+  const allActive = [...agentStatus.active, ...agentStatus.background];
+
+  return (
+    <div className="animate-fade-in">
+      {/* Running tasks */}
+      {allActive.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="inline-block w-2 h-2 rounded-full bg-accent live-pulse" />
+            <h2 className="text-sm font-semibold text-text-primary">Running Now</h2>
+            <span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent text-[10px] font-medium">
+              {allActive.length}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {allActive.map((t) => (
+              <div key={t.task_id} className="bg-bg-secondary border border-border rounded-xl p-4 card-hover">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-medium text-text-primary truncate">{t.name}</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${LANE_STYLE[t.lane] || "bg-bg-tertiary text-text-muted"}`}>
+                    {t.lane}
+                  </span>
+                  <span className="ml-auto text-xs text-text-muted tabular-nums">{t.elapsed_s}s</span>
+                </div>
+                {t.description && <p className="text-xs text-text-muted truncate">{t.description}</p>}
+                {t.current_step && (
+                  <p className="text-[11px] text-text-secondary mt-1">
+                    Step {t.step_count}: <span className="text-accent">{t.current_step}</span>
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Recent completed */}
+      {agentStatus.recent.length > 0 && (
+        <div>
+          <h2 className="text-sm font-semibold text-text-primary mb-3 flex items-center gap-2">
+            Agent History
+            <span className="text-[10px] text-text-muted font-normal">{agentStatus.recent.length} recent</span>
+          </h2>
+          <div className="bg-bg-secondary border border-border rounded-xl overflow-hidden">
+            {agentStatus.recent.slice(0, 5).map((t) => (
+              <div key={t.task_id} className="flex items-center gap-3 px-4 py-2.5 border-b border-border last:border-b-0 hover:bg-bg-hover/50 transition-colors">
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wider ${STATUS_STYLE[t.status] || "bg-bg-tertiary text-text-muted"}`}>
+                  {t.status}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-text-primary truncate">{t.name}</p>
+                  {t.result_preview && <p className="text-[11px] text-text-muted truncate">{t.result_preview}</p>}
+                  {t.error && <p className="text-[11px] text-red-400 truncate">{t.error}</p>}
+                </div>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${LANE_STYLE[t.lane] || "bg-bg-tertiary text-text-muted"}`}>
+                  {t.lane}
+                </span>
+                <span className="text-xs text-text-muted tabular-nums shrink-0">
+                  {t.duration_s != null ? `${t.duration_s}s` : "-"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
 function timeAgo(iso: string): string {
@@ -193,6 +280,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
     pendingApprovals: 0,
   });
   const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [uptime, setUptime] = useState("—");
 
   useEffect(() => {
@@ -240,6 +328,20 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
       if (healthResp) setUptime("Online");
     }
     load();
+  }, []);
+
+  // Poll agent status every 3s
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const s = await api.getAgentStatus();
+        if (alive) setAgentStatus(s);
+      } catch { /* ignore */ }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(id); };
   }, []);
 
   const gatewayLabel =
@@ -326,6 +428,9 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             }
           />
         </div>
+
+        {/* ── Live Agent Status ──────────────────────────────── */}
+        <AgentStatusPanel agentStatus={agentStatus} />
 
         {/* ── Two-column: Resources + Activity ────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">

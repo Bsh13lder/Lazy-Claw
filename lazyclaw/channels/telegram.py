@@ -31,6 +31,15 @@ from lazyclaw.runtime.callbacks import AgentEvent
 
 logger = logging.getLogger(__name__)
 
+# Global reference for webhook/external access
+_telegram_adapter_instance: "TelegramAdapter | None" = None
+
+
+def get_telegram_adapter() -> "TelegramAdapter | None":
+    """Return the active TelegramAdapter (set during start)."""
+    return _telegram_adapter_instance
+
+
 # Retry config for network-flaky Telegram sends
 _SEND_MAX_RETRIES = 3
 _SEND_RETRY_BASE_DELAY = 2.0  # seconds
@@ -743,6 +752,9 @@ class TelegramAdapter(ChannelAdapter):
         await self._app.start()
         await self._app.updater.start_polling()
         logger.info("Telegram adapter started")
+
+        global _telegram_adapter_instance
+        _telegram_adapter_instance = self
 
         # Register "/" autocomplete menu with Telegram (must be after start)
         try:

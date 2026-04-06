@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from lazyclaw.config import Config
 from lazyclaw.crypto.key_manager import get_user_dek
-from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ CODE_SPECIALIST = SpecialistConfig(
         "clean, working code. Explain your approach briefly, then deliver the implementation."
     ),
     allowed_skills=("calculate", "create_skill", "list_skills", "delete_skill"),
-    preferred_model="gpt-5-mini",
+    preferred_model=None,
     is_builtin=True,
 )
 
@@ -138,7 +138,7 @@ RESEARCH_SPECIALIST = SpecialistConfig(
     allowed_skills=(
         "web_search", "browser", "read_file", "list_directory", "run_command",
     ),
-    preferred_model="gpt-5-mini",
+    preferred_model=None,
     is_builtin=True,
 )
 
@@ -275,7 +275,7 @@ async def delete_specialist(config: Config, user_id: str, name: str) -> bool:
 
     target_id = None
     for row_id, name_enc in all_rows:
-        decrypted = decrypt(name_enc, key) if name_enc.startswith("enc:") else name_enc
+        decrypted = decrypt_field(name_enc, key)
         if decrypted == name:
             target_id = row_id
             break
@@ -284,7 +284,7 @@ async def delete_specialist(config: Config, user_id: str, name: str) -> bool:
         return False
 
     async with db_session(config) as db:
-        await db.execute("DELETE FROM specialists WHERE id = ?", (target_id,))
+        await db.execute("DELETE FROM specialists WHERE id = ? AND user_id = ?", (target_id, user_id))
         await db.commit()
 
     logger.info("Deleted specialist '%s' for user %s", name, user_id)

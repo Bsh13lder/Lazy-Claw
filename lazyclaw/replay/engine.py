@@ -7,7 +7,7 @@ import logging
 
 from lazyclaw.config import Config
 from lazyclaw.crypto.key_manager import get_user_dek
-from lazyclaw.crypto.encryption import decrypt
+from lazyclaw.crypto.encryption import decrypt_field
 from lazyclaw.db.connection import db_session
 from lazyclaw.replay.models import TraceEntry, TraceSession
 
@@ -67,7 +67,7 @@ async def get_trace(
     entries = []
     for row in all_rows:
         entry_id, sess_id, seq, etype, content_enc, meta_json, created = row
-        content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
+        content = decrypt_field(content_enc, key)
         metadata = json.loads(meta_json) if meta_json else None
 
         entries.append(TraceEntry(

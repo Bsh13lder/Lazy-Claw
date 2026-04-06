@@ -16,9 +16,8 @@ from uuid import uuid4
 from lazyclaw.config import Config
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import (
-    decrypt,
+    decrypt_field,
     encrypt,
-    is_encrypted,
 )
 from lazyclaw.db.connection import db_session
 
@@ -80,7 +79,7 @@ def _enc(value: str | None, key: bytes) -> str | None:
 def _dec(value: str | None, key: bytes) -> str | None:
     if value is None:
         return ""
-    return decrypt(value, key) if is_encrypted(value) else value
+    return decrypt_field(value, key, fallback="")
 
 
 def _row_to_gig(row, key: bytes) -> Gig:

@@ -1,9 +1,12 @@
 from __future__ import annotations
+import logging
 from uuid import uuid4
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
+
+logger = logging.getLogger(__name__)
 
 
 async def save_memory(
@@ -42,12 +45,10 @@ async def get_memories(
 
     memories = []
     for row in results:
-        content = row[2]
-        decrypted = decrypt(content, key) if content.startswith("enc:") else content
         memories.append({
             "id": row[0],
             "type": row[1],
-            "content": decrypted,
+            "content": decrypt_field(row[2], key),
             "importance": row[3],
             "created_at": row[4],
         })

@@ -87,13 +87,13 @@ async def update_session(
 
         if body.title is not None:
             await db.execute(
-                "UPDATE agent_chat_sessions SET title = ? WHERE id = ?",
-                (body.title, session_id),
+                "UPDATE agent_chat_sessions SET title = ? WHERE id = ? AND user_id = ?",
+                (body.title, session_id, user.id),
             )
         if body.archived is True:
             await db.execute(
-                "UPDATE agent_chat_sessions SET archived_at = datetime('now') WHERE id = ?",
-                (session_id,),
+                "UPDATE agent_chat_sessions SET archived_at = datetime('now') WHERE id = ? AND user_id = ?",
+                (session_id, user.id),
             )
         await db.commit()
     return {"status": "updated"}
@@ -118,8 +118,8 @@ async def delete_session(
             (session_id, user.id),
         )
         await db.execute(
-            "DELETE FROM agent_chat_sessions WHERE id = ?",
-            (session_id,),
+            "DELETE FROM agent_chat_sessions WHERE id = ? AND user_id = ?",
+            (session_id, user.id),
         )
         await db.commit()
     return {"status": "deleted"}

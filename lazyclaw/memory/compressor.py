@@ -70,7 +70,11 @@ async def compress_history(
     if len(raw_messages) <= WINDOW_SIZE:
         decrypted = []
         for msg_id, role, content, tool_name, metadata in raw_messages:
-            text = decrypt(content, key) if content.startswith("enc:") else content
+            try:
+                text = decrypt(content, key) if content.startswith("enc:") else content
+            except Exception:
+                logger.warning("Failed to decrypt message %s, skipping", msg_id)
+                text = "[decryption error]"
             decrypted.append({
                 "id": msg_id, "role": role, "content": text,
                 "tool_name": tool_name, "metadata": metadata,
@@ -81,7 +85,11 @@ async def compress_history(
     # Full path: decrypt all messages for compression
     decrypted = []
     for msg_id, role, content, tool_name, metadata in raw_messages:
-        text = decrypt(content, key) if content.startswith("enc:") else content
+        try:
+            text = decrypt(content, key) if content.startswith("enc:") else content
+        except Exception:
+            logger.warning("Failed to decrypt message %s, skipping", msg_id)
+            text = "[decryption error]"
         decrypted.append({
             "id": msg_id, "role": role, "content": text,
             "tool_name": tool_name, "metadata": metadata,
@@ -251,7 +259,10 @@ async def _load_existing_summary(
         result = await row.fetchone()
         if result:
             content = result[0]
-            return decrypt(content, key) if content.startswith("enc:") else content
+            try:
+                return decrypt(content, key) if content.startswith("enc:") else content
+            except Exception:
+                logger.warning("Failed to decrypt cached summary, regenerating")
 
         # Flexible match: find the most recent summary starting from the same
         # from_id, covering at least 80% of messages we need
@@ -269,7 +280,10 @@ async def _load_existing_summary(
                 result[1], len(older_messages),
             )
             content = result[0]
-            return decrypt(content, key) if content.startswith("enc:") else content
+            try:
+                return decrypt(content, key) if content.startswith("enc:") else content
+            except Exception:
+                logger.warning("Failed to decrypt flexible-match summary, regenerating")
 
     return None
 

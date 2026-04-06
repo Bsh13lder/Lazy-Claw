@@ -191,7 +191,11 @@ async def generate_recovery_for_user(
 
     if stored_pw_dek:
         # Unwrap existing master key — keep it stable across phrase rotations
-        master_key = unwrap_master_key(stored_pw_dek, pw_wrapping_key)
+        try:
+            master_key = unwrap_master_key(stored_pw_dek, pw_wrapping_key)
+        except Exception:
+            logger.error("Failed to unwrap master key for user %s", user_id)
+            raise ValueError("Failed to decrypt master key — possible data corruption")
     else:
         # Legacy user: use the password-derived key AS the master key
         master_key = pw_wrapping_key

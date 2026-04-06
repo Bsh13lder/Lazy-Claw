@@ -123,7 +123,11 @@ def _read_encrypted(path: Path, key: bytes, max_lines: int) -> str | None:
     if not raw:
         return None
     if is_encrypted(raw):
-        content = decrypt(raw, key)
+        try:
+            content = decrypt(raw, key)
+        except Exception:
+            logger.warning("Failed to decrypt layer file %s", path)
+            return None
     else:
         # Accept unencrypted files (manually written or migrated content)
         content = raw

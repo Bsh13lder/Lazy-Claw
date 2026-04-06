@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from lazyclaw.config import Config
 from lazyclaw.crypto.key_manager import get_user_dek
-from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ async def get_session(
     messages = []
     for row in all_rows:
         msg_id, sess_id, from_a, to_a, msg_type, content_enc, created = row
-        content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
+        content = decrypt_field(content_enc, key)
         messages.append(TeamMessage(
             id=msg_id,
             team_session_id=sess_id,

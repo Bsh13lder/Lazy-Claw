@@ -20,6 +20,9 @@ class UpdateEcoRequest(BaseModel):
     allowed_providers: list[str] | None = None
     free_providers: list[str] | None = None
     preferred_free_model: str | None = None
+    brain_model: str | None = None
+    worker_model: str | None = None
+    fallback_model: str | None = None
 
 
 @router.get("/settings")
@@ -93,5 +96,33 @@ async def list_providers(user: User = Depends(get_current_user)):
         "data": {
             "configured": configured,
             "all_providers": info,
+        },
+    }
+
+
+@router.get("/models")
+async def list_models(user: User = Depends(get_current_user)):
+    """List all available AI models from the catalog."""
+    from lazyclaw.llm.model_registry import MODEL_CATALOG, MODE_MODELS
+
+    models = [
+        {
+            "id": p.name,
+            "display_name": p.display_name,
+            "provider": p.provider,
+            "is_local": p.is_local,
+            "role": p.role,
+            "tool_calling": p.tool_calling,
+            "optimized": p.provider == "anthropic",
+        }
+        for p in MODEL_CATALOG.values()
+    ]
+    return {
+        "success": True,
+        "data": {
+            "models": models,
+            "mode_defaults": {
+                mode: dict(roles) for mode, roles in MODE_MODELS.items()
+            },
         },
     }

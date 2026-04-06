@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,8 @@ from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +249,20 @@ def decrypt(token: str, key: bytes, aad: bytes | None = None) -> str:
     return plaintext.decode("utf-8")
 
 
+def try_decrypt(
+    token: str,
+    key: bytes,
+    aad: bytes | None = None,
+    fallback: str = "[encrypted]",
+) -> str:
+    """Decrypt, returning *fallback* on any failure (wrong key, corruption, etc.)."""
+    try:
+        return decrypt(token, key, aad)
+    except Exception:
+        logger.warning("Decryption failed for token prefix %.20s…", token[:20], exc_info=True)
+        return fallback
+
+
 def is_encrypted(value: str) -> bool:
     """Check if a value is in encrypted format (v1 or v2)."""
     return value.startswith("enc:v1:") or value.startswith("enc:v2:")
@@ -258,13 +275,18 @@ def encrypt_field(value: str | None, key: bytes, aad: bytes | None = None) -> st
     return encrypt(value, key, aad)
 
 
-def decrypt_field(value: str | None, key: bytes, aad: bytes | None = None) -> str | None:
-    """Null-safe decryption wrapper."""
+def decrypt_field(
+    value: str | None,
+    key: bytes,
+    aad: bytes | None = None,
+    fallback: str = "[encrypted]",
+) -> str | None:
+    """Null-safe, error-safe decryption wrapper."""
     if value is None:
         return None
     if not is_encrypted(value):
         return value
-    return decrypt(value, key, aad)
+    return try_decrypt(value, key, aad, fallback=fallback)
 
 
 # ---------------------------------------------------------------------------

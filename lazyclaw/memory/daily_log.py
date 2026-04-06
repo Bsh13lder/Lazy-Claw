@@ -6,7 +6,7 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, decrypt_field, encrypt, is_encrypted
+from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
@@ -74,8 +74,8 @@ async def get_daily_log(config: Config, user_id: str, date: str) -> dict | None:
     return {
         "id": result[0],
         "date": result[1],
-        "summary": decrypt(result[2], key) if result[2] and is_encrypted(result[2]) else result[2],
-        "key_events": decrypt(result[3], key) if result[3] and is_encrypted(result[3]) else result[3],
+        "summary": decrypt_field(result[2], key),
+        "key_events": decrypt_field(result[3], key),
         "created_at": result[4],
     }
 
@@ -97,8 +97,8 @@ async def list_daily_logs(config: Config, user_id: str, limit: int = 30) -> list
         logs.append({
             "id": r[0],
             "date": r[1],
-            "summary": decrypt(r[2], key) if r[2] and is_encrypted(r[2]) else r[2],
-            "key_events": decrypt(r[3], key) if r[3] and is_encrypted(r[3]) else r[3],
+            "summary": decrypt_field(r[2], key),
+            "key_events": decrypt_field(r[3], key),
             "created_at": r[4],
         })
     return logs
@@ -142,7 +142,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
     conversation_lines = []
     for r in results:
         role = r[0]
-        content = decrypt_field(r[1], key) if r[1] and is_encrypted(r[1]) else r[1]
+        content = decrypt_field(r[1], key)
         conversation_lines.append(f"[{role}]: {content}")
 
     conversation_text = "\n".join(conversation_lines[:100])  # Cap at 100 messages

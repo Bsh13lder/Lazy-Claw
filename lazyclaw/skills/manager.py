@@ -5,7 +5,7 @@ import logging
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.skills.instruction import InstructionSkill
@@ -77,14 +77,9 @@ async def get_skill_by_id(config: Config, user_id: str, skill_id: str) -> dict |
     if not result:
         return None
 
-    enc_name = result[1]
-    name = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
-
-    enc_instruction = result[4]
-    instruction = decrypt(enc_instruction, key) if enc_instruction and enc_instruction.startswith("enc:") else enc_instruction
-
-    enc_code = result[5]
-    code = decrypt(enc_code, key) if enc_code and enc_code.startswith("enc:") else enc_code
+    name = decrypt_field(result[1], key)
+    instruction = decrypt_field(result[4], key)
+    code = decrypt_field(result[5], key)
 
     return {
         "id": result[0],
@@ -154,8 +149,7 @@ async def list_user_skills(config: Config, user_id: str) -> list[dict]:
 
     skills = []
     for row in results:
-        enc_name = row[1]
-        decrypted_name = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
+        decrypted_name = decrypt_field(row[1], key)
         skills.append({
             "id": row[0],
             "name": decrypted_name,
@@ -178,8 +172,7 @@ async def delete_user_skill(config: Config, user_id: str, skill_name: str) -> bo
     # Find the skill by decrypted name
     target_id = None
     for row in results:
-        enc_name = row[1]
-        decrypted = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
+        decrypted = decrypt_field(row[1], key)
         if decrypted == skill_name:
             target_id = row[0]
             break
@@ -188,7 +181,7 @@ async def delete_user_skill(config: Config, user_id: str, skill_name: str) -> bo
         return False
 
     async with db_session(config) as db:
-        await db.execute("DELETE FROM skills WHERE id = ?", (target_id,))
+        await db.execute("DELETE FROM skills WHERE id = ? AND user_id = ?", (target_id, user_id))
         await db.commit()
     return True
 
@@ -213,17 +206,17 @@ async def load_user_skills(
         enc_name, description, enc_instruction, skill_type, enc_code, params_schema = (
             row[0], row[1], row[2], row[3], row[4], row[5],
         )
-        name = decrypt(enc_name, key) if enc_name.startswith("enc:") else enc_name
+        name = decrypt_field(enc_name, key)
 
         if skill_type == "instruction" and enc_instruction:
-            instruction = decrypt(enc_instruction, key) if enc_instruction.startswith("enc:") else enc_instruction
+            instruction = decrypt_field(enc_instruction, key)
             skill = InstructionSkill(
                 skill_name=name,
                 skill_description=description,
                 instruction=instruction,
             )
         elif skill_type == "code" and enc_code:
-            code = decrypt(enc_code, key) if enc_code.startswith("enc:") else enc_code
+            code = decrypt_field(enc_code, key)
             schema = json.loads(params_schema) if params_schema else None
             skill = CodeSkill(
                 skill_name=name,

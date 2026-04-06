@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import decrypt, encrypt, is_encrypted
+from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
@@ -39,18 +39,12 @@ def _encrypt_field(value: str | None, key: bytes) -> str | None:
     return encrypt(value, key)
 
 
-def _decrypt_field(value: str | None, key: bytes) -> str | None:
-    if value is None:
-        return None
-    return decrypt(value, key) if is_encrypted(value) else value
-
-
 def _row_to_dict(row, key: bytes) -> dict:
     result = {}
     for i, col in enumerate(TASK_COLUMNS):
         value = row[i]
         if col in ENCRYPTED_FIELDS:
-            value = _decrypt_field(value, key)
+            value = decrypt_field(value, key)
         result[col] = value
     return result
 

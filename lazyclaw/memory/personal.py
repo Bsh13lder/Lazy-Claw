@@ -45,10 +45,13 @@ async def get_memories(
 
     memories = []
     for row in results:
+        decrypted = decrypt_field(row[2], key)
         memories.append({
             "id": row[0],
+            "key": row[1],
+            "value": decrypted,
             "type": row[1],
-            "content": decrypt_field(row[2], key),
+            "content": decrypted,
             "importance": row[3],
             "created_at": row[4],
         })

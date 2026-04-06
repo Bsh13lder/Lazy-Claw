@@ -38,6 +38,7 @@ async def list_user_traces(
         {
             "trace_session_id": t.trace_session_id,
             "entry_count": t.entry_count,
+            "created_at": t.started_at,
             "started_at": t.started_at,
             "ended_at": t.ended_at,
             "entry_types": list(t.entry_types),

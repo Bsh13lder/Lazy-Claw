@@ -214,6 +214,7 @@ async def get_audit_log(
             "id": e.id,
             "action": e.action,
             "skill_name": e.skill_name,
+            "result_summary": e.result_summary,
             "source": e.source,
             "created_at": e.created_at,
         }

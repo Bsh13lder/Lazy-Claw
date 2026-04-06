@@ -444,5 +444,118 @@ export const getAgentStatus = () =>
 
 // ── Replay ─────────────────────────────────────────────────────────────────
 
-export const listTraces = () =>
-  request<{ success: boolean; data: Record<string, unknown>[] }>("/api/replay/traces").then((r) => r.data);
+export interface TraceEntry {
+  id: string;
+  trace_session_id: string;
+  sequence: number;
+  entry_type: string;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface TraceSummary {
+  trace_session_id: string;
+  entry_count: number;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+export const listTraces = (limit = 20) =>
+  request<{ success: boolean; data: TraceSummary[] }>(`/api/replay/traces?limit=${limit}`).then((r) => r.data);
+
+export const getTrace = (traceSessionId: string) =>
+  request<{ success: boolean; data: TraceEntry[] }>(`/api/replay/traces/${traceSessionId}`).then((r) => r.data);
+
+export const deleteTrace = (traceSessionId: string) =>
+  request<{ success: boolean }>(`/api/replay/traces/${traceSessionId}`, { method: "DELETE" });
+
+export const shareTrace = (traceSessionId: string, expiresHours = 72) =>
+  request<{ success: boolean; data: { share_token: string; url: string } }>("/api/replay/share", {
+    method: "POST",
+    body: JSON.stringify({ trace_session_id: traceSessionId, expires_hours: expiresHours }),
+  }).then((r) => r.data);
+
+// ── Teams (additional) ────────────────────────────────────────────────────
+
+export const updateSpecialist = (name: string, body: {
+  display_name?: string;
+  system_prompt?: string;
+  allowed_skills?: string[];
+  preferred_model?: string;
+}) =>
+  request<{ success: boolean }>(`/api/teams/specialists/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+export interface TeamSession {
+  session_id: string;
+  specialist: string;
+  task: string;
+  status: string;
+  created_at: string;
+}
+
+export const listTeamSessions = () =>
+  request<{ success: boolean; data: TeamSession[] }>("/api/teams/sessions").then((r) => r.data);
+
+export const getTeamSession = (sessionId: string) =>
+  request<{ success: boolean; data: Record<string, unknown>[] }>(`/api/teams/sessions/${sessionId}`).then((r) => r.data);
+
+// ── Audit Log ─────────────────────────────────────────────────────────────
+
+export interface AuditEntry {
+  id: string;
+  action: string;
+  skill_name: string | null;
+  result_summary: string | null;
+  source: string;
+  created_at: string;
+}
+
+export const getAuditLog = (opts?: { action?: string; since?: string; limit?: number }) => {
+  const params = new URLSearchParams();
+  if (opts?.action) params.set("action", opts.action);
+  if (opts?.since) params.set("since", opts.since);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return request<{ success: boolean; data: AuditEntry[]; count: number }>(
+    `/api/permissions/audit${qs ? `?${qs}` : ""}`
+  ).then((r) => ({ entries: r.data, count: r.count }));
+};
+
+// ── Browser / Site Memory ─────────────────────────────────────────────────
+
+export interface SiteMemory {
+  id: string;
+  domain: string;
+  memory_type: string;
+  title: string | null;
+  content: string | null;
+  success_count: number;
+  fail_count: number;
+  last_used: string | null;
+  created_at: string;
+}
+
+export const listSiteMemories = () =>
+  request<{ memories: SiteMemory[] }>("/api/browser/site-memory").then((r) => r.memories);
+
+export const deleteSiteMemory = (id: string) =>
+  request<{ status: string }>(`/api/browser/site-memory/${id}`, { method: "DELETE" });
+
+export const clearDomainMemory = (domain: string) =>
+  request<{ deleted: number }>(`/api/browser/site-memory/domain/${encodeURIComponent(domain)}`, { method: "DELETE" });
+
+// ── Compression ───────────────────────────────────────────────────────────
+
+export const getCompressionStats = (chatSessionId?: string) => {
+  const qs = chatSessionId ? `?chat_session_id=${chatSessionId}` : "";
+  return request<{ success: boolean; data: Record<string, unknown> }>(`/api/compression/stats${qs}`).then((r) => r.data);
+};
+
+// ── Connector ─────────────────────────────────────────────────────────────
+
+export const getConnectorStatus = () =>
+  request<{ connected: boolean; device_info: Record<string, unknown> | null }>("/api/connector/status");

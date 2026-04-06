@@ -2,7 +2,7 @@ import { useAuth } from "../context/AuthContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
+export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -13,6 +13,8 @@ interface NavShellProps {
 const PAGE_META: Record<Page, { label: string; description: string }> = {
   overview: { label: "Overview", description: "System health & activity" },
   activity: { label: "Activity", description: "Live agent & task monitor" },
+  replay: { label: "Replay", description: "Session traces & debugging" },
+  audit: { label: "Audit", description: "Action log & security" },
   hub: { label: "Skill Hub", description: "Discover & install skills" },
   skills: { label: "Skills", description: "Manage agent tools" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
@@ -39,6 +41,22 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+      </svg>
+    ),
+  },
+  {
+    page: "replay",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <polygon points="5 3 19 12 5 21 5 3" />
+      </svg>
+    ),
+  },
+  {
+    page: "audit",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
       </svg>
     ),
   },

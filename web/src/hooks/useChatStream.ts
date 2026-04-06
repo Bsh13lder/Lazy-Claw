@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWebSocket, type ConnectionStatus } from "./useWebSocket";
 
 export interface ToolCallInfo {
@@ -49,8 +49,10 @@ export function useChatStream({
   const toolsRef = useRef<ToolCallInfo[]>([]);
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
-  onCompleteRef.current = onComplete;
-  onErrorRef.current = onError;
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+    onErrorRef.current = onError;
+  }, [onComplete, onError]);
 
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;

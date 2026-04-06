@@ -117,6 +117,7 @@ BUNDLED_MCPS = {
         "pip_name": "n8n-mcp-server",
         "description": "n8n workflow automation — raw REST API access for advanced operations",
         "optional": True,
+        "env_required": ["N8N_API_KEY"],
         "env": {"N8N_HOST": "http://lazyclaw-n8n:5678"},
     },
 }
@@ -475,19 +476,52 @@ async def list_servers(config: Config, user_id: str) -> list[dict]:
         )
         results = await rows.fetchall()
 
+    # Load tool counts from cache
+    tool_counts: dict[str, int] = {}
+    async with db_session(config) as db2:
+        tc_rows = await db2.execute("SELECT server_name, tools_json FROM mcp_tool_cache")
+        for tc_row in await tc_rows.fetchall():
+            try:
+                tool_counts[tc_row[0]] = len(json.loads(tc_row[1]))
+            except (json.JSONDecodeError, TypeError):
+                tool_counts[tc_row[0]] = 0
+
+    # Build set of connected server names (not just IDs) for cross-user matching
+    connected_names: set[str] = set()
+    for sid, client in _active_clients.items():
+        if hasattr(client, "name"):
+            connected_names.add(client.name)
+
     servers = []
     for row in results:
         raw_config = row[3]
         decrypted = decrypt(raw_config, key) if raw_config.startswith("enc:") else raw_config
+        server_id = row[0]
+        server_name = row[1]
+        is_connected = server_id in _active_clients or server_name in connected_names
+        parsed_config = json.loads(decrypted)
+
+        # Derive status
+        if is_connected:
+            status = "connected"
+        elif not bool(row[4]):
+            status = "disabled"
+        else:
+            status = "disconnected"
+
         servers.append({
-            "id": row[0],
-            "name": row[1],
+            "id": server_id,
+            "name": server_name,
             "transport": row[2],
-            "config": json.loads(decrypted),
+            "config": parsed_config,
+            "command": parsed_config.get("command"),
+            "url": parsed_config.get("url"),
             "enabled": bool(row[4]),
             "created_at": row[5],
             "favorite": bool(row[6]),
-            "connected": row[0] in _active_clients,
+            "connected": is_connected,
+            "status": status,
+            "tool_count": tool_counts.get(server_name, 0),
         })
     return servers
 

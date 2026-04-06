@@ -6,16 +6,16 @@ interface ConnectionStatusProps {
 }
 
 export default function ConnectionStatus({ status }: ConnectionStatusProps) {
-  const [showLabel, setShowLabel] = useState(true);
+  const [showLabel, setShowLabel] = useState(status !== "connected");
 
   // Auto-hide "Connected" label after 3s
   useEffect(() => {
     if (status === "connected") {
-      setShowLabel(true);
       const timer = setTimeout(() => setShowLabel(false), 3000);
       return () => clearTimeout(timer);
     }
-    setShowLabel(true);
+    // Non-connected states always show the label
+    return undefined;
   }, [status]);
 
   const dotColor =

@@ -75,7 +75,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [chatOpen, setChatOpen] = useState(true);
   const [chatExpanded, setChatExpanded] = useState(false);
   const activeIdRef = useRef(activeSessionId);
-  activeIdRef.current = activeSessionId;
+  useEffect(() => {
+    activeIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   // Load sessions from backend on mount
   useEffect(() => {
@@ -271,6 +273,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useChat(): ChatContextValue {
   const ctx = useContext(ChatContext);
   if (!ctx) throw new Error("useChat must be used within ChatProvider");

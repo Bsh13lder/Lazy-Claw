@@ -667,6 +667,66 @@ function TeamsTab({
 
 // ── Permissions Tab ────────────────────────────────────────────────────────
 
+function PendingApprovals() {
+  const [approvals, setApprovals] = useState<Record<string, unknown>[]>([]);
+  const toast = useToast();
+
+  useEffect(() => {
+    api.listPendingApprovals().then((data) => setApprovals(Array.isArray(data) ? data : [])).catch(() => {});
+  }, []);
+
+  if (approvals.length === 0) return null;
+
+  const handleApprove = async (id: string) => {
+    try {
+      await api.approveRequest(id);
+      setApprovals((prev) => prev.filter((a) => a.id !== id));
+      toast.success("Approved");
+    } catch { toast.error("Failed to approve"); }
+  };
+
+  const handleDeny = async (id: string) => {
+    try {
+      await api.denyRequest(id);
+      setApprovals((prev) => prev.filter((a) => a.id !== id));
+      toast.success("Denied");
+    } catch { toast.error("Failed to deny"); }
+  };
+
+  return (
+    <section className="bg-amber-900/10 border border-amber-500/20 rounded-xl p-5 mb-6">
+      <h2 className="text-sm font-semibold text-amber-400 mb-3 flex items-center gap-2">
+        Pending Approvals
+        <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-[10px] font-medium">
+          {approvals.length}
+        </span>
+      </h2>
+      <div className="space-y-2">
+        {approvals.map((a) => (
+          <div key={a.id as string} className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-bg-secondary border border-border">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-text-primary font-mono truncate">{a.skill_name as string}</p>
+              <p className="text-[10px] text-text-muted">Source: {a.source as string}</p>
+            </div>
+            <button
+              onClick={() => handleApprove(a.id as string)}
+              className="text-xs text-green-400 border border-green-500/30 px-3 py-1 rounded-lg hover:bg-green-500/10 transition-colors"
+            >
+              Approve
+            </button>
+            <button
+              onClick={() => handleDeny(a.id as string)}
+              className="text-xs text-red-400 border border-red-500/30 px-3 py-1 rounded-lg hover:bg-red-500/10 transition-colors"
+            >
+              Deny
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function PermissionsTab({
   perms,
   onPermsUpdate,
@@ -675,6 +735,8 @@ function PermissionsTab({
   readonly onPermsUpdate: (updates: Partial<PermissionSettings>) => Promise<void>;
 }) {
   const toast = useToast();
+  const [timeoutVal, setTimeoutVal] = useState(perms ? String(perms.auto_approve_timeout) : "0");
+  const [savingTimeout, setSavingTimeout] = useState(false);
 
   if (!perms) {
     return (
@@ -718,9 +780,6 @@ function PermissionsTab({
     }
   };
 
-  const [timeoutVal, setTimeoutVal] = useState(String(perms.auto_approve_timeout));
-  const [savingTimeout, setSavingTimeout] = useState(false);
-
   const handleTimeoutSave = async () => {
     const val = parseInt(timeoutVal, 10);
     if (Number.isNaN(val) || val < 0) {
@@ -740,6 +799,9 @@ function PermissionsTab({
 
   return (
     <div className="space-y-6">
+      {/* Pending approvals */}
+      <PendingApprovals />
+
       {/* Category defaults */}
       <section className="bg-bg-secondary border border-border rounded-xl p-5">
         <SectionHeading
@@ -822,9 +884,9 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<TabId>("eco");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const results = await Promise.allSettled([
+  useEffect(() => {
+    let alive = true;
+    Promise.allSettled([
       api.getEcoSettings(),
       api.getEcoUsage(),
       api.getEcoProviders(),
@@ -832,21 +894,19 @@ export default function Settings() {
       api.getTeamSettings(),
       api.listSpecialists(),
       api.getPermissionSettings(),
-    ]);
-
-    if (results[0].status === "fulfilled") setEco(results[0].value);
-    if (results[1].status === "fulfilled") setUsage(results[1].value);
-    if (results[2].status === "fulfilled") setProviders(Array.isArray(results[2].value) ? results[2].value : []);
-    if (results[3].status === "fulfilled") setRateLimits(results[3].value);
-    if (results[4].status === "fulfilled") setTeam(results[4].value);
-    if (results[5].status === "fulfilled") setSpecialists(Array.isArray(results[5].value) ? results[5].value : []);
-    if (results[6].status === "fulfilled") setPerms(results[6].value);
-    setLoading(false);
+    ]).then((results) => {
+      if (!alive) return;
+      if (results[0].status === "fulfilled") setEco(results[0].value);
+      if (results[1].status === "fulfilled") setUsage(results[1].value);
+      if (results[2].status === "fulfilled") setProviders(Array.isArray(results[2].value) ? results[2].value : []);
+      if (results[3].status === "fulfilled") setRateLimits(results[3].value);
+      if (results[4].status === "fulfilled") setTeam(results[4].value);
+      if (results[5].status === "fulfilled") setSpecialists(Array.isArray(results[5].value) ? results[5].value : []);
+      if (results[6].status === "fulfilled") setPerms(results[6].value);
+      setLoading(false);
+    });
+    return () => { alive = false; };
   }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   const handleEcoMode = useCallback(async (mode: string) => {
     try {

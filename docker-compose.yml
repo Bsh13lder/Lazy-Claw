@@ -8,6 +8,9 @@ services:
     ports:
       - "18789:18789"
     env_file: .env
+    environment:
+      # n8n MCP connection (inside docker network)
+      - N8N_HOST=http://lazyclaw-n8n:5678
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills

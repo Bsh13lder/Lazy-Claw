@@ -31,7 +31,11 @@ export function useWebSocket({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pingTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const onMessageRef = useRef(onMessage);
-  onMessageRef.current = onMessage;
+  useEffect(() => {
+    onMessageRef.current = onMessage;
+  }, [onMessage]);
+
+  const connectRef = useRef<() => void>(null);
 
   const cleanup = useCallback(() => {
     if (pingTimer.current) clearInterval(pingTimer.current);
@@ -59,9 +63,9 @@ export function useWebSocket({
     );
     reconnectTimer.current = setTimeout(() => {
       reconnectAttempt.current += 1;
-      connect();
+      connectRef.current?.();
     }, delay);
-  }, []); // connect is defined below — stable via ref pattern
+  }, []);
 
   const connect = useCallback(() => {
     cleanup();
@@ -102,13 +106,22 @@ export function useWebSocket({
   }, [cleanup, enabled, scheduleReconnect]);
 
   useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
+  useEffect(() => {
     if (enabled) {
-      connect();
-    } else {
-      cleanup();
-      setStatus("disconnected");
+      // Deferred to avoid synchronous setState within the effect body
+      const timer = setTimeout(connect, 0);
+      return () => {
+        clearTimeout(timer);
+        cleanup();
+      };
     }
-    return cleanup;
+    cleanup();
+    // Defer to avoid synchronous setState within the effect body
+    const timer = setTimeout(() => setStatus("disconnected"), 0);
+    return () => clearTimeout(timer);
   }, [enabled, connect, cleanup]);
 
   const send = useCallback((data: unknown) => {

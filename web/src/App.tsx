@@ -4,6 +4,8 @@ import { ChatProvider } from "./context/ChatContext";
 import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
+import Replay from "./pages/Replay";
+import Audit from "./pages/Audit";
 import SkillHub from "./pages/SkillHub";
 import Skills from "./pages/Skills";
 import Jobs from "./pages/Jobs";
@@ -36,6 +38,8 @@ function AppContent() {
     switch (page) {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
+      case "replay": return <Replay />;
+      case "audit": return <Audit />;
       case "hub": return <SkillHub />;
       case "skills": return <Skills />;
       case "jobs": return <Jobs />;

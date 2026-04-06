@@ -1,10 +1,10 @@
-"""ECO Router v5 — 3-mode architecture with Claude CLI.
+"""ECO Router v5 — 3-mode architecture.
 
 Three roles: Brain (= Team Lead), Worker, Fallback.
 Three modes:
   HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
   FULL:    User-configurable brain/worker/fallback (paid, auto)
-  CLAUDE:  All roles via claude CLI ($0 — covered by subscription)
+  CLAUDE:  Haiku API brain (native tools) + Claude CLI fallback ($0)
 
 All model assignments come from MODE_MODELS in model_registry.py.
 User overrides in eco_settings take priority over defaults.
@@ -509,12 +509,6 @@ class EcoRouter:
         if model and role not in (ROLE_BRAIN, ROLE_WORKER):
             return await self._route_paid(messages, user_id, model, **kwargs)
 
-        # Claude CLI mode — all roles go through claude -p
-        if settings.mode == MODE_CLAUDE:
-            return await self._route_claude(
-                messages, user_id, settings=settings, role=role, **kwargs
-            )
-
         if role == ROLE_BRAIN:
             return await self._route_brain(
                 messages, user_id, settings, models, **kwargs
@@ -546,6 +540,11 @@ class EcoRouter:
         agent when API key is expired but Claude subscription works.
         """
         brain_name = models["brain"]
+        # CLI/MCP model names can't go through paid API — route to CLI
+        if brain_name in ("claude-cli", "claude_code"):
+            return await self._route_claude(
+                messages, user_id, settings=settings, **kwargs,
+            )
         try:
             return await self._route_paid(
                 messages, user_id, brain_name,
@@ -553,9 +552,17 @@ class EcoRouter:
                 **kwargs,
             )
         except Exception as exc:
-            if "401" in str(exc) or "authentication" in str(exc).lower():
+            exc_str = str(exc)
+            if "401" in exc_str or "authentication" in exc_str.lower():
                 logger.warning(
                     "Paid brain 401 — falling back to Claude CLI: %s", exc,
+                )
+                return await self._route_claude(
+                    messages, user_id, settings=settings, **kwargs,
+                )
+            if "529" in exc_str or "overloaded" in exc_str.lower():
+                logger.warning(
+                    "Paid brain 529 overloaded — falling back to Claude CLI: %s", exc,
                 )
                 return await self._route_claude(
                     messages, user_id, settings=settings, **kwargs,
@@ -572,13 +579,12 @@ class EcoRouter:
         role: str = ROLE_BRAIN,
         **kwargs,
     ) -> LLMResponse:
-        """Route all calls through claude -p CLI ($0 via subscription).
+        """Route through Claude CLI ($0 via subscription).
 
-        User can set brain model via /mode brain opus|sonnet|haiku.
-        This controls the --model flag passed to claude -p.
+        Cascade: CLI → paid API fallback.
+        CLI works on native Mac. In Docker, falls back to paid API.
         """
-        # CLI mode only supports sonnet and opus (both 4.6)
-        cli_model = "sonnet"  # default
+        cli_model = "sonnet"
         if settings and settings.brain_model:
             if "opus" in settings.brain_model.lower():
                 cli_model = "opus"
@@ -589,7 +595,6 @@ class EcoRouter:
             )
             self._claude_cli = ClaudeCLIProvider(model=cli_model)
         else:
-            # Update model if settings changed
             self._claude_cli._model = cli_model
 
         self._set_routing(
@@ -603,9 +608,7 @@ class EcoRouter:
         except Exception as exc:
             logger.warning("Claude CLI failed: %s", exc)
             self._last_claude_fallback = str(exc)
-            # Only fall back to paid API if the key is actually valid.
-            # When in pure claude mode, the API key is often expired/absent —
-            # falling back would just produce a 401 error.
+            # ── 3. Last resort: paid API fallback ──
             try:
                 response = await self._route_paid(
                     messages, user_id, "claude-sonnet-4-6",
@@ -619,7 +622,6 @@ class EcoRouter:
             except Exception as paid_exc:
                 if "401" in str(paid_exc) or "authentication" in str(paid_exc).lower():
                     logger.warning("Paid fallback also failed (401) — returning CLI error")
-                    # Return a helpful error instead of raw 401
                     return LLMResponse(
                         content=(
                             f"Claude CLI timed out and the API key is invalid. "
@@ -649,6 +651,13 @@ class EcoRouter:
         worker_profile = get_model(worker_name)
         is_local_worker = worker_profile and worker_profile.is_local
 
+        # CLI/MCP model names can't go through paid API — route to CLI
+        if worker_name in ("claude-cli", "claude_code"):
+            return await self._route_claude(
+                messages, user_id, settings=settings, role=ROLE_WORKER,
+                **kwargs,
+            )
+
         # FULL mode: worker is paid (Haiku) — go straight to API.
         # Falls back to Claude CLI on auth errors (401).
         if not is_local_worker:
@@ -659,9 +668,10 @@ class EcoRouter:
                     **kwargs,
                 )
             except Exception as exc:
-                if "401" in str(exc) or "authentication" in str(exc).lower():
+                exc_str = str(exc)
+                if "401" in exc_str or "authentication" in exc_str.lower() or "529" in exc_str or "overloaded" in exc_str.lower():
                     logger.warning(
-                        "Paid worker 401 — falling back to Claude CLI: %s", exc,
+                        "Paid worker error — falling back to Claude CLI: %s", exc,
                     )
                     return await self._route_claude(
                         messages, user_id, settings=settings, role=ROLE_WORKER,
@@ -705,6 +715,9 @@ class EcoRouter:
         **kwargs,
     ) -> LLMResponse:
         """Route to paid provider (Claude/OpenAI)."""
+        # Guard: non-API models must not reach paid routing
+        if model in ("claude-cli", "claude_code"):
+            raise ValueError(f"Cannot route non-API model to paid provider: {model}")
         provider = "anthropic" if model.startswith("claude-") else "openai"
         self._set_routing(model, provider, is_local=False, reason=reason)
         self._record_usage(user_id, "paid")
@@ -773,6 +786,11 @@ class EcoRouter:
         """Fallback to paid when local/worker fails. Always auto-fallback."""
         fallback_name = models["fallback"]
         logger.info("Auto-fallback to %s: %s", fallback_name, reason)
+        # Claude CLI fallback — route through CLI provider ($0)
+        if fallback_name == "claude-cli":
+            return await self._route_claude(
+                messages, user_id, settings=settings, **kwargs,
+            )
         return await self._route_paid(
             messages, user_id, fallback_name,
             reason=f"auto_fallback: {reason}",
@@ -848,24 +866,24 @@ class EcoRouter:
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
 
-        # Claude CLI mode — use non-streaming fallback
-        if settings.mode == MODE_CLAUDE:
-            response = await self._route_claude(
-                messages, user_id, settings=settings, role=role, **kwargs
-            )
-            yield StreamChunk(
-                delta=response.content,
-                tool_calls=response.tool_calls,
-                usage=response.usage,
-                model=response.model,
-                done=True,
-            )
-            return
-
         if role == ROLE_BRAIN:
-            # Brain: always paid streaming.
-            # Falls back to Claude CLI on auth errors (401).
+            # Brain: paid streaming, or CLI fallback for non-API models.
             brain_name = models["brain"]
+
+            # Non-API models (CLI/MCP) — use non-streaming CLI fallback
+            if brain_name in ("claude-cli", "claude_code"):
+                response = await self._route_claude(
+                    messages, user_id, settings=settings, role=role, **kwargs,
+                )
+                yield StreamChunk(
+                    delta=response.content,
+                    tool_calls=response.tool_calls,
+                    usage=response.usage,
+                    model=response.model,
+                    done=True,
+                )
+                return
+
             self._record_usage(user_id, "paid")
             provider = "anthropic" if brain_name.startswith("claude-") else "openai"
             self._set_routing(
@@ -878,9 +896,10 @@ class EcoRouter:
                 ):
                     yield chunk
             except Exception as exc:
-                if "401" in str(exc) or "authentication" in str(exc).lower():
+                exc_str = str(exc)
+                if "401" in exc_str or "authentication" in exc_str.lower() or "529" in exc_str or "overloaded" in exc_str.lower():
                     logger.warning(
-                        "Paid stream 401 — falling back to Claude CLI: %s", exc,
+                        "Paid stream error — falling back to Claude CLI: %s", exc,
                     )
                     response = await self._route_claude(
                         messages, user_id, settings=settings, role=role, **kwargs,
@@ -916,9 +935,10 @@ class EcoRouter:
                 ):
                     yield chunk
             except Exception as exc:
-                if "401" in str(exc) or "authentication" in str(exc).lower():
+                exc_str = str(exc)
+                if "401" in exc_str or "authentication" in exc_str.lower() or "529" in exc_str or "overloaded" in exc_str.lower():
                     logger.warning(
-                        "Paid worker stream 401 — falling back to CLI: %s", exc,
+                        "Paid worker stream error — falling back to CLI: %s", exc,
                     )
                     response = await self._route_claude(
                         messages, user_id, settings=settings, role=ROLE_WORKER,
@@ -1045,7 +1065,7 @@ class EcoRouter:
         mode_labels = {
             MODE_HYBRID: "HYBRID",
             MODE_FULL: "FULL",
-            MODE_CLAUDE: "CLAUDE CLI",
+            MODE_CLAUDE: "CLAUDE",
         }
 
         return {

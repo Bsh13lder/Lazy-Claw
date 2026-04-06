@@ -45,8 +45,9 @@ MODE_MODELS: dict[str, dict[str, str]] = {
         "fallback": "claude-sonnet-4-6",
     },
     "claude": {
-        "brain":    "claude-cli",
-        "worker":   "claude-cli",
+        # Haiku brain (cheap API, native tool_use) + CLI fallback ($0)
+        "brain":    "claude-haiku-4-5-20251001",
+        "worker":   "claude-haiku-4-5-20251001",
         "fallback": "claude-cli",
     },
 }

@@ -31,7 +31,7 @@ from lazyclaw.llm.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_S = 45  # Reduced from 120 — retry on timeout instead of blocking
+_TIMEOUT_S = 90  # 90s allows complex tool prompts; retries handle hangs
 _MAX_RETRIES = 2  # Retry once before giving up (total 2 attempts)
 _WARM_POOL_SIZE = 1  # Pre-warmed processes ready for instant use
 _WARM_EXPIRE_S = 60  # Kill warm process if unused after 60s
@@ -244,6 +244,34 @@ def _parse_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
     return remaining, tool_calls
 
 
+def _find_claude_binary() -> str:
+    """Find the claude CLI binary, searching common install paths.
+
+    The server process may not have the same PATH as the user's shell,
+    so we check well-known locations explicitly.
+    """
+    # 1. Standard PATH lookup
+    found = shutil.which("claude")
+    if found:
+        return found
+
+    # 2. Common install locations (macOS / Linux)
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, ".local", "bin", "claude"),
+        os.path.join(home, "bin", "claude"),
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            logger.info("Found claude CLI at %s (not in PATH)", path)
+            return path
+
+    # 3. Fallback — will fail at runtime with clear error
+    return "claude"
+
+
 class ClaudeCLIProvider(BaseLLMProvider):
     """LLM provider that routes through the `claude` CLI.
 
@@ -252,7 +280,7 @@ class ClaudeCLIProvider(BaseLLMProvider):
     """
 
     def __init__(self, claude_bin: str | None = None, model: str = "sonnet") -> None:
-        self._claude_bin = claude_bin or shutil.which("claude") or "claude"
+        self._claude_bin = claude_bin or _find_claude_binary()
         self._model = model
         self._active_sessions: dict[str, bool] = {}  # session_id → has_been_used
         # Warm pool: pre-spawned processes ready for immediate use
@@ -402,13 +430,22 @@ class ClaudeCLIProvider(BaseLLMProvider):
             if proc.returncode != 0:
                 err = stderr.decode("utf-8", errors="replace").strip()
                 out = stdout.decode("utf-8", errors="replace").strip()
-                # Claude CLI often writes errors to stdout as JSON
-                err_detail = err or out[:500] or "(no output)"
+                combined = err or out or "(no output)"
+
+                # Parse JSON error responses from claude CLI
+                _not_logged_in = "Not logged in" in combined or "/login" in combined
+                if _not_logged_in:
+                    raise RuntimeError(
+                        "Claude CLI is not logged in. Run 'claude' in terminal "
+                        "and complete login, then restart LazyClaw."
+                    )
+
+                err_detail = combined[:500]
                 if attempt < _MAX_RETRIES - 1:
                     logger.warning(
-                        "Claude CLI failed (exit %d, attempt %d/%d): stderr=%s stdout=%s",
+                        "Claude CLI failed (exit %d, attempt %d/%d): %s",
                         proc.returncode, attempt + 1, _MAX_RETRIES,
-                        err[:200] or "(empty)", out[:200] or "(empty)",
+                        err_detail[:200],
                     )
                     continue
                 logger.error("Claude CLI failed (exit %d): %s", proc.returncode, err_detail)
@@ -492,6 +529,14 @@ class ClaudeCLIProvider(BaseLLMProvider):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
+            data = None
+
+        # Check for error responses (is_error=true in JSON)
+        if isinstance(data, dict) and data.get("is_error"):
+            error_msg = data.get("result", "Unknown CLI error")
+            raise RuntimeError(f"Claude CLI error: {error_msg}")
+
+        if data is None:
             # Fallback: treat as plain text
             logger.warning("Claude CLI returned non-JSON, treating as text")
             remaining, tool_calls = _parse_tool_calls(raw)

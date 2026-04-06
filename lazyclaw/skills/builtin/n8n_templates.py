@@ -245,6 +245,124 @@ def _drive_to_instagram(params: dict[str, Any]) -> dict:
     }
 
 
+def _google_trends_check(params: dict[str, Any]) -> dict:
+    """Schedule trigger -> HTTP Request to Google Trends RSS."""
+    keyword = params.get("keyword", "AI")
+    return {
+        "name": params.get("name", f"Google Trends: {keyword}"),
+        "nodes": [
+            {
+                "parameters": {
+                    "rule": {"interval": [{"field": "cronExpression", "expression": params.get("cron", "0 */6 * * *")}]},
+                },
+                "id": "schedule-1",
+                "name": "Schedule Trigger",
+                "type": "n8n-nodes-base.scheduleTrigger",
+                "typeVersion": 1.2,
+                "position": [250, 300],
+            },
+            {
+                "parameters": {
+                    "url": f"https://trends.google.com/trending/rss?geo={params.get('geo', 'US')}",
+                    "options": {"response": {"response": {"responseFormat": "text"}}},
+                },
+                "id": "http-1",
+                "name": "Google Trends",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [500, 300],
+            },
+        ],
+        "connections": {
+            "Schedule Trigger": {"main": [[{"node": "Google Trends", "type": "main", "index": 0}]]},
+        },
+        "settings": {"executionOrder": "v1"},
+    }
+
+
+def _webhook_to_sheets(params: dict[str, Any]) -> dict:
+    """Webhook trigger -> Google Sheets append (data collection)."""
+    return {
+        "name": params.get("name", "Webhook to Google Sheets"),
+        "nodes": [
+            {
+                "parameters": {"httpMethod": "POST", "path": params.get("webhook_path", "collect")},
+                "id": "webhook-1",
+                "name": "Webhook",
+                "type": "n8n-nodes-base.webhook",
+                "typeVersion": 2,
+                "position": [250, 300],
+                "webhookId": "",
+            },
+            {
+                "parameters": {
+                    "operation": "append",
+                    "documentId": {"value": params.get("sheet_id", "")},
+                    "sheetName": {"value": params.get("sheet_name", "Sheet1")},
+                    "columns": {"mappingMode": "autoMapInputData"},
+                },
+                "id": "sheets-1",
+                "name": "Google Sheets",
+                "type": "n8n-nodes-base.googleSheets",
+                "typeVersion": 4.5,
+                "position": [500, 300],
+                "credentials": {"googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"}},
+            },
+        ],
+        "connections": {
+            "Webhook": {"main": [[{"node": "Google Sheets", "type": "main", "index": 0}]]},
+        },
+        "settings": {"executionOrder": "v1"},
+    }
+
+
+def _schedule_http_telegram(params: dict[str, Any]) -> dict:
+    """Schedule -> HTTP Request -> Telegram (periodic API check + notify)."""
+    return {
+        "name": params.get("name", "Periodic API Check to Telegram"),
+        "nodes": [
+            {
+                "parameters": {
+                    "rule": {"interval": [{"field": "cronExpression", "expression": params.get("cron", "0 */1 * * *")}]},
+                },
+                "id": "schedule-1",
+                "name": "Schedule Trigger",
+                "type": "n8n-nodes-base.scheduleTrigger",
+                "typeVersion": 1.2,
+                "position": [250, 300],
+            },
+            {
+                "parameters": {
+                    "url": params.get("api_url", "https://api.example.com/status"),
+                    "options": {},
+                },
+                "id": "http-1",
+                "name": "HTTP Request",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [500, 300],
+            },
+            {
+                "parameters": {
+                    "chatId": params.get("chat_id", ""),
+                    "text": params.get("message_template", "API Response: {{ $json }}"),
+                },
+                "id": "telegram-1",
+                "name": "Telegram",
+                "type": "n8n-nodes-base.telegram",
+                "typeVersion": 1.2,
+                "position": [750, 300],
+                "credentials": {"telegramApi": {"id": "", "name": "Telegram"}},
+            },
+        ],
+        "connections": {
+            "Schedule Trigger": {"main": [[{"node": "HTTP Request", "type": "main", "index": 0}]]},
+            "HTTP Request": {"main": [[{"node": "Telegram", "type": "main", "index": 0}]]},
+        },
+        "settings": {"executionOrder": "v1"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Template registry
 # ---------------------------------------------------------------------------
@@ -285,6 +403,24 @@ TEMPLATES: list[dict] = [
         "keywords": ["drive", "instagram", "auto post", "upload photo", "new photo"],
         "description": "When a new file appears in Google Drive, post it to Instagram",
         "build": _drive_to_instagram,
+    },
+    {
+        "name": "Google Trends Check",
+        "keywords": ["trends", "google trends", "trending", "keyword monitor"],
+        "description": "Periodically check Google Trends RSS for trending topics",
+        "build": _google_trends_check,
+    },
+    {
+        "name": "Webhook to Google Sheets",
+        "keywords": ["collect data", "log data", "data collection", "webhook sheets"],
+        "description": "Receive webhook data and append it to a Google Sheet",
+        "build": _webhook_to_sheets,
+    },
+    {
+        "name": "Periodic API Check to Telegram",
+        "keywords": ["api check", "monitor api", "periodic", "health check", "status check"],
+        "description": "Periodically call an API and send results to Telegram",
+        "build": _schedule_http_telegram,
     },
 ]
 

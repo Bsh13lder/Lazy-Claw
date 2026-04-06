@@ -41,13 +41,20 @@ DEFAULT_ECO = {
     "monthly_paid_budget": 0,
     "auto_fallback": True,
     "max_workers": 10,
-    "brain_model": None,       # None = use default from model_registry
-    "worker_model": None,      # None = use default from model_registry
-    "fallback_model": None,    # None = use default from model_registry
-    # FULL mode user-settable overrides (take priority over generic overrides)
+    # Generic overrides (legacy, lowest priority)
+    "brain_model": None,
+    "worker_model": None,
+    "fallback_model": None,
+    # Per-mode overrides (highest priority)
+    "hybrid_brain_model": None,
+    "hybrid_worker_model": None,
+    "hybrid_fallback_model": None,
     "full_brain_model": None,
     "full_worker_model": None,
     "full_fallback_model": None,
+    "claude_brain_model": None,
+    "claude_worker_model": None,
+    "claude_fallback_model": None,
     "locked_provider": None,
     "allowed_providers": None,
     "free_providers": None,    # None = auto-detect from env

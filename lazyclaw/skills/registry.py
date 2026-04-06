@@ -236,6 +236,8 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.n8n_management import (
             N8nStatusSkill, N8nListWorkflowsSkill, N8nCreateWorkflowSkill,
             N8nManageWorkflowSkill, N8nRunWorkflowSkill, N8nListExecutionsSkill,
+            N8nGetWorkflowSkill, N8nUpdateWorkflowSkill,
+            N8nListCredentialsSkill, N8nGetExecutionSkill,
         )
 
         self.register(N8nStatusSkill(config=config))
@@ -244,6 +246,10 @@ class SkillRegistry:
         self.register(N8nManageWorkflowSkill(config=config))
         self.register(N8nRunWorkflowSkill(config=config))
         self.register(N8nListExecutionsSkill(config=config))
+        self.register(N8nGetWorkflowSkill(config=config))
+        self.register(N8nUpdateWorkflowSkill(config=config))
+        self.register(N8nListCredentialsSkill(config=config))
+        self.register(N8nGetExecutionSkill(config=config))
 
         # System status skills
         from lazyclaw.skills.builtin.system_status import (

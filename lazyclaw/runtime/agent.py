@@ -168,6 +168,8 @@ _N8N_KEYWORDS = frozenset({
 _N8N_TOOL_NAMES = frozenset({
     "n8n_status", "n8n_list_workflows", "n8n_create_workflow",
     "n8n_manage_workflow", "n8n_run_workflow", "n8n_list_executions",
+    "n8n_get_workflow", "n8n_update_workflow",
+    "n8n_list_credentials", "n8n_get_execution",
 })
 
 # Channel name → bundled MCP server name (for on-demand connect)
@@ -1079,6 +1081,7 @@ class Agent:
         _escalated = False  # True after auto-escalation to brain_model
         _escalation_iter = 0  # Iteration when escalation happened
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
+        _denied_approvals: set[str] = set()  # "skill_name:args_hash" — user-denied this turn
         # Graduated escalation level: 0=normal, 1=soft nudge, 2=brain escalation
         # Level 3 (give up) triggers when stuck is detected at level 2.
         _escalation_level: int = 0
@@ -1748,6 +1751,23 @@ class Agent:
                             all_new_messages.append(tool_msg)
                             continue
 
+                        # Check if user already denied this exact tool+args this turn
+                        _denial_key = f"{skill_name}:{json.dumps(parsed_args, sort_keys=True)}"
+                        if _denial_key in _denied_approvals:
+                            logger.info("Tool %s already denied this turn, skipping re-prompt", skill_name)
+                            result = (
+                                f"The user already denied '{skill_name}' with these arguments. "
+                                f"Do not retry this action. Try a different approach or ask the user."
+                            )
+                            tool_msg = LLMMessage(
+                                role="tool",
+                                content=result,
+                                tool_call_id=tc.id,
+                            )
+                            messages.append(tool_msg)
+                            all_new_messages.append(tool_msg)
+                            continue
+
                         # Try inline approval via callback (CLI y/n prompt)
                         # Pass display name so the UI shows friendly names
                         if hasattr(cb, '_pending_display_name'):
@@ -1766,6 +1786,7 @@ class Agent:
                                 {"tool": tc.name, "display_name": _display},
                             ))
                         else:
+                            _denied_approvals.add(_denial_key)
                             await cb.on_event(AgentEvent(
                                 "approval", f"{_display} denied",
                                 {"skill": skill_name, "display_name": _display, "approved": False},

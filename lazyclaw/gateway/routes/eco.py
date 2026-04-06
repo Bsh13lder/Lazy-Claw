@@ -20,9 +20,16 @@ class UpdateEcoRequest(BaseModel):
     allowed_providers: list[str] | None = None
     free_providers: list[str] | None = None
     preferred_free_model: str | None = None
-    brain_model: str | None = None
-    worker_model: str | None = None
-    fallback_model: str | None = None
+    # Per-mode model overrides
+    hybrid_brain_model: str | None = None
+    hybrid_worker_model: str | None = None
+    hybrid_fallback_model: str | None = None
+    full_brain_model: str | None = None
+    full_worker_model: str | None = None
+    full_fallback_model: str | None = None
+    claude_brain_model: str | None = None
+    claude_worker_model: str | None = None
+    claude_fallback_model: str | None = None
 
 
 @router.get("/settings")
@@ -42,7 +49,7 @@ async def update_settings(
     config: Config = Depends(load_config),
 ):
     """Update ECO mode settings."""
-    updates = body.model_dump(exclude_none=True)
+    updates = body.model_dump(exclude_unset=True)
     if not updates:
         return {"success": False, "error": "No fields to update"}
     try:
@@ -85,17 +92,46 @@ async def get_rate_limits(user: User = Depends(get_current_user)):
 
 
 @router.get("/providers")
-async def list_providers(user: User = Depends(get_current_user)):
-    """List available free AI providers and their status."""
+async def list_providers(
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """List all AI providers (paid + free) and their configuration status."""
+    import os
     from lazyclaw.llm.free_providers import get_provider_info
 
-    info = get_provider_info()
-    configured = [p["name"] for p in info if p["configured"]]
+    free_info = get_provider_info()
+
+    # Build paid providers from env / config
+    paid_providers = [
+        {
+            "name": "anthropic",
+            "display_name": "Anthropic (Claude)",
+            "configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "is_paid": True,
+            "env_key": "ANTHROPIC_API_KEY",
+        },
+        {
+            "name": "openai",
+            "display_name": "OpenAI (GPT)",
+            "configured": bool(os.environ.get("OPENAI_API_KEY")),
+            "is_paid": True,
+            "env_key": "OPENAI_API_KEY",
+        },
+    ]
+
+    # Enrich free providers with extra fields
+    all_providers = paid_providers + [
+        {**p, "is_paid": False, "display_name": p["name"].title(), "env_key": p.get("env_key", "")}
+        for p in free_info
+    ]
+
+    configured = [p["name"] for p in all_providers if p["configured"]]
     return {
         "success": True,
         "data": {
             "configured": configured,
-            "all_providers": info,
+            "all_providers": all_providers,
         },
     }
 

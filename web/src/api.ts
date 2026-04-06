@@ -59,6 +59,32 @@ export interface EcoSettings {
   monthly_paid_budget: number;
   locked_provider?: string;
   allowed_providers?: string[];
+  // Per-mode model overrides
+  hybrid_brain_model?: string | null;
+  hybrid_worker_model?: string | null;
+  hybrid_fallback_model?: string | null;
+  full_brain_model?: string | null;
+  full_worker_model?: string | null;
+  full_fallback_model?: string | null;
+  claude_brain_model?: string | null;
+  claude_worker_model?: string | null;
+  claude_fallback_model?: string | null;
+  [key: string]: unknown; // allow dynamic per-mode keys
+}
+
+export interface ModelInfo {
+  id: string;
+  display_name: string;
+  provider: string;
+  is_local: boolean;
+  role: string;
+  tool_calling: boolean;
+  optimized: boolean;
+}
+
+export interface ModelsData {
+  models: ModelInfo[];
+  mode_defaults: Record<string, Record<string, string>>;
 }
 
 export interface EcoUsage {
@@ -358,6 +384,9 @@ export const getEcoProviders = () =>
 
 export const getEcoRateLimits = () =>
   request<{ success: boolean; data: RateLimits }>("/api/eco/rate-limits").then((r) => r.data);
+
+export const getEcoModels = () =>
+  request<{ success: boolean; data: ModelsData }>("/api/eco/models").then((r) => r.data);
 
 // ── Teams ──────────────────────────────────────────────────────────────────
 

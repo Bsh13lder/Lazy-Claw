@@ -8,6 +8,7 @@ import type {
   TeamSettings,
   Specialist,
   PermissionSettings,
+  ModelsData,
 } from "../api";
 import { useToast } from "../context/ToastContext";
 import Modal from "../components/Modal";
@@ -103,9 +104,9 @@ interface ModeDef {
 }
 
 const MODE_CARDS: readonly ModeDef[] = [
-  { mode: "eco", name: "ECO", description: "Free models only" },
-  { mode: "hybrid", name: "HYBRID", description: "Auto-fallback" },
-  { mode: "full", name: "FULL", description: "Premium models" },
+  { mode: "hybrid", name: "HYBRID", description: "Paid brain + free local worker" },
+  { mode: "full", name: "FULL", description: "All premium models" },
+  { mode: "claude", name: "CLAUDE", description: "Claude CLI ($0 subscription)" },
 ] as const;
 
 const TEAM_MODES = ["single", "parallel", "sequential"] as const;
@@ -164,6 +165,189 @@ function Toggle({ on, onChange, disabled }: { on: boolean; onChange: () => void;
   );
 }
 
+// ── Model Assignment ───────────────────────────────────────────────────────
+
+const ROLES = ["brain", "worker", "fallback"] as const;
+
+const ROLE_INFO: Record<string, { label: string; description: string }> = {
+  brain: { label: "Brain", description: "Main agent & team lead" },
+  worker: { label: "Worker", description: "Specialists & background tasks" },
+  fallback: { label: "Fallback", description: "When primary model fails" },
+};
+
+function ModelAssignment({
+  eco,
+  modelsData,
+  onSettingsUpdate,
+}: {
+  readonly eco: EcoSettings;
+  readonly modelsData: ModelsData;
+  readonly onSettingsUpdate: (updates: Partial<EcoSettings>) => Promise<void>;
+}) {
+  const toast = useToast();
+  const mode = eco.mode;
+  const defaults = modelsData.mode_defaults[mode] ?? {};
+
+  const modeKey = (role: string) => `${mode}_${role}_model`;
+
+  const handleModelChange = async (role: string, value: string) => {
+    const key = modeKey(role);
+    const newVal = value === "" ? null : value;
+    try {
+      await onSettingsUpdate({ [key]: newVal });
+      toast.success(`${ROLE_INFO[role]?.label ?? role} model updated`);
+    } catch {
+      toast.error("Failed to update model");
+    }
+  };
+
+  const currentModel = (role: string): string => {
+    return (eco[modeKey(role)] as string | null | undefined) ?? "";
+  };
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <SectionHeading
+        title="Model Assignment"
+        subtitle={`Configure which models each role uses in ${mode.toUpperCase()} mode`}
+      />
+      <div className="space-y-3">
+        {ROLES.map((role) => {
+          const info = ROLE_INFO[role];
+          const active = currentModel(role);
+          const defaultModel = defaults[role] ?? "—";
+          return (
+            <div key={role} className="flex items-center gap-4">
+              <div className="w-24 shrink-0">
+                <p className="text-sm font-medium text-text-primary">{info.label}</p>
+                <p className="text-[10px] text-text-muted">{info.description}</p>
+              </div>
+              <select
+                value={active}
+                onChange={(e) => handleModelChange(role, e.target.value)}
+                className="flex-1 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light appearance-none cursor-pointer"
+              >
+                <option value="">Default ({defaultModel})</option>
+                {modelsData.models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name} — {m.provider}{m.optimized ? " *" : ""}{m.is_local ? " (local)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[10px] text-text-muted mt-3">* = optimized for this platform. Each mode has independent model settings.</p>
+    </section>
+  );
+}
+
+// ── Providers List ─────────────────────────────────────────────────────────
+
+function ProvidersList({ providers }: { readonly providers: readonly EcoProvider[] }) {
+  const toast = useToast();
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [keyValue, setKeyValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const handleSaveKey = async (envKey: string) => {
+    if (!keyValue.trim()) { toast.error("API key cannot be empty"); return; }
+    setSaving(true);
+    try {
+      await api.setVaultKey(envKey, keyValue.trim());
+      toast.success("API key saved to vault");
+      setEditingKey(null);
+      setKeyValue("");
+    } catch { toast.error("Failed to save API key"); }
+    finally { setSaving(false); }
+  };
+
+  const handleDeleteKey = async (envKey: string) => {
+    try {
+      await api.deleteVaultKey(envKey);
+      toast.success("API key removed");
+    } catch { toast.error("Failed to remove API key"); }
+  };
+
+  // Sort: paid first, then by name
+  const sorted = [...providers].sort((a, b) => {
+    if (a.is_paid && !b.is_paid) return -1;
+    if (!a.is_paid && b.is_paid) return 1;
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <SectionHeading title="Providers" subtitle="Manage AI provider API keys" />
+      <div className="space-y-2">
+        {sorted.map((p) => {
+          const envKey = String(p.env_key || "");
+          const isEditing = editingKey === p.name;
+          return (
+            <div key={p.name} className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-bg-hover">
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${p.configured ? "bg-accent" : "bg-text-muted opacity-40"}`} />
+              <div className="flex-1 min-w-0">
+                <span className="text-sm text-text-primary truncate block">
+                  {String(p.display_name || p.name)}
+                </span>
+                {Boolean(p.is_paid) && <span className="text-[9px] text-amber uppercase tracking-wider">paid</span>}
+              </div>
+              {isEditing ? (
+                <div className="flex gap-1.5 items-center">
+                  <input
+                    type="password"
+                    placeholder="sk-..."
+                    value={keyValue}
+                    onChange={(e) => setKeyValue(e.target.value)}
+                    className="w-40 px-2 py-1 text-xs rounded bg-bg-tertiary border border-border text-text-primary focus:outline-none focus:border-border-light"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => handleSaveKey(envKey)}
+                    disabled={saving}
+                    className="px-2 py-1 text-[10px] text-accent border border-accent/30 rounded hover:bg-accent-soft disabled:opacity-40"
+                  >
+                    {saving ? "..." : "Save"}
+                  </button>
+                  <button
+                    onClick={() => { setEditingKey(null); setKeyValue(""); }}
+                    className="px-2 py-1 text-[10px] text-text-muted border border-border rounded hover:bg-bg-hover"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className="flex gap-1.5 items-center">
+                  <span className={`text-[10px] shrink-0 ${p.configured ? "text-accent" : "text-text-muted"}`}>
+                    {p.configured ? "active" : "not configured"}
+                  </span>
+                  {envKey && (
+                    <button
+                      onClick={() => { setEditingKey(String(p.name)); setKeyValue(""); }}
+                      className="px-2 py-1 text-[10px] text-text-muted border border-border rounded hover:bg-bg-hover hover:text-text-primary"
+                    >
+                      {p.configured ? "Update" : "Add key"}
+                    </button>
+                  )}
+                  {p.configured && envKey && (
+                    <button
+                      onClick={() => handleDeleteKey(envKey)}
+                      className="px-2 py-1 text-[10px] text-red-400 border border-red-400/30 rounded hover:bg-red-400/10"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // ── ECO Tab ────────────────────────────────────────────────────────────────
 
 function EcoTab({
@@ -171,6 +355,7 @@ function EcoTab({
   usage,
   providers,
   rateLimits,
+  modelsData,
   onModeChange,
   onSettingsUpdate,
 }: {
@@ -178,6 +363,7 @@ function EcoTab({
   readonly usage: EcoUsage | null;
   readonly providers: readonly EcoProvider[];
   readonly rateLimits: RateLimits | null;
+  readonly modelsData: ModelsData | null;
   readonly onModeChange: (mode: string) => void;
   readonly onSettingsUpdate: (updates: Partial<EcoSettings>) => Promise<void>;
 }) {
@@ -245,6 +431,15 @@ function EcoTab({
           })}
         </div>
       </section>
+
+      {/* Model Assignment */}
+      {eco && modelsData && (
+        <ModelAssignment
+          eco={eco}
+          modelsData={modelsData}
+          onSettingsUpdate={onSettingsUpdate}
+        />
+      )}
 
       {/* Budget + badges */}
       {eco && (
@@ -330,20 +525,7 @@ function EcoTab({
 
       {/* Providers */}
       {providers.length > 0 && (
-        <section className="bg-bg-secondary border border-border rounded-xl p-5">
-          <SectionHeading title="Providers" />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {providers.map((p) => (
-              <div key={p.name} className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-bg-hover">
-                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${p.configured ? "bg-accent" : "bg-text-muted opacity-40"}`} />
-                <span className="text-sm text-text-primary flex-1 truncate">{p.name}</span>
-                <span className={`text-[10px] shrink-0 ${p.configured ? "text-accent" : "text-text-muted"}`}>
-                  {p.configured ? "configured" : "not configured"}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
+        <ProvidersList providers={providers} />
       )}
 
       {/* Rate limits */}
@@ -878,6 +1060,7 @@ export default function Settings() {
   const [usage, setUsage] = useState<EcoUsage | null>(null);
   const [providers, setProviders] = useState<EcoProvider[]>([]);
   const [rateLimits, setRateLimits] = useState<RateLimits | null>(null);
+  const [modelsData, setModelsData] = useState<ModelsData | null>(null);
   const [team, setTeam] = useState<TeamSettings | null>(null);
   const [specialists, setSpecialists] = useState<Specialist[]>([]);
   const [perms, setPerms] = useState<PermissionSettings | null>(null);
@@ -894,6 +1077,7 @@ export default function Settings() {
       api.getTeamSettings(),
       api.listSpecialists(),
       api.getPermissionSettings(),
+      api.getEcoModels(),
     ]).then((results) => {
       if (!alive) return;
       if (results[0].status === "fulfilled") setEco(results[0].value);
@@ -903,6 +1087,7 @@ export default function Settings() {
       if (results[4].status === "fulfilled") setTeam(results[4].value);
       if (results[5].status === "fulfilled") setSpecialists(Array.isArray(results[5].value) ? results[5].value : []);
       if (results[6].status === "fulfilled") setPerms(results[6].value);
+      if (results[7].status === "fulfilled") setModelsData(results[7].value);
       setLoading(false);
     });
     return () => { alive = false; };
@@ -996,6 +1181,7 @@ export default function Settings() {
             usage={usage}
             providers={providers}
             rateLimits={rateLimits}
+            modelsData={modelsData}
             onModeChange={handleEcoMode}
             onSettingsUpdate={handleEcoSettingsUpdate}
           />

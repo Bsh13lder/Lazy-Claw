@@ -141,13 +141,19 @@ class EcoSettings:
     monthly_paid_budget: float = 0.0        # 0 = unlimited
     auto_fallback: bool = True              # Both modes auto-fallback
     max_workers: int = 10                   # Max concurrent workers
-    brain_model: str | None = None          # Override brain (None = default)
-    worker_model: str | None = None         # Override worker (None = default)
-    fallback_model: str | None = None       # Override fallback (None = default)
-    # FULL mode user-settable overrides
+    brain_model: str | None = None          # Generic override (lowest priority)
+    worker_model: str | None = None
+    fallback_model: str | None = None
+    # Per-mode overrides (highest priority)
+    hybrid_brain_model: str | None = None
+    hybrid_worker_model: str | None = None
+    hybrid_fallback_model: str | None = None
     full_brain_model: str | None = None
     full_worker_model: str | None = None
     full_fallback_model: str | None = None
+    claude_brain_model: str | None = None
+    claude_worker_model: str | None = None
+    claude_fallback_model: str | None = None
     locked_provider: str | None = None      # Lock to specific free provider
     allowed_providers: list[str] | None = None
     free_providers: list[str] | None = None
@@ -190,9 +196,15 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
         brain_model=eco.get("brain_model"),
         worker_model=eco.get("worker_model") or eco.get("specialist_model"),
         fallback_model=eco.get("fallback_model"),
+        hybrid_brain_model=eco.get("hybrid_brain_model"),
+        hybrid_worker_model=eco.get("hybrid_worker_model"),
+        hybrid_fallback_model=eco.get("hybrid_fallback_model"),
         full_brain_model=eco.get("full_brain_model"),
         full_worker_model=eco.get("full_worker_model"),
         full_fallback_model=eco.get("full_fallback_model"),
+        claude_brain_model=eco.get("claude_brain_model"),
+        claude_worker_model=eco.get("claude_worker_model"),
+        claude_fallback_model=eco.get("claude_fallback_model"),
         locked_provider=eco.get("locked_provider"),
         allowed_providers=allowed,
         free_providers=free_providers,
@@ -452,21 +464,19 @@ class EcoRouter:
     def _resolve_models(self, settings: EcoSettings) -> dict[str, str]:
         """Get brain/worker/fallback model IDs for the current mode.
 
-        HYBRID: defaults from MODE_MODELS, generic overrides apply.
-        FULL: full_*_model overrides take priority, then generic overrides,
-              then MODE_MODELS defaults.
+        Priority: per-mode override > generic override > MODE_MODELS default.
+        Each mode is fully isolated — setting HYBRID worker won't affect FULL.
         """
         defaults = get_mode_models(settings.mode)
-        if settings.mode == MODE_FULL:
-            return {
-                "brain": settings.full_brain_model or settings.brain_model or defaults["brain"],
-                "worker": settings.full_worker_model or settings.worker_model or defaults["worker"],
-                "fallback": settings.full_fallback_model or settings.fallback_model or defaults["fallback"],
-            }
+        mode = settings.mode
+        # Per-mode fields: {mode}_{role}_model
+        mode_brain = getattr(settings, f"{mode}_brain_model", None)
+        mode_worker = getattr(settings, f"{mode}_worker_model", None)
+        mode_fallback = getattr(settings, f"{mode}_fallback_model", None)
         return {
-            "brain": settings.brain_model or defaults["brain"],
-            "worker": settings.worker_model or defaults["worker"],
-            "fallback": settings.fallback_model or defaults["fallback"],
+            "brain": mode_brain or settings.brain_model or defaults["brain"],
+            "worker": mode_worker or settings.worker_model or defaults["worker"],
+            "fallback": mode_fallback or settings.fallback_model or defaults["fallback"],
         }
 
     def _is_auto_fallback(self, settings: EcoSettings) -> bool:

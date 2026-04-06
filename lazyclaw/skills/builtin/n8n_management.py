@@ -526,3 +526,286 @@ class N8nListExecutionsSkill(BaseSkill):
             return "\n".join(lines)
         except Exception as exc:
             return _connection_error_msg(exc)
+
+
+# ---------------------------------------------------------------------------
+# 7. n8n_get_workflow
+# ---------------------------------------------------------------------------
+
+class N8nGetWorkflowSkill(BaseSkill):
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_get_workflow"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def description(self) -> str:
+        return "Get full details of an n8n workflow by ID (nodes, connections, credentials)."
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "workflow_id": {
+                    "type": "string",
+                    "description": "The workflow ID (use n8n_list_workflows to find it)",
+                },
+            },
+            "required": ["workflow_id"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            wf_id = params["workflow_id"]
+            data = await _n8n_request(self._config, user_id, "GET", f"/api/v1/workflows/{wf_id}")
+
+            name = data.get("name", "Untitled")
+            active = "active" if data.get("active") else "inactive"
+            nodes = data.get("nodes", [])
+            node_summary = ", ".join(n.get("name", n.get("type", "?")) for n in nodes)
+
+            lines = [
+                f"== Workflow: {name} (ID: {wf_id}, {active}) ==",
+                "",
+                f"Nodes ({len(nodes)}): {node_summary}",
+                "",
+                "Full JSON:",
+                json.dumps(data, indent=2),
+            ]
+            return "\n".join(lines)
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+
+# ---------------------------------------------------------------------------
+# 8. n8n_update_workflow
+# ---------------------------------------------------------------------------
+
+class N8nUpdateWorkflowSkill(BaseSkill):
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_update_workflow"
+
+    @property
+    def permission_hint(self) -> str:
+        return "ask"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Update an n8n workflow by ID. Fetches the current workflow, "
+            "merges your changes, and PUTs the result. "
+            "Pass the full or partial workflow JSON to update."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "workflow_id": {
+                    "type": "string",
+                    "description": "The workflow ID to update",
+                },
+                "workflow_json": {
+                    "type": "object",
+                    "description": (
+                        "The workflow object with changes. Can be a full workflow "
+                        "or partial (e.g., just {\"name\": \"New Name\"} or "
+                        "{\"nodes\": [...], \"connections\": {...}})"
+                    ),
+                },
+            },
+            "required": ["workflow_id", "workflow_json"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            wf_id = params["workflow_id"]
+            changes = params["workflow_json"]
+
+            # Fetch current workflow first
+            current = await _n8n_request(
+                self._config, user_id, "GET", f"/api/v1/workflows/{wf_id}",
+            )
+
+            # Merge changes into current (shallow merge; nodes/connections replace entirely)
+            merged = {**current, **changes}
+            # Remove server-only fields that n8n rejects on PUT
+            for key in ("id", "createdAt", "updatedAt", "versionId"):
+                merged.pop(key, None)
+
+            result = await _n8n_request(
+                self._config, user_id, "PUT",
+                f"/api/v1/workflows/{wf_id}",
+                body=merged, timeout=30.0,
+            )
+
+            updated_name = result.get("name", "Untitled")
+            return (
+                f"Workflow '{updated_name}' (ID: {wf_id}) updated successfully. "
+                f"Open http://localhost:5678/workflow/{wf_id} to view."
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+
+# ---------------------------------------------------------------------------
+# 9. n8n_list_credentials
+# ---------------------------------------------------------------------------
+
+class N8nListCredentialsSkill(BaseSkill):
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_list_credentials"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def description(self) -> str:
+        return "List all configured n8n credentials (name, type, ID — not secret values)."
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            data = await _n8n_request(self._config, user_id, "GET", "/api/v1/credentials")
+            creds = data.get("data", [])
+
+            if not creds:
+                return "No credentials configured in n8n. Add them in n8n Settings > Credentials."
+
+            lines = ["== n8n Credentials ==", ""]
+            lines.append(f"{'ID':<8} {'Type':<30} {'Name'}")
+            lines.append("-" * 60)
+
+            for cred in creds:
+                cred_id = str(cred.get("id", "?"))
+                cred_type = cred.get("type", "?")
+                cred_name = cred.get("name", "Untitled")
+                lines.append(f"{cred_id:<8} {cred_type:<30} {cred_name}")
+
+            lines.append("")
+            lines.append(f"Total: {len(creds)} credential(s)")
+            return "\n".join(lines)
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+
+# ---------------------------------------------------------------------------
+# 10. n8n_get_execution
+# ---------------------------------------------------------------------------
+
+class N8nGetExecutionSkill(BaseSkill):
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_get_execution"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def description(self) -> str:
+        return (
+            "Get full details of an n8n execution by ID, including "
+            "node outputs, error messages, and timing."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "execution_id": {
+                    "type": "string",
+                    "description": "The execution ID (use n8n_list_executions to find it)",
+                },
+            },
+            "required": ["execution_id"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            ex_id = params["execution_id"]
+            data = await _n8n_request(self._config, user_id, "GET", f"/api/v1/executions/{ex_id}")
+
+            status = data.get("status", "?")
+            wf_name = data.get("workflowData", {}).get("name", "?")
+            wf_id = data.get("workflowId", "?")
+            started = data.get("startedAt", "?")
+            stopped = data.get("stoppedAt", "?")
+
+            lines = [
+                f"== Execution {ex_id} ==",
+                f"Workflow: {wf_name} (ID: {wf_id})",
+                f"Status: {status}",
+                f"Started: {started}",
+                f"Finished: {stopped}",
+                "",
+            ]
+
+            # Extract per-node results
+            result_data = data.get("data", {}).get("resultData", {})
+            run_data = result_data.get("runData", {})
+            if run_data:
+                lines.append("Node Results:")
+                for node_name, node_runs in run_data.items():
+                    for run in node_runs:
+                        node_status = run.get("executionStatus", "?")
+                        error = run.get("error")
+                        error_msg = ""
+                        if isinstance(error, dict):
+                            error_msg = error.get("message", "")
+                        elif error:
+                            error_msg = str(error)
+                        lines.append(f"  {node_name}: {node_status}")
+                        if error_msg:
+                            lines.append(f"    Error: {error_msg}")
+
+            # Show last error if present at top level
+            last_error = result_data.get("error")
+            if last_error:
+                err_msg = last_error.get("message", str(last_error)) if isinstance(last_error, dict) else str(last_error)
+                lines.append("")
+                lines.append(f"Execution Error: {err_msg}")
+
+            return "\n".join(lines)
+        except Exception as exc:
+            return _connection_error_msg(exc)

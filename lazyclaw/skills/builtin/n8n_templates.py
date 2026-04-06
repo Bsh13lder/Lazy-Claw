@@ -440,7 +440,7 @@ def match_template(description: str) -> dict | None:
             best_score = score
             best_match = tmpl
 
-    if best_score >= 1:
+    if best_score >= 2:
         return best_match
     return None
 

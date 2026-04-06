@@ -312,7 +312,7 @@ class N8nCreateWorkflowSkill(BaseSkill):
             if activate and wf_id != "?":
                 try:
                     await _n8n_request(
-                        self._config, user_id, "PUT",
+                        self._config, user_id, "POST",
                         f"/api/v1/workflows/{wf_id}/activate",
                     )
                 except Exception as act_exc:
@@ -380,10 +380,10 @@ class N8nManageWorkflowSkill(BaseSkill):
             action = params["action"]
 
             if action == "activate":
-                await _n8n_request(self._config, user_id, "PUT", f"/api/v1/workflows/{wf_id}/activate")
+                await _n8n_request(self._config, user_id, "POST", f"/api/v1/workflows/{wf_id}/activate")
                 return f"Workflow {wf_id} activated."
             elif action == "deactivate":
-                await _n8n_request(self._config, user_id, "PUT", f"/api/v1/workflows/{wf_id}/deactivate")
+                await _n8n_request(self._config, user_id, "POST", f"/api/v1/workflows/{wf_id}/deactivate")
                 return f"Workflow {wf_id} deactivated."
             elif action == "delete":
                 await _n8n_request(self._config, user_id, "DELETE", f"/api/v1/workflows/{wf_id}")
@@ -649,8 +649,12 @@ class N8nUpdateWorkflowSkill(BaseSkill):
 
             # Merge changes into current (shallow merge; nodes/connections replace entirely)
             merged = {**current, **changes}
-            # Remove server-only fields that n8n rejects on PUT
-            for key in ("id", "createdAt", "updatedAt", "versionId"):
+            # Remove all read-only fields that n8n rejects on PUT
+            for key in (
+                "id", "createdAt", "updatedAt", "versionId", "active",
+                "isArchived", "triggerCount", "meta", "tags",
+                "activeVersion", "shared", "usedCredentials",
+            ):
                 merged.pop(key, None)
 
             result = await _n8n_request(

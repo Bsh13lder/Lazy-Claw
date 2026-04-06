@@ -1279,9 +1279,11 @@ class Agent:
                         )
                 else:
                     # No tools — stream for real-time output
-                    # Buffer <think>...</think> blocks — don't show thinking to user
+                    # Buffer <think>...</think> and <taor_plan>...</taor_plan> — don't show to user
                     _in_think_block = False
                     _think_buffer = ""
+                    _in_taor_block = False
+                    _taor_buffer = ""
                     try:
                         async for chunk in self.eco_router.stream_chat(
                             messages, user_id=user_id, model=iter_model,
@@ -1298,19 +1300,36 @@ class Agent:
                                 if _in_think_block:
                                     _think_buffer += text
                                     if "</think>" in _think_buffer:
-                                        # Thinking done — emit anything after </think>
                                         after = _think_buffer.split("</think>", 1)[1].strip()
                                         _in_think_block = False
                                         _think_buffer = ""
                                         if after:
-                                            await cb.on_event(AgentEvent(
-                                                "token", after, {"model": chunk.model},
-                                            ))
-                                    # Don't emit while in think block
-                                else:
-                                    await cb.on_event(AgentEvent(
-                                        "token", text, {"model": chunk.model},
-                                    ))
+                                            text = after
+                                        else:
+                                            continue
+                                    else:
+                                        continue
+
+                                # Buffer <taor_plan> blocks
+                                if "<taor_plan>" in streamed_content and not _in_taor_block:
+                                    _in_taor_block = True
+                                    _taor_buffer = ""
+                                if _in_taor_block:
+                                    _taor_buffer += text
+                                    if "</taor_plan>" in _taor_buffer:
+                                        after = _taor_buffer.split("</taor_plan>", 1)[1].strip()
+                                        _in_taor_block = False
+                                        _taor_buffer = ""
+                                        if after:
+                                            text = after
+                                        else:
+                                            continue
+                                    else:
+                                        continue
+
+                                await cb.on_event(AgentEvent(
+                                    "token", text, {"model": chunk.model},
+                                ))
 
                             if chunk.done:
                                 response = _LLMResp(
@@ -1506,10 +1525,14 @@ class Agent:
                         logger.warning("Nudging tool use: LLM skipped tools for channel query")
                         continue
 
-                    # Strip <think>...</think> tags from local models (Nanbeige)
+                    # Strip internal tags that should never reach the user
                     if "<think>" in _final_content:
                         _final_content = re.sub(
                             r"<think>.*?</think>\s*", "", _final_content, flags=re.DOTALL
+                        ).strip()
+                    if "<taor_plan>" in _final_content:
+                        _final_content = re.sub(
+                            r"<taor_plan>.*?</taor_plan>\s*", "", _final_content, flags=re.DOTALL
                         ).strip()
 
                     # Empty response from worker model — retry with brain.

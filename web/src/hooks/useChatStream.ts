@@ -131,7 +131,7 @@ export function useChatStream({
             t.name === name && t.status === "running"
               ? {
                   ...t,
-                  status: (error ? "error" : "done") as const,
+                  status: error ? ("error" as const) : ("done" as const),
                   preview,
                   error,
                   completed_at: now,

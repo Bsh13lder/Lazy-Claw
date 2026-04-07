@@ -69,6 +69,8 @@ export interface EcoSettings {
   claude_brain_model?: string | null;
   claude_worker_model?: string | null;
   claude_fallback_model?: string | null;
+  free_providers?: string[];
+  preferred_free_model?: string | null;
   [key: string]: unknown; // allow dynamic per-mode keys
 }
 

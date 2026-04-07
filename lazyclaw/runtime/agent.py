@@ -1284,6 +1284,7 @@ class Agent:
                     _think_buffer = ""
                     _in_taor_block = False
                     _taor_buffer = ""
+                    _taor_close_tag = "</taor_plan>"
                     try:
                         async for chunk in self.eco_router.stream_chat(
                             messages, user_id=user_id, model=iter_model,
@@ -1310,14 +1311,18 @@ class Agent:
                                     else:
                                         continue
 
-                                # Buffer <taor_plan> blocks
-                                if "<taor_plan>" in streamed_content and not _in_taor_block:
-                                    _in_taor_block = True
-                                    _taor_buffer = ""
+                                # Buffer <taor_plan> and <plan> blocks
+                                for _tag in ("<taor_plan>", "<plan>"):
+                                    _close = _tag.replace("<", "</")
+                                    if _tag in streamed_content and not _in_taor_block:
+                                        _in_taor_block = True
+                                        _taor_buffer = ""
+                                        _taor_close_tag = _close
+                                        break
                                 if _in_taor_block:
                                     _taor_buffer += text
-                                    if "</taor_plan>" in _taor_buffer:
-                                        after = _taor_buffer.split("</taor_plan>", 1)[1].strip()
+                                    if _taor_close_tag in _taor_buffer:
+                                        after = _taor_buffer.split(_taor_close_tag, 1)[1].strip()
                                         _in_taor_block = False
                                         _taor_buffer = ""
                                         if after:
@@ -1533,6 +1538,10 @@ class Agent:
                     if "<taor_plan>" in _final_content:
                         _final_content = re.sub(
                             r"<taor_plan>.*?</taor_plan>\s*", "", _final_content, flags=re.DOTALL
+                        ).strip()
+                    if "<plan>" in _final_content:
+                        _final_content = re.sub(
+                            r"<plan>.*?</plan>\s*", "", _final_content, flags=re.DOTALL
                         ).strip()
 
                     # Empty response from worker model — retry with brain.

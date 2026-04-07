@@ -195,6 +195,7 @@ async def wait_for_page_ready(conn, timeout: float = 5.0) -> bool:
         )
         return True
     except (asyncio.TimeoutError, Exception):
+        logger.debug("wait_for_page_ready timed out or failed", exc_info=True)
         return False
 
 
@@ -218,6 +219,7 @@ async def detect_and_solve_cloudflare(conn, timeout: float = 20.0) -> bool:
         )
         page_text = result.get("result", {}).get("value", "")
     except Exception:
+        logger.warning("Failed to read page text for Cloudflare detection", exc_info=True)
         return False
 
     is_challenge = any(p in page_text for p in CLOUDFLARE_PATTERNS)

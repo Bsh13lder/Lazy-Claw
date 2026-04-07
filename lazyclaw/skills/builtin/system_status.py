@@ -115,6 +115,7 @@ class ShowStatusSkill(BaseSkill):
                             await (await db.execute(query)).fetchone()
                         )[0]
                     except Exception:
+                        logger.debug("Failed to query count for %s", label, exc_info=True)
                         counts[label] = 0
 
             lines.append("")
@@ -149,6 +150,7 @@ class ShowStatusSkill(BaseSkill):
                     )
                     mcp_servers = await rows.fetchall()
                 except Exception:
+                    logger.debug("Failed to query MCP servers", exc_info=True)
                     mcp_servers = []
 
             lines.append("")
@@ -261,6 +263,7 @@ class RunDoctorSkill(BaseSkill):
                 else:
                     checks.append(("MCP Servers", "WARN", "None configured"))
             except Exception:
+                logger.debug("MCP server health check failed", exc_info=True)
                 checks.append(("MCP Servers", "WARN", "Table not found"))
 
             # 6. Bundled MCP packages
@@ -393,6 +396,7 @@ class ShowUsageSkill(BaseSkill):
                         )
                         meta = json.loads(meta_str) if isinstance(meta_str, str) else {}
                     except Exception:
+                        logger.debug("Failed to decrypt/parse trace metadata", exc_info=True)
                         meta = {}
 
                     total_prompt += meta.get("prompt_tokens", 0)
@@ -490,6 +494,7 @@ class ShowLogsSkill(BaseSkill):
                         else (content_enc or "")
                     )
                 except Exception:
+                    logger.debug("Failed to decrypt trace content", exc_info=True)
                     content = "[encrypted]"
 
                 snippet = content[:70] + "..." if len(content) > 70 else content

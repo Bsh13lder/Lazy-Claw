@@ -432,6 +432,7 @@ async def capture_error_text(backend) -> str:
         result = await backend.evaluate(_JS_ERROR_TEXT)
         return str(result or "")
     except Exception:
+        logger.debug("Failed to extract error text from page", exc_info=True)
         return ""
 
 

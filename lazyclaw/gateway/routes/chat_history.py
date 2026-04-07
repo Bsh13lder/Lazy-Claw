@@ -175,7 +175,7 @@ async def get_session_messages(
                     meta = json.loads(metadata_raw)
                     tool_calls = meta.get("tool_calls")
                 except (json.JSONDecodeError, TypeError):
-                    pass
+                    logger.debug("Failed to parse message metadata JSON", exc_info=True)
 
             messages.append({
                 "id": r[0],

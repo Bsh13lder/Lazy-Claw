@@ -38,6 +38,7 @@ async def get_permission_settings(config: Config, user_id: str) -> dict:
     try:
         settings = json.loads(result[0])
     except (json.JSONDecodeError, TypeError):
+        logger.warning("Failed to parse permission settings JSON, returning defaults")
         return dict(DEFAULT_PERMISSIONS)
 
     perms = settings.get("permissions", {})
@@ -94,6 +95,7 @@ async def update_permission_settings(
         try:
             current_settings = json.loads(result[0])
         except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse permission settings JSON during update, starting fresh")
             current_settings = {}
 
     # Update permissions section (immutable pattern — new dict)

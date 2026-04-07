@@ -258,7 +258,7 @@ class CDPBackend:
                 {"timeout": 10000},
             )
         except Exception:
-            pass  # Some pages don't trigger navigation events
+            logger.debug("Page.waitForNavigation not triggered (expected for some pages)", exc_info=True)
 
         # Wait for DOM to settle + auto-solve Cloudflare if detected
         try:
@@ -703,6 +703,7 @@ class CDPBackend:
         try:
             logs = json.loads(raw) if isinstance(raw, str) else []
         except Exception:
+            logger.debug("Failed to parse console logs JSON", exc_info=True)
             logs = []
 
         if clear:
@@ -934,7 +935,7 @@ async def restart_browser_with_cdp(
                 if os.path.exists(lock_path) or os.path.islink(lock_path):
                     os.unlink(lock_path)
             except OSError:
-                logger.warning("Could not remove stale profile lock %s", lock_path)
+                logger.warning("Could not remove stale profile lock %s", lock_path, exc_info=True)
 
     # Relaunch VISIBLE browser with CDP
     from lazyclaw.browser.stealth import STEALTH_LAUNCH_ARGS
@@ -996,6 +997,7 @@ def _is_same_origin_nav(current_url: str, new_url: str) -> bool:
             and cur.netloc != ""  # Don't match empty origins
         )
     except Exception:
+        logger.debug("Failed to parse URLs for same-origin check", exc_info=True)
         return False
 
 

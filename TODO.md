@@ -112,16 +112,20 @@
 ## React Web UI ✅ COMPLETE
 - [x] **W.1 Vite + React 19 + TypeScript** — `web/`: Full build pipeline, Tailwind CSS.
 - [x] **W.2 Auth** — Login/register with session cookie auth.
-- [x] **W.3 Chat Page** — Agent chat with markdown rendering, message history.
-- [x] **W.4 Overview** — Dashboard overview page.
-- [x] **W.5 Skills Panel** — Browse, create, edit, delete skills.
-- [x] **W.6 Jobs Panel** — Cron jobs CRUD, pause/resume.
-- [x] **W.7 MCP Panel** — Server management, connect/disconnect.
-- [x] **W.8 Memory Panel** — Personal memories, daily logs.
-- [x] **W.9 Vault Panel** — Credential management.
-- [x] **W.10 Settings Panel** — ECO mode, model config, system settings.
+- [x] **W.3 Chat Sidebar** — Persistent chat sidebar with WebSocket streaming, markdown rendering, tool call visualization (available on every page).
+- [x] **W.4 Overview** — Dashboard with health stats, activities, pending approvals.
+- [x] **W.5 Activity** — Live agent and task monitor (active, background, recent).
+- [x] **W.6 Replay** — Session trace playback and debugging.
+- [x] **W.7 Audit** — Action log with filtering and security review.
+- [x] **W.8 Skill Hub** — Discover and install skills.
+- [x] **W.9 Skills Panel** — Browse, create, edit, delete skills.
+- [x] **W.10 Jobs Panel** — Cron jobs CRUD, pause/resume.
+- [x] **W.11 MCP Panel** — Server management, connect/disconnect.
+- [x] **W.12 Memory Panel** — Personal memories, daily logs.
+- [x] **W.13 Vault Panel** — Credential management.
+- [x] **W.14 Settings Panel** — ECO mode, model config, team settings, permissions.
 
-**Verification**: `cd web && npm run dev` → full control panel at localhost:3000.
+**Verification**: `cd web && npm run dev` → full control panel at localhost:5173.
 
 ## Claude CLI Provider ✅ COMPLETE
 - [x] **CLI.1 Provider** — `lazyclaw/llm/providers/claude_cli_provider.py`: Routes LLM calls through `claude -p` ($0 cost).
@@ -139,10 +143,10 @@
 ## Future: CLI Client Mode
 - [ ] **`lazyclaw chat`** — Thin REPL client that connects to running `lazyclaw start` server via HTTP API (port 18789). Tasks go through the same lane queue → show on TUI dashboard. Server runs in terminal 1, REPL in terminal 2. Both share agent, queue, browser, watchers. Great for testing.
 
-## Future: LazyTasker Plugin + Docker
+## Future: LazyTasker Plugin
 - [ ] **LazyTasker Plugin** — `plugins/lazytasker/`: Optional integration (tasks, projects, expenses).
 - [ ] **Plugin Loader** — `lazyclaw/skills/loader.py`: Load plugin packages from filesystem.
-- [ ] **Docker** — `Dockerfile`, `docker-compose.yml`: Containerized deployment.
+- [x] **Docker** — `Dockerfile`, `docker-compose.yml`, `web/Dockerfile`: Containerized deployment.
 - [ ] **Documentation** — `README.md`: Setup guide, architecture, plugin development guide.
 - [ ] **Example Plugin** — `plugins/example/`: Template for community plugin development.
 
@@ -165,19 +169,19 @@
 
 Standalone MCP servers that plug into LazyClaw (or any MCP-compatible client).
 
-- [x] **mcp-freeride** — Free AI router. 7 providers (Groq, Gemini, OpenRouter, Together, Mistral, HuggingFace, Ollama). Health tracking, latency ranking, auto-fallback. Standalone in `mcp-freeride/`.
-- [x] **mcp-apihunter** — Community-driven free API discovery engine. Users submit endpoints → auto-validates → adds to pool. Auto-scanner discovers OpenRouter free models, local Ollama, and known free-tier APIs. LazyClaw pulls latest registry automatically. Standalone in `mcp-apihunter/`.
-- [x] **mcp-healthcheck** — Background pinger for all configured AI sources. Scores by speed/uptime/model quality, serves live leaderboard. mcp-freeride uses this for intelligent routing. Standalone in `mcp-healthcheck/`.
 - [x] **mcp-taskai** — Task intelligence via free AI. Auto-categorize tasks, suggest deadlines, detect duplicates, summarize overdue pile. Uses free AI directly ($0). Standalone in `mcp-taskai/`.
-- [x] **mcp-vaultwhisper** — Privacy-safe AI proxy. Strips identifiable data before sending to any free API, re-injects context after response. E2E encryption + free AI = rare combo. Standalone in `mcp-vaultwhisper/`.
+- [ ] **mcp-freeride** — Free AI router. 7 providers (Groq, Gemini, OpenRouter, Together, Mistral, HuggingFace, Ollama). **Disabled: source files missing (config.py, router.py, server.py, all providers). Needs rebuild.**
+- [ ] **mcp-healthcheck** — Background pinger for all configured AI sources. **Disabled: source files missing (server.py, monitor.py). Needs rebuild.**
+- [ ] **mcp-apihunter** — Community-driven free API discovery engine. **Disabled: validator.py missing, scanner is stub. Needs rebuild.**
+- [ ] **mcp-vaultwhisper** — Privacy-safe AI proxy. Strips PII before sending to free APIs. **Disabled: source files missing (server.py, patterns.py). Needs rebuild.**
 
-Dependency chain:
+Dependency chain (not yet active):
 ```
 LazyClaw Core
-    └── mcp-taskai         (smart task features)
-         └── mcp-freeride  ✅ (routes to best free AI)
-              ├── mcp-apihunter   (finds new sources)
-              └── mcp-healthcheck (monitors them)
+    └── mcp-taskai ✅      (smart task features)
+         └── mcp-freeride  ❌ (disabled — rebuild needed)
+              ├── mcp-apihunter   ❌ (disabled)
+              └── mcp-healthcheck ❌ (disabled)
 ```
 
 ## Future: ECO Mode — Smart Token Routing (Needs Planning)
@@ -223,7 +227,7 @@ Users have full control over which AIs handle which tasks:
 **Provider Selection:**
 - "Use only Groq" → locks all ECO tasks to Groq, waits if rate-limited
 - "Use Groq + Gemini" → custom mix, user picks which providers are in their pool
-- "Use all free" → default, mcp-freeride picks the fastest available
+- "Use all free" → default, eco_router picks the fastest available (mcp-freeride planned)
 - Per-provider toggle: enable/disable any provider from the UI
 
 **Per-Task AI Assignment:**
@@ -435,16 +439,16 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 
 ---
 
-## 🚀 PUBLIC LAUNCH CHECKLIST (48 hours — deadline: April 1, 2026)
+## 🚀 PUBLIC LAUNCH CHECKLIST
 
 ### MUST DO (launch blockers)
-- [x] **L.1 README rewrite** — Update skill count (101), MCP count (10), add Web UI section, fix ECO mode (HYBRID+FULL only), add WhatsApp/Instagram/Email MCPs to table, add Activepieces integration section.
-- [ ] **L.2 WebSocket streaming** — Add `/ws/agent/chat` for real-time chat in Web UI. Currently blocking POST only.
+- [x] **L.1 README rewrite** — Update skill count (101), MCP count (10), add Web UI section, fix ECO mode, add WhatsApp/Instagram/Email MCPs, add n8n integration section.
+- [x] **L.2 WebSocket streaming** — `/ws/chat` endpoint in `gateway/routes/chat_ws.py`. Real-time streaming for Web UI.
 - [ ] **L.3 Fix silent exceptions** — 130+ `except: pass` blocks need logging. Makes debugging impossible.
-- [ ] **L.4 .gitignore check** — Verify: .env, *.db, __pycache__, .venv/, node_modules/, web/dist/ all ignored.
+- [x] **L.4 .gitignore check** — .env, *.db, __pycache__, .venv/, node_modules/, web/dist/ all ignored.
 - [ ] **L.5 Clean personal data** — Remove any personal data, test DB files, or local paths from repo.
 - [ ] **L.6 install.sh test** — Verify one-command install works on fresh machine.
-- [ ] **L.7 LICENSE** — Verify MIT license file exists and is correct.
+- [x] **L.7 LICENSE** — MIT license file exists.
 
 ### SHOULD DO (first week)
 - [ ] **L.8 Config extraction** — Move hardcoded timeouts/ports to config.py with env var overrides.
@@ -467,7 +471,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Phase 5 (Computer Control): ✅ COMPLETE — Security manager, native executor, connector server, standalone connector, REST + WS API, 5 agent skills
 - Phase 6 (Channels — partial): ✅ Telegram polling adapter, channel base abstractions
 - Phase 7 (MCP + Heartbeat): ✅ COMPLETE — MCP client/server/bridge, manager, heartbeat daemon, cron jobs, orchestrator, 14 API endpoints
-- MCP Ecosystem: ✅ COMPLETE — mcp-freeride, mcp-healthcheck, mcp-apihunter, mcp-vaultwhisper, mcp-taskai
+- MCP Ecosystem: ⚠️ PARTIAL — mcp-taskai active; mcp-freeride, mcp-healthcheck, mcp-apihunter, mcp-vaultwhisper disabled (source rebuild needed)
 - ECO Mode (core): ✅ COMPLETE — eco_router, rate_limiter, eco_settings, task classifier, response badges, 5 API endpoints
 - Permissions & Approval System: ✅ COMPLETE — Permission checker (allow/ask/deny), inline approval flow, admin role, audit log, 8 API endpoints
 - Phase 8 (Multi-Agent Teams): ✅ COMPLETE — Team lead, 4 built-in specialists, parallel executor, specialist runner, critic (merged), team conversations, settings, 8 API endpoints
@@ -482,7 +486,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Browser-Use Compat: ✅ COMPLETE — _BrowserChatOpenAI with __getattr__/__setattr__ for browser-use 0.12 + langchain-openai 1.1.9
 - Timezone Fix: ✅ COMPLETE — get_time defaults to system local timezone, deprecated utcnow() replaced
 - Research Specialist: ✅ Updated — now has read_file, list_directory, run_command for local file access
-- Free AI Auto-Discovery: ✅ COMPLETE — mcp-apihunter scanner (OpenRouter free models, Ollama local, known free tiers), startup scan, `apihunter_scan` MCP tool
+- Free AI Auto-Discovery: ❌ DISABLED — mcp-apihunter disabled (validator.py missing, scanner is stub). Needs rebuild.
 - Dynamic Ollama Models: ✅ COMPLETE — OllamaProvider.refresh_models() from /api/tags, pull/delete/show helpers, FreeRideRouter.refresh_ollama()
 - ECO NL Skills: ✅ COMPLETE — eco_set_mode, eco_show_status, eco_set_provider (3 skills)
 - Provider NL Skills: ✅ COMPLETE — provider_list, provider_add, provider_scan (3 skills)

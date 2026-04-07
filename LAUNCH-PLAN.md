@@ -1,30 +1,31 @@
 # LazyClaw Launch Plan — Go Live & Grow Day by Day
 
 ## Strategy
-Go live NOW with what works (CLI + TUI + Telegram + API). Add Web UI as first major feature. Fix bugs in parallel. Add channels and features day by day.
+Go live with what works (CLI + TUI + Telegram + API + Web UI + WebSocket chat). Fix remaining issues, then grow features day by day.
 
-## Session Map — What Touches What (NO CONFLICTS)
+## Pre-Launch Status (updated 2026-04-07)
 
-| Session | Files Touched | Can Run In Parallel With |
-|---------|--------------|--------------------------|
-| **W1** Web UI Frontend | NEW: `web/` folder (React) | B1, B2 |
-| **W2** WebSocket Streaming | `gateway/app.py`, NEW: `gateway/routes/streaming.py` | B1, B2 |
-| **B1** Silent Exception Fix | Various `.py` files (only `except: pass` blocks) | W1, W2 |
-| **B2** Config Extraction | `config.py`, various (only timeout/URL constants) | W1, W2 |
+| Session | Status | Notes |
+|---------|--------|-------|
+| **W1** Web UI Frontend | ✅ DONE | React 19 + Vite + Tailwind, 12 pages |
+| **W2** WebSocket Streaming | ✅ DONE | `/ws/chat` in `gateway/routes/chat_ws.py` |
+| **B1** Silent Exception Fix | ❌ BLOCKER | 130+ `except: pass` blocks — prompt ready below |
+| **B2** Config Extraction | ⏳ POST-LAUNCH | Move to first week |
+| **P1** Personal Data Scan | ❌ BLOCKER | Scan for hardcoded paths, keys, personal data — prompt ready below |
 
 After launch (day by day — one per day):
 
 | Session | What |
 |---------|------|
 | **D1** | Discord channel adapter |
-| **D2** | WhatsApp channel adapter |
-| **D3** | Skill marketplace / public registry |
-| **D4** | Voice input (whisper) |
-| **D5** | Web UI dashboard (settings, memory, jobs panels) |
+| **D2** | Skill Hub — universal skill/MCP registry (cross-framework) |
+| **D3** | Voice input (whisper) |
+| **D4** | Config extraction (hardcoded timeouts/ports → config.py) |
+| **D5** | Web UI dashboard extensions (real-time status, cost tracking) |
 
 ---
 
-## SESSION W1 — Web UI Chat Frontend
+## SESSION W1 — Web UI Chat Frontend ✅ DONE
 **Time: ~4-5 hours | Priority: HIGH**
 **Files: Creates NEW `web/` directory — zero conflict with backend**
 
@@ -121,9 +122,9 @@ VERIFY:
 
 ---
 
-## SESSION W2 — WebSocket Agent Streaming
+## SESSION W2 — WebSocket Agent Streaming ✅ DONE
 **Time: ~2-3 hours | Priority: HIGH**
-**Files: `gateway/app.py` (add 1 route), NEW `gateway/routes/streaming.py`**
+**Files: `gateway/routes/chat_ws.py` — already implemented as `/ws/chat`**
 
 ```
 READ CLAUDE.md and lazyclaw/gateway/app.py and lazyclaw/gateway/routes/connector.py (for WebSocket pattern reference).
@@ -441,16 +442,62 @@ DO NOT modify any backend files.
 
 ---
 
+## SESSION P1 — Personal Data & Secrets Scan
+**Time: ~1-2 hours | Priority: BLOCKER**
+**Files: Various — scan entire repo, remove/replace any personal data**
+
+```
+READ CLAUDE.md first.
+
+TASK: Scan the entire LazyClaw repository for personal data, hardcoded secrets, test databases, and local file paths that should not be in a public repo.
+
+SCAN FOR:
+1. Hardcoded API keys, tokens, or passwords (search for patterns like sk-, ghp_, Bearer, password=, api_key=, token=)
+2. .env files that accidentally got committed (not .env.example)
+3. SQLite .db files in the repo
+4. Hardcoded local paths (like /Users/, /home/username/, C:\Users\)
+5. Personal email addresses, usernames, phone numbers, or IPs in code or config
+6. Test data with real personal information
+7. Telegram chat IDs or bot tokens hardcoded anywhere
+8. Any file over 1MB that looks like test data or database dumps
+
+FOR EACH FINDING:
+- If it's a secret/token: remove it, replace with a placeholder like "YOUR_API_KEY_HERE" or reference to env var
+- If it's a .db file: add to .gitignore, delete from repo (git rm --cached)
+- If it's a local path: make it relative or configurable via env var
+- If it's personal data in test fixtures: replace with fake data
+- If it's in git history: note it but don't rewrite history (we'll do that separately if needed)
+
+ALSO CHECK:
+- .env.example exists and has ALL required env vars listed (with placeholder values, not real ones)
+- .gitignore covers: .env, *.db, *.sqlite, __pycache__/, .venv/, node_modules/, web/dist/, *.pyc, .DS_Store, browser_profiles/
+- No committed node_modules/ or .venv/ directories
+
+DO NOT:
+- Rewrite git history
+- Change any business logic
+- Remove comments that mention technologies or tools by name (those are fine)
+
+VERIFY:
+- grep -rI "sk-" --include="*.py" --include="*.ts" --include="*.json" — zero real keys
+- grep -rI "/Users/" --include="*.py" --include="*.ts" — zero local paths
+- find . -name "*.db" -not -path "./.git/*" — zero database files in repo
+- find . -name ".env" -not -name ".env.example" -not -path "./.git/*" — zero .env files
+```
+
+---
+
 ## LAUNCH CHECKLIST (before pushing to GitHub)
 
-- [ ] README.md rewritten (we do this together in Cowork)
+- [x] README.md rewritten (~110 skills, 6 active MCPs, 3 ECO modes, 11-page Web UI + chat sidebar, n8n integration)
 - [ ] .env.example is complete and has no secrets
-- [ ] .gitignore covers: .env, *.db, __pycache__, .venv/, node_modules/, web/dist/
-- [ ] LICENSE file (MIT) exists
+- [x] .gitignore covers: .env, *.db, __pycache__, .venv/, node_modules/, web/dist/
+- [x] LICENSE file (MIT) exists
 - [ ] CHANGELOG.md exists (even if short)
 - [ ] install.sh works on fresh machine
 - [ ] `lazyclaw setup` runs without errors
 - [ ] `lazyclaw start` launches gateway + telegram
-- [ ] Web UI builds with `cd web && npm run build`
-- [ ] No hardcoded API keys anywhere
-- [ ] Remove any personal data from DB/config
+- [x] Web UI builds with `cd web && npm run build`
+- [ ] No hardcoded API keys anywhere (run session P1)
+- [ ] Remove any personal data from DB/config (run session P1)
+- [ ] Silent exceptions fixed (run session B1)

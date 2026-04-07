@@ -69,7 +69,8 @@ def is_mcp_check_due(ctx: dict) -> bool:
         interval = float(ctx.get("check_interval", 120))
         last = float(ctx.get("last_check", 0))
     except (ValueError, TypeError):
-        return True  # Corrupted data — run check to fix it
+        logger.warning("Corrupted MCP watcher interval/last_check data, forcing check")
+        return True
     return (time.time() - last) >= interval
 
 
@@ -82,6 +83,7 @@ def is_mcp_watcher_expired(ctx: dict) -> bool:
         exp_dt = datetime.fromisoformat(expires)
         return datetime.now(timezone.utc) >= exp_dt
     except (ValueError, TypeError):
+        logger.debug("Failed to parse MCP watcher expires_at timestamp", exc_info=True)
         return False
 
 

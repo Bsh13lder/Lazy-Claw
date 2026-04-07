@@ -167,6 +167,7 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
+        logger.warning("Failed to parse eco settings JSON, using defaults", exc_info=True)
         return EcoSettings()
 
     eco = data.get("eco", {})
@@ -366,6 +367,7 @@ class EcoRouter:
             self._ollama_checked = True
             return self._ollama
         except Exception:
+            logger.debug("Ollama availability check failed", exc_info=True)
             self._ollama_checked = True
             return None
 
@@ -826,6 +828,7 @@ class EcoRouter:
                 preferred_model=settings.preferred_free_model,
             )
         except RuntimeError:
+            logger.warning("All free providers failed", exc_info=True)
             return None
 
         self._rate_limiter.record_request(result.provider)

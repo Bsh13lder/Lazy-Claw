@@ -56,7 +56,7 @@ async def _verify_secret(request: Request) -> None:
             if _default_user_id:
                 expected = await get_credential(_config, _default_user_id, "webhook_secret") or ""
         except Exception:
-            pass
+            logger.warning("Failed to retrieve webhook secret from vault", exc_info=True)
 
     if not expected:
         # No secret configured = open (local Docker network only)

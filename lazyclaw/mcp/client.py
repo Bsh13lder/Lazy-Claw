@@ -23,6 +23,7 @@ def _get_child_pids(parent_pid: int) -> set[int]:
         )
         return {int(line) for line in out.strip().split("\n") if line.strip()}
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        logger.debug("Failed to get child PIDs for parent %d", parent_pid, exc_info=True)
         return set()
 
 
@@ -375,6 +376,7 @@ class MCPClient:
                     try:
                         proc.wait(timeout=3)
                     except Exception:
+                        logger.debug("MCP child process did not exit in 3s, force-killing (pid=%s)", proc.pid, exc_info=True)
                         proc.kill()
                     logger.debug("Force-killed MCP child process (pid=%s)", proc.pid)
             except Exception as exc:
@@ -389,4 +391,4 @@ class MCPClient:
                 os.kill(child_pid, signal.SIGTERM)
                 logger.debug("Force-killed MCP child by PID %d", child_pid)
             except OSError:
-                pass  # Already dead
+                logger.debug("MCP child process PID %d already dead", child_pid)

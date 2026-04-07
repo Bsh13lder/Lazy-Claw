@@ -149,6 +149,7 @@ class ProviderAddSkill(BaseSkill):
                 else:
                     status_msg = f"Validation: failed ({validation.error})"
             except Exception:
+                logger.debug("Provider validation skipped", exc_info=True)
                 status_msg = "Validation: skipped"
 
             return (

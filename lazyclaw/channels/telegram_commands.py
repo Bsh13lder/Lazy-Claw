@@ -747,6 +747,7 @@ class TelegramCommands:
                     try:
                         ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
                     except (ValueError, TypeError):
+                        logger.debug("Failed to parse watcher context JSON", exc_info=True)
                         ctx = {}
 
                     service = ctx.get("service", "")
@@ -863,6 +864,7 @@ class TelegramCommands:
                 try:
                     text = decrypt(key, content) if content and content.startswith("enc:") else content
                 except Exception:
+                    logger.debug("Failed to decrypt message content for history display", exc_info=True)
                     text = "[encrypted]"
                 icon = "\U0001f464" if role == "user" else "\U0001f43e"
                 preview = (text or "")[:120].replace("\n", " ").replace("<", "&lt;")
@@ -1200,6 +1202,7 @@ class TelegramCommands:
             try:
                 ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
             except (ValueError, TypeError):
+                logger.debug("Failed to parse WhatsApp watcher context JSON", exc_info=True)
                 ctx = {}
             muted = [g for g in ctx.get("muted_groups", [])]
             if group_name.lower() not in [g.lower() for g in muted]:
@@ -1224,6 +1227,7 @@ class TelegramCommands:
                     try:
                         ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
                     except (ValueError, TypeError):
+                        logger.debug("Failed to parse WhatsApp watcher context JSON", exc_info=True)
                         ctx = {}
                     muted = ctx.get("muted_groups", [])
                     if muted:
@@ -1249,6 +1253,7 @@ class TelegramCommands:
             try:
                 ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
             except (ValueError, TypeError):
+                logger.debug("Failed to parse WhatsApp watcher context JSON for unmute", exc_info=True)
                 ctx = {}
             muted = ctx.get("muted_groups", [])
             ctx["muted_groups"] = [g for g in muted if g.lower() != group_name.lower()]
@@ -1318,6 +1323,7 @@ class TelegramCommands:
             try:
                 ctx = _json.loads(raw_ctx) if raw_ctx and not str(raw_ctx).startswith("enc:") else {}
             except (ValueError, TypeError):
+                logger.debug("Failed to parse watcher context JSON for status", exc_info=True)
                 ctx = {}
 
             service = ctx.get("service", "")
@@ -1401,6 +1407,7 @@ class TelegramCommands:
                     f"\U0001f310 Platforms: {platforms}"
                 )
             except Exception:
+                logger.debug("Failed to load user profile for display", exc_info=True)
                 await self._reply(update, "\U0001f464 No profile set. Try: <code>/profile skills python,react</code>")
             return
         field, value = args[0].lower(), " ".join(args[1:]) if len(args) > 1 else ""
@@ -1441,6 +1448,7 @@ class TelegramCommands:
                 else:
                     await self._reply(update, "\U0001f310 Browser: <b>idle</b>")
             except Exception:
+                logger.debug("Browser status check failed, assuming not running", exc_info=True)
                 await self._reply(update, "\U0001f310 Browser: <b>not running</b>")
         elif subcmd == "close":
             try:

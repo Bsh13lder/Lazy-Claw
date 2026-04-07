@@ -421,6 +421,7 @@ async def auto_extract(
             eco = EcoRouter(config, LLMRouter(config))
             response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
         except Exception:
+            logger.warning("EcoRouter unavailable for auto_extract, falling back to direct LLM", exc_info=True)
             router = LLMRouter(config)
             response = await router.chat(
                 messages, model=config.worker_model, user_id=user_id

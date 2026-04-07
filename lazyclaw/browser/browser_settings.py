@@ -56,6 +56,7 @@ async def get_browser_settings(config: Config, user_id: str) -> dict:
     try:
         settings = json.loads(result[0])
     except (json.JSONDecodeError, TypeError):
+        logger.debug("Failed to parse user settings JSON, using browser defaults", exc_info=True)
         return dict(DEFAULT_BROWSER)
 
     browser = settings.get("browser", {})
@@ -95,6 +96,7 @@ async def update_browser_settings(
         try:
             current_settings = json.loads(result[0])
         except (json.JSONDecodeError, TypeError):
+            logger.debug("Failed to parse existing settings JSON during update", exc_info=True)
             current_settings = {}
 
     # Update browser section

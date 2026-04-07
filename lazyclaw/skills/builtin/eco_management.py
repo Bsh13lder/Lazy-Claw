@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
 
 
 class EcoSetModeSkill(BaseSkill):
@@ -300,7 +304,7 @@ class EcoSetModelSkill(BaseSkill):
                         f"Installed models: {', '.join(installed) or 'none'}"
                     )
             except Exception:
-                pass  # Ollama might be down, allow setting anyway
+                logger.debug("Ollama model verification skipped (Ollama may be down)", exc_info=True)
 
             key = "brain_model" if role == "brain" else "worker_model"
             await update_eco_settings(self._config, user_id, {key: model})

@@ -270,7 +270,7 @@ class HeartbeatDaemon:
             )
         except Exception:
             # Can't tell — assume it's visible to be safe
-            pass
+            logger.debug("Failed to check if browser is headless, assuming visible", exc_info=True)
 
         if is_headless:
             # Headless on primary port — safe to reuse directly
@@ -596,6 +596,7 @@ class HeartbeatDaemon:
                         if now < nag_due:
                             continue  # Not time for this nag yet
                     except (ValueError, TypeError):
+                        logger.debug("Failed to parse reminder datetime for nag check, skipping", exc_info=True)
                         continue
 
                 # Decrypt title and get task details
@@ -606,6 +607,7 @@ class HeartbeatDaemon:
                         else enc_title
                     )
                 except Exception:
+                    logger.warning("Failed to decrypt task title for reminder, using placeholder", exc_info=True)
                     title = "Task reminder"
 
                 # Get full task for category/priority
@@ -665,8 +667,10 @@ class HeartbeatDaemon:
 
                     await self._telegram_push(msg_text, reply_markup=keyboard)
                 except TypeError:
+                    logger.debug("Telegram keyboard not supported, sending plain text", exc_info=True)
                     await self._telegram_push(msg_text)
                 except ImportError:
+                    logger.debug("Telegram library not available for keyboard, sending plain text")
                     await self._telegram_push(msg_text)
 
                 # Update nag_count and reminder_at to now (for next nag calculation)

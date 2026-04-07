@@ -60,6 +60,7 @@ def _get_local_tz() -> timezone:
         offset_s = -_time.timezone if _time.daylight == 0 else -_time.altzone
         return timezone(timedelta(seconds=offset_s))
     except Exception:
+        logger.debug("Failed to detect local timezone, falling back to CET", exc_info=True)
         return timezone(timedelta(hours=1))  # CET fallback
 
 
@@ -837,6 +838,7 @@ async def _get_pending_reminders(config, user_id: str) -> list[dict]:
             if j.get("job_type") == "reminder" and j.get("status") == "active"
         ]
     except Exception:
+        logger.debug("Failed to fetch pending reminders from agent_jobs", exc_info=True)
         return []
 
 

@@ -66,6 +66,7 @@ class SearchJobsSkill(BaseSkill):
         try:
             max_results = min(int(params.get("max_results", 10)), 50)
         except (ValueError, TypeError):
+            logger.debug("Invalid max_results param, defaulting to 10")
             max_results = 10
 
         if not keywords:
@@ -91,6 +92,7 @@ class SearchJobsSkill(BaseSkill):
                         else parsed
                     )
                 except json.JSONDecodeError:
+                    logger.debug("Failed to parse MCP job search results JSON", exc_info=True)
                     mcp_jobs = []
             else:
                 mcp_jobs = mcp_result if isinstance(mcp_result, list) else []
@@ -294,6 +296,7 @@ class SearchJobsSkill(BaseSkill):
             logger.warning("JobSpy direct: found %d jobs", len(jobs))
             return json.dumps({"jobs": jobs})
         except ImportError:
+            logger.debug("jobspy package not available for direct search")
             return None
         except Exception as exc:
             logger.warning("JobSpy direct search failed: %s", exc)

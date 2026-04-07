@@ -752,7 +752,7 @@ function _resolveGroupName(jid) {
 /** Check if a chat is currently muted. */
 function _isChatMuted(jid) {
   // Normalize JID before lookup — message remoteJid may include session suffix
-  // (e.g. "34664476256:18@s.whatsapp.net") while mutedChats keys are normalized
+  // (e.g. "15551234567:18@s.whatsapp.net") while mutedChats keys are normalized
   const normalizedJid = normalizeJid(jid);
   const muteExpiry = mutedChats.get(normalizedJid);
   if (muteExpiry == null) return false;
@@ -775,7 +775,7 @@ function extractPhone(jid) {
 /** Normalize a JID — strip group suffix (:NN) for direct messages. */
 function normalizeJid(jid) {
   if (!jid) return jid;
-  // "34664476256:18@s.whatsapp.net" → "34664476256@s.whatsapp.net"
+  // "15551234567:18@s.whatsapp.net" → "15551234567@s.whatsapp.net"
   // Group JIDs (@g.us) are left untouched
   if (jid.includes("@s.whatsapp.net")) {
     const phone = jid.split("@")[0].split(":")[0];
@@ -919,7 +919,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        to: { type: "string", description: 'Contact name or phone number. E.g. "lisichka" or "34612345678"' },
+        to: { type: "string", description: 'Contact name or phone number. E.g. "John" or "15551234567"' },
         message: { type: "string", description: "Message text to send" },
       },
       required: ["to", "message"],
@@ -966,7 +966,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        to: { type: "string", description: 'Contact name or phone number. E.g. "lisichka" or "34612345678"' },
+        to: { type: "string", description: 'Contact name or phone number. E.g. "John" or "15551234567"' },
         image_path: { type: "string", description: "Absolute path to the image file" },
         caption: { type: "string", description: "Optional caption for the image" },
       },

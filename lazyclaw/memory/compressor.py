@@ -64,7 +64,7 @@ async def compress_history(
                 name=f"daily-summary-{user_id}-{yesterday}",
             )
     except Exception:
-        pass  # Don't block message processing
+        logger.debug("Background daily summary trigger failed (non-blocking)", exc_info=True)
 
     # Fast path: if within window, decrypt only and return (skip summary logic)
     if len(raw_messages) <= WINDOW_SIZE:

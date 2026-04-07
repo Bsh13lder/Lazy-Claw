@@ -49,18 +49,22 @@ BUNDLED_MCPS = {
     "mcp-freeride": {
         "module": "mcp_freeride",
         "description": "Free AI router (ECO mode)",
+        "disabled": True,  # Source files missing (config.py, router.py, server.py) — rebuild needed
     },
     "mcp-healthcheck": {
         "module": "mcp_healthcheck",
         "description": "AI provider health monitor",
+        "disabled": True,  # Source files missing (server.py, monitor.py) — rebuild needed
     },
     "mcp-apihunter": {
         "module": "mcp_apihunter",
         "description": "Free API endpoint discovery",
+        "disabled": True,  # validator.py missing, scanner is stub — rebuild needed
     },
     "mcp-vaultwhisper": {
         "module": "mcp_vaultwhisper",
         "description": "Privacy-safe AI proxy (PII scrubbing)",
+        "disabled": True,  # Source files missing (server.py, patterns.py) — rebuild needed
     },
     "mcp-taskai": {
         "module": "mcp_taskai",
@@ -309,7 +313,8 @@ def touch_client(server_id: str) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return  # No event loop — skip timer (e.g. during shutdown)
+        logger.debug("No event loop for MCP idle timer (e.g. during shutdown)")
+        return
 
     # Capture current version — timer callback will compare against it
     version_at_schedule = _activity_versions[server_id]
@@ -325,7 +330,7 @@ def _schedule_idle_disconnect(server_id: str, version_at_schedule: int) -> None:
         loop = asyncio.get_running_loop()
         loop.create_task(_idle_disconnect(server_id, version_at_schedule))
     except RuntimeError:
-        pass  # Event loop closed — nothing to do
+        logger.debug("Event loop closed during MCP idle disconnect scheduling", exc_info=True)
 
 
 async def _idle_disconnect(server_id: str, version_at_schedule: int) -> None:
@@ -484,6 +489,7 @@ async def list_servers(config: Config, user_id: str) -> list[dict]:
             try:
                 tool_counts[tc_row[0]] = len(json.loads(tc_row[1]))
             except (json.JSONDecodeError, TypeError):
+                logger.debug("Failed to parse cached tool schemas for %s", tc_row[0], exc_info=True)
                 tool_counts[tc_row[0]] = 0
 
     # Build set of connected server names (not just IDs) for cross-user matching
@@ -781,6 +787,10 @@ async def auto_register_bundled_mcps(
         existing_names = {row[0] for row in await rows.fetchall()}
 
     for name, info in BUNDLED_MCPS.items():
+        # Skip disabled servers (source files missing, rebuild needed)
+        if info.get("disabled"):
+            continue
+
         # Skip if already registered
         if name in existing_names:
             continue
@@ -933,6 +943,8 @@ async def connect_and_register_bundled_mcps(
 
     def _is_available(name: str) -> bool:
         info = BUNDLED_MCPS.get(name, {})
+        if info.get("disabled"):
+            return False
         for key in info.get("env_required", []):
             if not _os.environ.get(key):
                 return False

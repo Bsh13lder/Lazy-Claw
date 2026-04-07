@@ -167,6 +167,7 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
         eco = EcoRouter(config, LLMRouter(config))
         response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
     except Exception:
+        logger.warning("EcoRouter unavailable for daily summary, falling back to direct LLM", exc_info=True)
         router = LLMRouter(config)
         response = await router.chat(messages, model=config.worker_model, user_id=user_id)
     summary = response.content
@@ -225,6 +226,7 @@ async def generate_weekly_summary(
         eco = EcoRouter(config, LLMRouter(config))
         response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
     except Exception:
+        logger.warning("EcoRouter unavailable for weekly summary, falling back to direct LLM", exc_info=True)
         router = LLMRouter(config)
         response = await router.chat(messages, model=config.worker_model, user_id=user_id)
     summary = response.content

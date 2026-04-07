@@ -202,6 +202,7 @@ async def get_payment_settings(
             require_approval=bool(data.get("require_approval", True)),
         )
     except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse payment settings, using defaults", exc_info=True)
         return PaymentSettings(
             auto_buy_limit=0.0,
             save_cvc=False,
@@ -373,6 +374,7 @@ async def should_auto_pay(
         if amount > settings.auto_buy_limit:
             return False
     except (ValueError, AttributeError):
+        logger.debug("Could not parse payment amount %r, requiring approval", amount_str, exc_info=True)
         return False  # Can't parse amount → require approval
 
     # Check if a card with CVC exists

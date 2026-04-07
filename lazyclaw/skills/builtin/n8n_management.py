@@ -54,7 +54,7 @@ async def _n8n_request(
             from lazyclaw.crypto.vault import get_credential
             api_key = await get_credential(config, user_id, "n8n_api_key") or ""
         except Exception:
-            pass
+            logger.debug("Failed to load n8n API key from vault, falling back to env", exc_info=True)
     if not api_key:
         api_key = os.getenv("N8N_API_KEY", "")
     if not api_key:
@@ -73,7 +73,7 @@ async def _n8n_request(
             if stored_url:
                 base_url = stored_url
         except Exception:
-            pass
+            logger.debug("Failed to load n8n base URL from vault, using env/default", exc_info=True)
 
     url = f"{base_url.rstrip('/')}{path}"
     headers = {"X-N8N-API-KEY": api_key, "Content-Type": "application/json"}

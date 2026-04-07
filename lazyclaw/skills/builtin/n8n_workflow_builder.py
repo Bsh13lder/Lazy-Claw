@@ -60,14 +60,14 @@ def _parse_workflow_json(content: str) -> dict:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        pass
+        logger.debug("Direct JSON parse failed for workflow output, trying brace extraction")
 
     brace_match = re.search(r"\{.*\}", content, re.DOTALL)
     if brace_match:
         try:
             return json.loads(brace_match.group(0))
         except json.JSONDecodeError:
-            pass
+            logger.debug("Brace-extracted JSON parse also failed for workflow output")
 
     raise ValueError("Could not parse workflow JSON from LLM response")
 

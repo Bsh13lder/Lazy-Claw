@@ -77,6 +77,8 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 > "OpenClaw, but encrypted and Python-native."
 
+**Status**: Early beta (v0.1). Solo developer, daily updates. Optimized with Claude Code — architecture reviewed and iterated continuously.
+
 ### Key Differentiators vs OpenClaw
 - **E2E Encryption**: AES-256-GCM on all user content. OpenClaw stores everything in plaintext.
 - **Python-native**: Full Python stack. Python AI ecosystem is 10x larger than TypeScript.
@@ -85,28 +87,30 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Architecture
 
-12 core components in `lazyclaw/` + supporting modules:
+16 modules in `lazyclaw/` + supporting infrastructure:
 
 | Component | Path | Purpose |
 |-----------|------|---------|
-| **Gateway** | `gateway/` | FastAPI HTTP+WS entry point. Session auth, CORS, routing |
-| **Agent Runtime** | `runtime/` | System prompt (SOUL.md + memory + skills), LLM calls, tool dispatch |
+| **Gateway** | `gateway/` | FastAPI HTTP+WS entry point (17 route files). Session auth, CORS, routing |
+| **Agent Runtime** | `runtime/` | TAOR agent loop, context builder, tool dispatch, task runner, team lead |
 | **Lane Queue** | `queue/` | FIFO serial execution per user session |
-| **Skills** | `skills/` | Instruction (NL), Code (sandboxed Python), Plugin (pip). Unified registry |
-| **Channels** | `channels/` | Telegram adapter (+ future Discord, WhatsApp, Signal, SimpleX) |
+| **Skills** | `skills/` | Instruction (NL), Code (sandboxed), Plugin (pip). 37 builtin + 9 survival skills |
+| **Channels** | `channels/` | Telegram native adapter + WhatsApp/Instagram/Email via MCP servers |
 | **Browser** | `browser/` | CDP-only browser control, JS extractors, site memory |
 | **Computer** | `computer/` | Native subprocess + WebSocket connector (remote) |
-| **Memory** | `memory/` | Encrypted personal facts, conversation history, compression |
+| **Memory** | `memory/` | Encrypted personal facts, conversation history, compression, daily/weekly logs |
 | **MCP** | `mcp/` | Native client + server + bridge to skill registry |
 | **Crypto** | `crypto/` | AES-256-GCM, PBKDF2, credential vault |
 | **Teams** | `teams/` | Specialists (browser, research, code) + delegate skill + parallel execution |
 | **Replay** | `replay/` | Session trace recording, playback, shareable tokens |
-| **Task Runner** | `runtime/task_runner.py` | Background parallel task execution with Telegram push notifications |
-| **TAOR Loop** | `runtime/taor.py` | Think-Act-Observe-Reflect agent loop with parallel tool execution |
+| **Tasks** | `tasks/` | Encrypted task store with CRUD, nagging reminders, recurring tasks |
+| **Notifications** | `notifications/` | Telegram push notifications for background tasks |
+| **Pipeline** | `pipeline/` | CRM-style pipeline store for workflow tracking |
+| **Survival** | `survival/` | Gig economy tools — job matching, applications, invoices, profiles |
 
-Supporting: `llm/` (multi-provider router + ECO mode + complexity routing), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool).
+Supporting: `llm/` (multi-provider router + ECO mode + Claude CLI provider), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool), `web/` (React 19 + TypeScript + Vite + Tailwind — 11 pages: Overview, Activity, Replay, Audit, SkillHub, Skills, Jobs, MCP, Memory, Vault, Settings + chat sidebar), `n8n-custom/` (n8n webhook integration + 6 management skills + templates).
 
-Standalone MCP servers: `mcp-freeride/` (free AI router), `mcp-healthcheck/` (provider monitor), `mcp-apihunter/` (API discovery), `mcp-vaultwhisper/` (PII proxy), `mcp-taskai/` (task intelligence), `mcp-lazydoctor/` (self-healing).
+Standalone MCP servers (6 active + 4 disabled): Active: `mcp-taskai/` (task intelligence), `mcp-lazydoctor/` (self-healing), `mcp-whatsapp/` (WhatsApp via WA-JS), `mcp-instagram/` (Instagram DMs/feed/stories), `mcp-email/` (Gmail/Outlook/IMAP), `mcp-jobspy/` (job search aggregator). Disabled (source rebuild needed): `mcp-freeride/`, `mcp-healthcheck/`, `mcp-apihunter/`, `mcp-vaultwhisper/`.
 
 ## Build & Run
 
@@ -120,7 +124,7 @@ lazyclaw start            # Full server (FastAPI + Telegram + Heartbeat)
 lazyclaw                  # Chat REPL only
 ```
 
-Default port: **18789**. MCP servers run standalone via `python -m mcp_freeride` etc.
+Default port: **18789**. MCP servers run standalone via `python -m mcp_taskai` etc.
 
 ## E2E Encryption
 
@@ -141,12 +145,12 @@ These are non-obvious architectural decisions -- read the code for implementatio
 
 - **User isolation**: ALL queries scoped by `user_id`. No cross-user data access.
 - **No hardcoded tools**: All tools from skill registry. Agent discovers dynamically.
-- **Smart tool selection**: Per-message category detection sends only relevant tools (8-17 instead of 71). 70-88% token savings.
+- **Smart tool selection**: ~110 skills registered (46 builtin + ~67 MCP), but only 4 base tools sent per message (search_tools, recall_memories, save_memory, delegate). LLM discovers rest via search_tools(). ~95% token savings.
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
 - **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
 - **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
-- **ECO v3 routing**: Three modes, 3 roles (Brain=Team Lead, Worker, Fallback). ECO ON: Haiku 4.5 brain + Nanbeige worker ($0) + Sonnet fallback (ask permission). HYBRID: same, auto-fallback to Haiku 4.5 on local failure; Nanbeige via Ollama MLX. FULL: Sonnet 4.6 brain + Haiku 4.5 worker + Opus fallback. All models from `MODE_MODELS` dict in `model_registry.py`. `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER).
-- **MLX backend**: `mlx_provider.py` for Apple Silicon local inference. `mlx_manager.py` manages server lifecycle. Auto `/no_think` for Qwen models. `<think>` tag stripping for Nanbeige.
+- **ECO routing**: 3 modes, 3 roles (Brain, Worker, Fallback). HYBRID: Sonnet 4.6 brain + local Ollama worker ($0) + Haiku fallback. FULL: Sonnet brain + Haiku workers + Sonnet fallback. CLAUDE: Haiku API brain (native tools) + Haiku workers + Claude CLI fallback. Old eco_on/local modes disabled (require 32GB+ RAM). `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER). Models from `MODE_MODELS` dict in `model_registry.py`.
+- **MLX backend** (deprecated): `mlx_provider.py` for Apple Silicon local inference. Superseded by Ollama's native MLX backend. `ollama_provider.py` handles local models with think-tag stripping and `/no_think` prefix for Qwen.
 - **RAM monitor**: `ram_monitor.py` tracks system + AI model memory. `/ram` Telegram command. TUI status bar shows RAM %. Uses macOS `memory_pressure` for accurate free %.
 - **Telegram /local command**: `/local on|off|worker|brain|restart` — start/stop MLX servers, auto-switches ECO mode.
 - **Unified browser tool**: Single `browser` skill with 7 actions (read, open, click, type, screenshot, tabs, scroll). CDP-only, no Playwright.
@@ -164,12 +168,14 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Telegram security**: Admin chat lock (first /start claims). Unauthorized chats blocked. Screenshots auto-forwarded.
 - **Telegram retry**: `_telegram_send_with_retry()` with exponential backoff on network errors.
 - **CancellationToken**: Cooperative cancellation from CLI → agent → specialists. Double Ctrl+C support.
-- **ECO mode**: Three modes (eco_on/hybrid/off). ECO ON = Haiku brain + Nanbeige workers ($0). HYBRID = same, auto-fallback. FULL = Sonnet brain + Haiku workers + Opus fallback.
+- **MODE_CLAUDE**: API brain (Haiku with native tool_use) + Claude CLI fallback ($0 via subscription). 529 resilience — auto-retries on overloaded.
 - **Token tracking**: OpenAI streaming reads usage chunk after finish_reason. Anthropic field names normalized.
 - **TAOR loop**: Think-Act-Observe-Reflect cycle in `taor.py`. Parallel tool execution via `asyncio.gather`. Tools run concurrently when independent; results merged before next think step.
 - **Context compaction**: 5-layer memory stack — live messages → sliding window (15 msgs full) → daily summary → weekly rollup → long-term facts. Each layer injected into context at build time. Never re-summarizes mid-session.
 - **5-layer memory**: Conversation history, compressed summaries, daily logs, weekly rollups, encrypted personal facts. All layers merged in `context_builder.py`.
 - **TodoWrite widget**: TUI task list rendered live in status bar. Agent marks items complete via `todo_write` tool during execution. User sees progress without interrupting the agent.
+- **WebSocket chat**: `/ws/chat` endpoint in `gateway/routes/chat_ws.py` for real-time streaming in Web UI. Separate from `/ws/connector` (computer control).
+- **n8n integration**: 6 management skills + workflow templates + Docker n8n sidecar. Webhook-triggered automations.
 - **Agent Skills compatibility**: Skills authored in Claude Code agent format (YAML frontmatter + markdown body) are importable via `lazyclaw skill import`. LazyClaw parses the skill description and maps it to an Instruction skill automatically.
 
 ## Git Commit Rules

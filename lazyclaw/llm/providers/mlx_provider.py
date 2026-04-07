@@ -120,6 +120,7 @@ class MLXProvider(BaseLLMProvider):
                 return models[0].get("id")
             return None
         except Exception:
+            logger.debug("Failed to get loaded MLX model", exc_info=True)
             return None
 
     # ── Message serialization (OpenAI format) ─────────────────────────

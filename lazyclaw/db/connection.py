@@ -51,7 +51,7 @@ async def init_db(config: Config) -> None:
                 if column not in columns:
                     await db.execute(sql)
             except Exception:
-                pass  # Column already exists or table doesn't exist yet
+                logger.debug("Migration %s.%s skipped (column may already exist)", table, column, exc_info=True)
 
         await db.commit()
 

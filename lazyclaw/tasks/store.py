@@ -280,6 +280,7 @@ async def complete_task(
                     next_due_dt = datetime.fromisoformat(next_due)
                     next_reminder = (next_due_dt + offset).isoformat()
                 except (ValueError, TypeError):
+                    logger.debug("Failed to compute next reminder offset, using next_due", exc_info=True)
                     next_reminder = next_due
 
             tags = None

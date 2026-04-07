@@ -291,6 +291,7 @@ async def _build_capabilities_section(
                 ollama_status = "not running"
             await provider.close()
         except Exception:
+            logger.debug("Ollama health check failed", exc_info=True)
             ollama_status = "unavailable"
 
     lines.append(f"**Config:** {' | '.join(config_parts)} | Ollama: {ollama_status}")
@@ -365,6 +366,7 @@ async def _get_mcp_status(config: Config, user_id: str) -> list[str]:
                     )
                     tool_count = len(tools)
                 except (asyncio.TimeoutError, Exception):
+                    logger.debug("Failed to list tools for MCP server %s", name, exc_info=True)
                     tool_count = 0
                 status = "connected"
             else:

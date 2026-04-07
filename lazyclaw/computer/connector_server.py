@@ -126,6 +126,7 @@ class ConnectorServer:
                 return ws.client_state == WebSocketState.CONNECTED
             return True
         except Exception:
+            logger.debug("WebSocket state check failed, assuming connected", exc_info=True)
             return True
 
     def get_device_info(self, user_id: str) -> dict | None:

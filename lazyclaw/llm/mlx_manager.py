@@ -188,10 +188,10 @@ class MLXManager:
         try:
             loop = asyncio.get_running_loop()
             self._idle_handle = loop.call_later(
-                _IDLE_TIMEOUT, lambda: asyncio.ensure_future(self._idle_shutdown()),
+                _IDLE_TIMEOUT, lambda: asyncio.create_task(self._idle_shutdown()),
             )
         except RuntimeError:
-            pass  # No running loop (e.g. during tests)
+            logger.debug("No running event loop for idle timer (e.g. during tests)", exc_info=True)
 
     def _cancel_idle_timer(self) -> None:
         if self._idle_handle is not None:
@@ -389,7 +389,7 @@ class MLXManager:
                 state.process.kill()
                 state.process.wait()
         except ProcessLookupError:
-            pass  # Already dead
+            logger.debug("MLX server process already dead (PID %d)", pid)
 
         state.process = None
         state.healthy = False
@@ -423,6 +423,7 @@ class MLXManager:
                 resp = await client.get(url)
                 return resp.status_code == 200
         except Exception:
+            logger.debug("MLX server health check failed on port %d", state.config.port, exc_info=True)
             return False
 
     async def _probe_server(self, port: int) -> str | None:
@@ -437,6 +438,7 @@ class MLXManager:
                 models = data.get("data", [])
                 return models[0].get("id") if models else None
         except Exception:
+            logger.debug("Failed to probe MLX server on port %d", port, exc_info=True)
             return None
 
     # ── Status for display ────────────────────────────────────────────

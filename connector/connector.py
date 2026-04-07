@@ -67,7 +67,7 @@ class Connector:
         """Stop the connector gracefully."""
         self._running = False
         if self._ws:
-            asyncio.ensure_future(self._ws.close())
+            asyncio.create_task(self._ws.close())
 
     async def _connect(self):
         """Establish WebSocket connection and start listening."""

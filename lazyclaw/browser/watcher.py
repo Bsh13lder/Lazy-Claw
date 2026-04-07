@@ -160,6 +160,7 @@ async def check_watcher(
             # Only trigger if unread count changed or top chat message changed
             changed = new_unread != old_unread or new_text != old_text
         except (json.JSONDecodeError, TypeError):
+            logger.debug("Failed to parse previous watcher value for WhatsApp comparison", exc_info=True)
             changed = current_value != last_value
     else:
         changed = current_value != last_value
@@ -242,6 +243,7 @@ def is_watcher_expired(context: dict) -> bool:
             exp = exp.replace(tzinfo=tz.utc)
         return now >= exp
     except (ValueError, TypeError):
+        logger.debug("Failed to parse watcher expires_at value", exc_info=True)
         return False
 
 
@@ -259,4 +261,5 @@ def is_check_due(context: dict) -> bool:
             last = last.replace(tzinfo=tz.utc)
         return (now - last).total_seconds() >= interval
     except (ValueError, TypeError):
+        logger.debug("Failed to parse watcher last_check value, treating as due", exc_info=True)
         return True

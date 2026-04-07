@@ -192,4 +192,5 @@ class StartGigSkill(BaseSkill):
             from lazyclaw.runtime.task_runner import _global_runner
             return _global_runner
         except (ImportError, AttributeError):
+            logger.debug("TaskRunner not available for gig execution", exc_info=True)
             return None

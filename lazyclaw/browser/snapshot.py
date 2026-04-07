@@ -547,6 +547,7 @@ def _short_url(url: str) -> str:
         parsed = urlparse(url)
         return parsed.hostname or url[:60]
     except Exception:
+        logger.debug("Failed to parse URL for shortening: %s", url[:60], exc_info=True)
         return url[:60]
 
 

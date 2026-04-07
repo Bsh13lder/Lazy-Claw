@@ -2181,6 +2181,7 @@ class Agent:
                             _snap_title = await _snap_backend.title()
                             _snapshot = f"After user help: now on {_snap_title} ({_snap_url})"
                         except Exception:
+                            logger.debug("Failed to get browser snapshot after user help", exc_info=True)
                             _snapshot = f"User intervention complete. Response: {_help_response}"
 
                         # Inject snapshot as assistant message (NOT tool —

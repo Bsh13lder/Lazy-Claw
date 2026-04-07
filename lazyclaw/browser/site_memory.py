@@ -122,6 +122,7 @@ async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]
         try:
             content = json.loads(content_str) if content_str else {}
         except json.JSONDecodeError:
+            logger.debug("Failed to parse site memory content as JSON for %s", row["id"], exc_info=True)
             content = {"raw": content_str}
 
         entry = {

@@ -6,7 +6,9 @@ build/
 .env
 data/
 *.db
+*.sqlite
 .venv/
+browser_profiles/
 .claude/
 *.egg
 .mypy_cache/
@@ -24,12 +26,13 @@ data/
 TODO.md
 DOCS.md
 
-# Standalone MCP servers (kept locally, not in repo)
+# Disabled MCP servers (source incomplete, rebuild needed)
 mcp-freeride/
 mcp-healthcheck/
 mcp-apihunter/
 mcp-vaultwhisper/
-mcp-taskai/
+
+# MCP server build artifacts
 mcp-lazydoctor/node_modules/
 .wwebjs_cache/
 

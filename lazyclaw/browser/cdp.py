@@ -189,6 +189,7 @@ class CDPConnection:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
+                    logger.debug("Received non-JSON CDP message, skipping", exc_info=True)
                     continue
 
                 msg_id = msg.get("id")

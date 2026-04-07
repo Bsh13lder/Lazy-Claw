@@ -177,6 +177,7 @@ def _time_ago(iso_str: str | None) -> str:
             return "just now"
         return _seconds_to_human(delta) + " ago"
     except Exception:
+        logger.debug("Failed to parse timestamp for time_ago: %s", iso_str, exc_info=True)
         return "?"
 
 
@@ -191,6 +192,7 @@ def _time_until(iso_str: str | None) -> str:
             return "overdue"
         return _seconds_to_human(delta)
     except Exception:
+        logger.debug("Failed to parse timestamp for time_until: %s", iso_str, exc_info=True)
         return "?"
 
 
@@ -802,6 +804,7 @@ class JobsBar(Static):
             try:
                 ctx = _json.loads(w.get("context", "{}"))
             except Exception:
+                logger.debug("Failed to parse watcher context JSON", exc_info=True)
                 ctx = {}
             interval_s = ctx.get("interval_seconds", 0)
             interval_str = _seconds_to_human(interval_s) if interval_s else "?"
@@ -1875,6 +1878,7 @@ class LazyClawApp(App):
                 try:
                     return decrypt(val, enc_key) if val.startswith("enc:") else val
                 except Exception:
+                    logger.warning("Failed to decrypt job field value", exc_info=True)
                     return val
 
             async with db_session(self._config) as db:
@@ -2089,6 +2093,7 @@ class LazyClawApp(App):
                     f.write(text)
                 self._post_log("info", f"Logs saved to {path}")
             except Exception:
+                logger.error("Failed to save logs to fallback file", exc_info=True)
                 self._post_log("error", f"Copy failed: {exc}")
 
     # ── Cancel / Settings actions ────────────────────────────────────
@@ -2474,6 +2479,7 @@ class LazyClawApp(App):
             try:
                 content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
             except Exception:
+                logger.warning("Failed to decrypt history message for TUI display", exc_info=True)
                 content = "[encrypted]"
             ts = (created_at or "")[-8:]  # HH:MM:SS
             preview = content[:100].replace("\n", " ")

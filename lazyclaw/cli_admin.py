@@ -63,6 +63,7 @@ async def show_status(config: Config, user_id: str) -> None:
             try:
                 counts[label] = (await (await db.execute(query)).fetchone())[0]
             except Exception:
+                logger.warning("Failed to query %s count", label, exc_info=True)
                 counts[label] = 0
 
     stats_table = Table(title="Database Stats", style="cyan")
@@ -103,6 +104,7 @@ async def show_status(config: Config, user_id: str) -> None:
             )
             mcp_servers = await mcp_rows.fetchall()
         except Exception:
+            logger.warning("Failed to query MCP servers for status display", exc_info=True)
             mcp_servers = []
 
     mcp_table = Table(title="MCP Servers", style="cyan")
@@ -266,6 +268,7 @@ async def show_mcp(config: Config, user_id: str) -> None:
     try:
         servers = await list_servers(config, user_id)
     except Exception:
+        logger.warning("Failed to list MCP servers", exc_info=True)
         servers = []
 
     if not servers:
@@ -302,12 +305,14 @@ async def show_mcp(config: Config, user_id: str) -> None:
             try:
                 tool_count = str(len(_json.loads(cached)))
             except Exception:
+                logger.warning("Failed to parse cached MCP tool schemas for %s", name, exc_info=True)
                 tool_count = "?"
         elif s["id"] in _active_clients:
             try:
                 tools = await _active_clients[s["id"]].list_tools()
                 tool_count = str(len(tools))
             except Exception:
+                logger.warning("Failed to list tools for MCP server %s", name, exc_info=True)
                 tool_count = "?"
 
         # Type label
@@ -666,6 +671,7 @@ async def nuke_account(config: Config, user_id: str) -> None:
                     count = (await row.fetchone())[0]
                     total += count
                 except Exception:
+                    logger.warning("Nuke count query failed for table %s", table, exc_info=True)
                     console.print(f"  [yellow]{table}: not found — skipping[/yellow]")
             console.print(f"  [red]{label}[/red]: {total} records")
 
@@ -707,7 +713,7 @@ async def nuke_account(config: Config, user_id: str) -> None:
                         )
                     deleted_total += result.rowcount
                 except Exception:
-                    pass  # Already warned during count phase
+                    logger.warning("Nuke delete failed for table %s", table, exc_info=True)
         await db.commit()
 
     console.print(f"\n[green]Deleted {deleted_total} records.[/green]")
@@ -788,6 +794,7 @@ async def show_logs(config: Config, user_id: str, limit: int = 20) -> None:
             )
             entries = await rows.fetchall()
         except Exception:
+            logger.warning("Failed to query agent traces for log display", exc_info=True)
             entries = []
 
     if not entries:
@@ -814,6 +821,7 @@ async def show_logs(config: Config, user_id: str, limit: int = 20) -> None:
         try:
             content = decrypt(content_enc, key) if content_enc and content_enc.startswith("enc:") else (content_enc or "")
         except Exception:
+            logger.warning("Failed to decrypt agent trace entry", exc_info=True)
             content = "[encrypted]"
         display = content[:70] + "..." if len(content) > 70 else content
         style = type_styles.get(entry_type, "white")
@@ -882,6 +890,7 @@ async def run_doctor(config: Config, user_id: str) -> None:
         else:
             checks.append(("MCP Servers", "[yellow]WARN[/yellow]", "None configured"))
     except Exception:
+        logger.warning("Failed to query MCP server count for doctor check", exc_info=True)
         checks.append(("MCP Servers", "[yellow]WARN[/yellow]", "Table not found"))
 
     # 6. Bundled MCP servers

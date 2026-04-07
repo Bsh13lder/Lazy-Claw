@@ -178,7 +178,8 @@ async def _is_browser_headless(port: int) -> bool:
         stdout, _ = await proc.communicate()
         return proc.returncode == 0 and bool(stdout.strip())
     except Exception:
-        return False  # Can't tell — assume visible to avoid killing user's browser
+        logger.debug("Headless check failed, assuming visible to avoid killing user's browser", exc_info=True)
+        return False
 
 
 async def _raise_browser_window() -> None:
@@ -215,7 +216,7 @@ async def _raise_browser_window() -> None:
                 if rc == 0:
                     return
     except FileNotFoundError:
-        pass  # wmctrl not installed — silently skip
+        logger.debug("wmctrl/osascript not installed, skipping window raise")
     except Exception as exc:
         logger.debug("wmctrl window raise failed: %s", exc)
 
@@ -496,6 +497,7 @@ class BrowserSkill(BaseSkill):
                 await _get_cdp_backend(user_id)
                 return await self.execute(user_id, params)
             except Exception:
+                logger.warning("CDP relaunch failed, trying auto-connect", exc_info=True)
                 return await self._auto_connect_and_retry(user_id, params)
         except Exception as e:
             logger.error("browser %s failed: %s", action, e, exc_info=True)
@@ -568,6 +570,7 @@ class BrowserSkill(BaseSkill):
             snap_text = mgr.format_snapshot(snapshot)
             parts.append(f"\n{snap_text}")
         except Exception:
+            logger.debug("Snapshot failed in page_context_summary, falling back to DOM elements", exc_info=True)
             # Fallback to old actionable elements if snapshot fails
             try:
                 from lazyclaw.browser.dom_optimizer import DOMOptimizer
@@ -659,7 +662,7 @@ class BrowserSkill(BaseSkill):
                 if memories:
                     summary += "\n\n--- Site Knowledge ---\n" + format_memories_for_context(memories)
             except Exception:
-                pass  # Site memory is best-effort
+                logger.debug("Site memory recall failed (best-effort)", exc_info=True)
 
         return summary
 
@@ -738,7 +741,7 @@ class BrowserSkill(BaseSkill):
                 if _check:
                     break
             except Exception:
-                break  # intentional: JS eval failed — page not ready, break and continue
+                break  # intentional: JS eval may fail while page loads, continue to navigation result
             await asyncio.sleep(_wait)
         else:
             # Still blank after 6.5s — auto-refresh once
@@ -1207,6 +1210,7 @@ class BrowserSkill(BaseSkill):
             snapshot = await mgr.take_snapshot(backend)
             snap_text = mgr.format_snapshot(snapshot)
         except Exception:
+            logger.debug("Post-chain snapshot failed", exc_info=True)
             snap_text = "(snapshot failed)"
 
         return (

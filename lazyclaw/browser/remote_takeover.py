@@ -263,7 +263,7 @@ async def take_desktop_screenshot() -> bytes | None:
         try:
             os.unlink(tmp)
         except OSError:
-            logger.warning("Could not remove temporary screenshot file %s", tmp)
+            logger.warning("Could not remove temporary screenshot file %s", tmp, exc_info=True)
     return None
 
 
@@ -298,7 +298,7 @@ async def start_macos_remote_session(user_id: str) -> RemoteSession:
                 vnc_ok = True
         except (OSError, ConnectionRefusedError):
             # Intentional: connection failure means Screen Sharing is not active
-            pass
+            logger.debug("macOS Screen Sharing not active on port %d", vnc_port, exc_info=True)
 
         if not vnc_ok:
             raise RuntimeError(
@@ -414,7 +414,7 @@ async def _start_xvfb(display_num: int) -> asyncio.subprocess.Process:
             proc.kill()
         except ProcessLookupError:
             # Intentional: process may have already exited before we kill it
-            pass
+            logger.debug("Xvfb process already exited before kill", exc_info=True)
         raise RuntimeError(f"Xvfb failed to bind display :{display_num}")
     logger.debug("Xvfb started on :%d (pid=%d)", display_num, proc.pid)
     return proc
@@ -528,9 +528,9 @@ async def _kill_process(pid: int) -> None:
             if result == 0:  # Still running
                 os.kill(pid, signal.SIGKILL)
         except ChildProcessError:
-            pass  # Not our child or already reaped
+            logger.debug("Process %d not our child or already reaped", pid, exc_info=True)
     except ProcessLookupError:
-        pass  # Already dead
+        logger.debug("Process %d already dead", pid, exc_info=True)
     except Exception as exc:
         logger.debug("Failed to kill pid %d: %s", pid, exc)
 

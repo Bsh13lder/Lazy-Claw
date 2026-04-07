@@ -183,6 +183,7 @@ class WatchSiteSkill(BaseSkill):
                 eco = EcoRouter(self._config, LLMRouter(self._config))
                 response = await eco.chat(messages, user_id="system", role=ROLE_WORKER)
             except Exception:
+                logger.warning("EcoRouter unavailable for extractor JS generation, falling back to direct LLM", exc_info=True)
                 from lazyclaw.llm.router import LLMRouter
                 router = LLMRouter(self._config)
                 response = await router.chat(messages, model=self._config.worker_model)

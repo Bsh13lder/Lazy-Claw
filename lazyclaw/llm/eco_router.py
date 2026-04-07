@@ -2,7 +2,7 @@
 
 Three roles: Brain (= Team Lead), Worker, Fallback.
 Three modes:
-  HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  HYBRID:  Sonnet brain + Gemma 4 E2B local worker ($0) + Haiku fallback (auto)
   FULL:    User-configurable brain/worker/fallback (paid, auto)
   CLAUDE:  Haiku API brain (native tools) + Claude CLI fallback ($0)
 
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # ── ECO Modes ─────────────────────────────────────────────────────────
 
-MODE_HYBRID = "hybrid"  # Haiku brain + Nanbeige local worker, auto-fallback
+MODE_HYBRID = "hybrid"  # Sonnet brain + Gemma 4 E2B local worker, auto-fallback
 MODE_FULL = "full"      # User-configurable brain/worker/fallback (paid)
 MODE_CLAUDE = "claude"  # All roles via claude -p CLI ($0 via subscription)
 
@@ -275,7 +275,7 @@ class EcoRouter:
     async def _ensure_local(self) -> tuple:
         """Lazy-init local providers. Returns (brain_provider, worker_provider).
 
-        HYBRID mode uses Ollama as the primary local worker (nanbeige4.1:3b).
+        HYBRID mode uses Ollama as the primary local worker (gemma4:e2b).
         Ollama delegates model management to its own server — no manual process
         lifecycle needed. MLX is checked as a secondary option for any users
         still running the legacy mlx_lm.server setup.
@@ -294,13 +294,13 @@ class EcoRouter:
             self._mlx_brain = None
             self._mlx_worker = None
 
-            # Primary: Ollama (handles Nanbeige4.1:3b via native MLX backend)
+            # Primary: Ollama (handles Gemma 4 E2B via Metal backend)
             try:
                 from lazyclaw.llm.providers.ollama_provider import OllamaProvider
                 ollama = OllamaProvider()
                 if await ollama.health_check():
                     self._ollama = ollama
-                    logger.info("Ollama connected — nanbeige4.1:3b worker ready")
+                    logger.info("Ollama connected — gemma4:e2b worker ready")
             except Exception as exc:
                 logger.debug("Ollama not available: %s", exc)
 
@@ -681,7 +681,7 @@ class EcoRouter:
                     )
                 raise
 
-        # HYBRID: try local Nanbeige first
+        # HYBRID: try local Gemma 4 first
         _, worker_provider = await self._ensure_local()
         provider = worker_provider or self._ollama
         if provider:
@@ -958,7 +958,7 @@ class EcoRouter:
                     raise
             return
 
-        # HYBRID: local worker streaming (Nanbeige)
+        # HYBRID: local worker streaming (Gemma 4)
         _, worker_provider = await self._ensure_local()
         provider = worker_provider or self._ollama
         if provider:

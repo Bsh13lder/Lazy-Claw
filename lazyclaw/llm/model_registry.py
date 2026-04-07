@@ -2,7 +2,7 @@
 
 Three roles: Brain (= Team Lead), Worker, Fallback.
 Three modes:
-  HYBRID:  Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  HYBRID:  Sonnet brain + Gemma 4 E2B local worker ($0) + Haiku fallback (auto)
   FULL:    User-configurable brain/worker/fallback (paid, auto)
   CLAUDE:  All roles via claude CLI ($0 — covered by subscription)
 """
@@ -33,9 +33,9 @@ class ModelProfile:
 
 MODE_MODELS: dict[str, dict[str, str]] = {
     "hybrid": {
-        # Sonnet 4.6 brain (paid) + Nanbeige via Ollama (free local worker)
+        # Sonnet 4.6 brain (paid) + Gemma 4 E2B via Ollama (free local worker)
         "brain":    "claude-sonnet-4-6",
-        "worker":   "nanbeige4.1:3b",
+        "worker":   "gemma4:e2b",
         "fallback": "claude-haiku-4-5-20251001",
     },
     "full": {
@@ -52,9 +52,8 @@ MODE_MODELS: dict[str, dict[str, str]] = {
     },
 }
 
-# Ollama equivalents (when MLX not available)
-OLLAMA_BRAIN_MODEL = "qwen3.5:9b"
-OLLAMA_WORKER_MODEL = "nanbeige4.1:3b"
+# Ollama local models
+OLLAMA_WORKER_MODEL = "gemma4:e2b"
 
 
 def get_mode_models(mode: str) -> dict[str, str]:
@@ -63,10 +62,9 @@ def get_mode_models(mode: str) -> dict[str, str]:
 
 
 # ── Backward-compat aliases (used by imports, remove later) ──────────
-# Note: HYBRID brain is now Sonnet 4.6 (paid API), worker is Ollama Nanbeige
 
 BRAIN_MODEL = MODE_MODELS["hybrid"]["brain"]     # claude-sonnet-4-6
-WORKER_MODEL = MODE_MODELS["hybrid"]["worker"]   # nanbeige4.1:3b (Ollama)
+WORKER_MODEL = MODE_MODELS["hybrid"]["worker"]   # gemma4:e2b (Ollama)
 FALLBACK_MODEL = MODE_MODELS["hybrid"]["fallback"]
 PAID_BRAIN_MODEL = MODE_MODELS["full"]["brain"]
 PAID_WORKER_MODEL = MODE_MODELS["full"]["worker"]
@@ -75,140 +73,32 @@ PAID_WORKER_MODEL = MODE_MODELS["full"]["worker"]
 # ── Model catalog ─────────────────────────────────────────────────────
 
 MODEL_CATALOG: dict[str, ModelProfile] = {
-    # ── LOCAL — MLX (Apple Silicon native, preferred) ─────────────────
-    # Brain: Qwen3.5-4B — best reasoning/writing at 4B, fits with worker on 16GB
-    "mlx-community/Qwen3.5-4B-4bit": ModelProfile(
-        name="mlx-community/Qwen3.5-4B-4bit",
-        display_name="Qwen3.5 4B",
-        provider="mlx",
+    # ── LOCAL — Ollama (Gemma 4 on Apple Silicon via Metal) ─────────────
+    # Default worker: Gemma 4 E2B — fits 16GB M2, native tool calling, 128K ctx
+    "gemma4:e2b": ModelProfile(
+        name="gemma4:e2b",
+        display_name="Gemma 4 E2B",
+        provider="ollama",
         is_local=True,
-        ram_mb=3500,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f9e0",  # 🧠
-        max_context=262144,
-        tool_calling=True,
-        role="brain",
-    ),
-    # Brain: Qwen3.5-9B — better quality, needs 32GB+ RAM for dual-model
-    "mlx-community/Qwen3.5-9B-MLX-4bit": ModelProfile(
-        name="mlx-community/Qwen3.5-9B-MLX-4bit",
-        display_name="Qwen3.5 9B",
-        provider="mlx",
-        is_local=True,
-        ram_mb=5600,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f9e0",  # 🧠
-        max_context=262144,
-        tool_calling=True,
-        role="brain",
-    ),
-    "mlx-community/Qwen3.5-9B-8bit": ModelProfile(
-        name="mlx-community/Qwen3.5-9B-8bit",
-        display_name="Qwen3.5 9B Q8",
-        provider="mlx",
-        is_local=True,
-        ram_mb=10400,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f9e0",  # 🧠
-        max_context=262144,
-        tool_calling=True,
-        role="brain",
-    ),
-    "mlx-community/Nanbeige4.1-3B-8bit": ModelProfile(
-        name="mlx-community/Nanbeige4.1-3B-8bit",
-        display_name="Nanbeige 3B Q8",
-        provider="mlx",
-        is_local=True,
-        ram_mb=4200,
+        ram_mb=7200,
         cost_input=0.0,
         cost_output=0.0,
         icon="\U0001f916",  # 🤖
-        max_context=262144,
+        max_context=131072,
         tool_calling=True,
         role="worker",
     ),
-    "mlx-community/Nanbeige4.1-3B-4bit": ModelProfile(
-        name="mlx-community/Nanbeige4.1-3B-4bit",
-        display_name="Nanbeige 3B Q4",
-        provider="mlx",
-        is_local=True,
-        ram_mb=2200,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f916",  # 🤖
-        max_context=262144,
-        tool_calling=True,
-        role="worker",
-    ),
-
-    # ── LOCAL — Ollama (cross-platform fallback) ──────────────────────
-    "qwen3.5:9b": ModelProfile(
-        name="qwen3.5:9b",
-        display_name="Qwen3.5 9B (Ollama)",
+    # Optional: Gemma 4 E4B — better quality, tighter on 16GB (~9.6GB)
+    "gemma4:e4b": ModelProfile(
+        name="gemma4:e4b",
+        display_name="Gemma 4 E4B",
         provider="ollama",
         is_local=True,
-        ram_mb=6600,
+        ram_mb=9600,
         cost_input=0.0,
         cost_output=0.0,
         icon="\U0001f9e0",  # 🧠
-        max_context=262144,
-        tool_calling=True,
-        role="brain",
-    ),
-    "nanbeige4.1:3b": ModelProfile(
-        name="nanbeige4.1:3b",
-        display_name="Nanbeige 3B (Ollama)",
-        provider="ollama",
-        is_local=True,
-        ram_mb=2500,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f916",  # 🤖
-        max_context=262144,
-        tool_calling=True,
-        role="worker",
-    ),
-
-    # Legacy Ollama models (kept for backward compat)
-    "qwen3:0.6b": ModelProfile(
-        name="qwen3:0.6b",
-        display_name="qwen3:0.6b",
-        provider="ollama",
-        is_local=True,
-        ram_mb=500,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f9e0",  # 🧠
-        max_context=32768,
-        tool_calling=True,
-        role="brain",
-    ),
-    "qwen3:1.7b": ModelProfile(
-        name="qwen3:1.7b",
-        display_name="qwen3:1.7b",
-        provider="ollama",
-        is_local=True,
-        ram_mb=1100,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f9e0",  # 🧠
-        max_context=32768,
-        tool_calling=True,
-        role="brain",
-    ),
-    "softw8/nanbeige4.1-3b-tools": ModelProfile(
-        name="softw8/nanbeige4.1-3b-tools",
-        display_name="nanbeige4.1-3b",
-        provider="ollama",
-        is_local=True,
-        ram_mb=2500,
-        cost_input=0.0,
-        cost_output=0.0,
-        icon="\U0001f916",  # 🤖
-        max_context=262144,
+        max_context=131072,
         tool_calling=True,
         role="worker",
     ),
@@ -321,7 +211,7 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
 class RoutingResult:
     """Immutable record of which model handled a request and why."""
 
-    model: str          # e.g. "qwen3.5-9b"
+    model: str          # e.g. "gemma4:e2b"
     provider: str       # e.g. "mlx"
     is_local: bool
     reason: str         # e.g. "eco_on: brain -> chat"

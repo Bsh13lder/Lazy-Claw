@@ -150,7 +150,7 @@ async def run_specialist(
                 kwargs["tools"] = filtered_tools
 
             # Workers use ROLE_WORKER — eco_router picks the right model
-            # (Nanbeige local in ECO ON, Haiku in ECO OFF, etc.)
+            # (Gemma 4 local in HYBRID, Haiku in FULL, etc.)
             logger.info("Worker %s iteration %d", specialist.name, _iteration + 1)
             response = await eco_router.chat(
                 messages, user_id=user_id, role=ROLE_WORKER, **kwargs

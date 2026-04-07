@@ -98,7 +98,7 @@ def format_response_footer(summary: WorkSummary) -> str:
     """One-line footer for Telegram response messages.
 
     With model attribution:
-      "✅ 12.3s │ 🤖 nanbeige4.1 [LOCAL] │ FREE"
+      "✅ 12.3s │ 🤖 gemma4:e2b [LOCAL] │ FREE"
       "✅ 15.2s │ 💰 gpt-5-mini │ $0.003"
     Without (backward compat):
       "✅ 12.3s │ 3 LLM │ 1,847 tokens"

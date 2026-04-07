@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
 
-_OLLAMA_BASE = "http://localhost:11434"
+_OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 
 class OllamaListSkill(BaseSkill):
@@ -93,7 +94,7 @@ class OllamaInstallSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Download and install an Ollama model locally. Examples: "
-            "'qwen3:1.7b', 'softw8/nanbeige4.1-3b-tools', 'llama3.2'. "
+            "'gemma4:e2b', 'gemma4:e4b', 'llama3.2'. "
             "Large models may take several minutes to download."
         )
 
@@ -108,7 +109,7 @@ class OllamaInstallSkill(BaseSkill):
             "properties": {
                 "model": {
                     "type": "string",
-                    "description": "Model name (e.g., 'qwen3:4b', 'llama3.2', 'mistral')",
+                    "description": "Model name (e.g., 'gemma4:e2b', 'llama3.2', 'mistral')",
                 },
             },
             "required": ["model"],

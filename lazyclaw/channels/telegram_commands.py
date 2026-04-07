@@ -451,7 +451,7 @@ class TelegramCommands:
             return
 
         settings = await get_eco_settings(self._config, user_id)
-        worker_model = settings.get("worker_model") or WORKER_MODEL  # nanbeige4.1:3b
+        worker_model = settings.get("worker_model") or WORKER_MODEL  # gemma4:e2b
 
         subcmd = args[0].lower() if args else "status"
 
@@ -502,7 +502,7 @@ class TelegramCommands:
                     update,
                     "\u274c Ollama not installed.\n"
                     "Install: <a href='https://ollama.com'>ollama.com</a>\n"
-                    "Then run: <code>ollama pull nanbeige4.1:3b</code>"
+                    "Then run: <code>ollama pull gemma4:e2b</code>"
                 )
                 return
 
@@ -543,7 +543,7 @@ class TelegramCommands:
                 update,
                 f"\u2705 Ollama running with <b>{worker_model}</b>\n"
                 f"\u2696\ufe0f Auto-switched to <b>HYBRID</b> mode\n"
-                f"(Sonnet 4.6 brain + local Nanbeige worker)"
+                f"(Sonnet 4.6 brain + local Gemma 4 worker)"
             )
             return
 

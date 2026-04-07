@@ -22,8 +22,8 @@ class EcoSetModeSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Set the AI routing mode. 'hybrid' uses Haiku brain + local "
-            "Nanbeige worker (cheap). 'full' uses user-configured paid models "
+            "Set the AI routing mode. 'hybrid' uses Sonnet brain + local "
+            "Gemma 4 worker (free). 'full' uses user-configured paid models "
             "for maximum quality."
         )
 
@@ -52,7 +52,7 @@ class EcoSetModeSkill(BaseSkill):
 
             descriptions = {
                 "hybrid": (
-                    "HYBRID mode enabled — Haiku brain + local Nanbeige worker ($0). "
+                    "HYBRID mode enabled — Sonnet brain + local Gemma 4 worker ($0). "
                     "Best balance of cost and quality."
                 ),
                 "full": (

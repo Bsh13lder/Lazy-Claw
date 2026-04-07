@@ -11,6 +11,8 @@ services:
     environment:
       # n8n MCP connection (inside docker network)
       - N8N_HOST=http://lazyclaw-n8n:5678
+      # Ollama runs on the host Mac — reach it via Docker's host gateway
+      - OLLAMA_HOST=http://host.docker.internal:11434
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills

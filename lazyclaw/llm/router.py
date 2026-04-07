@@ -16,6 +16,13 @@ class LLMRouter:
             return "openai"
         elif model.startswith("claude-"):
             return "anthropic"
+        elif model.startswith(("gemma", "llama", "qwen", "phi", "mistral")):
+            return "ollama"
+        # Check MODEL_CATALOG for known local models
+        from lazyclaw.llm.model_registry import get_model
+        profile = get_model(model)
+        if profile and profile.provider == "ollama":
+            return "ollama"
         raise ValueError(f"Cannot infer provider for model: {model}")
 
     def _get_api_key(self, provider_name: str) -> str | None:
@@ -42,6 +49,9 @@ class LLMRouter:
             return OpenAIProvider(api_key)
         elif provider_name == "anthropic":
             return AnthropicProvider(api_key)
+        elif provider_name == "ollama":
+            from lazyclaw.llm.providers.ollama_provider import OllamaProvider
+            return OllamaProvider()
         raise ValueError(f"Unknown provider: {provider_name}")
 
     async def chat(
@@ -53,6 +63,10 @@ class LLMRouter:
     ) -> LLMResponse:
         model = model or self._config.brain_model
         provider_name = self._infer_provider_name(model)
+
+        # Ollama doesn't need an API key — skip key check
+        if provider_name == "ollama" and provider_name not in self._providers:
+            self._providers[provider_name] = self._create_provider(provider_name, "")
 
         # Check cache first
         if provider_name not in self._providers:
@@ -74,6 +88,10 @@ class LLMRouter:
         """Stream chat responses. Yields StreamChunk instances."""
         model = model or self._config.brain_model
         provider_name = self._infer_provider_name(model)
+
+        # Ollama doesn't need an API key
+        if provider_name == "ollama" and provider_name not in self._providers:
+            self._providers[provider_name] = self._create_provider(provider_name, "")
 
         if provider_name not in self._providers:
             api_key = await self._resolve_api_key(provider_name, user_id)

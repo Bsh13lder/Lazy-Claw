@@ -4,7 +4,7 @@ Settings stored in the existing users.settings JSON column
 under the "eco" key. No new DB table needed.
 
 Two modes (3 roles: Brain, Worker, Fallback):
-  hybrid  — Haiku brain + Nanbeige local worker ($0) + Haiku fallback (auto)
+  hybrid  — Sonnet brain + Gemma 4 E2B local worker ($0) + Haiku fallback (auto)
   full    — User-configurable brain/worker/fallback (paid, auto)
 """
 

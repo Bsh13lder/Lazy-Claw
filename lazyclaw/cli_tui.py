@@ -95,7 +95,7 @@ class SystemStats:
     ollama_models: tuple[str, ...] = ()
     # Active model names for status bar display
     brain_model_name: str = ""   # e.g. "Sonnet 4.6" or last routing display name
-    worker_model_name: str = ""  # e.g. "nanbeige4.1:3b" or "Haiku 4.5"
+    worker_model_name: str = ""  # e.g. "gemma4:e2b" or "Haiku 4.5"
     # RAM monitor (ECO v2)
     ram_system_pct: float = 0.0
     ram_ai_mb: int = 0
@@ -1161,7 +1161,7 @@ class AIRoutingBar(Static):
         """Render routing stats from EcoRouter.get_routing_stats().
 
         routing_stats = {
-            "models": {"qwen3:0.6b": {"calls": 12, "cost": 0.0, "icon": "...", ...}},
+            "models": {"gemma4:e2b": {"calls": 12, "cost": 0.0, "icon": "...", ...}},
             "total_cost": 0.003,
             "total_calls": 19,
             "local_pct": 92,
@@ -1760,7 +1760,7 @@ class LazyClawApp(App):
                 self._post_log("info", "MLX worker already running on :8081")
                 return
 
-            # Check RAM — need ~4.5GB free for Nanbeige 3B Q8
+            # Check RAM — need headroom for local model
             try:
                 from lazyclaw.llm.ram_monitor import get_ram_status
                 ram = await get_ram_status()

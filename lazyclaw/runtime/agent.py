@@ -1546,7 +1546,7 @@ class Agent:
 
                     # Empty response from worker model — retry with brain.
                     # Covers: Haiku empty response bug, worker can't produce
-                    # final answer (Nanbeige bad at chat), etc.
+                    # final answer (local worker bad at chat), etc.
                     if (
                         not _final_content.strip()
                         and tools

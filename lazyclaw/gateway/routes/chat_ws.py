@@ -82,7 +82,9 @@ class WebSocketCallback:
             })
 
         elif kind == "work_summary":
-            self._work_summary = event.metadata.get("summary")
+            from dataclasses import asdict
+            raw = event.metadata.get("summary")
+            self._work_summary = asdict(raw) if hasattr(raw, "__dataclass_fields__") else raw
 
         elif kind == "cancelled":
             await self._send({"type": "cancelled"})

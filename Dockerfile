@@ -29,18 +29,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY lazyclaw/ ./lazyclaw/
 COPY pyproject.toml ./
 
-# Required bundled MCP servers (Python)
-COPY mcp-freeride/ ./mcp-freeride/
-COPY mcp-healthcheck/ ./mcp-healthcheck/
-COPY mcp-apihunter/ ./mcp-apihunter/
-COPY mcp-vaultwhisper/ ./mcp-vaultwhisper/
+# Bundled MCP servers (Python — active only)
 COPY mcp-taskai/ ./mcp-taskai/
 COPY mcp-lazydoctor/ ./mcp-lazydoctor/
 RUN pip install --no-cache-dir \
-        ./mcp-freeride \
-        ./mcp-healthcheck \
-        ./mcp-apihunter \
-        ./mcp-vaultwhisper \
         ./mcp-taskai \
         ./mcp-lazydoctor
 

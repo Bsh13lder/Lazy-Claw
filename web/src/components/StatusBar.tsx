@@ -1,28 +1,14 @@
-import { useEffect, useState } from "react";
 import { useChat } from "../context/ChatContext";
-import * as api from "../api";
+import { useAgentStatus } from "../context/AgentStatusContext";
 
 export default function StatusBar() {
   const { connectionStatus, streamingState, chatOpen, toggleChat } = useChat();
-  const [taskCount, setTaskCount] = useState({ active: 0, background: 0 });
+  const { agentStatus } = useAgentStatus();
 
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => {
-      try {
-        const status = await api.getAgentStatus();
-        if (alive) {
-          setTaskCount({
-            active: status.active.length,
-            background: status.background.length,
-          });
-        }
-      } catch { /* ignore */ }
-    };
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => { alive = false; clearInterval(id); };
-  }, []);
+  const taskCount = {
+    active: agentStatus?.active.length ?? 0,
+    background: agentStatus?.background.length ?? 0,
+  };
 
   const wsColor =
     connectionStatus === "connected" ? "bg-accent" :

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
-import type { AgentStatus, Job, McpServer } from "../api";
+import type { AgentStatus, Job, McpServer, ActivityEvent } from "../api";
 import { useAuth } from "../context/AuthContext";
 import { useChat } from "../context/ChatContext";
+import { useAgentStatus } from "../context/AgentStatusContext";
 import type { Page } from "../components/NavShell";
 
 /* ── Types ──────────────────────────────────────────────────────────── */
@@ -20,13 +21,7 @@ interface HealthData {
   pendingApprovals: number;
 }
 
-interface ActivityItem {
-  id: string;
-  icon: "job" | "mcp" | "skill" | "memory";
-  label: string;
-  detail: string;
-  time: string;
-}
+// ActivityItem removed — using real ActivityEvent from context
 
 /* ── Sub-components ─────────────────────────────────────────────────── */
 
@@ -91,48 +86,39 @@ function ResourceGauge({ label, value, max, unit }: { label: string; value: numb
   );
 }
 
-const ACTIVITY_ICONS: Record<string, React.ReactNode> = {
-  job: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <circle cx="12" cy="12" r="10" />
-      <polyline points="12 6 12 12 16 14" />
-    </svg>
-  ),
-  mcp: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
-    </svg>
-  ),
-  skill: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-    </svg>
-  ),
-  memory: (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z" />
-      <path d="M12 16v-4M12 8h.01" />
-    </svg>
-  ),
+const EVENT_TYPE_STYLE: Record<string, { color: string; icon: React.ReactNode }> = {
+  task: {
+    color: "text-blue-400",
+    icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>,
+  },
+  tool_execution: {
+    color: "text-cyan",
+    icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></svg>,
+  },
+  specialist: {
+    color: "text-orange-400",
+    icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /></svg>,
+  },
+  approval: {
+    color: "text-amber",
+    icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>,
+  },
+  error: {
+    color: "text-red-400",
+    icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" /></svg>,
+  },
 };
 
-function ActivityRow({ item }: { item: ActivityItem }) {
-  const iconColor =
-    item.icon === "job" ? "text-cyan" :
-    item.icon === "mcp" ? "text-amber" :
-    item.icon === "skill" ? "text-accent" :
-    "text-text-muted";
-
+function RealActivityRow({ event }: { event: ActivityEvent }) {
+  const style = EVENT_TYPE_STYLE[event.type] ?? EVENT_TYPE_STYLE.task;
   return (
     <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg hover:bg-bg-hover/50 transition-colors">
-      <div className={`mt-0.5 shrink-0 ${iconColor}`}>
-        {ACTIVITY_ICONS[item.icon]}
-      </div>
+      <div className={`mt-0.5 shrink-0 ${style.color}`}>{style.icon}</div>
       <div className="min-w-0 flex-1">
-        <p className="text-sm text-text-primary truncate">{item.label}</p>
-        <p className="text-[11px] text-text-muted truncate">{item.detail}</p>
+        <p className="text-sm text-text-primary truncate">{event.title}</p>
+        <p className="text-[11px] text-text-muted truncate">{event.detail}</p>
       </div>
-      <span className="text-[10px] text-text-muted shrink-0 tabular-nums">{item.time}</span>
+      <span className="text-[10px] text-text-muted shrink-0 tabular-nums">{timeAgo(event.timestamp)}</span>
     </div>
   );
 }
@@ -236,33 +222,7 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function buildActivity(jobs: Job[], mcpServers: McpServer[]): ActivityItem[] {
-  const items: ActivityItem[] = [];
-
-  for (const j of jobs) {
-    if (j.last_run) {
-      items.push({
-        id: `job-${j.id}`,
-        icon: "job",
-        label: j.name,
-        detail: `${j.status === "active" ? "Ran" : "Completed"} — ${j.instruction.slice(0, 60)}`,
-        time: timeAgo(j.last_run),
-      });
-    }
-  }
-
-  for (const m of mcpServers) {
-    items.push({
-      id: `mcp-${m.id}`,
-      icon: "mcp",
-      label: m.name,
-      detail: `${m.status === "connected" ? "Connected" : m.status} — ${m.tool_count} tools via ${m.transport}`,
-      time: "",
-    });
-  }
-
-  return items.slice(0, 12);
-}
+// buildActivity removed — using real ActivityEvent from context
 
 /* ── Main component ──────────────────────────────────────────────── */
 
@@ -281,8 +241,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
     ecoMode: "...",
     pendingApprovals: 0,
   });
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
-  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const { agentStatus, activityFeed, metrics } = useAgentStatus();
   const [uptime, setUptime] = useState("—");
 
   useEffect(() => {
@@ -324,26 +283,17 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
         pendingApprovals: appArr.length,
       });
 
-      setActivity(buildActivity(jobsArr, mcpArr));
-
-      // Fake uptime from health check — real implementation would come from server
-      if (healthResp) setUptime("Online");
+      // Calculate real uptime from server start time
+      if (healthResp?.started_at) {
+        const elapsed = Math.floor(Date.now() / 1000 - healthResp.started_at);
+        const hours = Math.floor(elapsed / 3600);
+        const minutes = Math.floor((elapsed % 3600) / 60);
+        setUptime(hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`);
+      } else if (healthResp) {
+        setUptime("Online");
+      }
     }
     load();
-  }, []);
-
-  // Poll agent status every 3s
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => {
-      try {
-        const s = await api.getAgentStatus();
-        if (alive) setAgentStatus(s);
-      } catch { /* ignore */ }
-    };
-    poll();
-    const id = setInterval(poll, 3000);
-    return () => { alive = false; clearInterval(id); };
   }, []);
 
   const gatewayLabel =
@@ -431,6 +381,33 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
           />
         </div>
 
+        {/* ── Agent Performance ──────────────────────────────── */}
+        {metrics && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade-in">
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Success Rate</p>
+              <p className={`text-lg font-semibold ${metrics.success_rate >= 80 ? "text-green-400" : metrics.success_rate >= 50 ? "text-amber" : "text-red-400"}`}>
+                {metrics.success_rate}%
+              </p>
+              <div className="h-1 bg-bg-tertiary rounded-full mt-2 overflow-hidden">
+                <div className="h-full bg-green-400 rounded-full" style={{ width: `${metrics.success_rate}%` }} />
+              </div>
+            </div>
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Avg Duration</p>
+              <p className="text-lg font-semibold text-text-primary">{metrics.avg_duration_s}s</p>
+            </div>
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Tasks / Hour</p>
+              <p className="text-lg font-semibold text-text-primary">{metrics.tasks_last_hour}</p>
+            </div>
+            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+              <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Tool Calls Today</p>
+              <p className="text-lg font-semibold text-cyan">{metrics.tool_calls_today}</p>
+            </div>
+          </div>
+        )}
+
         {/* ── Live Agent Status ──────────────────────────────── */}
         <AgentStatusPanel agentStatus={agentStatus} />
 
@@ -488,27 +465,27 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             </div>
           </div>
 
-          {/* Activity feed */}
+          {/* Activity feed — real events from context */}
           <div className="lg:col-span-3 bg-bg-secondary border border-border rounded-xl animate-fade-in-2 flex flex-col">
             <div className="flex items-center justify-between px-5 pt-4 pb-2">
               <h2 className="text-sm font-semibold text-text-primary">Recent Activity</h2>
-              <span className="text-[10px] text-text-muted">{activity.length} events</span>
+              <span className="text-[10px] text-text-muted">{activityFeed.length} events</span>
             </div>
 
             <div className="flex-1 overflow-y-auto px-2 pb-3 max-h-72">
-              {activity.length === 0 ? (
+              {activityFeed.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-text-muted">
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-2 opacity-40">
                     <circle cx="12" cy="12" r="10" />
                     <polyline points="12 6 12 12 16 14" />
                   </svg>
                   <p className="text-xs">No recent activity</p>
-                  <p className="text-[10px] mt-1">Run a job or connect an MCP server to get started</p>
+                  <p className="text-[10px] mt-1">Send a message or run a job to get started</p>
                 </div>
               ) : (
                 <div className="space-y-0.5">
-                  {activity.map((item) => (
-                    <ActivityRow key={item.id} item={item} />
+                  {activityFeed.slice(0, 12).map((ev) => (
+                    <RealActivityRow key={ev.id} event={ev} />
                   ))}
                 </div>
               )}

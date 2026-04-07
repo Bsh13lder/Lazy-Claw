@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections import Counter
 from contextlib import asynccontextmanager
 
@@ -36,6 +37,7 @@ from lazyclaw.llm.model_manager import seed_default_models
 logger = logging.getLogger(__name__)
 
 _config = load_config()
+_server_started_at = time.time()
 
 # Shared state — set by cli.py at startup
 _lane_queue = None
@@ -151,7 +153,7 @@ class ChatResponse(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.1.0", "started_at": _server_started_at}
 
 
 @app.post("/api/agent/chat", response_model=ChatResponse)

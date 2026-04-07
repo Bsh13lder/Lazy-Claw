@@ -171,22 +171,13 @@ function JobCard({ job, onPause, onResume, onDelete }: JobCardProps) {
         {/* Quick actions */}
         <div className="flex items-center gap-1 shrink-0">
           {job.status === "active" && (
-            <>
-              <button
-                onClick={() => onResume(job.id)}
-                title="Run Now"
-                className="p-1.5 rounded-lg text-text-muted hover:text-accent hover:bg-bg-hover transition-colors"
-              >
-                <PlayIcon />
-              </button>
-              <button
-                onClick={() => onPause(job.id)}
-                title="Pause"
-                className="p-1.5 rounded-lg text-text-muted hover:text-amber hover:bg-bg-hover transition-colors"
-              >
-                <PauseIcon />
-              </button>
-            </>
+            <button
+              onClick={() => onPause(job.id)}
+              title="Pause"
+              className="p-1.5 rounded-lg text-text-muted hover:text-amber hover:bg-bg-hover transition-colors"
+            >
+              <PauseIcon />
+            </button>
           )}
           {job.status === "paused" && (
             <button

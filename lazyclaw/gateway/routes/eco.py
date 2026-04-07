@@ -11,6 +11,15 @@ from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
 
 router = APIRouter(prefix="/api/eco", tags=["eco"])
 
+# Shared EcoRouter instance — set by cli.py at startup
+_eco_router_instance = None
+
+
+def set_eco_deps(eco_router_ref) -> None:
+    """Called by cli.py to inject the live EcoRouter for usage tracking."""
+    global _eco_router_instance
+    _eco_router_instance = eco_router_ref
+
 
 class UpdateEcoRequest(BaseModel):
     mode: str | None = None
@@ -62,16 +71,31 @@ async def update_settings(
 @router.get("/usage")
 async def get_usage(user: User = Depends(get_current_user)):
     """Get token usage stats for the current user."""
-    # Get eco_router from app state (set during startup)
-    # For now, return basic structure — wired up during integration
+    if _eco_router_instance is None:
+        return {
+            "success": True,
+            "data": {
+                "free_count": 0,
+                "paid_count": 0,
+                "total": 0,
+                "free_percentage": 0,
+                "message": "Usage tracking active when eco_router is initialized",
+            },
+        }
+
+    raw = _eco_router_instance.get_usage(user.id)
+    # Map: local + free are both "free" from the user's cost perspective
+    free = raw.get("local_count", 0) + raw.get("free_count", 0)
+    paid = raw.get("paid_count", 0)
+    total = raw.get("total", 0)
+    free_pct = round(free / total * 100, 1) if total > 0 else 0
     return {
         "success": True,
         "data": {
-            "free_count": 0,
-            "paid_count": 0,
-            "total": 0,
-            "free_percentage": 0,
-            "message": "Usage tracking active when eco_router is initialized",
+            "free_count": free,
+            "paid_count": paid,
+            "total": total,
+            "free_percentage": free_pct,
         },
     }
 

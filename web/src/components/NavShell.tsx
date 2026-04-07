@@ -1,4 +1,5 @@
 import { useAuth } from "../context/AuthContext";
+import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
@@ -127,7 +128,10 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
 
 export default function NavShell({ activePage, onNavigate, children }: NavShellProps) {
   const { user, logout } = useAuth();
+  const { agentStatus } = useAgentStatus();
   const meta = PAGE_META[activePage];
+
+  const runningCount = (agentStatus?.active.length ?? 0) + (agentStatus?.background.length ?? 0);
 
   return (
     <div className="h-screen flex flex-col bg-bg-primary">
@@ -165,6 +169,11 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
                     <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 bg-accent rounded-r-full" />
                   )}
                   {item.icon}
+                  {item.page === "activity" && runningCount > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 w-[14px] h-[14px] rounded-full bg-accent text-[8px] font-bold text-bg-primary flex items-center justify-center">
+                      {runningCount > 9 ? "9+" : runningCount}
+                    </span>
+                  )}
                 </button>
               );
             })}

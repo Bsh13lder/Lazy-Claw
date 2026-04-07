@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ChatProvider } from "./context/ChatContext";
+import { AgentStatusProvider } from "./context/AgentStatusContext";
 import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
@@ -53,9 +54,11 @@ function AppContent() {
 
   return (
     <ChatProvider>
-      <NavShell activePage={page} onNavigate={setPage}>
-        {pageContent}
-      </NavShell>
+      <AgentStatusProvider>
+        <NavShell activePage={page} onNavigate={setPage}>
+          {pageContent}
+        </NavShell>
+      </AgentStatusProvider>
     </ChatProvider>
   );
 }

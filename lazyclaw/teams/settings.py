@@ -16,12 +16,11 @@ logger = logging.getLogger(__name__)
 
 # Valid team modes
 VALID_MODES = {"auto", "always", "never"}
-VALID_CRITIC_MODES = {"auto", "always", "never"}
 
 # Default team settings
 DEFAULT_TEAMS = {
     "mode": "never",
-    "critic_mode": "auto",
+    "critic_mode": False,
     "max_parallel": 3,
     "specialist_timeout": 120,
 }
@@ -41,6 +40,7 @@ async def get_team_settings(config: Config, user_id: str) -> dict:
     try:
         settings = json.loads(result[0])
     except (json.JSONDecodeError, TypeError):
+        logger.warning("Failed to parse team settings JSON, returning defaults")
         return dict(DEFAULT_TEAMS)
 
     teams = settings.get("teams", {})
@@ -49,6 +49,12 @@ async def get_team_settings(config: Config, user_id: str) -> dict:
 
     merged = dict(DEFAULT_TEAMS)
     merged.update(teams)
+
+    # Coerce legacy string critic_mode to bool
+    cm = merged.get("critic_mode")
+    if isinstance(cm, str):
+        merged["critic_mode"] = cm == "always"
+
     return merged
 
 
@@ -59,8 +65,7 @@ async def update_team_settings(config: Config, user_id: str, updates: dict) -> d
             raise ValueError(f"Invalid team mode: {updates['mode']}. Must be one of: {VALID_MODES}")
 
     if "critic_mode" in updates:
-        if updates["critic_mode"] not in VALID_CRITIC_MODES:
-            raise ValueError(f"Invalid critic mode: {updates['critic_mode']}. Must be one of: {VALID_CRITIC_MODES}")
+        updates["critic_mode"] = bool(updates["critic_mode"])
 
     if "max_parallel" in updates:
         val = updates["max_parallel"]
@@ -84,6 +89,7 @@ async def update_team_settings(config: Config, user_id: str, updates: dict) -> d
         try:
             current_settings = json.loads(result[0])
         except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse team settings JSON during update, starting fresh")
             current_settings = {}
 
     # Update teams section

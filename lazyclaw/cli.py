@@ -215,6 +215,10 @@ async def run_agent(config: Config) -> None:
     from lazyclaw.gateway.routes.activity import set_activity_deps
     set_activity_deps(team_lead, task_runner)
 
+    # Wire ECO usage tracking
+    from lazyclaw.gateway.routes.eco import set_eco_deps
+    set_eco_deps(agent.eco_router)
+
     # Wire webhook endpoint (n8n → LazyClaw)
     from lazyclaw.channels.telegram import resolve_user_id as _resolve_uid
     from lazyclaw.gateway.routes.webhook import set_webhook_deps
@@ -406,6 +410,8 @@ async def _show_chat_history(config: Config, user_id: str) -> None:
         try:
             content = decrypt(content_enc, key) if content_enc.startswith("enc:") else content_enc
         except Exception:
+            logger = logging.getLogger(__name__)
+            logger.warning("Failed to decrypt chat history message", exc_info=True)
             content = "[encrypted]"
 
         ts = (created_at or "")[:16]  # "2026-03-20 00:28"

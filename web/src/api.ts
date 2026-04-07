@@ -112,6 +112,7 @@ export interface TeamSettings {
   mode: string;
   critic_mode: boolean;
   max_parallel: number;
+  specialist_timeout: number;
 }
 
 export interface Specialist {
@@ -121,7 +122,6 @@ export interface Specialist {
   allowed_skills: string[];
   preferred_model: string | null;
   is_builtin: boolean;
-  builtin: boolean;
 }
 
 export interface PermissionSettings {
@@ -237,7 +237,7 @@ export const getSessionMessages = (sessionId: string, opts?: { limit?: number; b
 // ── Health ─────────────────────────────────────────────────────────────────
 
 export const healthCheck = () =>
-  request<{ status: string; version: string }>("/api/health");
+  request<{ status: string; version: string; started_at?: number }>("/api/health");
 
 // ── Skills ─────────────────────────────────────────────────────────────────
 
@@ -471,6 +471,34 @@ export interface AgentStatus {
 export const getAgentStatus = () =>
   request<AgentStatus>("/api/agents/status");
 
+// ── Activity Feed + Metrics ──────────────────────────────────────────────
+
+export interface ActivityEvent {
+  id: string;
+  type: "task" | "tool_execution" | "specialist" | "approval" | "error";
+  title: string;
+  detail: string;
+  status: string;
+  timestamp: string;
+  duration_ms?: number | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface AgentMetrics {
+  avg_duration_s: number;
+  success_rate: number;
+  total_completed: number;
+  total_failed: number;
+  tasks_last_hour: number;
+  tool_calls_today: number;
+}
+
+export const getActivityFeed = (limit = 30) =>
+  request<{ success: boolean; data: ActivityEvent[] }>(`/api/agents/activity/feed?limit=${limit}`).then((r) => r.data);
+
+export const getAgentMetrics = () =>
+  request<{ success: boolean; data: AgentMetrics }>("/api/agents/metrics").then((r) => r.data);
+
 // ── Replay ─────────────────────────────────────────────────────────────────
 
 export interface TraceEntry {
@@ -504,6 +532,22 @@ export const shareTrace = (traceSessionId: string, expiresHours = 72) =>
     method: "POST",
     body: JSON.stringify({ trace_session_id: traceSessionId, expires_hours: expiresHours }),
   }).then((r) => r.data);
+
+export interface ShareInfo {
+  id: string;
+  trace_session_id: string;
+  share_token: string;
+  expires_at: string;
+  created_at: string;
+}
+
+export const listShares = (traceSessionId?: string) => {
+  const qs = traceSessionId ? `?trace_session_id=${traceSessionId}` : "";
+  return request<{ success: boolean; data: ShareInfo[] }>(`/api/replay/shares${qs}`).then((r) => r.data);
+};
+
+export const deleteShare = (shareId: string) =>
+  request<{ success: boolean }>(`/api/replay/shares/${shareId}`, { method: "DELETE" });
 
 // ── Teams (additional) ────────────────────────────────────────────────────
 

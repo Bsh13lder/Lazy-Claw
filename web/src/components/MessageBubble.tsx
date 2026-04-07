@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { ToolCallInfo } from "../hooks/useChatStream";
-import ToolCallIndicator from "./ToolCallIndicator";
+import ToolCallCard from "./ToolCallCard";
 
 interface MessageBubbleProps {
   role: "user" | "assistant";
@@ -87,14 +87,9 @@ export default function MessageBubble({
 
           {/* Tool calls */}
           {toolCalls && toolCalls.length > 0 && (
-            <div className="mb-2">
+            <div className="mb-2 space-y-0.5">
               {toolCalls.map((tc, i) => (
-                <ToolCallIndicator
-                  key={`${tc.name}-${i}`}
-                  name={tc.name}
-                  status={tc.status}
-                  preview={tc.preview}
-                />
+                <ToolCallCard key={`${tc.name}-${i}`} tool={tc} />
               ))}
             </div>
           )}

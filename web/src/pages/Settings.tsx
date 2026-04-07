@@ -488,6 +488,58 @@ function EcoTab({
         </section>
       )}
 
+      {/* Free provider controls */}
+      {eco && providers.length > 0 && (
+        <section className="bg-bg-secondary border border-border rounded-xl p-5">
+          <SectionHeading title="Free Providers" subtitle="Select which free providers to use for worker tasks" />
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {providers.filter((p) => !p.is_paid).map((p) => {
+                const selected = eco.free_providers?.includes(String(p.name)) ?? false;
+                return (
+                  <label key={p.name} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-bg-hover cursor-pointer hover:bg-bg-tertiary transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={async () => {
+                        const current = eco.free_providers ?? [];
+                        const next = selected
+                          ? current.filter((n) => n !== String(p.name))
+                          : [...current, String(p.name)];
+                        try {
+                          await onSettingsUpdate({ free_providers: next } as Partial<EcoSettings>);
+                        } catch { /* ignore */ }
+                      }}
+                      className="rounded"
+                    />
+                    <span className="text-sm text-text-primary">{String(p.display_name || p.name)}</span>
+                    <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${p.configured ? "bg-accent" : "bg-text-muted opacity-40"}`} />
+                  </label>
+                );
+              })}
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-text-secondary mb-1.5">Preferred free model</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  defaultValue={eco.preferred_free_model ?? ""}
+                  onBlur={async (e) => {
+                    const val = e.target.value.trim() || null;
+                    try {
+                      await onSettingsUpdate({ preferred_free_model: val } as Partial<EcoSettings>);
+                      toast.success("Preferred model updated");
+                    } catch { toast.error("Failed to update"); }
+                  }}
+                  placeholder="e.g. gemma-3-4b"
+                  className="flex-1 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary font-mono focus:outline-none focus:border-border-light"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Usage stats with progress bar */}
       {usage && (
         <section className="bg-bg-secondary border border-border rounded-xl p-5">
@@ -560,6 +612,87 @@ function EcoTab({
   );
 }
 
+// ── Team Sessions ─────────────────────────────────────────────────────────
+
+function TeamSessionsSection() {
+  const [sessions, setSessions] = useState<api.TeamSession[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Record<string, unknown>[]>([]);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+
+  useEffect(() => {
+    api.listTeamSessions()
+      .then((data) => setSessions(Array.isArray(data) ? data : []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleExpand = async (sessionId: string) => {
+    if (expandedId === sessionId) { setExpandedId(null); return; }
+    setExpandedId(sessionId);
+    setLoadingDetail(true);
+    try {
+      const data = await api.getTeamSession(sessionId);
+      setDetail(Array.isArray(data) ? data : []);
+    } catch { setDetail([]); }
+    finally { setLoadingDetail(false); }
+  };
+
+  if (loading) return null;
+  if (sessions.length === 0) return null;
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <SectionHeading title="Recent Sessions" subtitle="Specialist delegation history" />
+      <div className="space-y-1">
+        {sessions.slice(0, 10).map((s) => {
+          const isExpanded = expandedId === s.session_id;
+          return (
+            <div key={s.session_id}>
+              <div
+                className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-bg-hover cursor-pointer transition-colors"
+                onClick={() => handleExpand(s.session_id)}
+              >
+                <span className={`w-2 h-2 rounded-full shrink-0 ${s.status === "done" ? "bg-green-400" : s.status === "running" ? "bg-accent live-pulse" : "bg-text-muted"}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-text-primary truncate">{s.specialist}</p>
+                  <p className="text-[10px] text-text-muted truncate">{s.task}</p>
+                </div>
+                <span className="text-[10px] text-text-muted shrink-0">
+                  {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(s.created_at))}
+                </span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                  className={`text-text-muted transition-transform ${isExpanded ? "rotate-180" : ""}`}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </div>
+              {isExpanded && (
+                <div className="ml-5 pl-3 border-l border-border mb-2">
+                  {loadingDetail ? (
+                    <p className="text-[10px] text-text-muted py-2">Loading...</p>
+                  ) : detail.length === 0 ? (
+                    <p className="text-[10px] text-text-muted py-2">No conversation entries</p>
+                  ) : (
+                    <div className="space-y-1 py-1">
+                      {detail.map((entry, i) => (
+                        <div key={i} className="text-xs text-text-secondary px-2 py-1 rounded bg-bg-hover">
+                          <span className="text-text-muted font-medium">{String(entry.role ?? "system")}:</span>{" "}
+                          <span className="truncate">{String(entry.content ?? "").slice(0, 200)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // ── Teams Tab ──────────────────────────────────────────────────────────────
 
 function TeamsTab({
@@ -592,9 +725,13 @@ function TeamsTab({
   const [creating, setCreating] = useState(false);
 
   const [maxParallel, setMaxParallel] = useState(String(team?.max_parallel ?? 3));
+  const [specTimeout, setSpecTimeout] = useState(String(team?.specialist_timeout ?? 120));
 
   useEffect(() => {
-    if (team) setMaxParallel(String(team.max_parallel));
+    if (team) {
+      setMaxParallel(String(team.max_parallel));
+      setSpecTimeout(String(team.specialist_timeout));
+    }
   }, [team]);
 
   const handleTeamChange = async (updates: Partial<TeamSettings>) => {
@@ -617,6 +754,15 @@ function TeamsTab({
       return;
     }
     await handleTeamChange({ max_parallel: val });
+  };
+
+  const handleSpecTimeoutSave = async () => {
+    const val = parseInt(specTimeout, 10);
+    if (Number.isNaN(val) || val < 10 || val > 600) {
+      toast.error("Must be between 10 and 600 seconds");
+      return;
+    }
+    await handleTeamChange({ specialist_timeout: val });
   };
 
   const handleDelete = async (name: string) => {
@@ -721,6 +867,34 @@ function TeamsTab({
               </button>
             </div>
           </div>
+
+          <div className="border-t border-border" />
+
+          {/* Specialist timeout */}
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="text-sm text-text-primary">Specialist Timeout</p>
+              <p className="text-xs text-text-muted">Max seconds per specialist task (10-600)</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="10"
+                max="600"
+                value={specTimeout}
+                onChange={(e) => setSpecTimeout(e.target.value)}
+                className="w-20 px-2 py-1 text-sm text-center rounded-lg bg-bg-hover border border-border text-text-primary focus:outline-none focus:border-border-light"
+              />
+              <span className="text-xs text-text-muted">s</span>
+              <button
+                onClick={handleSpecTimeoutSave}
+                disabled={saving === "specialist_timeout"}
+                className="text-xs text-accent border border-accent/30 px-2 py-1 rounded-lg hover:bg-accent-soft disabled:opacity-40 transition-colors"
+              >
+                Save
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -750,8 +924,8 @@ function TeamsTab({
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-sm font-medium text-text-primary">{s.name}</span>
-                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${s.builtin ? "bg-cyan-soft text-cyan" : "bg-accent-soft text-accent"}`}>
-                      {s.builtin ? "builtin" : "custom"}
+                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${s.is_builtin ? "bg-cyan-soft text-cyan" : "bg-accent-soft text-accent"}`}>
+                      {s.is_builtin ? "builtin" : "custom"}
                     </span>
                   </div>
                   {s.display_name && s.display_name !== s.name && (
@@ -761,7 +935,7 @@ function TeamsTab({
                     <p className="text-[10px] text-text-muted">Model: {s.preferred_model}</p>
                   )}
                 </div>
-                {!s.builtin && (
+                {!s.is_builtin && (
                   <button
                     onClick={() => handleDelete(s.name)}
                     className="shrink-0 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-text-muted hover:text-error hover:bg-bg-hover transition-all"
@@ -777,6 +951,9 @@ function TeamsTab({
           <p className="text-xs text-text-muted py-4 text-center">No specialists loaded</p>
         )}
       </section>
+
+      {/* Team Sessions */}
+      <TeamSessionsSection />
 
       {/* Create specialist modal */}
       <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Add Specialist">
@@ -909,6 +1086,102 @@ function PendingApprovals() {
   );
 }
 
+function SkillPermissionsTable() {
+  const toast = useToast();
+  const [skills, setSkills] = useState<Record<string, unknown>[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.listSkillPermissions()
+      .then((data) => setSkills(Array.isArray(data) ? data : []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleLevelChange = async (skillName: string, newLevel: string) => {
+    try {
+      await api.setSkillPermission(skillName, newLevel);
+      setSkills((prev) =>
+        prev.map((s) =>
+          s.skill_name === skillName ? { ...s, effective_level: newLevel, has_override: true } : s
+        )
+      );
+      toast.success(`${skillName}: ${newLevel}`);
+    } catch {
+      toast.error("Failed to update permission");
+    }
+  };
+
+  const handleRemoveOverride = async (skillName: string) => {
+    try {
+      await api.removeSkillPermission(skillName);
+      setSkills((prev) =>
+        prev.map((s) =>
+          s.skill_name === skillName ? { ...s, has_override: false } : s
+        )
+      );
+      toast.success(`Override removed for ${skillName}`);
+    } catch {
+      toast.error("Failed to remove override");
+    }
+  };
+
+  if (loading || skills.length === 0) return null;
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <SectionHeading title="Skill Permissions" subtitle="Resolved permission level for each skill" />
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-text-muted border-b border-border">
+              <th className="text-left py-2 pr-4 font-medium">Skill</th>
+              <th className="text-left py-2 px-4 font-medium">Category</th>
+              <th className="text-center py-2 px-4 font-medium">Level</th>
+              <th className="text-right py-2 pl-4 font-medium">Override</th>
+            </tr>
+          </thead>
+          <tbody>
+            {skills.map((s) => {
+              const name = String(s.skill_name ?? "");
+              const cat = String(s.category ?? "—");
+              const level = String(s.effective_level ?? s.level ?? "ask");
+              const hasOverride = Boolean(s.has_override);
+              return (
+                <tr key={name} className="border-b border-border/50 hover:bg-bg-hover/50">
+                  <td className="py-2 pr-4 text-text-primary font-mono truncate max-w-[200px]">{name}</td>
+                  <td className="py-2 px-4 text-text-muted">{cat}</td>
+                  <td className="py-2 px-4 text-center">
+                    <select
+                      value={level}
+                      onChange={(e) => handleLevelChange(name, e.target.value)}
+                      className="text-[10px] px-2 py-0.5 rounded-full bg-bg-tertiary border border-border text-text-primary cursor-pointer"
+                    >
+                      {PERMISSION_LEVELS.map((l) => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="py-2 pl-4 text-right">
+                    {hasOverride && (
+                      <button
+                        onClick={() => handleRemoveOverride(name)}
+                        className="text-[10px] text-red-400 border border-red-400/30 px-2 py-0.5 rounded hover:bg-red-400/10"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function PermissionsTab({
   perms,
   onPermsUpdate,
@@ -1021,6 +1294,9 @@ function PermissionsTab({
           </div>
         </section>
       )}
+
+      {/* Per-skill permissions */}
+      <SkillPermissionsTable />
 
       {/* Auto-approve timeout */}
       <section className="bg-bg-secondary border border-border rounded-xl p-5">

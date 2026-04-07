@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useChatStream, type StreamingState, type ToolCallInfo } from "../hooks/useChatStream";
+import { useChatStream, type StreamingState, type ToolCallInfo, type UsageInfo } from "../hooks/useChatStream";
 import type { ConnectionStatus } from "../hooks/useWebSocket";
 import * as api from "../api";
 
@@ -19,6 +19,10 @@ export interface Message {
   content: string;
   timestamp: number;
   toolCalls?: ToolCallInfo[];
+  tokens?: number;
+  cost?: number;
+  model?: string;
+  latency_ms?: number;
 }
 
 export interface ChatSessionLocal {
@@ -63,8 +67,20 @@ function makeMessage(
   role: "user" | "assistant",
   content: string,
   toolCalls?: ToolCallInfo[],
+  usage?: UsageInfo | null,
+  latency_ms?: number,
 ): Message {
-  return { id: crypto.randomUUID(), role, content, timestamp: Date.now(), toolCalls };
+  return {
+    id: crypto.randomUUID(),
+    role,
+    content,
+    timestamp: Date.now(),
+    toolCalls,
+    tokens: usage?.total_tokens,
+    cost: usage?.cost,
+    model: usage?.model,
+    latency_ms,
+  };
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────
@@ -158,9 +174,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // ── Streaming ──────────────────────────────────────────────────────────
 
   const handleComplete = useCallback(
-    (payload: { content: string; toolCalls: ToolCallInfo[] }) => {
+    (payload: { content: string; toolCalls: ToolCallInfo[]; usage?: UsageInfo | null; latency_ms?: number }) => {
       const sid = activeIdRef.current;
-      const msg = makeMessage("assistant", payload.content, payload.toolCalls);
+      const msg = makeMessage("assistant", payload.content, payload.toolCalls, payload.usage, payload.latency_ms);
       updateSession(sid, (s) => ({ ...s, messages: [...s.messages, msg] }));
     },
     [updateSession],

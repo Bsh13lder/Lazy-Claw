@@ -38,6 +38,7 @@ class WebSocketCallback:
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     _buffer: str = field(default="", init=False)
     _closed: bool = field(default=False, init=False)
+    _work_summary: dict | None = field(default=None, init=False)
 
     async def _send(self, data: dict) -> None:
         if self._closed:
@@ -79,6 +80,9 @@ class WebSocketCallback:
                 "type": "specialist_done",
                 "name": event.metadata.get("specialist", event.detail),
             })
+
+        elif kind == "work_summary":
+            self._work_summary = event.metadata.get("summary")
 
         elif kind == "cancelled":
             await self._send({"type": "cancelled"})
@@ -167,10 +171,13 @@ async def chat_websocket(ws: WebSocket):
                             chat_session_id=session_id,
                         )
 
-                    await active_callback._send({
+                    done_payload: dict = {
                         "type": "done",
                         "content": result or active_callback._buffer,
-                    })
+                    }
+                    if active_callback._work_summary:
+                        done_payload["usage"] = active_callback._work_summary
+                    await active_callback._send(done_payload)
                 except asyncio.CancelledError:
                     await active_callback._send({"type": "cancelled"})
                 except Exception as exc:

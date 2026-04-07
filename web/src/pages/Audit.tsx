@@ -52,7 +52,7 @@ export default function Audit() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-lg font-semibold text-text-primary">Audit Log</h1>
-            <p className="text-sm text-text-muted">{count} entries recorded</p>
+            <p className="text-sm text-text-muted">Showing {count} entries</p>
           </div>
           <div className="flex items-center gap-2">
             <select

@@ -153,6 +153,15 @@ class CDPBackend:
             import tempfile
             profile_dir = os.path.join(tempfile.gettempdir(), "lazyclaw-cdp-profile")
 
+        # Clean stale profile locks (from crashed/killed containers or processes)
+        for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock_path = os.path.join(profile_dir, lock_file)
+            try:
+                if os.path.exists(lock_path) or os.path.islink(lock_path):
+                    os.unlink(lock_path)
+            except OSError:
+                pass
+
         # Auto-load LazyClaw ref engine extension (silent, no user prompt)
         ext_path = str(Path(__file__).parent / "extension")
 

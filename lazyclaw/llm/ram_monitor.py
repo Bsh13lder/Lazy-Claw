@@ -201,17 +201,32 @@ def _get_model_name_for_port(port: int) -> str | None:
 # ── macOS system info ─────────────────────────────────────────────────
 
 async def _get_total_ram() -> int:
-    """Get total system RAM in MB via sysctl."""
+    """Get total system RAM in MB. Tries sysctl (macOS) then /proc/meminfo (Linux)."""
+    # Try macOS sysctl first
     try:
         result = await asyncio.create_subprocess_exec(
             "sysctl", "-n", "hw.memsize",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         stdout, _ = await result.communicate()
-        return int(stdout.strip()) // (1024 * 1024)
+        value = stdout.strip()
+        if value and result.returncode == 0:
+            return int(value) // (1024 * 1024)
+    except FileNotFoundError:
+        pass  # Not macOS — try Linux
     except Exception:
-        logger.warning("Failed to get total RAM via sysctl", exc_info=True)
-        return 0
+        pass
+    # Try Linux /proc/meminfo
+    try:
+        import pathlib
+        meminfo = pathlib.Path("/proc/meminfo").read_text()
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // 1024  # kB to MB
+    except Exception:
+        pass
+    logger.debug("Could not determine total RAM (not macOS or Linux)")
+    return 0
 
 
 async def _get_ram_breakdown(total: int) -> dict[str, int]:
@@ -282,10 +297,37 @@ async def _get_ram_breakdown(total: int) -> dict[str, int]:
             "compressed_mb": _to_mb(compressed),
             "cached_mb": _to_mb(cached_pages),
         }
+    except FileNotFoundError:
+        pass  # Not macOS
     except Exception:
-        logger.warning("Failed to parse vm_stat output for RAM breakdown", exc_info=True)
+        logger.debug("Failed to parse vm_stat output for RAM breakdown")
 
-    # Fallback: memory_pressure percentage (no breakdown)
+    # Fallback 1: Linux /proc/meminfo
+    try:
+        import pathlib
+        meminfo = pathlib.Path("/proc/meminfo").read_text()
+        fields: dict[str, int] = {}
+        for line in meminfo.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                fields[parts[0].rstrip(":")] = int(parts[1])  # kB
+        available = fields.get("MemAvailable", 0) // 1024
+        cached = fields.get("Cached", 0) // 1024
+        buffers = fields.get("Buffers", 0) // 1024
+        used = total - available
+        return {
+            "available_mb": available,
+            "app_mb": max(0, used - cached - buffers),
+            "wired_mb": 0,
+            "compressed_mb": 0,
+            "cached_mb": cached + buffers,
+        }
+    except FileNotFoundError:
+        pass  # Not Linux
+    except Exception:
+        logger.debug("Failed to parse /proc/meminfo for RAM breakdown")
+
+    # Fallback 2: macOS memory_pressure percentage (no breakdown)
     try:
         result = await asyncio.create_subprocess_exec(
             "memory_pressure",
@@ -299,8 +341,10 @@ async def _get_ram_breakdown(total: int) -> dict[str, int]:
                 pct_str = line.split(":")[1].strip().rstrip("%")
                 free_pct = int(pct_str)
                 return {**zeroes, "available_mb": total * free_pct // 100}
+    except FileNotFoundError:
+        pass
     except Exception:
-        logger.warning("Failed to parse memory_pressure output for RAM breakdown fallback", exc_info=True)
+        logger.debug("Failed to parse memory_pressure output")
 
     return zeroes
 

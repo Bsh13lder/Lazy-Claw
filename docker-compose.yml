@@ -14,6 +14,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
+      - ~/.claude:/root/.claude:ro  # Mount Claude auth (Max subscription)
 
   lazyclaw-web:
     build:

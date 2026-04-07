@@ -46,6 +46,9 @@ RUN pip install --no-cache-dir \
         ./mcp-jobspy \
         n8n-mcp-server
 
+# Claude Code CLI (for claude-code MCP — agent uses Claude as coding tool)
+RUN npm install -g @anthropic-ai/claude-code
+
 # Optional bundled MCP server (Node.js)
 COPY mcp-whatsapp/package.json mcp-whatsapp/package-lock.json ./mcp-whatsapp/
 RUN cd mcp-whatsapp && npm ci --omit=dev && cd ..

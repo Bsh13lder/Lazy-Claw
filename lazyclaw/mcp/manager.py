@@ -77,8 +77,8 @@ BUNDLED_MCPS = {
     "claude-code": {
         "npx": "@steipete/claude-code-mcp",
         "description": "Full coding agent — build features, debug, refactor, code review, run tests. Use for complex code tasks. For simple file edits use write_file instead.",
-        # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth),
-        # not the API key which may have no credits
+        # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth)
+        # via mounted ~/.claude auth, not the API key
         "strip_env": ["ANTHROPIC_API_KEY"],
     },
     "mcp-jobspy": {

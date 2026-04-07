@@ -530,7 +530,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - Fast Dispatch: ✅ COMPLETE — agent_settings.py, TeamLeadState, heavy tool detection → TaskRunner → instant return. Agent limit skills (4). Team lead always free <2s
 - TUI Dashboard: ✅ COMPLETE — Textual-based, system bar, agent cards, activity feed, services panel, cost bar, AI routing panel, admin input
 - Telegram Clean UX: ✅ COMPLETE — typing indicator, delayed status msg, edit-in-place, footer with model attribution, background task push
-- Activepieces Integration: ✅ COMPLETE — docker-compose.activepieces.yml, MCP connection, 450+ app automations via Activepieces MCP trigger, full setup guide in docs/integrations/activepieces.md
+- Activepieces Integration: ❌ REMOVED — replaced by n8n native integration
 - Survival Instinct: ✅ COMPLETE — survival/profile.py, survival/matcher.py, 6 skills (search_jobs, apply_job, survival_mode, survival_status, set_skills_profile, review_deliverable). JobSpy MCP + Stripe MCP configured. Claude Code MCP critic for code review with auto-fix loop
 - Watcher System: ✅ COMPLETE — Zero-token site monitoring, WhatsApp/Gmail extractors, Telegram push notifications, smart diff
 - Tab Manager: ✅ COMPLETE — TabContext (scoped CDP per tab), TabLease, parallel specialist browser access

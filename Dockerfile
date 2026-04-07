@@ -56,5 +56,12 @@ COPY mcp-whatsapp/src/ ./mcp-whatsapp/src/
 
 RUN pip install -e .
 COPY .env.example .env.example
+
+# Create non-root user — required for Claude CLI
+# (refuses --dangerously-skip-permissions when running as root)
+RUN groupadd -r lazyclaw && useradd -r -g lazyclaw -m -d /home/lazyclaw lazyclaw \
+    && chown -R lazyclaw:lazyclaw /app
+USER lazyclaw
+
 EXPOSE 18789
 CMD ["lazyclaw", "start"]

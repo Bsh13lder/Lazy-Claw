@@ -33,9 +33,9 @@ class ModelProfile:
 
 MODE_MODELS: dict[str, dict[str, str]] = {
     "hybrid": {
-        # Sonnet 4.6 brain (paid) + Gemma 4 E2B via Ollama (free local worker)
+        # Sonnet 4.6 brain (paid) + LazyClaw Gemma 4 E2B via Ollama (free local worker)
         "brain":    "claude-sonnet-4-6",
-        "worker":   "gemma4:e2b",
+        "worker":   "lazyclaw-e2b",
         "fallback": "claude-haiku-4-5-20251001",
     },
     "full": {
@@ -52,8 +52,8 @@ MODE_MODELS: dict[str, dict[str, str]] = {
     },
 }
 
-# Ollama local models
-OLLAMA_WORKER_MODEL = "gemma4:e2b"
+# Ollama local models (custom Modelfiles with agent identity baked in)
+OLLAMA_WORKER_MODEL = "lazyclaw-e2b"
 
 
 def get_mode_models(mode: str) -> dict[str, str]:
@@ -73,11 +73,40 @@ PAID_WORKER_MODEL = MODE_MODELS["full"]["worker"]
 # ── Model catalog ─────────────────────────────────────────────────────
 
 MODEL_CATALOG: dict[str, ModelProfile] = {
-    # ── LOCAL — Ollama (Gemma 4 on Apple Silicon via Metal) ─────────────
-    # Default worker: Gemma 4 E2B — fits 16GB M2, native tool calling, 128K ctx
+    # ── LOCAL — Ollama (Gemma 4 with LazyClaw agent identity baked in) ──
+    # Custom Modelfiles: agent SYSTEM prompt + low temperature + 32K ctx
+    # Default worker: E2B — fits 16GB M2, native tool calling
+    "lazyclaw-e2b": ModelProfile(
+        name="lazyclaw-e2b",
+        display_name="Gemma 4 E2B",
+        provider="ollama",
+        is_local=True,
+        ram_mb=7200,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f916",  # 🤖
+        max_context=32768,
+        tool_calling=True,
+        role="worker",
+    ),
+    # E4B — better quality brain, tighter on 16GB (~9.6GB)
+    "lazyclaw-e4b": ModelProfile(
+        name="lazyclaw-e4b",
+        display_name="Gemma 4 E4B",
+        provider="ollama",
+        is_local=True,
+        ram_mb=9600,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="\U0001f9e0",  # 🧠
+        max_context=32768,
+        tool_calling=True,
+        role="brain",
+    ),
+    # Base models (without agent identity — for reference/fallback)
     "gemma4:e2b": ModelProfile(
         name="gemma4:e2b",
-        display_name="Gemma 4 E2B",
+        display_name="Gemma 4 E2B (base)",
         provider="ollama",
         is_local=True,
         ram_mb=7200,
@@ -88,10 +117,9 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         tool_calling=True,
         role="worker",
     ),
-    # Optional: Gemma 4 E4B — better quality, tighter on 16GB (~9.6GB)
     "gemma4:e4b": ModelProfile(
         name="gemma4:e4b",
-        display_name="Gemma 4 E4B",
+        display_name="Gemma 4 E4B (base)",
         provider="ollama",
         is_local=True,
         ram_mb=9600,
@@ -100,7 +128,7 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         icon="\U0001f9e0",  # 🧠
         max_context=131072,
         tool_calling=True,
-        role="worker",
+        role="brain",
     ),
 
     # ── CLI — FREE (user's Claude subscription) ────────────────────────

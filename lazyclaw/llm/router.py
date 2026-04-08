@@ -16,7 +16,7 @@ class LLMRouter:
             return "openai"
         elif model.startswith("claude-"):
             return "anthropic"
-        elif model.startswith(("gemma", "llama", "qwen", "phi", "mistral")):
+        elif model.startswith(("gemma", "llama", "qwen", "phi", "mistral", "lazyclaw-")):
             return "ollama"
         # Check MODEL_CATALOG for known local models
         from lazyclaw.llm.model_registry import get_model

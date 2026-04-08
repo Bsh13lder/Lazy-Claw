@@ -28,6 +28,8 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-cli (opus)": {"input": 0.0, "output": 0.0},
     "claude-cli (haiku)": {"input": 0.0, "output": 0.0},
     # Local Ollama models — $0 always
+    "lazyclaw-e2b": {"input": 0.0, "output": 0.0},
+    "lazyclaw-e4b": {"input": 0.0, "output": 0.0},
     "gemma4:e2b": {"input": 0.0, "output": 0.0},
     "gemma4:e4b": {"input": 0.0, "output": 0.0},
 }

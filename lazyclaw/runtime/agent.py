@@ -581,14 +581,24 @@ class Agent:
         from lazyclaw.runtime.context_builder import build_context
         from lazyclaw.runtime.personality import load_personality
 
-        # Check if using local model (needed for greeting prompt optimization)
+        # Check if using local model (needed for tool count optimization)
         _is_local_model = False
         try:
-            from lazyclaw.llm.eco_router import MODE_ECO_ON
             from lazyclaw.llm.eco_settings import get_eco_settings as _get_eco
+            from lazyclaw.llm.model_registry import get_model, get_mode_models
             logger.debug("process_message TRACE: loading eco settings...")
             _eco = await _get_eco(self.config, user_id)
-            _is_local_model = _eco.get("mode") == MODE_ECO_ON
+            _mode = _eco.get("mode", "hybrid")
+            # Check if the resolved worker model is local
+            _defaults = get_mode_models(_mode)
+            _worker_id = _eco.get(f"{_mode}_worker_model") or _eco.get("worker_model") or _defaults.get("worker", "")
+            _brain_id = _eco.get(f"{_mode}_brain_model") or _eco.get("brain_model") or _defaults.get("brain", "")
+            _worker_profile = get_model(_worker_id)
+            _brain_profile = get_model(_brain_id)
+            _is_local_model = bool(
+                (_worker_profile and _worker_profile.is_local)
+                or (_brain_profile and _brain_profile.is_local)
+            )
         except Exception:
             logger.debug("Failed to load eco settings for local model check", exc_info=True)
 
@@ -709,10 +719,10 @@ class Agent:
             if not _matched_channels:
                 _continuation_signals = {
                     "reply", "tell", "say", "send", "forward", "yes", "no",
-                    "ok", "read", "check", "show", "open", "next", "more",
+                    "ok", "read", "check", "show", "next", "more",
                 }
                 _words = set(_msg_lower.split())
-                _looks_like_continuation = bool(_words & _continuation_signals) or len(_msg_lower) < 40
+                _looks_like_continuation = bool(_words & _continuation_signals) and len(_msg_lower) < 40
                 if _looks_like_continuation:
                     for msg in history[-2:]:  # Only last 2 messages (immediate context)
                         if msg.role == "assistant" and msg.tool_calls:
@@ -919,6 +929,7 @@ class Agent:
                     _channel_tools = []
 
             # Build base tools + conditionally add browser.
+            # Smart tool selection: same for all models. LLM discovers extras via search_tools().
             # When channel MCP tools dominate, trim base set to reduce noise.
             _base_names = set(_BASE_TOOL_NAMES)
             if _channel_tools and not _wants_tasks and not _wants_survival:
@@ -974,13 +985,14 @@ class Agent:
                 if nt.get("function", {}).get("name") not in _existing_names:
                     tools.append(nt)
 
-            # Include favorite MCP tools
+            # Include favorite MCP tools ONLY when channel keywords matched
+            # (not on every message — the meta-tool pattern uses search_tools for discovery)
             _fav_prefixes = tuple(
                 f"mcp_{sid}_" for sid in _favorite_server_ids
                 if sid in _active_clients
             )
             _existing_names = {t.get("function", {}).get("name") for t in tools}
-            if _fav_prefixes:
+            if _fav_prefixes and _matched_channels:
                 for tool_info in self.registry.list_mcp_tools():
                     func = tool_info.get("function", {})
                     tname = func.get("name", "")
@@ -1267,9 +1279,20 @@ class Agent:
                             role=_iter_role, **kwargs
                         )
                         if response.content:
-                            await cb.on_event(AgentEvent(
-                                "token", response.content, {"model": response.model},
-                            ))
+                            # Strip <plan>/<taor_plan> tags before showing to user
+                            _display_content = response.content
+                            if "<plan>" in _display_content:
+                                _display_content = re.sub(
+                                    r"<plan>.*?</plan>\s*", "", _display_content, flags=re.DOTALL
+                                ).strip()
+                            if "<taor_plan>" in _display_content:
+                                _display_content = re.sub(
+                                    r"<taor_plan>.*?</taor_plan>\s*", "", _display_content, flags=re.DOTALL
+                                ).strip()
+                            if _display_content:
+                                await cb.on_event(AgentEvent(
+                                    "token", _display_content, {"model": response.model},
+                                ))
                     except Exception as exc:
                         logger.error("Chat failed: %s", exc, exc_info=True)
                         response = _LLMResp(

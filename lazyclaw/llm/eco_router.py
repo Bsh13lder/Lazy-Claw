@@ -536,17 +536,42 @@ class EcoRouter:
         models: dict[str, str],
         **kwargs,
     ) -> LLMResponse:
-        """Brain: paid API (Haiku in HYBRID, user-configured in FULL).
+        """Brain: paid API or local Ollama (user-configurable).
 
         Falls back to Claude CLI on auth errors (401) — prevents dead
         agent when API key is expired but Claude subscription works.
         """
         brain_name = models["brain"]
+        brain_profile = get_model(brain_name)
+        is_local_brain = brain_profile and brain_profile.is_local
+
         # CLI/MCP model names can't go through paid API — route to CLI
         if brain_name in ("claude-cli", "claude_code"):
             return await self._route_claude(
                 messages, user_id, settings=settings, **kwargs,
             )
+
+        # Local brain (user chose a local model like gemma4:e4b)
+        if is_local_brain:
+            _, worker_provider = await self._ensure_local()
+            provider = worker_provider or self._ollama
+            if provider:
+                try:
+                    return await self._call_local(
+                        provider, messages, brain_name, user_id,
+                        reason=f"{settings.mode}: brain -> {brain_name}",
+                        **kwargs,
+                    )
+                except Exception as exc:
+                    logger.warning("%s local brain failed: %s — falling back", settings.mode, exc)
+            # Local failed — fallback
+            return await self._fallback(
+                messages, user_id, settings, models,
+                reason=f"{settings.mode}: local_brain_failed",
+                **kwargs,
+            )
+
+        # Paid brain (default path)
         try:
             return await self._route_paid(
                 messages, user_id, brain_name,
@@ -887,6 +912,39 @@ class EcoRouter:
                 )
                 return
 
+            # Local brain streaming (user chose a local model)
+            brain_profile = get_model(brain_name)
+            is_local_brain = brain_profile and brain_profile.is_local
+            if is_local_brain:
+                _, worker_provider = await self._ensure_local()
+                provider = worker_provider or self._ollama
+                if provider:
+                    self._set_routing(
+                        brain_name, "ollama", is_local=True,
+                        reason=f"{settings.mode}_stream: brain -> {brain_name}",
+                    )
+                    try:
+                        async for chunk in provider.stream_chat(
+                            messages, model=brain_name, **kwargs
+                        ):
+                            yield chunk
+                    except Exception as exc:
+                        logger.warning("Local brain stream failed: %s — non-streaming fallback", exc)
+                        response = await self._fallback(
+                            messages, user_id, settings, models,
+                            reason=f"{settings.mode}: local_brain_stream_failed",
+                            **kwargs,
+                        )
+                        yield StreamChunk(
+                            delta=response.content,
+                            tool_calls=response.tool_calls,
+                            usage=response.usage,
+                            model=response.model,
+                            done=True,
+                        )
+                    return
+
+            # Paid brain streaming (default)
             self._record_usage(user_id, "paid")
             provider = "anthropic" if brain_name.startswith("claude-") else "openai"
             self._set_routing(

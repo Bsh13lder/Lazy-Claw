@@ -77,13 +77,13 @@ async def get_agent_status(user: User = Depends(get_current_user)):
     bg_running: list[dict] = []
     if _task_runner is not None:
         try:
-            for task_id, name, elapsed in _task_runner.list_running(user.id):
+            for task in _task_runner.list_running(user.id):
                 bg_running.append({
-                    "task_id": task_id,
-                    "name": name,
+                    "task_id": task["id"],
+                    "name": task["name"],
                     "lane": "background",
                     "status": "running",
-                    "elapsed_s": round(elapsed, 1),
+                    "elapsed_s": round(task["elapsed_seconds"], 1),
                 })
         except Exception:
             logger.warning("Failed to list running background tasks", exc_info=True)

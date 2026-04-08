@@ -16,9 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Chromium for browser automation (site watchers, CDP)
 # lsof needed by ram_monitor.py for port checks
+# VNC stack: Xvfb (virtual display) + x11vnc + websockify + noVNC for remote takeover
 RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         lsof \
+        xvfb \
+        x11vnc \
+        python3-websockify \
+        novnc \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

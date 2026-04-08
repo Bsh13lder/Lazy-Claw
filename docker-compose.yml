@@ -7,12 +7,21 @@ services:
     shm_size: '1gb'
     ports:
       - "18789:18789"
+      - "6080:6080"    # noVNC remote takeover (browser control from phone)
     env_file: .env
     environment:
       # n8n MCP connection (inside docker network)
       - N8N_HOST=http://lazyclaw-n8n:5678
       # Ollama runs on the host Mac — reach it via Docker's host gateway
       - OLLAMA_HOST=http://host.docker.internal:11434
+      # Enable server mode for VNC remote takeover in Docker
+      - LAZYCLAW_SERVER_MODE=true
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18789/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills

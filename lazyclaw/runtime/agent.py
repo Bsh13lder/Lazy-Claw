@@ -2138,9 +2138,10 @@ class Agent:
                             "ready", "show me", "show", "ok", "yes",
                         ):
                             if not getattr(self, "is_background", False):
-                                from lazyclaw.skills.builtin.browser_skill import (
-                                    _get_visible_cdp_backend, _raise_browser_window,
-                                    _stop_remote_session,
+                                from lazyclaw.skills.builtin.browser_actions.backends import (
+                                    get_visible_cdp_backend as _get_visible_cdp_backend,
+                                    raise_browser_window as _raise_browser_window,
+                                    stop_remote_session as _stop_remote_session,
                                 )
                                 await _get_visible_cdp_backend(user_id)
 
@@ -2207,7 +2208,7 @@ class Agent:
 
                         # Take snapshot after user intervention
                         try:
-                            from lazyclaw.skills.builtin.browser_skill import _get_cdp_backend
+                            from lazyclaw.skills.builtin.browser_actions.backends import get_cdp_backend as _get_cdp_backend
                             _snap_backend = await _get_cdp_backend(user_id)
                             _snap_url = await _snap_backend.current_url()
                             _snap_title = await _snap_backend.title()

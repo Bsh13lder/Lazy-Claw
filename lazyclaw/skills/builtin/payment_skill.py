@@ -251,7 +251,7 @@ class PaymentSkill(BaseSkill):
 
     async def _detect_payment(self, user_id: str) -> str:
         from lazyclaw.browser.payment import detect_payment_page
-        from lazyclaw.skills.builtin.browser_skill import _get_cdp_backend
+        from lazyclaw.skills.builtin.browser_actions.backends import get_cdp_backend as _get_cdp_backend
 
         backend = await _get_cdp_backend(user_id)
         result = await detect_payment_page(backend)

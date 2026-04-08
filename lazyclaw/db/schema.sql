@@ -356,6 +356,9 @@ CREATE TABLE IF NOT EXISTS background_tasks (
     result TEXT,
     error TEXT,
     timeout INTEGER DEFAULT 300,
+    cost_usd REAL DEFAULT 0.0,
+    tokens_used INTEGER DEFAULT 0,
+    llm_calls INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT
 );

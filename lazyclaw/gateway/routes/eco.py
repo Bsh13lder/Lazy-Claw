@@ -100,6 +100,50 @@ async def get_usage(user: User = Depends(get_current_user)):
     }
 
 
+@router.get("/costs")
+async def get_costs(user: User = Depends(get_current_user)):
+    """Get per-model cost breakdown (mirrors TUI cost panel)."""
+    if _eco_router_instance is None:
+        return {
+            "success": True,
+            "data": {
+                "models": {},
+                "total_cost": 0.0,
+                "total_calls": 0,
+                "local_pct": 0,
+            },
+        }
+
+    stats = _eco_router_instance.get_routing_stats()
+    return {"success": True, "data": stats}
+
+
+@router.get("/rates")
+async def get_rates(user: User = Depends(get_current_user)):
+    """Get all model token rates (cost per 1K tokens)."""
+    from lazyclaw.llm.pricing import MODEL_COSTS
+
+    rates = [
+        {
+            "model": model,
+            "input_per_1k": costs["input"],
+            "output_per_1k": costs["output"],
+            "is_free": costs["input"] == 0 and costs["output"] == 0,
+        }
+        for model, costs in MODEL_COSTS.items()
+    ]
+    return {"success": True, "data": {"rates": rates}}
+
+
+@router.post("/rates/refresh")
+async def refresh_rates(user: User = Depends(get_current_user)):
+    """Refresh model rates from provider pricing pages."""
+    from lazyclaw.llm.pricing import refresh_rates as do_refresh
+
+    updated = await do_refresh()
+    return {"success": True, "data": {"updated_models": updated}}
+
+
 @router.get("/rate-limits")
 async def get_rate_limits(user: User = Depends(get_current_user)):
     """Get current rate limit status for all free providers."""

@@ -24,7 +24,11 @@ class AnthropicProvider(BaseLLMProvider):
 
     @staticmethod
     def _serialize_messages(messages: list[LLMMessage]) -> list[dict]:
-        """Serialize messages for Anthropic API, handling tool calls and merging consecutive user messages."""
+        """Serialize messages for Anthropic API, handling tool calls and merging consecutive user messages.
+
+        Ensures the conversation never ends with an assistant message
+        (Anthropic rejects assistant-prefill on newer models).
+        """
         result: list[dict] = []
 
         for m in messages:
@@ -58,6 +62,11 @@ class AnthropicProvider(BaseLLMProvider):
 
             else:
                 result.append({"role": m.role, "content": m.content})
+
+        # Anthropic requires the conversation to end with a user message.
+        # If it ends with assistant, drop trailing assistant messages.
+        while result and result[-1].get("role") == "assistant":
+            result.pop()
 
         return result
 

@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.gateway.auth import User, get_current_user
@@ -92,6 +93,40 @@ async def get_agent_status(user: User = Depends(get_current_user)):
         "background": bg_running,
         "recent": recent,
     }
+
+
+class CancelRequest(BaseModel):
+    task_id: str
+
+
+@router.post("/cancel")
+async def cancel_task(
+    body: CancelRequest,
+    user: User = Depends(get_current_user),
+):
+    """Cancel a running background task."""
+    if _task_runner is None:
+        return {"success": False, "error": "Task runner not available"}
+
+    cancelled = await _task_runner.cancel(body.task_id, user.id)
+    if cancelled:
+        return {"success": True, "data": {"task_id": body.task_id, "status": "cancelled"}}
+    return {"success": False, "error": "Task not found or not cancellable"}
+
+
+@router.post("/cancel-all")
+async def cancel_all_tasks(user: User = Depends(get_current_user)):
+    """Cancel all running background tasks for the current user."""
+    if _task_runner is None:
+        return {"success": False, "error": "Task runner not available"}
+
+    running = _task_runner.list_running(user.id)
+    cancelled = []
+    for task_id, name, _ in running:
+        if await _task_runner.cancel(task_id, user.id):
+            cancelled.append({"task_id": task_id, "name": name})
+
+    return {"success": True, "data": {"cancelled": cancelled, "count": len(cancelled)}}
 
 
 @router.get("/activity/feed")

@@ -221,13 +221,17 @@ class TaskRunner:
                     user_id, instruction, callback=callback,
                 )
 
-            # Store result (encrypted)
+            # Store result (encrypted) + cost stats from work_summary
             encrypted_result = encrypt(result, key)
+            _cost = _captured_summary.total_cost if _captured_summary else 0.0
+            _tokens = _captured_summary.total_tokens if _captured_summary else 0
+            _calls = _captured_summary.llm_calls if _captured_summary else 0
             async with db_session(self._config) as db:
                 await db.execute(
                     "UPDATE background_tasks SET status = 'done', result = ?, "
+                    "cost_usd = ?, tokens_used = ?, llm_calls = ?, "
                     "completed_at = datetime('now') WHERE id = ?",
-                    (encrypted_result, task_id),
+                    (encrypted_result, _cost, _tokens, _calls, task_id),
                 )
                 await db.commit()
 
@@ -353,7 +357,8 @@ class TaskRunner:
 
         async with db_session(self._config) as db:
             rows = await db.execute(
-                "SELECT id, name, status, error, created_at, completed_at "
+                "SELECT id, name, status, error, created_at, completed_at, "
+                "cost_usd, tokens_used, llm_calls "
                 "FROM background_tasks WHERE user_id = ? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (user_id, limit),
@@ -369,6 +374,9 @@ class TaskRunner:
                 "error": row[3],
                 "created_at": row[4],
                 "completed_at": row[5],
+                "cost_usd": row[6] or 0.0,
+                "tokens_used": row[7] or 0,
+                "llm_calls": row[8] or 0,
             })
         return tasks
 

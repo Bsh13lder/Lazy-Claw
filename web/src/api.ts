@@ -96,6 +96,13 @@ export interface EcoUsage {
   free_percentage: number;
 }
 
+export interface EcoCosts {
+  models: Record<string, unknown>;
+  total_cost: number;
+  total_calls: number;
+  local_pct: number;
+}
+
 export interface EcoProvider {
   name: string;
   configured: boolean;
@@ -390,6 +397,9 @@ export const getEcoRateLimits = () =>
 export const getEcoModels = () =>
   request<{ success: boolean; data: ModelsData }>("/api/eco/models").then((r) => r.data);
 
+export const getEcoCosts = () =>
+  request<{ success: boolean; data: EcoCosts }>("/api/eco/costs").then((r) => r.data);
+
 // ── Teams ──────────────────────────────────────────────────────────────────
 
 export const getTeamSettings = () =>
@@ -500,6 +510,15 @@ export const getActivityFeed = (limit = 30) =>
 
 export const getAgentMetrics = () =>
   request<{ success: boolean; data: AgentMetrics }>("/api/agents/metrics").then((r) => r.data);
+
+export const cancelTask = (taskId: string) =>
+  request<{ success: boolean }>("/api/agents/cancel", {
+    method: "POST",
+    body: JSON.stringify({ task_id: taskId }),
+  });
+
+export const cancelAllTasks = () =>
+  request<{ success: boolean }>("/api/agents/cancel-all", { method: "POST" });
 
 // ── Replay ─────────────────────────────────────────────────────────────────
 

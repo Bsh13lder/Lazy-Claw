@@ -2376,7 +2376,7 @@ class Agent:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
-                # Update message count
+                # Update message count + auto-set title from first user message
                 if chat_session_id:
                     await db.execute(
                         "UPDATE agent_chat_sessions SET message_count = "
@@ -2384,6 +2384,15 @@ class Agent:
                         "WHERE id = ?",
                         (chat_session_id, chat_session_id),
                     )
+                    # Set title from first user message if still untitled
+                    user_msgs = [m for m in all_new_messages if m.role == "user"]
+                    if user_msgs:
+                        first_text = user_msgs[0].content[:50]
+                        await db.execute(
+                            "UPDATE agent_chat_sessions SET title = ? "
+                            "WHERE id = ? AND (title IS NULL OR title = '')",
+                            (first_text, chat_session_id),
+                        )
                 await db.commit()
 
             # Record and return the final assistant message content

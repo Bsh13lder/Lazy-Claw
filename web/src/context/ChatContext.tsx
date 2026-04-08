@@ -52,6 +52,18 @@ interface ChatContextValue {
 
 const ChatContext = createContext<ChatContextValue | null>(null);
 
+// ── localStorage persistence ──────────────────────────────────────────────
+
+const SESSION_KEY = "lazyclaw_active_session_id";
+
+function persistActiveSession(id: string): void {
+  try { localStorage.setItem(SESSION_KEY, id); } catch { /* private browsing */ }
+}
+
+function loadPersistedSession(): string | null {
+  try { return localStorage.getItem(SESSION_KEY); } catch { return null; }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function makeLocalSession(id?: string, title?: string): ChatSessionLocal {
@@ -93,6 +105,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const activeIdRef = useRef(activeSessionId);
   useEffect(() => {
     activeIdRef.current = activeSessionId;
+    if (activeSessionId) persistActiveSession(activeSessionId);
   }, [activeSessionId]);
 
   // Load sessions from backend on mount
@@ -111,12 +124,20 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       } else {
         const local = remote.map((r) => ({
           id: r.id,
-          title: r.title,
+          title: r.title || "New Chat",
           messages: [] as Message[],
           loaded: false,
         }));
         setSessions(local);
-        setActiveSessionId(local[0].id);
+        // Restore last-used session if still in list, else pick the one with most messages
+        const persisted = loadPersistedSession();
+        const match = persisted && local.find((s) => s.id === persisted);
+        if (match) {
+          setActiveSessionId(match.id);
+        } else {
+          // Pick most recent session (they're ordered by created_at DESC from backend)
+          setActiveSessionId(local[0].id);
+        }
       }
     }).catch(() => {
       // Backend unavailable — create local session
@@ -128,10 +149,19 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Load messages when switching to an unloaded session
+  // Note: only depends on activeSessionId — sessions is checked via ref-like
+  // updater pattern to avoid re-trigger loops from setSessions.
   useEffect(() => {
     if (!activeSessionId) return;
-    const session = sessions.find((s) => s.id === activeSessionId);
-    if (!session || session.loaded) return;
+
+    // Check if session needs loading via updater to avoid sessions dep
+    let needsLoad = false;
+    setSessions((prev) => {
+      const session = prev.find((s) => s.id === activeSessionId);
+      needsLoad = !!session && !session.loaded;
+      return prev; // no mutation — just reading
+    });
+    if (!needsLoad) return;
 
     let alive = true;
     api.getSessionMessages(activeSessionId, { limit: 100 }).then((msgs) => {
@@ -162,7 +192,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       );
     });
     return () => { alive = false; };
-  }, [activeSessionId, sessions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId]);
 
   const updateSession = useCallback(
     (id: string, updater: (s: ChatSessionLocal) => ChatSessionLocal) => {
@@ -240,17 +271,26 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const deleteSession = useCallback(
     (id: string) => {
       api.deleteChatSession(id).catch(() => {});
+      const wasActive = activeIdRef.current === id;
+
       setSessions((prev) => {
         const next = prev.filter((s) => s.id !== id);
         if (next.length === 0) {
-          const fresh = makeLocalSession();
-          api.createChatSession("New Chat").catch(() => {});
-          return [fresh];
-        }
-        if (activeIdRef.current === id) {
-          setActiveSessionId(next[0].id);
+          return [makeLocalSession()];
         }
         return next;
+      });
+
+      // Handle side effects outside state updater
+      setSessions((current) => {
+        if (current.length === 1 && current[0].loaded && current[0].messages.length === 0) {
+          // Fresh session just created above — sync with backend
+          api.createChatSession("New Chat").catch(() => {});
+        }
+        if (wasActive) {
+          setActiveSessionId(current[0].id);
+        }
+        return current; // no mutation
       });
     },
     [],

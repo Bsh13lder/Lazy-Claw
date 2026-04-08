@@ -7,12 +7,14 @@ import {
   type ReactNode,
 } from "react";
 import * as api from "../api";
-import type { AgentStatus, ActivityEvent, AgentMetrics } from "../api";
+import type { AgentStatus, ActivityEvent, AgentMetrics, EcoUsage, EcoCosts } from "../api";
 
 interface AgentStatusContextValue {
   agentStatus: AgentStatus | null;
   activityFeed: ActivityEvent[];
   metrics: AgentMetrics | null;
+  ecoUsage: EcoUsage | null;
+  ecoCosts: EcoCosts | null;
 }
 
 const AgentStatusContext = createContext<AgentStatusContextValue | null>(null);
@@ -21,6 +23,8 @@ export function AgentStatusProvider({ children }: { children: ReactNode }) {
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
   const [metrics, setMetrics] = useState<AgentMetrics | null>(null);
+  const [ecoUsage, setEcoUsage] = useState<EcoUsage | null>(null);
+  const [ecoCosts, setEcoCosts] = useState<EcoCosts | null>(null);
   const aliveRef = useRef(true);
 
   useEffect(() => {
@@ -42,11 +46,19 @@ export function AgentStatusProvider({ children }: { children: ReactNode }) {
       } catch { /* ignore */ }
     };
 
-    // Metrics — every 10s
+    // Metrics + ECO usage — every 10s
     const pollMetrics = async () => {
       try {
         const data = await api.getAgentMetrics();
         if (aliveRef.current) setMetrics(data);
+      } catch { /* ignore */ }
+      try {
+        const usage = await api.getEcoUsage();
+        if (aliveRef.current) setEcoUsage(usage);
+      } catch { /* ignore */ }
+      try {
+        const costs = await api.getEcoCosts();
+        if (aliveRef.current) setEcoCosts(costs);
       } catch { /* ignore */ }
     };
 
@@ -68,7 +80,7 @@ export function AgentStatusProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AgentStatusContext.Provider value={{ agentStatus, activityFeed, metrics }}>
+    <AgentStatusContext.Provider value={{ agentStatus, activityFeed, metrics, ecoUsage, ecoCosts }}>
       {children}
     </AgentStatusContext.Provider>
   );

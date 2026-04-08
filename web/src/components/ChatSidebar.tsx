@@ -1,80 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useChat } from "../context/ChatContext";
 import MessageBubble from "./MessageBubble";
 import ChatInput from "./ChatInput";
 import ConnectionStatus from "./ConnectionStatus";
-
-// ── Session List Dropdown ─────────────────────────────────────────────────
-
-function SessionDropdown() {
-  const { sessions, activeSessionId, selectSession, createSession, deleteSession } = useChat();
-  const [open, setOpen] = useState(false);
-  const dropRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (dropRef.current && !dropRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const active = sessions.find((s) => s.id === activeSessionId);
-
-  return (
-    <div ref={dropRef} className="relative flex-1 min-w-0">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-text-primary hover:bg-bg-hover transition-colors w-full min-w-0"
-      >
-        <span className="truncate">{active?.title ?? "New Chat"}</span>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-text-muted">
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-      </button>
-
-      {open && (
-        <div className="absolute top-full left-0 mt-1 w-64 bg-bg-secondary border border-border rounded-xl shadow-lg z-50 max-h-[300px] overflow-y-auto">
-          <button
-            onClick={() => { createSession(); setOpen(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-accent hover:bg-bg-hover transition-colors border-b border-border"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            New Chat
-          </button>
-          {sessions.map((s) => (
-            <div
-              key={s.id}
-              className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors group ${
-                s.id === activeSessionId ? "bg-bg-hover text-text-primary" : "text-text-secondary hover:bg-bg-hover/60"
-              }`}
-            >
-              <button
-                onClick={() => { selectSession(s.id); setOpen(false); }}
-                className="flex-1 text-left truncate"
-              >
-                {s.title}
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-error/20 text-text-muted hover:text-error transition-all"
-                title="Delete"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Chat Sidebar ──────────────────────────────────────────────────────────
 
 export default function ChatSidebar() {
   const {
@@ -87,6 +15,7 @@ export default function ChatSidebar() {
     chatExpanded,
     toggleChat,
     toggleExpanded,
+    createSession,
   } = useChat();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -124,9 +53,25 @@ export default function ChatSidebar() {
   return (
     <div className={`${widthClass} bg-bg-primary border-l border-border flex flex-col shrink-0 transition-all duration-200`}>
       {/* Header */}
-      <div className="flex items-center gap-1 px-2 py-2 border-b border-border bg-bg-secondary shrink-0">
-        <SessionDropdown />
+      <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-bg-secondary shrink-0">
+        {/* Title */}
+        <span className="text-xs font-medium text-text-primary truncate flex-1 min-w-0">
+          {activeSession.title || "Chat"}
+        </span>
+
+        {/* New chat */}
+        <button
+          onClick={createSession}
+          className="p-1.5 rounded-lg hover:bg-bg-hover text-text-muted hover:text-accent transition-colors"
+          title="New chat"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+
         <ConnectionStatus status={connectionStatus} />
+
         {/* Expand/collapse toggle */}
         <button
           onClick={toggleExpanded}
@@ -185,6 +130,10 @@ export default function ChatSidebar() {
                 content={m.content}
                 timestamp={m.timestamp}
                 toolCalls={m.toolCalls}
+                tokens={m.tokens}
+                cost={m.cost}
+                model={m.model}
+                latency_ms={m.latency_ms}
               />
             ))}
 

@@ -33,8 +33,24 @@ class UpdateSessionRequest(BaseModel):
 
 @router.get("/sessions")
 async def list_sessions(user: User = Depends(get_current_user)):
-    """List user's chat sessions (non-archived, newest first)."""
+    """List user's chat sessions (non-archived, newest first).
+
+    Also repairs orphaned messages — creates missing session rows
+    for any chat_session_id that has messages but no session entry.
+    """
     async with db_session(_config) as db:
+        # Repair orphaned messages — create missing session rows
+        await db.execute(
+            "INSERT OR IGNORE INTO agent_chat_sessions (id, user_id, message_count) "
+            "SELECT m.chat_session_id, m.user_id, COUNT(*) "
+            "FROM agent_messages m "
+            "LEFT JOIN agent_chat_sessions s ON s.id = m.chat_session_id "
+            "WHERE m.user_id = ? AND s.id IS NULL "
+            "GROUP BY m.chat_session_id",
+            (user.id,),
+        )
+        await db.commit()
+
         rows = await db.execute(
             "SELECT id, title, message_count, created_at "
             "FROM agent_chat_sessions "

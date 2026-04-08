@@ -11,6 +11,10 @@ interface MessageBubbleProps {
   timestamp?: number;
   toolCalls?: ToolCallInfo[];
   isStreaming?: boolean;
+  tokens?: number;
+  cost?: number;
+  model?: string;
+  latency_ms?: number;
 }
 
 function formatTime(ts: number): string {
@@ -27,7 +31,7 @@ function CopyButton({ text }: { text: string }) {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    }).catch(() => { /* clipboard denied — non-HTTPS or permission blocked */ });
   }, [text]);
 
   return (
@@ -41,14 +45,26 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function formatCost(cost: number): string {
+  if (cost === 0) return "Free";
+  if (cost < 0.001) return `$${cost.toFixed(5)}`;
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(3)}`;
+}
+
 export default function MessageBubble({
   role,
   content,
   timestamp,
   toolCalls,
   isStreaming,
+  tokens,
+  cost,
+  model,
+  latency_ms,
 }: MessageBubbleProps) {
   const isUser = role === "user";
+  const hasMeta = !isUser && !isStreaming && (tokens != null || cost != null || model != null);
 
   return (
     <div className="animate-fade-in py-4 group">
@@ -119,6 +135,32 @@ export default function MessageBubble({
                 {content}
               </ReactMarkdown>
               {isStreaming && <span className="typing-cursor" />}
+            </div>
+          )}
+
+          {/* Token / cost / model metadata */}
+          {hasMeta && (
+            <div className="msg-meta mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              {model && (
+                <span className="msg-meta-pill bg-bg-tertiary text-text-muted">
+                  {model}
+                </span>
+              )}
+              {tokens != null && tokens > 0 && (
+                <span className="msg-meta-pill bg-bg-tertiary text-text-muted">
+                  {tokens.toLocaleString()} tok
+                </span>
+              )}
+              {cost != null && (
+                <span className={`msg-meta-pill ${cost === 0 ? "bg-accent-soft text-accent" : "bg-amber-soft text-amber"}`}>
+                  {formatCost(cost)}
+                </span>
+              )}
+              {latency_ms != null && latency_ms > 0 && (
+                <span className="msg-meta-pill bg-bg-tertiary text-text-muted">
+                  {latency_ms < 1000 ? `${latency_ms}ms` : `${(latency_ms / 1000).toFixed(1)}s`} TTFT
+                </span>
+              )}
             </div>
           )}
         </div>

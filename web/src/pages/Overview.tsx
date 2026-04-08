@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useCallback, useState } from "react";
 import * as api from "../api";
-import type { AgentStatus, Job, McpServer, ActivityEvent } from "../api";
+import type { AgentStatus, Job, McpServer, ActivityEvent, EcoUsage, EcoCosts } from "../api";
 import { useAuth } from "../context/AuthContext";
 import { useChat } from "../context/ChatContext";
 import { useAgentStatus } from "../context/AgentStatusContext";
+import { RecentTaskRow } from "../components/TaskRow";
 import type { Page } from "../components/NavShell";
 
 /* ── Types ──────────────────────────────────────────────────────────── */
@@ -20,8 +21,6 @@ interface HealthData {
   ecoMode: string;
   pendingApprovals: number;
 }
-
-// ActivityItem removed — using real ActivityEvent from context
 
 /* ── Sub-components ─────────────────────────────────────────────────── */
 
@@ -58,13 +57,13 @@ function StatCard({
   accent?: boolean;
 }) {
   return (
-    <div className="bg-bg-secondary border border-border rounded-xl p-4 card-hover flex items-start gap-3 animate-fade-in">
+    <div className="glass-card glow-accent rounded-xl p-4 flex items-start gap-3 animate-fade-in">
       <div className={`p-2 rounded-lg shrink-0 ${accent ? "bg-accent-soft text-accent" : "bg-bg-tertiary text-text-muted"}`}>
         {icon}
       </div>
       <div className="min-w-0">
         <p className="text-[11px] text-text-muted uppercase tracking-wider mb-0.5">{title}</p>
-        <p className="text-xl font-semibold text-text-primary tabular-nums">{value}</p>
+        <p className="text-xl font-semibold text-text-primary stat-value">{value}</p>
         {sub && <p className="text-[11px] text-text-muted mt-0.5">{sub}</p>}
       </div>
     </div>
@@ -77,7 +76,7 @@ function ResourceGauge({ label, value, max, unit }: { label: string; value: numb
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <span className="text-xs text-text-muted">{label}</span>
-        <span className="text-xs text-text-secondary tabular-nums">
+        <span className="text-xs text-text-secondary stat-value">
           {value}{unit && <span className="text-text-muted">/{max}{unit}</span>}
         </span>
       </div>
@@ -131,14 +130,23 @@ const LANE_STYLE: Record<string, string> = {
   specialist: "bg-orange-900/30 text-orange-400",
 };
 
-const STATUS_STYLE: Record<string, string> = {
-  running: "bg-accent-soft text-accent",
-  done: "bg-green-900/30 text-green-400",
-  failed: "bg-red-900/30 text-red-400",
-  cancelled: "bg-yellow-900/30 text-yellow-400",
-};
-
 function AgentStatusPanel({ agentStatus }: { agentStatus: AgentStatus | null }) {
+  const [expandedTask, setExpandedTask] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<Set<string>>(new Set());
+
+  const handleCancel = useCallback(async (taskId: string) => {
+    setCancelling((prev) => new Set(prev).add(taskId));
+    try {
+      await api.cancelTask(taskId);
+    } catch { /* ignore — status poll will update */ }
+  }, []);
+
+  const handleCancelAll = useCallback(async () => {
+    try {
+      await api.cancelAllTasks();
+    } catch { /* ignore */ }
+  }, []);
+
   if (!agentStatus) return null;
 
   const allActive = [...agentStatus.active, ...agentStatus.background];
@@ -154,16 +162,36 @@ function AgentStatusPanel({ agentStatus }: { agentStatus: AgentStatus | null }) 
             <span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent text-[10px] font-medium">
               {allActive.length}
             </span>
+            {allActive.length > 1 && (
+              <button
+                onClick={handleCancelAll}
+                className="ml-auto px-2.5 py-1 text-[10px] rounded-lg border border-red-400/30 text-red-400 hover:bg-red-900/20 transition-colors"
+              >
+                Cancel All
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {allActive.map((t) => (
-              <div key={t.task_id} className="bg-bg-secondary border border-border rounded-xl p-4 card-hover">
+              <div key={t.task_id} className="glass-card glow-accent rounded-xl p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm font-medium text-text-primary truncate">{t.name}</span>
                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${LANE_STYLE[t.lane] || "bg-bg-tertiary text-text-muted"}`}>
                     {t.lane}
                   </span>
-                  <span className="ml-auto text-xs text-text-muted tabular-nums">{t.elapsed_s}s</span>
+                  <span className="ml-auto text-xs text-text-muted stat-value">{t.elapsed_s}s</span>
+                  <button
+                    onClick={() => handleCancel(t.task_id)}
+                    disabled={cancelling.has(t.task_id)}
+                    className="p-1 rounded-lg text-text-muted hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-40"
+                    title="Cancel task"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="15" y1="9" x2="9" y2="15" />
+                      <line x1="9" y1="9" x2="15" y2="15" />
+                    </svg>
+                  </button>
                 </div>
                 {t.description && <p className="text-xs text-text-muted truncate">{t.description}</p>}
                 {t.current_step && (
@@ -177,31 +205,21 @@ function AgentStatusPanel({ agentStatus }: { agentStatus: AgentStatus | null }) 
         </div>
       )}
 
-      {/* Recent completed */}
+      {/* Recent completed — expandable rows */}
       {agentStatus.recent.length > 0 && (
         <div>
           <h2 className="text-sm font-semibold text-text-primary mb-3 flex items-center gap-2">
             Agent History
             <span className="text-[10px] text-text-muted font-normal">{agentStatus.recent.length} recent</span>
           </h2>
-          <div className="bg-bg-secondary border border-border rounded-xl overflow-hidden">
-            {agentStatus.recent.slice(0, 5).map((t) => (
-              <div key={t.task_id} className="flex items-center gap-3 px-4 py-2.5 border-b border-border last:border-b-0 hover:bg-bg-hover/50 transition-colors">
-                <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium uppercase tracking-wider ${STATUS_STYLE[t.status] || "bg-bg-tertiary text-text-muted"}`}>
-                  {t.status}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm text-text-primary truncate">{t.name}</p>
-                  {t.result_preview && <p className="text-[11px] text-text-muted truncate">{t.result_preview}</p>}
-                  {t.error && <p className="text-[11px] text-red-400 truncate">{t.error}</p>}
-                </div>
-                <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${LANE_STYLE[t.lane] || "bg-bg-tertiary text-text-muted"}`}>
-                  {t.lane}
-                </span>
-                <span className="text-xs text-text-muted tabular-nums shrink-0">
-                  {t.duration_s != null ? `${t.duration_s}s` : "-"}
-                </span>
-              </div>
+          <div className="glass-card rounded-xl overflow-hidden">
+            {agentStatus.recent.slice(0, 8).map((t) => (
+              <RecentTaskRow
+                key={t.task_id}
+                task={t}
+                expanded={expandedTask === t.task_id}
+                onToggle={() => setExpandedTask(expandedTask === t.task_id ? null : t.task_id)}
+              />
             ))}
           </div>
         </div>
@@ -210,10 +228,82 @@ function AgentStatusPanel({ agentStatus }: { agentStatus: AgentStatus | null }) 
   );
 }
 
+/* ── Cost & Usage Panel ──────────────────────────────────────── */
+
+function CostUsagePanel({
+  ecoUsage,
+  ecoCosts,
+  ecoMode,
+}: {
+  ecoUsage: EcoUsage | null;
+  ecoCosts: EcoCosts | null;
+  ecoMode: string;
+}) {
+  if (!ecoUsage && !ecoCosts) return null;
+
+  const totalCost = ecoCosts?.total_cost ?? 0;
+  const freePct = ecoUsage?.free_percentage ?? 0;
+  const totalCalls = ecoCosts?.total_calls ?? ecoUsage?.total ?? 0;
+  const localPct = ecoCosts?.local_pct ?? 0;
+
+  return (
+    <div className="animate-fade-in">
+      <h2 className="text-sm font-semibold text-text-primary mb-3 flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber">
+          <line x1="12" y1="1" x2="12" y2="23" /><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+        </svg>
+        Cost & Token Usage
+        <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider font-medium ml-auto ${
+          ecoMode === "eco" ? "bg-accent-soft text-accent" :
+          ecoMode === "hybrid" ? "bg-cyan-soft text-cyan" :
+          ecoMode === "claude" ? "bg-purple-900/30 text-purple-400" :
+          "bg-bg-tertiary text-text-muted"
+        }`}>
+          {ecoMode}
+        </span>
+      </h2>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Total Cost */}
+        <div className="glass-card glow-accent rounded-xl p-4">
+          <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Total Cost</p>
+          <p className={`text-lg font-semibold stat-value ${totalCost === 0 ? "text-accent" : "text-amber"}`}>
+            {totalCost === 0 ? "Free" : `$${totalCost.toFixed(4)}`}
+          </p>
+        </div>
+
+        {/* Free/Local % */}
+        <div className="glass-card rounded-xl p-4">
+          <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Free / Local</p>
+          <p className="text-lg font-semibold text-accent stat-value">{freePct}%</p>
+          <div className="h-1 bg-bg-tertiary rounded-full mt-2 overflow-hidden">
+            <div className="h-full bg-accent rounded-full" style={{ width: `${freePct}%` }} />
+          </div>
+        </div>
+
+        {/* Total Calls */}
+        <div className="glass-card rounded-xl p-4">
+          <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Total Calls</p>
+          <p className="text-lg font-semibold text-text-primary stat-value">{totalCalls.toLocaleString()}</p>
+        </div>
+
+        {/* Local Model % */}
+        <div className="glass-card rounded-xl p-4">
+          <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Local Models</p>
+          <p className="text-lg font-semibold text-cyan stat-value">{localPct}%</p>
+          <div className="h-1 bg-bg-tertiary rounded-full mt-2 overflow-hidden">
+            <div className="h-full bg-cyan rounded-full" style={{ width: `${localPct}%` }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(diff)) return iso;
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
@@ -221,8 +311,6 @@ function timeAgo(iso: string): string {
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
 }
-
-// buildActivity removed — using real ActivityEvent from context
 
 /* ── Main component ──────────────────────────────────────────────── */
 
@@ -241,7 +329,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
     ecoMode: "...",
     pendingApprovals: 0,
   });
-  const { agentStatus, activityFeed, metrics } = useAgentStatus();
+  const { agentStatus, activityFeed, metrics, ecoUsage, ecoCosts } = useAgentStatus();
   const [uptime, setUptime] = useState("—");
 
   useEffect(() => {
@@ -258,8 +346,8 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
 
       const healthResp = results[0].status === "fulfilled" ? results[0].value : null;
       const skills = results[1].status === "fulfilled" ? results[1].value : [];
-      const jobs: Job[] = results[2].status === "fulfilled" ? (results[2].value as Job[]) : [];
-      const mcp: McpServer[] = results[3].status === "fulfilled" ? (results[3].value as McpServer[]) : [];
+      const jobs = results[2].status === "fulfilled" ? results[2].value : [];
+      const mcp = results[3].status === "fulfilled" ? results[3].value : [];
       const memories = results[4].status === "fulfilled" ? results[4].value : [];
       const eco = results[5].status === "fulfilled" ? results[5].value : null;
       const approvals = results[6].status === "fulfilled" ? results[6].value : [];
@@ -302,7 +390,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
     "Gateway offline";
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full overflow-y-auto grid-bg">
       <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
 
         {/* ── Welcome banner ────────────────────────────────────── */}
@@ -315,7 +403,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
 
         {/* ── System health banner ──────────────────────────────── */}
         <div className="animate-fade-in">
-          <div className="flex items-center gap-3 px-5 py-4 rounded-xl bg-bg-secondary border border-border">
+          <div className="flex items-center gap-3 px-5 py-4 rounded-xl glass-card glow-accent">
             <LiveDot status={health.gateway} />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-text-primary">{gatewayLabel}</p>
@@ -323,7 +411,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
                 v{health.version} &middot; {uptime} &middot; {health.connectedMcp}/{health.mcpServers} MCP servers
               </p>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-bg-tertiary">
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-bg-tertiary/60">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent">
                 <rect x="3" y="11" width="18" height="11" rx="2" />
                 <path d="M7 11V7a5 5 0 0110 0v4" />
@@ -384,29 +472,32 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
         {/* ── Agent Performance ──────────────────────────────── */}
         {metrics && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade-in">
-            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+            <div className="glass-card rounded-xl p-4">
               <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Success Rate</p>
-              <p className={`text-lg font-semibold ${metrics.success_rate >= 80 ? "text-green-400" : metrics.success_rate >= 50 ? "text-amber" : "text-red-400"}`}>
+              <p className={`text-lg font-semibold stat-value ${metrics.success_rate >= 80 ? "text-green-400" : metrics.success_rate >= 50 ? "text-amber" : "text-red-400"}`}>
                 {metrics.success_rate}%
               </p>
               <div className="h-1 bg-bg-tertiary rounded-full mt-2 overflow-hidden">
                 <div className="h-full bg-green-400 rounded-full" style={{ width: `${metrics.success_rate}%` }} />
               </div>
             </div>
-            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+            <div className="glass-card rounded-xl p-4">
               <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Avg Duration</p>
-              <p className="text-lg font-semibold text-text-primary">{metrics.avg_duration_s}s</p>
+              <p className="text-lg font-semibold text-text-primary stat-value">{metrics.avg_duration_s}s</p>
             </div>
-            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+            <div className="glass-card rounded-xl p-4">
               <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Tasks / Hour</p>
-              <p className="text-lg font-semibold text-text-primary">{metrics.tasks_last_hour}</p>
+              <p className="text-lg font-semibold text-text-primary stat-value">{metrics.tasks_last_hour}</p>
             </div>
-            <div className="bg-bg-secondary border border-border rounded-xl p-4">
+            <div className="glass-card rounded-xl p-4">
               <p className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Tool Calls Today</p>
-              <p className="text-lg font-semibold text-cyan">{metrics.tool_calls_today}</p>
+              <p className="text-lg font-semibold text-cyan stat-value">{metrics.tool_calls_today}</p>
             </div>
           </div>
         )}
+
+        {/* ── Cost & Token Usage ──────────────────────────────── */}
+        <CostUsagePanel ecoUsage={ecoUsage} ecoCosts={ecoCosts} ecoMode={health.ecoMode} />
 
         {/* ── Live Agent Status ──────────────────────────────── */}
         <AgentStatusPanel agentStatus={agentStatus} />
@@ -415,7 +506,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
 
           {/* Resource usage */}
-          <div className="lg:col-span-2 bg-bg-secondary border border-border rounded-xl p-5 animate-fade-in-1 space-y-5">
+          <div className="lg:col-span-2 glass-card rounded-xl p-5 animate-fade-in-1 space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-text-primary">Resources</h2>
               <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider font-medium ${
@@ -447,7 +538,7 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             />
 
             {/* Quick info rows */}
-            <div className="pt-2 border-t border-border space-y-2">
+            <div className="pt-2 border-t border-border/50 space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-text-muted">ECO Mode</span>
                 <span className="text-text-primary font-medium">{health.ecoMode.toUpperCase()}</span>
@@ -465,8 +556,8 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             </div>
           </div>
 
-          {/* Activity feed — real events from context */}
-          <div className="lg:col-span-3 bg-bg-secondary border border-border rounded-xl animate-fade-in-2 flex flex-col">
+          {/* Activity feed */}
+          <div className="lg:col-span-3 glass-card rounded-xl animate-fade-in-2 flex flex-col">
             <div className="flex items-center justify-between px-5 pt-4 pb-2">
               <h2 className="text-sm font-semibold text-text-primary">Recent Activity</h2>
               <span className="text-[10px] text-text-muted">{activityFeed.length} events</span>
@@ -547,7 +638,7 @@ function QuickAction({ label, icon, onClick }: { label: string; icon: React.Reac
   return (
     <button
       onClick={onClick}
-      className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-bg-secondary border border-border text-text-secondary hover:text-text-primary hover:border-border-light card-hover transition-colors text-sm"
+      className="flex items-center gap-2.5 px-4 py-3 rounded-xl glass-card glow-accent text-text-secondary hover:text-text-primary transition-colors text-sm"
     >
       <span className="text-text-muted">{icon}</span>
       {label}

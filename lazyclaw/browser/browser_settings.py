@@ -18,11 +18,13 @@ from lazyclaw.db.connection import db_session
 logger = logging.getLogger(__name__)
 
 VALID_MODES = {"off", "auto", "on"}
+VALID_BACKENDS = {"cdp", "browser_use"}
 
 DEFAULT_BROWSER = {
     "persistent": "auto",      # "off" | "auto" | "on"
     "idle_timeout": 3600,      # seconds before auto-close (auto mode), 1 hour
     "cdp_approved": False,     # user approved auto-restart Brave with CDP
+    "backend": "cdp",          # "cdp" (raw CDP) | "browser_use" (Playwright via browser-use)
 }
 
 # In-memory activity tracker (no DB overhead)

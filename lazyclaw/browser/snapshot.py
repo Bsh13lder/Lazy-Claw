@@ -518,6 +518,54 @@ class SnapshotManager:
 
         return "\n".join(lines).rstrip()
 
+    def format_snapshot_compact(
+        self,
+        snapshot: PageSnapshot,
+        preview_per_landmark: int = 3,
+    ) -> str:
+        """Ultra-compact snapshot — landmark summaries + top elements only.
+
+        Produces ~4x fewer tokens than format_snapshot for large pages.
+        LLM can expand specific landmarks via snapshot(landmark="main").
+
+        Use when: element_count > 30 and no specific task_hint/landmark_filter.
+        """
+        if not snapshot.landmarks:
+            return (
+                f"Page: {snapshot.title} | {snapshot.url}\n"
+                f"PAGE IS BLANK — 0 elements. Login may be required."
+            )
+
+        lines = [
+            f"Page: {snapshot.title} | {_short_url(snapshot.url)}",
+            f"Total: {snapshot.element_count} interactive elements",
+        ]
+
+        if snapshot.context:
+            for key, val in snapshot.context:
+                label = key.replace("_rows", " items").replace("_", " ")
+                lines.append(f"  {label}: {val}")
+
+        lines.append("")
+
+        for lm in snapshot.landmarks:
+            count = len(lm.ref_ids)
+            lines.append(f"[{lm.name}] ({count} elements)")
+
+            # Show first few elements as preview
+            for ref_id in lm.ref_ids[:preview_per_landmark]:
+                el = snapshot.elements.get(ref_id)
+                if el:
+                    lines.append(_format_element(el))
+
+            remaining = count - preview_per_landmark
+            if remaining > 0:
+                lines.append(f"  ... +{remaining} more (use snapshot landmark='{lm.name}' to expand)")
+            lines.append("")
+
+        lines.append("TIP: Use snapshot(landmark='name') to expand a specific section.")
+        return "\n".join(lines).rstrip()
+
 
 # ── Formatting helpers ────────────────────────────────────────────────
 

@@ -42,6 +42,9 @@ class CompiledStep:
     text: str            # Text to type (for "type" action)
     url: str             # URL to navigate (for "open" action)
     wait_seconds: float  # Wait time (for "wait" action)
+    # Stagehand-style cached selectors — recorded on success, used for replay
+    css_selector: str = ""   # CSS selector that worked last time
+    aria_label: str = ""     # ARIA label for self-healing fallback
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,10 @@ def compile_path(
     for step in browser_steps:
         action = step.action or ""
         target = step.target or ""
+        # Extract cached selector and ARIA info from step metadata
+        css_sel = getattr(step, "css_selector", "") or ""
+        aria = getattr(step, "aria_label", "") or ""
+        role = getattr(step, "ref_role", "") or ""
 
         if action == "open":
             compiled_steps.append(CompiledStep(
@@ -125,23 +132,26 @@ def compile_path(
                 wait_seconds=0,
             ))
         elif action == "click":
-            # Extract role/name from target description
             compiled_steps.append(CompiledStep(
                 action="click",
-                ref_role="",  # Will be filled by snapshot matching
+                ref_role=role,
                 ref_name=target,
                 text="",
                 url="",
                 wait_seconds=0,
+                css_selector=css_sel,
+                aria_label=aria,
             ))
         elif action == "type":
             compiled_steps.append(CompiledStep(
                 action="type",
-                ref_role="",
+                ref_role=role,
                 ref_name=target,
                 text="",  # Don't save actual typed text (privacy)
                 url="",
                 wait_seconds=0,
+                css_selector=css_sel,
+                aria_label=aria,
             ))
         elif action == "press_key":
             compiled_steps.append(CompiledStep(
@@ -190,6 +200,8 @@ async def save_compiled_path(
             "text": s.text,
             "url": s.url,
             "wait": s.wait_seconds,
+            "css": s.css_selector,
+            "aria": s.aria_label,
         }
         for s in path.steps
     ]
@@ -275,6 +287,8 @@ async def find_compiled_path(
             text=s.get("text", ""),
             url=s.get("url", ""),
             wait_seconds=float(s.get("wait", 0)),
+            css_selector=s.get("css", ""),
+            aria_label=s.get("aria", ""),
         )
         for s in steps_data
     )
@@ -303,3 +317,153 @@ async def mark_path_failed(
         title=f"PATH: {task_pattern[:100]}",
     )
     logger.info("Marked compiled path as failed: %s", task_pattern[:60])
+
+
+# ── Replay compiled paths (Stagehand-style) ──────────────────────────
+
+
+async def replay_path(
+    backend,
+    path: CompiledPath,
+    dynamic_text: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Replay a compiled path without LLM — pure cached actions.
+
+    Uses cached CSS selectors first (fast, no LLM). Falls back to
+    role/name accessibility matching if selector fails (self-healing).
+
+    Args:
+        backend: CDPBackend or BrowserUseBackend
+        path: compiled path to replay
+        dynamic_text: map of step_index -> text to type (for type actions)
+
+    Returns:
+        (success, summary) tuple
+    """
+    import asyncio
+
+    results: list[str] = []
+    total = len(path.steps)
+
+    for i, step in enumerate(path.steps):
+        try:
+            if step.action == "open" and step.url:
+                await backend.goto(step.url)
+                await asyncio.sleep(2.0)
+                results.append(f"{i+1}. open {step.url[:50]}")
+
+            elif step.action == "click":
+                clicked = await _replay_click(backend, step)
+                if not clicked:
+                    return False, (
+                        f"Replay failed at step {i+1}/{total}: "
+                        f"could not find element '{step.ref_name}'"
+                    )
+                results.append(f"{i+1}. click '{step.ref_name}'")
+                await asyncio.sleep(0.5)
+
+            elif step.action == "type":
+                text = (dynamic_text or {}).get(str(i), step.text)
+                if not text:
+                    results.append(f"{i+1}. type (skipped — no text)")
+                    continue
+                typed = await _replay_type(backend, step, text)
+                if not typed:
+                    return False, (
+                        f"Replay failed at step {i+1}/{total}: "
+                        f"could not find input '{step.ref_name}'"
+                    )
+                results.append(f"{i+1}. type '{text[:20]}...'")
+
+            elif step.action == "press_key" and step.ref_name:
+                await backend.press_key(step.ref_name)
+                results.append(f"{i+1}. press_key {step.ref_name}")
+                await asyncio.sleep(0.3)
+
+            elif step.action == "scroll":
+                direction = step.ref_name if step.ref_name in ("up", "down") else "down"
+                await backend.scroll(direction)
+                results.append(f"{i+1}. scroll {direction}")
+                await asyncio.sleep(0.5)
+
+            elif step.action == "wait":
+                wait = min(step.wait_seconds, 10.0)
+                await asyncio.sleep(wait)
+                results.append(f"{i+1}. wait {wait}s")
+
+        except Exception as exc:
+            return False, (
+                f"Replay failed at step {i+1}/{total}: {exc}"
+            )
+
+    summary = f"Replay complete ({total}/{total} steps):\n" + "\n".join(results)
+    return True, summary
+
+
+async def _replay_click(backend, step: CompiledStep) -> bool:
+    """Try clicking via cached selector, fall back to role/name matching."""
+    # Strategy 1: cached CSS selector (instant, no searching)
+    if step.css_selector:
+        try:
+            await backend.click(step.css_selector)
+            logger.debug("Replay click via cached CSS: %s", step.css_selector)
+            return True
+        except Exception:
+            logger.debug("Cached CSS selector failed: %s", step.css_selector)
+
+    # Strategy 2: ARIA label match (self-healing)
+    if step.aria_label:
+        try:
+            match = await backend.click_by_role(step.aria_label)
+            if match:
+                logger.debug("Replay click via ARIA: %s", step.aria_label)
+                return True
+        except Exception:
+            logger.debug("ARIA click failed: %s", step.aria_label)
+
+    # Strategy 3: original ref_name (accessibility tree search)
+    if step.ref_name:
+        try:
+            match = await backend.click_by_role(step.ref_name)
+            if match:
+                logger.debug("Replay click via ref_name: %s", step.ref_name)
+                return True
+        except Exception:
+            logger.debug("ref_name click failed: %s", step.ref_name)
+
+    return False
+
+
+async def _replay_type(backend, step: CompiledStep, text: str) -> bool:
+    """Try typing via cached selector, fall back to role/name matching."""
+    # Strategy 1: cached CSS selector
+    if step.css_selector:
+        try:
+            await backend.type_text(step.css_selector, text)
+            return True
+        except Exception:
+            logger.debug("Cached CSS type failed: %s", step.css_selector)
+
+    # Strategy 2: find by role/name, click to focus, then type
+    if step.ref_name or step.aria_label:
+        target = step.aria_label or step.ref_name
+        try:
+            match = await backend.find_element_by_role(target)
+            if match:
+                await backend.click(f"[aria-label='{target}']")
+                import asyncio
+                await asyncio.sleep(0.2)
+                # Type character by character
+                conn = await backend._ensure_connected()
+                for char in text:
+                    await conn.send("Input.dispatchKeyEvent", {
+                        "type": "keyDown", "text": char, "key": char,
+                    })
+                    await conn.send("Input.dispatchKeyEvent", {
+                        "type": "keyUp", "key": char,
+                    })
+                return True
+        except Exception:
+            logger.debug("Role-based type failed: %s", target)
+
+    return False

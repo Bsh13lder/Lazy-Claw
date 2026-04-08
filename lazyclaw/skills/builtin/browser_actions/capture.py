@@ -57,6 +57,18 @@ async def action_snapshot(
     snapshot = await snapshot_mgr.take_snapshot(backend)
     task_hint = params.get("task_hint")
     landmark_filter = params.get("landmark")
+
+    # Auto-compact mode for large pages (>30 elements) when no specific
+    # filter/hint is given — saves ~4x tokens. LLM can expand via landmark param.
+    use_compact = (
+        snapshot.element_count > 30
+        and not task_hint
+        and not landmark_filter
+    )
+
+    if use_compact:
+        return snapshot_mgr.format_snapshot_compact(snapshot)
+
     return snapshot_mgr.format_snapshot(
         snapshot,
         task_hint=task_hint,

@@ -43,20 +43,47 @@ def query_to_url(query: str) -> str:
 
 # ── CDP backend helpers ─────────────────────────────────────────────────
 
+async def _get_user_backend_pref(user_id: str) -> str:
+    """Get user's preferred browser backend ('cdp' or 'browser_use')."""
+    try:
+        from lazyclaw.browser.browser_settings import get_browser_settings
+        from lazyclaw.config import load_config
+        config = load_config()
+        settings = await get_browser_settings(config, user_id)
+        return settings.get("backend", "cdp")
+    except Exception:
+        return "cdp"
+
+
 async def get_cdp_backend(user_id: str = "default"):
-    """Get or create the CDP backend for a user.
+    """Get or create the browser backend for a user.
 
     Lazy singleton — recreates if user_id profile changed.
+    Respects user's backend preference (cdp vs browser_use).
     """
     global _cdp_backend
-    from lazyclaw.browser.cdp_backend import CDPBackend
     from lazyclaw.config import load_config
 
     config = load_config()
-    port = getattr(config, "cdp_port", 9222)
     profile_dir = str(config.database_dir / "browser_profiles" / user_id)
 
-    if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
+    # Check if user wants browser-use backend
+    backend_pref = await _get_user_backend_pref(user_id)
+    if backend_pref == "browser_use":
+        from lazyclaw.browser.browser_use_backend import is_available
+        if is_available():
+            from lazyclaw.browser.browser_use_backend import BrowserUseBackend
+            if _cdp_backend is None or getattr(_cdp_backend, "backend_type", "") != "browser_use":
+                _cdp_backend = BrowserUseBackend(headless=True, profile_dir=profile_dir)
+            return _cdp_backend
+        else:
+            logger.warning("browser-use not installed, falling back to CDP backend")
+
+    # Default: raw CDP backend
+    from lazyclaw.browser.cdp_backend import CDPBackend
+    port = getattr(config, "cdp_port", 9222)
+
+    if _cdp_backend is None or getattr(_cdp_backend, "_profile_dir", None) != profile_dir:
         _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
     return _cdp_backend
 

@@ -21,6 +21,30 @@ from .read_open import element_not_found_hint
 
 logger = logging.getLogger(__name__)
 
+# Consecutive failure counter for vision fallback (reset on success)
+_consecutive_failures: int = 0
+
+
+def _record_success() -> None:
+    global _consecutive_failures
+    _consecutive_failures = 0
+
+
+def _record_failure() -> int:
+    global _consecutive_failures
+    _consecutive_failures += 1
+    return _consecutive_failures
+
+
+async def _try_vision_fallback(backend, failure_count: int, context: str):
+    """Try vision analysis if failure threshold reached. Returns VisionAnalysis or None."""
+    try:
+        from lazyclaw.browser.vision_fallback import check_and_analyze
+        return await check_and_analyze(backend, failure_count, context)
+    except Exception as exc:
+        logger.debug("Vision fallback unavailable: %s", exc)
+        return None
+
 
 async def action_click(
     user_id: str, params: dict, tab_context, snapshot_mgr, verifier,
@@ -60,10 +84,26 @@ async def action_click(
                         target_ref=ref, error_text=_error_text,
                     )
                     confirm += f"\n{_vr.format(f'Clicked [{ref}]')}"
+                    if _vr.succeeded:
+                        _record_success()
+                    else:
+                        count = _record_failure()
+                        vision = await _try_vision_fallback(backend, count, f"click {ref} failed")
+                        if vision:
+                            confirm += f"\n\nVISION: {vision.description}\nSuggestion: {vision.suggestion}"
                 except Exception as exc:
                     logger.debug("Post-click verification failed: %s", exc)
+            else:
+                _record_success()
             return confirm
-        return f"Ref '{ref}' not found or element is gone. Take a new snapshot to get fresh refs."
+
+        # Ref not found — record failure and try vision
+        count = _record_failure()
+        hint = f"Ref '{ref}' not found or element is gone. Take a new snapshot to get fresh refs."
+        vision = await _try_vision_fallback(backend, count, f"ref {ref} not found")
+        if vision:
+            hint += f"\n\nVISION: {vision.description}\nSuggestion: {vision.suggestion}"
+        return hint
 
     # CSS selector path
     is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))

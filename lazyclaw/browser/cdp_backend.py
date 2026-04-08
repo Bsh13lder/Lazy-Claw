@@ -160,7 +160,7 @@ class CDPBackend:
                 if os.path.exists(lock_path) or os.path.islink(lock_path):
                     os.unlink(lock_path)
             except OSError:
-                pass
+                logger.debug("Failed to remove stale browser lock file: %s", lock_path, exc_info=True)
 
         # Auto-load LazyClaw ref engine extension (silent, no user prompt)
         ext_path = str(Path(__file__).parent / "extension")

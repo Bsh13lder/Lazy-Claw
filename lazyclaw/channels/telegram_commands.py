@@ -1726,7 +1726,7 @@ class TelegramCommands:
             try:
                 await update.message.delete()
             except Exception:
-                pass
+                logger.debug("Could not delete plaintext password message from chat", exc_info=True)
 
             await self._reply(update,
                 "\u2705 <b>Password reset!</b>\n\n"

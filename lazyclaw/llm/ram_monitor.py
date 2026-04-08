@@ -215,7 +215,7 @@ async def _get_total_ram() -> int:
     except FileNotFoundError:
         pass  # Not macOS — try Linux
     except Exception:
-        pass
+        logger.debug("Failed to read total RAM via sysctl", exc_info=True)
     # Try Linux /proc/meminfo
     try:
         import pathlib
@@ -224,7 +224,7 @@ async def _get_total_ram() -> int:
             if line.startswith("MemTotal:"):
                 return int(line.split()[1]) // 1024  # kB to MB
     except Exception:
-        pass
+        logger.debug("Failed to read total RAM from /proc/meminfo", exc_info=True)
     logger.debug("Could not determine total RAM (not macOS or Linux)")
     return 0
 
@@ -342,7 +342,7 @@ async def _get_ram_breakdown(total: int) -> dict[str, int]:
                 free_pct = int(pct_str)
                 return {**zeroes, "available_mb": total * free_pct // 100}
     except FileNotFoundError:
-        pass
+        logger.debug("memory_pressure command not found (not macOS)", exc_info=True)
     except Exception:
         logger.debug("Failed to parse memory_pressure output")
 

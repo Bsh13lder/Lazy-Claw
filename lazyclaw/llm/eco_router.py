@@ -225,6 +225,15 @@ async def _load_eco_settings(config: Config, user_id: str) -> EcoSettings:
     return _parse_eco_settings(result[0])
 
 
+def _infer_paid_provider(model: str) -> str:
+    """Infer paid provider name from model name."""
+    if model.startswith("claude-"):
+        return "anthropic"
+    if model.startswith(("MiniMax-", "minimax-")):
+        return "minimax"
+    return "openai"
+
+
 # ── EcoRouter ─────────────────────────────────────────────────────────
 
 class EcoRouter:
@@ -485,6 +494,16 @@ class EcoRouter:
         """Both HYBRID and FULL always auto-fallback."""
         return True
 
+    async def get_fallback_model(self, user_id: str) -> str:
+        """Public: return the fallback model name for this user's current mode.
+
+        Used by callers (Agent) to force-escalate when the brain/worker
+        returns empty responses repeatedly (e.g. MiniMax error 2013).
+        """
+        settings = await _load_eco_settings(self._config, user_id)
+        models = self._resolve_models(settings)
+        return models["fallback"]
+
     # ── Main chat router ──────────────────────────────────────────────
 
     async def chat(
@@ -509,6 +528,11 @@ class EcoRouter:
 
         # Explicit model override — bypass routing
         if model and role not in (ROLE_BRAIN, ROLE_WORKER):
+            # Claude CLI is not a paid API model — route through CLI provider
+            if model == "claude-cli":
+                return await self._route_claude(
+                    messages, user_id, settings=settings, **kwargs,
+                )
             return await self._route_paid(messages, user_id, model, **kwargs)
 
         if role == ROLE_BRAIN:
@@ -741,11 +765,11 @@ class EcoRouter:
         reason: str = "paid",
         **kwargs,
     ) -> LLMResponse:
-        """Route to paid provider (Claude/OpenAI)."""
+        """Route to paid provider (Claude/OpenAI/MiniMax)."""
         # Guard: non-API models must not reach paid routing
         if model in ("claude-cli", "claude_code"):
             raise ValueError(f"Cannot route non-API model to paid provider: {model}")
-        provider = "anthropic" if model.startswith("claude-") else "openai"
+        provider = _infer_paid_provider(model)
         self._set_routing(model, provider, is_local=False, reason=reason)
         self._record_usage(user_id, "paid")
 
@@ -946,7 +970,7 @@ class EcoRouter:
 
             # Paid brain streaming (default)
             self._record_usage(user_id, "paid")
-            provider = "anthropic" if brain_name.startswith("claude-") else "openai"
+            provider = _infer_paid_provider(brain_name)
             self._set_routing(
                 brain_name, provider, is_local=False,
                 reason=f"{settings.mode}_stream: brain",
@@ -985,7 +1009,7 @@ class EcoRouter:
         # Falls back to Claude CLI on auth errors (401).
         if not is_local_worker:
             self._record_usage(user_id, "paid")
-            provider = "anthropic" if worker_name.startswith("claude-") else "openai"
+            provider = _infer_paid_provider(worker_name)
             self._set_routing(
                 worker_name, provider, is_local=False,
                 reason=f"{settings.mode}_stream: worker",

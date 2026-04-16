@@ -85,7 +85,13 @@ async def _n8n_request(
         resp.raise_for_status()
         if resp.status_code == 204:
             return {}
-        return resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            data = None
+        if data is None:
+            return {}
+        return data
 
 
 def _connection_error_msg(exc: Exception) -> str:

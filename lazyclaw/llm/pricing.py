@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 MODEL_COSTS: dict[str, dict[str, float]] = {
     # OpenAI
     "gpt-5-mini": {"input": 0.00015, "output": 0.0006},
+    # MiniMax — Token Plan subscription (no per-token billing)
+    "minimax-m2.7": {"input": 0.0, "output": 0.0},
+    "minimax-m2.7-highspeed": {"input": 0.0, "output": 0.0},
+    "minimax-m2.5": {"input": 0.0, "output": 0.0},
+    "minimax-m2.5-highspeed": {"input": 0.0, "output": 0.0},
     "gpt-5": {"input": 0.005, "output": 0.015},
     "gpt-4.1-mini": {"input": 0.0004, "output": 0.0016},
     "gpt-4.1": {"input": 0.002, "output": 0.008},

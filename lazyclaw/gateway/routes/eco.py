@@ -167,24 +167,39 @@ async def list_providers(
     """List all AI providers (paid + free) and their configuration status."""
     import os
     from lazyclaw.llm.free_providers import get_provider_info
+    from lazyclaw.crypto.vault import get_credential
 
     free_info = get_provider_info()
+
+    # Check both env AND vault for paid provider keys
+    async def paid_configured(env_key: str) -> bool:
+        if os.environ.get(env_key):
+            return True
+        vault_val = await get_credential(config, user.id, env_key)
+        return bool(vault_val and vault_val.strip())
 
     # Build paid providers from env / config
     paid_providers = [
         {
             "name": "anthropic",
             "display_name": "Anthropic (Claude)",
-            "configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "configured": await paid_configured("ANTHROPIC_API_KEY"),
             "is_paid": True,
             "env_key": "ANTHROPIC_API_KEY",
         },
         {
             "name": "openai",
             "display_name": "OpenAI (GPT)",
-            "configured": bool(os.environ.get("OPENAI_API_KEY")),
+            "configured": await paid_configured("OPENAI_API_KEY"),
             "is_paid": True,
             "env_key": "OPENAI_API_KEY",
+        },
+        {
+            "name": "minimax",
+            "display_name": "MiniMax (Token Plan)",
+            "configured": await paid_configured("MINIMAX_API_KEY"),
+            "is_paid": True,
+            "env_key": "MINIMAX_API_KEY",
         },
     ]
 

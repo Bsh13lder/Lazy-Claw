@@ -26,6 +26,8 @@ class Config:
     cors_origin: str = "http://localhost:3000"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    minimax_api_key: str | None = None
+    minimax_base_url: str = "https://api.minimax.io/v1"
     telegram_bot_token: str | None = None
     browser_timeout: int = 300
     computer_timeout: int = 30
@@ -44,6 +46,10 @@ def load_config() -> Config:
 
     openai_key = os.getenv("OPENAI_API_KEY") or None
     anthropic_key = os.getenv("ANTHROPIC_API_KEY") or None
+    minimax_key = os.getenv("MINIMAX_API_KEY") or None
+    minimax_base_url = os.getenv(
+        "MINIMAX_BASE_URL", "https://api.minimax.io/v1"
+    ) or "https://api.minimax.io/v1"
 
     # Brain model: main agent, team lead, complex fallback
     explicit_brain = os.getenv("BRAIN_MODEL") or os.getenv("DEFAULT_MODEL")
@@ -72,6 +78,8 @@ def load_config() -> Config:
         cors_origin=os.getenv("CORS_ORIGIN", "http://localhost:3000"),
         openai_api_key=openai_key,
         anthropic_api_key=anthropic_key,
+        minimax_api_key=minimax_key,
+        minimax_base_url=minimax_base_url,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
         computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),

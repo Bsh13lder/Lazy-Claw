@@ -20,6 +20,7 @@ Benefits:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -116,7 +117,8 @@ async def get_user_dek(config: Config, user_id: str) -> bytes:
     4. If the user has NO ``encrypted_dek`` (legacy), derive the old key,
        adopt it as their DEK, wrap and store it for future use.
 
-    This is the **only** function callers need for encryption operations.
+    CPU-bound key derivation (PBKDF2, unwrap) runs in thread pool to avoid
+    blocking the async event loop.
     """
     # Fast path: cache hit
     cached = _get_cached_dek(user_id)
@@ -137,15 +139,21 @@ async def get_user_dek(config: Config, user_id: str) -> bytes:
     user_salt: str = result[0]
     encrypted_dek_token: str | None = result[1]
 
-    if encrypted_dek_token:
-        # Normal path: unwrap existing DEK
-        wrapping_key = derive_wrapping_key(
-            config.server_secret, user_id, user_salt.encode("utf-8"),
-        )
-        dek = unwrap_dek(encrypted_dek_token, wrapping_key)
-    else:
-        # Legacy migration: the old derived key becomes the DEK
-        dek = derive_server_key(config.server_secret, user_id)
+    def derive_and_unwrap() -> bytes:
+        if encrypted_dek_token:
+            # Normal path: unwrap existing DEK
+            wrapping_key = derive_wrapping_key(
+                config.server_secret, user_id, user_salt.encode("utf-8"),
+            )
+            return unwrap_dek(encrypted_dek_token, wrapping_key)
+        else:
+            # Legacy migration: the old derived key becomes the DEK
+            return derive_server_key(config.server_secret, user_id)
+
+    dek = await asyncio.to_thread(derive_and_unwrap)
+
+    if not encrypted_dek_token:
+        # Store migrated DEK (DB write, fast)
         await _store_wrapped_dek(config, user_id, user_salt, dek)
         logger.info("Migrated user %s to envelope encryption", user_id)
 

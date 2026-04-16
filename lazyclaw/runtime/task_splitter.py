@@ -40,9 +40,18 @@ _VERB_AND_VERB = re.compile(
 )
 
 
+_FALSE_COMPOUND = re.compile(
+    r"\b(and\s+(?:tell|show|let|give|send|report|explain|describe)\s+me)\b",
+    re.IGNORECASE,
+)
+
+
 def _looks_compound(message: str) -> bool:
     """Fast regex check — does this message LOOK like multiple tasks?"""
     if len(message) < 15:
+        return False
+    # Exclude "verb X and tell me" — that's a single task with reporting suffix
+    if _FALSE_COMPOUND.search(message) is not None:
         return False
     # Explicit compound keywords always trigger
     if _COMPOUND_KEYWORDS.search(message) is not None:

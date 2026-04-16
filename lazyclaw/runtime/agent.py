@@ -535,30 +535,33 @@ class Agent:
                 logger.info("COMPOUND split result: %d tasks — %s",
                             len(sub_tasks), [(s.name, s.lane) for s in sub_tasks])
                 if len(sub_tasks) > 1:
-                    # Dispatch each sub-task
-                    dispatched: list[str] = []
-                    for st in sub_tasks:
-                        task_id = await self._task_runner.submit(
-                            user_id=user_id,
-                            instruction=st.instruction,
-                            name=st.name,
-                            callback=callback,
+                    has_bg = any(st.lane == "background" for st in sub_tasks)
+                    if has_bg and self._task_runner:
+                        # Mix of foreground/background — dispatch all to task_runner
+                        dispatched: list[str] = []
+                        for st in sub_tasks:
+                            await self._task_runner.submit(
+                                user_id=user_id,
+                                instruction=st.instruction,
+                                name=st.name,
+                                callback=callback,
+                            )
+                            dispatched.append(f"{st.name} ({st.lane})")
+
+                        status_msg = (
+                            f"On it — split into {len(sub_tasks)} tasks:\n"
+                            + "\n".join(f"  • {d}" for d in dispatched)
                         )
-                        dispatched.append(f"{st.name} ({st.lane})")
 
-                    summary = ", ".join(dispatched)
-                    status_msg = (
-                        f"On it — split into {len(sub_tasks)} tasks:\n"
-                        + "\n".join(f"  • {d}" for d in dispatched)
-                    )
-
-                    await cb.on_event(AgentEvent(
-                        FAST_DISPATCH, status_msg,
-                        {"tasks": len(sub_tasks), "names": dispatched},
-                    ))
-                    await cb.on_event(AgentEvent("stream_done", "", {}))
-                    await cb.on_event(AgentEvent("done", "Dispatched", {}))
-                    return status_msg
+                        await cb.on_event(AgentEvent(
+                            FAST_DISPATCH, status_msg,
+                            {"tasks": len(sub_tasks), "names": dispatched},
+                        ))
+                        await cb.on_event(AgentEvent("stream_done", "", {}))
+                        await cb.on_event(AgentEvent("done", "Dispatched", {}))
+                        return status_msg
+                    # All foreground — run sequentially inline, don't background
+                    # (fall through to normal processing with the full original message)
 
         # Register foreground task with TeamLead (skip for background agents)
         _fg_task_id: str | None = None
@@ -1279,7 +1282,7 @@ class Agent:
                             role=_iter_role, **kwargs
                         )
                         if response.content:
-                            # Strip <plan>/<taor_plan> tags before showing to user
+                            # Strip <plan>/<taor_plan> tags and <think>... thinking blocks
                             _display_content = response.content
                             if "<plan>" in _display_content:
                                 _display_content = re.sub(
@@ -1288,6 +1291,11 @@ class Agent:
                             if "<taor_plan>" in _display_content:
                                 _display_content = re.sub(
                                     r"<taor_plan>.*?</taor_plan>\s*", "", _display_content, flags=re.DOTALL
+                                ).strip()
+                            # Strip <think>... thinking tags (MiniMax reasoning output)
+                            if "<think>" in _display_content:
+                                _display_content = re.sub(
+                                    r"<think>.*?</think>\s*", "", _display_content, flags=re.DOTALL
                                 ).strip()
                             if _display_content:
                                 await cb.on_event(AgentEvent(
@@ -1567,24 +1575,33 @@ class Agent:
                             r"<plan>.*?</plan>\s*", "", _final_content, flags=re.DOTALL
                         ).strip()
 
-                    # Empty response from worker model — retry with brain.
-                    # Covers: Haiku empty response bug, worker can't produce
-                    # final answer (local worker bad at chat), etc.
+                    # Empty response from worker/brain model — escalate to fallback.
+                    # Covers: MiniMax error 2013 (empty), Haiku empty response bug,
+                    # worker can't produce final answer, etc.
+                    # Use the fallback model (different provider) so we don't
+                    # loop back to the same broken brain.
                     if (
                         not _final_content.strip()
                         and tools
                         and not _escalated
                     ):
+                        try:
+                            _fallback_name = await self.eco_router.get_fallback_model(user_id)
+                        except Exception:
+                            _fallback_name = None
                         logger.warning(
-                            "Empty LLM response from %s (usage=%s, tools=%d) — retrying with brain model",
-                            response.model, response.usage, len(tools),
+                            "Empty LLM response from %s (usage=%s, tools=%d) — escalating to fallback %s",
+                            response.model, response.usage, len(tools), _fallback_name,
                         )
                         _escalated = True
                         _escalation_iter = iteration
-                        iter_model = None  # Let eco_router decide
-                        _iter_role = ROLE_BRAIN
+                        # Pin to fallback model AND use a non-brain/worker role
+                        # so eco_router.chat() takes the explicit-model bypass
+                        # (_route_paid) instead of re-picking the broken brain.
+                        iter_model = _fallback_name
+                        _iter_role = "escalation" if _fallback_name else ROLE_BRAIN
                         streamed_content = ""
-                        continue  # Retry this iteration with brain model
+                        continue  # Retry with a different provider
 
                     # Final text response (already streamed to user)
                     await cb.on_event(AgentEvent("stream_done", "", {}))

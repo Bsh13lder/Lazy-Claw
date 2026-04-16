@@ -18,11 +18,15 @@ class LLMRouter:
             return "anthropic"
         elif model.startswith(("gemma", "llama", "qwen", "phi", "mistral", "lazyclaw-")):
             return "ollama"
+        elif model.startswith(("MiniMax-", "minimax-")):
+            return "minimax"
         # Check MODEL_CATALOG for known local models
         from lazyclaw.llm.model_registry import get_model
         profile = get_model(model)
         if profile and profile.provider == "ollama":
             return "ollama"
+        if profile and profile.provider == "minimax":
+            return "minimax"
         raise ValueError(f"Cannot infer provider for model: {model}")
 
     def _get_api_key(self, provider_name: str) -> str | None:
@@ -30,19 +34,47 @@ class LLMRouter:
             return self._config.openai_api_key
         elif provider_name == "anthropic":
             return self._config.anthropic_api_key
+        elif provider_name == "minimax":
+            return self._config.minimax_api_key
         return None
 
+    _PROVIDER_VAULT_KEY: dict[str, str] = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "minimax": "MINIMAX_API_KEY",
+    }
+
+    _vault_key_cache: dict[str, tuple[str, float]] = {}
+    _VAULT_CACHE_TTL = 300.0  # 5 minutes
+
     async def _resolve_api_key(self, provider_name: str, user_id: str | None) -> str | None:
-        """Get API key from config first, then vault fallback."""
+        """Get API key from config first, then vault fallback (with timeout + cache)."""
         key = self._get_api_key(provider_name)
         if key:
             return key
         if not user_id:
             return None
-        # Try vault
-        from lazyclaw.crypto.vault import get_credential
-        vault_key = f"{provider_name}_api_key"
-        return await get_credential(self._config, user_id, vault_key)
+
+        import time
+        vault_key = self._PROVIDER_VAULT_KEY.get(provider_name, f"{provider_name}_api_key")
+        cache_entry = self._vault_key_cache.get(vault_key)
+        if cache_entry is not None:
+            cached_key, cached_at = cache_entry
+            if time.monotonic() - cached_at < self._VAULT_CACHE_TTL:
+                return cached_key
+
+        try:
+            import asyncio
+            from lazyclaw.crypto.vault import get_credential
+            key = await asyncio.wait_for(
+                get_credential(self._config, user_id, vault_key),
+                timeout=5.0,
+            )
+            if key:
+                self._vault_key_cache[vault_key] = (key, time.monotonic())
+            return key
+        except (asyncio.TimeoutError, Exception):
+            return None
 
     def _create_provider(self, provider_name: str, api_key: str) -> BaseLLMProvider:
         if provider_name == "openai":
@@ -52,6 +84,9 @@ class LLMRouter:
         elif provider_name == "ollama":
             from lazyclaw.llm.providers.ollama_provider import OllamaProvider
             return OllamaProvider()
+        elif provider_name == "minimax":
+            from lazyclaw.llm.providers.minimax_provider import MinimaxProvider
+            return MinimaxProvider(api_key, base_url=self._config.minimax_base_url)
         raise ValueError(f"Unknown provider: {provider_name}")
 
     async def chat(

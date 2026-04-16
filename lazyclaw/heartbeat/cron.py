@@ -5,6 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
+def is_valid(expression: str) -> bool:
+    """Check if a cron expression is valid without raising."""
+    from croniter import croniter
+
+    if not expression or not expression.strip():
+        return False
+    return croniter.is_valid(expression)
+
+
 def parse_cron(expression: str):
     """Validate and parse a cron expression. Returns a croniter instance.
 

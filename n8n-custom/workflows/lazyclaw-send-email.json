@@ -1,0 +1,78 @@
+{
+  "id": "lzclw-send-email-v1",
+  "name": "LazyClaw Send Email",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lazyclaw-send-email",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [260, 300],
+      "webhookId": "lazyclaw-send-email"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst to = body.to;\nconst subject = body.subject || '(no subject)';\nconst text = body.body || '';\n\nif (!to) {\n  throw new Error('Missing required field: to');\n}\n\nconst raw = [\n  `To: ${to}`,\n  `Subject: ${subject}`,\n  'MIME-Version: 1.0',\n  'Content-Type: text/plain; charset=UTF-8',\n  '',\n  text,\n].join('\\r\\n');\n\nconst b64 = Buffer.from(raw, 'utf-8')\n  .toString('base64')\n  .replace(/\\+/g, '-')\n  .replace(/\\//g, '_')\n  .replace(/=+$/, '');\n\nreturn [{ json: { raw: b64, to, subject } }];"
+      },
+      "id": "code-node",
+      "name": "Build MIME",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"raw\": \"{{$json.raw}}\"}",
+        "options": {}
+      },
+      "id": "gmail-send",
+      "name": "Gmail Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [700, 300],
+      "credentials": {
+        "googleOAuth2Api": {
+          "id": "27THm9NpkWEGBesE",
+          "name": "Google account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"sent\", \"messageId\": \"{{ $('Gmail Send').item.json.id }}\", \"to\": \"{{ $('Build MIME').item.json.to }}\" }"
+      },
+      "id": "respond-node",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [920, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {"main": [[{"node": "Build MIME", "type": "main", "index": 0}]]},
+    "Build MIME": {"main": [[{"node": "Gmail Send", "type": "main", "index": 0}]]},
+    "Gmail Send": {"main": [[{"node": "Respond", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"},
+  "pinData": {}
+}

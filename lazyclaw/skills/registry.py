@@ -95,6 +95,7 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.memory_save import MemorySaveSkill
         from lazyclaw.skills.builtin.memory_recall import MemoryRecallSkill
         from lazyclaw.skills.builtin.tool_discovery import SearchToolsSkill
+        from lazyclaw.skills.builtin.send_email import SendEmailSkill
 
         self.register(SearchToolsSkill(registry=self))
         self.register(WebSearchSkill())
@@ -102,6 +103,7 @@ class SkillRegistry:
         self.register(CalculateSkill())
         self.register(MemorySaveSkill(config=config))
         self.register(MemoryRecallSkill(config=config))
+        self.register(SendEmailSkill(config=config, registry=self))
 
         from lazyclaw.skills.builtin.vault import (
             VaultSetSkill, VaultListSkill, VaultDeleteSkill, SaveSiteLoginSkill,

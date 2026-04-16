@@ -405,6 +405,23 @@ class HeartbeatDaemon:
                     if changed and notification:
                         logger.info("Watcher '%s' detected change", job_name)
 
+                        # Light up the BrowserCanvas (zero LLM tokens)
+                        try:
+                            from lazyclaw.browser import event_bus
+                            event_bus.publish(event_bus.BrowserEvent(
+                                user_id=user_id,
+                                kind="alert",
+                                target=job_name,
+                                detail=notification[:200],
+                                extra={
+                                    "template_name": ctx.get("template_name"),
+                                    "template_id": ctx.get("template_id"),
+                                    "watch_url": ctx.get("url"),
+                                },
+                            ))
+                        except Exception:
+                            logger.debug("Canvas alert publish failed", exc_info=True)
+
                         # Push directly to Telegram (no agent loop — zero tokens)
                         if self._telegram_push:
                             try:

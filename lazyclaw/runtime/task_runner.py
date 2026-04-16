@@ -160,7 +160,11 @@ class TaskRunner:
 
         # Register with TeamLead for instant status
         if self._team_lead:
-            self._team_lead.register(task_id, task_name, instruction[:80], "background")
+            self._team_lead.register(
+                task_id, task_name, instruction[:80], "background",
+                instruction_full=instruction,
+                user_id=user_id,
+            )
 
         logger.info(
             "Background task %s (%s) started for user %s",
@@ -238,7 +242,9 @@ class TaskRunner:
             logger.info("Background task %s (%s) completed", task_id[:8], task_name)
 
             if self._team_lead:
-                self._team_lead.complete(task_id, result[:100])
+                self._team_lead.complete(
+                    task_id, result[:100], result_full=result,
+                )
 
             # Build rich notification with stats from work_summary
             meta: dict = {"task_id": task_id, "name": task_name, "result": result}

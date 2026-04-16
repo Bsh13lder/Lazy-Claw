@@ -3,7 +3,7 @@ import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "jobs" | "mcp" | "memory" | "vault" | "settings";
+export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "mcp" | "memory" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -18,6 +18,7 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   audit: { label: "Audit", description: "Action log & security" },
   hub: { label: "Skill Hub", description: "Discover & install skills" },
   skills: { label: "Skills", description: "Manage agent tools" },
+  templates: { label: "Templates", description: "Saved browser recipes" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
   mcp: { label: "MCP", description: "Server integrations" },
   memory: { label: "Memory", description: "Personal facts & logs" },
@@ -77,6 +78,16 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+      </svg>
+    ),
+  },
+  {
+    page: "templates",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+        <rect x="3" y="4" width="18" height="4" rx="1" />
+        <rect x="3" y="11" width="18" height="4" rx="1" />
+        <rect x="3" y="18" width="11" height="3" rx="1" />
       </svg>
     ),
   },

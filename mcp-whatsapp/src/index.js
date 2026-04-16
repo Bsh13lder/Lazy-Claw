@@ -321,6 +321,8 @@ function killOrphanedProcesses() {
   }
 }
 
+let _muteResyncTimer = null;
+
 async function startWhatsApp(force = false) {
   // Clean up any orphaned instances of this script first
   killOrphanedProcesses();
@@ -437,23 +439,69 @@ async function startWhatsApp(force = false) {
       log(`Contacts cached: ${contacts.size}`);
 
       // Log contact + message count after history sync settles
-      setTimeout(() => {
+      setTimeout(async () => {
         const totalMsgs = [...messageStore.values()].reduce((sum, msgs) => sum + msgs.length, 0);
         const lidCount = [...contacts.keys()].filter((k) => k.endsWith("@lid")).length;
         const phoneCount = [...contacts.keys()].filter((k) => k.endsWith("@s.whatsapp.net")).length;
         log(`After connect: ${contacts.size} contacts (${phoneCount} phone, ${lidCount} LID), ${totalMsgs} messages cached`);
         _buildLidMap();
 
-        // Resolve missing group names in background
-        let groupsToResolve = 0;
-        for (const jid of contacts.keys()) {
-          if (jid.endsWith("@g.us") && !contacts.get(jid)?.name) {
-            _resolveGroupName(jid);
-            groupsToResolve++;
+        // Eager group-metadata hydration: one bulk call fetches all groups' subjects,
+        // participants, and mute state. Fixes "Group" display + missing sender names.
+        try {
+          const allGroups = await sock.groupFetchAllParticipating();
+          let hydrated = 0;
+          let participantsAdded = 0;
+          for (const [gjid, meta] of Object.entries(allGroups || {})) {
+            const existing = contacts.get(gjid) || { phone: null, notify: "" };
+            if (meta?.subject) existing.name = meta.subject;
+            contacts.set(gjid, existing);
+            hydrated++;
+
+            for (const p of meta?.participants || []) {
+              const pjid = p.id;
+              if (!pjid) continue;
+              if (!contacts.has(pjid)) {
+                contacts.set(pjid, {
+                  name: p.notify || p.name || "",
+                  notify: p.notify || "",
+                  phone: extractPhone(pjid),
+                });
+                participantsAdded++;
+              } else if (!contacts.get(pjid).name && (p.notify || p.name)) {
+                contacts.get(pjid).name = p.notify || p.name;
+              }
+            }
+
+            const muteVal = toMuteNumber(meta?.muteEndTime ?? meta?.announceMuteEndTime ?? null);
+            if (muteVal !== 0) mutedChats.set(gjid, muteVal);
           }
+          if (hydrated > 0) {
+            saveContacts();
+            saveMutedDebounced();
+            _buildLidMap();
+            log(`Group hydration: ${hydrated} groups, +${participantsAdded} participant contacts`);
+          }
+        } catch (e) {
+          log(`groupFetchAllParticipating failed: ${e.message}`);
+          // Fallback: old per-group lazy fetch
+          let groupsToResolve = 0;
+          for (const jid of contacts.keys()) {
+            if (jid.endsWith("@g.us") && !contacts.get(jid)?.name) {
+              _resolveGroupName(jid);
+              groupsToResolve++;
+            }
+          }
+          if (groupsToResolve > 0) log(`Fallback: resolving ${groupsToResolve} group names lazily`);
         }
-        if (groupsToResolve > 0) {
-          log(`Resolving ${groupsToResolve} group names in background...`);
+
+        // Force app-state resync so mutes applied on the phone arrive here.
+        // regular_high carries per-chat mute state; events flow through chats.update.
+        try {
+          await sock.resyncAppState(["regular_high", "regular_low", "critical_block"], false);
+          log("App state resync complete (mute state refreshed)");
+        } catch (e) {
+          log(`resyncAppState failed: ${e.message}`);
         }
 
         // Log muted chats for debugging
@@ -700,6 +748,7 @@ async function startWhatsApp(force = false) {
     const chatCount = (event.chats || []).length;
     const contactCount = (event.contacts || []).length;
     log(`History sync event: ${msgCount} messages, ${chatCount} chats, ${contactCount} contacts, isLatest=${event.isLatest}`);
+    let dmNamesLearned = 0;
     for (const msg of (event.messages || [])) {
       const jid = msg.key?.remoteJid;
       if (!jid || jid === "status@broadcast") continue;
@@ -708,6 +757,26 @@ async function startWhatsApp(force = false) {
       const msgId = msg.key.id;
       if (!chatMsgs.some((m) => m.key.id === msgId)) {
         chatMsgs.push(msg);
+      }
+
+      // Learn DM contact names from history-sync pushName.
+      // Without this, old DMs stay stuck as "+<phone>" since messages.upsert only
+      // fires for new messages — historical ones never update the contact map.
+      const isDmJid = jid.endsWith("@s.whatsapp.net");
+      if (isDmJid && msg.pushName && !msg.key.fromMe) {
+        const existing = contacts.get(jid);
+        const phone = extractPhone(jid);
+        const needsName = !existing || !existing.name || existing.name === existing.phone || existing.name === phone;
+        if (needsName) {
+          contacts.set(jid, {
+            name: msg.pushName,
+            notify: msg.pushName,
+            phone: phone,
+          });
+          dmNamesLearned++;
+        } else if (existing && !existing.notify) {
+          existing.notify = msg.pushName;
+        }
       }
     }
     // Trim all chats after history sync
@@ -721,7 +790,21 @@ async function startWhatsApp(force = false) {
       log(`After history sync: ${totalStored} messages stored across ${messageStore.size} chats`);
       saveMessagesDebounced();
     }
+    if (dmNamesLearned > 0) {
+      log(`Learned ${dmNamesLearned} DM contact names from history pushName`);
+      saveContacts();
+    }
   });
+
+  // Periodic mute-state resync so phone-side mute toggles reach the MCP
+  // even without a new message arriving. Installed once per process.
+  if (!_muteResyncTimer) {
+    _muteResyncTimer = setInterval(() => {
+      if (isReady && sock) {
+        sock.resyncAppState(["regular_high"], false).catch(() => {});
+      }
+    }, 10 * 60 * 1000);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +830,33 @@ function _resolveGroupName(jid) {
       log(`Resolved group name: ${jid} → "${meta.subject}"`);
     }
   }).catch(() => {}).finally(() => _pendingGroupFetches.delete(jid));
+}
+
+/**
+ * Resolve a DM contact's display name by scanning cached messages for a pushName.
+ * Baileys doesn't expose an on-demand name-lookup API, but history-synced
+ * messages usually carry `msg.pushName`. This catches DMs whose contacts entry
+ * was created before we started learning names from history (existing message cache).
+ */
+function _resolveContactName(jid) {
+  if (!jid || !jid.endsWith("@s.whatsapp.net")) return;
+  const existing = contacts.get(jid);
+  const phone = extractPhone(jid);
+  if (existing && existing.name && existing.name !== existing.phone && existing.name !== phone) return;
+  const msgs = messageStore.get(jid);
+  if (!msgs || msgs.length === 0) return;
+  for (const m of msgs) {
+    if (m.key?.fromMe) continue;
+    if (m.pushName) {
+      const next = existing || { phone, notify: "" };
+      next.name = m.pushName;
+      if (!next.notify) next.notify = m.pushName;
+      contacts.set(jid, next);
+      saveContacts();
+      log(`Resolved DM name from cache: ${jid} → "${m.pushName}"`);
+      return;
+    }
+  }
 }
 
 /** Check if a chat is currently muted. */
@@ -856,13 +966,21 @@ function _formatMsg(msg) {
   const jid = msg.key.remoteJid || "";
   const isGroup = jid.endsWith("@g.us");
   let chatName = contacts.get(jid)?.name
-    || (isGroup ? "Group" : null)  // Don't show JID fragments for groups
+    || (isGroup ? `Group ${jid.split("@")[0].slice(-6)}` : null)
     || extractPhone(jid)
     || jid.split("@")[0];
 
   // Trigger lazy group name fetch if missing
   if (isGroup && !contacts.get(jid)?.name) {
     _resolveGroupName(jid);
+  }
+  // Trigger lazy DM name fetch when the cached name is still the phone fallback
+  if (!isGroup && jid.endsWith("@s.whatsapp.net")) {
+    const dmc = contacts.get(jid);
+    const phoneStr = extractPhone(jid);
+    if (!dmc || !dmc.name || dmc.name === dmc.phone || dmc.name === phoneStr) {
+      _resolveContactName(jid);
+    }
   }
 
   // Check if this chat is muted on WhatsApp
@@ -883,11 +1001,14 @@ function _formatMsg(msg) {
   // For group messages: "from" = person who sent, add group context
   if (isGroup && !msg.key.fromMe) {
     const partJid = msg.key.participant || "";
-    // Resolve participant name: pushName → contacts → LID→phone contacts → cleaned JID
+    // Resolve participant name: saved contact first (hydrated via groupFetchAllParticipating),
+    // then Baileys notify, then LID→phone bridge, and only fall back to msg.pushName last.
     const partContact = contacts.get(partJid);
-    const partName = msg.pushName
-      || partContact?.name || partContact?.notify
+    const partName =
+         partContact?.name
+      || partContact?.notify
       || (lidToPhone.has(partJid) ? contacts.get(lidToPhone.get(partJid))?.name : "")
+      || msg.pushName
       || "";
     result.participant = partJid;
     result.participantName = partName;
@@ -1086,7 +1207,7 @@ async function handleRead(args) {
       if (jid === "status@broadcast") continue;
       const c = contacts.get(jid);
       const isGroupJid = jid.endsWith("@g.us");
-      const name = c?.name || c?.notify || (isGroupJid ? "Group" : null) || extractPhone(jid) || jid.split("@")[0];
+      const name = c?.name || c?.notify || (isGroupJid ? `Group ${jid.split("@")[0].slice(-6)}` : null) || extractPhone(jid) || jid.split("@")[0];
       let latestTs = 0;
       let latestBody = "";
       let latestFrom = "";
@@ -1207,7 +1328,7 @@ async function handleListChats(args) {
     const c = contacts.get(jid);
     const isGroup = jid.endsWith("@g.us");
     const isLid = jid.endsWith("@lid");
-    const displayName = c?.name || c?.notify || (isGroup ? "Group" : null) || extractPhone(jid) || jid.split("@")[0];
+    const displayName = c?.name || c?.notify || (isGroup ? `Group ${jid.split("@")[0].slice(-6)}` : null) || extractPhone(jid) || jid.split("@")[0];
 
     // Find most recent message timestamp
     let latestTs = 0;
@@ -1420,7 +1541,7 @@ async function handleListMuted() {
   for (const [jid, val] of mutedChats) {
     const c = contacts.get(jid);
     const isGroup = jid.endsWith("@g.us");
-    const name = c?.name || (isGroup ? "Group" : null) || extractPhone(jid) || jid.split("@")[0];
+    const name = c?.name || (isGroup ? `Group ${jid.split("@")[0].slice(-6)}` : null) || extractPhone(jid) || jid.split("@")[0];
     result.push({
       name,
       jid,

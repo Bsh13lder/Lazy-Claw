@@ -175,6 +175,26 @@ class SkillRegistry:
         self.register(BrowserSetPersistentSkill(config=config))
         self.register(BrowserApproveConnectSkill(config=config))
 
+        # Remote browser takeover (noVNC link, works in Telegram + web)
+        from lazyclaw.skills.builtin.browser_share import ShareBrowserControlSkill
+        self.register(ShareBrowserControlSkill(config=config))
+
+        # Checkpoint approval — agent pauses for user OK before risky actions
+        from lazyclaw.skills.builtin.checkpoint_skill import RequestUserApprovalSkill
+        self.register(RequestUserApprovalSkill(config=config))
+
+        # Browser templates (saved-agent recipes for govt appointments etc.)
+        from lazyclaw.skills.builtin.browser_templates_skill import (
+            DeleteBrowserTemplateSkill, ListBrowserTemplatesSkill,
+            RunBrowserTemplateSkill, SaveBrowserTemplateSkill,
+            WatchAppointmentSlotsSkill,
+        )
+        self.register(SaveBrowserTemplateSkill(config=config))
+        self.register(ListBrowserTemplatesSkill(config=config))
+        self.register(DeleteBrowserTemplateSkill(config=config))
+        self.register(RunBrowserTemplateSkill(config=config))
+        self.register(WatchAppointmentSlotsSkill(config=config))
+
         # Watcher skills (zero-token site monitoring)
         from lazyclaw.skills.builtin.watcher_skills import (
             WatchSiteSkill, StopWatcherSkill, ListWatchersSkill,

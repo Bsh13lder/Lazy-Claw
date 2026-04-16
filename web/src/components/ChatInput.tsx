@@ -260,48 +260,82 @@ export default function ChatInput({
           />
         )}
 
-        <div className="flex items-end bg-bg-tertiary rounded-2xl border border-border focus-within:border-border-light transition-colors">
+        <div
+          className={`flex items-end bg-bg-tertiary rounded-2xl border transition-colors focus-within:border-border-light ${
+            isStreaming ? "border-cyan/40" : "border-border"
+          }`}
+        >
           <textarea
             ref={textareaRef}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
-            placeholder="Message LazyClaw... (type / for commands)"
+            placeholder={
+              isStreaming
+                ? "Agent is working — type to send a side-note (ask status, pivot, add info)"
+                : "Message LazyClaw... (type / for commands)"
+            }
             disabled={disabled}
             maxLength={MAX_LENGTH}
             rows={1}
             className="flex-1 resize-none bg-transparent px-4 py-3.5 text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none disabled:opacity-50 max-h-[200px]"
           />
 
-          {isStreaming ? (
-            <button
-              onClick={onCancel}
-              className="m-2 p-1.5 rounded-lg bg-error/20 text-error hover:bg-error/30 transition-colors"
-              aria-label="Stop generating"
-              title="Stop generating"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="6" width="12" height="12" rx="2" />
-              </svg>
-            </button>
-          ) : (
+          <div className="flex items-center gap-1 m-2">
+            {isStreaming && (
+              <button
+                onClick={onCancel}
+                className="p-1.5 rounded-lg bg-error/20 text-error hover:bg-error/30 transition-colors"
+                aria-label="Stop agent"
+                title="Cancel the running turn"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              </button>
+            )}
             <button
               onClick={handleSend}
               disabled={disabled || !value.trim()}
-              className="m-2 p-1.5 rounded-lg bg-text-primary text-bg-primary disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-80 transition-opacity"
-              aria-label="Send"
+              className={`p-1.5 rounded-lg disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-80 transition-opacity ${
+                isStreaming
+                  ? "bg-cyan/20 text-cyan"
+                  : "bg-text-primary text-bg-primary"
+              }`}
+              aria-label={isStreaming ? "Send side-note" : "Send"}
+              title={
+                isStreaming
+                  ? "Send as side-note to the running agent (no new turn)"
+                  : "Send"
+              }
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z" />
-              </svg>
+              {isStreaming ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z" />
+                </svg>
+              )}
             </button>
-          )}
+          </div>
         </div>
 
         <div className="flex items-center justify-between mt-2 px-1">
           <p className="text-[11px] text-text-muted">
-            Type <span className="font-mono text-text-secondary">/</span> for commands. All messages E2E encrypted.
+            {isStreaming ? (
+              <>
+                <span className="text-cyan">● Side-note mode</span>
+                <span className="mx-1.5">—</span>
+                your input appends to the running turn instead of starting a new one.
+              </>
+            ) : (
+              <>
+                Type <span className="font-mono text-text-secondary">/</span> for commands. All messages E2E encrypted.
+              </>
+            )}
           </p>
           {showCharCount && (
             <span

@@ -1,0 +1,35 @@
+[
+  {
+    "name": "Cita Previa Spain",
+    "icon": "🇪🇸",
+    "playbook": "Goal: book a 'Cita Previa' (government appointment) on the Spanish Sede Electrónica.\n\nSteps:\n1. Open https://sede.administracionespublicas.gob.es/icpplus/index.html — pick the user's province (default: Madrid). If province is not Madrid, ask first.\n2. Pick the trámite (procedure) — common ones: 'POLICIA-EXPEDICIÓN/RENOVACIÓN DE DOCUMENTOS DE EXTRANJEROS (TIE)', 'POLICIA-CERTIFICADOS Y ASIGNACIÓN N.I.E.'. If unclear, ask the user.\n3. Use the user's NIE/passport from the credential vault (vault key 'nie' or 'passport'). Never invent values.\n4. Read the available calendar slots. If 'no hay citas' is shown, escalate to watch_appointment_slots so the user is notified when one opens.\n5. CHECKPOINT 'Pick date' — confirm the date+time choice with the user.\n6. CHECKPOINT 'Confirm booking' — final confirmation before submitting.\n7. Save the resguardo PDF to memory.\n\nQuirks: the site session expires every ~10 minutes. If you see 'Su sesión ha expirado', restart from step 1. The site uses Spanish — read text in Spanish, do not auto-translate UI labels in the agent log.",
+    "setup_urls": [
+      "https://sede.administracionespublicas.gob.es/icpplus/index.html"
+    ],
+    "checkpoints": [
+      "Pick date",
+      "Confirm booking"
+    ],
+    "watch_url": "https://sede.administracionespublicas.gob.es/icpplus/index.html",
+    "watch_extractor": "(() => { const t = document.body.innerText.toLowerCase(); if (t.includes('no hay citas') || t.includes('no es posible')) return 'no_slots'; const slots = document.querySelectorAll('input[type=radio][name*=cita], button[id*=fecha], a[href*=fecha]'); return slots.length > 0 ? 'slots_open:' + slots.length : 'unknown'; })()",
+    "watch_condition": "Trigger when extractor result starts with 'slots_open:'.",
+    "page_reader_mode": "auto"
+  },
+  {
+    "name": "Doctoralia Appointment",
+    "icon": "🩺",
+    "playbook": "Goal: book a doctor or specialist appointment on Doctoralia.\n\nSteps:\n1. Open https://www.doctoralia.es and search for the specialty + city the user mentioned.\n2. Filter to the user's preferred insurance if stored (vault key 'insurance').\n3. Read the next 3 available slots for the top 5 doctors that match.\n4. CHECKPOINT 'Select doctor' — show the user the shortlist and wait for their pick.\n5. CHECKPOINT 'Pick slot' — confirm the date+time.\n6. CHECKPOINT 'Confirm booking' — final OK before submitting.\n7. Save the booking confirmation page screenshot to memory.\n\nQuirks: Doctoralia sometimes asks for a phone verification code. If that happens, call request_user_approval with name 'Phone code' and detail asking the user to paste the SMS code.",
+    "setup_urls": [
+      "https://www.doctoralia.es/"
+    ],
+    "checkpoints": [
+      "Select doctor",
+      "Pick slot",
+      "Confirm booking"
+    ],
+    "watch_url": null,
+    "watch_extractor": null,
+    "watch_condition": null,
+    "page_reader_mode": "auto"
+  }
+]

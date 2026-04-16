@@ -5,7 +5,15 @@ import { useAuth } from "../context/AuthContext";
 import { useChat } from "../context/ChatContext";
 import { useAgentStatus } from "../context/AgentStatusContext";
 import { RecentTaskRow } from "../components/TaskRow";
+import { iconFor, colorFor } from "../components/toolIcons";
 import type { Page } from "../components/NavShell";
+
+const PHASE_BADGE_STYLE: Record<string, string> = {
+  think: "bg-cyan/10 text-cyan border-cyan/30",
+  act: "bg-accent/10 text-accent border-accent/30",
+  observe: "bg-amber/10 text-amber border-amber/30",
+  reflect: "bg-purple-400/10 text-purple-400 border-purple-400/30",
+};
 
 /* ── Types ──────────────────────────────────────────────────────────── */
 
@@ -172,35 +180,78 @@ function AgentStatusPanel({ agentStatus }: { agentStatus: AgentStatus | null }) 
             )}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {allActive.map((t) => (
-              <div key={t.task_id} className="glass-card glow-accent rounded-xl p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-medium text-text-primary truncate">{t.name}</span>
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${LANE_STYLE[t.lane] || "bg-bg-tertiary text-text-muted"}`}>
-                    {t.lane}
-                  </span>
-                  <span className="ml-auto text-xs text-text-muted stat-value">{t.elapsed_s}s</span>
-                  <button
-                    onClick={() => handleCancel(t.task_id)}
-                    disabled={cancelling.has(t.task_id)}
-                    className="p-1 rounded-lg text-text-muted hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-40"
-                    title="Cancel task"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="15" y1="9" x2="9" y2="15" />
-                      <line x1="9" y1="9" x2="15" y2="15" />
-                    </svg>
-                  </button>
+            {allActive.map((t) => {
+              const currentTool = t.current_tool || t.current_step;
+              const request = t.instruction || t.description;
+              const phaseClass = t.phase ? (PHASE_BADGE_STYLE[t.phase] || "") : "";
+              return (
+                <div key={t.task_id} className="glass-card glow-accent rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent live-pulse" />
+                    <span className="text-sm font-medium text-text-primary truncate">{t.name}</span>
+                    {t.phase && (
+                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-medium uppercase tracking-wider ${phaseClass}`}>
+                        <span className="w-1 h-1 rounded-full pulse-dot bg-current" />
+                        {t.phase}
+                      </span>
+                    )}
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${LANE_STYLE[t.lane] || "bg-bg-tertiary text-text-muted"}`}>
+                      {t.lane}
+                    </span>
+                    <span className="ml-auto text-xs text-text-muted stat-value">{t.elapsed_s}s</span>
+                    <button
+                      onClick={() => handleCancel(t.task_id)}
+                      disabled={cancelling.has(t.task_id)}
+                      className="p-1 rounded-lg text-text-muted hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-40"
+                      title="Cancel task"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="15" y1="9" x2="9" y2="15" />
+                        <line x1="9" y1="9" x2="15" y2="15" />
+                      </svg>
+                    </button>
+                  </div>
+                  {request && (
+                    <p className="text-xs text-text-muted line-clamp-2">
+                      <span className="text-text-muted/60">›</span> {request}
+                    </p>
+                  )}
+                  {currentTool && (
+                    <p className="text-[11px] text-text-secondary mt-1.5 flex items-center gap-1.5">
+                      <span className={colorFor(currentTool)}>{iconFor(currentTool)}</span>
+                      <span>
+                        Using <span className="text-accent font-medium">{currentTool}</span>
+                      </span>
+                      {(t.step_count ?? 0) > 0 && (
+                        <span className="text-text-muted">· step {t.step_count}</span>
+                      )}
+                    </p>
+                  )}
+                  {t.recent_tools && t.recent_tools.length > 1 && (
+                    <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                      {t.recent_tools.slice(-4).map((rt, i) => (
+                        <span
+                          key={`${rt}-${i}`}
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-border/50 bg-bg-tertiary/40 text-text-muted"
+                        >
+                          <span className={colorFor(rt)}>{iconFor(rt)}</span>
+                          <span className="truncate max-w-[80px]">{rt}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {(t.step_count ?? 0) > 0 && (
+                    <div className="mt-2 h-1 bg-bg-tertiary rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent rounded-full transition-all duration-500 animate-bar-fill"
+                        style={{ width: `${Math.min(((Number(t.step_count) || 0) / Math.max(Number(t.step_count) || 1, 5)) * 100, 95)}%` }}
+                      />
+                    </div>
+                  )}
                 </div>
-                {t.description && <p className="text-xs text-text-muted truncate">{t.description}</p>}
-                {t.current_step && (
-                  <p className="text-[11px] text-text-secondary mt-1">
-                    Step {t.step_count}: <span className="text-accent">{t.current_step}</span>
-                  </p>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

@@ -42,6 +42,7 @@ interface ChatContextValue {
   chatExpanded: boolean;
   sendMessage: (text: string) => void;
   cancelGeneration: () => void;
+  dismissBrowserSession: () => void;
   createSession: () => void;
   selectSession: (id: string) => void;
   deleteSession: (id: string) => void;
@@ -224,7 +225,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const {
     sendMessage: wsSendMessage,
+    sendSideNote: wsSendSideNote,
     cancelGeneration,
+    dismissBrowserSession,
     streamingState,
     connectionStatus,
   } = useChatStream({
@@ -232,11 +235,30 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     onError: handleError,
   });
 
+  // Keep a live ref to streamingState so sendMessage can decide side-note vs
+  // new-turn without re-memoizing on every state change.
+  const streamingRef = useRef(streamingState);
+  useEffect(() => { streamingRef.current = streamingState; }, [streamingState]);
+
   // ── Actions ────────────────────────────────────────────────────────────
 
   const sendMessage = useCallback(
     (text: string) => {
       const sid = activeIdRef.current;
+      // If an agent turn is already in-flight, route to the side-channel
+      // instead of starting a new turn. Shows up as a dim user note inline.
+      if (streamingRef.current.isStreaming) {
+        const sideMsg: Message = {
+          ...makeMessage("user", text),
+          content: `↳ ${text}`,  // marker so we can render differently
+        };
+        updateSession(sid, (s) => ({
+          ...s,
+          messages: [...s.messages, sideMsg],
+        }));
+        wsSendSideNote(text);
+        return;
+      }
       const userMsg = makeMessage("user", text);
       updateSession(sid, (s) => ({
         ...s,
@@ -245,7 +267,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }));
       wsSendMessage(text, sid);
     },
-    [updateSession, wsSendMessage],
+    [updateSession, wsSendMessage, wsSendSideNote],
   );
 
   const createSession = useCallback(() => {
@@ -316,6 +338,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         chatExpanded,
         sendMessage,
         cancelGeneration,
+        dismissBrowserSession,
         createSession,
         selectSession,
         deleteSession,

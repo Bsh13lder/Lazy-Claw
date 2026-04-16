@@ -3,6 +3,8 @@ import { useChat } from "../context/ChatContext";
 import MessageBubble from "./MessageBubble";
 import ChatInput from "./ChatInput";
 import ConnectionStatus from "./ConnectionStatus";
+import ThinkingCard from "./ThinkingCard";
+import BrowserCanvas from "./BrowserCanvas";
 
 export default function ChatSidebar() {
   const {
@@ -11,12 +13,25 @@ export default function ChatSidebar() {
     connectionStatus,
     sendMessage,
     cancelGeneration,
+    dismissBrowserSession,
     chatOpen,
     chatExpanded,
     toggleChat,
     toggleExpanded,
     createSession,
   } = useChat();
+
+  // Forward "Help" submissions from the BrowserCanvas into the side-note
+  // channel so the running agent picks them up between TAOR iterations.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail) sendMessage(detail);
+    };
+    window.addEventListener("lazyclaw:browser-help", handler as EventListener);
+    return () =>
+      window.removeEventListener("lazyclaw:browser-help", handler as EventListener);
+  }, [sendMessage]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isStreaming = streamingState.isStreaming;
@@ -106,6 +121,14 @@ export default function ChatSidebar() {
         </button>
       </div>
 
+      {/* Live browser canvas — only when an event has arrived */}
+      {streamingState.browserSession && (
+        <BrowserCanvas
+          session={streamingState.browserSession}
+          onDismiss={dismissBrowserSession}
+        />
+      )}
+
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {isEmpty ? (
@@ -138,30 +161,22 @@ export default function ChatSidebar() {
             ))}
 
             {isStreaming && (
-              streamingState.streamContent ? (
-                <MessageBubble
-                  role="assistant"
-                  content={streamingState.streamContent}
-                  toolCalls={streamingState.activeTools}
-                  isStreaming
+              <>
+                <ThinkingCard
+                  phase={streamingState.currentPhase}
+                  tools={streamingState.activeTools}
+                  sideNotes={streamingState.sideNotes}
+                  startedAt={streamingState.startedAt}
                 />
-              ) : (
-                <div className="py-3 animate-fade-in">
-                  <div className="max-w-3xl mx-auto flex gap-3 px-4">
-                    <div className="w-6 h-6 rounded-full bg-accent-soft flex items-center justify-center shrink-0">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent">
-                        <rect x="3" y="11" width="18" height="11" rx="2" />
-                        <path d="M7 11V7a5 5 0 0110 0v4" />
-                      </svg>
-                    </div>
-                    <div className="flex gap-1.5 items-center pt-1.5">
-                      <span className="w-1.5 h-1.5 bg-text-muted rounded-full pulse-dot" />
-                      <span className="w-1.5 h-1.5 bg-text-muted rounded-full pulse-dot" style={{ animationDelay: "0.2s" }} />
-                      <span className="w-1.5 h-1.5 bg-text-muted rounded-full pulse-dot" style={{ animationDelay: "0.4s" }} />
-                    </div>
-                  </div>
-                </div>
-              )
+                {streamingState.streamContent && (
+                  <MessageBubble
+                    role="assistant"
+                    content={streamingState.streamContent}
+                    toolCalls={streamingState.activeTools}
+                    isStreaming
+                  />
+                )}
+              </>
             )}
             <div className="h-2" />
           </div>
@@ -171,7 +186,7 @@ export default function ChatSidebar() {
       {/* Input */}
       <ChatInput
         onSend={sendMessage}
-        disabled={isStreaming || connectionStatus !== "connected"}
+        disabled={connectionStatus !== "connected"}
         isStreaming={isStreaming}
         onCancel={cancelGeneration}
       />

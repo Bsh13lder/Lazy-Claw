@@ -57,6 +57,11 @@ class TrackedTask:
     step_count: int = 0          # Number of tool calls so far
     result_preview: str = ""     # First 100 chars of result
     error: str = ""              # Error message if failed
+    instruction_full: str = ""   # Full untruncated user instruction
+    result_full: str = ""        # Full untruncated result
+    phase: str = ""              # Current TAOR phase: think|act|observe|reflect
+    current_tool: str = ""       # Current tool name (cleaner than current_step)
+    recent_tools: tuple = ()     # Last N tool names in order (tuple of str)
 
 
 # ── Team Lead ─────────────────────────────────────────────────────────
@@ -71,6 +76,27 @@ class TeamLead:
     def __init__(self) -> None:
         self._active: dict[str, TrackedTask] = {}
         self._history: deque[TrackedTask] = deque(maxlen=_MAX_HISTORY)
+        # Per-task cancel tokens (live objects, not serialisable).
+        # Populated at register() time when caller supplies a token.
+        self._cancel_tokens: dict[str, object] = {}
+        # Per-task event-bus fan-out hook (optional — set by app.py).
+        # Callable: publish(user_id: str, event: dict) -> None
+        self._event_publisher = None
+        # task_id -> user_id owning the task (for cancel auth + fan-out)
+        self._task_users: dict[str, str] = {}
+
+    def set_event_publisher(self, publisher) -> None:
+        """Inject an event-bus publisher for live dashboard streaming."""
+        self._event_publisher = publisher
+
+    def _publish(self, user_id: str, event: dict) -> None:
+        """Fire-and-forget event emit. Never raises."""
+        if self._event_publisher is None or not user_id:
+            return
+        try:
+            self._event_publisher(user_id, event)
+        except Exception:
+            pass
 
     # ── Registration ──────────────────────────────────────────────
 
@@ -80,46 +106,104 @@ class TeamLead:
         name: str,
         description: str,
         lane: str,
+        *,
+        instruction_full: str = "",
+        cancel_token: object | None = None,
+        user_id: str = "",
     ) -> TrackedTask:
         """Register a new running task. Returns the created snapshot."""
+        full = instruction_full or description
         task = TrackedTask(
             task_id=task_id,
             name=name,
-            description=description[:80],
+            description=full[:80],
             lane=lane,
             status="running",
             started_at=time.monotonic(),
+            instruction_full=full,
         )
         self._active[task_id] = task
+        if cancel_token is not None:
+            self._cancel_tokens[task_id] = cancel_token
+        if user_id:
+            self._task_users[task_id] = user_id
+        self._publish(user_id, {
+            "type": "task_started",
+            "task_id": task_id,
+            "name": name,
+            "lane": lane,
+            "description": task.description,
+        })
         return task
 
     def update_step(self, task_id: str, step_name: str) -> None:
-        """Update current step for a running task (no-op if not found)."""
+        """Update current step (tool name) for a running task."""
         task = self._active.get(task_id)
         if task is not None:
+            recent = list(task.recent_tools) + [step_name]
+            if len(recent) > 10:
+                recent = recent[-10:]
             self._active[task_id] = replace(
                 task,
                 step_count=task.step_count + 1,
                 current_step=step_name,
+                current_tool=step_name,
+                recent_tools=tuple(recent),
             )
+            self._publish(self._task_users.get(task_id, ""), {
+                "type": "task_step",
+                "task_id": task_id,
+                "step": step_name,
+                "step_count": task.step_count + 1,
+            })
+
+    def update_phase(self, task_id: str, phase: str) -> None:
+        """Update TAOR phase (think|act|observe|reflect) for a running task."""
+        task = self._active.get(task_id)
+        if task is not None:
+            self._active[task_id] = replace(task, phase=phase)
+            self._publish(self._task_users.get(task_id, ""), {
+                "type": "task_phase",
+                "task_id": task_id,
+                "phase": phase,
+            })
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def complete(self, task_id: str, result_preview: str = "") -> None:
+    def complete(
+        self,
+        task_id: str,
+        result_preview: str = "",
+        *,
+        result_full: str = "",
+    ) -> None:
         """Mark task as done and move to history."""
         task = self._active.pop(task_id, None)
+        uid = self._task_users.pop(task_id, "")
+        self._cancel_tokens.pop(task_id, None)
         if task is not None:
+            full = result_full or result_preview
             self._history.append(replace(
                 task,
                 status="done",
                 completed_at=time.monotonic(),
-                result_preview=result_preview[:100],
+                result_preview=(result_preview or full)[:100],
+                result_full=full,
                 current_step="",
+                current_tool="",
+                phase="",
             ))
+            self._publish(uid, {
+                "type": "task_completed",
+                "task_id": task_id,
+                "status": "done",
+            })
 
     def fail(self, task_id: str, error: str = "") -> None:
         """Mark task as failed and move to history."""
         task = self._active.pop(task_id, None)
+        uid = self._task_users.pop(task_id, "")
+        self._cancel_tokens.pop(task_id, None)
         if task is not None:
             self._history.append(replace(
                 task,
@@ -127,18 +211,53 @@ class TeamLead:
                 completed_at=time.monotonic(),
                 error=error[:200],
                 current_step="",
+                current_tool="",
+                phase="",
             ))
+            self._publish(uid, {
+                "type": "task_completed",
+                "task_id": task_id,
+                "status": "failed",
+                "error": error[:200],
+            })
 
     def cancel(self, task_id: str) -> None:
-        """Mark task as cancelled and move to history."""
+        """Mark task as cancelled and move to history (bookkeeping only)."""
         task = self._active.pop(task_id, None)
+        uid = self._task_users.pop(task_id, "")
+        self._cancel_tokens.pop(task_id, None)
         if task is not None:
             self._history.append(replace(
                 task,
                 status="cancelled",
                 completed_at=time.monotonic(),
                 current_step="",
+                current_tool="",
+                phase="",
             ))
+            self._publish(uid, {
+                "type": "task_completed",
+                "task_id": task_id,
+                "status": "cancelled",
+            })
+
+    def request_cancel(self, task_id: str, user_id: str = "") -> bool:
+        """Fire the cancel token for a live task. Does NOT move to history
+        (the agent loop will call .cancel(task_id) on its own teardown).
+
+        Returns True if a cancel token was fired. Authorises by user_id if
+        supplied (prevents cross-user cancel).
+        """
+        if user_id and self._task_users.get(task_id, "") != user_id:
+            return False
+        token = self._cancel_tokens.get(task_id)
+        if token is None:
+            return False
+        try:
+            token.cancel()
+            return True
+        except Exception:
+            return False
 
     @property
     def active_count(self) -> int:

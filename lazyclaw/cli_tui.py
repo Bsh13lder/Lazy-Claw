@@ -1182,7 +1182,13 @@ class AIRoutingBar(Static):
             bar_width = 20
             filled = int(bar_width * pct / 100)
             bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
-            tag = "[bold green]LOCAL[/bold green]" if m.get("is_local") else f"[{_C_ERROR}]PAID[/{_C_ERROR}]"
+            if m.get("is_local"):
+                tag = "[bold green]LOCAL[/bold green]"
+            elif m.get("cost", 0) == 0:
+                # $0 API model — user has a subscription (MiniMax Plus, Claude Max CLI, etc.)
+                tag = "[bold cyan]SUB[/bold cyan]"
+            else:
+                tag = f"[{_C_ERROR}]PAID[/{_C_ERROR}]"
             display = m.get("display_name", name)
             icon = m.get("icon", "\U0001f916")
             cost_str = "FREE" if m.get("cost", 0) == 0 else _fmt_cost(m["cost"])

@@ -53,13 +53,118 @@ class CDPBackend:
     Does NOT close the user's browser — only disconnects the WebSocket.
     """
 
-    def __init__(self, port: int = 9222, profile_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        port: int = 9222,
+        profile_dir: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
         self._port = port
         self._profile_dir = profile_dir  # Shared with Playwright when set
+        self._user_id = user_id           # When set, action events are published
         self._conn: CDPConnection | None = None
         self._current_tab: CDPTab | None = None
         self._last_activity: float = 0.0
         self._connect_lock = asyncio.Lock()
+        self._last_thumb_url: str | None = None  # Throttle thumb captures per URL change
+
+    def set_user_id(self, user_id: str | None) -> None:
+        """Late-bind user_id (used by the shared singleton when user switches)."""
+        self._user_id = user_id
+
+    def _emit(
+        self,
+        kind: str,
+        action: str | None = None,
+        target: str | None = None,
+        url: str | None = None,
+        title: str | None = None,
+        detail: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Publish a browser event. No-op if no user_id is bound."""
+        if not self._user_id:
+            return
+        try:
+            from lazyclaw.browser.event_bus import BrowserEvent, is_live_mode, publish
+            publish(BrowserEvent(
+                user_id=self._user_id,
+                kind=kind,
+                action=action,
+                target=target,
+                url=url,
+                title=title,
+                detail=detail,
+                extra=extra,
+            ))
+            # In live mode, schedule a fresh thumbnail after every action so
+            # the canvas reflects what the agent actually sees, not a stale frame.
+            if kind == "action" and is_live_mode(self._user_id):
+                try:
+                    asyncio.get_running_loop().create_task(self._maybe_live_capture())
+                except RuntimeError:
+                    # No running loop (sync context) — safe to skip
+                    pass
+        except Exception:
+            logger.debug("Browser event publish failed (non-fatal)", exc_info=True)
+
+    async def _capture_thumbnail(self, url: str | None, force: bool = False) -> None:
+        """Capture a small WebP thumbnail and store it in the event bus.
+
+        Throttled: only captures when URL changes (or when force=True / live mode).
+        Uses Pillow if available, else stores the raw PNG.
+        """
+        if not self._user_id or not self._conn:
+            return
+        if not force and url and url == self._last_thumb_url:
+            return
+        try:
+            # Use the inline path (don't call self.screenshot to avoid emitting
+            # a fake "screenshot" action event for the agent log).
+            params: dict = {"format": "png", "quality": 80}
+            result = await self._conn.send("Page.captureScreenshot", params)
+            png_bytes = base64.b64decode(result.get("data", ""))
+            if not png_bytes:
+                return
+            thumb_bytes = png_bytes
+            try:
+                import io
+                from PIL import Image
+                img = Image.open(io.BytesIO(png_bytes))
+                if img.width > 640:
+                    ratio = 640.0 / img.width
+                    img = img.resize((640, int(img.height * ratio)))
+                buf = io.BytesIO()
+                img.save(buf, format="WEBP", quality=70)
+                thumb_bytes = buf.getvalue()
+            except Exception:
+                logger.debug("Pillow downscale unavailable, storing PNG as-is", exc_info=True)
+            from lazyclaw.browser.event_bus import set_thumbnail
+            set_thumbnail(self._user_id, thumb_bytes, url=url)
+            self._last_thumb_url = url
+        except Exception:
+            logger.debug("Thumbnail capture failed", exc_info=True)
+
+    async def _maybe_live_capture(self) -> None:
+        """If live mode is on, capture a thumbnail right now.
+
+        Called after every user-visible action when the user is actively
+        watching the canvas. No-op when live mode is off (zero overhead).
+        """
+        if not self._user_id:
+            return
+        try:
+            from lazyclaw.browser.event_bus import is_live_mode
+            if not is_live_mode(self._user_id):
+                return
+        except Exception:
+            return
+        try:
+            url = await self.current_url()
+        except Exception:
+            url = None
+        # Force capture even if URL is unchanged — that's the whole point of live mode.
+        asyncio.create_task(self._capture_thumbnail(url, force=True))
 
     async def _ensure_connected(self) -> CDPConnection:
         """Lazy connect: discover Chrome and connect to active tab.
@@ -249,6 +354,11 @@ class CDPBackend:
     async def goto(self, url: str) -> None:
         conn = await self._ensure_connected()
 
+        self._emit(
+            kind="navigate", action="goto", url=url,
+            detail=f"Going to {url}",
+        )
+
         # SPA hash navigation: if same origin but different hash/path,
         # Page.navigate won't work (Gmail, Twitter, etc. ignore it).
         # Use JS window.location.href instead, which SPAs do handle.
@@ -264,6 +374,7 @@ class CDPBackend:
             )
             # SPAs need time to render after hash change (Gmail: 1-2s)
             await asyncio.sleep(random.uniform(1.5, 2.5))
+            await self._post_nav_emit(url)
             return
 
         await conn.send("Page.navigate", {"url": url})
@@ -285,6 +396,27 @@ class CDPBackend:
             await detect_and_solve_cloudflare(conn, timeout=20.0)
         except Exception:
             logger.warning("Page ready / Cloudflare detection failed after navigation", exc_info=True)
+
+        await self._post_nav_emit(url)
+
+    async def _post_nav_emit(self, requested_url: str) -> None:
+        """Emit navigate event with final URL+title and capture a thumbnail."""
+        if not self._user_id:
+            return
+        try:
+            final_url = await self.current_url()
+        except Exception:
+            final_url = requested_url
+        try:
+            page_title = await self.title()
+        except Exception:
+            page_title = None
+        self._emit(
+            kind="navigate", action="goto", url=final_url, title=page_title,
+            detail=f"Loaded {page_title or final_url}",
+        )
+        # Fire-and-forget thumbnail (don't block the agent loop)
+        asyncio.create_task(self._capture_thumbnail(final_url))
 
     async def current_url(self) -> str:
         conn = await self._ensure_connected()
@@ -340,7 +472,36 @@ class CDPBackend:
                 }
         result = await conn.send("Page.captureScreenshot", params)
         b64_data = result.get("data", "")
-        return base64.b64decode(b64_data)
+        png_bytes = base64.b64decode(b64_data)
+        # Update thumbnail cache opportunistically. Don't recurse — the
+        # thumbnail helper calls screenshot() too, but with throttling.
+        if self._user_id and not full_page:
+            try:
+                from lazyclaw.browser.event_bus import set_thumbnail
+                try:
+                    cur_url = await self.current_url()
+                except Exception:
+                    cur_url = None
+                # Cheap downscale path inline to avoid circular call
+                try:
+                    import io
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(png_bytes))
+                    if img.width > 640:
+                        ratio = 640.0 / img.width
+                        img = img.resize((640, int(img.height * ratio)))
+                    buf = io.BytesIO()
+                    img.save(buf, format="WEBP", quality=70)
+                    set_thumbnail(self._user_id, buf.getvalue(), url=cur_url)
+                except Exception:
+                    set_thumbnail(self._user_id, png_bytes, url=cur_url)
+            except Exception:
+                logger.debug("Thumbnail cache update failed", exc_info=True)
+        self._emit(
+            kind="action", action="screenshot",
+            detail="Captured screenshot",
+        )
+        return png_bytes
 
     async def click(self, selector: str) -> None:
         conn = await self._ensure_connected()
@@ -372,6 +533,11 @@ class CDPBackend:
         from lazyclaw.browser.human_input import human_click
         await human_click(conn, x, y, target_size=target_size)
 
+        self._emit(
+            kind="action", action="click", target=selector[:80],
+            detail=f"Clicked {selector[:60]}",
+        )
+
     async def type_text(self, selector: str, text: str) -> None:
         conn = await self._ensure_connected()
         # Find element coordinates and click to focus (human-like)
@@ -395,6 +561,15 @@ class CDPBackend:
             conn, text,
             field_x=coords["x"] if coords else None,
             field_y=coords["y"] if coords else None,
+        )
+
+        # Mask passwords/secrets in the visible detail line
+        masked = text if len(text) <= 40 else text[:37] + "…"
+        if any(s in selector.lower() for s in ("password", "passwd", "pin", "secret")):
+            masked = "•" * min(len(text), 8)
+        self._emit(
+            kind="action", action="type", target=selector[:80],
+            detail=f"Typed '{masked}' into {selector[:40]}",
         )
 
     async def press_key(self, key: str) -> None:
@@ -442,12 +617,20 @@ class CDPBackend:
             "windowsVirtualKeyCode": code,
             "nativeVirtualKeyCode": code,
         })
+        self._emit(
+            kind="action", action="press_key", target=key,
+            detail=f"Pressed {key}",
+        )
 
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         conn = await self._ensure_connected()
         # Human-like scroll with momentum deceleration
         from lazyclaw.browser.human_input import human_scroll
         await human_scroll(conn, direction=direction, amount=amount)
+        self._emit(
+            kind="action", action="scroll", target=direction,
+            detail=f"Scrolled {direction} {amount}px",
+        )
 
     async def wait_for_selector(
         self, selector: str, timeout_ms: int = 5000,
@@ -637,6 +820,12 @@ class CDPBackend:
         but dispatches mousedown + mouseup + click on the actual DOM element.
         Returns {"role": str, "name": str} if clicked, None if not found.
         """
+        # Emit will fire after success below — record intent here too so
+        # the user sees the agent attempting it even if it fails.
+        self._emit(
+            kind="action", action="click_by_role", target=description[:80],
+            detail=f"Looking for {description!r}",
+        )
         conn = await self._ensure_connected()
         await conn.send("Accessibility.enable")
         result = await conn.send("Accessibility.getFullAXTree", {"depth": 6})
@@ -685,10 +874,13 @@ class CDPBackend:
                     this.click();
                 }""",
             })
-            return {
-                "role": node.get("role", {}).get("value", ""),
-                "name": node.get("name", {}).get("value", ""),
-            }
+            role_name = node.get("role", {}).get("value", "")
+            label = node.get("name", {}).get("value", "")
+            self._emit(
+                kind="action", action="click", target=label or role_name,
+                detail=f"Clicked {role_name} '{label}'" if label else f"Clicked {role_name}",
+            )
+            return {"role": role_name, "name": label}
         except Exception as exc:
             logger.debug("click_by_role failed: %s", exc)
 
@@ -890,6 +1082,10 @@ class CDPBackend:
         try:
             conn = await self._ensure_connected()
             await conn.send("Target.closeTarget", {"targetId": target_id})
+            self._emit(
+                kind="action", action="close_tab", target=target_id[:24],
+                detail="Closed tab",
+            )
         except Exception as exc:
             logger.debug("close_tab %s failed: %s", target_id, exc)
 

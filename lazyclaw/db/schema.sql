@@ -440,3 +440,27 @@ ON channel_bindings(user_id, channel);
 
 CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date
 ON daily_logs(user_id, date DESC);
+
+-- Browser templates (saved-agent recipes for repeatable flows like govt
+-- appointments). system_prompt + playbook are encrypted; setup_urls /
+-- checkpoints / watch_extractor stay plaintext for query and inspection.
+CREATE TABLE IF NOT EXISTS browser_templates (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    icon TEXT,
+    system_prompt TEXT,            -- encrypted
+    setup_urls TEXT,               -- JSON array of URLs to open before run
+    checkpoints TEXT,              -- JSON array of checkpoint names
+    playbook TEXT,                 -- encrypted free-form instructions
+    page_reader_mode TEXT NOT NULL DEFAULT 'auto',  -- on | off | auto
+    watch_url TEXT,                -- URL the slot-poller hits
+    watch_extractor TEXT,          -- JS string for cheap polling
+    watch_condition TEXT,          -- "TRIGGERED if slots > 0" rule
+    watch_job_id TEXT,             -- references agent_jobs(id) when active
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_browser_templates_user
+ON browser_templates(user_id, name);

@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useAgentStatus } from "../context/AgentStatusContext";
 import type { AgentTask, ActivityEvent, AgentMetrics } from "../api";
+import { cancelTask } from "../api";
 import { StatusBadge, LaneBadge, RecentTaskRow, formatElapsed } from "../components/TaskRow";
+import { iconFor, colorFor } from "../components/toolIcons";
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 
@@ -105,34 +107,94 @@ function StatCard({
   );
 }
 
+/* ── Phase Badge ──────────────────────────────────────────────── */
+
+const PHASE_COLORS: Record<string, string> = {
+  think: "bg-cyan/10 text-cyan border-cyan/30",
+  act: "bg-accent/10 text-accent border-accent/30",
+  observe: "bg-amber/10 text-amber border-amber/30",
+  reflect: "bg-purple-400/10 text-purple-400 border-purple-400/30",
+};
+
+function PhaseBadge({ phase }: { phase: string }) {
+  const cls = PHASE_COLORS[phase] || "bg-bg-tertiary text-text-muted border-border";
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-medium uppercase tracking-wider ${cls}`}>
+      <span className="w-1 h-1 rounded-full pulse-dot bg-current" />
+      {phase}
+    </span>
+  );
+}
+
 /* ── Active Task Card ────────────────────────────────────────── */
 
-function ActiveTaskCard({ task }: { task: AgentTask }) {
+function ActiveTaskCard({ task, onCancelled }: { task: AgentTask; onCancelled?: () => void }) {
+  const [cancelling, setCancelling] = useState(false);
+
+  const handleCancel = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (cancelling) return;
+    setCancelling(true);
+    try {
+      await cancelTask(task.task_id);
+      onCancelled?.();
+    } catch {
+      setCancelling(false);
+    }
+  };
+
+  const currentTool = task.current_tool || task.current_step;
+  const recentTools = task.recent_tools || [];
+  const request = task.instruction || task.description;
+
   return (
-    <div className="bg-bg-secondary border border-border rounded-xl p-4 animate-fade-in">
-      <div className="flex items-center gap-2 mb-2">
+    <div className="bg-bg-secondary border border-border rounded-xl p-4 animate-fade-in hover:border-border-light transition-colors">
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
         <span className="inline-block w-2 h-2 rounded-full bg-accent live-pulse" />
         <span className="text-sm font-medium text-text-primary flex-1 min-w-0 truncate">{task.name}</span>
+        {task.phase && <PhaseBadge phase={task.phase} />}
         <LaneBadge lane={task.lane} />
         <span className="text-xs text-text-muted tabular-nums shrink-0">{formatElapsed(task.elapsed_s ?? 0)}</span>
+        <button
+          onClick={handleCancel}
+          disabled={cancelling}
+          className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-red-900/30 text-red-400 hover:bg-red-900/50 disabled:opacity-50 transition-colors"
+          title="Cancel this task"
+        >
+          {cancelling ? "cancelling…" : "cancel"}
+        </button>
       </div>
-      {task.description && (
-        <p className="text-xs text-text-secondary mb-2 line-clamp-2">{task.description}</p>
+      {request && (
+        <p className="text-xs text-text-secondary mb-2 line-clamp-2">
+          <span className="text-text-muted/60">›</span> {request}
+        </p>
       )}
       {/* Current tool being used */}
-      {task.current_step && (
-        <div className="flex items-center gap-2 text-[11px] text-text-muted">
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-cyan shrink-0">
-            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-          </svg>
-          <span>Using <span className="text-cyan">{task.current_step}</span></span>
+      {currentTool && (
+        <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+          <span className={colorFor(currentTool)}>{iconFor(currentTool)}</span>
+          <span>Using <span className="text-cyan font-medium">{currentTool}</span></span>
           {(task.step_count ?? 0) > 0 && (
-            <span className="text-text-muted">({task.step_count} calls)</span>
+            <span className="text-text-muted">· step {task.step_count}</span>
           )}
         </div>
       )}
+      {/* Recent tools strip */}
+      {recentTools.length > 1 && (
+        <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+          {recentTools.slice(-5).map((t, i) => (
+            <span
+              key={`${t}-${i}`}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-border/50 bg-bg-tertiary/40 text-text-muted"
+            >
+              <span className={colorFor(t)}>{iconFor(t)}</span>
+              <span className="truncate max-w-[80px]">{t}</span>
+            </span>
+          ))}
+        </div>
+      )}
       {/* Progress bar */}
-      {(task.step_count ?? 0) > 0 && task.current_step != null && (
+      {(task.step_count ?? 0) > 0 && (
         <div className="mt-2">
           <div className="h-1 bg-bg-tertiary rounded-full overflow-hidden">
             <div
@@ -141,6 +203,45 @@ function ActiveTaskCard({ task }: { task: AgentTask }) {
             />
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function SpecialistSubCard({ task }: { task: AgentTask }) {
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancel = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (cancelling) return;
+    setCancelling(true);
+    try {
+      await cancelTask(task.task_id);
+    } catch {
+      setCancelling(false);
+    }
+  };
+  const currentTool = task.current_tool || task.current_step;
+  return (
+    <div className="bg-bg-secondary border border-border rounded-lg px-3 py-2 animate-fade-in">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="w-1.5 h-1.5 rounded-full bg-orange-400 live-pulse" />
+        <LaneBadge lane="specialist" />
+        <span className="text-xs text-text-primary truncate flex-1 min-w-0">{task.name}</span>
+        {task.phase && <PhaseBadge phase={task.phase} />}
+        <span className="text-[10px] text-text-muted tabular-nums">{formatElapsed(task.elapsed_s ?? 0)}</span>
+        <button
+          onClick={handleCancel}
+          disabled={cancelling}
+          className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-900/30 text-red-400 hover:bg-red-900/50 disabled:opacity-50 transition-colors"
+        >
+          {cancelling ? "…" : "cancel"}
+        </button>
+      </div>
+      {currentTool && (
+        <p className="text-[10px] text-text-muted mt-1 flex items-center gap-1.5">
+          <span className={colorFor(currentTool)}>{iconFor(currentTool)}</span>
+          Using <span className="text-cyan">{currentTool}</span>
+        </p>
       )}
     </div>
   );
@@ -325,17 +426,7 @@ export default function Activity() {
                       {specialistTasks.length > 0 && (
                         <div className="ml-6 mt-1 space-y-1 border-l-2 border-orange-400/30 pl-3">
                           {specialistTasks.map((st) => (
-                            <div key={st.task_id} className="bg-bg-secondary border border-border rounded-lg px-3 py-2 animate-fade-in">
-                              <div className="flex items-center gap-2">
-                                <span className="w-1.5 h-1.5 rounded-full bg-orange-400 live-pulse" />
-                                <LaneBadge lane="specialist" />
-                                <span className="text-xs text-text-primary truncate flex-1">{st.name}</span>
-                                <span className="text-[10px] text-text-muted tabular-nums">{formatElapsed(st.elapsed_s ?? 0)}</span>
-                              </div>
-                              {st.current_step && (
-                                <p className="text-[10px] text-text-muted mt-1 ml-4">Using <span className="text-cyan">{st.current_step}</span></p>
-                              )}
-                            </div>
+                            <SpecialistSubCard key={st.task_id} task={st} />
                           ))}
                         </div>
                       )}
@@ -373,6 +464,7 @@ export default function Activity() {
                       task={t}
                       expanded={expandedTask === t.task_id}
                       onToggle={() => setExpandedTask(expandedTask === t.task_id ? null : t.task_id)}
+                      onCancel={t.status === "running" ? () => { cancelTask(t.task_id).catch(() => {}); } : undefined}
                     />
                   ))}
                 </div>

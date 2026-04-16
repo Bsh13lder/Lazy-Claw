@@ -243,6 +243,94 @@ export const getSessionMessages = (sessionId: string, opts?: { limit?: number; b
     .then((r) => r.messages);
 };
 
+// ── Browser canvas ─────────────────────────────────────────────────────────
+
+export interface BrowserStateInfo {
+  state: { url?: string; title?: string; ts?: number } | null;
+  events: Array<{
+    kind: string;
+    ts: number;
+    action?: string;
+    target?: string;
+    url?: string;
+    title?: string;
+    detail?: string;
+    extra?: Record<string, unknown>;
+  }>;
+  has_thumbnail: boolean;
+}
+
+export const getBrowserState = () =>
+  request<BrowserStateInfo>("/api/browser/state");
+
+/** Returns latest browser thumbnail blob, or null if none captured yet. */
+export async function getBrowserFrame(): Promise<Blob | null> {
+  const res = await fetch("/api/browser/frame", { credentials: "include" });
+  if (res.status === 204 || !res.ok) return null;
+  return res.blob();
+}
+
+/** Force the browser backend to capture a fresh thumbnail right now. */
+export const refreshBrowserFrame = () =>
+  request<{ status: string; url?: string; error?: string }>(
+    "/api/browser/frame/refresh",
+    { method: "POST" },
+  );
+
+export interface BrowserLiveMode {
+  active: boolean;
+  remaining_seconds: number;
+  expires_at?: number;
+}
+
+export const getBrowserLiveMode = () =>
+  request<BrowserLiveMode>("/api/browser/live-mode");
+
+export const startBrowserLiveMode = (seconds?: number) =>
+  request<BrowserLiveMode>("/api/browser/live-mode/start", {
+    method: "POST",
+    body: JSON.stringify({ seconds }),
+  });
+
+export const stopBrowserLiveMode = () =>
+  request<{ active: boolean }>("/api/browser/live-mode/stop", { method: "POST" });
+
+export interface BrowserRemoteSession {
+  active: boolean;
+  url: string | null;
+  capable: boolean;
+}
+
+export const getBrowserRemoteStatus = () =>
+  request<BrowserRemoteSession>("/api/browser/remote-session");
+
+export const startBrowserRemoteSession = () =>
+  request<{ url: string }>("/api/browser/remote-session/start", { method: "POST" });
+
+export const stopBrowserRemoteSession = () =>
+  request<{ status: string }>("/api/browser/remote-session/stop", { method: "POST" });
+
+export interface PendingCheckpoint {
+  name: string;
+  detail?: string | null;
+  created_at: number;
+}
+
+export const getPendingCheckpoint = () =>
+  request<{ pending: PendingCheckpoint | null }>("/api/browser/checkpoint");
+
+export const approveCheckpoint = (name: string, reason?: string) =>
+  request<{ status: string }>("/api/browser/checkpoint/approve", {
+    method: "POST",
+    body: JSON.stringify({ name, reason }),
+  });
+
+export const rejectCheckpoint = (name: string, reason?: string) =>
+  request<{ status: string }>("/api/browser/checkpoint/reject", {
+    method: "POST",
+    body: JSON.stringify({ name, reason }),
+  });
+
 // ── Health ─────────────────────────────────────────────────────────────────
 
 export const healthCheck = () =>
@@ -464,13 +552,18 @@ export interface AgentTask {
   task_id: string;
   name: string;
   description: string;
+  instruction?: string;    // full untruncated user instruction
   lane: string;
   status: string;
   elapsed_s?: number;
   current_step?: string;
+  current_tool?: string;
   step_count?: number;
+  phase?: string;          // TAOR phase: think|act|observe|reflect
+  recent_tools?: string[];
   duration_s?: number | null;
   result_preview?: string;
+  result?: string;         // full untruncated result
   error?: string | null;
 }
 

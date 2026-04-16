@@ -18,6 +18,7 @@ from lazyclaw.gateway.routes.memory import router as memory_router
 from lazyclaw.gateway.routes.skills import router as skills_router
 from lazyclaw.gateway.routes.vault import router as vault_router
 from lazyclaw.gateway.routes.browser import router as browser_router
+from lazyclaw.gateway.routes.browser_templates import router as browser_templates_router
 from lazyclaw.gateway.routes.connector import router as connector_router
 from lazyclaw.gateway.routes.connector import ws_router as connector_ws_router
 from lazyclaw.gateway.routes.mcp import router as mcp_router
@@ -127,6 +128,7 @@ app.include_router(skills_router)
 app.include_router(memory_router)
 app.include_router(vault_router)
 app.include_router(browser_router)
+app.include_router(browser_templates_router)
 app.include_router(connector_router)
 app.include_router(connector_ws_router)
 app.include_router(mcp_router)

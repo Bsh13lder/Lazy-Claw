@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <!-- Concept C: Abstract LC Monogram — Clean "L" and "C" merged into one mark, with lock dot -->
+  <defs>
+    <linearGradient id="gc" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#34d399"/>
+      <stop offset="100%" style="stop-color:#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="400" height="400" fill="#0a0a0a"/>
+
+  <!-- The "L" shape — vertical bar + horizontal base -->
+  <path d="M 115 70 L 115 250 L 230 250"
+        fill="none" stroke="url(#gc)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- The "C" wrapping around — open arc -->
+  <path d="M 270 105 C 310 105, 330 140, 330 175 C 330 215, 310 250, 270 250"
+        fill="none" stroke="url(#gc)" stroke-width="28" stroke-linecap="round"/>
+
+  <!-- Lock keyhole dot — sits where L meets C -->
+  <circle cx="250" cy="175" r="14" fill="url(#gc)"/>
+  <circle cx="250" cy="175" r="6" fill="#0a0a0a"/>
+  <rect x="248" y="175" width="4" height="10" rx="1.5" fill="#0a0a0a"/>
+
+  <!-- Text -->
+  <text x="200" y="320" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-weight="700" font-size="36" fill="#f1f5f9" letter-spacing="6">LAZYCLAW</text>
+  <text x="200" y="348" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-weight="400" font-size="11" fill="#34d399" letter-spacing="5">ENCRYPTED AI AGENT</text>
+</svg>

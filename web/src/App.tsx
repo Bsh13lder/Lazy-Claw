@@ -9,6 +9,7 @@ import Replay from "./pages/Replay";
 import Audit from "./pages/Audit";
 import SkillHub from "./pages/SkillHub";
 import Skills from "./pages/Skills";
+import BrowserTemplates from "./pages/BrowserTemplates";
 import Jobs from "./pages/Jobs";
 import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
@@ -43,6 +44,7 @@ function AppContent() {
       case "audit": return <Audit />;
       case "hub": return <SkillHub />;
       case "skills": return <Skills />;
+      case "templates": return <BrowserTemplates />;
       case "jobs": return <Jobs />;
       case "mcp": return <Mcp />;
       case "memory": return <Memory />;

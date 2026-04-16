@@ -20,10 +20,43 @@ export interface UsageInfo {
   model?: string;
 }
 
+export interface PhaseInfo {
+  phase: "think" | "act" | "observe" | "reflect";
+  iteration?: number;
+  tools?: string[];
+  startedAt: number;
+}
+
+export interface BrowserEvent {
+  kind: string;        // action | navigate | snapshot | checkpoint | alert | takeover | done
+  ts: number;
+  action?: string;     // click | type | goto | scroll | screenshot | press_key | tabs
+  target?: string;
+  url?: string;
+  title?: string;
+  detail?: string;
+  extra?: Record<string, unknown>;
+}
+
+export interface BrowserSession {
+  url?: string;
+  title?: string;
+  events: BrowserEvent[];   // ring buffer, last 8
+  thumbnailVersion: number; // bumps on URL change → triggers thumb refetch
+  takeoverUrl?: string;     // set when remote VNC session opens
+  pendingCheckpoint?: { name: string; detail?: string; ts: number };
+  active: boolean;
+  updatedAt: number;
+}
+
 export interface StreamingState {
   isStreaming: boolean;
   streamContent: string;
   activeTools: ToolCallInfo[];
+  currentPhase?: PhaseInfo;
+  sideNotes: string[];  // side-notes the user queued for the running turn
+  startedAt?: number;   // turn start timestamp for elapsed display
+  browserSession?: BrowserSession;
 }
 
 interface OnCompletePayload {
@@ -41,7 +74,9 @@ interface UseChatStreamOptions {
 
 interface UseChatStreamReturn {
   sendMessage: (content: string, sessionId: string) => void;
+  sendSideNote: (content: string) => void;
   cancelGeneration: () => void;
+  dismissBrowserSession: () => void;
   streamingState: StreamingState;
   connectionStatus: ConnectionStatus;
 }
@@ -55,6 +90,7 @@ export function useChatStream({
     isStreaming: false,
     streamContent: "",
     activeTools: [],
+    sideNotes: [],
   });
 
   // Buffer tokens and flush via rAF to avoid excessive re-renders
@@ -64,6 +100,11 @@ export function useChatStream({
   const usageRef = useRef<UsageInfo | null>(null);
   const sendTimeRef = useRef<number>(0);
   const firstTokenTimeRef = useRef<number>(0);
+  const phaseRef = useRef<PhaseInfo | undefined>(undefined);
+  const sideNotesRef = useRef<string[]>([]);
+  const startedAtRef = useRef<number>(0);
+  const browserSessionRef = useRef<BrowserSession | undefined>(undefined);
+  const browserClearTimerRef = useRef<number>(0);
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
   useEffect(() => {
@@ -74,7 +115,16 @@ export function useChatStream({
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;
     const tools = [...toolsRef.current];
-    setStreamingState({ isStreaming: true, streamContent: content, activeTools: tools });
+    const isStreaming = !!startedAtRef.current || !!browserSessionRef.current?.active;
+    setStreamingState({
+      isStreaming,
+      streamContent: content,
+      activeTools: tools,
+      currentPhase: phaseRef.current,
+      sideNotes: [...sideNotesRef.current],
+      startedAt: startedAtRef.current || undefined,
+      browserSession: browserSessionRef.current,
+    });
     rafRef.current = 0;
   }, []);
 
@@ -89,12 +139,32 @@ export function useChatStream({
     toolsRef.current = [];
     usageRef.current = null;
     firstTokenTimeRef.current = 0;
+    phaseRef.current = undefined;
+    sideNotesRef.current = [];
+    startedAtRef.current = 0;
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
     }
-    setStreamingState({ isStreaming: false, streamContent: "", activeTools: [] });
+    // NOTE: do NOT clear browserSessionRef — its lifecycle is independent
+    // (auto-clears after 5min idle, or when the user dismisses).
+    setStreamingState({
+      isStreaming: false,
+      streamContent: "",
+      activeTools: [],
+      sideNotes: [],
+      browserSession: browserSessionRef.current,
+    });
   }, []);
+
+  const dismissBrowserSession = useCallback(() => {
+    if (browserClearTimerRef.current) {
+      window.clearTimeout(browserClearTimerRef.current);
+      browserClearTimerRef.current = 0;
+    }
+    browserSessionRef.current = undefined;
+    scheduleFlush();
+  }, [scheduleFlush]);
 
   const handleMessage = useCallback(
     (data: unknown) => {
@@ -176,6 +246,24 @@ export function useChatStream({
           // Agent reasoning — captured for future display
           break;
 
+        case "phase": {
+          phaseRef.current = {
+            phase: msg.phase as PhaseInfo["phase"],
+            iteration: msg.iteration as number | undefined,
+            tools: msg.tools as string[] | undefined,
+            startedAt: Date.now(),
+          };
+          scheduleFlush();
+          break;
+        }
+
+        case "side_note_ack": {
+          const note = msg.message as string;
+          sideNotesRef.current = [...sideNotesRef.current, note];
+          scheduleFlush();
+          break;
+        }
+
         case "usage": {
           // Token usage event from backend
           usageRef.current = {
@@ -218,6 +306,63 @@ export function useChatStream({
         case "cancelled":
           resetStream();
           break;
+
+        case "browser_event": {
+          const evt: BrowserEvent = {
+            kind: (msg.kind as string) ?? "action",
+            ts: ((msg.ts as number) ?? Date.now() / 1000),
+            action: msg.action as string | undefined,
+            target: msg.target as string | undefined,
+            url: msg.url as string | undefined,
+            title: msg.title as string | undefined,
+            detail: msg.detail as string | undefined,
+            extra: msg.extra as Record<string, unknown> | undefined,
+          };
+          const prev = browserSessionRef.current;
+          const events = prev ? [...prev.events, evt].slice(-12) : [evt];
+          const urlChanged = !!evt.url && evt.url !== prev?.url;
+          // A checkpoint event with extra.resolved means it was handled —
+          // drop any pending banner.
+          const resolved = evt.extra?.resolved as string | undefined;
+          let nextCheckpoint = prev?.pendingCheckpoint;
+          if (evt.kind === "checkpoint") {
+            if (resolved === "approved" || resolved === "rejected") {
+              nextCheckpoint = undefined;
+            } else {
+              nextCheckpoint = {
+                name: evt.target ?? evt.detail ?? "Checkpoint",
+                detail: evt.detail,
+                ts: evt.ts,
+              };
+            }
+          }
+          const next: BrowserSession = {
+            url: evt.url ?? prev?.url,
+            title: evt.title ?? prev?.title,
+            events,
+            thumbnailVersion: urlChanged
+              ? (prev?.thumbnailVersion ?? 0) + 1
+              : (prev?.thumbnailVersion ?? 0),
+            takeoverUrl:
+              evt.kind === "takeover"
+                ? (evt.extra?.url as string | undefined) ?? undefined
+                : prev?.takeoverUrl,
+            pendingCheckpoint: nextCheckpoint,
+            active: true,
+            updatedAt: Date.now(),
+          };
+          browserSessionRef.current = next;
+          // Auto-clear after 5 minutes idle so the canvas disappears.
+          if (browserClearTimerRef.current) {
+            window.clearTimeout(browserClearTimerRef.current);
+          }
+          browserClearTimerRef.current = window.setTimeout(() => {
+            browserSessionRef.current = undefined;
+            scheduleFlush();
+          }, 5 * 60 * 1000);
+          scheduleFlush();
+          break;
+        }
       }
     },
     [scheduleFlush, resetStream],
@@ -234,16 +379,36 @@ export function useChatStream({
       toolsRef.current = [];
       usageRef.current = null;
       firstTokenTimeRef.current = 0;
+      phaseRef.current = undefined;
+      sideNotesRef.current = [];
       sendTimeRef.current = Date.now();
-      setStreamingState({ isStreaming: true, streamContent: "", activeTools: [] });
+      startedAtRef.current = Date.now();
+      setStreamingState({
+        isStreaming: true,
+        streamContent: "",
+        activeTools: [],
+        sideNotes: [],
+        startedAt: Date.now(),
+      });
       send({ type: "message", content, session_id: sessionId });
     },
     [send],
+  );
+
+  const sendSideNote = useCallback(
+    (content: string) => {
+      // Append to pending side-notes immediately (optimistic) — server will
+      // ack with side_note_ack which we treat as confirmation.
+      sideNotesRef.current = [...sideNotesRef.current, content];
+      scheduleFlush();
+      send({ type: "side_note", content });
+    },
+    [send, scheduleFlush],
   );
 
   const cancelGeneration = useCallback(() => {
     send({ type: "cancel" });
   }, [send]);
 
-  return { sendMessage, cancelGeneration, streamingState, connectionStatus };
+  return { sendMessage, sendSideNote, cancelGeneration, dismissBrowserSession, streamingState, connectionStatus };
 }

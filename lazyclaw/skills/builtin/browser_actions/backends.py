@@ -84,7 +84,13 @@ async def get_cdp_backend(user_id: str = "default"):
     port = getattr(config, "cdp_port", 9222)
 
     if _cdp_backend is None or getattr(_cdp_backend, "_profile_dir", None) != profile_dir:
-        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir, user_id=user_id)
+    else:
+        # User switched on the shared singleton — late-bind so events route correctly
+        try:
+            _cdp_backend.set_user_id(user_id)
+        except AttributeError:
+            pass
     return _cdp_backend
 
 
@@ -121,7 +127,12 @@ async def get_visible_cdp_backend(user_id: str = "default"):
             # Case 1: already visible -> reuse
             logger.info("Browser already visible on CDP port %d, reusing", port)
             if _cdp_backend is None or _cdp_backend._profile_dir != profile_dir:
-                _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+                _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir, user_id=user_id)
+            else:
+                try:
+                    _cdp_backend.set_user_id(user_id)
+                except AttributeError:
+                    pass
             return _cdp_backend
 
         # Case 2: headless -> capture URL, kill, relaunch visible
@@ -138,7 +149,7 @@ async def get_visible_cdp_backend(user_id: str = "default"):
         )
         if not ws_url:
             logger.error("Failed to relaunch visible browser — CDP never responded")
-        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+        _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir, user_id=user_id)
 
         await asyncio.sleep(1.0)
 
@@ -175,7 +186,7 @@ async def get_visible_cdp_backend(user_id: str = "default"):
         if await find_chrome_cdp(port):
             break
 
-    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir, user_id=user_id)
     return _cdp_backend
 
 
@@ -273,7 +284,7 @@ async def _get_remote_cdp_backend(user_id: str = "default"):
         browser_bin=config.browser_executable,
         stuck_url=stuck_url,
     )
-    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir)
+    _cdp_backend = CDPBackend(port=port, profile_dir=profile_dir, user_id=user_id)
     return _cdp_backend
 
 

@@ -39,6 +39,23 @@ class WebSocketCallback:
     _buffer: str = field(default="", init=False)
     _closed: bool = field(default=False, init=False)
     _work_summary: dict | None = field(default=None, init=False)
+    # Side-channel notes the user typed while the agent was already running.
+    # Drained by the agent loop between TAOR iterations and injected as
+    # system messages so the agent can acknowledge or pivot mid-run.
+    _side_notes: list = field(default_factory=list, init=False)
+
+    def push_side_note(self, text: str) -> None:
+        """Queue a side-channel note from the user for the running agent."""
+        if text and text.strip():
+            self._side_notes.append(text.strip())
+
+    def pop_side_notes(self) -> list:
+        """Return and clear pending side notes (agent-side polled)."""
+        if not self._side_notes:
+            return []
+        notes = list(self._side_notes)
+        self._side_notes.clear()
+        return notes
 
     async def _send(self, data: dict) -> None:
         if self._closed:
@@ -81,6 +98,21 @@ class WebSocketCallback:
                 "name": event.metadata.get("specialist", event.detail),
             })
 
+        elif kind == "phase":
+            # TAOR phase transition — think|act|observe|reflect.
+            await self._send({
+                "type": "phase",
+                "phase": event.metadata.get("phase", event.detail),
+                "iteration": event.metadata.get("iteration"),
+                "tools": event.metadata.get("tools"),
+            })
+
+        elif kind == "side_note_ack":
+            await self._send({
+                "type": "side_note_ack",
+                "message": event.detail,
+            })
+
         elif kind == "work_summary":
             from dataclasses import asdict
             raw = event.metadata.get("summary")
@@ -111,6 +143,37 @@ async def _authenticate_ws(ws: WebSocket):
     return await get_session_user(_config, session_id)
 
 
+async def _run_agent_turn(
+    user_id: str,
+    content: str,
+    session_id: str | None,
+    cb: WebSocketCallback,
+) -> str:
+    """Single agent turn — enqueue via lane or run directly."""
+    if _lane_queue:
+        return await _lane_queue.enqueue(
+            user_id, content,
+            callback=cb,
+            chat_session_id=session_id,
+        )
+
+    from lazyclaw.llm.router import LLMRouter
+    from lazyclaw.permissions.checker import PermissionChecker
+    from lazyclaw.runtime.agent import Agent
+    from lazyclaw.skills.registry import SkillRegistry
+
+    registry = _shared_registry or SkillRegistry()
+    if not _shared_registry:
+        registry.register_defaults(config=_config)
+    router = LLMRouter(_config)
+    checker = PermissionChecker(_config, registry)
+    agent = Agent(_config, router, registry, permission_checker=checker)
+    agent.cancel_token = cb.cancel_token
+    return await agent.process_message(
+        user_id, content, callback=cb, chat_session_id=session_id,
+    )
+
+
 @ws_chat_router.websocket("/ws/chat")
 async def chat_websocket(ws: WebSocket):
     user = await _authenticate_ws(ws)
@@ -121,7 +184,61 @@ async def chat_websocket(ws: WebSocket):
     await ws.accept()
     logger.info("WebSocket chat connected: user=%s", user.username)
 
-    active_callback: WebSocketCallback | None = None
+    # Mutable holder — shared between reader task and writer tasks.
+    state: dict = {"active": None}  # type: dict[str, WebSocketCallback | None]
+    writer_tasks: set = set()
+
+    # Forward live browser events from the per-user pub/sub bus.
+    # Runs alongside the chat-message reader; cancelled on disconnect.
+    async def _browser_event_pump() -> None:
+        from lazyclaw.browser.event_bus import recent_events, subscribe
+
+        # Initial paint: send last 4 events so the canvas mounts with state.
+        try:
+            for evt in recent_events(user.id, limit=4):
+                payload = {"type": "browser_event", **evt.to_frame()}
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(payload)
+        except Exception:
+            logger.debug("Initial browser-event paint failed", exc_info=True)
+        try:
+            async for evt in subscribe(user.id):
+                if ws.client_state != WebSocketState.CONNECTED:
+                    return
+                try:
+                    await ws.send_json({"type": "browser_event", **evt.to_frame()})
+                except Exception:
+                    logger.debug("browser_event send failed", exc_info=True)
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    bus_task = asyncio.create_task(_browser_event_pump())
+
+    async def _run_one_turn(content: str, session_id: str | None) -> None:
+        """Run a single agent turn as its own task. Shared state['active']
+        points at the current callback so the reader can route side-notes
+        and cancels to it."""
+        cb = WebSocketCallback(ws=ws)
+        state["active"] = cb
+        try:
+            result = await _run_agent_turn(user.id, content, session_id, cb)
+            done_payload: dict = {
+                "type": "done",
+                "content": result or cb._buffer,
+            }
+            if cb._work_summary:
+                done_payload["usage"] = cb._work_summary
+            await cb._send(done_payload)
+        except asyncio.CancelledError:
+            await cb._send({"type": "cancelled"})
+        except Exception as exc:
+            logger.error("WebSocket chat turn error: %s", exc, exc_info=True)
+            await cb._send({"type": "error", "message": str(exc)})
+        finally:
+            # Only clear state.active if it's still this callback
+            if state.get("active") is cb:
+                state["active"] = None
 
     try:
         while True:
@@ -130,72 +247,70 @@ async def chat_websocket(ws: WebSocket):
 
             if msg_type == "ping":
                 await ws.send_json({"type": "pong"})
+                continue
 
-            elif msg_type == "cancel":
-                if active_callback:
-                    active_callback.cancel_token.cancel()
+            if msg_type == "cancel":
+                cb = state.get("active")
+                if cb is not None:
+                    cb.cancel_token.cancel()
+                continue
 
-            elif msg_type == "message":
-                content = data.get("content", "").strip()
+            if msg_type == "side_note":
+                # Explicit side-channel message — append to running agent.
+                note = (data.get("content") or "").strip()
+                cb = state.get("active")
+                if cb is not None and note:
+                    cb.push_side_note(note)
+                    await ws.send_json({
+                        "type": "side_note_ack",
+                        "message": note[:80],
+                    })
+                elif cb is None and note:
+                    # No agent running — just treat it as a normal message.
+                    msg_type = "message"
+                    data["content"] = note
+                else:
+                    continue
+
+            if msg_type == "message":
+                content = (data.get("content") or "").strip()
                 if not content:
                     await ws.send_json({"type": "error", "message": "Empty message"})
                     continue
 
                 session_id = data.get("session_id")
-                active_callback = WebSocketCallback(ws=ws)
 
-                try:
-                    if _lane_queue:
-                        result = await _lane_queue.enqueue(
-                            user.id, content,
-                            callback=active_callback,
-                            chat_session_id=session_id,
-                        )
-                    else:
-                        from lazyclaw.llm.router import LLMRouter
-                        from lazyclaw.permissions.checker import PermissionChecker
-                        from lazyclaw.runtime.agent import Agent
-                        from lazyclaw.skills.registry import SkillRegistry
-
-                        registry = _shared_registry or SkillRegistry()
-                        if not _shared_registry:
-                            registry.register_defaults(config=_config)
-                        router = LLMRouter(_config)
-                        checker = PermissionChecker(_config, registry)
-                        agent = Agent(
-                            _config, router, registry,
-                            permission_checker=checker,
-                        )
-                        agent.cancel_token = active_callback.cancel_token
-                        result = await agent.process_message(
-                            user.id, content,
-                            callback=active_callback,
-                            chat_session_id=session_id,
-                        )
-
-                    done_payload: dict = {
-                        "type": "done",
-                        "content": result or active_callback._buffer,
-                    }
-                    if active_callback._work_summary:
-                        done_payload["usage"] = active_callback._work_summary
-                    await active_callback._send(done_payload)
-                except asyncio.CancelledError:
-                    await active_callback._send({"type": "cancelled"})
-                except Exception as exc:
-                    logger.error("WebSocket chat error: %s", exc, exc_info=True)
-                    await active_callback._send({
-                        "type": "error",
-                        "message": str(exc),
+                # If an agent turn is already running, auto-promote this
+                # message to a side-note so the user doesn't have to
+                # remember which button to press.
+                cb = state.get("active")
+                if cb is not None:
+                    cb.push_side_note(content)
+                    await ws.send_json({
+                        "type": "side_note_ack",
+                        "message": content[:80],
                     })
-                finally:
-                    active_callback = None
+                    continue
+
+                # Otherwise start a new turn as its own background task —
+                # keeps the reader loop free to accept side-notes + cancels.
+                task = asyncio.create_task(_run_one_turn(content, session_id))
+                writer_tasks.add(task)
+                task.add_done_callback(writer_tasks.discard)
 
     except WebSocketDisconnect:
         logger.info("WebSocket chat disconnected: user=%s", user.username)
-        if active_callback:
-            active_callback.cancel_token.cancel()
+        cb = state.get("active")
+        if cb is not None:
+            cb.cancel_token.cancel()
+        for t in writer_tasks:
+            t.cancel()
+        bus_task.cancel()
     except Exception as exc:
         logger.error("WebSocket unexpected error: %s", exc, exc_info=True)
-        if active_callback:
-            active_callback.cancel_token.cancel()
+        cb = state.get("active")
+        if cb is not None:
+            cb.cancel_token.cancel()
+        for t in writer_tasks:
+            t.cancel()
+        bus_task.cancel()

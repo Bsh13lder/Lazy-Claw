@@ -52,11 +52,15 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                 "task_id": t.task_id,
                 "name": t.name,
                 "description": t.description,
+                "instruction": t.instruction_full or t.description,
                 "lane": t.lane,
                 "status": t.status,
                 "elapsed_s": round(now - t.started_at, 1),
                 "current_step": t.current_step,
+                "current_tool": t.current_tool or t.current_step,
                 "step_count": t.step_count,
+                "phase": t.phase,
+                "recent_tools": list(t.recent_tools),
             })
         for t in _team_lead.recent_tasks[:10]:
             duration = None
@@ -66,10 +70,12 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                 "task_id": t.task_id,
                 "name": t.name,
                 "description": t.description,
+                "instruction": t.instruction_full or t.description,
                 "lane": t.lane,
                 "status": t.status,
                 "duration_s": duration,
                 "result_preview": t.result_preview,
+                "result": t.result_full or t.result_preview,
                 "error": t.error or None,
             })
 
@@ -104,27 +110,54 @@ async def cancel_task(
     body: CancelRequest,
     user: User = Depends(get_current_user),
 ):
-    """Cancel a running background task."""
-    if _task_runner is None:
-        return {"success": False, "error": "Task runner not available"}
+    """Cancel a running task — foreground, specialist, or background.
 
-    cancelled = await _task_runner.cancel(body.task_id, user.id)
-    if cancelled:
-        return {"success": True, "data": {"task_id": body.task_id, "status": "cancelled"}}
+    Tries foreground/specialist first via TeamLead cancel tokens, then
+    falls back to TaskRunner's asyncio-task cancel for background jobs.
+    """
+    fired = False
+
+    # Foreground / specialist via TeamLead cancel token
+    if _team_lead is not None:
+        try:
+            fired = _team_lead.request_cancel(body.task_id, user.id)
+        except Exception as exc:
+            logger.warning("TeamLead.request_cancel failed: %s", exc)
+
+    # Background via TaskRunner
+    if not fired and _task_runner is not None:
+        try:
+            fired = await _task_runner.cancel(body.task_id, user.id)
+        except Exception as exc:
+            logger.warning("TaskRunner.cancel failed: %s", exc)
+
+    if fired:
+        return {"success": True, "data": {"task_id": body.task_id, "status": "cancelling"}}
     return {"success": False, "error": "Task not found or not cancellable"}
 
 
 @router.post("/cancel-all")
 async def cancel_all_tasks(user: User = Depends(get_current_user)):
-    """Cancel all running background tasks for the current user."""
-    if _task_runner is None:
-        return {"success": False, "error": "Task runner not available"}
+    """Cancel all running tasks for the current user — foreground + background."""
+    cancelled: list[dict] = []
 
-    running = _task_runner.list_running(user.id)
-    cancelled = []
-    for task_id, name, _ in running:
-        if await _task_runner.cancel(task_id, user.id):
-            cancelled.append({"task_id": task_id, "name": name})
+    # Foreground + specialist via TeamLead
+    if _team_lead is not None:
+        for t in list(_team_lead.active_tasks):
+            try:
+                if _team_lead.request_cancel(t.task_id, user.id):
+                    cancelled.append({"task_id": t.task_id, "name": t.name})
+            except Exception as exc:
+                logger.warning("cancel_all: TeamLead fire failed: %s", exc)
+
+    # Background via TaskRunner
+    if _task_runner is not None:
+        try:
+            for task in _task_runner.list_running(user.id):
+                if await _task_runner.cancel(task["id"], user.id):
+                    cancelled.append({"task_id": task["id"], "name": task["name"]})
+        except Exception as exc:
+            logger.warning("cancel_all: TaskRunner sweep failed: %s", exc)
 
     return {"success": True, "data": {"cancelled": cancelled, "count": len(cancelled)}}
 

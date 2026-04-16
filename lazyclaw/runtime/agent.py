@@ -567,7 +567,12 @@ class Agent:
         _fg_task_id: str | None = None
         if self._team_lead and not getattr(self, "is_background", False):
             _fg_task_id = str(uuid4())
-            self._team_lead.register(_fg_task_id, "chat", message[:80], "foreground")
+            self._team_lead.register(
+                _fg_task_id, "chat", message[:80], "foreground",
+                instruction_full=message,
+                cancel_token=cancel_token,
+                user_id=user_id,
+            )
         _session_tokens = 0
 
         # Initialize trace recorder
@@ -1133,6 +1138,41 @@ class Agent:
                     await cb.on_event(AgentEvent("done", "Cancelled", {}))
                     return "Operation cancelled."
 
+                # ── Drain side-channel notes from the user (WebSocket) ────
+                # If the user typed something while we were working, inject
+                # it as a system message so the agent can pivot.
+                try:
+                    _popper = getattr(cb, "pop_side_notes", None)
+                    if callable(_popper):
+                        _notes = _popper()
+                        for _note in _notes:
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=(
+                                    f"[User side-note mid-task]: {_note}\n"
+                                    "Acknowledge briefly and incorporate into "
+                                    "your current work if relevant."
+                                ),
+                            ))
+                            await cb.on_event(AgentEvent(
+                                "side_note_ack",
+                                f"Got it: {_note[:60]}",
+                                {"note": _note},
+                            ))
+                except Exception:
+                    pass
+
+                # TAOR phase: entering "think" — LLM planning / reasoning.
+                try:
+                    await cb.on_event(AgentEvent(
+                        "phase", "think",
+                        {"phase": "think", "iteration": iteration},
+                    ))
+                    if self._team_lead and _fg_task_id:
+                        self._team_lead.update_phase(_fg_task_id, "think")
+                except Exception:
+                    pass
+
                 # Prune old tool results to save tokens
                 # Early iterations: keep 2 full results for context
                 # Later iterations: keep only 1 (agent already has the gist)
@@ -1683,6 +1723,18 @@ class Agent:
                     await cb.on_event(AgentEvent("stream_done", "", {}))
                     streamed_content = ""
 
+                # TAOR phase: entering "act" — tool execution.
+                try:
+                    await cb.on_event(AgentEvent(
+                        "phase", "act",
+                        {"phase": "act", "iteration": iteration,
+                         "tools": [tc.name for tc in (response.tool_calls or [])]},
+                    ))
+                    if self._team_lead and _fg_task_id:
+                        self._team_lead.update_phase(_fg_task_id, "act")
+                except Exception:
+                    pass
+
                 # Assistant message with tool calls (may have partial text content)
                 assistant_msg = LLMMessage(
                     role="assistant",
@@ -2048,6 +2100,18 @@ class Agent:
                 # ── Stuck detection (replaces old inline loop detection) ──
                 # Only run if tools were actually called this iteration
                 if response and response.tool_calls:
+                    # TAOR phase: entering "observe" — interpreting tool results.
+                    try:
+                        await cb.on_event(AgentEvent(
+                            "phase", "observe",
+                            {"phase": "observe", "iteration": iteration,
+                             "results_count": len(response.tool_calls)},
+                        ))
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.update_phase(_fg_task_id, "observe")
+                    except Exception:
+                        pass
+
                     _last_result = _tool_results[-1] if _tool_results else None
                     _stuck_signal = detect_stuck(
                         _tool_call_history, _tool_results, _last_result,
@@ -2286,6 +2350,16 @@ class Agent:
         # text-only response — no tool calls. This keeps it cheap and fast.
         if _taor_verify_passes > 0 and needs_tools and all_new_messages:
             from lazyclaw.llm.providers.base import LLMResponse as _LLMRespV
+            # TAOR phase: entering "reflect" — verification pass.
+            try:
+                await cb.on_event(AgentEvent(
+                    "phase", "reflect",
+                    {"phase": "reflect", "passes": _taor_verify_passes},
+                ))
+                if self._team_lead and _fg_task_id:
+                    self._team_lead.update_phase(_fg_task_id, "reflect")
+            except Exception:
+                pass
             for _taor_v in range(_taor_verify_passes):
                 _taor_last = all_new_messages[-1]
                 _taor_final = _taor_last.content or ""
@@ -2455,7 +2529,9 @@ class Agent:
             # ALWAYS mark foreground task done/failed in TeamLead
             if self._team_lead and _fg_task_id:
                 if content:
-                    self._team_lead.complete(_fg_task_id, content[:100])
+                    self._team_lead.complete(
+                        _fg_task_id, content[:100], result_full=content,
+                    )
                 else:
                     self._team_lead.fail(_fg_task_id, "Post-loop error")
 

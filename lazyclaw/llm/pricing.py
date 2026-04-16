@@ -15,7 +15,11 @@ logger = logging.getLogger(__name__)
 MODEL_COSTS: dict[str, dict[str, float]] = {
     # OpenAI
     "gpt-5-mini": {"input": 0.00015, "output": 0.0006},
-    # MiniMax — Token Plan subscription (no per-token billing)
+    # MiniMax — Token Plan subscription (flat monthly fee, no per-token billing).
+    # Plus $20/mo = 4,500 M2.7 req / 5h. Max $50/mo = 15,000 / 5h.
+    # Keys cover both capitalizations the registry uses (MiniMax-M2.7 vs minimax-m2.5).
+    "MiniMax-M2.7": {"input": 0.0, "output": 0.0},
+    "MiniMax-Text-01": {"input": 0.0, "output": 0.0},
     "minimax-m2.7": {"input": 0.0, "output": 0.0},
     "minimax-m2.7-highspeed": {"input": 0.0, "output": 0.0},
     "minimax-m2.5": {"input": 0.0, "output": 0.0},
@@ -43,7 +47,14 @@ _FALLBACK = MODEL_COSTS["gpt-5-mini"]
 
 
 def calculate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    """Return USD cost for a single LLM call."""
+    """Return USD cost for a single LLM call.
+
+    MiniMax models are always $0 (subscription-based). This is a safety
+    net in case MODEL_COSTS is missing a key — a missing subscription
+    model would otherwise fall through to gpt-5-mini rates.
+    """
+    if model and model.lower().startswith("minimax"):
+        return 0.0
     rates = MODEL_COSTS.get(model, _FALLBACK)
     return (tokens_in * rates["input"] + tokens_out * rates["output"]) / 1000
 

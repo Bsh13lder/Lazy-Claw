@@ -9,6 +9,7 @@ import email.utils
 import imaplib
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
@@ -33,21 +34,45 @@ _CONFIG_FILE: Path | None = None
 
 
 def _get_config_path() -> Path:
-    """Get the path for persisted email configs."""
+    """Resolve the email_configs.json path.
+
+    Priority:
+    1. ``LAZYCLAW_DATA_DIR`` env var (explicit override)
+    2. ``/app/data`` (Docker convention — matches docker-compose mount)
+    3. Project-root ``data/`` when running from an editable source install
+    4. ``~/.lazyclaw/`` (always writable fallback)
+
+    The previous implementation walked ``__file__`` up three levels, which
+    resolved to ``/usr/local/lib/python3.11/data`` when pip-installed in
+    Docker — not writable, so every load/save failed with PermissionError.
+    """
     global _CONFIG_FILE
-    if _CONFIG_FILE is None:
-        # Try data/ directory (lazyclaw project), fall back to ~/.lazyclaw/
-        candidates = [
-            Path(__file__).resolve().parent.parent.parent / "data",
-            Path.home() / ".lazyclaw",
-        ]
-        for d in candidates:
-            if d.exists():
-                _CONFIG_FILE = d / "email_configs.json"
-                break
-        if _CONFIG_FILE is None:
-            candidates[0].mkdir(parents=True, exist_ok=True)
-            _CONFIG_FILE = candidates[0] / "email_configs.json"
+    if _CONFIG_FILE is not None:
+        return _CONFIG_FILE
+
+    candidates: list[Path] = []
+    env_dir = os.environ.get("LAZYCLAW_DATA_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(Path("/app/data"))
+    candidates.append(
+        Path(__file__).resolve().parent.parent.parent / "data"
+    )
+    candidates.append(Path.home() / ".lazyclaw")
+
+    # Prefer the first candidate that already exists AND is writable.
+    for d in candidates:
+        if d.exists() and os.access(d, os.W_OK):
+            _CONFIG_FILE = d / "email_configs.json"
+            return _CONFIG_FILE
+
+    # Nothing writable found — create the home fallback.
+    fallback = Path.home() / ".lazyclaw"
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    _CONFIG_FILE = fallback / "email_configs.json"
     return _CONFIG_FILE
 
 

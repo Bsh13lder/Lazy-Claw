@@ -131,6 +131,7 @@ class SearchJobsSkill(BaseSkill):
             )
 
         # Create gig records for found jobs
+        created_count = 0
         for job in good[:5]:
             try:
                 await create_gig(
@@ -143,6 +144,7 @@ class SearchJobsSkill(BaseSkill):
                     external_job_id=job.job_id or "",
                     status="found",
                 )
+                created_count += 1
             except Exception as exc:
                 logger.warning("Failed to create gig record: %s", exc)
 
@@ -162,6 +164,21 @@ class SearchJobsSkill(BaseSkill):
             "Reply with a number to apply, or 'skip all'.\n"
             "DO NOT search more — these are the results. Wait for the user to choose."
         )
+
+        # Best-effort Telegram push so the user is notified even when the
+        # search was triggered from a background job or the web UI.
+        # Failures are swallowed inside push_telegram — search succeeds
+        # regardless of Telegram status.
+        if created_count:
+            try:
+                from lazyclaw.notifications.push import push_telegram
+
+                await push_telegram(
+                    self._config,
+                    "\n".join(lines),
+                )
+            except Exception as exc:
+                logger.debug("Job-match Telegram push skipped: %s", exc)
 
         # Store displayed jobs for apply_job index matching
         search_data = json.dumps([

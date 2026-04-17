@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useChat } from "../context/ChatContext";
+import * as api from "../api";
 
 interface BrowserTemplate {
   id: string;
@@ -77,6 +78,9 @@ export default function BrowserTemplates() {
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
   const [form, setForm] = useState<TemplateForm>(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiError, setAiError] = useState<string | null>(null);
   const { sendMessage, setChatOpen } = useChat();
 
   const reload = async () => {
@@ -101,6 +105,34 @@ export default function BrowserTemplates() {
   const startCreate = () => {
     setForm(EMPTY_FORM);
     setEditingId("new");
+  };
+
+  const startAiDraft = async () => {
+    const prompt = aiPrompt.trim();
+    if (!prompt) return;
+    setBusy(true);
+    setAiError(null);
+    try {
+      const draft = await api.createTemplateFromPrompt(prompt);
+      setForm({
+        name: draft.name || "",
+        icon: draft.icon || "🌐",
+        setup_urls: (draft.setup_urls || []).join("\n"),
+        checkpoints: (draft.checkpoints || []).join("\n"),
+        playbook: draft.playbook || "",
+        page_reader_mode: "auto",
+        watch_url: "",
+        watch_extractor: "",
+        watch_condition: "",
+      });
+      setEditingId("new");
+      setAiOpen(false);
+      setAiPrompt("");
+    } catch (e) {
+      setAiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const startEdit = (t: BrowserTemplate) => {
@@ -307,6 +339,14 @@ export default function BrowserTemplates() {
             ＋ Seed examples
           </button>
           <button
+            onClick={() => { setAiError(null); setAiOpen((o) => !o); }}
+            disabled={busy}
+            className="text-xs px-2 py-1 rounded border border-accent/50 text-accent bg-accent/10 hover:bg-accent/20 disabled:opacity-40"
+            title="Describe what you want in natural language — LazyClaw drafts the template"
+          >
+            ✨ Create with AI
+          </button>
+          <button
             onClick={startCreate}
             disabled={busy}
             className="text-xs px-2 py-1 rounded bg-accent text-bg-primary font-medium disabled:opacity-40"
@@ -318,6 +358,51 @@ export default function BrowserTemplates() {
           Saved recipes the agent can replay by name — perfect for govt appointments,
           doctor bookings, and anything you do more than once.
         </p>
+
+        {aiOpen && (
+          <div className="border border-accent/30 bg-accent/5 rounded-md p-3 flex flex-col gap-2">
+            <div className="text-xs font-medium text-text-primary">
+              Describe the flow
+            </div>
+            <div className="text-[11px] text-text-muted">
+              Plain language. LazyClaw drafts the URLs, playbook, and checkpoints.
+              You review and edit before saving.
+            </div>
+            <textarea
+              rows={3}
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && aiPrompt.trim() && !busy) {
+                  e.preventDefault();
+                  void startAiDraft();
+                }
+              }}
+              placeholder="e.g. book my monthly doctor appointment with Seguridad Social in Madrid"
+              className="text-sm px-3 py-2 rounded border border-border bg-bg-primary text-text-primary focus:outline-none focus:border-accent"
+              autoFocus
+            />
+            {aiError && (
+              <div className="text-[11px] text-rose-400">{aiError}</div>
+            )}
+            <div className="flex justify-end gap-1.5">
+              <button
+                onClick={() => { setAiOpen(false); setAiPrompt(""); setAiError(null); }}
+                disabled={busy}
+                className="text-xs px-2 py-1 rounded text-text-muted hover:text-text-primary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={startAiDraft}
+                disabled={busy || !aiPrompt.trim()}
+                className="text-xs px-2 py-1 rounded bg-accent text-bg-primary font-medium disabled:opacity-40"
+              >
+                {busy ? "Drafting…" : "Draft template (⌘+Enter)"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {loading && <div className="text-sm text-text-muted">Loading...</div>}
         {error && (

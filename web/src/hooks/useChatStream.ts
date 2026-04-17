@@ -49,6 +49,14 @@ export interface BrowserSession {
   updatedAt: number;
 }
 
+export interface TemplateSuggest {
+  suggestedName: string;
+  setupUrls: string[];
+  checkpoints: string[];
+  actionCount: number;
+  createdAt: number;
+}
+
 export interface StreamingState {
   isStreaming: boolean;
   streamContent: string;
@@ -57,6 +65,7 @@ export interface StreamingState {
   sideNotes: string[];  // side-notes the user queued for the running turn
   startedAt?: number;   // turn start timestamp for elapsed display
   browserSession?: BrowserSession;
+  templateSuggest?: TemplateSuggest;
 }
 
 interface OnCompletePayload {
@@ -77,6 +86,7 @@ interface UseChatStreamReturn {
   sendSideNote: (content: string) => void;
   cancelGeneration: () => void;
   dismissBrowserSession: () => void;
+  dismissTemplateSuggest: () => void;
   streamingState: StreamingState;
   connectionStatus: ConnectionStatus;
 }
@@ -105,6 +115,7 @@ export function useChatStream({
   const startedAtRef = useRef<number>(0);
   const browserSessionRef = useRef<BrowserSession | undefined>(undefined);
   const browserClearTimerRef = useRef<number>(0);
+  const templateSuggestRef = useRef<TemplateSuggest | undefined>(undefined);
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
   useEffect(() => {
@@ -124,6 +135,7 @@ export function useChatStream({
       sideNotes: [...sideNotesRef.current],
       startedAt: startedAtRef.current || undefined,
       browserSession: browserSessionRef.current,
+      templateSuggest: templateSuggestRef.current,
     });
     rafRef.current = 0;
   }, []);
@@ -146,14 +158,15 @@ export function useChatStream({
       cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
     }
-    // NOTE: do NOT clear browserSessionRef — its lifecycle is independent
-    // (auto-clears after 5min idle, or when the user dismisses).
+    // NOTE: do NOT clear browserSessionRef or templateSuggestRef — their
+    // lifecycles are independent of a single turn's streaming state.
     setStreamingState({
       isStreaming: false,
       streamContent: "",
       activeTools: [],
       sideNotes: [],
       browserSession: browserSessionRef.current,
+      templateSuggest: templateSuggestRef.current,
     });
   }, []);
 
@@ -163,6 +176,11 @@ export function useChatStream({
       browserClearTimerRef.current = 0;
     }
     browserSessionRef.current = undefined;
+    scheduleFlush();
+  }, [scheduleFlush]);
+
+  const dismissTemplateSuggest = useCallback(() => {
+    templateSuggestRef.current = undefined;
     scheduleFlush();
   }, [scheduleFlush]);
 
@@ -307,6 +325,18 @@ export function useChatStream({
           resetStream();
           break;
 
+        case "template_suggest": {
+          templateSuggestRef.current = {
+            suggestedName: (msg.suggested_name as string) || "Saved flow",
+            setupUrls: (msg.setup_urls as string[]) ?? [],
+            checkpoints: (msg.checkpoints as string[]) ?? [],
+            actionCount: (msg.action_count as number) ?? 0,
+            createdAt: Date.now(),
+          };
+          scheduleFlush();
+          break;
+        }
+
         case "browser_event": {
           const evt: BrowserEvent = {
             kind: (msg.kind as string) ?? "action",
@@ -410,5 +440,13 @@ export function useChatStream({
     send({ type: "cancel" });
   }, [send]);
 
-  return { sendMessage, sendSideNote, cancelGeneration, dismissBrowserSession, streamingState, connectionStatus };
+  return {
+    sendMessage,
+    sendSideNote,
+    cancelGeneration,
+    dismissBrowserSession,
+    dismissTemplateSuggest,
+    streamingState,
+    connectionStatus,
+  };
 }

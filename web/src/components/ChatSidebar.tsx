@@ -5,6 +5,7 @@ import ChatInput from "./ChatInput";
 import ConnectionStatus from "./ConnectionStatus";
 import ThinkingCard from "./ThinkingCard";
 import BrowserCanvas from "./BrowserCanvas";
+import TemplateSuggestBanner from "./TemplateSuggestBanner";
 
 export default function ChatSidebar() {
   const {
@@ -14,6 +15,7 @@ export default function ChatSidebar() {
     sendMessage,
     cancelGeneration,
     dismissBrowserSession,
+    dismissTemplateSuggest,
     chatOpen,
     chatExpanded,
     toggleChat,
@@ -126,6 +128,14 @@ export default function ChatSidebar() {
         <BrowserCanvas
           session={streamingState.browserSession}
           onDismiss={dismissBrowserSession}
+        />
+      )}
+
+      {/* Post-turn "save this as a template?" suggestion */}
+      {streamingState.templateSuggest && (
+        <TemplateSuggestBanner
+          suggest={streamingState.templateSuggest}
+          onDismiss={dismissTemplateSuggest}
         />
       )}
 

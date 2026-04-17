@@ -37,11 +37,12 @@ class SaveBrowserTemplateSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Save a reusable browser flow (playbook + setup URLs + approval checkpoints) "
-            "so the agent can repeat it later by name. "
-            "Use for government appointments (DGT, cita previa, NIE), recurring bookings "
-            "(doctor, gym, restaurant), or any multi-step browsing flow you want to repeat. "
-            "After saving, the agent can run it via run_browser_template."
+            "Save the browser flow the user just ran as a reusable template. "
+            "Call with ONLY `name` and LazyClaw auto-captures the URLs, checkpoints, "
+            "and a drafted playbook from the live browser event stream. "
+            "Pass the other fields only when the user explicitly dictates them. "
+            "Use when the user says things like 'save this as a template', "
+            "'remember this flow as X', or 'bookmark this bot'."
         )
 
     @property
@@ -53,25 +54,26 @@ class SaveBrowserTemplateSkill(BaseSkill):
                 "playbook": {
                     "type": "string",
                     "description": (
-                        "Free-form instructions for how to run the flow. "
-                        "Mention required vault keys (e.g. 'use NIE from vault'), "
-                        "site quirks, what to look for, what to skip."
+                        "Optional. If omitted, LazyClaw drafts one from the browser event stream. "
+                        "Only set this when the user dictates the instructions verbatim."
                     ),
                 },
                 "setup_urls": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "URLs to open before the flow starts.",
+                    "description": (
+                        "Optional. If omitted, captured automatically from recent `goto` events."
+                    ),
                 },
                 "checkpoints": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Names of approval checkpoints (must match request_user_approval names). "
-                        "E.g. ['Pick date', 'Confirm booking']"
+                        "Optional. If omitted, captured automatically from recent "
+                        "request_user_approval checkpoint events."
                     ),
                 },
-                "icon": {"type": "string", "description": "Optional emoji or short icon."},
+                "icon": {"type": "string", "description": "Optional emoji. Auto-picked from host if omitted."},
                 "watch_url": {
                     "type": "string",
                     "description": (
@@ -98,21 +100,62 @@ class SaveBrowserTemplateSkill(BaseSkill):
             return "Error: not configured"
         from lazyclaw.browser import templates as tpl_store
 
+        name = params.get("name")
+        if not name:
+            return "Error: name is required."
+
+        playbook = params.get("playbook")
+        setup_urls = params.get("setup_urls")
+        checkpoints = params.get("checkpoints")
+        icon = params.get("icon")
+
+        # If the caller passed only `name` (plus optional watch_*), harvest
+        # URLs / checkpoints / playbook from the live event stream.
+        auto_captured = False
+        if not playbook and not setup_urls and not checkpoints:
+            auto_captured = True
+            try:
+                from lazyclaw.browser.template_synth import synthesize_template_from_events
+                from lazyclaw.llm.router import LLMRouter
+
+                router = LLMRouter(self._config)
+                draft = await synthesize_template_from_events(
+                    self._config, router, user_id, name=name,
+                )
+                if draft is not None:
+                    setup_urls = draft.setup_urls
+                    checkpoints = draft.checkpoints
+                    playbook = draft.playbook
+                    icon = icon or draft.icon
+            except Exception as exc:
+                logger.warning("save_browser_template auto-capture failed: %s", exc, exc_info=True)
+
         try:
             tpl = await tpl_store.create_template(
                 self._config, user_id,
-                name=params["name"],
-                icon=params.get("icon"),
-                playbook=params.get("playbook"),
-                setup_urls=params.get("setup_urls"),
-                checkpoints=params.get("checkpoints"),
+                name=name,
+                icon=icon,
+                playbook=playbook,
+                setup_urls=setup_urls,
+                checkpoints=checkpoints,
                 watch_url=params.get("watch_url"),
                 watch_extractor=params.get("watch_extractor"),
                 watch_condition=params.get("watch_condition"),
             )
         except Exception as exc:
             return f"Could not save template: {exc}"
-        return f"Saved template '{tpl['name']}' (id: {tpl['id'][:8]})."
+
+        urls_n = len(tpl.get("setup_urls") or [])
+        cp_n = len(tpl.get("checkpoints") or [])
+        if auto_captured:
+            summary = (
+                f"Saved template '{tpl['name']}' — auto-captured "
+                f"{urls_n} URL(s), {cp_n} checkpoint(s), drafted playbook. "
+                f"Edit it from the Templates page."
+            )
+        else:
+            summary = f"Saved template '{tpl['name']}' (id: {tpl['id'][:8]})."
+        return summary
 
 
 class ListBrowserTemplatesSkill(BaseSkill):

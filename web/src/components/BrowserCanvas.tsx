@@ -31,6 +31,9 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpText, setHelpText] = useState("");
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveResult, setSaveResult] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [vncUrl, setVncUrl] = useState<string | null>(session.takeoverUrl ?? null);
   const [liveMode, setLiveMode] = useState<{ active: boolean; remaining: number }>({
@@ -145,6 +148,25 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
     window.dispatchEvent(new CustomEvent("lazyclaw:browser-help", { detail: text }));
     setHelpText("");
     setHelpOpen(false);
+  };
+
+  const saveAsTemplate = async () => {
+    const name = saveName.trim();
+    if (!name) return;
+    setBusy(true);
+    setSaveResult(null);
+    try {
+      const r = await api.saveTemplateFromCurrentSession(name);
+      setSaveResult(
+        `Saved '${r.template.name}' — captured ${r.captured.url_count} URL(s), ${r.captured.checkpoint_count} checkpoint(s).`,
+      );
+      setSaveName("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSaveResult(`Could not save: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const refreshNow = async () => {
@@ -324,6 +346,14 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
             >
               💬 Help
             </button>
+            <button
+              onClick={() => { setSaveResult(null); setSaveOpen((o) => !o); }}
+              disabled={busy}
+              className="text-[11px] px-2 py-1 rounded border border-border hover:bg-bg-hover text-text-secondary disabled:opacity-50"
+              title="Save this flow as a reusable template"
+            >
+              💾 Save as template
+            </button>
             {!vncUrl ? (
               <button
                 onClick={startTakeover}
@@ -381,6 +411,47 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
                   className="text-[11px] px-2 py-1 rounded bg-accent text-bg-primary font-medium disabled:opacity-40"
                 >
                   Send (⌘+Enter)
+                </button>
+              </div>
+            </div>
+          )}
+
+          {saveOpen && (
+            <div className="flex flex-col gap-1.5 rounded-md border border-border bg-bg-primary/60 p-2">
+              <div className="text-[11px] text-text-muted">
+                LazyClaw captures the recent URLs, checkpoints, and drafts a playbook automatically.
+              </div>
+              <input
+                type="text"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && saveName.trim() && !busy) {
+                    e.preventDefault();
+                    void saveAsTemplate();
+                  }
+                }}
+                placeholder="Template name (e.g. 'DGT cita previa')"
+                className="text-[11px] px-2 py-1.5 rounded border border-border bg-bg-primary text-text-primary focus:outline-none focus:border-accent"
+                autoFocus
+              />
+              {saveResult && (
+                <div className="text-[11px] text-text-secondary">{saveResult}</div>
+              )}
+              <div className="flex justify-end gap-1.5">
+                <button
+                  onClick={() => { setSaveOpen(false); setSaveResult(null); }}
+                  className="text-[11px] px-2 py-1 rounded text-text-muted hover:text-text-primary"
+                  disabled={busy}
+                >
+                  Close
+                </button>
+                <button
+                  onClick={saveAsTemplate}
+                  disabled={busy || !saveName.trim()}
+                  className="text-[11px] px-2 py-1 rounded bg-accent text-bg-primary font-medium disabled:opacity-40"
+                >
+                  {busy ? "Saving…" : "Save"}
                 </button>
               </div>
             </div>

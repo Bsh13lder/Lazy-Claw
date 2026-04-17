@@ -218,14 +218,108 @@ async def chat_websocket(ws: WebSocket):
 
     bus_task = asyncio.create_task(_browser_event_pump())
 
+    async def _maybe_suggest_template(
+        user_id: str, turn_start_ts: float, cb: "WebSocketCallback"
+    ) -> None:
+        """Post-turn hook — emit a template_suggest frame when the user just
+        ran a multi-step browser flow we could save as a reusable recipe.
+
+        UI-only: the frame never re-enters the LLM context. Strict trigger
+        (≥3 actions + ≥1 checkpoint + no existing template for the host)
+        keeps noise down.
+        """
+        from urllib.parse import urlparse
+
+        from lazyclaw.browser import event_bus
+        from lazyclaw.browser import templates as tpl_store
+
+        # Only events from this turn — avoid ring-buffer bleed-through.
+        import time as _time
+        max_age = max(1.0, _time.time() - turn_start_ts)
+        events = event_bus.recent_events(user_id, limit=30, max_age_s=max_age)
+        if not events:
+            return
+
+        action_events = [
+            e for e in events
+            if e.kind in ("action", "navigate")
+            and getattr(e, "action", None) in ("click", "type", "goto", "scroll", "press_key")
+        ]
+        checkpoint_events = [e for e in events if e.kind == "checkpoint"]
+
+        if len(action_events) < 3 or len(checkpoint_events) < 1:
+            return
+
+        setup_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for e in events:
+            if getattr(e, "action", None) == "goto" and e.url and e.url not in seen_urls:
+                setup_urls.append(e.url)
+                seen_urls.add(e.url)
+            if len(setup_urls) >= 3:
+                break
+        if not setup_urls:
+            return
+
+        # Skip if the user already has a template covering this host.
+        try:
+            first_host = urlparse(setup_urls[0]).netloc.lower()
+        except ValueError:
+            first_host = ""
+        try:
+            existing = await tpl_store.list_templates(_config, user_id)
+        except Exception:
+            existing = []
+        for t in existing:
+            for u in (t.get("setup_urls") or []):
+                try:
+                    if urlparse(u).netloc.lower() == first_host and first_host:
+                        return
+                except ValueError:
+                    continue
+
+        checkpoint_names: list[str] = []
+        seen_cp: set[str] = set()
+        for e in checkpoint_events:
+            label = getattr(e, "target", None) or getattr(e, "detail", None)
+            if label and label not in seen_cp:
+                checkpoint_names.append(label)
+                seen_cp.add(label)
+
+        # Suggested name — prefer a page title, fall back to the host.
+        suggested_name = ""
+        for e in reversed(events):
+            if getattr(e, "title", None):
+                suggested_name = e.title[:60].strip()
+                break
+        if not suggested_name:
+            suggested_name = (first_host or "Saved flow")[:60]
+
+        await cb._send({
+            "type": "template_suggest",
+            "suggested_name": suggested_name,
+            "setup_urls": setup_urls,
+            "checkpoints": checkpoint_names,
+            "action_count": len(action_events),
+        })
+
     async def _run_one_turn(content: str, session_id: str | None) -> None:
         """Run a single agent turn as its own task. Shared state['active']
         points at the current callback so the reader can route side-notes
         and cancels to it."""
+        import time as _time
+
         cb = WebSocketCallback(ws=ws)
         state["active"] = cb
+        turn_start_ts = _time.time()
         try:
             result = await _run_agent_turn(user.id, content, session_id, cb)
+            # Auto-suggest template if the turn included a multi-step
+            # browser flow. UI-only frame — never enters LLM context.
+            try:
+                await _maybe_suggest_template(user.id, turn_start_ts, cb)
+            except Exception:
+                logger.debug("template_suggest emit failed", exc_info=True)
             done_payload: dict = {
                 "type": "done",
                 "content": result or cb._buffer,

@@ -331,6 +331,44 @@ export const rejectCheckpoint = (name: string, reason?: string) =>
     body: JSON.stringify({ name, reason }),
   });
 
+// ── Browser Templates ─────────────────────────────────────────────────────
+
+export interface BrowserTemplateDraft {
+  name: string;
+  icon: string;
+  setup_urls: string[];
+  checkpoints: string[];
+  playbook: string;
+}
+
+export interface BrowserTemplate extends BrowserTemplateDraft {
+  id: string;
+  system_prompt?: string | null;
+  watch_url?: string | null;
+  watch_extractor?: string | null;
+  watch_condition?: string | null;
+  page_reader_mode?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** Capture the user's in-flight browser flow as a new template. */
+export const saveTemplateFromCurrentSession = (name: string) =>
+  request<{
+    template: BrowserTemplate;
+    captured: { event_count: number; url_count: number; checkpoint_count: number };
+  }>("/api/browser/templates/from-current-session", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+
+/** Generate a NON-persisted template draft from a one-line description. */
+export const createTemplateFromPrompt = (prompt: string) =>
+  request<{ draft: BrowserTemplateDraft }>("/api/browser/templates/from-prompt", {
+    method: "POST",
+    body: JSON.stringify({ prompt }),
+  }).then((r) => r.draft);
+
 // ── Health ─────────────────────────────────────────────────────────────────
 
 export const healthCheck = () =>

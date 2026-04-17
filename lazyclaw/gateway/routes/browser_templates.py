@@ -31,6 +31,93 @@ async def seed_templates(user: User = Depends(get_current_user)):
     return {"created": [t["name"] for t in created]}
 
 
+@router.post("/from-current-session")
+async def create_from_current_session(
+    payload: dict = Body(...),
+    user: User = Depends(get_current_user),
+):
+    """Capture the user's in-flight browser flow as a template.
+
+    Backs the BrowserCanvas '💾 Save as template' button. Pulls recent
+    events from the per-user bus, synthesizes a draft (setup_urls +
+    checkpoints + LLM-drafted playbook), and persists it.
+    """
+    name = (payload or {}).get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    from lazyclaw.browser.template_synth import synthesize_template_from_events
+    from lazyclaw.llm.router import LLMRouter
+
+    router_llm = LLMRouter(_config)
+    try:
+        draft = await synthesize_template_from_events(
+            _config, router_llm, user.id, name=name,
+        )
+    except Exception as exc:
+        logger.warning("from-current-session synthesis failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Synthesis failed: {exc}")
+
+    if draft is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No recent browser activity to capture. Open a page and click "
+                "through the flow first, then Save as template."
+            ),
+        )
+
+    try:
+        tpl = await tpl_store.create_template(
+            _config, user.id,
+            name=draft.name,
+            icon=draft.icon,
+            playbook=draft.playbook,
+            setup_urls=draft.setup_urls,
+            checkpoints=draft.checkpoints,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "template": tpl,
+        "captured": {
+            "event_count": draft.event_count,
+            "url_count": len(draft.setup_urls),
+            "checkpoint_count": len(draft.checkpoints),
+        },
+    }
+
+
+@router.post("/from-prompt")
+async def create_from_prompt(
+    payload: dict = Body(...),
+    user: User = Depends(get_current_user),
+):
+    """Generate a NON-persisted template draft from a one-line description.
+
+    Backs the '✨ Create with AI' dialog on the Templates page. The user
+    reviews + edits the draft in the existing form before saving.
+    """
+    prompt = (payload or {}).get("prompt", "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    if len(prompt) > 800:
+        raise HTTPException(status_code=400, detail="prompt too long (max 800 chars)")
+
+    from lazyclaw.browser.template_synth import draft_template_from_prompt
+    from lazyclaw.llm.router import LLMRouter
+
+    router_llm = LLMRouter(_config)
+    try:
+        draft = await draft_template_from_prompt(
+            router_llm, _config, user.id, prompt,
+        )
+    except Exception as exc:
+        logger.warning("from-prompt draft failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Draft failed: {exc}")
+    return {"draft": draft}
+
+
 @router.post("")
 async def create_template(
     payload: dict = Body(...),

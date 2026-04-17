@@ -91,7 +91,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 | Component | Path | Purpose |
 |-----------|------|---------|
-| **Gateway** | `gateway/` | FastAPI HTTP+WS entry point (17 route files). Session auth, CORS, routing |
+| **Gateway** | `gateway/` | FastAPI HTTP+WS entry point (19 route files). Session auth, CORS, routing |
 | **Agent Runtime** | `runtime/` | TAOR agent loop, context builder, tool dispatch, task runner, team lead |
 | **Lane Queue** | `queue/` | FIFO serial execution per user session |
 | **Skills** | `skills/` | Instruction (NL), Code (sandboxed), Plugin (pip). 37 builtin + 9 survival skills |
@@ -108,7 +108,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Pipeline** | `pipeline/` | CRM-style pipeline store for workflow tracking |
 | **Survival** | `survival/` | Gig economy tools — job matching, applications, invoices, profiles |
 
-Supporting: `llm/` (multi-provider router + ECO mode + Claude CLI provider), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool), `web/` (React 19 + TypeScript + Vite + Tailwind — 11 pages: Overview, Activity, Replay, Audit, SkillHub, Skills, Jobs, MCP, Memory, Vault, Settings + chat sidebar), `n8n-custom/` (n8n webhook integration + 6 management skills + templates).
+Supporting: `llm/` (multi-provider router + ECO mode + Claude CLI provider), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool), `web/` (React 19 + TypeScript + Vite + Tailwind — 12 pages: Overview, Activity, Replay, Audit, SkillHub, Skills, Templates, Jobs, MCP, Memory, Vault, Settings + persistent chat sidebar with live BrowserCanvas), `n8n-custom/` (n8n webhook integration + 6 management skills + templates).
 
 Standalone MCP servers (6 active + 4 disabled): Active: `mcp-taskai/` (task intelligence), `mcp-lazydoctor/` (self-healing), `mcp-whatsapp/` (WhatsApp via WA-JS), `mcp-instagram/` (Instagram DMs/feed/stories), `mcp-email/` (Gmail/Outlook/IMAP), `mcp-jobspy/` (job search aggregator). Disabled (source rebuild needed): `mcp-freeride/`, `mcp-healthcheck/`, `mcp-apihunter/`, `mcp-vaultwhisper/`.
 
@@ -145,12 +145,12 @@ These are non-obvious architectural decisions -- read the code for implementatio
 
 - **User isolation**: ALL queries scoped by `user_id`. No cross-user data access.
 - **No hardcoded tools**: All tools from skill registry. Agent discovers dynamically.
-- **Smart tool selection**: ~110 skills registered (46 builtin + ~67 MCP), but only 4 base tools sent per message (search_tools, recall_memories, save_memory, delegate). LLM discovers rest via search_tools(). ~95% token savings.
+- **Smart tool selection**: 128 builtin skills + ~67 MCP tools registered, but only 4 base tools sent per message (search_tools, recall_memories, save_memory, delegate). LLM discovers rest via search_tools(). ~95% token savings.
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
 - **Background tasks**: `run_background` skill → TaskRunner spawns independent Agent → Telegram push on completion.
 - **Delegate tool**: Agent calls `delegate(specialist, instruction)` inline — no separate team lead LLM call.
-- **ECO routing**: 3 modes, 3 roles (Brain, Worker, Fallback). HYBRID: Sonnet 4.6 brain + local Ollama worker ($0) + Haiku fallback. FULL: Sonnet brain + Haiku workers + Sonnet fallback. CLAUDE: Haiku API brain (native tools) + Haiku workers + Claude CLI fallback. Old eco_on/local modes disabled (require 32GB+ RAM). `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER). Models from `MODE_MODELS` dict in `model_registry.py`.
-- **MLX backend** (deprecated): `mlx_provider.py` for Apple Silicon local inference. Superseded by Ollama's native MLX backend. `ollama_provider.py` handles local models with think-tag stripping and `/no_think` prefix for Qwen.
+- **ECO routing**: 3 modes, 3 roles (Brain, Worker, Fallback). HYBRID (default): Sonnet 4.6 brain + `gemma4:e2b` local worker via Ollama ($0) + Haiku fallback. FULL: Sonnet brain + Haiku workers + Sonnet fallback. CLAUDE: Haiku API brain (native tools) + Haiku workers + Claude CLI fallback ($0 via subscription). Old eco_on/local modes (Nanbeige/Qwen) removed in commit cf1e309 — replaced by Gemma 4 E2B. `eco_router.py` routes by role (ROLE_BRAIN vs ROLE_WORKER). Models from `MODE_MODELS` dict in `model_registry.py`.
+- **MLX backend** (deprecated): `mlx_provider.py` kept for compatibility but unused. Ollama (`ollama_provider.py`) is the live path for local models. Current worker is `gemma4:e2b`. Nanbeige/Qwen references in the codebase are historical.
 - **RAM monitor**: `ram_monitor.py` tracks system + AI model memory. `/ram` Telegram command. TUI status bar shows RAM %. Uses macOS `memory_pressure` for accurate free %.
 - **Telegram /local command**: `/local on|off|worker|brain|restart` — start/stop MLX servers, auto-switches ECO mode.
 - **Unified browser tool**: Single `browser` skill with 7 actions (read, open, click, type, screenshot, tabs, scroll). CDP-only, no Playwright.
@@ -175,6 +175,11 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **5-layer memory**: Conversation history, compressed summaries, daily logs, weekly rollups, encrypted personal facts. All layers merged in `context_builder.py`.
 - **TodoWrite widget**: TUI task list rendered live in status bar. Agent marks items complete via `todo_write` tool during execution. User sees progress without interrupting the agent.
 - **WebSocket chat**: `/ws/chat` endpoint in `gateway/routes/chat_ws.py` for real-time streaming in Web UI. Separate from `/ws/connector` (computer control).
+- **Browser event bus** (zero-token UI observability): `lazyclaw/browser/event_bus.py` — per-user pub/sub + ring buffer + URL-stamped thumbnail cache. `cdp_backend.py` emits `browser_event` on every user-visible action; `chat_ws.py` has a per-user pump that forwards events as `{type: "browser_event"}` frames. Events NEVER enter LLM context — UI-only, zero token cost. Passwords masked in typed detail lines.
+- **Live mode**: `/api/browser/live-mode/start` flips a 5-min per-user flag that makes cdp_backend capture a fresh WebP thumbnail after every action (not just on URL change). Addresses stale-frame bug when the agent uses cheap accessibility-tree reads instead of `screenshot`. `🔄 Refresh` button in BrowserCanvas force-captures one frame on demand.
+- **Checkpoints**: `lazyclaw/browser/checkpoints.py` + `request_user_approval` skill. Agent calls before risky actions (submit/pay/book/delete/sign/send); call blocks until user hits Approve/Reject on the canvas or `/api/browser/checkpoint/{approve,reject}`. Same name auto-approves on re-call. 10-min soft-reject timeout.
+- **Saved browser templates**: `lazyclaw/browser/templates.py` + `browser_templates` table. Encrypted CRUD (playbook + system_prompt) with plaintext setup_urls, checkpoints, watch_extractor. Skills: `save_browser_template`, `list_browser_templates`, `run_browser_template`, `watch_appointment_slots` (hooks into existing watcher daemon for zero-token slot polling). Ships seed recipes (Cita Previa Spain, Doctoralia). Watcher fires → heartbeat publishes canvas `alert` event + Telegram push.
+- **Remote takeover from any channel**: `share_browser_control` NL skill returns a noVNC URL; works identically in Telegram, web chat, CLI. Routes through `remote_takeover.start_remote_session` (Linux + Xvfb/x11vnc) or `start_macos_remote_session` (macOS Screen Sharing). `POST /api/browser/remote-session/start` exposes the same path to the Web UI.
 - **n8n integration**: 6 management skills + workflow templates + Docker n8n sidecar. Webhook-triggered automations.
 - **Agent Skills compatibility**: Skills authored in Claude Code agent format (YAML frontmatter + markdown body) are importable via `lazyclaw skill import`. LazyClaw parses the skill description and maps it to an Instruction skill automatically.
 

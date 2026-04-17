@@ -32,7 +32,7 @@
 
 **LazyClaw** is an open-source AI agent platform where every piece of user data is encrypted with AES-256-GCM before it touches disk. Conversations, memories, skills, credentials, scheduled jobs — all encrypted. The server never sees plaintext.
 
-Built in Python. Native MCP. Multi-agent delegation. Cost-aware routing. Browser automation via CDP. Telegram + WhatsApp + Instagram + Email. ~110 skills discoverable at runtime. React Web UI with 11 pages + chat sidebar.
+Built in Python. Native MCP. Multi-agent delegation. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, and saved templates for recurring flows like government appointments**. Telegram + WhatsApp + Instagram + Email. 128 builtin skills + ~67 MCP tools discoverable at runtime. React Web UI with 12 pages + persistent chat sidebar.
 
 ## Why LazyClaw?
 
@@ -46,13 +46,14 @@ LazyClaw takes a different approach:
 | **API keys** | Encrypted credential vault | `.env` plaintext |
 | **Conversations** | Encrypted per-user | Plaintext JSONL |
 | **Memories** | Encrypted personal facts | Plaintext markdown |
-| **Tool selection** | Smart discovery via search_tools (4 base tools, ~110 discoverable) | All tools every turn (5K+ tokens) |
-| **Cost routing** | 3-mode Brain/Worker split (Sonnet brain + local/Haiku workers) | Manual model config |
+| **Tool selection** | Smart discovery via search_tools (4 base tools, ~195 discoverable) | All tools every turn (5K+ tokens) |
+| **Cost routing** | 3-mode Brain/Worker split (Sonnet brain + Gemma 4 E2B/Haiku workers) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
 | **MCP** | Native client + server + 6 bundled servers | Community plugins |
 | **Integrations** | n8n native (full workflow CRUD, 6 skills, templates, Docker) | Manual API wiring |
 | **Channels** | Telegram + WhatsApp + Instagram + Email MCPs | Browser-only for most |
-| **Web UI** | React control panel (11 pages + chat sidebar) + WebSocket streaming | Varies |
+| **Browser control** | Live canvas + checkpoints + saved templates + noVNC takeover (zero extra tokens) | Screenshots or nothing |
+| **Web UI** | React control panel (12 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming | Varies |
 | **Language** | Python (largest AI ecosystem) | TypeScript |
 
 ## Quickstart
@@ -116,10 +117,10 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 
 | Module | Purpose |
 |--------|---------|
-| `gateway/` | FastAPI HTTP + WebSocket entry point (17 route files) |
+| `gateway/` | FastAPI HTTP + WebSocket entry point (19 route files) |
 | `runtime/` | TAOR agent loop, context builder, tool dispatch, task runner |
 | `queue/` | FIFO serial execution per user |
-| `skills/` | ~110 skills — Instruction, Code (sandboxed), Plugin, Survival |
+| `skills/` | 128 builtin skills — Instruction, Code (sandboxed), Plugin, Survival, Browser templates |
 | `channels/` | Telegram native adapter + WhatsApp/Instagram/Email via MCP |
 | `browser/` | CDP browser control, page reader, site memory, DOM click engine |
 | `computer/` | Native subprocess + remote WebSocket connector |
@@ -137,7 +138,7 @@ Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude CLI, Anthrop
 
 | | |
 |---|---|
-| `web/` | React 19 + TypeScript + Vite + Tailwind control panel (11 pages + chat sidebar) |
+| `web/` | React 19 + TypeScript + Vite + Tailwind control panel (12 pages + chat sidebar with live BrowserCanvas) |
 
 ## Encryption
 
@@ -162,7 +163,7 @@ Server-side operations (cron jobs, background tasks) derive keys from `PBKDF2(SE
 
 ### Smart Tool Selection
 
-~110 registered skills (46 builtin + ~67 MCP), but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
+128 builtin skills + ~67 MCP tools registered, but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
 
 ### Multi-Agent Delegation
 
@@ -196,9 +197,9 @@ Three-mode cost routing with brain/worker model split:
 
 | Mode | Brain | Worker | Fallback | Cost |
 |------|-------|--------|----------|------|
-| **HYBRID** (default) | Sonnet 4.6 | Local model via Ollama ($0) | Haiku 4.5 | Low |
+| **HYBRID** (default) | Sonnet 4.6 | `gemma4:e2b` via Ollama ($0) | Haiku 4.5 | Low |
 | **FULL** | Sonnet 4.6 | Haiku 4.5 | Sonnet 4.6 | Normal |
-| **CLAUDE** | Haiku API (native tools) | Haiku API | Claude CLI fallback | Low |
+| **CLAUDE** | Haiku API (native tools) | Haiku API | Claude CLI ($0 via subscription) | Low |
 
 The brain handles orchestration, workers handle simple tasks. Complexity detection uses regex heuristics (no extra LLM call). User-configurable model assignments per mode and monthly budget caps.
 
@@ -210,14 +211,18 @@ HYBRID mode uses any local model you run via Ollama as the worker — $0 cost fo
 
 CDP-based control of the user's real Brave/Chrome browser. No separate Chromium instance — the agent uses your actual browser with your logins, cookies, and sessions.
 
+- **Live BrowserCanvas** — embedded in the chat sidebar. See the URL, action timeline (click / type / goto), and a thumbnail of the current page as the agent works. **Zero extra LLM tokens** — events flow UI-only, never enter the agent's context.
+- **Live mode** — one-tap toggle on the canvas. Captures a fresh screenshot after every action for 5 minutes. Use it when the agent is stuck or you just want to watch.
+- **Checkpoints** — the agent calls `request_user_approval` before risky actions (submit, pay, book, delete, sign). The canvas shows an inline Approve / Reject banner; agent blocks until you decide. Same name auto-approves on re-call.
+- **Saved templates** — reusable recipes for recurring flows. `Templates` page lets you save a playbook + setup URLs + checkpoints + optional zero-token slot watcher. Ships seed examples for Cita Previa Spain (DGT) and Doctoralia.
+- **Slot polling** — `watch_appointment_slots` hooks a template to the watcher daemon. Zero LLM tokens per check; Telegram + canvas alert fires when slots open.
+- **Remote takeover** — noVNC via the `share_browser_control` NL skill or the canvas `🎮 Take control` button. Works from Telegram, web chat, and CLI identically.
 - **Shared profiles** — login once, all tools see it
 - **Brave auto-detect** — Brave > Chrome > Chromium (built-in ad blocking = cleaner pages for LLM)
 - **Human-like delays** — random 0.2-1.5s between clicks, 0.03-0.12s typing
 - **Ref-ID snapshots** — interactive elements with click refs (~1-4KB) instead of full accessibility tree (50KB)
-- **Orchestrated reading** — extractors for content understanding + snapshots for interaction
 - **DOM click engine** — real JavaScript clicks (works with Gmail, React, Angular SPAs)
 - **Site memory** — encrypted per-domain learning, auto-saved from specialist experience
-- **Remote takeover** — noVNC link sent to Telegram for server-mode browser auth
 
 ## MCP
 
@@ -280,7 +285,7 @@ While the agent works, type `/status` or "what's happening" to see live progress
 
 ## Web UI
 
-React 19 + TypeScript + Vite + Tailwind control panel with 11 pages, a persistent chat sidebar, and real-time WebSocket streaming:
+React 19 + TypeScript + Vite + Tailwind control panel with 12 pages, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
 
 - **Overview** — System dashboard with health stats and pending approvals
 - **Activity** — Live agent and task monitor (active, background, recent)
@@ -288,12 +293,13 @@ React 19 + TypeScript + Vite + Tailwind control panel with 11 pages, a persisten
 - **Audit** — Action log with filtering and security review
 - **Skill Hub** — Discover and install skills
 - **Skills** — Browse, create, edit, delete skills
+- **Templates** — Saved browser recipes (DGT cita previa, Doctoralia, custom) with one-click Run / Watch / Seed
 - **Jobs** — Cron job management (create, pause, resume)
 - **MCP** — Server management (connect, disconnect, install)
 - **Memory** — Personal memories + daily logs
 - **Vault** — Encrypted credential management
 - **Settings** — ECO mode, model config, team settings, permissions
-- **Chat Sidebar** — Persistent agent conversation with WebSocket streaming, markdown rendering, tool call visualization (available on every page)
+- **Chat Sidebar** — Persistent agent conversation with WebSocket streaming, markdown rendering, tool call visualization, and live BrowserCanvas showing URL + action timeline + thumbnail + Refresh / Live / Help / Take control buttons (available on every page)
 
 ```bash
 cd web && npm install && npm run dev   # Development (port 5173)
@@ -338,8 +344,11 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] ECO mode — HYBRID (Sonnet brain + local Ollama worker), FULL (all-Claude), CLAUDE (Haiku API)
 - [x] Multi-agent teams with inline delegation
 - [x] Browser automation (CDP + shared profiles + DOM click engine)
-- [x] ~110 skills discoverable at runtime (46 builtin + ~67 MCP)
-- [x] React Web UI control panel (11 pages + chat sidebar) + WebSocket streaming
+- [x] ~195 skills discoverable at runtime (128 builtin + ~67 MCP)
+- [x] React Web UI control panel (12 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming
+- [x] Live browser canvas — URL + action timeline + thumbnail + takeover (zero LLM tokens)
+- [x] Saved browser templates (govt appointments, recurring flows) with zero-token slot polling
+- [x] Checkpoints — agent pauses for user approval before submit/pay/book/delete/sign/send
 - [x] Instagram, WhatsApp, Email MCP servers (no browser needed)
 - [x] WhatsApp mute from Telegram (reply "mute")
 - [x] MCP auto-install from Telegram (/mcp install)
@@ -367,12 +376,12 @@ See [TODO.md](TODO.md) for the full phase plan.
 
 ```
 lazyclaw/
-├── gateway/        # FastAPI HTTP + WS (17 route files)
+├── gateway/        # FastAPI HTTP + WS (19 route files)
 ├── runtime/        # TAOR agent loop, context, tool dispatch, task runner
 ├── queue/          # Lane-based FIFO queue
-├── skills/         # ~110 skills — Instruction, Code, Plugin, Survival
+├── skills/         # 128 builtin skills — Instruction, Code, Plugin, Survival, Templates
 ├── channels/       # Telegram adapter
-├── browser/        # CDP browser control
+├── browser/        # CDP control + event bus + checkpoints + saved templates
 ├── computer/       # Native subprocess + connector
 ├── memory/         # Encrypted facts + compression
 ├── mcp/            # MCP client + server + bridge
@@ -383,12 +392,12 @@ lazyclaw/
 ├── notifications/  # Telegram push notifications
 ├── pipeline/       # CRM pipeline store
 ├── survival/       # Gig economy tools
-├── heartbeat/      # Cron daemon
+├── heartbeat/      # Cron daemon (watchers → canvas alert + Telegram push)
 ├── permissions/    # Allow/ask/deny + audit
-├── llm/            # Multi-provider router + ECO
+├── llm/            # Multi-provider router + ECO (Gemma 4 E2B worker)
 └── db/             # aiosqlite + connection pool
 
-web/                # React 19 control panel (11 pages + chat sidebar)
+web/                # React 19 control panel (12 pages + chat sidebar + live BrowserCanvas)
 n8n-custom/         # n8n Docker sidecar config
 mcp-taskai/         # Task intelligence
 mcp-lazydoctor/     # Self-healing agent

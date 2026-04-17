@@ -444,7 +444,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 ### MUST DO (launch blockers)
 - [x] **L.1 README rewrite** — Update skill count (101), MCP count (10), add Web UI section, fix ECO mode, add WhatsApp/Instagram/Email MCPs, add n8n integration section.
 - [x] **L.2 WebSocket streaming** — `/ws/chat` endpoint in `gateway/routes/chat_ws.py`. Real-time streaming for Web UI.
-- [ ] **L.3 Fix silent exceptions** — 130+ `except: pass` blocks need logging. Makes debugging impossible.
+- [x] **L.3 Fix silent exceptions** — 130+ `except: pass` blocks replaced with `logger.debug(..., exc_info=True)` (commit 76f6121).
 - [x] **L.4 .gitignore check** — .env, *.db, __pycache__, .venv/, node_modules/, web/dist/ all ignored.
 - [ ] **L.5 Clean personal data** — Remove any personal data, test DB files, or local paths from repo.
 - [ ] **L.6 install.sh test** — Verify one-command install works on fresh machine.
@@ -462,6 +462,47 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - [ ] **L.14 LazyTasker integration** — Connect Flutter app as first-class mobile client.
 - [ ] **L.15 Voice input** — Whisper transcription for Telegram voice messages.
 - [ ] **L.16 Web UI dashboard** — Extend with real-time agent status, cost tracking.
+
+## Browser Canvas & Smart Agent (shipped 2026-04-17, commit ae204c3) ✅ COMPLETE
+- [x] **BC.A Phase A — Visualization MVP**
+  - [x] `lazyclaw/browser/event_bus.py` — per-user pub/sub + 50-event ring buffer + URL-stamped WebP thumbnail cache (zero LLM tokens)
+  - [x] `cdp_backend.py` — emits `browser_event` on click / type / goto / scroll / screenshot / press_key / click_by_role / close_tab. Passwords masked.
+  - [x] `backends.py` — passes `user_id` into shared singleton so events route per-user
+  - [x] `gateway/routes/browser.py` — `/state`, `/frame`, `/frame/refresh`, `/live-mode/{start,stop}`, `/remote-session/{start,stop}`
+  - [x] `gateway/routes/chat_ws.py` — per-user `_browser_event_pump` forwards frames as `{type: "browser_event"}`
+  - [x] `share_browser_control` NL skill — noVNC URL in any channel (Telegram, web chat, CLI)
+  - [x] `web/src/components/BrowserCanvas.tsx` — URL + action timeline + thumbnail + Refresh / Live / Help / Take control / Open VNC / End takeover buttons
+  - [x] `web/src/hooks/useChatStream.ts` — `browser_event` handler, independent lifecycle (5min auto-clear), dismissBrowserSession
+  - [x] `web/src/components/toolIcons.tsx` — per-action icons (click, type, goto, scroll, screenshot, press_key, close_tab, checkpoint, takeover)
+
+- [x] **BC.B Phase B — Help & Checkpoints**
+  - [x] `lazyclaw/browser/checkpoints.py` — pending registry, `request_checkpoint` blocks until approve/reject, auto-approve same name, 10-min soft-reject
+  - [x] `request_user_approval` skill — agent calls before submit / pay / book / delete / sign / send
+  - [x] `/api/browser/checkpoint` GET + approve + reject routes
+  - [x] `CheckpointBanner` inline on canvas — Approve & continue / Reject + reason input
+  - [x] Help button routes through existing side-note channel (no extra plumbing)
+
+- [x] **BC.D Phase D — Saved browser templates (govt-appointment recipes)**
+  - [x] `lazyclaw/browser/templates.py` — encrypted CRUD + `build_run_instruction` hydration helper
+  - [x] `browser_templates` table in schema.sql (idempotent CREATE IF NOT EXISTS, no migration risk)
+  - [x] 5 NL skills: `save_browser_template`, `list_browser_templates`, `delete_browser_template`, `run_browser_template`, `watch_appointment_slots`
+  - [x] `gateway/routes/browser_templates.py` — REST CRUD + `/seed` + `/{id}/run`
+  - [x] `web/src/pages/BrowserTemplates.tsx` + nav entry — list, edit, run, watch, one-click seed
+  - [x] Seed recipes ship in `templates_seed.json` — Cita Previa Spain (DGT) + Doctoralia
+  - [x] Heartbeat watcher fire → publishes canvas `alert` event (Telegram push unchanged)
+
+- [x] **BC.Fix — Live mode (stale-frame bug)**
+  - [x] URL-stamped thumbnails — canvas knows when cache is for a different page
+  - [x] Auto force-refresh on canvas expand — no more stale frame from previous flow
+  - [x] Live mode flag: 5-min per-user flag → `_emit()` triggers `_capture_thumbnail(force=True)` after every action
+  - [x] `🔄 Refresh` + `👁 Live mode` buttons on canvas
+
+- [ ] **BC.E — Auto-live-mode on stuck (future)**
+  - [ ] `stuck_detector.py` fires → call `/api/browser/live-mode/start` → user sees exactly what broke
+  - [ ] Telegram inline approve/reject buttons for checkpoints (currently web-only)
+  - [ ] Instruction injection mid-task (`_pending_help[user_id]`) — for now side-notes cover it
+
+**Verification**: live at http://localhost:3001/. Send browser prompt → canvas appears in chat with URL + timeline + thumbnail. Click 🔄 Refresh → fresh screenshot. Click 👁 Live → every action captured 5min. Call `request_user_approval` → approve/reject banner. Templates page → seed examples → run via chat. Zero LLM tokens added (events UI-only).
 
 ## Done
 - Phase 1 (Foundation): ✅ COMPLETE — Crypto, DB, config, LLM router, agent, gateway, CLI wizard, auth, model manager

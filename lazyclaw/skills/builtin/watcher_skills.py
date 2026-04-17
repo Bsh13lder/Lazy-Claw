@@ -654,11 +654,11 @@ class TestWatcherSkill(BaseSkill):
         probe["last_value"] = None
 
         from lazyclaw.browser.browser_settings import touch_browser_activity
-        from lazyclaw.browser.cdp_backend import CDPBrowserBackend
+        from lazyclaw.browser.cdp_backend import CDPBackend
         from lazyclaw.browser.watcher import check_watcher
 
         touch_browser_activity()
-        backend = CDPBrowserBackend(user_id=user_id)
+        backend = CDPBackend(user_id=user_id)
         try:
             _changed, _notification, new_ctx = await check_watcher(backend, probe)
         except Exception as exc:

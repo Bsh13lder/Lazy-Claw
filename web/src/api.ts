@@ -750,6 +750,96 @@ export const getAuditLog = (opts?: { action?: string; since?: string; limit?: nu
   ).then((r) => ({ entries: r.data, count: r.count }));
 };
 
+// ── Watchers ──────────────────────────────────────────────────────────────
+
+export interface Watcher {
+  id: string;
+  name: string;
+  status: string;
+  job_type: string;
+  instruction?: string | null;
+  url?: string | null;
+  page_type?: string | null;
+  check_interval?: number | null;
+  expires_at?: string | null;
+  last_check?: string | null;
+  last_value?: string | null;
+  custom_js?: string | null;
+  what_to_watch?: string | null;
+  one_shot?: boolean;
+  template_id?: string | null;
+  template_name?: string | null;
+  template_icon?: string | null;
+  template_watch_condition?: string | null;
+  created_at?: string;
+  last_run?: string | null;
+  next_run?: string | null;
+  next_check_ts?: number | null;
+  check_count: number;
+  trigger_count: number;
+  error_count: number;
+  last_error?: string | null;
+  last_trigger_ts?: number | null;
+  last_trigger_message?: string | null;
+}
+
+export interface WatcherCheck {
+  ts: number;
+  changed: boolean;
+  triggered: boolean;
+  value_preview?: string | null;
+  error?: string | null;
+  notification?: string | null;
+}
+
+export interface WatcherSummary {
+  total: number;
+  active: number;
+  paused: number;
+  last_trigger_ts?: number | null;
+  last_trigger_name?: string | null;
+  last_trigger_message?: string | null;
+}
+
+export const listWatchers = () =>
+  request<{ watchers: Watcher[] }>("/api/watchers").then((r) => r.watchers);
+
+export const getWatcherSummary = () =>
+  request<WatcherSummary>("/api/watchers/summary");
+
+export const getWatcher = (id: string) =>
+  request<Watcher>(`/api/watchers/${id}`);
+
+export const getWatcherHistory = (id: string) =>
+  request<{ watcher_id: string; checks: WatcherCheck[] }>(`/api/watchers/${id}/history`)
+    .then((r) => r.checks);
+
+export const pauseWatcher = (id: string) =>
+  request<{ status: string }>(`/api/watchers/${id}/pause`, { method: "POST" });
+
+export const resumeWatcher = (id: string) =>
+  request<{ status: string }>(`/api/watchers/${id}/resume`, { method: "POST" });
+
+export const updateWatcher = (id: string, body: {
+  check_interval?: number;
+  custom_js?: string | null;
+  what_to_watch?: string | null;
+  notify_template?: string | null;
+}) =>
+  request<Watcher>(`/api/watchers/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+export const deleteWatcher = (id: string) =>
+  request<{ status: string }>(`/api/watchers/${id}`, { method: "DELETE" });
+
+export const testWatcher = (id: string) =>
+  request<{ url?: string; page_type?: string; extracted_value?: string; timestamp?: string }>(
+    `/api/watchers/${id}/test`,
+    { method: "POST" },
+  );
+
 // ── Browser / Site Memory ─────────────────────────────────────────────────
 
 export interface SiteMemory {

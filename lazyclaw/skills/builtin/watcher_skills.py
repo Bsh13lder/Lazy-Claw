@@ -327,6 +327,7 @@ class ListWatchersSkill(BaseSkill):
             return "Error: Not configured"
 
         from lazyclaw.heartbeat.orchestrator import list_jobs
+        from lazyclaw.watchers import history as watcher_history
         import json
 
         jobs = await list_jobs(self._config, user_id)
@@ -349,12 +350,325 @@ class ListWatchersSkill(BaseSkill):
             if expires and expires != "never":
                 expires = expires[:16].replace("T", " ")
 
+            stats = watcher_history.get_stats(user_id, w["id"])
+            last_ck = ctx.get("last_check")
+            last_ck = last_ck[:16].replace("T", " ") if last_ck else "never"
+            last_val = stats.get("last_value_preview") or ctx.get("last_value")
+            if last_val and len(last_val) > 80:
+                last_val = last_val[:80] + "…"
+
             status = w.get("status", "?")
             lines.append(
                 f"- {w.get('name', '?')} [{status}]\n"
                 f"  URL: {ctx.get('url', '?')}\n"
                 f"  Every {interval}min | Expires: {expires}\n"
+                f"  Last check: {last_ck} | checks: {stats['check_count']}, "
+                f"triggers: {stats['trigger_count']}"
+                + (f", errors: {stats['error_count']}" if stats['error_count'] else "")
+                + "\n"
+                f"  Last value: {last_val or '—'}\n"
                 f"  ID: {w['id'][:8]}..."
             )
 
         return f"Active watchers ({len(watchers)}):\n\n" + "\n\n".join(lines)
+
+
+# ── control skills — edit / pause / resume / test live watchers ──────────
+
+
+async def _find_watcher(config, user_id: str, needle: str) -> dict | None:
+    """Find one active/paused watcher by name substring or ID prefix."""
+    from lazyclaw.heartbeat.orchestrator import list_jobs
+    needle = (needle or "").strip().lower()
+    if not needle:
+        return None
+    jobs = await list_jobs(config, user_id)
+    watchers = [
+        j for j in jobs
+        if j.get("job_type") == "watcher"
+        and j.get("status") in ("active", "paused")
+    ]
+    # 1) exact ID prefix wins
+    for w in watchers:
+        if w["id"].startswith(needle):
+            return w
+    # 2) case-insensitive name substring
+    for w in watchers:
+        if needle in (w.get("name") or "").lower():
+            return w
+    return None
+
+
+class PauseWatcherSkill(BaseSkill):
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "pause_watcher"
+
+    @property
+    def category(self) -> str:
+        return "browser"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Pause a running watcher without deleting it. Use when the user "
+            "says 'pause the DGT watcher', 'stop watching for now', "
+            "'mute the doctor watcher'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "watcher": {
+                    "type": "string",
+                    "description": "Watcher name (partial match) or ID prefix.",
+                },
+            },
+            "required": ["watcher"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        w = await _find_watcher(self._config, user_id, params.get("watcher", ""))
+        if w is None:
+            return f"No watcher matching '{params.get('watcher')}'."
+        if w["status"] == "paused":
+            return f"'{w['name']}' is already paused."
+        from lazyclaw.heartbeat.orchestrator import pause_job
+        await pause_job(self._config, user_id, w["id"])
+        return f"Paused watcher '{w['name']}'. Use resume_watcher to start it again."
+
+
+class ResumeWatcherSkill(BaseSkill):
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "resume_watcher"
+
+    @property
+    def category(self) -> str:
+        return "browser"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Resume a paused watcher. Use when the user says 'resume the X "
+            "watcher', 'start watching again', 'unpause the monitor'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "watcher": {
+                    "type": "string",
+                    "description": "Watcher name (partial match) or ID prefix.",
+                },
+            },
+            "required": ["watcher"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        w = await _find_watcher(self._config, user_id, params.get("watcher", ""))
+        if w is None:
+            return f"No watcher matching '{params.get('watcher')}'."
+        if w["status"] == "active":
+            return f"'{w['name']}' is already active."
+        from lazyclaw.db.connection import db_session
+        async with db_session(self._config) as db:
+            await db.execute(
+                "UPDATE agent_jobs SET status = 'active' "
+                "WHERE id = ? AND user_id = ? AND job_type = 'watcher'",
+                (w["id"], user_id),
+            )
+            await db.commit()
+        return f"Resumed watcher '{w['name']}'. Next check runs on the current interval."
+
+
+class EditWatcherSkill(BaseSkill):
+    """Combined edit: interval / extractor JS / what-to-watch condition."""
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "edit_watcher"
+
+    @property
+    def category(self) -> str:
+        return "browser"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Edit an existing watcher: change its check interval, rewrite the "
+            "JS extractor, or update the human-readable condition. Use when "
+            "the user says 'check the DGT one every minute', 'change the "
+            "extractor for X', 'edit the watcher'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "watcher": {
+                    "type": "string",
+                    "description": "Watcher name (partial match) or ID prefix.",
+                },
+                "interval_minutes": {
+                    "type": "number",
+                    "description": "New check interval in minutes. Minimum 0.25 (15s).",
+                },
+                "extractor_js": {
+                    "type": "string",
+                    "description": (
+                        "New JavaScript extractor. Must return a value that "
+                        "changes when the trigger condition is met."
+                    ),
+                },
+                "what_to_watch": {
+                    "type": "string",
+                    "description": "New human-readable condition description.",
+                },
+            },
+            "required": ["watcher"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        w = await _find_watcher(self._config, user_id, params.get("watcher", ""))
+        if w is None:
+            return f"No watcher matching '{params.get('watcher')}'."
+
+        import json
+        try:
+            ctx = json.loads(w.get("context") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            ctx = {}
+
+        changed: list[str] = []
+        if params.get("interval_minutes") is not None:
+            try:
+                secs = max(15, int(float(params["interval_minutes"]) * 60))
+            except (TypeError, ValueError):
+                return "interval_minutes must be a number."
+            ctx["check_interval"] = secs
+            ctx["last_check"] = None
+            changed.append(f"interval → {secs // 60}min")
+        if params.get("extractor_js"):
+            ctx["custom_js"] = params["extractor_js"].strip()
+            ctx["last_value"] = None
+            changed.append("extractor rewritten")
+        if params.get("what_to_watch"):
+            ctx["what_to_watch"] = params["what_to_watch"].strip()
+            changed.append("condition updated")
+
+        if not changed:
+            return "Nothing to change — pass interval_minutes, extractor_js, or what_to_watch."
+
+        from lazyclaw.heartbeat.orchestrator import update_job
+        await update_job(
+            self._config, user_id, w["id"], context=json.dumps(ctx),
+        )
+        # Mirror to parent template when present.
+        try:
+            tpl_id = ctx.get("template_id")
+            if tpl_id and (params.get("extractor_js") or params.get("what_to_watch")):
+                from lazyclaw.browser import templates as tpl_store
+                tpl_fields: dict = {}
+                if params.get("extractor_js"):
+                    tpl_fields["watch_extractor"] = ctx["custom_js"]
+                if params.get("what_to_watch"):
+                    tpl_fields["watch_condition"] = ctx["what_to_watch"]
+                await tpl_store.update_template(
+                    self._config, user_id, tpl_id, **tpl_fields,
+                )
+        except Exception:
+            logger.debug("mirror to template failed", exc_info=True)
+        return f"Updated '{w['name']}': {', '.join(changed)}."
+
+
+class TestWatcherSkill(BaseSkill):
+    """Run the extractor once against the watcher's URL and report the result."""
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "test_watcher"
+
+    @property
+    def category(self) -> str:
+        return "browser"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Test a watcher once — runs its JS extractor against its URL and "
+            "shows what came back, without modifying state. Use when the user "
+            "says 'test the watcher', 'what would it find right now', "
+            "'check that the extractor works'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "watcher": {
+                    "type": "string",
+                    "description": "Watcher name (partial match) or ID prefix.",
+                },
+            },
+            "required": ["watcher"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        w = await _find_watcher(self._config, user_id, params.get("watcher", ""))
+        if w is None:
+            return f"No watcher matching '{params.get('watcher')}'."
+
+        import json
+        try:
+            ctx = json.loads(w.get("context") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            ctx = {}
+        probe = dict(ctx)
+        probe["last_value"] = None
+
+        from lazyclaw.browser.browser_settings import touch_browser_activity
+        from lazyclaw.browser.cdp_backend import CDPBrowserBackend
+        from lazyclaw.browser.watcher import check_watcher
+
+        touch_browser_activity()
+        backend = CDPBrowserBackend(user_id=user_id)
+        try:
+            _changed, _notification, new_ctx = await check_watcher(backend, probe)
+        except Exception as exc:
+            return f"Extractor failed on {ctx.get('url', '?')}: {exc}"
+
+        value = new_ctx.get("last_value") or "(empty)"
+        if isinstance(value, str) and len(value) > 400:
+            value = value[:400] + "…"
+        return (
+            f"Test run of '{w['name']}':\n"
+            f"  URL: {ctx.get('url', '?')}\n"
+            f"  Extracted: {value}"
+        )

@@ -3,7 +3,7 @@ import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "mcp" | "memory" | "vault" | "settings";
+export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -20,6 +20,7 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   skills: { label: "Skills", description: "Manage agent tools" },
   templates: { label: "Templates", description: "Saved browser recipes" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
+  watchers: { label: "Watchers", description: "Zero-token site monitors" },
   mcp: { label: "MCP", description: "Server integrations" },
   memory: { label: "Memory", description: "Personal facts & logs" },
   vault: { label: "Vault", description: "Encrypted credentials" },
@@ -97,6 +98,15 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <circle cx="12" cy="12" r="10" />
         <polyline points="12 6 12 12 16 14" />
+      </svg>
+    ),
+  },
+  {
+    page: "watchers",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+        <circle cx="12" cy="12" r="3" />
       </svg>
     ),
   },

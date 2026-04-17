@@ -198,11 +198,17 @@ class SkillRegistry:
         # Watcher skills (zero-token site monitoring)
         from lazyclaw.skills.builtin.watcher_skills import (
             WatchSiteSkill, StopWatcherSkill, ListWatchersSkill,
+            PauseWatcherSkill, ResumeWatcherSkill,
+            EditWatcherSkill, TestWatcherSkill,
         )
 
         self.register(WatchSiteSkill(config=config))
         self.register(StopWatcherSkill(config=config))
         self.register(ListWatchersSkill(config=config))
+        self.register(PauseWatcherSkill(config=config))
+        self.register(ResumeWatcherSkill(config=config))
+        self.register(EditWatcherSkill(config=config))
+        self.register(TestWatcherSkill(config=config))
 
         # MCP watcher skill (WhatsApp, Email monitoring via MCP)
         from lazyclaw.skills.builtin.watch_mcp import WatchMCPSkill

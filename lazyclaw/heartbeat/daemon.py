@@ -382,6 +382,11 @@ class HeartbeatDaemon:
                     if is_watcher_expired(ctx):
                         logger.info("Watcher '%s' expired, removing", job_name)
                         await delete_job(self._config, user_id, job_id)
+                        try:
+                            from lazyclaw.watchers import history as _hist
+                            _hist.forget_watcher(user_id, job_id)
+                        except Exception:
+                            logger.debug("history forget failed", exc_info=True)
                         await self._lane_queue.enqueue(
                             user_id,
                             f"[WATCHER] '{job_name}' has expired and stopped.",
@@ -394,13 +399,45 @@ class HeartbeatDaemon:
 
                     # Run the check — zero LLM calls
                     touch_browser_activity()
-                    changed, notification, new_ctx = await check_watcher(backend, ctx)
+                    check_error: str | None = None
+                    try:
+                        changed, notification, new_ctx = await check_watcher(backend, ctx)
+                    except Exception as exc:
+                        check_error = f"{type(exc).__name__}: {exc}"
+                        # Record the failure before re-raising to keep the
+                        # existing top-level handler behavior.
+                        try:
+                            from lazyclaw.watchers import history as _hist
+                            _hist.record_check(
+                                user_id, job_id,
+                                changed=False,
+                                triggered=False,
+                                error=check_error,
+                            )
+                        except Exception:
+                            logger.debug("history record (error) failed", exc_info=True)
+                        raise
 
                     # Save updated context (new last_value, last_check)
                     await update_job(
                         self._config, user_id, job_id,
                         context=json.dumps(new_ctx),
                     )
+
+                    # Record this check in the in-memory ring for the Watchers UI
+                    try:
+                        from lazyclaw.watchers import history as _hist
+                        _hist.record_check(
+                            user_id, job_id,
+                            changed=changed,
+                            triggered=bool(changed and notification),
+                            value_preview=(
+                                (new_ctx.get("last_value") or "")[:500] or None
+                            ),
+                            notification=notification if (changed and notification) else None,
+                        )
+                    except Exception:
+                        logger.debug("history record failed", exc_info=True)
 
                     if changed and notification:
                         logger.info("Watcher '%s' detected change", job_name)

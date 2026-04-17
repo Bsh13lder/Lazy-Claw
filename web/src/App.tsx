@@ -11,6 +11,7 @@ import SkillHub from "./pages/SkillHub";
 import Skills from "./pages/Skills";
 import BrowserTemplates from "./pages/BrowserTemplates";
 import Jobs from "./pages/Jobs";
+import Watchers from "./pages/Watchers";
 import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
 import Vault from "./pages/Vault";
@@ -46,6 +47,7 @@ function AppContent() {
       case "skills": return <Skills />;
       case "templates": return <BrowserTemplates />;
       case "jobs": return <Jobs />;
+      case "watchers": return <Watchers />;
       case "mcp": return <Mcp />;
       case "memory": return <Memory />;
       case "vault": return <Vault />;

@@ -32,6 +32,38 @@
     "page_reader_mode": "auto"
   },
   {
+    "name": "Workana Dev Projects",
+    "icon": "🌎",
+    "playbook": "Goal: watch Workana (Spanish-speaking + LatAm freelance marketplace) for fresh IT/programming projects matching the user's stack.\n\nWhy Workana: less saturated than Upwork, Spanish-language clients that pay EUR/USD, micro-gigs ($20-300) that Claude can deliver in 15-60 min.\n\nSteps:\n1. Open https://www.workana.com/jobs?category=it-programming&query=python . The user must be logged in (one-time via the live browser canvas) to read full project details and bid. If not logged in, call request_user_approval named 'Log in to Workana'.\n2. Read the top 10 project cards: title, budget, time-remaining-to-bid, number of existing bids, client rating.\n3. Filter out anything matching profile.excluded_keywords or under profile.min_fixed_rate.\n4. Rank by: fewer existing bids (<5 is gold), fresh posts (<6h), clear scope.\n5. For the top 1-3 matches, call draft_freelance_proposal with the project URL. Note: Workana bids work better in Spanish if the client is from ES/LatAm — the draft skill auto-detects language from the brief.\n6. CHECKPOINT 'Submit bid' — show the draft, wait for user approval. NEVER auto-submit.\n7. Log each attempt via create_gig (platform='workana', status='applied').\n\nQuirks: Workana uses Créditos (credits) for bids — free tier is limited. Tell the user how many credits the bid will cost before they submit.",
+    "setup_urls": [
+      "https://www.workana.com/jobs?category=it-programming&query=python"
+    ],
+    "checkpoints": [
+      "Log in to Workana",
+      "Submit bid"
+    ],
+    "watch_url": "https://www.workana.com/jobs?category=it-programming&query=python",
+    "watch_extractor": "(() => { try { const links = document.querySelectorAll('a[href*=\"/job/\"]'); const ids = Array.from(links).map(a => { const m = a.href.match(/\\/job\\/([^\\/?#]+)/); return m ? m[1] : null; }).filter(Boolean); const unique = Array.from(new Set(ids)).slice(0, 10); if (unique.length === 0) { const t = document.body.innerText.toLowerCase(); if (t.includes('iniciar sesión') || t.includes('log in') || t.includes('sign in')) return 'login_required'; return 'no_jobs_found'; } return 'jobs:' + unique.join(','); } catch (e) { return 'error:' + e.message; } })()",
+    "watch_condition": "New Workana project slugs appear in the top 10 of the programming feed.",
+    "page_reader_mode": "auto"
+  },
+  {
+    "name": "PeoplePerHour Python",
+    "icon": "🇪🇺",
+    "playbook": "Goal: watch PeoplePerHour (UK/EU-friendly freelance marketplace) for fresh Python/web projects.\n\nWhy PPH: lower volume than Upwork but less competition; EU buyers pay in EUR/GBP; hourlies are common (good for Claude-accelerated work). Weekly plans start cheap.\n\nSteps:\n1. Open https://www.peopleperhour.com/freelance-jobs?filter=freelance-jobs&keywords=python . Login required to bid; call request_user_approval named 'Log in to PeoplePerHour' if blocked.\n2. Read the top 10 jobs: title, budget, posted-age, number of proposals already submitted, buyer location (EU buyers pay faster).\n3. Drop anything with >10 existing proposals (too saturated) or under profile.min_fixed_rate.\n4. For the top 1-3 matches, call draft_freelance_proposal with the job URL. PPH rewards short, direct proposals — cap at 150 words, focus on the ONE specific clarifying question.\n5. CHECKPOINT 'Submit proposal' — show the draft, wait for user approval. NEVER auto-submit.\n6. Log each attempt via create_gig (platform='peopleperhour', status='applied').\n\nQuirks: PPH uses Credits for proposals (free starter pool is tiny, ~10 credits/mo). Always warn the user how many credits this costs.",
+    "setup_urls": [
+      "https://www.peopleperhour.com/freelance-jobs?filter=freelance-jobs&keywords=python"
+    ],
+    "checkpoints": [
+      "Log in to PeoplePerHour",
+      "Submit proposal"
+    ],
+    "watch_url": "https://www.peopleperhour.com/freelance-jobs?filter=freelance-jobs&keywords=python",
+    "watch_extractor": "(() => { try { const links = document.querySelectorAll('a[href*=\"/freelance-jobs/\"]'); const ids = Array.from(links).map(a => { const m = a.href.match(/\\/freelance-jobs\\/[^\\/]+\\/[^\\/]+\\/([^?#]+)/); return m ? m[1] : null; }).filter(Boolean); const unique = Array.from(new Set(ids)).slice(0, 10); if (unique.length === 0) { const t = document.body.innerText.toLowerCase(); if (t.includes('sign in') || t.includes('log in')) return 'login_required'; if (t.includes('cloudflare') || t.includes('just a moment')) return 'cloudflare'; return 'no_jobs_found'; } return 'jobs:' + unique.join(','); } catch (e) { return 'error:' + e.message; } })()",
+    "watch_condition": "New PeoplePerHour job slugs appear in the freelance-jobs feed.",
+    "page_reader_mode": "auto"
+  },
+  {
     "name": "Doctoralia Appointment",
     "icon": "🩺",
     "playbook": "Goal: book a doctor or specialist appointment on Doctoralia.\n\nSteps:\n1. Open https://www.doctoralia.es and search for the specialty + city the user mentioned.\n2. Filter to the user's preferred insurance if stored (vault key 'insurance').\n3. Read the next 3 available slots for the top 5 doctors that match.\n4. CHECKPOINT 'Select doctor' — show the user the shortlist and wait for their pick.\n5. CHECKPOINT 'Pick slot' — confirm the date+time.\n6. CHECKPOINT 'Confirm booking' — final OK before submitting.\n7. Save the booking confirmation page screenshot to memory.\n\nQuirks: Doctoralia sometimes asks for a phone verification code. If that happens, call request_user_approval with name 'Phone code' and detail asking the user to paste the SMS code.",

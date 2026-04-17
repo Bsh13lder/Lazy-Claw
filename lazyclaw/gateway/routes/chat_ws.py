@@ -194,8 +194,11 @@ async def chat_websocket(ws: WebSocket):
         from lazyclaw.browser.event_bus import recent_events, subscribe
 
         # Initial paint: send last 4 events so the canvas mounts with state.
+        # Only replay events from the last 5 min — matches the frontend's
+        # auto-clear window so a long-idle ring buffer doesn't mount a
+        # stale BrowserCanvas on reconnect.
         try:
-            for evt in recent_events(user.id, limit=4):
+            for evt in recent_events(user.id, limit=4, max_age_s=300):
                 payload = {"type": "browser_event", **evt.to_frame()}
                 if ws.client_state == WebSocketState.CONNECTED:
                     await ws.send_json(payload)

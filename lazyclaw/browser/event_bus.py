@@ -115,14 +115,27 @@ async def subscribe(user_id: str) -> AsyncIterator[BrowserEvent]:
                 pass
 
 
-def recent_events(user_id: str, limit: int = 8) -> list[BrowserEvent]:
-    """Return the latest N events for initial paint."""
+def recent_events(
+    user_id: str,
+    limit: int = 8,
+    max_age_s: float | None = None,
+) -> list[BrowserEvent]:
+    """Return the latest N events for initial paint.
+
+    When `max_age_s` is set, events older than that (relative to now) are
+    dropped. Used by the WebSocket initial paint so a long-idle ring buffer
+    doesn't mount a stale BrowserCanvas on reconnect.
+    """
     ch = _channels.get(user_id)
     if ch is None:
         return []
     if limit <= 0:
         return []
-    return list(ch.ring)[-limit:]
+    events = list(ch.ring)[-limit:]
+    if max_age_s is not None:
+        cutoff = time.time() - max_age_s
+        events = [e for e in events if e.ts >= cutoff]
+    return events
 
 
 def latest_state(user_id: str) -> dict | None:

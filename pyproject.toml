@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lazyclaw"
-version = "0.1.0"
+version = "0.2.0"
 description = "E2E Encrypted AI Agent Platform"
 readme = "README.md"
 license = {text = "MIT"}
@@ -37,10 +37,15 @@ discord = ["discord.py>=2.3.0"]
 eco = []
 voice = ["openai-whisper>=20231117"]
 local = ["llama-cpp-python>=0.2.0"]
-all = ["lazyclaw[telegram,discord,voice,eco]"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+all = ["lazyclaw[telegram,discord,voice,eco,dev]"]
 
 [project.scripts]
 lazyclaw = "lazyclaw.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["lazyclaw*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

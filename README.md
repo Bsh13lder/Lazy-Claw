@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="docs/images/logo-wordmark.png" alt="LazyClaw" width="480" />
+  <img src="docs/images/logo-brutalist.png" alt="LazyClaw" width="320" />
 </p>
+
+<h1 align="center">LazyClaw</h1>
 
 <h3 align="center">E2E Encrypted AI Agent Platform</h3>
 

@@ -520,6 +520,9 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
           />
         </div>
 
+        {/* ── Watchers strip (zero-token site monitors) ───────── */}
+        <WatchersStrip onNavigate={onNavigate} />
+
         {/* ── Agent Performance ──────────────────────────────── */}
         {metrics && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade-in">
@@ -693,6 +696,68 @@ function QuickAction({ label, icon, onClick }: { label: string; icon: React.Reac
     >
       <span className="text-text-muted">{icon}</span>
       {label}
+    </button>
+  );
+}
+
+function WatchersStrip({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const [summary, setSummary] = useState<api.WatcherSummary | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      api.getWatcherSummary()
+        .then((s) => { if (alive) setSummary(s); })
+        .catch(() => { /* endpoint may 401/return empty — stay hidden */ });
+    };
+    load();
+    const id = window.setInterval(load, 20000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, []);
+
+  // Keep the dashboard tidy — hide the strip entirely when the user has
+  // zero watchers (no empty state noise).
+  if (!summary || summary.total === 0) return null;
+
+  const fmt = (ts: number | null | undefined) => {
+    if (!ts) return null;
+    const diff = Math.max(0, Date.now() / 1000 - ts);
+    if (diff < 60) return `${Math.round(diff)}s ago`;
+    if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.round(diff / 3600)}h ago`;
+    return `${Math.round(diff / 86400)}d ago`;
+  };
+  const lastTriggerRel = fmt(summary.last_trigger_ts);
+
+  return (
+    <button
+      onClick={() => onNavigate("watchers")}
+      className="glass-card rounded-xl px-4 py-3 flex items-center gap-4 text-left hover:border-accent/40 transition-colors group"
+      title="Open watchers"
+    >
+      <div className="p-2 rounded-lg bg-accent-soft text-accent shrink-0">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[11px] text-text-muted uppercase tracking-wider">Watchers</div>
+        <div className="text-sm text-text-primary truncate">
+          <span className="font-medium">{summary.active}</span> active
+          {summary.paused > 0 && (
+            <span className="text-text-muted"> · {summary.paused} paused</span>
+          )}
+          {lastTriggerRel && summary.last_trigger_name && (
+            <span className="text-text-muted">
+              {" "}· last fired <span className="text-amber">{summary.last_trigger_name}</span> {lastTriggerRel}
+            </span>
+          )}
+        </div>
+      </div>
+      <span className="text-xs text-text-muted group-hover:text-accent transition-colors shrink-0">
+        View →
+      </span>
     </button>
   );
 }

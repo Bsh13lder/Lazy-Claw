@@ -388,6 +388,7 @@ class SkillRegistry:
         # Survival skills (job hunting + gig execution pipeline)
         from lazyclaw.skills.builtin.survival import (
             ApplyJobSkill,
+            DraftFreelanceProposalSkill,
             InvoiceClientSkill,
             ReviewDeliverableSkill,
             SearchJobsSkill,
@@ -396,6 +397,7 @@ class SkillRegistry:
             SubmitDeliverableSkill,
             SurvivalModeSkill,
             SurvivalStatusSkill,
+            WatchRedditForHireSkill,
         )
 
         self.register(SearchJobsSkill(config=config, registry=self))
@@ -407,6 +409,8 @@ class SkillRegistry:
         self.register(StartGigSkill(config=config, registry=self))
         self.register(SubmitDeliverableSkill(config=config, registry=self))
         self.register(InvoiceClientSkill(config=config, registry=self))
+        self.register(DraftFreelanceProposalSkill(config=config, registry=self))
+        self.register(WatchRedditForHireSkill(config=config))
 
         # TodoWrite — real-time task plan tracking (mandatory for 3+ step tasks)
         from lazyclaw.skills.builtin.todo_write import TodoWriteSkill

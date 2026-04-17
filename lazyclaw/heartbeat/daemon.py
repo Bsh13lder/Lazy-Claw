@@ -536,6 +536,11 @@ class HeartbeatDaemon:
                 if is_mcp_watcher_expired(ctx):
                     logger.info("MCP watcher '%s' expired, removing", job_name)
                     await delete_job(self._config, user_id, job_id)
+                    try:
+                        from lazyclaw.watchers import history as _hist
+                        _hist.forget_watcher(user_id, job_id)
+                    except Exception:
+                        logger.debug("history forget failed", exc_info=True)
                     if self._telegram_push:
                         await self._telegram_push(f"MCP watcher '{job_name}' expired and stopped.")
                     continue
@@ -545,16 +550,42 @@ class HeartbeatDaemon:
 
                 # Run the MCP check
                 logger.info("MCP watcher '%s' checking (%s)...", job_name, ctx.get("service", "?"))
-                changed, notification, new_ctx = await check_mcp_watcher(
-                    ctx, _active_clients,
-                    config=self._config, user_id=user_id,
-                )
+                mcp_check_error: str | None = None
+                try:
+                    changed, notification, new_ctx = await check_mcp_watcher(
+                        ctx, _active_clients,
+                        config=self._config, user_id=user_id,
+                    )
+                except Exception as exc:
+                    mcp_check_error = f"{type(exc).__name__}: {exc}"
+                    try:
+                        from lazyclaw.watchers import history as _hist
+                        _hist.record_check(
+                            user_id, job_id,
+                            changed=False, triggered=False, error=mcp_check_error,
+                        )
+                    except Exception:
+                        logger.debug("history record (error) failed", exc_info=True)
+                    raise
 
                 # Save updated context
                 await update_job(
                     self._config, user_id, job_id,
                     context=json.dumps(new_ctx),
                 )
+
+                # Record this MCP check in the watcher history ring.
+                try:
+                    from lazyclaw.watchers import history as _hist
+                    _hist.record_check(
+                        user_id, job_id,
+                        changed=changed,
+                        triggered=bool(changed and notification),
+                        value_preview=(notification[:500] if changed and notification else None),
+                        notification=notification if (changed and notification) else None,
+                    )
+                except Exception:
+                    logger.debug("history record failed", exc_info=True)
 
                 if changed and notification:
                     logger.info("MCP watcher '%s' detected change", job_name)

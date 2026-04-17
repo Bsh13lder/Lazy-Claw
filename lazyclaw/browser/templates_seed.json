@@ -16,6 +16,22 @@
     "page_reader_mode": "auto"
   },
   {
+    "name": "Upwork Python Jobs",
+    "icon": "💼",
+    "playbook": "Goal: watch the Upwork feed for fresh Python / automation gigs and help the user apply FAST (first-to-reply wins on Upwork).\n\nSteps:\n1. Open https://www.upwork.com/nx/search/jobs/?q=python&sort=recency&per_page=20 . The user must already be logged in — if you see a login wall, call request_user_approval named 'Log in to Upwork' so the user can do it in the live browser canvas.\n2. Read the top 10 job cards: title, budget, posted-age, client history (hire rate, spent), required skills.\n3. Rank them against the user's SkillsProfile (skills, min_fixed_rate, excluded_keywords).\n4. For the top 1-3 matches, call draft_freelance_proposal with the job URL to get a tailored proposal.\n5. CHECKPOINT 'Submit proposal' — show the draft and wait for user approval before they submit. NEVER auto-submit. Upwork permanent-bans automation with no appeal.\n6. Log each attempt via create_gig (status='applied') so the user's pipeline stays accurate.\n\nQuirks: Upwork sometimes shows a Cloudflare interstitial — refresh once. Connects cost real money; always tell the user how many this proposal will cost before they submit.",
+    "setup_urls": [
+      "https://www.upwork.com/nx/search/jobs/?q=python&sort=recency&per_page=20"
+    ],
+    "checkpoints": [
+      "Log in to Upwork",
+      "Submit proposal"
+    ],
+    "watch_url": "https://www.upwork.com/nx/search/jobs/?q=python&sort=recency&per_page=20",
+    "watch_extractor": "(() => { try { const cards = document.querySelectorAll('article[data-test=\"JobTile\"], section[data-test=\"JobTile\"], [data-ev-sublocation=\"job_feed_tile\"], article.job-tile'); const ids = Array.from(cards).slice(0, 10).map(c => { const a = c.querySelector('a[href*=\"/jobs/~\"]'); if (!a) return null; const m = a.href.match(/\\/jobs\\/~([a-f0-9]+)/); return m ? m[1] : null; }).filter(Boolean); if (ids.length === 0) { const t = document.body.innerText.toLowerCase(); if (t.includes('log in') || t.includes('sign in')) return 'login_required'; if (t.includes('just a moment') || t.includes('cloudflare')) return 'cloudflare'; return 'no_jobs_found'; } return 'jobs:' + ids.join(','); } catch (e) { return 'error:' + e.message; } })()",
+    "watch_condition": "New Python job IDs appear in the top 10 of the recency-sorted feed.",
+    "page_reader_mode": "auto"
+  },
+  {
     "name": "Doctoralia Appointment",
     "icon": "🩺",
     "playbook": "Goal: book a doctor or specialist appointment on Doctoralia.\n\nSteps:\n1. Open https://www.doctoralia.es and search for the specialty + city the user mentioned.\n2. Filter to the user's preferred insurance if stored (vault key 'insurance').\n3. Read the next 3 available slots for the top 5 doctors that match.\n4. CHECKPOINT 'Select doctor' — show the user the shortlist and wait for their pick.\n5. CHECKPOINT 'Pick slot' — confirm the date+time.\n6. CHECKPOINT 'Confirm booking' — final OK before submitting.\n7. Save the booking confirmation page screenshot to memory.\n\nQuirks: Doctoralia sometimes asks for a phone verification code. If that happens, call request_user_approval with name 'Phone code' and detail asking the user to paste the SMS code.",

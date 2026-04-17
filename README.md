@@ -132,7 +132,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `tasks/` | Encrypted task store, nagging reminders, recurring tasks |
 | `notifications/` | Telegram push for background tasks |
 | `pipeline/` | CRM-style pipeline store |
-| `survival/` | Gig economy tools — job matching, applications, invoices |
+| `survival/` | Gig economy tools — JobSpy search, proposal drafter, freelance platform watchers (Upwork/Workana/PeoplePerHour/Reddit), invoices |
 
 Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude CLI, Anthropic, OpenAI), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool).
 
@@ -252,7 +252,7 @@ CDP-based control of the user's real Brave/Chrome browser. No separate Chromium 
 - **Live BrowserCanvas** — embedded in the chat sidebar. See the URL, action timeline (click / type / goto), and a thumbnail of the current page as the agent works. **Zero extra LLM tokens** — events flow UI-only, never enter the agent's context.
 - **Live mode** — one-tap toggle on the canvas. Captures a fresh screenshot after every action for 5 minutes. Use it when the agent is stuck or you just want to watch.
 - **Checkpoints** — the agent calls `request_user_approval` before risky actions (submit, pay, book, delete, sign). The canvas shows an inline Approve / Reject banner; agent blocks until you decide. Same name auto-approves on re-call.
-- **Saved templates** — reusable recipes for recurring flows. `Templates` page lets you save a playbook + setup URLs + checkpoints + optional zero-token slot watcher. Ships seed examples for Cita Previa Spain (DGT) and Doctoralia.
+- **Saved templates** — reusable recipes for recurring flows. `Templates` page lets you save a playbook + setup URLs + checkpoints + optional zero-token slot watcher. Ships seed examples for Cita Previa Spain (DGT), Doctoralia, and freelance gig feeds (Upwork · Workana · PeoplePerHour) with login + submit checkpoints.
 - **Slot polling** — `watch_appointment_slots` hooks a template to the watcher daemon. Zero LLM tokens per check; Telegram + canvas alert fires when slots open.
 - **Remote takeover** — noVNC via the `share_browser_control` NL skill or the canvas `🎮 Take control` button. Works from Telegram, web chat, and CLI identically.
 - **Shared profiles** — login once, all tools see it

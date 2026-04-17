@@ -374,21 +374,33 @@ Connect to any OAuth-protected remote MCP server (Canva, GitHub, Slack, Google).
 
 The agent finds matching freelance jobs, writes proposals, does the work, and gets paid. User approves at every step. Cron jobs check for new opportunities.
 
-- [ ] **17.1 JobSpy MCP** — Bundle or connect JobSpy MCP server. Search Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google simultaneously.
-- [ ] **17.2 Upwork MCP** — Connect Upwork MCP. Search jobs, manage proposals, track contracts, monitor earnings.
-- [ ] **17.3 Stripe MCP** — Connect official Stripe MCP (remote, OAuth). Create/send invoices, track payments.
-- [ ] **17.4 Skills Profile** — `lazyclaw/skills/builtin/survival.py`: User defines skills, rates, preferences. Stored encrypted.
-- [ ] **17.5 Job Matcher** — `search_jobs(keywords, budget_min, platforms)` → scores relevance against skills profile → ranks opportunities.
-- [ ] **17.6 Proposal Writer** — `apply_job(job_id)` → Claude Code MCP writes personalized cover letter → submits via Upwork/LinkedIn MCP. **User approves before submit.**
-- [ ] **17.7 Work Executor** — `start_job(job_id)` → long-running specialist (up to 8h timeout). Code → Claude Code MCP. Research → web_search + browser. Design → Canva MCP. Writing → Claude Code MCP.
-- [ ] **17.8 Delivery + Invoice** — `submit_deliverable(job_id)` → uploads via platform MCP. `create_invoice(job_id)` → Stripe MCP.
-- [ ] **17.9 Survival Cron** — Heartbeat jobs: check new matching jobs (30 min), check client messages (15 min), check payment status (daily).
-- [ ] **17.10 Survival Dashboard** — Telegram daily summary: "Found 5 jobs, applied to 2, working on 1, earned $150 this week."
-- [ ] **17.11 User Settings** — survival_mode (bool), skills_profile, min_hourly_rate, max_concurrent_jobs, platforms, auto_apply (ALWAYS false — user approves).
+- [x] **17.1 JobSpy MCP** — `mcp-jobspy/` bundled MCP server, pinned to `python-jobspy>=1.1.82`. Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google.
+- [ ] **17.2 Upwork MCP** — Deferred. Current path: browser template + Live Mode cookie login. Real MCP can replace later.
+- [ ] **17.3 Stripe MCP** — Not shipped yet. `invoice_client` skill scaffolded only.
+- [x] **17.4 Skills Profile** — `lazyclaw/survival/profile.py` (`SkillsProfile` dataclass, encrypted in users.settings), `set_skills_profile` skill.
+- [x] **17.5 Job Matcher** — `lazyclaw/survival/matcher.py` (pure-Python: 0.6 skills / 0.2 budget / 0.1 category) + `search_jobs` skill.
+- [x] **17.6 Proposal Writer** — `draft_freelance_proposal` skill: opens job URL, reads brief, drafts 3-paragraph proposal against SkillsProfile, pushes to Telegram. `apply_job` skill wires the platform side. **Never auto-submits — TOS ban risk on Upwork/LinkedIn/PPH documented inline.**
+- [x] **17.7 Work Executor** — `start_gig` skill spawns Claude Code MCP specialist with gig workspace + deliverable review loop.
+- [~] **17.8 Delivery + Invoice** — `submit_deliverable` shipped; Stripe integration is `invoice_client` scaffold only.
+- [x] **17.9 Survival Cron** — `survival_mode` skill toggles the heartbeat cron; `watch_reddit_forhire` + `watch_appointment_slots` cover the watcher side.
+- [ ] **17.10 Survival Dashboard** — `survival_status` is text-only; no richer dashboard yet.
+- [x] **17.11 User Settings** — stored in `users.settings` under `survival.profile` JSON. `auto_apply` intentionally NOT implemented (TOS risk).
 
 **CRITICAL RULE**: Agent NEVER auto-applies or auto-accepts work. User approves every application and every job start. Agent proposes, user decides.
 
 **Verification**: Enable survival mode → agent finds matching jobs → notifies on Telegram → user approves → agent applies → gets hired → does the work → submits → invoices → gets paid. Full loop.
+
+### Phase 17b: Freelance Watchers (2026-04-17)
+
+Zero-token daily gig monitoring across three freelance platforms + Reddit. Delivered as browser template seeds (using the existing watcher infrastructure — no new infrastructure written).
+
+- [x] **17b.1 Upwork seed** — `templates_seed.json` `Upwork Python Jobs`: setup URL, login checkpoint, site-specific extractor keyed on `/jobs/~<id>` slugs, submit checkpoint.
+- [x] **17b.2 Workana seed** — `Workana Dev Projects`: Spanish/LatAm market, extractor keyed on `/job/<slug>` URLs, credits warning in playbook.
+- [x] **17b.3 PeoplePerHour seed** — `PeoplePerHour Python`: UK/EU buyers, extractor keyed on `/freelance-jobs/<cat>/<sub>/<slug>`, credits warning in playbook.
+- [x] **17b.4 Reddit watcher** — `watch_reddit_forhire` skill: polls /r/forhire + /r/slavelabour + /r/jobbit + /r/hireaprogrammer via Reddit JSON API, filters `[HIRING]` + profile keywords, dedupes against encrypted `personal_memory` fingerprint store, pushes matches to Telegram.
+- [ ] **17b.5 Fiverr inbox watcher** — Deferred until user has live Fiverr gigs to monitor.
+- [ ] **17b.6 Malt.es / InfoJobs.es MCPs** — Spain-native boards. InfoJobs has an official API; Malt needs Apify scraper wrapper.
+- [ ] **17b.7 Per-user Gmail OAuth** — Current n8n Gmail is shared OAuth; fine for single-user self use, blocks multi-user SaaS.
 
 ## Future: Workflow Builder UI
 
@@ -572,7 +584,7 @@ Eval-driven skill development. Define standard tasks per skill with expected out
 - TUI Dashboard: ✅ COMPLETE — Textual-based, system bar, agent cards, activity feed, services panel, cost bar, AI routing panel, admin input
 - Telegram Clean UX: ✅ COMPLETE — typing indicator, delayed status msg, edit-in-place, footer with model attribution, background task push
 - Activepieces Integration: ❌ REMOVED — replaced by n8n native integration
-- Survival Instinct: ✅ COMPLETE — survival/profile.py, survival/matcher.py, 6 skills (search_jobs, apply_job, survival_mode, survival_status, set_skills_profile, review_deliverable). JobSpy MCP + Stripe MCP configured. Claude Code MCP critic for code review with auto-fix loop
+- Survival Instinct: ✅ COMPLETE — survival/profile.py, survival/matcher.py, 8 skills (search_jobs, apply_job, survival_mode, survival_status, set_skills_profile, review_deliverable, draft_freelance_proposal, watch_reddit_forhire). JobSpy MCP pinned to 1.1.82. Freelance template seeds: Upwork / Workana / PeoplePerHour with login+submit checkpoints. Stripe integration scaffolded (invoice_client). Claude Code MCP critic for code review with auto-fix loop
 - Watcher System: ✅ COMPLETE — Zero-token site monitoring, WhatsApp/Gmail extractors, Telegram push notifications, smart diff
 - Tab Manager: ✅ COMPLETE — TabContext (scoped CDP per tab), TabLease, parallel specialist browser access
 - Site Recon: ❓ UNDER REVIEW — delegate.py `_maybe_research_site()` disabled from auto-run. Code kept but not called. Specialist has `web_search` skill and can self-research when needed. Revisit: maybe expose as `/research <domain>` command or let specialist call it explicitly via a `research_site` skill

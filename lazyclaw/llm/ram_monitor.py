@@ -162,8 +162,13 @@ def format_ram_compact(status: RAMStatus) -> str:
 def _get_model_name_for_port(port: int) -> str | None:
     """Get the short model name running on an MLX port (8080/8081).
 
-    Parses the --model arg from the process command line.
-    Returns e.g. 'Nanbeige 3B' or 'Qwen3.5 4B', or None.
+    **Deprecated — MLX backend replaced by Ollama (Gemma 4 E2B) in cf1e309.**
+    The regex is name-agnostic; any `--model` arg on the process command
+    line gets parsed into a short display name. Kept for users running
+    older MLX-based setups.
+
+    Returns a short display name like 'Gemma 4 3B', or None when no MLX
+    server is detected on that port.
     """
     try:
         result = subprocess.run(

@@ -106,7 +106,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
                               ┌──────────────┼──────────────┐
                               ▼              ▼              ▼
                         Skill Registry   Browser (CDP)   MCP Bridge
-                        ~110 skills      Brave/Chrome    6 MCP servers
+                        128 skills       Brave/Chrome    6 MCP servers
                               │              │              │
                               ▼              ▼              ▼
                         Code Sandbox    Shared Profile   External Tools

@@ -87,6 +87,8 @@ async def verify_provider_async(provider: str, key: str) -> bool:
         tmp_config.openai_api_key = key
     elif provider == "anthropic":
         tmp_config.anthropic_api_key = key
+    elif provider == "minimax":
+        tmp_config.minimax_api_key = key
 
     router = LLMRouter(tmp_config)
     return await router.verify_provider(provider, key)
@@ -882,8 +884,19 @@ async def _chat_loop() -> None:
     log_file = str(config.database_dir / "lazyclaw.log")
     _configure_logging(config.log_level, log_file)
 
-    if not config.server_secret or not (config.openai_api_key or config.anthropic_api_key):
-        console.print("[red]Not configured. Run 'lazyclaw setup' first.[/red]")
+    # Accept any of the five LLM paths — Anthropic, MiniMax, OpenAI (paid
+    # APIs) or Ollama / Claude CLI (runtime-detected, no key required).
+    has_api_key = bool(
+        config.anthropic_api_key
+        or config.minimax_api_key
+        or config.openai_api_key
+    )
+    if not config.server_secret or not has_api_key:
+        console.print(
+            "[red]Not configured. Run 'lazyclaw setup' first.[/red]\n"
+            "[dim]Need at least one of: ANTHROPIC_API_KEY, MINIMAX_API_KEY, "
+            "OPENAI_API_KEY — or Ollama running locally, or `claude login`.[/dim]"
+        )
         raise SystemExit(1)
 
     await init_db(config)
@@ -1094,45 +1107,80 @@ def setup() -> None:
 
     console.print()
 
-    # AI Provider
+    # AI Provider — 5 paths work. Claude is primary/tested; MiniMax tested as
+    # drop-in alternative brain; Ollama is the free local option; OpenAI legacy.
+    console.print(
+        "[dim]LazyClaw works with 5 LLM paths. Claude is primary; MiniMax is a "
+        "tested alternative (flat subscription); Ollama is free + local; "
+        "OpenAI is a legacy fallback; Claude CLI ($0 via Max) is configured "
+        "separately after setup.[/dim]"
+    )
     provider = Prompt.ask(
         "[bold cyan]Choose your AI provider[/bold cyan]",
-        choices=["openai", "anthropic"],
-        default="openai",
+        choices=["anthropic", "minimax", "ollama", "openai", "skip"],
+        default="anthropic",
     )
 
     api_key = ""
     verified = False
-    while not verified:
-        api_key = Prompt.ask(
-            f"[bold cyan]Enter your {provider.capitalize()} API key[/bold cyan]",
-            password=True,
+    if provider == "skip":
+        console.print(
+            "[yellow]Skipping AI provider setup. Configure one later via "
+            "`.env` or the Web UI Settings page.[/yellow]"
         )
-        if not api_key.strip():
-            console.print("[yellow]Skipping AI provider setup.[/yellow]")
-            break
-
-        with console.status("[bold cyan]Verifying API key..."):
-            try:
-                ok = asyncio.run(verify_provider_async(provider, api_key.strip()))
-            except Exception as exc:
-                ok = False
-                console.print(f"[dim]Error: {exc}[/dim]")
-
-        if ok:
-            console.print(f"[green]\u2713[/green] {provider.capitalize()} API key verified")
-            verified = True
-        else:
-            console.print(f"[red]\u2717[/red] API key verification failed")
-            if not Confirm.ask("Retry?", default=True):
+    elif provider == "ollama":
+        # No API key — just verify Ollama is running locally and recommend pulling the worker model.
+        console.print(
+            "[dim]Ollama runs locally. Make sure `ollama serve` is running, then "
+            "pull the recommended worker model:[/dim]"
+        )
+        console.print("    [bold]ollama pull gemma4:e2b[/bold]")
+        console.print(
+            "[dim]After setup you can also run "
+            "`lazyclaw eco set-mode hybrid` to use it automatically.[/dim]"
+        )
+        save_env("DEFAULT_MODEL", "lazyclaw-e2b")
+        verified = True
+    else:
+        # anthropic | minimax | openai — ask for an API key and verify it.
+        provider_label = {
+            "anthropic": "Anthropic",
+            "minimax": "MiniMax",
+            "openai": "OpenAI",
+        }[provider]
+        while not verified:
+            api_key = Prompt.ask(
+                f"[bold cyan]Enter your {provider_label} API key[/bold cyan]",
+                password=True,
+            )
+            if not api_key.strip():
+                console.print("[yellow]Skipping AI provider setup.[/yellow]")
                 break
 
-    if api_key.strip():
-        if provider == "openai":
-            save_env("OPENAI_API_KEY", api_key.strip())
-        else:
-            save_env("ANTHROPIC_API_KEY", api_key.strip())
-            save_env("DEFAULT_MODEL", "claude-sonnet-4-6")
+            with console.status("[bold cyan]Verifying API key..."):
+                try:
+                    ok = asyncio.run(verify_provider_async(provider, api_key.strip()))
+                except Exception as exc:
+                    ok = False
+                    console.print(f"[dim]Error: {exc}[/dim]")
+
+            if ok:
+                console.print(f"[green]\u2713[/green] {provider_label} API key verified")
+                verified = True
+            else:
+                console.print(f"[red]\u2717[/red] API key verification failed")
+                if not Confirm.ask("Retry?", default=True):
+                    break
+
+        if api_key.strip():
+            if provider == "openai":
+                save_env("OPENAI_API_KEY", api_key.strip())
+            elif provider == "minimax":
+                save_env("MINIMAX_API_KEY", api_key.strip())
+                save_env("DEFAULT_MODEL", "MiniMax-M2.7")
+            else:  # anthropic
+                save_env("ANTHROPIC_API_KEY", api_key.strip())
+                save_env("DEFAULT_MODEL", "claude-sonnet-4-6")
 
     console.print()
 
@@ -1243,8 +1291,18 @@ def start() -> None:
     if not config.server_secret:
         console.print("[red]No SERVER_SECRET. Run 'lazyclaw setup' first.[/red]")
         raise SystemExit(1)
-    if not (config.openai_api_key or config.anthropic_api_key):
-        console.print("[red]No AI provider configured. Run 'lazyclaw setup' first.[/red]")
+    has_api_key = bool(
+        config.anthropic_api_key
+        or config.minimax_api_key
+        or config.openai_api_key
+    )
+    if not has_api_key:
+        console.print(
+            "[red]No AI provider configured.[/red]\n"
+            "[dim]Set one of ANTHROPIC_API_KEY, MINIMAX_API_KEY, "
+            "OPENAI_API_KEY in `.env`, or run Ollama locally, or "
+            "`claude login` for the CLI path. Then re-run.[/dim]"
+        )
         raise SystemExit(1)
 
     console.print(Panel("Starting LazyClaw...", style="cyan"))

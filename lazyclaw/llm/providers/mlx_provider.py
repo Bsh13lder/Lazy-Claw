@@ -2,7 +2,8 @@
 
 DEPRECATED: Ollama 0.19+ includes a native MLX backend for Apple Silicon and
 handles model loading, memory management, and process lifecycle automatically.
-Use OllamaProvider (ollama_provider.py) with nanbeige4.1:3b instead.
+Use OllamaProvider (ollama_provider.py) with `lazyclaw-e2b` (Gemma 4 E2B)
+instead — this is the current HYBRID-mode worker.
 
 This file is kept for backward compatibility with any users still running
 mlx_lm.server manually. It will be removed in a future release.

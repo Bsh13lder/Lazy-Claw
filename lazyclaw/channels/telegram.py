@@ -286,7 +286,13 @@ class _TelegramCallback:
         return "\n".join(lines)
 
     async def _update_status(self, force: bool = False) -> None:
-        """Edit the status message in-place with throttling."""
+        """Edit the status message in-place with throttling.
+
+        The initial send is muted (disable_notification=True) so tool-switch
+        progress never pings the user's phone — only the final reply does.
+        Subsequent edits inherit the silent creation (Telegram only notifies
+        on new messages, not edits).
+        """
         now = time.monotonic()
         if not force and (now - self._last_edit_time) < _EDIT_THROTTLE_S:
             return
@@ -298,6 +304,7 @@ class _TelegramCallback:
             else:
                 self._status_msg = await self._bot.send_message(
                     chat_id=self._chat_id, text=text,
+                    disable_notification=True,
                 )
             self._last_edit_time = now
         except Exception as exc:
@@ -562,7 +569,8 @@ class _TelegramCallback:
                     )
 
         elif kind == "browser_plan":
-            # Show the browsing plan as a brief message
+            # Show the browsing plan as a brief message — silent, so the
+            # user isn't pinged every time the agent replans.
             goal = event.metadata.get("goal", event.detail)
             steps = event.metadata.get("steps", [])
             steps_text = "\n".join(
@@ -575,6 +583,7 @@ class _TelegramCallback:
                 await _telegram_send_with_retry(
                     lambda: self._bot.send_message(
                         chat_id=self._chat_id, text=text,
+                        disable_notification=True,
                     )
                 )
             except Exception as exc:
@@ -624,6 +633,8 @@ class _TelegramCallback:
             self._work_summary = event.metadata.get("summary")
 
         elif kind == "attachment":
+            # Interim screenshots (browser snapshots, etc.) are sent silently
+            # so a run that takes 5 screenshots doesn't ping the phone 5 times.
             data = event.metadata.get("data", b"")
             media_type = event.metadata.get("media_type", "")
             caption = event.detail[:1024] if event.detail else None
@@ -634,6 +645,7 @@ class _TelegramCallback:
                             chat_id=self._chat_id,
                             photo=io.BytesIO(data),
                             caption=caption,
+                            disable_notification=True,
                         )
                     )
                 except Exception as exc:

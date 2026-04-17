@@ -47,7 +47,7 @@ LazyClaw takes a different approach:
 | **Conversations** | Encrypted per-user | Plaintext JSONL |
 | **Memories** | Encrypted personal facts | Plaintext markdown |
 | **Tool selection** | Smart discovery via search_tools (4 base tools, ~195 discoverable) | All tools every turn (5K+ tokens) |
-| **Cost routing** | 3-mode Brain/Worker split (Sonnet brain + Gemma 4 E2B/Haiku workers) | Manual model config |
+| **Cost routing** | 3-mode Brain/Worker split across 5 providers (Anthropic · MiniMax subscription · OpenAI · local Ollama · Claude CLI) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
 | **MCP** | Native client + server + 6 bundled servers | Community plugins |
 | **Integrations** | n8n native (full workflow CRUD, 6 skills, templates, Docker) | Manual API wiring |
@@ -82,12 +82,12 @@ pip install pipx && pipx install --editable .
 lazyclaw setup
 ```
 
-Requires: Python 3.11+, pipx, an AI provider key (OpenAI or Anthropic).
+Requires: Python 3.11+, pipx, and at least one LLM path — Anthropic API key (recommended), MiniMax API key, OpenAI key, local Ollama, or the Anthropic Claude CLI.
 </details>
 
-**Requirements:** Python 3.11+ (installed automatically on macOS), an AI provider key (OpenAI or Anthropic).
+**Requirements:** Python 3.11+ (installed automatically on macOS) and at least one LLM path — Anthropic API key (recommended), MiniMax API key, OpenAI key, local Ollama, or the Anthropic Claude CLI. Any one works.
 
-> **For best results, use Anthropic.** Claude Haiku 4.5 as default + Sonnet 4.6 for complex tasks gives the fastest responses (2-5s) with excellent tool use. LazyClaw auto-configures the optimal model routing when it detects an Anthropic API key.
+> **LazyClaw is optimized for Claude.** Sonnet 4.6 as brain + Haiku 4.5 as workers gives the fastest responses (2–5s) with excellent tool use, and everything is tuned around this pairing. **MiniMax M2.7 is also tested and works really well** as an alternative brain for users who prefer a flat subscription over per-token billing. LazyClaw auto-configures optimal model routing when it detects any supported provider key.
 
 ## Architecture
 
@@ -179,6 +179,19 @@ Specialists run in parallel via `asyncio.gather`. Results merge back into the co
 
 `run_background` skill spawns independent agent instances for long-running work. Max 5 global, 2 per user. Results pushed to Telegram on completion.
 
+### Task Manager (Second Brain)
+
+Encrypted tasks with nagging reminders and due-date escalation:
+
+- **Nag pattern** — 15min → 30min → 1hr, capped at 5 (no spam spiral)
+- **Relative time parsing** — `remind me in +1h30m drink water`, parsed server-side so the LLM never does time math
+- **User/agent separation** — the agent's own todos are tracked separately from yours
+- **Telegram inline buttons** — Done / Snooze 1h / Tomorrow, one tap from the reminder message
+- **Recurring tasks** — daily / weekly / monthly with auto-created next occurrences
+- **AI enrichment** — auto-categorize on save via `mcp-taskai` (graceful degradation when the MCP is offline)
+
+All task content (title, description, category, tags) is encrypted at rest. Only priority / status / due_date / timestamps stay plaintext for query efficiency.
+
 ### Context Compression
 
 Long conversations don't break. A sliding window keeps the last 15 messages full, older ones get summarized. Daily auto-summaries (via gpt-5-mini) and weekly rollups keep context rich without re-summarizing on every message.
@@ -207,6 +220,31 @@ HYBRID mode uses any local model you run via Ollama as the worker — $0 cost fo
 
 **Agent Skills compatible** — skills written in Claude Code agent format (YAML + markdown) can be imported directly via `lazyclaw skill import`.
 
+### Supported LLM providers
+
+LazyClaw routes through a single `LLMRouter` that speaks five provider dialects. Set any one of the API keys (or install Ollama locally, or log in to the Claude CLI) and the agent will pick it up automatically.
+
+| Provider | Models | How it bills | Good for |
+|----------|--------|--------------|----------|
+| **Anthropic** | Sonnet 4.6, Haiku 4.5, Opus 4.6 | Per-token API | Best tool use, best-in-class quality. **LazyClaw is optimized around Claude.** |
+| **MiniMax** | MiniMax-M2.7, minimax-m2.5 | Subscription-priced (flat-rate), OpenAI-compatible API at `api.minimax.io/v1` | **Tested and works really well** as an alternative brain — 204K context, strong tool calling, predictable monthly cost. Auto-falls-back to Claude on rate-limit. |
+| **OpenAI** | GPT-5, GPT-5-mini | Per-token API | Legacy fallback; kept for users with existing OpenAI keys. |
+| **Ollama** (local) | Gemma 4 E2B / E4B (`lazyclaw-e2b` / `lazyclaw-e4b` custom Modelfiles with agent identity baked in) | Free (runs on your machine) | Default HYBRID worker. Great for tool-call-heavy tasks when you don't want to pay per token. |
+| **Claude CLI** | `claude -p` subprocess | Free for Anthropic Max subscribers | CLAUDE-mode fallback: run the whole agent for $0 if you already pay for Max. |
+
+**Which should I use?**
+LazyClaw was built and tuned against Claude Sonnet 4.6 + Haiku 4.5 — that's the recommended default and what ECO HYBRID mode ships with. **MiniMax M2.7 has been tested as a drop-in brain replacement and works well** for the same workload at a flat monthly cost. OpenAI works but isn't the focus. Ollama is the zero-cost local worker. Claude CLI lets Max subscribers run everything through the CLI at no extra cost.
+
+Set any of these in `.env`:
+
+```
+ANTHROPIC_API_KEY=...
+MINIMAX_API_KEY=...         # optional; MINIMAX_BASE_URL defaults to api.minimax.io/v1
+OPENAI_API_KEY=...          # optional legacy
+```
+
+Or install Ollama and `ollama pull` one of the bundled models. Or `claude login` for the CLI path. Any one is enough to get started.
+
 ## Browser
 
 CDP-based control of the user's real Brave/Chrome browser. No separate Chromium instance — the agent uses your actual browser with your logins, cookies, and sessions.
@@ -231,6 +269,8 @@ First-class MCP support — both client and server.
 **As client:** Connect to any MCP server (stdio, SSE, streamable HTTP). External tools automatically registered as first-class skills. Parallel startup via `asyncio.gather` (~2s for 10 servers instead of sequential). Auto-install from Telegram via `/mcp install`.
 
 **As server:** Expose LazyClaw tools to any MCP-compatible client via SSE.
+
+**Remote MCP with OAuth:** The agent can connect to OAuth-protected remote MCP servers (Canva, GitHub, Slack, Google Drive, Gmail) via a single natural-language command. Say *"connect to Canva"* → LazyClaw opens Brave for the OAuth login → catches the callback on localhost → stores tokens encrypted in the vault → the remote server's tools become first-class agent skills. Auto-refreshes on expiry without re-prompting.
 
 **Bundled MCP servers (6 active):**
 
@@ -349,6 +389,9 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] Live browser canvas — URL + action timeline + thumbnail + takeover (zero LLM tokens)
 - [x] Saved browser templates (govt appointments, recurring flows) with zero-token slot polling
 - [x] Checkpoints — agent pauses for user approval before submit/pay/book/delete/sign/send
+- [x] MiniMax provider integration (subscription-priced, OpenAI-compatible, tested as a Claude alternative brain)
+- [x] Remote MCP OAuth flow (Canva, GitHub, Google — auto browser login, encrypted token storage, auto-refresh)
+- [x] Task Manager (second brain) with encrypted storage + nag escalation + Telegram inline buttons
 - [x] Instagram, WhatsApp, Email MCP servers (no browser needed)
 - [x] WhatsApp mute from Telegram (reply "mute")
 - [x] MCP auto-install from Telegram (/mcp install)

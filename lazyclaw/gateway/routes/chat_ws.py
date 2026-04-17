@@ -218,6 +218,35 @@ async def chat_websocket(ws: WebSocket):
 
     bus_task = asyncio.create_task(_browser_event_pump())
 
+    # Forward background-task completion events so the web chat can show
+    # results from tasks that started in an earlier turn (the original
+    # WebSocketCallback is long gone by the time a background task finishes).
+    async def _task_event_pump() -> None:
+        from lazyclaw.runtime import task_event_bus
+
+        # Initial paint: replay recent completions (last 10 min) so a user
+        # who reconnects right after a task finished still sees the result.
+        try:
+            for evt in task_event_bus.recent_events(user.id, limit=3, max_age_s=600):
+                payload = {"type": evt.kind, **evt.to_frame()}
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(payload)
+        except Exception:
+            logger.debug("Initial task-event paint failed", exc_info=True)
+        try:
+            async for evt in task_event_bus.subscribe(user.id):
+                if ws.client_state != WebSocketState.CONNECTED:
+                    return
+                try:
+                    await ws.send_json({"type": evt.kind, **evt.to_frame()})
+                except Exception:
+                    logger.debug("task_event send failed", exc_info=True)
+                    return
+        except asyncio.CancelledError:
+            pass
+
+    task_bus_task = asyncio.create_task(_task_event_pump())
+
     async def _maybe_suggest_template(
         user_id: str, turn_start_ts: float, cb: "WebSocketCallback"
     ) -> None:
@@ -403,6 +432,7 @@ async def chat_websocket(ws: WebSocket):
         for t in writer_tasks:
             t.cancel()
         bus_task.cancel()
+        task_bus_task.cancel()
     except Exception as exc:
         logger.error("WebSocket unexpected error: %s", exc, exc_info=True)
         cb = state.get("active")
@@ -411,3 +441,4 @@ async def chat_websocket(ws: WebSocket):
         for t in writer_tasks:
             t.cancel()
         bus_task.cancel()
+        task_bus_task.cancel()

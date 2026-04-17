@@ -279,9 +279,10 @@ class TelegramCommands:
         if not user_id:
             return
         args = context.args or []
+        from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
+        from lazyclaw.llm.model_registry import get_mode_models
+
         if not args:
-            from lazyclaw.llm.model_registry import get_mode_models
-            from lazyclaw.llm.eco_settings import get_eco_settings
             _eco = await get_eco_settings(self._config, user_id)
             _models = get_mode_models(_eco.get("mode", "hybrid"))
             await self._reply(update,
@@ -293,10 +294,23 @@ class TelegramCommands:
             )
             return
         if len(args) >= 2:
-            role, model = args[0].lower(), args[1]
-            if role in ("brain", "worker"):
-                setattr(self._config, f"{role}_model", model)
-                await self._reply(update, f"\u2705 {role.title()}: <code>{model}</code>")
+            role, model = args[0].lower(), " ".join(args[1:])
+            if role in ("brain", "worker", "fallback"):
+                # Persist to the per-user users.settings JSON (same path as
+                # the web UI Settings page and /mode brain/worker) so the
+                # change applies across every channel, not just this one.
+                try:
+                    await update_eco_settings(
+                        self._config, user_id, {f"{role}_model": model},
+                    )
+                except ValueError as exc:
+                    await self._reply(update, f"\u274c {exc}")
+                    return
+                await self._reply(
+                    update,
+                    f"\u2705 {role.title()}: <code>{model}</code> "
+                    f"(applies to Telegram + Web UI + CLI)",
+                )
                 return
         await self._reply(update, "\U0001f9e0 Usage: <code>/model brain MODEL</code> or <code>/model worker MODEL</code>")
 

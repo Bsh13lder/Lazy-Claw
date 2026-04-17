@@ -20,6 +20,7 @@ from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import encrypt, decrypt
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime import task_event_bus
 
 if TYPE_CHECKING:
     from lazyclaw.config import Config
@@ -256,13 +257,30 @@ class TaskRunner:
                 meta["total_cost"] = _captured_summary.total_cost
                 meta["models_used"] = [m[0] for m in _captured_summary.models_used]
 
-            # Notify user
+            # Notify user (Telegram + dashboard via the callback),
+            # AND fan-in to the per-user task event bus so the web chat
+            # WebSocket can surface the result inline.
             if _original_cb:
                 await _original_cb.on_event(AgentEvent(
                     "background_done",
                     f"Background task '{task_name}' completed",
                     meta,
                 ))
+            try:
+                task_event_bus.publish(task_event_bus.TaskEvent(
+                    user_id=user_id,
+                    kind="background_done",
+                    task_id=task_id,
+                    name=task_name,
+                    result=(result or "")[:4000],
+                    duration_ms=meta.get("duration_ms"),
+                    total_tokens=meta.get("total_tokens"),
+                    llm_calls=meta.get("llm_calls"),
+                    total_cost=meta.get("total_cost"),
+                    tools_used=tuple(meta.get("tools_used", []) or []),
+                ))
+            except Exception:
+                logger.debug("task_event_bus publish (done) failed", exc_info=True)
 
         except asyncio.TimeoutError:
             _status = "failed"
@@ -287,6 +305,16 @@ class TaskRunner:
                     {"task_id": task_id, "name": task_name,
                      "error": f"Timed out after {timeout}s"},
                 ))
+            try:
+                task_event_bus.publish(task_event_bus.TaskEvent(
+                    user_id=user_id,
+                    kind="background_failed",
+                    task_id=task_id,
+                    name=task_name,
+                    error=f"Timed out after {timeout}s",
+                ))
+            except Exception:
+                logger.debug("task_event_bus publish (timeout) failed", exc_info=True)
 
         except asyncio.CancelledError:
             _status = "cancelled"
@@ -323,6 +351,16 @@ class TaskRunner:
                     f"Background task '{task_name}' failed",
                     {"task_id": task_id, "name": task_name, "error": str(exc)[:200]},
                 ))
+            try:
+                task_event_bus.publish(task_event_bus.TaskEvent(
+                    user_id=user_id,
+                    kind="background_failed",
+                    task_id=task_id,
+                    name=task_name,
+                    error=str(exc)[:500],
+                ))
+            except Exception:
+                logger.debug("task_event_bus publish (fail) failed", exc_info=True)
 
         finally:
             # ALWAYS clean up (prevents memory leaks)

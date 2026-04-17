@@ -39,11 +39,17 @@ class RunBackgroundSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Start a one-shot task that runs in the background while you keep chatting. "
+            "Start a long-running action that should continue while the user keeps chatting. "
             "The background agent has ALL your tools (browser, web_search, memory, etc). "
-            "Use for: sending messages, web research, checking prices, "
-            "any task that takes time. You'll be notified on Telegram when it's done. "
-            "NOT for monitoring/watching — use watch_site or watch_messages instead. "
+            "USE ONLY WHEN: the task takes >30s AND is a concrete action "
+            "(send a message, submit a form, apply to a job, run a scraping job, "
+            "execute a multi-step browser flow). "
+            "DO NOT USE FOR: diagnostic questions ('what is the problem?', "
+            "'why doesn't X work?', 'check the logs', 'explain this config'), "
+            "one-shot lookups, short answers, summaries of what you just did, "
+            "or anything a single tool call could answer. Answer those inline instead. "
+            "NOT for monitoring/watching — use watch_site or watch_messages. "
+            "Results stream back into THIS chat when done (and to Telegram). "
             "Can run up to 2 background tasks at once."
         )
 

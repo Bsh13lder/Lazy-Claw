@@ -75,9 +75,23 @@ interface OnCompletePayload {
   latency_ms?: number;
 }
 
+export interface BackgroundCompletePayload {
+  kind: "background_done" | "background_failed";
+  taskId: string;
+  name: string;
+  result?: string;
+  error?: string;
+  durationMs?: number;
+  totalTokens?: number;
+  llmCalls?: number;
+  totalCost?: number;
+  toolsUsed?: string[];
+}
+
 interface UseChatStreamOptions {
   onComplete: (payload: OnCompletePayload) => void;
   onError: (message: string) => void;
+  onBackgroundComplete?: (payload: BackgroundCompletePayload) => void;
   enabled?: boolean;
 }
 
@@ -94,6 +108,7 @@ interface UseChatStreamReturn {
 export function useChatStream({
   onComplete,
   onError,
+  onBackgroundComplete,
   enabled = true,
 }: UseChatStreamOptions): UseChatStreamReturn {
   const [streamingState, setStreamingState] = useState<StreamingState>({
@@ -118,10 +133,12 @@ export function useChatStream({
   const templateSuggestRef = useRef<TemplateSuggest | undefined>(undefined);
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
+  const onBackgroundCompleteRef = useRef(onBackgroundComplete);
   useEffect(() => {
     onCompleteRef.current = onComplete;
     onErrorRef.current = onError;
-  }, [onComplete, onError]);
+    onBackgroundCompleteRef.current = onBackgroundComplete;
+  }, [onComplete, onError, onBackgroundComplete]);
 
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;
@@ -334,6 +351,26 @@ export function useChatStream({
             createdAt: Date.now(),
           };
           scheduleFlush();
+          break;
+        }
+
+        case "background_done":
+        case "background_failed": {
+          const cb = onBackgroundCompleteRef.current;
+          if (cb) {
+            cb({
+              kind: type,
+              taskId: (msg.task_id as string) ?? "",
+              name: (msg.name as string) ?? "Task",
+              result: msg.result as string | undefined,
+              error: msg.error as string | undefined,
+              durationMs: msg.duration_ms as number | undefined,
+              totalTokens: msg.total_tokens as number | undefined,
+              llmCalls: msg.llm_calls as number | undefined,
+              totalCost: msg.total_cost as number | undefined,
+              toolsUsed: msg.tools_used as string[] | undefined,
+            });
+          }
           break;
         }
 

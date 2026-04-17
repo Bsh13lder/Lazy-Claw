@@ -296,14 +296,21 @@ class ListJobsSkill(BaseSkill):
             elif job_type == "watcher":
                 # Watcher jobs store state in context JSON, not DB fields
                 ctx = _parse_watcher_context(job.get("context", "{}"))
-                interval_sec = ctx.get("check_interval", 120)
-                interval_min = int(interval_sec) // 60
-                last_check = ctx.get("last_check", 0)
+                try:
+                    interval_sec = int(ctx.get("check_interval", 120) or 120)
+                except (TypeError, ValueError):
+                    interval_sec = 120
+                interval_min = interval_sec // 60
+                # last_check may round-trip through JSON as int, float, or str.
+                try:
+                    last_check = int(float(ctx.get("last_check", 0) or 0))
+                except (TypeError, ValueError):
+                    last_check = 0
                 service = ctx.get("service", "?")
                 seen_count = len(ctx.get("last_seen_ids", []))
                 expires = ctx.get("expires_at", "")
 
-                if last_check and last_check > 0:
+                if last_check > 0:
                     last_dt = datetime.fromtimestamp(last_check, tz=timezone.utc)
                     last_str = last_dt.strftime("%Y-%m-%d %H:%M UTC")
                 else:

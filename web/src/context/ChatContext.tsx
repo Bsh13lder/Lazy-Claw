@@ -7,7 +7,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useChatStream, type StreamingState, type ToolCallInfo, type UsageInfo } from "../hooks/useChatStream";
+import {
+  useChatStream,
+  type BackgroundCompletePayload,
+  type StreamingState,
+  type ToolCallInfo,
+  type UsageInfo,
+} from "../hooks/useChatStream";
 import type { ConnectionStatus } from "../hooks/useWebSocket";
 import * as api from "../api";
 
@@ -224,6 +230,31 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [updateSession],
   );
 
+  // Background task finished AFTER its originating turn — surface result
+  // inline so the user (and the agent on the next turn, via server-side
+  // chat history) can see what happened.
+  const handleBackgroundComplete = useCallback(
+    (payload: BackgroundCompletePayload) => {
+      const sid = activeIdRef.current;
+      const header =
+        payload.kind === "background_done"
+          ? `✅ Background task completed — **${payload.name}**`
+          : `❌ Background task failed — **${payload.name}**`;
+      const body =
+        payload.kind === "background_done"
+          ? (payload.result || "(no output)")
+          : (payload.error || "(unknown error)");
+      const content = `${header}\n\n${body}`;
+      const usage: UsageInfo | null =
+        payload.totalTokens != null || payload.totalCost != null
+          ? { total_tokens: payload.totalTokens, cost: payload.totalCost }
+          : null;
+      const msg = makeMessage("assistant", content, undefined, usage);
+      updateSession(sid, (s) => ({ ...s, messages: [...s.messages, msg] }));
+    },
+    [updateSession],
+  );
+
   const {
     sendMessage: wsSendMessage,
     sendSideNote: wsSendSideNote,
@@ -235,6 +266,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   } = useChatStream({
     onComplete: handleComplete,
     onError: handleError,
+    onBackgroundComplete: handleBackgroundComplete,
   });
 
   // Keep a live ref to streamingState so sendMessage can decide side-note vs

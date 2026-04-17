@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!--
+    B2: Amber Terminal (VT220 DEC vibe)
+    Same brutalist layout as B, palette swapped to amber-on-black. Warmer,
+    more "retro-unix" than phosphor-green's "hacker/matrix." Softer
+    readability, different cultural cue — amber = craftsperson, green =
+    outsider.
+  -->
+  <rect width="240" height="240" fill="#120a02"/>
+
+  <!-- Faint amber rules -->
+  <rect x="20" y="38" width="200" height="1" fill="#ffb000" opacity="0.35"/>
+  <rect x="20" y="202" width="200" height="1" fill="#ffb000" opacity="0.35"/>
+
+  <!-- Wordmark -->
+  <text x="24" y="110"
+        font-family="'JetBrains Mono', 'SF Mono', Menlo, ui-monospace, monospace"
+        font-weight="800" font-size="58" fill="#ffb000" letter-spacing="-3">lazy</text>
+  <text x="24" y="172"
+        font-family="'JetBrains Mono', 'SF Mono', Menlo, ui-monospace, monospace"
+        font-weight="800" font-size="58" fill="#ffb000" letter-spacing="-3">claw</text>
+
+  <!-- Cursor block -->
+  <rect x="170" y="128" width="30" height="46" fill="#ffb000"/>
+
+  <!-- Prompt line -->
+  <text x="24" y="220"
+        font-family="'JetBrains Mono', monospace"
+        font-weight="400" font-size="9" fill="#ffb000" opacity="0.55">$ lazyclaw --encrypted</text>
+</svg>

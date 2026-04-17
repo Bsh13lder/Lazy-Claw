@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!--
+    Sketch A: Sloth Claw
+    Direct pun on the name. Sloths are the literal "lazy claw." Three hooked
+    talons hanging from a paw pad, all curving the same direction like a
+    sloth hanging from a branch. Warm rust on cream — anti-tech-startup
+    palette. Has character without being a cartoon mascot.
+  -->
+  <rect width="240" height="240" fill="#f2ebdc"/>
+  <g fill="#b84a2c">
+    <!-- Paw pad -->
+    <rect x="55" y="42" width="130" height="58" rx="22"/>
+    <!-- Three hooked claws, all curving the same way -->
+    <g>
+      <path d="M 72 100
+               C 68 140 78 178 112 208
+               C 114 212 108 214 104 212
+               C 72 190 58 145 62 100 Z"
+            transform="translate(0 0)"/>
+      <path d="M 72 100
+               C 68 140 78 178 112 208
+               C 114 212 108 214 104 212
+               C 72 190 58 145 62 100 Z"
+            transform="translate(40 -2)"/>
+      <path d="M 72 100
+               C 68 140 78 178 112 208
+               C 114 212 108 214 104 212
+               C 72 190 58 145 62 100 Z"
+            transform="translate(80 0)"/>
+    </g>
+  </g>
+</svg>

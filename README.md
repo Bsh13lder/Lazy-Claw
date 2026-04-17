@@ -1,12 +1,5 @@
 <p align="center">
-  <pre>
-   _                     _____ _
-  | |    __ _ _____   _ / ____| |
-  | |   / _` |_  / | | | |    | | __ ___      __
-  | |  | (_| |/ /| |_| | |    | |/ _` \ \ /\ / /
-  | |___\__,_/___|\__, | |____| | (_| |\ V  V /
-  |______\        |___/ \_____|_|\__,_| \_/\_/
-  </pre>
+  <img src="docs/images/logo-wordmark.png" alt="LazyClaw" width="480" />
 </p>
 
 <h3 align="center">E2E Encrypted AI Agent Platform</h3>

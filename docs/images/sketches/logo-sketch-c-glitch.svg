@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!--
+    Sketch C: Glitched Diamond (Encryption as Visual Corruption)
+    The "encryption" is the brand itself — a shape being scrambled. RGB-split
+    chromatic aberration on a geometric diamond, interrupted by horizontal
+    scan-line glitches. Electric magenta + cyan. Says "your data is
+    scrambled to anyone looking" without using a single padlock cliche.
+  -->
+  <rect width="240" height="240" fill="#08080c"/>
+
+  <!-- Cyan channel (offset left) -->
+  <polygon points="113,50 207,120 113,190 19,120"
+           fill="none" stroke="#00e5ff" stroke-width="6" stroke-linejoin="miter"/>
+
+  <!-- Magenta channel (offset right) -->
+  <polygon points="127,50 221,120 127,190 33,120"
+           fill="none" stroke="#ff2d95" stroke-width="6" stroke-linejoin="miter"/>
+
+  <!-- White core outline -->
+  <polygon points="120,50 214,120 120,190 26,120"
+           fill="none" stroke="#fafaff" stroke-width="2" stroke-linejoin="miter"/>
+
+  <!-- Horizontal glitch slice — cut the middle, offset a slab -->
+  <rect x="0" y="108" width="240" height="10" fill="#08080c"/>
+  <polygon points="40,108 200,108 210,118 30,118" fill="#00e5ff" opacity="0.35"/>
+
+  <rect x="0" y="148" width="240" height="5" fill="#08080c"/>
+  <polygon points="70,148 180,148 190,153 60,153" fill="#ff2d95" opacity="0.35"/>
+
+  <!-- Scan-line texture (fine horizontal lines for CRT vibe) -->
+  <g opacity="0.08" fill="#fafaff">
+    <rect x="0" y="60"  width="240" height="1"/>
+    <rect x="0" y="80"  width="240" height="1"/>
+    <rect x="0" y="100" width="240" height="1"/>
+    <rect x="0" y="140" width="240" height="1"/>
+    <rect x="0" y="160" width="240" height="1"/>
+    <rect x="0" y="180" width="240" height="1"/>
+  </g>
+</svg>

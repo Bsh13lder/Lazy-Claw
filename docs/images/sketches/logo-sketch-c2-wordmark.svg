@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!--
+    C2: Glitched Wordmark (typography IS the glitch)
+    Drops the diamond. The word LAZYCLAW itself becomes the mark, rendered
+    as three RGB-split layers (cyan/magenta/white) with horizontal scan-line
+    interruptions. Reads as a wordmark AND a visual — no icon needed.
+  -->
+  <rect width="240" height="240" fill="#08080c"/>
+
+  <!-- Cyan layer offset left -->
+  <text x="116" y="128" text-anchor="middle"
+        font-family="Impact, 'Arial Black', 'Helvetica Neue', sans-serif"
+        font-weight="900" font-size="42" fill="#00e5ff" letter-spacing="2">LAZYCLAW</text>
+
+  <!-- Magenta layer offset right -->
+  <text x="124" y="128" text-anchor="middle"
+        font-family="Impact, 'Arial Black', 'Helvetica Neue', sans-serif"
+        font-weight="900" font-size="42" fill="#ff2d95" letter-spacing="2">LAZYCLAW</text>
+
+  <!-- White core layer -->
+  <text x="120" y="128" text-anchor="middle"
+        font-family="Impact, 'Arial Black', 'Helvetica Neue', sans-serif"
+        font-weight="900" font-size="42" fill="#fafaff" letter-spacing="2">LAZYCLAW</text>
+
+  <!-- Horizontal scan-line glitch cutting through letters -->
+  <rect x="0" y="112" width="240" height="3" fill="#08080c"/>
+  <rect x="18" y="109" width="204" height="1" fill="#00e5ff" opacity="0.6"/>
+  <rect x="0" y="124" width="240" height="2" fill="#08080c"/>
+  <rect x="36" y="127" width="172" height="1" fill="#ff2d95" opacity="0.6"/>
+
+  <!-- Displaced slab — a horizontal chunk of letters offset sideways -->
+  <g transform="translate(6 0)">
+    <rect x="0" y="116" width="240" height="8" fill="#08080c"/>
+    <text x="116" y="128" text-anchor="middle"
+          font-family="Impact, 'Arial Black', 'Helvetica Neue', sans-serif"
+          font-weight="900" font-size="42" fill="#00e5ff" letter-spacing="2" clip-path="inset(116px 0 112px 0)">LAZYCLAW</text>
+  </g>
+
+  <!-- Fine scan-line texture -->
+  <g opacity="0.08" fill="#fafaff">
+    <rect x="0" y="90"  width="240" height="1"/>
+    <rect x="0" y="104" width="240" height="1"/>
+    <rect x="0" y="144" width="240" height="1"/>
+    <rect x="0" y="158" width="240" height="1"/>
+  </g>
+
+  <!-- Sub-tag -->
+  <text x="120" y="170" text-anchor="middle"
+        font-family="'JetBrains Mono', monospace"
+        font-size="9" fill="#fafaff" opacity="0.5" letter-spacing="4">SIGNAL · ENCRYPTED</text>
+</svg>

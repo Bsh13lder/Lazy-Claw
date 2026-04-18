@@ -116,13 +116,53 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (activeSessionId) persistActiveSession(activeSessionId);
   }, [activeSessionId]);
 
-  // Load sessions from backend on mount
+  // Load sessions from backend on mount.
+  //
+  // Invariants we keep to survive refresh:
+  //   1. If localStorage has a session id, that session MUST end up active —
+  //      even if the backend's list didn't return it (race, repair pending,
+  //      archived-then-unarchived, etc.). We reconstruct a local shell and
+  //      let the messages-loader fetch its history.
+  //   2. Never silently fall back to "most recent" and drop the user's chat.
   useEffect(() => {
     let alive = true;
+    const persisted = loadPersistedSession();
+
     api.listChatSessions().then((remote) => {
       if (!alive) return;
-      if (remote.length === 0) {
-        // No sessions yet — create one
+
+      const local = remote.map((r) => ({
+        id: r.id,
+        title: r.title || "New Chat",
+        messages: [] as Message[],
+        loaded: false,
+      }));
+
+      // Case 1: we have a persisted id
+      if (persisted) {
+        const match = local.find((s) => s.id === persisted);
+        if (match) {
+          setSessions(local);
+          setActiveSessionId(match.id);
+          return;
+        }
+        // Persisted id not in remote list — reconstruct a shell so we can
+        // still fetch its messages. The session row may exist server-side
+        // (orphan repair runs on next list_sessions call) but wasn't in
+        // the first response. We add it to the front of the list.
+        const shell: ChatSessionLocal = {
+          id: persisted,
+          title: "Restored chat",
+          messages: [],
+          loaded: false,
+        };
+        setSessions([shell, ...local]);
+        setActiveSessionId(persisted);
+        return;
+      }
+
+      // Case 2: no persisted id
+      if (local.length === 0) {
         api.createChatSession("New Chat").then((created) => {
           if (!alive) return;
           const s = makeLocalSession(created.id, created.title);
@@ -130,26 +170,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           setActiveSessionId(s.id);
         });
       } else {
-        const local = remote.map((r) => ({
-          id: r.id,
-          title: r.title || "New Chat",
-          messages: [] as Message[],
-          loaded: false,
-        }));
         setSessions(local);
-        // Restore last-used session if still in list, else pick the one with most messages
-        const persisted = loadPersistedSession();
-        const match = persisted && local.find((s) => s.id === persisted);
-        if (match) {
-          setActiveSessionId(match.id);
-        } else {
-          // Pick most recent session (they're ordered by created_at DESC from backend)
-          setActiveSessionId(local[0].id);
-        }
+        setActiveSessionId(local[0].id);
       }
     }).catch(() => {
-      // Backend unavailable — create local session
-      const s = makeLocalSession();
+      if (!alive) return;
+      // Backend unavailable — reuse persisted id if any, else new local shell
+      const fallbackId = persisted ?? undefined;
+      const s = makeLocalSession(fallbackId);
       setSessions([s]);
       setActiveSessionId(s.id);
     });

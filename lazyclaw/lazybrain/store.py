@@ -159,6 +159,25 @@ async def _resolve_pending_links(db, user_id: str, new_note: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+async def _existing_journal_title(
+    config: Config, user_id: str, date_ymd: str
+) -> str | None:
+    """Return the exact title of the journal note for date_ymd if one exists,
+    else None. Used by save_note to auto-link same-day notes into the day's
+    journal page — giving every task/memory/site-memory an automatic graph
+    edge to the day it was created.
+    """
+    expected_key = normalize_page(f"Journal — {date_ymd}")
+    async with db_session(config) as db:
+        row = await db.execute(
+            "SELECT 1 FROM notes WHERE user_id = ? AND title_key = ? LIMIT 1",
+            (user_id, expected_key),
+        )
+        if await row.fetchone():
+            return f"Journal — {date_ymd}"
+    return None
+
+
 async def save_note(
     config: Config,
     user_id: str,
@@ -177,6 +196,28 @@ async def save_note(
     note_id = str(uuid4())
     now = _now()
     resolved_title = title if title is not None else _first_line(content)
+
+    # Day-based auto-link: for non-journal notes, append a wikilink to that
+    # day's journal page if one exists. Creates the "what happened today"
+    # cluster in the graph without any user effort.
+    is_journal_note = bool(
+        resolved_title
+        and (
+            resolved_title.startswith("Journal —")
+            or resolved_title.startswith("Daily summary")
+            or resolved_title.startswith("Weekly summary")
+        )
+    )
+    if not is_journal_note and "[[Journal —" not in content:
+        try:
+            day = now[:10]  # YYYY-MM-DD
+            day_title = await _existing_journal_title(config, user_id, day)
+            if day_title:
+                content = content.rstrip() + f"\n\n_[[{day_title}]]_"
+        except Exception:
+            # Never block note creation on an auto-link failure
+            pass
+
     title_key = _title_key(resolved_title)
     enc_title = encrypt_field(resolved_title, dek, _title_aad(user_id))
     enc_content = encrypt_field(content, dek, _content_aad(user_id))

@@ -61,6 +61,20 @@ async def backfill(user_id: str, *, dry_run: bool = False) -> None:
     skipped_no_title = 0
     skipped_already = 0
 
+    # Build day-index: date (YYYY-MM-DD) → journal_title + list of non-journal notes
+    day_journal: dict[str, str] = {}
+    day_members: dict[str, list[tuple[str, str]]] = {}  # date → [(title, id), ...]
+    for note in notes:
+        created = (note.get("created_at") or "")[:10]
+        title = (note.get("title") or "").strip()
+        if not created or not title:
+            continue
+        if title.startswith("Journal —") or title.startswith("Daily summary"):
+            if created not in day_journal:
+                day_journal[created] = title
+        else:
+            day_members.setdefault(created, []).append((title, note["id"]))
+
     for note in notes:
         nid = note["id"]
         title = (note.get("title") or "").strip()
@@ -68,6 +82,8 @@ async def backfill(user_id: str, *, dry_run: bool = False) -> None:
         if not title:
             skipped_no_title += 1
             continue
+        created = (note.get("created_at") or "")[:10]
+        is_journal = title.startswith("Journal —") or title.startswith("Daily summary")
 
         # Compute related notes by shared-tag count
         my_tags = tags_by_id[nid]
@@ -90,7 +106,19 @@ async def backfill(user_id: str, *, dry_run: bool = False) -> None:
         # Pass 1: rewrite body with wikilink_injector (known-title match)
         new_content = await inject(config, user_id, content, max_rewrites=20)
 
-        # Pass 2: append Related section if not already there and we have picks
+        # Pass 2: day-link. Non-journal notes → append [[Journal — YYYY-MM-DD]].
+        #          Journal notes → append links to same-day member notes.
+        if is_journal:
+            members = day_members.get(created, [])[:10]
+            if members and "### Same day" not in new_content:
+                lines = ["\n\n### Same day"] + [f"- [[{t}]]" for t, _ in members]
+                new_content = new_content.rstrip() + "\n".join([""] + lines)
+        else:
+            jt = day_journal.get(created)
+            if jt and f"[[{jt}]]" not in new_content:
+                new_content = new_content.rstrip() + f"\n\n_[[{jt}]]_"
+
+        # Pass 3: append Related section if not already there and we have picks
         has_related = "### Related" in new_content or "## Related" in new_content
         if top3 and not has_related:
             related_lines = [f"- [[{t}]]" for _, t, _ in top3]

@@ -20,9 +20,13 @@ class VaultSetSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Securely store a credential (API key, token, password) in the encrypted vault. "
-            "The value is encrypted with AES-256-GCM before storage. "
-            "Common keys: openai_api_key, anthropic_api_key, github_token"
+            "Store secrets SAFELY. Use this for ANY credential the user gives you — "
+            "API keys, OAuth client_id/client_secret, tokens, passwords, session "
+            "cookies, SSH keys, DB connection strings. The value is AES-256-GCM "
+            "encrypted. Pick a human-readable snake_case `key` like "
+            "`google_oauth_client_secret`, `google_oauth_client_id`, "
+            "`openai_api_key`, `stripe_secret_key`. "
+            "⚠️ NEVER put credentials in save_memory or write_file — always vault_set."
         )
 
     @property
@@ -45,9 +49,16 @@ class VaultSetSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         if not self._config:
             return "Error: Vault not configured"
+        params = params or {}
+        key = (params.get("key") or "").strip()
+        value = params.get("value")
+        if not key:
+            return "Error: `key` is required (e.g. 'google_oauth_client_secret')."
+        if value is None or value == "":
+            return f"Error: `value` is required (the actual secret to store under '{key}')."
         from lazyclaw.crypto.vault import set_credential
-        await set_credential(self._config, user_id, params["key"], params["value"])
-        return f"Credential '{params['key']}' saved securely."
+        await set_credential(self._config, user_id, key, value)
+        return f"Credential '{key}' saved securely in the vault."
 
 
 class VaultListSkill(BaseSkill):
@@ -116,11 +127,18 @@ class VaultDeleteSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         if not self._config:
             return "Error: Vault not configured"
+        params = params or {}
+        key = (params.get("key") or "").strip()
+        if not key:
+            return (
+                "Error: `key` is required. Call `vault_list` first to see "
+                "stored credential names."
+            )
         from lazyclaw.crypto.vault import delete_credential
-        deleted = await delete_credential(self._config, user_id, params["key"])
+        deleted = await delete_credential(self._config, user_id, key)
         if deleted:
-            return f"Credential '{params['key']}' deleted."
-        return f"No credential found with key '{params['key']}'."
+            return f"Credential '{key}' deleted."
+        return f"No credential found with key '{key}'."
 
 
 class SaveSiteLoginSkill(BaseSkill):

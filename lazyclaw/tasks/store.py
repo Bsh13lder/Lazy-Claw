@@ -228,6 +228,72 @@ async def get_task(
     return _row_to_dict(row, key) if row else None
 
 
+async def get_task_owner(
+    config: Config, task_id: str
+) -> str | None:
+    """Return the user_id that owns a task, or None if the task doesn't exist.
+
+    Used by channel callbacks (Telegram buttons) where the callback itself
+    doesn't know which user owns a task — only the task_id comes back from
+    the inline button's callback_data.
+    """
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM tasks WHERE id = ?", (task_id,),
+        )
+        row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def get_nagging_tasks(
+    config: Config, user_id: str | None = None, limit: int = 5,
+) -> list[dict]:
+    """Return tasks currently being nagged (reminder due + nag_count > 0).
+
+    If `user_id` is None, returns nagging tasks across all users — used by
+    channel adapters resolving a natural-language "done" against whichever
+    user owns the current open reminder.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if user_id:
+        params = (user_id, now_iso)
+        where = (
+            "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
+            "AND reminder_at IS NOT NULL AND reminder_at <= ? "
+            "AND nag_count > 0"
+        )
+    else:
+        params = (now_iso,)
+        where = (
+            "WHERE status IN ('todo', 'in_progress') "
+            "AND reminder_at IS NOT NULL AND reminder_at <= ? "
+            "AND nag_count > 0"
+        )
+
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            f"SELECT {TASK_SELECT} FROM tasks {where} "
+            f"ORDER BY reminder_at DESC LIMIT ?",
+            (*params, limit),
+        )
+        rows = await cursor.fetchall()
+
+    # Decrypt per row using each owner's key (may differ across rows).
+    results: list[dict] = []
+    keys: dict[str, bytes] = {}
+    for row in rows:
+        owner_uid = row[TASK_COLUMNS.index("user_id")]
+        if owner_uid not in keys:
+            try:
+                keys[owner_uid] = await get_user_dek(config, owner_uid)
+            except Exception:
+                logger.debug("Could not derive DEK for user %s", owner_uid, exc_info=True)
+                continue
+        results.append(_row_to_dict(row, keys[owner_uid]))
+    return results
+
+
 async def update_task(
     config: Config,
     user_id: str,

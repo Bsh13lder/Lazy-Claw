@@ -1901,8 +1901,33 @@ class TelegramCommands:
             except ValueError:
                 return
             try:
-                from lazyclaw.tasks.store import complete_task, update_task
+                from lazyclaw.tasks.store import (
+                    complete_task, get_task_owner, update_task,
+                )
                 from datetime import timedelta
+
+                # The chat may be bound to a different user than the task
+                # owner (multi-user setups where resolve_user_id returns the
+                # first-registered user). Look up the real owner from the
+                # task itself, which we trust because the callback_data was
+                # signed by our own heartbeat daemon.
+                task_owner_id = await get_task_owner(self._config, task_id)
+                if not task_owner_id:
+                    logger.info(
+                        "Task callback: task %s not found in DB (chat=%s)",
+                        task_id, chat_id,
+                    )
+                    await query.edit_message_text(
+                        "\u274c Task not found (already deleted?)"
+                    )
+                    return
+                if not self._is_allowed(chat_id):
+                    logger.warning(
+                        "Unauthorized task callback from chat %s for task %s",
+                        chat_id, task_id,
+                    )
+                    return
+                user_id = task_owner_id
 
                 if sub_action == "done":
                     # Get task name before completing

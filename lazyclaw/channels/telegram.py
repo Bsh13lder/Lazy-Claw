@@ -883,6 +883,12 @@ class TelegramAdapter(ChannelAdapter):
         if await self._handle_instant_mute(update, user_id, raw_text):
             return
 
+        # ── Instant done: short "done / finished / hecho" reply ──
+        # Lets the user complete a nagging task by typing instead of tapping
+        # the inline button. Zero LLM calls.
+        if await self._handle_instant_done(update, user_id, raw_text):
+            return
+
         # Launch concurrently — LaneQueue serializes per user, fast dispatch
         # returns in <2s so the queue drains quickly for heavy tasks
         import asyncio as _aio
@@ -1040,6 +1046,86 @@ class TelegramAdapter(ChannelAdapter):
             names = "\n".join(f"  \u2022 {r}" for r in results)
             await update.message.reply_text(f"{emoji} {verb}:\n{names}")
 
+        return True
+
+    # Short positive replies that should complete an open task reminder.
+    # Kept deliberately tight (single-token / short phrase) so normal
+    # conversation isn't hijacked. English + Spanish (user in Madrid).
+    _DONE_TRIGGERS = frozenset({
+        "done", "done!", "done.", "did it", "i did it", "i done it",
+        "finished", "i finished it", "i'm done", "im done",
+        "task done", "task is done", "task is finish", "task finished",
+        "complete", "completed", "✅", "done ✅",
+        "hecho", "ya", "terminado", "termine", "terminé", "listo", "ya esta", "ya está",
+    })
+
+    async def _handle_instant_done(
+        self, update: Update, user_id: str, raw_text: str,
+    ) -> bool:
+        """Handle short 'done / finished / hecho' replies against an open
+        task reminder.
+
+        Returns True when the message was consumed (caller should stop so
+        the agent is never invoked for what is really a UI click).
+
+        Strategy:
+        - Only trigger on short, unambiguous positive replies.
+        - Find tasks currently being nagged (any user on this chat).
+        - If exactly one nagging task: complete it silently (no LLM).
+        - If multiple: list them with numbers, prompting a specific reply.
+        - If none: fall through so the agent handles it normally.
+        """
+        clean = raw_text.strip().lower()
+        # Strip trailing punctuation that doesn't change intent.
+        compact = clean.rstrip(".!? ").strip()
+        if compact not in self._DONE_TRIGGERS and clean not in self._DONE_TRIGGERS:
+            return False
+        # Extra safety: never hijack longer messages.
+        if len(raw_text) > 40:
+            return False
+
+        try:
+            from lazyclaw.tasks.store import complete_task, get_nagging_tasks
+        except Exception:
+            logger.debug("tasks.store unavailable for instant-done", exc_info=True)
+            return False
+
+        try:
+            # Look across all users — the reminder daemon pushes every user's
+            # nag to the single admin chat, so the task owner may not match
+            # the chat's resolved user_id.
+            nagging = await get_nagging_tasks(self._config, user_id=None, limit=5)
+        except Exception:
+            logger.warning("get_nagging_tasks failed", exc_info=True)
+            return False
+
+        if not nagging:
+            return False  # Let the agent take it — maybe it's a real answer.
+
+        if len(nagging) > 1:
+            lines = ["Which one is done?"]
+            for i, t in enumerate(nagging[:5], 1):
+                lines.append(f"  {i}. {t.get('title', 'task')}")
+            lines.append("\nReply with the number, or tap the \u2705 button on the reminder.")
+            await update.message.reply_text("\n".join(lines))
+            return True
+
+        task = nagging[0]
+        owner_id = task.get("user_id") or user_id
+        task_id = task["id"]
+        title = task.get("title", "Task")
+        try:
+            ok = await complete_task(self._config, owner_id, task_id)
+        except Exception as exc:
+            logger.warning("instant_done complete_task failed: %s", exc, exc_info=True)
+            return False
+        if not ok:
+            await update.message.reply_text(
+                f"\u274c Couldn't complete '{title}' — open it in /tasks and try again."
+            )
+            return True
+
+        await update.message.reply_text(f"\u2705 Done: {title}")
         return True
 
     async def _process_and_reply(

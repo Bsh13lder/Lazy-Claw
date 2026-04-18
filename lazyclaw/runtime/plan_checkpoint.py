@@ -45,10 +45,26 @@ class PendingPlan:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     decision: Optional[PlanDecision] = None
     created_at: float = field(default_factory=time.time)
+    # Clarification mode — set when the model returned `QUESTION: ...`
+    # instead of a plan. `question` is what to ask the user; `answer` is
+    # what they typed back. When both are set the waiter resumes.
+    question: Optional[str] = None
+    answer: Optional[str] = None
+
+
+@dataclass
+class _PendingClarification:
+    question: str
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    answer: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
 
 
 # Per-user state. Only one plan pending at a time per user.
 _pending: dict[str, PendingPlan] = {}
+
+# Per-user clarification (question) state. One at a time per user.
+_pending_q: dict[str, _PendingClarification] = {}
 
 # Session-level auto-approve. user_id -> expiry_timestamp.
 _auto_approve_until: dict[str, float] = {}
@@ -126,6 +142,76 @@ async def request_plan_approval(
     if decision.approved and decision.auto_approve_session:
         set_session_auto_approve(user_id)
     return decision
+
+
+def get_pending_question(user_id: str) -> Optional[_PendingClarification]:
+    return _pending_q.get(user_id)
+
+
+async def request_clarification(
+    user_id: str,
+    question: str,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> Optional[str]:
+    """Ask the user a clarifying question and wait for their typed answer.
+
+    Returns the answer text, or None on timeout / cancellation.
+    """
+    if not user_id or not question:
+        return None
+
+    existing = _pending_q.pop(user_id, None)
+    if existing and not existing.event.is_set():
+        existing.answer = None
+        existing.event.set()
+
+    pending = _PendingClarification(question=question.strip())
+    _pending_q[user_id] = pending
+
+    _publish_question_event(user_id, question)
+
+    try:
+        await asyncio.wait_for(pending.event.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pending.answer = None
+    finally:
+        if _pending_q.get(user_id) is pending:
+            _pending_q.pop(user_id, None)
+
+    return pending.answer
+
+
+def answer_clarification(user_id: str, answer: str) -> bool:
+    """Release the pending question with the user's typed answer."""
+    pending = _pending_q.get(user_id)
+    if pending is None or pending.event.is_set():
+        return False
+    pending.answer = (answer or "").strip() or None
+    pending.event.set()
+    return True
+
+
+def cancel_clarification(user_id: str) -> bool:
+    pending = _pending_q.get(user_id)
+    if pending is None or pending.event.is_set():
+        return False
+    pending.answer = None
+    pending.event.set()
+    return True
+
+
+def _publish_question_event(user_id: str, question: str) -> None:
+    try:
+        from lazyclaw.browser import event_bus
+        event_bus.publish(event_bus.BrowserEvent(
+            user_id=user_id,
+            kind="plan_question",
+            target="plan_question",
+            detail=question[:300],
+            extra={"question": question},
+        ))
+    except Exception:
+        logger.debug("Plan question publish failed (non-fatal)", exc_info=True)
 
 
 def approve(

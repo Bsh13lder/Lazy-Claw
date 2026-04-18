@@ -334,15 +334,31 @@ export const rejectCheckpoint = (name: string, reason?: string) =>
 // ── Plan-Mode approval gate (Claude-Code-style) ──────────────────────────
 
 export interface PendingPlan {
+  kind: "plan";
   plan: string;
   steps: string[];
   created_at: number;
 }
 
+export interface PendingPlanQuestion {
+  kind: "question";
+  question: string;
+  created_at: number;
+}
+
+export type PendingInteraction = PendingPlan | PendingPlanQuestion;
+
 export const getPendingPlan = () =>
-  request<{ pending: PendingPlan | null; auto_approve_session: boolean }>(
-    "/api/agent/plan",
-  );
+  request<{
+    pending: PendingInteraction | null;
+    auto_approve_session: boolean;
+  }>("/api/agent/plan");
+
+export const answerPlanQuestion = (answer: string) =>
+  request<{ status: string }>("/api/agent/plan/answer", {
+    method: "POST",
+    body: JSON.stringify({ answer }),
+  });
 
 export const approvePlan = (opts?: {
   reason?: string;
@@ -573,6 +589,11 @@ export interface SearchQuota {
   reset_month: string;
 }
 
+export interface SearchKeyStatus {
+  serper: boolean;
+  serpapi: boolean;
+}
+
 export interface AboutInfo {
   version: string;
   started_at: number;
@@ -583,6 +604,7 @@ export interface AboutInfo {
   eco_mode: string;
   search_provider: string;
   search_quota: SearchQuota;
+  search_keys?: SearchKeyStatus;
   free_providers: string[];
   telegram_configured: boolean;
   mcp_server_count: number;

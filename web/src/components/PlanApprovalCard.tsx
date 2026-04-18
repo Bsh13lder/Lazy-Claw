@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { approvePlan, rejectPlan } from "../api";
-import type { PendingPlanInfo } from "../hooks/useChatStream";
+import { answerPlanQuestion, approvePlan, rejectPlan } from "../api";
+import type { PendingInteractionInfo } from "../hooks/useChatStream";
 
 interface PlanApprovalCardProps {
-  plan: PendingPlanInfo;
+  plan: PendingInteractionInfo;
   onResolved: () => void;
 }
 
@@ -11,6 +11,85 @@ export default function PlanApprovalCard({
   plan,
   onResolved,
 }: PlanApprovalCardProps) {
+  if (plan.kind === "question") {
+    return <QuestionCard plan={plan} onResolved={onResolved} />;
+  }
+  return <PlanCard plan={plan} onResolved={onResolved} />;
+}
+
+function QuestionCard({
+  plan,
+  onResolved,
+}: {
+  plan: Extract<PendingInteractionInfo, { kind: "question" }>;
+  onResolved: () => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const trimmed = answer.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    try {
+      await answerPlanQuestion(trimmed);
+      onResolved();
+    } catch (err) {
+      console.error("Plan answer failed", err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="py-3 animate-fade-in">
+      <div className="max-w-3xl mx-auto px-4">
+        <div className="border border-cyan/50 bg-cyan/10 rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-cyan/60 bg-cyan/20 text-cyan text-[10px] font-semibold uppercase tracking-wider">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan pulse-dot" />
+              Quick question before I plan
+            </span>
+          </div>
+
+          <div className="text-sm text-text-primary leading-snug">
+            {plan.question}
+          </div>
+
+          <div className="flex flex-wrap items-start gap-2 pt-1">
+            <textarea
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              placeholder="Type your answer…"
+              rows={2}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
+              }}
+              className="flex-1 min-w-[200px] px-2 py-1.5 rounded-md bg-bg-tertiary border border-border text-xs text-text-primary placeholder-text-muted resize-none"
+            />
+            <button
+              onClick={submit}
+              disabled={busy || !answer.trim()}
+              className="px-3 py-1.5 rounded-md bg-cyan text-bg-primary text-xs font-semibold hover:bg-cyan/90 disabled:opacity-50 transition-colors"
+              title="Send answer (⌘/Ctrl + Enter)"
+            >
+              Answer
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({
+  plan,
+  onResolved,
+}: {
+  plan: Extract<PendingInteractionInfo, { kind: "plan" }>;
+  onResolved: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");

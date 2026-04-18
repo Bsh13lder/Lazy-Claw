@@ -14,7 +14,7 @@ import re
 import time
 
 import telegram.error
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
@@ -686,6 +686,25 @@ class _TelegramCallback:
             except Exception as exc:
                 logger.warning("Failed to send plan prompt: %s", exc)
 
+        elif kind == "plan_question":
+            # Agent wants a clarifying answer before drafting a plan.
+            # Use ForceReply so the user's next message is routed to
+            # plan_checkpoint.answer_clarification() by _handle_message.
+            question = event.metadata.get("question", event.detail) or ""
+            try:
+                await _telegram_send_with_retry(
+                    lambda: self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=f"\u2753 {question}",
+                        reply_markup=ForceReply(
+                            selective=False,
+                            input_field_placeholder="Your answer…",
+                        ),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to send plan question: %s", exc)
+
         elif kind == "plan_approved":
             try:
                 note = "\u26a1 Auto-approving next plans for 30min" if (
@@ -980,6 +999,25 @@ class TelegramAdapter(ChannelAdapter):
                 logger.warning("Failed to delete recovery password message for user %s", user_id)
             await self._handle_recovery_password(update, user_id, text)
             return
+
+        # ── Plan-mode clarifying question: intercept answer ──
+        # If the agent asked a QUESTION: via plan_checkpoint and is blocked
+        # waiting for an answer, route this message as the answer instead
+        # of starting a new turn.
+        try:
+            from lazyclaw.runtime import plan_checkpoint
+            if plan_checkpoint.get_pending_question(user_id) is not None:
+                released = plan_checkpoint.answer_clarification(user_id, text)
+                if released:
+                    try:
+                        await update.message.reply_text(
+                            "\u2713 Got it, planning now…"
+                        )
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            logger.debug("plan-question intercept failed", exc_info=True)
 
         # ── Instant mute: reply "mute" to a watcher notification ──
         # Zero LLM calls — handle directly for instant response

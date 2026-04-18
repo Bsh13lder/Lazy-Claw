@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import type { PhaseInfo, ToolCallInfo } from "../hooks/useChatStream";
 import { iconFor, colorFor } from "./toolIcons";
+import ThinkingPanel from "./ThinkingPanel";
 
 interface ThinkingCardProps {
   phase?: PhaseInfo;
   tools: ToolCallInfo[];
   sideNotes: string[];
   startedAt?: number;
+  thinkingContent?: string;
+  thinkingDone?: boolean;
 }
 
 const PHASE_LABEL: Record<PhaseInfo["phase"], string> = {
@@ -44,6 +47,8 @@ export default function ThinkingCard({
   tools,
   sideNotes,
   startedAt,
+  thinkingContent,
+  thinkingDone,
 }: ThinkingCardProps) {
   const [now, setNow] = useState(Date.now());
 
@@ -96,6 +101,14 @@ export default function ThinkingCard({
                 </span>
               )}
             </div>
+
+            {/* Collapsible reasoning panel (MiniMax / Claude thinking) */}
+            {thinkingContent && (
+              <ThinkingPanel
+                content={thinkingContent}
+                done={!!thinkingDone}
+              />
+            )}
 
             {/* Current tool */}
             {runningTool && (

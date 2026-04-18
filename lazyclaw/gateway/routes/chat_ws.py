@@ -121,6 +121,13 @@ class WebSocketCallback:
                 "steps": event.metadata.get("steps", []),
             })
 
+        elif kind == "plan_question":
+            # Agent needs one piece of info before it can plan.
+            await self._send({
+                "type": "plan_question",
+                "question": event.metadata.get("question", event.detail),
+            })
+
         elif kind == "plan_approved":
             await self._send({
                 "type": "plan_approved",
@@ -128,6 +135,17 @@ class WebSocketCallback:
                     "auto_approve_session", False,
                 ),
             })
+
+        elif kind == "thinking_delta":
+            # Model reasoning token — surfaced for the collapsible
+            # Thinking panel in the Web UI.
+            await self._send({
+                "type": "thinking_delta",
+                "content": event.detail,
+            })
+
+        elif kind == "thinking_done":
+            await self._send({"type": "thinking_done"})
 
         elif kind == "work_summary":
             from dataclasses import asdict

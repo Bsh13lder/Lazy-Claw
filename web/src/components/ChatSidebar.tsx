@@ -7,6 +7,7 @@ import ThinkingCard from "./ThinkingCard";
 import BrowserCanvas from "./BrowserCanvas";
 import TemplateSuggestBanner from "./TemplateSuggestBanner";
 import PlanApprovalCard from "./PlanApprovalCard";
+import PlanModeToggle from "./PlanModeToggle";
 
 export default function ChatSidebar() {
   const {
@@ -77,6 +78,9 @@ export default function ChatSidebar() {
         <span className="text-xs font-medium text-text-primary truncate flex-1 min-w-0">
           {activeSession.title || "Chat"}
         </span>
+
+        {/* Plan mode toggle — quick switch between Plan ↔ Auto */}
+        <PlanModeToggle />
 
         {/* New chat */}
         <button
@@ -186,6 +190,8 @@ export default function ChatSidebar() {
                   tools={streamingState.activeTools}
                   sideNotes={streamingState.sideNotes}
                   startedAt={streamingState.startedAt}
+                  thinkingContent={streamingState.thinkingContent}
+                  thinkingDone={streamingState.thinkingDone}
                 />
                 {streamingState.streamContent && (
                   <MessageBubble

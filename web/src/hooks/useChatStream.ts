@@ -58,10 +58,21 @@ export interface TemplateSuggest {
 }
 
 export interface PendingPlanInfo {
+  kind: "plan";
   plan: string;
   steps: string[];
   createdAt: number;
 }
+
+export interface PendingPlanQuestionInfo {
+  kind: "question";
+  question: string;
+  createdAt: number;
+}
+
+export type PendingInteractionInfo =
+  | PendingPlanInfo
+  | PendingPlanQuestionInfo;
 
 export interface StreamingState {
   isStreaming: boolean;
@@ -72,8 +83,10 @@ export interface StreamingState {
   startedAt?: number;   // turn start timestamp for elapsed display
   browserSession?: BrowserSession;
   templateSuggest?: TemplateSuggest;
-  pendingPlan?: PendingPlanInfo;
+  pendingPlan?: PendingInteractionInfo;
   planAutoApproveSession?: boolean;
+  thinkingContent?: string;    // live reasoning stream for the Thinking panel
+  thinkingDone?: boolean;      // true once </think> arrived
 }
 
 interface OnCompletePayload {
@@ -140,8 +153,10 @@ export function useChatStream({
   const browserSessionRef = useRef<BrowserSession | undefined>(undefined);
   const browserClearTimerRef = useRef<number>(0);
   const templateSuggestRef = useRef<TemplateSuggest | undefined>(undefined);
-  const pendingPlanRef = useRef<PendingPlanInfo | undefined>(undefined);
+  const pendingPlanRef = useRef<PendingInteractionInfo | undefined>(undefined);
   const planAutoApproveSessionRef = useRef<boolean>(false);
+  const thinkingContentRef = useRef<string>("");
+  const thinkingDoneRef = useRef<boolean>(false);
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
   const onBackgroundCompleteRef = useRef(onBackgroundComplete);
@@ -169,6 +184,8 @@ export function useChatStream({
       templateSuggest: templateSuggestRef.current,
       pendingPlan: pendingPlanRef.current,
       planAutoApproveSession: planAutoApproveSessionRef.current,
+      thinkingContent: thinkingContentRef.current || undefined,
+      thinkingDone: thinkingDoneRef.current,
     });
     rafRef.current = 0;
   }, []);
@@ -322,8 +339,19 @@ export function useChatStream({
 
         case "plan_pending": {
           pendingPlanRef.current = {
+            kind: "plan",
             plan: (msg.plan as string) ?? "",
             steps: (msg.steps as string[]) ?? [],
+            createdAt: Date.now(),
+          };
+          scheduleFlush();
+          break;
+        }
+
+        case "plan_question": {
+          pendingPlanRef.current = {
+            kind: "question",
+            question: (msg.question as string) ?? "",
             createdAt: Date.now(),
           };
           scheduleFlush();
@@ -333,6 +361,19 @@ export function useChatStream({
         case "plan_approved": {
           pendingPlanRef.current = undefined;
           planAutoApproveSessionRef.current = !!msg.auto_approve_session;
+          scheduleFlush();
+          break;
+        }
+
+        case "thinking_delta": {
+          thinkingContentRef.current += (msg.content as string) ?? "";
+          thinkingDoneRef.current = false;
+          scheduleFlush();
+          break;
+        }
+
+        case "thinking_done": {
+          thinkingDoneRef.current = true;
           scheduleFlush();
           break;
         }
@@ -492,6 +533,8 @@ export function useChatStream({
       firstTokenTimeRef.current = 0;
       phaseRef.current = undefined;
       sideNotesRef.current = [];
+      thinkingContentRef.current = "";
+      thinkingDoneRef.current = false;
       sendTimeRef.current = Date.now();
       startedAtRef.current = Date.now();
       setStreamingState({

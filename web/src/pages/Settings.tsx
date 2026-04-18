@@ -1403,13 +1403,19 @@ function SearchTab({
   };
 
   const quota = about?.search_quota;
-  const freeProviders = new Set(about?.free_providers ?? []);
-  // free_providers currently only lists LLM providers — fall back to quota presence for search
+  // Authoritative: backend reads the env directly and reports presence.
+  // Fall back to a quota-heuristic only on older backends that don't send
+  // `search_keys` yet — keeps the UI useful during rolling upgrades.
+  const keys = about?.search_keys;
   const keyConfigured = (envKey: string | null): boolean => {
     if (!envKey) return true;
+    if (keys) {
+      if (envKey === "SERPER_KEY") return !!keys.serper;
+      if (envKey === "SERPAPI_KEY") return !!keys.serpapi;
+    }
     if (!quota) return false;
-    if (envKey === "SERPER_KEY") return quota.serper_used > 0 || freeProviders.has("serper");
-    if (envKey === "SERPAPI_KEY") return quota.serpapi_used > 0 || freeProviders.has("serpapi");
+    if (envKey === "SERPER_KEY") return quota.serper_used > 0;
+    if (envKey === "SERPAPI_KEY") return quota.serpapi_used > 0;
     return false;
   };
 
@@ -1467,6 +1473,26 @@ function SearchTab({
           );
         })}
       </div>
+
+      {/* Show a "how to configure" note only when at least one key is missing */}
+      {(keys && (!keys.serper || !keys.serpapi)) && (
+        <div className="mt-5 p-3 rounded-lg bg-bg-tertiary border border-border text-xs text-text-muted leading-relaxed">
+          <div className="text-text-secondary font-medium mb-1">
+            Configure an API key
+          </div>
+          Add the missing keys to your <code className="text-accent">.env</code> file
+          at the repo root, then restart the container:
+          <pre className="mt-2 p-2 rounded bg-bg-primary border border-border overflow-x-auto text-[11px]">
+{`# .env
+SERPER_KEY=...       # https://serper.dev (2 500 free/mo)
+SERPAPI_KEY=...      # https://serpapi.com (100 free/mo, needed for Flights)
+
+docker compose restart lazyclaw`}
+          </pre>
+          DuckDuckGo works out of the box — no key needed. Use <em>Auto</em> to
+          prefer whichever provider has quota and fall back on limits.
+        </div>
+      )}
 
       {quota && (
         <div className="mt-6 pt-5 border-t border-border">

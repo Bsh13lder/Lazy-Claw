@@ -121,7 +121,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `browser/` | CDP browser control, page reader, site memory, DOM click engine |
 | `computer/` | Native subprocess + remote WebSocket connector |
 | `memory/` | Encrypted facts, history, compression, daily/weekly summaries |
-| `lazybrain/` | Python-native Logseq-style PKM — encrypted notes, `[[wikilinks]]`, backlinks, daily journal, force-directed graph. 21 NL skills exposing full Logseq surface to the agent. |
+| `lazybrain/` | Python-native Obsidian-grade PKM — encrypted notes, `[[wikilinks]]`, backlinks, force-directed graph, daily journal, **callouts** (`> [!info]`), **transclusion** (`![[note]]`), **YAML frontmatter** panel, and a **spatial canvas** (React Flow). **AI-native**: autolink suggestions, auto-tag/title, semantic search via local embeddings (`nomic-embed-text`), "Ask your notes" RAG with `[[citations]]`, topic rollups, morning briefings. 28 NL skills + 17 REST endpoints. ⌘K command palette, ⌘O quick switcher, Obsidian-Minimal-inspired violet theme. |
 | `mcp/` | Native MCP client + server + skill bridge |
 | `crypto/` | AES-256-GCM, PBKDF2, credential vault |
 | `teams/` | Specialist delegation + parallel execution |
@@ -188,6 +188,19 @@ Encrypted tasks with nagging reminders and due-date escalation:
 - **AI enrichment** — auto-categorize on save via `mcp-taskai` (graceful degradation when the MCP is offline)
 
 All task content (title, description, category, tags) is encrypted at rest. Only priority / status / due_date / timestamps stay plaintext for query efficiency.
+
+### LazyBrain — Obsidian-grade PKM
+
+A Python-native, E2E-encrypted knowledge base the user and the agent share. Open at `/lazybrain`:
+
+- **Core Logseq surface** — `[[wikilinks]]`, `#tags`, backlinks panel, force-directed graph, daily journal with auto-naming, **21 NL skills** for notes / journal / graph / tags / pinning.
+- **Obsidian-style markdown** — callouts (`> [!info|tip|warning|danger|question|quote|todo|bug|example|success|abstract|note]`), transclusion (`![[Note]]` renders inline collapsibly), YAML frontmatter parsed into a typed **Properties panel** (date picker, tag chips, status dropdown).
+- **Spatial canvas** — React Flow board with text nodes + note-reference nodes + arrows. Autosaves. Encrypted JSON payload.
+- **AI-native** (7 skills Obsidian can't ship natively) — autolink suggestions, auto-title/tag on save, **semantic search** via local embeddings (`nomic-embed-text` over Ollama, encrypted 768-d vectors), **"Ask your notes"** RAG with `[[citations]]`, topic rollups, morning briefings. Every feature degrades to substring/offline when Ollama's down.
+- **UX chrome** — ⌘K command palette, ⌘O quick switcher, outline pane, hover preview, importance-slider graph filter, violet Obsidian-Minimal-inspired theme scoped under `.lazybrain-root` (rest of app keeps emerald).
+- **Single source of truth** — tasks, personal memory, daily logs, site memory, lessons all auto-mirror here with `owner/{user,agent}` + `kind/*` tags, so the graph grows while you work.
+
+All content encrypted per user (AES-256-GCM with AAD=`notes:{title,content,embedding}`). 28 NL skills + 17 REST endpoints total.
 
 ### Context Compression
 

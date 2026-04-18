@@ -65,6 +65,12 @@ After the user approves, you'll get a system message starting with "The user has
 
 **Bypass phrases** (user types these → plan mode skipped for that turn): `just do it`, `go ahead`, `don't ask`, `skip plan`, `no plan`, `hazlo`, `adelante`, `ejecutalo`, `yolo`, `auto`. If the user's message contains one, proceed directly to tools.
 
+**Clarifying questions.** If the request is ambiguous and ONE missing piece of info would materially change the plan, respond instead with exactly:
+
+`QUESTION: <your single short question>`
+
+Nothing else on that line — no preface, no plan, no "shall I". The runtime pauses and the user answers in a text box; their answer is fed back and you produce the plan on the next round. Cap: one question per turn — do NOT ping-pong.
+
 ### No-Loop Rules — HARD
 The stuck detector will force-stop you around 2–3 repeated failures. Never reach that point.
 

@@ -183,6 +183,11 @@ def make_user_facing_plan_prompt(message: str, tool_names: list[str]) -> str:
     This is shown to the USER (not just the LLM's own scratchpad) before
     any tool call. The LLM must NOT invoke tools in this response — it
     only drafts the plan. The user then approves or rejects.
+
+    Two valid response shapes:
+      * ``QUESTION: <one short question>`` — when the request is
+        ambiguous and exactly one missing fact would change the plan.
+      * The ``**Plan**`` markdown block — otherwise.
     """
     tools_hint = ", ".join(tool_names[:20]) if tool_names else "(none available)"
     return (
@@ -190,7 +195,12 @@ def make_user_facing_plan_prompt(message: str, tool_names: list[str]) -> str:
         "tools in this response — only write the plan as plain markdown.\n\n"
         f"User request:\n{message}\n\n"
         f"Available tools (pick the ones you actually need):\n{tools_hint}\n\n"
-        "Format exactly like this, nothing else:\n\n"
+        "If the request is AMBIGUOUS and you need ONE specific piece of "
+        "info to plan properly, respond with exactly one line:\n"
+        "QUESTION: <your single short question>\n"
+        "Nothing else, no plan, no preface. Cap: one question per turn — "
+        "do NOT ping-pong with the user.\n\n"
+        "Otherwise produce the plan in this exact format, nothing else:\n\n"
         "**Plan**\n"
         "1. <short step, name the tool you'll use>\n"
         "2. <short step>\n"
@@ -200,7 +210,6 @@ def make_user_facing_plan_prompt(message: str, tool_names: list[str]) -> str:
         "- Be concrete. Each step says WHAT you'll do and WHICH tool.\n"
         "- If the task is trivial (one tool call, pure read), just say: "
         "\"Plan: single call to <tool>\" and stop.\n"
-        "- If you lack info from the user, say what you need at the end.\n"
         "- Do NOT output XML, do NOT call tools, do NOT ask 'shall I proceed'."
     )
 

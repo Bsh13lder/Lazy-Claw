@@ -20,18 +20,57 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 @router.get("/plan")
 async def plan_pending(user: User = Depends(get_current_user)):
-    """Return the pending plan awaiting approval, if any."""
+    """Return the pending interaction (plan OR question), if any."""
+    # Clarification question first — it takes precedence because it
+    # fires before the plan is drafted.
+    pending_q = plan_checkpoint.get_pending_question(user.id)
+    if pending_q is not None:
+        return {
+            "pending": {
+                "kind": "question",
+                "question": pending_q.question,
+                "created_at": pending_q.created_at,
+            },
+            "auto_approve_session": plan_checkpoint.is_session_auto_approved(user.id),
+        }
+
     pending = plan_checkpoint.get_pending(user.id)
     if pending is None:
         return {"pending": None}
     return {
         "pending": {
+            "kind": "plan",
             "plan": pending.plan_text,
             "steps": pending.steps,
             "created_at": pending.created_at,
         },
         "auto_approve_session": plan_checkpoint.is_session_auto_approved(user.id),
     }
+
+
+@router.post("/plan/answer")
+async def plan_answer(
+    user: User = Depends(get_current_user),
+    payload: dict = Body(default={}),
+):
+    """Submit the user's answer to a pending clarifying question."""
+    payload = payload or {}
+    answer = (payload.get("answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer is required")
+    released = plan_checkpoint.answer_clarification(user.id, answer)
+    if not released:
+        raise HTTPException(
+            status_code=409, detail="No question awaiting an answer",
+        )
+    event_bus.publish(event_bus.BrowserEvent(
+        user_id=user.id,
+        kind="plan_question",
+        target="plan_question",
+        detail="answered",
+        extra={"status": "answered"},
+    ))
+    return {"status": "answered"}
 
 
 @router.post("/plan/approve")

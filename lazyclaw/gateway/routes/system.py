@@ -68,6 +68,8 @@ async def get_about(
 ):
     """System diagnostics — safe to show in the UI."""
     # Lazy imports keep this route cheap at import time.
+    import os
+
     from lazyclaw.llm.eco_settings import get_eco_settings
     from lazyclaw.llm.free_providers import discover_providers
     from lazyclaw.skills.builtin.web_search import (
@@ -79,6 +81,13 @@ async def get_about(
     eco = await get_eco_settings(config, user.id)
     general = await get_general_settings(config, user.id)
     usage = get_search_usage()
+    # Authoritative API-key presence — reads env directly so the UI doesn't
+    # have to infer "configured" from quota/usage heuristics that fail on a
+    # fresh install before any request has been made.
+    search_keys = {
+        "serper": bool(os.environ.get("SERPER_KEY", "").strip()),
+        "serpapi": bool(os.environ.get("SERPAPI_KEY", "").strip()),
+    }
 
     try:
         free_providers = sorted(discover_providers().keys())
@@ -111,6 +120,7 @@ async def get_about(
             "serpapi_limit": _SERPAPI_MONTHLY_LIMIT,
             "reset_month": usage.reset_month,
         },
+        "search_keys": search_keys,
         "free_providers": free_providers,
         "telegram_configured": bool(config.telegram_bot_token),
         "mcp_server_count": mcp_count,

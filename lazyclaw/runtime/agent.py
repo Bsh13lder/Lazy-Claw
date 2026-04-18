@@ -561,16 +561,62 @@ class Agent:
             LLMMessage(role="system", content=plan_instruction),
         ]
 
-        logger.info("Plan gate: requesting plan text from brain")
-        plan_resp = await self.eco_router.chat(
-            plan_messages, user_id=user_id, role=ROLE_BRAIN,
-        )
-        plan_text = (plan_resp.content or "").strip()
-        if not plan_text:
-            logger.warning("Plan gate: empty plan — skipping approval")
-            return "(empty plan — auto-continuing)"
+        # Clarification-question loop. Capped at 3 rounds to prevent
+        # ping-pong if the model keeps asking.
+        _THINK_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
+        max_rounds = 3
+        plan_text: str = ""
+        steps: list[str] = []
+        for round_idx in range(max_rounds):
+            logger.info(
+                "Plan gate: requesting plan text from brain (round %d)",
+                round_idx,
+            )
+            plan_resp = await self.eco_router.chat(
+                plan_messages, user_id=user_id, role=ROLE_BRAIN,
+            )
+            plan_text = (plan_resp.content or "").strip()
+            if "<think>" in plan_text:
+                plan_text = _THINK_RE.sub("", plan_text).strip()
+            if not plan_text:
+                logger.warning("Plan gate: empty plan — skipping approval")
+                return "(empty plan — auto-continuing)"
 
-        steps = parse_plan_steps(plan_text)
+            if cancel_token.is_cancelled:
+                raise _PlanRejected("cancelled before approval")
+
+            # Clarifying-question branch.
+            if plan_text.startswith("QUESTION:"):
+                question = plan_text[len("QUESTION:"):].strip()
+                logger.info(
+                    "Plan gate: requesting clarification: %s",
+                    question[:120],
+                )
+                await cb.on_event(AgentEvent(
+                    "plan_question", question, {"question": question},
+                ))
+                answer = await plan_checkpoint.request_clarification(
+                    user_id=user_id, question=question,
+                )
+                if answer is None:
+                    raise _PlanRejected("question cancelled or timed out")
+                logger.info(
+                    "Plan gate: got answer (%d chars)", len(answer),
+                )
+                plan_messages.append(LLMMessage(
+                    role="user",
+                    content=f"(answer to your question) {answer}",
+                ))
+                continue
+
+            # Normal plan branch — break out of the round loop.
+            steps = parse_plan_steps(plan_text)
+            break
+        else:
+            # Exhausted rounds without a plan.
+            raise _PlanRejected(
+                "too many clarification rounds — rephrase the request"
+            )
 
         # Stream the plan to the user via the normal chat channel too,
         # so Telegram / CLI users see it even without a plan card.
@@ -578,13 +624,9 @@ class Agent:
             "plan_pending", plan_text,
             {"steps": steps, "plan": plan_text},
         ))
-
         logger.info(
             "Plan gate: showing %d-step plan to user %s", len(steps), user_id,
         )
-
-        if cancel_token.is_cancelled:
-            raise _PlanRejected("cancelled before approval")
 
         decision = await plan_checkpoint.request_plan_approval(
             user_id=user_id,
@@ -1540,7 +1582,10 @@ class Agent:
                             if chunk.delta:
                                 streamed_content += chunk.delta
 
-                                # Buffer thinking, only emit real content
+                                # Buffer thinking, only emit real content.
+                                # ALSO relay thinking chunks to the UI as
+                                # `thinking_delta` events so the chat can
+                                # show a collapsible reasoning panel.
                                 text = chunk.delta
                                 if "<think>" in streamed_content and not _in_think_block:
                                     _in_think_block = True
@@ -1548,7 +1593,23 @@ class Agent:
                                 if _in_think_block:
                                     _think_buffer += text
                                     if "</think>" in _think_buffer:
-                                        after = _think_buffer.split("</think>", 1)[1].strip()
+                                        before, after_raw = _think_buffer.split(
+                                            "</think>", 1,
+                                        )
+                                        # Emit the closing reasoning chunk
+                                        # (minus the </think> tag itself).
+                                        _reasoning_chunk = before.replace(
+                                            "<think>", "",
+                                        )
+                                        if _reasoning_chunk:
+                                            await cb.on_event(AgentEvent(
+                                                "thinking_delta",
+                                                _reasoning_chunk, {},
+                                            ))
+                                        await cb.on_event(AgentEvent(
+                                            "thinking_done", "", {},
+                                        ))
+                                        after = after_raw.strip()
                                         _in_think_block = False
                                         _think_buffer = ""
                                         if after:
@@ -1556,6 +1617,14 @@ class Agent:
                                         else:
                                             continue
                                     else:
+                                        # Streaming reasoning mid-block —
+                                        # surface the delta, strip any
+                                        # leading <think> opener.
+                                        _r_chunk = text.replace("<think>", "")
+                                        if _r_chunk:
+                                            await cb.on_event(AgentEvent(
+                                                "thinking_delta", _r_chunk, {},
+                                            ))
                                         continue
 
                                 # Buffer <taor_plan> and <plan> blocks

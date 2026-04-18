@@ -453,20 +453,37 @@ def _keyword_research_to_sheet(params: dict[str, Any]) -> dict:
         "return rows.map(r => ({ json: r }));\n"
     )
 
+    # Use a Webhook trigger (not Manual) so n8n can set active=true AND
+    # n8n_run_workflow can actually fire it programmatically. The rows
+    # code node prefers webhook body when present, falls back to the
+    # hard-coded `rows` array so the workflow remains runnable by just
+    # clicking "Execute Workflow" too.
+    webhook_path = params.get("webhook_path") or "keyword-research"
     return {
         "name": params.get("name", "Keyword Research to Google Sheets"),
         "nodes": [
             {
-                "parameters": {},
-                "id": "manual-1",
-                "name": "Manual Trigger",
-                "type": "n8n-nodes-base.manualTrigger",
-                "typeVersion": 1,
+                "parameters": {"httpMethod": "POST", "path": webhook_path, "options": {}},
+                "id": "webhook-1",
+                "name": "Webhook",
+                "type": "n8n-nodes-base.webhook",
+                "typeVersion": 2,
                 "position": [250, 300],
+                "webhookId": "",
             },
             {
                 "parameters": {
-                    "jsCode": code_body,
+                    "jsCode": (
+                        "// Prefer rows from webhook body; fall back to the\n"
+                        "// hard-coded keyword list baked in at workflow build.\n"
+                        "const first = $input.first() && $input.first().json;\n"
+                        "const body = (first && (first.body || first.rows)) || null;\n"
+                        "const hardcoded = " + _json.dumps(safe_rows, ensure_ascii=False) + ";\n"
+                        "let source = Array.isArray(body) ? body\n"
+                        "  : Array.isArray(body && body.rows) ? body.rows\n"
+                        "  : hardcoded;\n"
+                        "return source.map(r => ({ json: r }));\n"
+                    ),
                 },
                 "id": "code-1",
                 "name": "Build Keyword Rows",
@@ -483,7 +500,7 @@ def _keyword_research_to_sheet(params: dict[str, Any]) -> dict:
             ),
         ],
         "connections": {
-            "Manual Trigger": {"main": [[{"node": "Build Keyword Rows", "type": "main", "index": 0}]]},
+            "Webhook": {"main": [[{"node": "Build Keyword Rows", "type": "main", "index": 0}]]},
             "Build Keyword Rows": {"main": [[{"node": "Google Sheets", "type": "main", "index": 0}]]},
         },
         "settings": {"executionOrder": "v1"},

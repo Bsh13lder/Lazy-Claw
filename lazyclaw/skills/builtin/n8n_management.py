@@ -32,12 +32,12 @@ logger = logging.getLogger(__name__)
 
 _N8N_DEFAULT_BASE = "http://lazyclaw-n8n:5678"
 
-# Types that n8n counts as "trigger nodes" — a workflow needs at least
-# one of these before activation will succeed. The suffix-match above
-# catches most custom/community triggers; this set covers the base ones
-# whose type names don't end in "Trigger".
-_TRIGGER_NODE_TYPES: frozenset[str] = frozenset({
-    "n8n-nodes-base.manualTrigger",
+# Types that n8n counts as triggers capable of AUTOMATIC activation.
+# n8n refuses active=true on workflows whose only trigger is manual
+# (Manual Trigger / Start) — those are run by clicking "Execute
+# Workflow" in the UI. Excluding them here prevents the create-skill
+# from attempting an activation that's guaranteed to 400.
+_ACTIVATABLE_TRIGGER_TYPES: frozenset[str] = frozenset({
     "n8n-nodes-base.webhook",
     "n8n-nodes-base.formTrigger",
     "n8n-nodes-base.scheduleTrigger",
@@ -45,8 +45,17 @@ _TRIGGER_NODE_TYPES: frozenset[str] = frozenset({
     "n8n-nodes-base.emailReadImap",
     "n8n-nodes-base.rssFeedRead",
     "n8n-nodes-base.executeWorkflowTrigger",
+})
+
+# Types that count as manual-only trigger nodes — present in the
+# workflow but don't enable activation.
+_MANUAL_ONLY_TRIGGER_TYPES: frozenset[str] = frozenset({
+    "n8n-nodes-base.manualTrigger",
     "n8n-nodes-base.start",
 })
+
+# Back-compat alias used elsewhere in the module.
+_TRIGGER_NODE_TYPES = _ACTIVATABLE_TRIGGER_TYPES | _MANUAL_ONLY_TRIGGER_TYPES
 
 
 class N8nHTTPError(RuntimeError):
@@ -881,13 +890,17 @@ class N8nCreateWorkflowSkill(BaseSkill):
             # update/activate retries.
             nodes_for_check = create_body.get("nodes") or []
             violations = _validate_workflow_nodes(nodes_for_check)
-            has_trigger = any(
-                (n.get("type") or "").lower().endswith(
-                    ("trigger", "webhook", "form", "schedule", "cron")
-                )
-                or (n.get("type") or "") in _TRIGGER_NODE_TYPES
+
+            def _node_type(n: dict) -> str:
+                return (n.get("type") or "") if isinstance(n, dict) else ""
+
+            has_activatable_trigger = any(
+                _node_type(n) in _ACTIVATABLE_TRIGGER_TYPES
                 for n in nodes_for_check
-                if isinstance(n, dict)
+            )
+            has_any_trigger = has_activatable_trigger or any(
+                _node_type(n) in _MANUAL_ONLY_TRIGGER_TYPES
+                for n in nodes_for_check
             )
 
             if violations:
@@ -900,14 +913,30 @@ class N8nCreateWorkflowSkill(BaseSkill):
                     f"n8n_manage_workflow(workflow_id='{wf_id}', action='activate'). "
                     f"Open http://localhost:5678/workflow/{wf_id} to view."
                 )
-            if not has_trigger:
+            if not has_any_trigger:
                 return (
                     f"Workflow '{created_name}' created (ID: {wf_id}) "
                     f"from {source} but NOT activated — no trigger node. "
-                    "Add a webhook/schedule/manual trigger via "
+                    "Add a webhook/schedule trigger via "
                     f"n8n_update_workflow(workflow_id='{wf_id}', ...), "
                     "then call n8n_manage_workflow(action='activate'). "
                     f"Open http://localhost:5678/workflow/{wf_id} to view."
+                )
+            if not has_activatable_trigger:
+                # Manual Trigger only — n8n refuses active=true. Return a
+                # friendly "created, run manually" message so the model
+                # does NOT call n8n_manage_workflow(action=activate) and
+                # bounce off a 400.
+                return (
+                    f"Workflow '{created_name}' created (ID: {wf_id}) "
+                    f"from {source}. Uses a Manual Trigger — n8n does "
+                    "NOT allow active=true on manual-only workflows. "
+                    "Run it by opening "
+                    f"http://localhost:5678/workflow/{wf_id} and clicking "
+                    "'Execute Workflow'. For programmatic firing, swap "
+                    "Manual Trigger for a Webhook via "
+                    f"n8n_update_workflow(workflow_id='{wf_id}', ...) "
+                    "and re-activate."
                 )
 
             # Activate if requested
@@ -982,6 +1011,33 @@ class N8nManageWorkflowSkill(BaseSkill):
             action = params["action"]
 
             if action == "activate":
+                # Pre-check: manual-only workflows can't be activated.
+                try:
+                    wf = await _n8n_request(
+                        self._config, user_id, "GET",
+                        f"/api/v1/workflows/{wf_id}",
+                    )
+                    wf_nodes = wf.get("nodes") or []
+                    has_activatable = any(
+                        (n.get("type") or "") in _ACTIVATABLE_TRIGGER_TYPES
+                        for n in wf_nodes if isinstance(n, dict)
+                    )
+                    has_manual_only = any(
+                        (n.get("type") or "") in _MANUAL_ONLY_TRIGGER_TYPES
+                        for n in wf_nodes if isinstance(n, dict)
+                    )
+                    if not has_activatable and has_manual_only:
+                        return (
+                            f"Error: Workflow {wf_id} only has a Manual "
+                            "Trigger — n8n does NOT allow activation of "
+                            "manual-only workflows. To fire programmatically, "
+                            "replace Manual Trigger with a Webhook node. "
+                            f"Open http://localhost:5678/workflow/{wf_id} "
+                            "and click 'Execute Workflow' to run it once."
+                        )
+                except Exception:
+                    # Pre-check is best-effort; fall through to activate.
+                    pass
                 await _n8n_request(self._config, user_id, "POST", f"/api/v1/workflows/{wf_id}/activate")
                 return f"Workflow {wf_id} activated."
             elif action == "deactivate":

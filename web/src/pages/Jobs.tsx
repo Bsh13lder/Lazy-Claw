@@ -3,6 +3,7 @@ import * as api from "../api";
 import type { Job } from "../api";
 import Modal from "../components/Modal";
 import { useToast } from "../context/ToastContext";
+import type { Page } from "../components/NavShell";
 
 /* ── Helpers ─────────────────────────────────────────────── */
 
@@ -203,21 +204,36 @@ function JobCard({ job, onPause, onResume, onDelete }: JobCardProps) {
 
 /* ── Empty State ─────────────────────────────────────────── */
 
-function EmptyState() {
+function EmptyState({ onNavigate }: { readonly onNavigate?: (page: Page) => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <ClockIcon className="text-text-muted mb-4 opacity-40" />
       <h2 className="text-sm font-medium text-text-secondary mb-1">No jobs scheduled</h2>
-      <p className="text-xs text-text-muted max-w-xs">
-        Create cron or one-off jobs to automate tasks
+      <p className="text-xs text-text-muted max-w-xs mb-3">
+        Create cron or one-off jobs to automate tasks.
       </p>
+      {onNavigate && (
+        <p className="text-[11px] text-text-muted">
+          Monitoring a page for changes?{" "}
+          <button
+            onClick={() => onNavigate("watchers")}
+            className="text-accent hover:underline"
+          >
+            Use the Watchers tab instead →
+          </button>
+        </p>
+      )}
     </div>
   );
 }
 
 /* ── Page ─────────────────────────────────────────────────── */
 
-export default function Jobs() {
+interface JobsProps {
+  readonly onNavigate?: (page: Page) => void;
+}
+
+export default function Jobs({ onNavigate }: JobsProps = {}) {
   const toast = useToast();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
@@ -232,12 +248,20 @@ export default function Jobs() {
   const [cContext, setCContext] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // AI draft
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const data = await api.listJobs();
-      setJobs(Array.isArray(data) ? data : []);
+      // Watchers live on their own page — never show them here.
+      const rows = Array.isArray(data) ? data : [];
+      setJobs(rows.filter((j) => (j as Job & { job_type?: string }).job_type !== "watcher"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load jobs");
     } finally {
@@ -299,6 +323,28 @@ export default function Jobs() {
     }
   };
 
+  const runAiDraft = async () => {
+    const prompt = aiPrompt.trim();
+    if (!prompt) return;
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const draft = await api.createJobFromPrompt(prompt);
+      setCName(draft.name || "");
+      setCInstruction(draft.instruction || "");
+      setCType(draft.job_type === "one_off" ? "one_off" : "cron");
+      setCCron(draft.cron_expression || "");
+      setCContext(draft.context || "");
+      setAiOpen(false);
+      setAiPrompt("");
+      setShowCreate(true);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : "Failed to draft job");
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-5xl mx-auto px-6 py-8 animate-fade-in">
@@ -306,12 +352,21 @@ export default function Jobs() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-lg font-semibold text-text-primary">Jobs</h1>
-            <p className="text-sm text-text-muted">{jobs.length} total</p>
+            <p className="text-sm text-text-muted">
+              {jobs.length} scheduled {jobs.length === 1 ? "job" : "jobs"} · cron & one-off
+            </p>
           </div>
           <div className="flex gap-2">
             <button
-              onClick={() => setShowCreate(true)}
+              onClick={() => { setAiError(null); setAiOpen((o) => !o); }}
               className="text-xs text-accent hover:text-accent-dim px-3 py-1.5 rounded-lg border border-accent/30 hover:bg-accent-soft transition-colors"
+              title="Describe the job in plain English — LazyClaw drafts it"
+            >
+              ✨ Create with AI
+            </button>
+            <button
+              onClick={() => setShowCreate(true)}
+              className="text-xs text-text-muted hover:text-text-secondary px-3 py-1.5 rounded-lg border border-border hover:bg-bg-hover transition-colors"
             >
               + Create job
             </button>
@@ -323,6 +378,46 @@ export default function Jobs() {
             </button>
           </div>
         </div>
+
+        {aiOpen && (
+          <div className="mb-4 border border-accent/30 bg-accent-soft rounded-xl p-3 flex flex-col gap-2">
+            <div className="text-xs font-medium text-text-primary">Describe the job</div>
+            <div className="text-[11px] text-text-muted">
+              Plain English. LazyClaw drafts the cron expression + instruction; you review before saving.
+            </div>
+            <textarea
+              rows={2}
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && aiPrompt.trim() && !aiBusy) {
+                  e.preventDefault();
+                  void runAiDraft();
+                }
+              }}
+              placeholder="e.g. remind me every Monday at 9am to review sales pipeline"
+              className="w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-border-light resize-y"
+              autoFocus
+            />
+            {aiError && <div className="text-[11px] text-error">{aiError}</div>}
+            <div className="flex justify-end gap-1.5">
+              <button
+                onClick={() => { setAiOpen(false); setAiPrompt(""); setAiError(null); }}
+                disabled={aiBusy}
+                className="text-xs px-2 py-1 rounded text-text-muted hover:text-text-primary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runAiDraft}
+                disabled={aiBusy || !aiPrompt.trim()}
+                className="text-xs px-3 py-1 rounded bg-accent text-bg-primary font-medium disabled:opacity-40"
+              >
+                {aiBusy ? "Drafting…" : "Draft job (⌘+Enter)"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Loading */}
         {loading && (
@@ -342,7 +437,7 @@ export default function Jobs() {
         )}
 
         {/* Empty state */}
-        {!loading && !error && jobs.length === 0 && <EmptyState />}
+        {!loading && !error && jobs.length === 0 && <EmptyState onNavigate={onNavigate} />}
 
         {/* Job list */}
         {!loading && !error && jobs.length > 0 && (

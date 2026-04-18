@@ -1,7 +1,27 @@
-/* Hide Chat beta from n8n sidebar */
+/* Hide AI / Chat / Agent entry points from n8n's UI.
+   LazyClaw is the AI brain — n8n is workflow-only. */
+
+/* Left sidebar menu items */
 a[href*="/chat"],
-a[href$="/chat"],
+a[href*="/ai-builder"],
+a[href*="/evaluation"],
+[data-test-id*="ai-builder"],
 [data-test-id="mainSidebar-chat"],
-.el-menu-item[title="Chat"] {
+[data-test-id="main-sidebar-chat"],
+.el-menu-item[title*="Chat"],
+.el-menu-item[title*="Agent"],
+.el-menu-item[title*="AI"] {
+  display: none !important;
+}
+
+/* "Ask AI" / AI Assistant floating button + pane */
+[data-test-id*="ai-assistant"],
+[data-test-id*="ask-ai"],
+[data-test-id*="ai-builder"],
+[class*="ai-assistant"],
+[class*="askAi"],
+[class*="ask-assistant"],
+.ask-assistant-button,
+.ask-assistant-chat {
   display: none !important;
 }

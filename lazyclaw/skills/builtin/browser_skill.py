@@ -1,7 +1,7 @@
 """Unified browser skill — single CDP-based tool for all browser interactions.
 
 Actions: read, open, click, type, screenshot, tabs, scroll, snapshot,
-         hover, drag, console_logs, chain, close, show, press_key.
+         hover, drag, console_logs, chain, close, show, press_key, ask_vision.
 
 Controls user's real Brave browser via Chrome DevTools Protocol.
 Action implementations live in browser_actions/ submodules.
@@ -16,6 +16,7 @@ from lazyclaw.browser.browser_settings import touch_browser_activity
 from lazyclaw.runtime.tool_result import ToolResult
 from lazyclaw.skills.base import BaseSkill
 
+from .browser_actions.ask_vision import action_ask_vision
 from .browser_actions.backends import get_cdp_backend, reset_backend
 from .browser_actions.capture import action_console_logs, action_screenshot, action_snapshot
 from .browser_actions.interact import action_click, action_drag, action_hover, action_press_key, action_type
@@ -77,6 +78,7 @@ class BrowserSkill(BaseSkill):
                         "read", "open", "click", "type", "press_key",
                         "screenshot", "tabs", "scroll", "close", "show",
                         "snapshot", "hover", "drag", "console_logs", "chain",
+                        "ask_vision",
                     ],
                     "description": (
                         "read: get page CONTENT (text, emails, messages) — no interactive refs. "
@@ -93,7 +95,11 @@ class BrowserSkill(BaseSkill):
                         "hover: hover over element. "
                         "drag: drag element from source to target. "
                         "console_logs: get browser console output. "
-                        "chain: execute multiple steps in one call."
+                        "chain: execute multiple steps in one call. "
+                        "ask_vision: delegate a visual question to a local vision model "
+                        "(gemma4:e2b). Use ONLY when snapshot/read can't answer — layout "
+                        "bugs, visual-only elements, CAPTCHAs, unexpected popups, disabled "
+                        "buttons, image content. Requires 'question' param. Free, ~3-5s."
                     ),
                 },
                 "target": {
@@ -144,6 +150,14 @@ class BrowserSkill(BaseSkill):
                 "visible": {
                     "type": "boolean",
                     "description": "Force visible browser window.",
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "For ask_vision: the specific visual question to answer "
+                        "(e.g. 'is the submit button enabled?', 'what error does "
+                        "the modal show?'). Be specific — avoid 'describe this'."
+                    ),
                 },
             },
             "required": ["action"],
@@ -233,11 +247,13 @@ class BrowserSkill(BaseSkill):
             return await action_console_logs(user_id, params, tab_context)
         elif action == "chain":
             return await action_chain(user_id, params, tab_context, mgr)
+        elif action == "ask_vision":
+            return await action_ask_vision(user_id, params, tab_context)
         else:
             return (
                 f"Unknown action: {action}. Use: read, open, click, type, "
                 f"press_key, screenshot, tabs, scroll, close, snapshot, "
-                f"hover, drag, console_logs, chain"
+                f"hover, drag, console_logs, chain, ask_vision"
             )
 
     async def _auto_connect_and_retry(self, user_id: str, params: dict) -> str:

@@ -819,3 +819,310 @@ class N8nGetExecutionSkill(BaseSkill):
             return "\n".join(lines)
         except Exception as exc:
             return _connection_error_msg(exc)
+
+
+# ---------------------------------------------------------------------------
+# 11. n8n_create_credential
+# ---------------------------------------------------------------------------
+
+class N8nCreateCredentialSkill(BaseSkill):
+    """Create a new credential in n8n.
+
+    For non-OAuth credentials (HTTP Header Auth, API Key, Basic Auth, plain
+    user/pass) the credential is fully usable immediately. For OAuth2
+    credentials, this only creates the shell — the user still has to click
+    "Connect my account" in the n8n UI to complete the consent flow.
+    Prefer `n8n_google_sheets_setup` for Google Sheets specifically.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_create_credential"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create a new credential in n8n (API keys, HTTP auth, basic auth, "
+            "etc.). Use when the user says 'add a credential for X', "
+            "'save the Slack token in n8n', 'create n8n API auth'. "
+            "For Google Sheets OAuth use n8n_google_sheets_setup instead."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Display name shown in n8n (e.g. 'My Slack token').",
+                },
+                "credential_type": {
+                    "type": "string",
+                    "description": (
+                        "n8n credential type ID. Common values: "
+                        "'httpHeaderAuth', 'httpBasicAuth', 'httpQueryAuth', "
+                        "'slackApi', 'openAiApi', 'notionApi'. "
+                        "For OAuth2 use the helper skill instead."
+                    ),
+                },
+                "data": {
+                    "type": "object",
+                    "description": (
+                        "Credential data as a JSON object. Shape depends on "
+                        "credential_type. E.g. for httpHeaderAuth: "
+                        "{\"name\": \"Authorization\", \"value\": \"Bearer xyz\"}."
+                    ),
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["name", "credential_type", "data"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        name = params.get("name", "").strip()
+        cred_type = params.get("credential_type", "").strip()
+        data = params.get("data")
+        if not name or not cred_type:
+            return "Error: name and credential_type are required."
+        if not isinstance(data, dict):
+            return "Error: data must be a JSON object."
+
+        try:
+            result = await _n8n_request(
+                self._config, user_id, "POST", "/api/v1/credentials",
+                body={"name": name, "type": cred_type, "data": data},
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        cred_id = result.get("id") or "(unknown)"
+        return (
+            f"Created n8n credential '{name}' (type: {cred_type}, id: {cred_id}). "
+            "For OAuth2 types, open the n8n Credentials page and click "
+            "'Connect my account' to complete the consent flow."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12. n8n_delete_credential
+# ---------------------------------------------------------------------------
+
+class N8nDeleteCredentialSkill(BaseSkill):
+    """Delete a credential from n8n by ID or exact name."""
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_delete_credential"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Delete a credential from n8n. Use when the user says 'remove the "
+            "Slack credential', 'delete old n8n API key'. To rotate a "
+            "credential, delete then call n8n_create_credential with the new value."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "credential": {
+                    "type": "string",
+                    "description": "Credential ID (exact) or display name (exact match).",
+                },
+            },
+            "required": ["credential"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        needle = params.get("credential", "").strip()
+        if not needle:
+            return "Error: credential is required."
+
+        # Resolve display-name to id via list if needed.
+        target_id = needle
+        try:
+            listing = await _n8n_request(
+                self._config, user_id, "GET", "/api/v1/credentials",
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        rows = listing.get("data", listing) if isinstance(listing, dict) else []
+        match = next(
+            (
+                c for c in rows
+                if isinstance(c, dict) and (
+                    c.get("id") == needle or c.get("name") == needle
+                )
+            ),
+            None,
+        )
+        if match is not None:
+            target_id = match["id"]
+
+        try:
+            await _n8n_request(
+                self._config, user_id, "DELETE",
+                f"/api/v1/credentials/{target_id}",
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+        return f"Deleted n8n credential '{needle}'."
+
+
+# ---------------------------------------------------------------------------
+# 13. n8n_google_sheets_setup
+# ---------------------------------------------------------------------------
+
+class N8nGoogleSheetsSetupSkill(BaseSkill):
+    """Create a Google Sheets OAuth2 credential shell in n8n.
+
+    OAuth2 requires a browser-based consent step that n8n must run itself
+    (the public API cannot accept a pre-authorized refresh token). This
+    skill automates everything except the final click:
+
+    1. Pulls clientId + clientSecret from LazyClaw vault
+       (keys: google_oauth_client_id, google_oauth_client_secret).
+       Falls back to skill parameters if the user passes them inline.
+    2. POSTs a googleSheetsOAuth2Api credential to n8n with the right scope.
+    3. Returns a URL for the user to open — one click through Google consent
+       and the credential is connected.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_google_sheets_setup"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Set up Google Sheets OAuth2 for n8n. Creates the credential "
+            "shell using clientId/clientSecret from vault (or parameters), "
+            "then returns a URL the user opens once to grant consent. "
+            "Use when the user says 'auth Google Sheets in n8n', "
+            "'connect Google Sheets'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Optional display name (default: 'Google Sheets').",
+                },
+                "client_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. OAuth2 clientId. If omitted, loaded from "
+                        "vault key google_oauth_client_id."
+                    ),
+                },
+                "client_secret": {
+                    "type": "string",
+                    "description": (
+                        "Optional. OAuth2 clientSecret. If omitted, loaded "
+                        "from vault key google_oauth_client_secret."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "OAuth scope. Default: "
+                        "https://www.googleapis.com/auth/spreadsheets."
+                    ),
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        display_name = (params.get("name") or "Google Sheets").strip()
+        client_id = (params.get("client_id") or "").strip()
+        client_secret = (params.get("client_secret") or "").strip()
+        scope = (params.get("scope")
+                 or "https://www.googleapis.com/auth/spreadsheets").strip()
+
+        # Fall back to vault for anything missing.
+        if not client_id or not client_secret:
+            try:
+                from lazyclaw.crypto.vault import get_credential
+                if not client_id:
+                    client_id = (await get_credential(
+                        self._config, user_id, "google_oauth_client_id",
+                    )) or ""
+                if not client_secret:
+                    client_secret = (await get_credential(
+                        self._config, user_id, "google_oauth_client_secret",
+                    )) or ""
+            except Exception:
+                logger.debug("Failed to load Google OAuth creds from vault", exc_info=True)
+
+        if not client_id or not client_secret:
+            return (
+                "Missing Google OAuth credentials. Save them first:\n"
+                "  vault_set key=google_oauth_client_id value=<your-client-id>\n"
+                "  vault_set key=google_oauth_client_secret value=<your-client-secret>\n"
+                "Or pass them to this skill as client_id / client_secret."
+            )
+
+        body = {
+            "name": display_name,
+            "type": "googleSheetsOAuth2Api",
+            "data": {
+                "clientId": client_id,
+                "clientSecret": client_secret,
+                "scope": scope,
+            },
+        }
+        try:
+            result = await _n8n_request(
+                self._config, user_id, "POST", "/api/v1/credentials",
+                body=body,
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        cred_id = result.get("id") or ""
+        # n8n's UI opens the credentials list at /home/credentials. From
+        # there the user clicks the new credential and hits "Connect my
+        # account". We can also deep-link to the edit view on some n8n
+        # builds: /home/credentials/{id} — safe to include as hint.
+        base = os.getenv("N8N_PUBLIC_URL", "http://localhost:5678").rstrip("/")
+        consent_url = f"{base}/home/credentials"
+        if cred_id:
+            consent_url = f"{base}/home/credentials/{cred_id}"
+
+        return (
+            f"Created Google Sheets OAuth2 credential '{display_name}' (id: "
+            f"{cred_id or 'unknown'}).\n"
+            f"Open this URL once to finish consent:\n  {consent_url}\n"
+            "Click 'Connect my account' and sign in with the Google account "
+            "that owns the Sheets you want to automate. After consent, the "
+            "credential is ready — any Google Sheets node can select it."
+        )
+

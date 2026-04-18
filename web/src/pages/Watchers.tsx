@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "../api";
 import type { Watcher, WatcherCheck } from "../api";
+import { useChat } from "../context/ChatContext";
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -53,6 +54,22 @@ function shortHost(url?: string | null): string {
 
 // ── page ─────────────────────────────────────────────────────────────────
 
+function buildWatcherAskPrompt(w: Watcher): string {
+  const parts: string[] = [];
+  parts.push(`Tell me about the '${w.name}' watcher`);
+  if (w.url) {
+    try { parts.push(`on ${new URL(w.url).host.replace(/^www\./, "")}`); }
+    catch { /* ignore malformed URL */ }
+  }
+  const tail: string[] = [
+    "what it's checking",
+    "the last extracted value",
+    "any errors",
+  ];
+  if ((w.trigger_count ?? 0) > 0) tail.push("the most recent trigger");
+  return `${parts.join(" ")} — ${tail.join(", ")}.`;
+}
+
 export default function Watchers() {
   const [items, setItems] = useState<Watcher[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,6 +77,7 @@ export default function Watchers() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const { sendMessage, setChatOpen } = useChat();
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -112,6 +130,12 @@ export default function Watchers() {
     try { await api.deleteWatcher(w.id); await reload(); setToast(`Deleted '${w.name}'`); }
     catch (e) { setToast(`Delete failed: ${e instanceof Error ? e.message : e}`); }
     finally { setBusyId(null); }
+  };
+
+  const onAsk = (w: Watcher) => {
+    setChatOpen(true);
+    sendMessage(buildWatcherAskPrompt(w));
+    setToast(`Asking LazyClaw about '${w.name}'…`);
   };
 
   return (
@@ -200,6 +224,14 @@ export default function Watchers() {
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="flex gap-1">
+                      <button
+                        onClick={() => onAsk(w)}
+                        disabled={busyId === w.id}
+                        className="text-[11px] px-2 py-1 rounded border border-border text-text-secondary hover:bg-bg-hover disabled:opacity-40"
+                        title="Ask LazyClaw about this watcher"
+                      >
+                        💬
+                      </button>
                       {w.status === "active" ? (
                         <button
                           onClick={() => void onPause(w)}
@@ -238,6 +270,7 @@ export default function Watchers() {
           watcher={selected}
           onClose={() => setSelectedId(null)}
           onChanged={async (msg) => { await reload(); if (msg) setToast(msg); }}
+          onAsk={() => onAsk(selected)}
         />
       )}
 
@@ -256,9 +289,10 @@ interface DetailProps {
   watcher: Watcher;
   onClose: () => void;
   onChanged: (msg?: string) => void | Promise<void>;
+  onAsk: () => void;
 }
 
-function WatcherDetail({ watcher, onClose, onChanged }: DetailProps) {
+function WatcherDetail({ watcher, onClose, onChanged, onAsk }: DetailProps) {
   const [intervalMinutes, setIntervalMinutes] = useState<string>(
     watcher.check_interval ? String(Math.round(watcher.check_interval / 60)) : "5",
   );
@@ -329,6 +363,13 @@ function WatcherDetail({ watcher, onClose, onChanged }: DetailProps) {
           <div className="text-sm font-medium text-text-primary truncate">{watcher.name}</div>
           <div className="text-[11px] text-text-muted truncate">{shortHost(watcher.url)}</div>
         </div>
+        <button
+          onClick={onAsk}
+          className="text-[11px] px-2 py-1 rounded border border-accent/40 bg-accent/10 text-accent hover:bg-accent/20"
+          title="Ask LazyClaw about this watcher"
+        >
+          💬 Ask
+        </button>
         <button
           onClick={onClose}
           className="p-1 rounded hover:bg-bg-hover text-text-muted"

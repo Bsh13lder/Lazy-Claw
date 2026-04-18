@@ -33,6 +33,26 @@ logger = logging.getLogger(__name__)
 _N8N_DEFAULT_BASE = "http://lazyclaw-n8n:5678"
 
 
+class N8nHTTPError(RuntimeError):
+    """n8n API returned a non-2xx status.
+
+    Carries the HTTP status, the request method+path, and a best-effort
+    decoded body so the tool layer can surface a readable error to the
+    brain (status + n8n's own message field when present).
+    """
+
+    def __init__(self, status: int, method: str, path: str, body_text: str, message: str | None = None):
+        self.status = status
+        self.method = method
+        self.path = path
+        self.body_text = (body_text or "")[:800]
+        self.message = message or ""
+        super().__init__(
+            f"n8n {method} {path} -> {status}"
+            + (f": {self.message}" if self.message else f": {self.body_text[:200]}")
+        )
+
+
 # ---------------------------------------------------------------------------
 # Shared HTTP helper
 # ---------------------------------------------------------------------------
@@ -52,8 +72,11 @@ async def _n8n_request(
       2. Environment variable N8N_API_KEY
     Base URL: vault 'n8n_base_url' -> env N8N_BASE_URL -> default.
 
-    Returns parsed JSON response.
-    Raises RuntimeError on auth/connection errors.
+    Returns parsed JSON response dict. 204 (No Content) returns {}.
+    Raises:
+      RuntimeError on config/auth problems (missing/invalid key).
+      N8nHTTPError on any 4xx/5xx from n8n, with the body attached.
+      httpx.ConnectError / httpx.TimeoutException when n8n is unreachable.
     """
     import httpx
 
@@ -90,15 +113,56 @@ async def _n8n_request(
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.request(method, url, headers=headers, json=body)
-        if resp.status_code == 401:
-            raise RuntimeError("n8n API key is invalid. Update with: vault_set key=n8n_api_key value=NEW_KEY")
-        resp.raise_for_status()
-        if resp.status_code == 204:
+        status = resp.status_code
+
+        if status == 401:
+            raise RuntimeError(
+                "n8n API key is invalid. Update with: vault_set key=n8n_api_key value=NEW_KEY"
+            )
+
+        if status >= 400:
+            body_text = ""
+            message = ""
+            try:
+                body_text = resp.text
+            except Exception:
+                body_text = ""
+            try:
+                payload = resp.json()
+                if isinstance(payload, dict):
+                    message = (
+                        payload.get("message")
+                        or payload.get("error")
+                        or payload.get("hint")
+                        or ""
+                    )
+                    if not message and "errors" in payload:
+                        errors = payload.get("errors")
+                        if isinstance(errors, list) and errors:
+                            message = str(errors[0])[:400]
+            except Exception:
+                pass
+            logger.warning(
+                "n8n %s %s -> %d: %s",
+                method, path, status, (message or body_text)[:400],
+            )
+            raise N8nHTTPError(status, method, path, body_text, message)
+
+        if status == 204 or not resp.content:
             return {}
+
         try:
             data = resp.json()
         except Exception:
-            data = None
+            snippet = (resp.text or "")[:200]
+            logger.warning(
+                "n8n %s %s -> %d returned non-JSON body: %s",
+                method, path, status, snippet,
+            )
+            raise N8nHTTPError(
+                status, method, path, resp.text or "",
+                message=f"expected JSON, got: {snippet}",
+            )
         if data is None:
             return {}
         return data
@@ -251,44 +315,145 @@ async def _trigger_via_webhook(
             else:
                 resp = await client.request(method, url, json=data or {})
         except Exception as exc:
-            return f"Webhook call failed: {exc}\nURL tried: {method} {url}"
+            return f"Error: webhook call to '{wf_name}' failed ({exc}). URL: {method} {url}"
 
     status = resp.status_code
     body = resp.text[:1500]
-    hint = ""
+
+    if 200 <= status < 300:
+        return (
+            f"Triggered '{wf_name}' via webhook.\n"
+            f"URL: {method} {url}\n"
+            f"HTTP status: {status}\n"
+            f"Response: {body or '(empty)'}"
+        )
+
     if use_test and status == 404:
         hint = (
-            "\n\nTip: /webhook-test/* only works while someone is clicking "
-            "'Listen for test event' in the n8n UI. For a repeatable "
-            "programmatic test, activate the workflow first (then calls "
-            "use the production /webhook/* URL automatically)."
+            " The /webhook-test/* URL only works while someone is clicking "
+            "'Listen for test event' in the n8n UI. Activate the workflow "
+            "first (n8n_manage_workflow action=activate) — then it uses the "
+            "production /webhook/* URL automatically."
         )
     elif status == 404:
         hint = (
-            "\n\nTip: workflow is active but n8n returned 404 — double-check "
-            "the Webhook node's path parameter."
+            " Workflow is active but n8n returned 404 — the Webhook node's "
+            "path parameter is probably wrong. Read it back with "
+            "n8n_get_workflow and do not guess another path."
         )
+    elif status == 500:
+        hint = (
+            " n8n executed the workflow but something inside it threw — "
+            "call n8n_list_executions then n8n_get_execution(include_data=true) "
+            "to see which node failed. Do not re-trigger."
+        )
+    else:
+        hint = " Read the body above verbatim before retrying."
 
     return (
-        f"Triggered '{wf_name}' via webhook.\n"
+        f"Error: webhook trigger for '{wf_name}' returned HTTP {status}.\n"
         f"URL: {method} {url}\n"
-        f"HTTP status: {status}\n"
-        f"Response: {body or '(empty)'}{hint}"
+        f"Response: {body or '(empty)'}.{hint}"
+    )
+
+
+_OAUTH_ERROR_MARKERS = (
+    "credentials have not been set up",
+    "credentials are not set",
+    "oauth2 credential is not",
+    "please connect your account",
+    "authorization required",
+    "node does not have any credentials",
+    "credential oauth",
+    "oauth token",
+    "refresh token",
+    "access token is invalid",
+)
+
+
+def _is_oauth_credential_error(exc: Exception) -> bool:
+    if not isinstance(exc, N8nHTTPError):
+        return False
+    combined = (exc.message + " " + exc.body_text).lower()
+    return any(m in combined for m in _OAUTH_ERROR_MARKERS)
+
+
+def _oauth_error_message(exc: N8nHTTPError) -> str:
+    """Produce a hard-stop message for the brain when an n8n call fails
+    because a Google (or other) OAuth credential has not been finished
+    in the n8n UI. The `STOP:` prefix tells the model not to retry or
+    pivot — just relay this verbatim to the user.
+    """
+    base_hint = (
+        "A credential in this workflow has not been authorized yet. "
+        "The user must complete OAuth consent in the n8n UI: "
+        "http://localhost:5678/home/credentials — open the Google/OAuth "
+        "credential shown in the workflow, click 'Connect my account', "
+        "sign in, and re-run the workflow.\n\n"
+        "Do NOT retry this call. Do NOT call run_command, browser, or any "
+        "other tool to work around it. Tell the user the exact URL above "
+        "and stop."
+    )
+    return (
+        f"Error: STOP_OAUTH_CREDENTIAL: n8n {exc.method} {exc.path} -> "
+        f"{exc.status}: {exc.message or exc.body_text[:200]}. {base_hint}"
     )
 
 
 def _connection_error_msg(exc: Exception) -> str:
-    """Friendly message for n8n connection failures."""
+    """Readable error string for n8n failures, always prefixed `Error:`.
+
+    The `Error:` prefix is a stable marker the brain (and stuck_detector)
+    keys off to avoid retry loops. Every non-success path must go through
+    here so no tool ever returns a success-shaped string on failure.
+    """
+    # OAuth credential errors get a dedicated hard-stop message so the
+    # brain hands the consent URL to the user instead of looping tools.
+    if _is_oauth_credential_error(exc):
+        return _oauth_error_message(exc)
+
+    if isinstance(exc, N8nHTTPError):
+        hint = ""
+        if exc.status == 404:
+            hint = (
+                " Hint: the workflow/resource ID probably does not exist. "
+                "Do not retry with a different guessed ID — list workflows "
+                "with n8n_list_workflows and confirm the correct one."
+            )
+        elif exc.status == 400:
+            hint = (
+                " Hint: n8n rejected the payload. Read the message above "
+                "verbatim, fix exactly that field, and retry once — "
+                "do NOT rebuild the workflow from scratch."
+            )
+        elif exc.status == 409:
+            hint = " Hint: a workflow with that name may already exist."
+        elif 500 <= exc.status < 600:
+            hint = (
+                " Hint: this is an n8n server error, not your payload. "
+                "Tell the user — do not retry in a loop."
+            )
+        detail = exc.message or exc.body_text[:200] or f"status {exc.status}"
+        return (
+            f"Error: n8n {exc.method} {exc.path} -> {exc.status}: {detail}."
+            f"{hint}"
+        )
+
     exc_str = str(exc)
     exc_type = type(exc).__name__
     if "ConnectError" in exc_type or "Connection refused" in exc_str:
         return (
-            "Cannot reach n8n. Make sure it's running: "
-            "docker compose up -d n8n"
+            "Error: cannot reach n8n at http://lazyclaw-n8n:5678. "
+            "Check the docker sidecar is running: docker compose up -d n8n."
         )
-    if "RuntimeError" in exc_type:
-        return str(exc)
-    return f"n8n error: {exc}"
+    if "Timeout" in exc_type:
+        return (
+            f"Error: n8n request timed out ({exc}). "
+            "The server is slow or unreachable — do not retry in a loop."
+        )
+    if isinstance(exc, RuntimeError):
+        return f"Error: {exc}"
+    return f"Error: n8n call failed ({exc_type}): {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +547,74 @@ class N8nListWorkflowsSkill(BaseSkill):
 
 
 # ---------------------------------------------------------------------------
+# 2.5. n8n_list_templates — menu of built-in parameterized templates
+# ---------------------------------------------------------------------------
+
+class N8nListTemplatesSkill(BaseSkill):
+    """Return the menu of built-in n8n templates shipped with LazyClaw.
+
+    These are parameterized workflow builders (webhook_to_telegram,
+    keyword_research_to_sheet, etc.) that produce n8n JSON known to pass
+    n8n's POST validation. Brain should consult this menu BEFORE calling
+    n8n_create_workflow, so it can pick a known-good template by name
+    instead of hoping the keyword matcher guesses right.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_list_templates"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def description(self) -> str:
+        return (
+            "List LazyClaw's built-in n8n workflow templates. Zero network "
+            "calls. Call this BEFORE n8n_create_workflow to pick a known-"
+            "good starting point. If no template fits, fall back to "
+            "n8n_search_templates (community library) or describe the "
+            "workflow and n8n_create_workflow will LLM-generate it."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            from lazyclaw.skills.builtin.n8n_templates import TEMPLATES
+        except Exception as exc:
+            return f"Error: could not load template registry: {exc}"
+
+        if not TEMPLATES:
+            return "No built-in templates registered."
+
+        lines = ["== LazyClaw built-in n8n templates ==", ""]
+        for tmpl in TEMPLATES:
+            lines.append(f"- {tmpl['name']}")
+            desc = (tmpl.get("description") or "").strip()
+            if desc:
+                lines.append(f"    {desc}")
+        lines.append("")
+        lines.append(
+            "Use one by calling n8n_create_workflow with a description that "
+            "mentions the template's key keywords (e.g. 'keyword research "
+            "to google sheet', 'webhook to telegram'). LazyClaw will "
+            "match the template and build known-good n8n JSON."
+        )
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # 3. n8n_create_workflow
 # ---------------------------------------------------------------------------
 
@@ -445,7 +678,7 @@ class N8nCreateWorkflowSkill(BaseSkill):
             activate = params.get("activate", False)
 
             # 1. Try template matching
-            from lazyclaw.skills.builtin.n8n_templates import match_template
+            from lazyclaw.skills.builtin.n8n_templates import match_template, TEMPLATES
             template = match_template(description)
 
             workflow_json: dict
@@ -455,7 +688,16 @@ class N8nCreateWorkflowSkill(BaseSkill):
                     build_params["name"] = wf_name
                 workflow_json = template["build"](build_params)
                 source = f"template: {template['name']}"
+                logger.info(
+                    "n8n_create_workflow: matched template '%s' for description %r",
+                    template["name"], description[:80],
+                )
             else:
+                logger.info(
+                    "n8n_create_workflow: no template match for %r (of %d built-ins), "
+                    "falling back to LLM generation",
+                    description[:80], len(TEMPLATES),
+                )
                 # 2. Fall back to LLM generation
                 try:
                     from lazyclaw.skills.builtin.n8n_workflow_builder import generate_workflow_json
@@ -488,10 +730,20 @@ class N8nCreateWorkflowSkill(BaseSkill):
             if wf_name and "name" not in workflow_json:
                 workflow_json["name"] = wf_name
 
+            # n8n 1.x POST /workflows accepts ONLY these four top-level
+            # fields — same allowlist as the PUT path. Strips anything the
+            # LLM hallucinated (e.g. "active", "tags", "triggerCount").
+            create_body = {
+                "name": workflow_json.get("name") or wf_name or "Untitled",
+                "nodes": workflow_json.get("nodes") or [],
+                "connections": workflow_json.get("connections") or {},
+                "settings": workflow_json.get("settings") or {"executionOrder": "v1"},
+            }
+
             # Create via API
             result = await _n8n_request(
                 self._config, user_id, "POST", "/api/v1/workflows",
-                body=workflow_json, timeout=30.0,
+                body=create_body, timeout=30.0,
             )
 
             wf_id = result.get("id", "?")
@@ -829,8 +1081,12 @@ class N8nUpdateWorkflowSkill(BaseSkill):
 
     async def execute(self, user_id: str, params: dict) -> str:
         try:
-            wf_id = params["workflow_id"]
-            changes = params["workflow_json"]
+            wf_id = (params.get("workflow_id") or "").strip()
+            changes = params.get("workflow_json")
+            if not wf_id:
+                return "Error: workflow_id is required."
+            if not isinstance(changes, dict):
+                return "Error: workflow_json must be a JSON object."
 
             # Fetch current workflow first
             current = await _n8n_request(
@@ -838,14 +1094,31 @@ class N8nUpdateWorkflowSkill(BaseSkill):
             )
 
             # Merge changes into current (shallow merge; nodes/connections replace entirely)
-            merged = {**current, **changes}
-            # Remove all read-only fields that n8n rejects on PUT
-            for key in (
-                "id", "createdAt", "updatedAt", "versionId", "active",
-                "isArchived", "triggerCount", "meta", "tags",
-                "activeVersion", "shared", "usedCredentials",
-            ):
-                merged.pop(key, None)
+            full = {**current, **changes}
+            # n8n 1.x public API: PUT /workflows/{id} accepts ONLY these four
+            # top-level fields. Everything else triggers
+            # "request/body must NOT have additional properties".
+            # Allowlist is the robust approach — the blocklist we had before
+            # always missed whatever version-specific field n8n added next.
+            merged: dict = {
+                "name": full.get("name") or "Untitled",
+                "nodes": full.get("nodes") or [],
+                "connections": full.get("connections") or {},
+                "settings": full.get("settings") or {"executionOrder": "v1"},
+            }
+
+            # Validate shape locally before hitting the API so a malformed
+            # workflow_json gets a specific error instead of a bare 400.
+            try:
+                from lazyclaw.skills.builtin.n8n_workflow_builder import _validate_workflow
+                issues = _validate_workflow(merged)
+            except Exception:
+                issues = []
+            if issues:
+                return (
+                    f"Error: workflow JSON invalid (not sent to n8n): "
+                    f"{'; '.join(issues[:5])}. Fix the structure and retry once."
+                )
 
             result = await _n8n_request(
                 self._config, user_id, "PUT",
@@ -1607,15 +1880,20 @@ class N8nInstallTemplateSkill(BaseSkill):
         if not workflow:
             return f"Template {tpl_id} has no workflow payload."
 
-        for readonly_field in ("id", "active", "versionId", "createdAt", "updatedAt", "triggerCount", "tags"):
-            workflow.pop(readonly_field, None)
         if override_name:
             workflow["name"] = override_name
-        workflow.setdefault("settings", {"executionOrder": "v1"})
+        # Same allowlist as n8n_create_workflow — n8n 1.x POST /workflows
+        # only accepts these four top-level fields.
+        post_body = {
+            "name": workflow.get("name") or "Imported template",
+            "nodes": workflow.get("nodes") or [],
+            "connections": workflow.get("connections") or {},
+            "settings": workflow.get("settings") or {"executionOrder": "v1"},
+        }
 
         try:
             created = await _n8n_request(
-                self._config, user_id, "POST", "/api/v1/workflows", body=workflow,
+                self._config, user_id, "POST", "/api/v1/workflows", body=post_body,
             )
         except Exception as exc:
             return _connection_error_msg(exc)

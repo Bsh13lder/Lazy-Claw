@@ -84,7 +84,7 @@ export default function PlanModeToggle() {
           title="Session trust active — next plans auto-approve. Click to clear."
           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-cyan/40 bg-cyan/10 text-cyan text-[10px] font-medium hover:bg-cyan/20 disabled:opacity-60 transition-colors"
         >
-          30m ×
+          5m ×
         </button>
       )}
     </div>

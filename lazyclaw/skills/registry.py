@@ -323,10 +323,12 @@ class SkillRegistry:
             N8nTestWorkflowSkill, N8nSearchTemplatesSkill,
             N8nInstallTemplateSkill, N8nListWebhooksSkill,
             N8nGoogleOAuthSetupSkill, N8nGoogleServicesSetupSkill,
+            N8nListTemplatesSkill,
         )
 
         self.register(N8nStatusSkill(config=config))
         self.register(N8nListWorkflowsSkill(config=config))
+        self.register(N8nListTemplatesSkill(config=config))
         self.register(N8nCreateWorkflowSkill(config=config))
         self.register(N8nManageWorkflowSkill(config=config))
         self.register(N8nRunWorkflowSkill(config=config))

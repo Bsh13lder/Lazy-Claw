@@ -2202,6 +2202,26 @@ class Agent:
                     _tool_call_history.append(tc.name)
                     _tool_results.append(_result_str)
 
+                    # ── Hard stop: OAuth credential not authorized ────
+                    # n8n_management surfaces this with a STOP_OAUTH_CREDENTIAL
+                    # marker when a workflow call fails because the user
+                    # hasn't finished OAuth consent. Break the loop
+                    # immediately and hand the consent URL back.
+                    if "STOP_OAUTH_CREDENTIAL" in _result_str:
+                        logger.warning(
+                            "OAuth credential not authorized — "
+                            "hard-stopping agent loop for user %s", user_id,
+                        )
+                        await cb.on_event(AgentEvent(
+                            "done", "OAuth credential not authorized",
+                            {"reason": "oauth_pending"},
+                        ))
+                        # Strip the internal marker before returning to user.
+                        _user_msg = _result_str.replace(
+                            "Error: STOP_OAUTH_CREDENTIAL: ", "",
+                        )
+                        return _user_msg
+
                     # ── Browser action planner: evaluate result ────────
                     # Track plan progress after every browser call.
                     # REPLAN → inject fallback hint.

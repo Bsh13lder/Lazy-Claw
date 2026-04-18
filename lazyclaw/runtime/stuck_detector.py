@@ -161,6 +161,121 @@ def detect_repeated_errors(
     return None
 
 
+# ── Intent-group detection ─────────────────────────────────────────
+#
+# The tool_name counter resets when the agent pivots from `n8n_update_workflow`
+# to `run_command` (or `browser`) even though it's the SAME failing task —
+# the model is just using a generic escape hatch to flail around the real
+# problem. Group those together so the error streak keeps counting.
+#
+# "Intent group" = the set of skill name prefixes that belong to the same
+# target system. When a call in a group fails AND the next call is either
+# another call in the same group OR a generic fallback tool, count it as
+# part of the same failure streak.
+
+_INTENT_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("n8n_",),
+    ("email_",),
+    ("whatsapp_",),
+    ("instagram_",),
+    ("gmail_",),
+    ("google_",),
+)
+
+# Generic fallback tools the model reaches for when a domain-specific
+# skill fails. If a recent call in an intent group failed, these should
+# count toward the same streak.
+_GENERIC_FALLBACK_TOOLS: frozenset[str] = frozenset({
+    "run_command",
+    "browser",
+    "list_directory",
+    "read_file",
+    "write_file",
+    "web_search",
+})
+
+_MIN_INTENT_ERROR_STREAK = 3
+
+
+def _match_intent_group(tool_name: str) -> tuple[str, ...] | None:
+    for group in _INTENT_GROUPS:
+        if any(tool_name.startswith(p) for p in group):
+            return group
+    return None
+
+
+def detect_intent_flail(
+    history: list[str],
+    results: list[str],
+) -> StuckSignal | None:
+    """Catch pivots-after-failure where the agent switches tools to dodge a wall.
+
+    Example sequence that triggers this:
+      n8n_update_workflow → Error
+      n8n_update_workflow → Error      (counted by repeated_error already)
+      run_command         → (any)      ← previously reset the streak
+      run_command         → (any)      ← still counts toward same intent
+
+    If the last N calls contain ≥2 errors in one intent group AND the
+    most recent calls are generic fallbacks or more group failures,
+    flag it as a stuck flail.
+    """
+    if len(history) < _MIN_INTENT_ERROR_STREAK or len(results) < _MIN_INTENT_ERROR_STREAK:
+        return None
+
+    window = min(len(history), 6)
+    recent_tools = history[-window:]
+    recent_results = results[-window:] if len(results) >= window else results[:]
+
+    # Find a failing intent group in the window.
+    failing_group: tuple[str, ...] | None = None
+    group_error_count = 0
+    for tool, res in zip(recent_tools, recent_results):
+        group = _match_intent_group(tool)
+        if group is None:
+            continue
+        if res.startswith(_ERROR_PREFIX):
+            if failing_group is None or failing_group == group:
+                failing_group = group
+                group_error_count += 1
+
+    if failing_group is None or group_error_count < 2:
+        return None
+
+    # The last tool must be either another call in the same group, or
+    # one of the generic fallback tools — that's the "flail" signal.
+    last_tool = recent_tools[-1]
+    same_group = _match_intent_group(last_tool) == failing_group
+    is_fallback = last_tool in _GENERIC_FALLBACK_TOOLS
+    if not (same_group or is_fallback):
+        return None
+
+    # Count fallback calls since the last same-group failure — if there
+    # are ≥2, it's the flail pattern we want to catch.
+    fallback_since_fail = 0
+    for tool in reversed(recent_tools):
+        group = _match_intent_group(tool)
+        if group == failing_group:
+            break
+        if tool in _GENERIC_FALLBACK_TOOLS:
+            fallback_since_fail += 1
+
+    if not same_group and fallback_since_fail < 2:
+        return None
+
+    prefix = failing_group[0].rstrip("_")
+    return StuckSignal(
+        reason="intent_flail",
+        tool_name=last_tool,
+        context=(
+            f"'{prefix}_*' failed {group_error_count}× in this turn — "
+            f"agent pivoted to '{last_tool}' which is not a real fix. "
+            "Stop and tell the user what's broken."
+        ),
+        needs_browser=False,
+    )
+
+
 # ── Same-result detection ──────────────────────────────────────────
 
 _SAME_RESULT_THRESHOLD = 3
@@ -348,6 +463,12 @@ def detect_stuck(
 
     # Repeated errors
     signal = detect_repeated_errors(tool_history, tool_results)
+    if signal:
+        return signal
+
+    # Intent flail — catches the "n8n failed → pivot to run_command / browser"
+    # pattern where the plain repeated-error counter resets on tool-name change.
+    signal = detect_intent_flail(tool_history, tool_results)
     if signal:
         return signal
 

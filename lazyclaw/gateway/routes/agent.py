@@ -82,7 +82,7 @@ async def plan_approve(
 
     Payload:
       - reason (optional): free text
-      - auto_approve_session (optional, bool): trust the agent for 30 min
+      - auto_approve_session (optional, bool): trust the agent for 5 min
     """
     payload = payload or {}
     reason = payload.get("reason")

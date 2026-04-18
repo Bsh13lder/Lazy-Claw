@@ -669,7 +669,7 @@ class _TelegramCallback:
                 ],
                 [
                     InlineKeyboardButton(
-                        "\u26a1 Approve & trust 30min",
+                        "\u26a1 Approve & trust 5min",
                         callback_data="plan:approve_trust",
                     ),
                 ],
@@ -707,7 +707,7 @@ class _TelegramCallback:
 
         elif kind == "plan_approved":
             try:
-                note = "\u26a1 Auto-approving next plans for 30min" if (
+                note = "\u26a1 Auto-approving next plans for 5min" if (
                     event.metadata.get("auto_approve_session")
                 ) else "\u25b6\ufe0f Running the plan..."
                 await _telegram_send_with_retry(
@@ -902,7 +902,7 @@ class TelegramAdapter(ChannelAdapter):
             )
             await query.edit_message_text(
                 query.message.text_markdown +
-                ("\n\n\u26a1 _Approved + trusting for 30min_"
+                ("\n\n\u26a1 _Approved + trusting for 5min_"
                  if released else "\n\n(no plan pending)"),
                 parse_mode="Markdown",
             )

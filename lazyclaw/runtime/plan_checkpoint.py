@@ -12,7 +12,7 @@ Flow:
 Three auto-approve levels:
   * **Per-turn phrase bypass** — handled upstream (agent checks message for
     "just do it" / "go ahead" / "hecho" before calling this module).
-  * **Session auto-approve** — `set_session_auto_approve(user_id, ttl=1800)`
+  * **Session auto-approve** — `set_session_auto_approve(user_id, ttl=300)`
     auto-approves every plan for N seconds without blocking.
   * **Global `auto_plan=False`** — user setting skips plan mode entirely
     (also handled upstream).
@@ -80,8 +80,13 @@ def is_session_auto_approved(user_id: str) -> bool:
     return True
 
 
-def set_session_auto_approve(user_id: str, ttl_seconds: int = 1800) -> None:
-    """Trust the agent for ttl_seconds — next plans auto-approve."""
+def set_session_auto_approve(user_id: str, ttl_seconds: int = 300) -> None:
+    """Trust the agent for ttl_seconds — next plans auto-approve.
+
+    Default shortened to 5 min (was 30). Longer windows let the agent
+    pivot into tool-loops silently when a task hits a wall; 5 min still
+    covers a normal multi-step task but forces a re-review for new asks.
+    """
     _auto_approve_until[user_id] = time.time() + ttl_seconds
     logger.info(
         "Plan auto-approve enabled for user %s for %ds", user_id, ttl_seconds,

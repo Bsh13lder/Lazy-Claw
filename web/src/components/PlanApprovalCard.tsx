@@ -158,9 +158,9 @@ function PlanCard({
                 onClick={() => handleApprove(true)}
                 disabled={busy}
                 className="px-3 py-1.5 rounded-md border border-accent/60 text-accent text-xs font-semibold hover:bg-accent/10 disabled:opacity-50 transition-colors"
-                title="Auto-approve all plans for the next 30 minutes"
+                title="Auto-approve all plans for the next 5 minutes"
               >
-                ⚡ Approve & trust 30min
+                ⚡ Approve & trust 5min
               </button>
               <button
                 onClick={() => setRejecting(true)}

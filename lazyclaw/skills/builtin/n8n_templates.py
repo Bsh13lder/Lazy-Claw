@@ -363,6 +363,170 @@ def _schedule_http_telegram(params: dict[str, Any]) -> dict:
     }
 
 
+def _keyword_research_to_sheet(params: dict[str, Any]) -> dict:
+    """Manual trigger -> Code (build keyword list) -> Google Sheets append.
+
+    This is the template the brain should reach for when the user asks
+    to "research keywords for X and put them in a sheet". Instead of
+    trying to orchestrate a Serper/SerpAPI call live, the template
+    bakes the researched keyword list into a Code node up front — so
+    running the workflow appends the rows the brain already vetted,
+    no external API credential needed.
+
+    Expected params:
+      name: workflow name
+      sheet_id: Google Sheets document ID (from the sheet URL)
+      sheet_name: tab name inside the sheet (default "Keywords")
+      rows: list of dicts, each with keys:
+        category, keyword, search_volume, difficulty, content_opportunity,
+        priority, status, notes, target_url
+
+    If `rows` is missing/empty, the template still validates and
+    produces a Code node that returns an empty list — the user can
+    fill it in n8n UI. This keeps the flow valid for POST even if
+    the brain hasn't finished the research yet.
+    """
+    import json as _json
+
+    rows_raw = params.get("rows") or []
+    safe_rows: list[dict] = []
+    if isinstance(rows_raw, list):
+        for row in rows_raw:
+            if isinstance(row, dict):
+                safe_rows.append({
+                    "Category": row.get("category", "") or "",
+                    "Keyword": row.get("keyword", "") or "",
+                    "Search Volume": row.get("search_volume", "") or "",
+                    "Difficulty": row.get("difficulty", "") or "",
+                    "Content Opportunity": row.get("content_opportunity", "") or "",
+                    "Priority": row.get("priority", "") or "",
+                    "Status": row.get("status", "pending") or "pending",
+                    "Notes": row.get("notes", "") or "",
+                    "Target URL": row.get("target_url", "") or "",
+                })
+
+    code_body = (
+        "// Keyword research rows prepared by LazyClaw.\n"
+        "// Edit this array in the n8n UI to update the keyword list.\n"
+        f"const rows = {_json.dumps(safe_rows, ensure_ascii=False, indent=2)};\n"
+        "return rows.map(r => ({ json: r }));\n"
+    )
+
+    return {
+        "name": params.get("name", "Keyword Research to Google Sheets"),
+        "nodes": [
+            {
+                "parameters": {},
+                "id": "manual-1",
+                "name": "Manual Trigger",
+                "type": "n8n-nodes-base.manualTrigger",
+                "typeVersion": 1,
+                "position": [250, 300],
+            },
+            {
+                "parameters": {
+                    "jsCode": code_body,
+                },
+                "id": "code-1",
+                "name": "Build Keyword Rows",
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [500, 300],
+            },
+            {
+                "parameters": {
+                    "operation": "append",
+                    "documentId": {"value": params.get("sheet_id", "")},
+                    "sheetName": {"value": params.get("sheet_name", "Keywords")},
+                    "columns": {"mappingMode": "autoMapInputData"},
+                },
+                "id": "sheets-1",
+                "name": "Google Sheets",
+                "type": "n8n-nodes-base.googleSheets",
+                "typeVersion": 4.5,
+                "position": [750, 300],
+                "credentials": {"googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"}},
+            },
+        ],
+        "connections": {
+            "Manual Trigger": {"main": [[{"node": "Build Keyword Rows", "type": "main", "index": 0}]]},
+            "Build Keyword Rows": {"main": [[{"node": "Google Sheets", "type": "main", "index": 0}]]},
+        },
+        "settings": {"executionOrder": "v1"},
+    }
+
+
+def _webhook_to_gmail_send(params: dict[str, Any]) -> dict:
+    """Webhook trigger -> Build MIME body -> HTTP POST to Gmail API (send).
+
+    Extracted from n8n-custom/workflows/lazyclaw-send-email.json so it's
+    callable the same way as other built-in templates. The user wires
+    up a Gmail OAuth2 credential in n8n once; the workflow reuses it.
+    """
+    return {
+        "name": params.get("name", "Webhook to Gmail Send"),
+        "nodes": [
+            {
+                "parameters": {"httpMethod": "POST", "path": params.get("webhook_path", "send-email")},
+                "id": "webhook-1",
+                "name": "Webhook",
+                "type": "n8n-nodes-base.webhook",
+                "typeVersion": 2,
+                "position": [250, 300],
+                "webhookId": "",
+            },
+            {
+                "parameters": {
+                    "jsCode": (
+                        "const body = $input.first().json.body || $input.first().json;\n"
+                        "const to = body.to || '';\n"
+                        "const subject = body.subject || '(no subject)';\n"
+                        "const text = body.text || body.message || '';\n"
+                        "const raw = [\n"
+                        "  `To: ${to}`,\n"
+                        "  `Subject: ${subject}`,\n"
+                        "  'Content-Type: text/plain; charset=UTF-8',\n"
+                        "  '',\n"
+                        "  text,\n"
+                        "].join('\\r\\n');\n"
+                        "const b64 = Buffer.from(raw).toString('base64')\n"
+                        "  .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');\n"
+                        "return [{ json: { raw: b64, to, subject } }];\n"
+                    ),
+                },
+                "id": "code-1",
+                "name": "Build MIME",
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [500, 300],
+            },
+            {
+                "parameters": {
+                    "method": "POST",
+                    "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                    "authentication": "genericCredentialType",
+                    "genericAuthType": "oAuth2Api",
+                    "sendBody": True,
+                    "specifyBody": "json",
+                    "jsonBody": "={{ { raw: $json.raw } }}",
+                    "options": {},
+                },
+                "id": "http-1",
+                "name": "Gmail Send",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [750, 300],
+                "credentials": {"oAuth2Api": {"id": "", "name": "Gmail OAuth2"}},
+            },
+        ],
+        "connections": {
+            "Webhook": {"main": [[{"node": "Build MIME", "type": "main", "index": 0}]]},
+            "Build MIME": {"main": [[{"node": "Gmail Send", "type": "main", "index": 0}]]},
+        },
+        "settings": {"executionOrder": "v1"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Template registry
 # ---------------------------------------------------------------------------
@@ -421,6 +585,35 @@ TEMPLATES: list[dict] = [
         "keywords": ["api check", "monitor api", "periodic", "health check", "status check"],
         "description": "Periodically call an API and send results to Telegram",
         "build": _schedule_http_telegram,
+    },
+    {
+        "name": "Keyword Research to Google Sheets",
+        "keywords": [
+            "keyword", "keywords", "keyword research", "research keywords",
+            "seo", "search terms", "keyword list", "palabras clave",
+            "keyword sheet", "sheets", "google sheets", "spreadsheet",
+        ],
+        "description": (
+            "Manual trigger that appends a researched keyword list "
+            "(category, keyword, volume, difficulty, priority, etc.) "
+            "into a Google Sheet. Pass `rows` as a list of dicts with the "
+            "keyword fields. Use this for SEO keyword planning."
+        ),
+        "build": _keyword_research_to_sheet,
+    },
+    {
+        "name": "Webhook to Gmail Send",
+        "keywords": [
+            "gmail", "send email", "send gmail", "gmail send", "webhook email",
+            "webhook gmail", "email notification", "mail send", "send mail",
+            "gmail api", "webhook to gmail", "webhook to email",
+        ],
+        "description": (
+            "Webhook POST → MIME builder → Gmail API send. Call the "
+            "webhook with JSON {to, subject, text} to send an email via "
+            "a Gmail OAuth2 credential."
+        ),
+        "build": _webhook_to_gmail_send,
     },
 ]
 

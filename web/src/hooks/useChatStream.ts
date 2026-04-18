@@ -57,6 +57,12 @@ export interface TemplateSuggest {
   createdAt: number;
 }
 
+export interface PendingPlanInfo {
+  plan: string;
+  steps: string[];
+  createdAt: number;
+}
+
 export interface StreamingState {
   isStreaming: boolean;
   streamContent: string;
@@ -66,6 +72,8 @@ export interface StreamingState {
   startedAt?: number;   // turn start timestamp for elapsed display
   browserSession?: BrowserSession;
   templateSuggest?: TemplateSuggest;
+  pendingPlan?: PendingPlanInfo;
+  planAutoApproveSession?: boolean;
 }
 
 interface OnCompletePayload {
@@ -101,6 +109,7 @@ interface UseChatStreamReturn {
   cancelGeneration: () => void;
   dismissBrowserSession: () => void;
   dismissTemplateSuggest: () => void;
+  clearPendingPlan: () => void;
   streamingState: StreamingState;
   connectionStatus: ConnectionStatus;
 }
@@ -131,6 +140,8 @@ export function useChatStream({
   const browserSessionRef = useRef<BrowserSession | undefined>(undefined);
   const browserClearTimerRef = useRef<number>(0);
   const templateSuggestRef = useRef<TemplateSuggest | undefined>(undefined);
+  const pendingPlanRef = useRef<PendingPlanInfo | undefined>(undefined);
+  const planAutoApproveSessionRef = useRef<boolean>(false);
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
   const onBackgroundCompleteRef = useRef(onBackgroundComplete);
@@ -143,7 +154,10 @@ export function useChatStream({
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;
     const tools = [...toolsRef.current];
-    const isStreaming = !!startedAtRef.current || !!browserSessionRef.current?.active;
+    const isStreaming =
+      !!startedAtRef.current ||
+      !!browserSessionRef.current?.active ||
+      !!pendingPlanRef.current;
     setStreamingState({
       isStreaming,
       streamContent: content,
@@ -153,6 +167,8 @@ export function useChatStream({
       startedAt: startedAtRef.current || undefined,
       browserSession: browserSessionRef.current,
       templateSuggest: templateSuggestRef.current,
+      pendingPlan: pendingPlanRef.current,
+      planAutoApproveSession: planAutoApproveSessionRef.current,
     });
     rafRef.current = 0;
   }, []);
@@ -198,6 +214,11 @@ export function useChatStream({
 
   const dismissTemplateSuggest = useCallback(() => {
     templateSuggestRef.current = undefined;
+    scheduleFlush();
+  }, [scheduleFlush]);
+
+  const clearPendingPlan = useCallback(() => {
+    pendingPlanRef.current = undefined;
     scheduleFlush();
   }, [scheduleFlush]);
 
@@ -295,6 +316,23 @@ export function useChatStream({
         case "side_note_ack": {
           const note = msg.message as string;
           sideNotesRef.current = [...sideNotesRef.current, note];
+          scheduleFlush();
+          break;
+        }
+
+        case "plan_pending": {
+          pendingPlanRef.current = {
+            plan: (msg.plan as string) ?? "",
+            steps: (msg.steps as string[]) ?? [],
+            createdAt: Date.now(),
+          };
+          scheduleFlush();
+          break;
+        }
+
+        case "plan_approved": {
+          pendingPlanRef.current = undefined;
+          planAutoApproveSessionRef.current = !!msg.auto_approve_session;
           scheduleFlush();
           break;
         }
@@ -489,6 +527,7 @@ export function useChatStream({
     cancelGeneration,
     dismissBrowserSession,
     dismissTemplateSuggest,
+    clearPendingPlan,
     streamingState,
     connectionStatus,
   };

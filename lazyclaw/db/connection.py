@@ -46,6 +46,14 @@ async def init_db(config: Config) -> None:
             ("background_tasks", "cost_usd", "ALTER TABLE background_tasks ADD COLUMN cost_usd REAL DEFAULT 0.0"),
             ("background_tasks", "tokens_used", "ALTER TABLE background_tasks ADD COLUMN tokens_used INTEGER DEFAULT 0"),
             ("background_tasks", "llm_calls", "ALTER TABLE background_tasks ADD COLUMN llm_calls INTEGER DEFAULT 0"),
+            # Task execution tracking — saved-but-unexecuted gap fix
+            ("tasks", "last_error", "ALTER TABLE tasks ADD COLUMN last_error TEXT"),
+            ("tasks", "attempt_count", "ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"),
+            ("tasks", "last_attempted_at", "ALTER TABLE tasks ADD COLUMN last_attempted_at TEXT"),
+            ("tasks", "trace_session_id", "ALTER TABLE tasks ADD COLUMN trace_session_id TEXT"),
+            ("tasks", "lazybrain_note_id", "ALTER TABLE tasks ADD COLUMN lazybrain_note_id TEXT"),
+            # Plan Mode — per-user toggle for Claude-Code-style approval gate.
+            ("users", "auto_plan", "ALTER TABLE users ADD COLUMN auto_plan INTEGER NOT NULL DEFAULT 1"),
         ]
         for table, column, sql in migrations:
             try:

@@ -331,6 +331,51 @@ export const rejectCheckpoint = (name: string, reason?: string) =>
     body: JSON.stringify({ name, reason }),
   });
 
+// ── Plan-Mode approval gate (Claude-Code-style) ──────────────────────────
+
+export interface PendingPlan {
+  plan: string;
+  steps: string[];
+  created_at: number;
+}
+
+export const getPendingPlan = () =>
+  request<{ pending: PendingPlan | null; auto_approve_session: boolean }>(
+    "/api/agent/plan",
+  );
+
+export const approvePlan = (opts?: {
+  reason?: string;
+  auto_approve_session?: boolean;
+}) =>
+  request<{ status: string; auto_approve_session: boolean }>(
+    "/api/agent/plan/approve",
+    { method: "POST", body: JSON.stringify(opts ?? {}) },
+  );
+
+export const rejectPlan = (reason?: string) =>
+  request<{ status: string; reason: string }>("/api/agent/plan/reject", {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+
+export interface PlanSettings {
+  auto_plan: boolean;
+  session_auto_approve: boolean;
+}
+
+export const getPlanSettings = () =>
+  request<PlanSettings>("/api/agent/plan/settings");
+
+export const setPlanSettings = (opts: {
+  auto_plan?: boolean;
+  clear_session_trust?: boolean;
+}) =>
+  request<PlanSettings>("/api/agent/plan/settings", {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+
 // ── Browser Templates ─────────────────────────────────────────────────────
 
 export interface BrowserTemplateDraft {
@@ -512,6 +557,48 @@ export const setVaultKey = (key: string, value: string) =>
 
 export const deleteVaultKey = (key: string) =>
   request<{ status: string }>(`/api/vault/${encodeURIComponent(key)}`, { method: "DELETE" });
+
+// ── General settings + System about ────────────────────────────────────────
+
+export interface GeneralSettings {
+  search_provider: "serper" | "serpapi" | "duckduckgo" | "auto";
+  show_cost_badges: boolean;
+}
+
+export interface SearchQuota {
+  serper_used: number;
+  serper_limit: number;
+  serpapi_used: number;
+  serpapi_limit: number;
+  reset_month: string;
+}
+
+export interface AboutInfo {
+  version: string;
+  started_at: number;
+  uptime_seconds: number;
+  python_version: string;
+  platform: string;
+  db_path: string;
+  eco_mode: string;
+  search_provider: string;
+  search_quota: SearchQuota;
+  free_providers: string[];
+  telegram_configured: boolean;
+  mcp_server_count: number;
+}
+
+export const getGeneralSettings = () =>
+  request<{ success: boolean; data: GeneralSettings }>("/api/settings/general").then((r) => r.data);
+
+export const updateGeneralSettings = (updates: Partial<GeneralSettings>) =>
+  request<{ success: boolean; data: GeneralSettings }>("/api/settings/general", {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  }).then((r) => r.data);
+
+export const getAboutInfo = () =>
+  request<{ success: boolean; data: AboutInfo }>("/api/system/about").then((r) => r.data);
 
 // ── ECO ────────────────────────────────────────────────────────────────────
 
@@ -1026,3 +1113,129 @@ export const listLazyBrainJournal = (limit = 14) =>
 
 export const listLazyBrainTags = () =>
   request<{ tags: LazyBrainTag[] }>("/api/lazybrain/tags").then((r) => r.tags);
+
+// ── LazyBrain Phase 2 — AI-native endpoints ─────────────────────────────
+
+export interface AutolinkSuggestion {
+  text: string;
+  page: string;
+}
+export interface AutolinkResponse {
+  suggestions: AutolinkSuggestion[];
+  source: "llm" | "substring" | "none";
+}
+export interface MetadataSuggestion {
+  title: string;
+  tags: string[];
+  source: "llm" | "none";
+}
+export interface SemanticResult extends LazyBrainNote {
+  _score?: number;
+}
+export interface SemanticSearchResponse {
+  query: string;
+  results: SemanticResult[];
+  source: "semantic" | "substring" | "empty";
+}
+export interface AskResponse {
+  question: string;
+  answer: string;
+  sources: string[];
+  source_count: number;
+  retrieval_source?: string;
+}
+export interface TopicRollupResponse {
+  topic: string;
+  rollup: string;
+  sources: string[];
+  source_count: number;
+  error?: string;
+}
+export interface MorningBriefingResponse {
+  status: "appended" | "skipped" | "error";
+  date: string;
+  note_id?: string;
+  reason?: string;
+}
+
+export const suggestLazyBrainLinks = (text: string, useLlm = true) =>
+  request<AutolinkResponse>("/api/lazybrain/autolink", {
+    method: "POST",
+    body: JSON.stringify({ text, use_llm: useLlm }),
+  });
+
+export const suggestLazyBrainMetadata = (content: string) =>
+  request<MetadataSuggestion>("/api/lazybrain/suggest-metadata", {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+
+export const semanticSearchLazyBrain = (query: string, k = 10) =>
+  request<SemanticSearchResponse>("/api/lazybrain/semantic-search", {
+    method: "POST",
+    body: JSON.stringify({ query, k }),
+  });
+
+export const askLazyBrain = (question: string, k = 8) =>
+  request<AskResponse>("/api/lazybrain/ask", {
+    method: "POST",
+    body: JSON.stringify({ question, k }),
+  });
+
+export const topicRollupLazyBrain = (topic: string) =>
+  request<TopicRollupResponse>("/api/lazybrain/topic-rollup", {
+    method: "POST",
+    body: JSON.stringify({ topic }),
+  });
+
+export const morningBriefingLazyBrain = (force = false) =>
+  request<MorningBriefingResponse>("/api/lazybrain/morning-briefing", {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+
+export const reindexLazyBrainEmbeddings = () =>
+  request<{ total: number; indexed: number; skipped: number; model: string }>(
+    "/api/lazybrain/reindex-embeddings",
+    { method: "POST" },
+  );
+
+// ── LazyBrain Phase 3 — canvas boards ───────────────────────────────────
+
+export interface CanvasBoardMeta {
+  id: string;
+  name: string;
+  created_at?: string;
+  updated_at: string;
+}
+export interface CanvasBoard extends CanvasBoardMeta {
+  payload: {
+    nodes: unknown[];
+    edges: unknown[];
+    viewport?: { x: number; y: number; zoom: number };
+  };
+}
+
+export const listLazyBrainCanvases = () =>
+  request<{ boards: CanvasBoardMeta[] }>("/api/lazybrain/canvas").then(
+    (r) => r.boards,
+  );
+
+export const getLazyBrainCanvas = (id: string) =>
+  request<CanvasBoard>(`/api/lazybrain/canvas/${encodeURIComponent(id)}`);
+
+export const saveLazyBrainCanvas = (body: {
+  id?: string | null;
+  name: string;
+  payload: CanvasBoard["payload"];
+}) =>
+  request<CanvasBoardMeta>("/api/lazybrain/canvas", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const deleteLazyBrainCanvas = (id: string) =>
+  request<{ status: string; id: string }>(
+    `/api/lazybrain/canvas/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );

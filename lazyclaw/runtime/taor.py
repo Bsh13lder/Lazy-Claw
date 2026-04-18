@@ -46,6 +46,20 @@ _GREETING_PREFIX = re.compile(
     re.IGNORECASE,
 )
 
+# Per-turn bypass phrases — user wants the agent to skip plan mode for this
+# one message. English, Spanish, Georgian (Latin), and colloquial variants.
+_PLAN_BYPASS = re.compile(
+    r"\b(just\s+do\s+it|go\s+ahead|don'?t\s+ask|skip\s+plan|"
+    r"no\s+plan|do\s+it\s+now|hazlo(\s+ya)?|adelante|ejecuta(lo)?(\s+ya)?|"
+    r"sin\s+plan|gaaketeb|gaakete|ra\s+izi|dzala|auto|yolo)\b",
+    re.IGNORECASE,
+)
+
+
+def has_plan_bypass_phrase(message: str) -> bool:
+    """True when the user told us to skip plan mode for this turn."""
+    return bool(_PLAN_BYPASS.search(message or ""))
+
 
 def detect_effort(message: str, has_tools: bool = True) -> EffortLevel:
     """Infer the appropriate effort level for a message.
@@ -163,6 +177,56 @@ def make_plan_prompt(
     )
 
 
+def make_user_facing_plan_prompt(message: str, tool_names: list[str]) -> str:
+    """Prompt that asks the LLM to produce a short, human-readable plan.
+
+    This is shown to the USER (not just the LLM's own scratchpad) before
+    any tool call. The LLM must NOT invoke tools in this response — it
+    only drafts the plan. The user then approves or rejects.
+    """
+    tools_hint = ", ".join(tool_names[:20]) if tool_names else "(none available)"
+    return (
+        "You are producing a PLAN for the user to review. Do NOT call any "
+        "tools in this response — only write the plan as plain markdown.\n\n"
+        f"User request:\n{message}\n\n"
+        f"Available tools (pick the ones you actually need):\n{tools_hint}\n\n"
+        "Format exactly like this, nothing else:\n\n"
+        "**Plan**\n"
+        "1. <short step, name the tool you'll use>\n"
+        "2. <short step>\n"
+        "3. <short step>\n"
+        "(up to 6 steps; stop when done)\n\n"
+        "Rules:\n"
+        "- Be concrete. Each step says WHAT you'll do and WHICH tool.\n"
+        "- If the task is trivial (one tool call, pure read), just say: "
+        "\"Plan: single call to <tool>\" and stop.\n"
+        "- If you lack info from the user, say what you need at the end.\n"
+        "- Do NOT output XML, do NOT call tools, do NOT ask 'shall I proceed'."
+    )
+
+
+def parse_plan_steps(plan_text: str) -> list[str]:
+    """Extract numbered step lines from a plan text response.
+
+    Returns a list of step descriptions (without the leading digit).
+    Best-effort — handles `1. x`, `1) x`, `- x`, `* x`, etc.
+    """
+    if not plan_text:
+        return []
+    steps: list[str] = []
+    for raw_line in plan_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(?:\d+[\.\)]|\-|\*)\s+(.+)$", line)
+        if m:
+            step = m.group(1).strip()
+            # Skip the header row that happens to match (e.g. bolded "**Plan**")
+            if step and not step.lower().startswith("plan"):
+                steps.append(step)
+    return steps
+
+
 def verify_response(
     original_message: str,
     final_response: str,
@@ -191,6 +255,30 @@ def verify_response(
         return False, "Empty response — agent produced no output."
 
     lower = final_response.lower()
+
+    # ── Strong signal: result_verifier stamped a `→ FAILED:` marker on a
+    # tool result. If the assistant still claimed success with words like
+    # "done" / "created" / "ran", it's hallucinating. Run at any effort.
+    _FAILED_MARKER = "→ FAILED:"
+    _success_claim = re.compile(
+        r"\b(done|completed?|sent|created|ran successfully|succeeded|"
+        r"executed successfully|finished)\b",
+        re.IGNORECASE,
+    )
+    _ack_failure = re.compile(
+        r"\b(error|failed|fail|couldn'?t|cannot|unable|refused|"
+        r"timed?\s*out|denied|missing)\b",
+        re.IGNORECASE,
+    )
+    failed_results = [r for r in tool_results if _FAILED_MARKER in r]
+    if failed_results and _success_claim.search(final_response) and not _ack_failure.search(final_response):
+        reason_preview = failed_results[-1]
+        idx = reason_preview.find(_FAILED_MARKER)
+        snippet = reason_preview[idx:idx + 120].replace("\n", " ")
+        return False, (
+            f"Claimed success but a tool reported failure: {snippet}. "
+            f"Acknowledge the failure or use fail_task() to record it."
+        )
 
     # For HIGH/MAX: check if tool errors went unacknowledged in the response.
     if effort in (EffortLevel.HIGH, EffortLevel.MAX) and tool_results:

@@ -6,6 +6,7 @@ import ConnectionStatus from "./ConnectionStatus";
 import ThinkingCard from "./ThinkingCard";
 import BrowserCanvas from "./BrowserCanvas";
 import TemplateSuggestBanner from "./TemplateSuggestBanner";
+import PlanApprovalCard from "./PlanApprovalCard";
 
 export default function ChatSidebar() {
   const {
@@ -16,6 +17,7 @@ export default function ChatSidebar() {
     cancelGeneration,
     dismissBrowserSession,
     dismissTemplateSuggest,
+    clearPendingPlan,
     chatOpen,
     chatExpanded,
     toggleChat,
@@ -170,7 +172,14 @@ export default function ChatSidebar() {
               />
             ))}
 
-            {isStreaming && (
+            {streamingState.pendingPlan && (
+              <PlanApprovalCard
+                plan={streamingState.pendingPlan}
+                onResolved={clearPendingPlan}
+              />
+            )}
+
+            {isStreaming && !streamingState.pendingPlan && (
               <>
                 <ThinkingCard
                   phase={streamingState.currentPhase}

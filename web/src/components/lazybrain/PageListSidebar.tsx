@@ -42,7 +42,7 @@ interface Props {
   onOpenGraph: () => void;
   onSearchFocus: () => void;
   noteCount: number;
-  viewMode: "notes" | "graph";
+  viewMode: "notes" | "graph" | "canvas";
   hasMore?: boolean;
   onLoadMore?: () => void;
   searchQuery?: string;

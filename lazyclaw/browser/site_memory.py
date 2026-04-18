@@ -75,18 +75,43 @@ async def remember(
             )
             await db.commit()
             logger.info("Updated site memory %s for %s", existing_id, domain)
-            return existing_id
+            memory_id = existing_id
+        else:
+            await db.execute(
+                "INSERT INTO site_memory (id, user_id, domain, memory_type, title, content, "
+                "success_count, fail_count, last_used) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, 0, datetime('now'))",
+                (memory_id, user_id, domain, memory_type, enc_title, enc_content),
+            )
+            await db.commit()
+            logger.info("Saved site memory %s for %s (%s)", memory_id, domain, memory_type)
 
-        await db.execute(
-            "INSERT INTO site_memory (id, user_id, domain, memory_type, title, content, "
-            "success_count, fail_count, last_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, 1, 0, datetime('now'))",
-            (memory_id, user_id, domain, memory_type, enc_title, enc_content),
-        )
-        await db.commit()
-        logger.info("Saved site memory %s for %s (%s)", memory_id, domain, memory_type)
+    # Mirror into LazyBrain (agent knowledge) on BOTH insert and update —
+    # otherwise repeated captures of the same site knowledge silently skip
+    # the PKM and the user never sees anything under "Site knowledge".
+    # Fire-and-forget — a PKM failure must not break site memory writes.
+    await _mirror_site_memory_note(
+        config, user_id, domain, memory_type, title, content,
+    )
 
-    # Mirror into LazyBrain (agent knowledge). Fire-and-forget.
+    return memory_id
+
+
+async def _mirror_site_memory_note(
+    config: Config,
+    user_id: str,
+    domain: str,
+    memory_type: str,
+    title: str,
+    content: dict,
+) -> None:
+    """Create or update the LazyBrain mirror note for a site_memory row.
+
+    Uses ``find_by_title`` to avoid creating a new note every time the user
+    refreshes the same piece of site knowledge. If a note with the same
+    title already exists for this user, we update its content in place;
+    otherwise we create a fresh one. Silent on failure.
+    """
     try:
         from lazyclaw.lazybrain import events as lb_events
         from lazyclaw.lazybrain import store as lb_store
@@ -96,24 +121,35 @@ async def remember(
             f"Domain: `{domain}` — type `{memory_type}`\n\n"
             f"```json\n{json.dumps(content, indent=2)[:1500]}\n```"
         )
+        note_title = f"Site: {domain} — {title[:40]}"
+        tags = [
+            "site-memory", "auto", "owner/agent",
+            f"site/{domain}", f"kind/{memory_type}",
+        ]
+
+        existing = await lb_store.find_by_title(config, user_id, note_title)
+        if existing:
+            updated = await lb_store.update_note(
+                config, user_id, existing["id"],
+                content=body, tags=tags,
+            )
+            if updated:
+                lb_events.publish_note_saved(
+                    user_id, updated["id"], updated.get("title"),
+                    updated.get("tags"), source="site-memory",
+                )
+            return
+
         note = await lb_store.save_note(
-            config,
-            user_id,
-            content=body,
-            title=f"Site: {domain} — {title[:40]}",
-            tags=[
-                "site-memory", "auto", "owner/agent",
-                f"site/{domain}", f"kind/{memory_type}",
-            ],
-            importance=5,
+            config, user_id,
+            content=body, title=note_title, tags=tags, importance=5,
         )
         lb_events.publish_note_saved(
-            user_id, note["id"], note["title"], note["tags"], source="site-memory",
+            user_id, note["id"], note["title"], note["tags"],
+            source="site-memory",
         )
     except Exception:
         logger.debug("lazybrain site_memory mirror failed", exc_info=True)
-
-    return memory_id
 
 
 async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]]:

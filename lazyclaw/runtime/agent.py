@@ -170,6 +170,11 @@ _N8N_TOOL_NAMES = frozenset({
     "n8n_manage_workflow", "n8n_run_workflow", "n8n_list_executions",
     "n8n_get_workflow", "n8n_update_workflow",
     "n8n_list_credentials", "n8n_get_execution",
+    "n8n_create_credential", "n8n_delete_credential",
+    "n8n_google_sheets_setup", "n8n_google_oauth_setup",
+    "n8n_google_services_setup",
+    "n8n_test_workflow", "n8n_search_templates",
+    "n8n_install_template", "n8n_list_webhooks",
 })
 
 # Channel name → bundled MCP server name (for on-demand connect)
@@ -462,6 +467,34 @@ async def _extract_and_store_lesson(
         logger.debug("Lesson extraction background task failed: %s", e)
 
 
+class _PlanRejected(Exception):
+    """Raised when the user rejects a plan at the approval gate."""
+
+    def __init__(self, reason: str | None) -> None:
+        self.reason = reason
+        super().__init__(reason or "plan rejected")
+
+
+async def _load_auto_plan_setting(user_id: str) -> bool:
+    """Read the user's auto_plan toggle. Default True (plan mode ON)."""
+    try:
+        from lazyclaw.config import load_config
+        from lazyclaw.db.connection import db_session
+        config = load_config()
+        async with db_session(config) as conn:
+            cur = await conn.execute(
+                "SELECT auto_plan FROM users WHERE id = ?", (user_id,),
+            )
+            row = await cur.fetchone()
+            if row is None or row[0] is None:
+                return True
+            # SQLite stores booleans as 0/1.
+            return bool(row[0])
+    except Exception:
+        # Missing column on older DBs — default to ON.
+        return True
+
+
 class Agent:
     def __init__(
         self,
@@ -488,6 +521,89 @@ class Agent:
         )
         self._task_runner = task_runner
         self._team_lead = team_lead
+
+    async def _run_plan_gate(
+        self,
+        *,
+        user_id: str,
+        message: str,
+        messages_so_far: list,
+        cb,
+        cancel_token,
+    ) -> str:
+        """Generate a user-facing plan, show it, block until approval.
+
+        Returns the plan text (already approved). Raises `_PlanRejected`
+        if the user rejects or times out.
+        """
+        from lazyclaw.runtime import plan_checkpoint
+        from lazyclaw.runtime.taor import (
+            make_user_facing_plan_prompt, parse_plan_steps,
+        )
+        # ROLE_BRAIN already imported at module top (line 12). Reuse it.
+
+        # Build a cheap plan-only LLM call (no tools). We reuse the same
+        # message history for context but append a plan-only instruction.
+        tool_names: list[str] = []
+        if self.registry is not None:
+            try:
+                tool_names = [
+                    t.get("function", {}).get("name", "")
+                    for t in self.registry.list_tools()
+                ]
+                tool_names = [n for n in tool_names if n][:40]
+            except Exception:
+                tool_names = []
+
+        plan_instruction = make_user_facing_plan_prompt(message, tool_names)
+        # LLMMessage is imported at the top of this module.
+        plan_messages = list(messages_so_far) + [
+            LLMMessage(role="system", content=plan_instruction),
+        ]
+
+        logger.info("Plan gate: requesting plan text from brain")
+        plan_resp = await self.eco_router.chat(
+            plan_messages, user_id=user_id, role=ROLE_BRAIN,
+        )
+        plan_text = (plan_resp.content or "").strip()
+        if not plan_text:
+            logger.warning("Plan gate: empty plan — skipping approval")
+            return "(empty plan — auto-continuing)"
+
+        steps = parse_plan_steps(plan_text)
+
+        # Stream the plan to the user via the normal chat channel too,
+        # so Telegram / CLI users see it even without a plan card.
+        await cb.on_event(AgentEvent(
+            "plan_pending", plan_text,
+            {"steps": steps, "plan": plan_text},
+        ))
+
+        logger.info(
+            "Plan gate: showing %d-step plan to user %s", len(steps), user_id,
+        )
+
+        if cancel_token.is_cancelled:
+            raise _PlanRejected("cancelled before approval")
+
+        decision = await plan_checkpoint.request_plan_approval(
+            user_id=user_id,
+            plan_text=plan_text,
+            steps=steps,
+        )
+
+        if not decision.approved:
+            raise _PlanRejected(decision.reason)
+
+        await cb.on_event(AgentEvent(
+            "plan_approved", "Plan approved",
+            {"auto_approve_session": decision.auto_approve_session},
+        ))
+        logger.info(
+            "Plan gate: approved (auto_approve_session=%s)",
+            decision.auto_approve_session,
+        )
+        return plan_text
 
     async def process_message(
         self,
@@ -953,15 +1069,13 @@ class Agent:
                 }
                 logger.info("Channel-focused: trimmed base tools to %d", len(_base_names))
 
-            # Browser only when user explicitly asks (keyword match)
+            # Browser only when user explicitly asks (keyword match).
+            # No re-injection from history — if the user has moved on, the LLM
+            # should not reach for the browser on its own.
             _wants_browser = any(kw in _msg_lower for kw in _BROWSER_KEYWORDS)
             _wants_visible = any(kw in _msg_lower for kw in (
                 "visible", "show me", "show it", "let me see", "make visible",
             ))
-            # Re-inject browser if recent history used it (follow-up context)
-            if not _wants_browser and "browser" in _history_tool_names:
-                _wants_browser = True
-                logger.info("Browser re-injected from recent history context")
             # Browser suppressed ONLY when channel MCP tools handle the request
             # (WhatsApp/Instagram/Email have dedicated MCP tools — no browser needed).
             # Task and survival tools should NEVER suppress browser — user can
@@ -1083,6 +1197,8 @@ class Agent:
         # Pure functions imported here to keep top-level imports clean.
         from lazyclaw.runtime.taor import (
             detect_effort, make_plan_prompt, verify_response, EffortLevel,
+            make_user_facing_plan_prompt, parse_plan_steps,
+            has_plan_bypass_phrase,
         )
         _effort = detect_effort(message, has_tools=needs_tools)
         # Number of verify+correction passes after the execute phase.
@@ -1095,6 +1211,41 @@ class Agent:
         }[_effort]
         _taor_retry_context: str | None = None  # Set on verify failure for replan
         logger.info("TAOR: effort=%s verify_passes=%d", _effort, _taor_verify_passes)
+
+        # ── Plan-Mode approval gate (Claude-Code-style) ────────────────────
+        # For MEDIUM+ tasks, show the user the plan and block on approval
+        # before any tool calls. Three bypasses:
+        #   (a) per-user auto_plan setting disabled → skip entirely
+        #   (b) per-turn phrase ("just do it", "go ahead", etc.) → skip
+        #   (c) session-level trust via plan_checkpoint → auto-approve
+        _plan_mode_used: bool = False
+        _plan_text_approved: str | None = None
+        _auto_plan_enabled = await _load_auto_plan_setting(user_id)
+        _bypassed_by_phrase = has_plan_bypass_phrase(message)
+        if (
+            _effort != EffortLevel.LOW
+            and needs_tools
+            and _auto_plan_enabled
+            and not _bypassed_by_phrase
+        ):
+            try:
+                _plan_text_approved = await self._run_plan_gate(
+                    user_id=user_id,
+                    message=message,
+                    messages_so_far=messages,
+                    cb=cb,
+                    cancel_token=cancel_token,
+                )
+                _plan_mode_used = True
+            except _PlanRejected as pr:
+                logger.info("Plan rejected for user %s: %s", user_id, pr.reason)
+                await cb.on_event(AgentEvent(
+                    "done", "Plan rejected", {"reason": pr.reason or ""}
+                ))
+                return (
+                    f"Plan rejected: {pr.reason or 'no reason given'}. "
+                    "Tell me how you'd like to proceed."
+                )
 
         # Agentic loop — brain decides when to stop, safety cap prevents runaway
         max_iterations = self.config.max_tool_iterations
@@ -1267,14 +1418,34 @@ class Agent:
                     and tools
                     and needs_tools
                 ):
-                    _taor_plan = make_plan_prompt(
-                        message, _effort, _taor_retry_context,
-                    )
-                    messages.append(LLMMessage(role="system", content=_taor_plan))
-                    logger.info(
-                        "TAOR Plan phase injected (effort=%s, retry=%s)",
-                        _effort, _taor_retry_context is not None,
-                    )
+                    # Plan-mode override: if the user already approved a
+                    # user-facing plan above, feed THAT into the loop
+                    # instead of asking the model to re-plan. Keeps the
+                    # approved intent intact and saves an LLM call.
+                    if _plan_mode_used and _plan_text_approved:
+                        messages.append(LLMMessage(
+                            role="system",
+                            content=(
+                                "The user has REVIEWED AND APPROVED this plan. "
+                                "Execute it step by step — do NOT re-plan, do "
+                                "NOT ask for confirmation again.\n\n"
+                                f"{_plan_text_approved}"
+                            ),
+                        ))
+                        logger.info(
+                            "TAOR Plan: using user-approved plan (no re-plan)",
+                        )
+                    else:
+                        _taor_plan = make_plan_prompt(
+                            message, _effort, _taor_retry_context,
+                        )
+                        messages.append(LLMMessage(
+                            role="system", content=_taor_plan,
+                        ))
+                        logger.info(
+                            "TAOR Plan phase injected (effort=%s, retry=%s)",
+                            _effort, _taor_retry_context is not None,
+                        )
 
                 kwargs: dict = {}
                 if tools:
@@ -1936,6 +2107,22 @@ class Agent:
                     if self._team_lead and _fg_task_id:
                         self._team_lead.update_step(_fg_task_id, _display)
 
+                    # ── Non-browser result verification ──────────────────
+                    # Stamp tool results with `→ FAILED: <reason>` when the
+                    # output looks like an error (HTTP 4xx/5xx, "Error:" /
+                    # "Exception:" / traceback, empty result from tools that
+                    # shouldn't be empty). Browser already self-stamps via
+                    # action_verifier — classify() is a no-op if the marker
+                    # is already present. The marker flows both into the
+                    # LLM context (so it stops paraphrasing errors as
+                    # success) and into stuck_detector.detect_no_progress.
+                    _result_str = result if isinstance(result, str) else str(result)
+                    from lazyclaw.runtime import result_verifier as _rv
+                    _rv_status, _rv_reason = _rv.classify(tc.name, _result_str)
+                    if _rv_status == "failed" and _rv_reason:
+                        _result_str = _rv.stamp_failed(_result_str, _rv_reason)
+                        result = _result_str  # keep downstream paths in sync
+
                     tool_msg = LLMMessage(
                         role="tool",
                         content=result,
@@ -1944,9 +2131,7 @@ class Agent:
                     messages.append(tool_msg)
                     all_new_messages.append(tool_msg)
                     _tool_call_history.append(tc.name)
-                    _tool_results.append(
-                        result if isinstance(result, str) else str(result)
-                    )
+                    _tool_results.append(_result_str)
 
                     # ── Browser action planner: evaluate result ────────
                     # Track plan progress after every browser call.

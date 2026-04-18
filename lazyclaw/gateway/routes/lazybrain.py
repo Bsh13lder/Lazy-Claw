@@ -6,7 +6,19 @@ from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
-from lazyclaw.lazybrain import events, graph, journal, store
+from lazyclaw.lazybrain import (
+    ask,
+    autolink,
+    canvas,
+    embeddings,
+    events,
+    graph,
+    journal,
+    metadata_suggest,
+    recap,
+    store,
+    topic_rollup,
+)
 
 _config = load_config()
 
@@ -36,6 +48,43 @@ class NoteUpdate(BaseModel):
 
 class JournalAppend(BaseModel):
     content: str = Field(min_length=1, max_length=50_000)
+
+
+# ─── Phase 2 AI request models ─────────────────────────────────────────
+
+class AutolinkRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+    use_llm: bool = True
+
+
+class SuggestMetadataRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    k: int = Field(default=10, ge=1, le=30)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    k: int = Field(default=8, ge=1, le=20)
+
+
+class TopicRollupRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=300)
+
+
+class MorningBriefingRequest(BaseModel):
+    force: bool = False
+
+
+# ─── Phase 3 canvas models ──────────────────────────────────────────────
+
+class CanvasSaveRequest(BaseModel):
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=120)
+    payload: dict
 
 
 # ---------------------------------------------------------------------------
@@ -221,3 +270,110 @@ async def list_journal_route(
 @router.get("/tags")
 async def tags_route(user: User = Depends(get_current_user)):
     return {"tags": await store.list_tags(_config, user.id)}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — AI-native endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/autolink")
+async def autolink_route(
+    body: AutolinkRequest,
+    user: User = Depends(get_current_user),
+):
+    return await autolink.suggest_links(
+        _config, user.id, body.text, use_llm=body.use_llm,
+    )
+
+
+@router.post("/suggest-metadata")
+async def suggest_metadata_route(
+    body: SuggestMetadataRequest,
+    user: User = Depends(get_current_user),
+):
+    existing = await store.list_tags(_config, user.id)
+    tags_seed = [row["tag"] for row in existing[:40]]
+    return await metadata_suggest.suggest_metadata(
+        _config, user.id, body.content, existing_tags=tags_seed,
+    )
+
+
+@router.post("/semantic-search")
+async def semantic_search_route(
+    body: SemanticSearchRequest,
+    user: User = Depends(get_current_user),
+):
+    return await embeddings.semantic_search(
+        _config, user.id, body.query, k=body.k,
+    )
+
+
+@router.post("/ask")
+async def ask_route(
+    body: AskRequest,
+    user: User = Depends(get_current_user),
+):
+    return await ask.ask_notes(_config, user.id, body.question, k=body.k)
+
+
+@router.post("/topic-rollup")
+async def topic_rollup_route(
+    body: TopicRollupRequest,
+    user: User = Depends(get_current_user),
+):
+    return await topic_rollup.topic_rollup(_config, user.id, body.topic)
+
+
+@router.post("/morning-briefing")
+async def morning_briefing_route(
+    body: MorningBriefingRequest,
+    user: User = Depends(get_current_user),
+):
+    return await recap.build_morning_briefing(_config, user.id, force=body.force)
+
+
+@router.post("/reindex-embeddings")
+async def reindex_embeddings_route(
+    user: User = Depends(get_current_user),
+):
+    return await embeddings.reindex_user(_config, user.id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Canvas
+# ---------------------------------------------------------------------------
+
+@router.get("/canvas")
+async def list_canvases_route(user: User = Depends(get_current_user)):
+    boards = await canvas.list_boards(_config, user.id)
+    return {"boards": boards}
+
+
+@router.get("/canvas/{board_id}")
+async def get_canvas_route(
+    board_id: str, user: User = Depends(get_current_user)
+):
+    board = await canvas.get_board(_config, user.id, board_id)
+    if not board:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return board
+
+
+@router.post("/canvas")
+async def save_canvas_route(
+    body: CanvasSaveRequest,
+    user: User = Depends(get_current_user),
+):
+    return await canvas.save_board(
+        _config, user.id, body.name, body.payload, board_id=body.id,
+    )
+
+
+@router.delete("/canvas/{board_id}")
+async def delete_canvas_route(
+    board_id: str, user: User = Depends(get_current_user)
+):
+    ok = await canvas.delete_board(_config, user.id, board_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return {"status": "deleted", "id": board_id}

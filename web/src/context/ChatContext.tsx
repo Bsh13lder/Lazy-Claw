@@ -50,6 +50,7 @@ interface ChatContextValue {
   cancelGeneration: () => void;
   dismissBrowserSession: () => void;
   dismissTemplateSuggest: () => void;
+  clearPendingPlan: () => void;
   createSession: () => void;
   selectSession: (id: string) => void;
   deleteSession: (id: string) => void;
@@ -289,6 +290,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     cancelGeneration,
     dismissBrowserSession,
     dismissTemplateSuggest,
+    clearPendingPlan,
     streamingState,
     connectionStatus,
   } = useChatStream({
@@ -402,6 +404,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         cancelGeneration,
         dismissBrowserSession,
         dismissTemplateSuggest,
+        clearPendingPlan,
         createSession,
         selectSession,
         deleteSession,

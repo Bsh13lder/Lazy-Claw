@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'user',
     created_at TEXT DEFAULT (datetime('now')),
     password_encrypted_dek TEXT,
-    recovery_encrypted_dek TEXT
+    recovery_encrypted_dek TEXT,
+    -- Plan Mode: 1 = show the agent's plan and wait for approval before
+    -- executing (Claude-Code-style). 0 = auto-execute (trusted / YOLO).
+    auto_plan INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -232,7 +235,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     tags TEXT,
     nag_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
-    completed_at TEXT
+    completed_at TEXT,
+    -- Execution tracking (phase A of self-review gap fix):
+    last_error TEXT,                              -- error message from last failed attempt
+    attempt_count INTEGER NOT NULL DEFAULT 0,     -- bumps on every fail_task call
+    last_attempted_at TEXT,                       -- timestamp of last execution attempt
+    trace_session_id TEXT,                        -- conversation trace that created this task
+    lazybrain_note_id TEXT                        -- mirror note id for status sync
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status
@@ -507,3 +516,36 @@ ON note_links(from_note_id);
 
 CREATE INDEX IF NOT EXISTS idx_note_links_to
 ON note_links(user_id, to_page_name);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- LazyBrain: encrypted embeddings (Phase 2.3)
+-- One row per note. `vector` is AES-GCM ciphertext over a float32-packed
+-- blob (hex-encoded so it fits sqlite's text-style encrypted envelope).
+-- `model` + `dim` are plaintext so we can filter incompatible rows without
+-- touching the DEK.
+CREATE TABLE IF NOT EXISTS note_embeddings (
+    note_id     TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      TEXT NOT NULL,  -- encrypted blob (envelope format)
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_note_embeddings_user
+ON note_embeddings(user_id, model, dim);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- LazyBrain: canvas boards (Phase 3.1)
+-- Free-form spatial workspace. `payload` is AES-GCM ciphertext over a
+-- React-Flow JSON dict ({nodes, edges, viewport}). Plaintext name is fine
+-- because it's user-facing and used to list boards in the sidebar.
+CREATE TABLE IF NOT EXISTS canvas_boards (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_canvas_boards_user
+ON canvas_boards(user_id, updated_at);

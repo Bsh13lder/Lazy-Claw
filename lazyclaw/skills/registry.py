@@ -90,6 +90,7 @@ class SkillRegistry:
     def register_defaults(self, config=None) -> None:
         """Register all built-in skills."""
         from lazyclaw.skills.builtin.web_search import WebSearchSkill
+        from lazyclaw.skills.builtin.keyword_research import KeywordResearchSkill
         from lazyclaw.skills.builtin.get_time import GetTimeSkill
         from lazyclaw.skills.builtin.calculate import CalculateSkill
         from lazyclaw.skills.builtin.memory_save import MemorySaveSkill
@@ -99,6 +100,7 @@ class SkillRegistry:
 
         self.register(SearchToolsSkill(registry=self))
         self.register(WebSearchSkill())
+        self.register(KeywordResearchSkill())
         self.register(GetTimeSkill())
         self.register(CalculateSkill())
         self.register(MemorySaveSkill(config=config))
@@ -152,6 +154,7 @@ class SkillRegistry:
         # Task manager skills (second brain)
         from lazyclaw.skills.builtin.task_manager import (
             AddTaskSkill, ListTasksSkill, CompleteTaskSkill,
+            FailTaskSkill,
             UpdateTaskSkill, DeleteTaskSkill, DailyBriefingSkill,
             WorkTodosSkill, StopBackgroundSkill,
         )
@@ -159,6 +162,7 @@ class SkillRegistry:
         self.register(AddTaskSkill(config=config))
         self.register(ListTasksSkill(config=config))
         self.register(CompleteTaskSkill(config=config))
+        self.register(FailTaskSkill(config=config))
         self.register(UpdateTaskSkill(config=config))
         self.register(DeleteTaskSkill(config=config))
         self.register(DailyBriefingSkill(config=config))
@@ -167,6 +171,9 @@ class SkillRegistry:
 
         # LazyBrain skills — Python-native Logseq-style PKM shared with the agent
         from lazyclaw.skills.builtin.lazybrain import (
+            AskNotesSkill, MorningBriefingSkill, ReindexEmbeddingsSkill,
+            SemanticSearchSkill, SuggestLinksSkill, SuggestMetadataSkill,
+            TopicRollupSkill,
             SaveNoteSkill, UpdateNoteSkill, DeleteNoteSkill,
             GetNoteSkill, SearchNotesSkill,
             FindLinkedSkill, GraphNeighborsSkill,
@@ -200,6 +207,15 @@ class SkillRegistry:
         self.register(UnpinNoteSkill(config=config))
         self.register(ListPinnedSkill(config=config))
         self.register(EnableWeeklyRollupSkill(config=config))
+
+        # LazyBrain AI-native skills (Phase 2)
+        self.register(SuggestLinksSkill(config=config))
+        self.register(SuggestMetadataSkill(config=config))
+        self.register(SemanticSearchSkill(config=config))
+        self.register(AskNotesSkill(config=config))
+        self.register(TopicRollupSkill(config=config))
+        self.register(MorningBriefingSkill(config=config))
+        self.register(ReindexEmbeddingsSkill(config=config))
 
         # Note: real_browser.py skills removed — merged into BrowserSkill above
 
@@ -304,6 +320,9 @@ class SkillRegistry:
             N8nListCredentialsSkill, N8nGetExecutionSkill,
             N8nCreateCredentialSkill, N8nDeleteCredentialSkill,
             N8nGoogleSheetsSetupSkill,
+            N8nTestWorkflowSkill, N8nSearchTemplatesSkill,
+            N8nInstallTemplateSkill, N8nListWebhooksSkill,
+            N8nGoogleOAuthSetupSkill, N8nGoogleServicesSetupSkill,
         )
 
         self.register(N8nStatusSkill(config=config))
@@ -319,6 +338,12 @@ class SkillRegistry:
         self.register(N8nCreateCredentialSkill(config=config))
         self.register(N8nDeleteCredentialSkill(config=config))
         self.register(N8nGoogleSheetsSetupSkill(config=config))
+        self.register(N8nTestWorkflowSkill(config=config))
+        self.register(N8nSearchTemplatesSkill(config=config))
+        self.register(N8nInstallTemplateSkill(config=config))
+        self.register(N8nListWebhooksSkill(config=config))
+        self.register(N8nGoogleOAuthSetupSkill(config=config))
+        self.register(N8nGoogleServicesSetupSkill(config=config))
 
         # System status skills
         from lazyclaw.skills.builtin.system_status import (

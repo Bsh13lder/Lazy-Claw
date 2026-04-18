@@ -9,13 +9,15 @@ import type {
   Specialist,
   PermissionSettings,
   ModelsData,
+  GeneralSettings,
+  AboutInfo,
 } from "../api";
 import { useToast } from "../context/ToastContext";
 import Modal from "../components/Modal";
 
 // ── Tab types ──────────────────────────────────────────────────────────────
 
-type TabId = "eco" | "teams" | "permissions";
+type TabId = "models" | "search" | "teams" | "permissions" | "about";
 
 interface TabDef {
   readonly id: TabId;
@@ -24,15 +26,6 @@ interface TabDef {
 }
 
 // ── SVG Icons ──────────────────────────────────────────────────────────────
-
-function DollarIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="12" y1="1" x2="12" y2="23" />
-      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-    </svg>
-  );
-}
 
 function UsersIcon() {
   return (
@@ -87,12 +80,65 @@ function TrashIcon() {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </svg>
+  );
+}
+
+function SlidersIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </svg>
+  );
+}
+
 // ── Tab definitions ────────────────────────────────────────────────────────
 
 const TABS: readonly TabDef[] = [
-  { id: "eco", label: "ECO Mode", icon: <DollarIcon /> },
+  { id: "models", label: "Models", icon: <SlidersIcon /> },
+  { id: "search", label: "Search", icon: <SearchIcon /> },
   { id: "teams", label: "Teams", icon: <UsersIcon /> },
   { id: "permissions", label: "Permissions", icon: <ShieldIcon /> },
+  { id: "about", label: "About", icon: <InfoIcon /> },
+] as const;
+
+// ── Search provider definitions ────────────────────────────────────────────
+
+interface SearchProviderDef {
+  readonly id: GeneralSettings["search_provider"];
+  readonly label: string;
+  readonly blurb: string;
+  readonly needsKey: string | null; // env var name, or null (no key)
+}
+
+const SEARCH_PROVIDERS: readonly SearchProviderDef[] = [
+  { id: "auto", label: "Auto", blurb: "Use system default, fall back on limits", needsKey: null },
+  { id: "serper", label: "Serper.dev", blurb: "Google Search (2,500 free/mo) + Shopping/News/Maps", needsKey: "SERPER_KEY" },
+  { id: "serpapi", label: "SerpAPI", blurb: "Google Search + Flights (only option for Flights)", needsKey: "SERPAPI_KEY" },
+  { id: "duckduckgo", label: "DuckDuckGo", blurb: "No API key, no flights/shopping, slower", needsKey: null },
 ] as const;
 
 // ── Mode card definitions ──────────────────────────────────────────────────
@@ -1328,6 +1374,210 @@ function PermissionsTab({
   );
 }
 
+// ── Search Tab ─────────────────────────────────────────────────────────────
+
+function SearchTab({
+  general,
+  about,
+  onUpdate,
+}: {
+  readonly general: GeneralSettings | null;
+  readonly about: AboutInfo | null;
+  readonly onUpdate: (updates: Partial<GeneralSettings>) => Promise<void>;
+}) {
+  const toast = useToast();
+  const [saving, setSaving] = useState<string | null>(null);
+  const current = general?.search_provider ?? "auto";
+
+  const select = async (id: GeneralSettings["search_provider"]) => {
+    if (id === current) return;
+    setSaving(id);
+    try {
+      await onUpdate({ search_provider: id });
+      toast.success(`Search engine: ${id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update");
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const quota = about?.search_quota;
+  const freeProviders = new Set(about?.free_providers ?? []);
+  // free_providers currently only lists LLM providers — fall back to quota presence for search
+  const keyConfigured = (envKey: string | null): boolean => {
+    if (!envKey) return true;
+    if (!quota) return false;
+    if (envKey === "SERPER_KEY") return quota.serper_used > 0 || freeProviders.has("serper");
+    if (envKey === "SERPAPI_KEY") return quota.serpapi_used > 0 || freeProviders.has("serpapi");
+    return false;
+  };
+
+  const usedPct = (used: number, limit: number) => (limit > 0 ? Math.min(100, (used / limit) * 100) : 0);
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <SectionHeading
+        title="Web Search Engine"
+        subtitle="Which provider the agent uses when it needs to search the web. Per-user preference — also respected by Telegram /search."
+      />
+
+      <div className="space-y-2">
+        {SEARCH_PROVIDERS.map((p) => {
+          const active = p.id === current;
+          const configured = keyConfigured(p.needsKey);
+          return (
+            <button
+              key={p.id}
+              onClick={() => select(p.id)}
+              disabled={saving !== null}
+              className={`w-full text-left flex items-start gap-3 px-4 py-3 rounded-lg border transition-colors ${
+                active
+                  ? "bg-accent-soft border-accent/40"
+                  : "bg-bg-tertiary border-border hover:border-border-light"
+              } ${saving !== null ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
+            >
+              <div className={`mt-0.5 w-4 h-4 rounded-full border-2 shrink-0 ${active ? "border-accent bg-accent" : "border-border"}`}>
+                {active && <div className="w-full h-full rounded-full bg-white scale-[0.4]" />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-medium text-text-primary">{p.label}</span>
+                  {p.needsKey ? (
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                        configured
+                          ? "bg-accent-soft text-accent border-accent/20"
+                          : "bg-error-soft text-error border-error/20"
+                      }`}
+                      title={p.needsKey}
+                    >
+                      {configured ? `${p.needsKey} ✓` : `${p.needsKey} missing`}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full border bg-bg-hover text-text-muted border-border">
+                      no API key
+                    </span>
+                  )}
+                  {saving === p.id && <SpinnerIcon />}
+                </div>
+                <p className="text-xs text-text-muted mt-1">{p.blurb}</p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {quota && (
+        <div className="mt-6 pt-5 border-t border-border">
+          <SectionHeading
+            title="Monthly quota"
+            subtitle={quota.reset_month ? `Current month: ${quota.reset_month}` : undefined}
+          />
+          <div className="space-y-3">
+            <QuotaBar label="Serper.dev" used={quota.serper_used} limit={quota.serper_limit} pct={usedPct(quota.serper_used, quota.serper_limit)} />
+            <QuotaBar label="SerpAPI" used={quota.serpapi_used} limit={quota.serpapi_limit} pct={usedPct(quota.serpapi_used, quota.serpapi_limit)} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function QuotaBar({ label, used, limit, pct }: { readonly label: string; readonly used: number; readonly limit: number; readonly pct: number }) {
+  const hot = pct >= 80;
+  return (
+    <div>
+      <div className="flex justify-between text-xs mb-1">
+        <span className="text-text-secondary">{label}</span>
+        <span className="text-text-muted tabular-nums">{used} / {limit}</span>
+      </div>
+      <div className="h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+        <div
+          className={`h-full ${hot ? "bg-error" : "bg-accent"} transition-all`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── About Tab ──────────────────────────────────────────────────────────────
+
+function AboutTab({ about }: { readonly about: AboutInfo | null }) {
+  const toast = useToast();
+
+  if (!about) {
+    return (
+      <section className="bg-bg-secondary border border-border rounded-xl p-5 text-sm text-text-muted">
+        System info unavailable.
+      </section>
+    );
+  }
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(about, null, 2));
+      toast.success("Diagnostics copied to clipboard");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Copy failed");
+    }
+  };
+
+  const formatUptime = (s: number): string => {
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${s % 60}s`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ${m % 60}m`;
+    const d = Math.floor(h / 24);
+    return `${d}d ${h % 24}h`;
+  };
+
+  const rows: readonly { readonly label: string; readonly value: string }[] = [
+    { label: "LazyClaw version", value: about.version },
+    { label: "Uptime", value: formatUptime(about.uptime_seconds) },
+    { label: "Python", value: about.python_version },
+    { label: "Platform", value: about.platform },
+    { label: "Database", value: about.db_path },
+    { label: "ECO mode", value: about.eco_mode.toUpperCase() },
+    { label: "Search provider", value: about.search_provider },
+    { label: "Telegram bot", value: about.telegram_configured ? "configured" : "not configured" },
+    { label: "MCP servers", value: String(about.mcp_server_count) },
+    { label: "Free LLM providers", value: about.free_providers.length > 0 ? about.free_providers.join(", ") : "none detected" },
+  ];
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-sm font-semibold text-text-primary">System</h2>
+          <p className="text-xs text-text-muted mt-0.5">Read-only diagnostics — useful for bug reports.</p>
+        </div>
+        <button
+          onClick={copy}
+          className="px-3 py-1.5 text-xs text-accent border border-accent/30 rounded-lg hover:bg-accent-soft transition-colors"
+        >
+          Copy diagnostics
+        </button>
+      </div>
+
+      <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
+        {rows.map((r) => (
+          <div key={r.label} className="flex justify-between items-center gap-4 px-4 py-2.5 bg-bg-tertiary/40">
+            <span className="text-xs text-text-muted shrink-0">{r.label}</span>
+            <span className="text-xs text-text-primary text-right break-all">{r.value}</span>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-[11px] text-text-muted mt-4">
+        LazyClaw is MIT-licensed, E2E-encrypted, Python-native. Source &amp; issues: see the repository.
+      </p>
+    </section>
+  );
+}
+
 // ── Main Settings page ─────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -1340,8 +1590,10 @@ export default function Settings() {
   const [team, setTeam] = useState<TeamSettings | null>(null);
   const [specialists, setSpecialists] = useState<Specialist[]>([]);
   const [perms, setPerms] = useState<PermissionSettings | null>(null);
+  const [general, setGeneral] = useState<GeneralSettings | null>(null);
+  const [about, setAbout] = useState<AboutInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<TabId>("eco");
+  const [tab, setTab] = useState<TabId>("models");
 
   useEffect(() => {
     let alive = true;
@@ -1354,6 +1606,8 @@ export default function Settings() {
       api.listSpecialists(),
       api.getPermissionSettings(),
       api.getEcoModels(),
+      api.getGeneralSettings(),
+      api.getAboutInfo(),
     ]).then((results) => {
       if (!alive) return;
       if (results[0].status === "fulfilled") setEco(results[0].value);
@@ -1364,10 +1618,21 @@ export default function Settings() {
       if (results[5].status === "fulfilled") setSpecialists(Array.isArray(results[5].value) ? results[5].value : []);
       if (results[6].status === "fulfilled") setPerms(results[6].value);
       if (results[7].status === "fulfilled") setModelsData(results[7].value);
+      if (results[8].status === "fulfilled") setGeneral(results[8].value);
+      if (results[9].status === "fulfilled") setAbout(results[9].value);
       setLoading(false);
     });
     return () => { alive = false; };
   }, []);
+
+  // Refresh About whenever the user switches onto the About tab,
+  // so uptime + quota are current.
+  useEffect(() => {
+    if (tab !== "about") return;
+    let alive = true;
+    api.getAboutInfo().then((v) => { if (alive) setAbout(v); }).catch(() => { /* noop */ });
+    return () => { alive = false; };
+  }, [tab]);
 
   const handleEcoMode = useCallback(async (mode: string) => {
     try {
@@ -1411,6 +1676,13 @@ export default function Settings() {
     setPerms(updated);
   }, []);
 
+  const handleGeneralUpdate = useCallback(async (updates: Partial<GeneralSettings>) => {
+    const updated = await api.updateGeneralSettings(updates);
+    setGeneral(updated);
+    // `search_provider` shows up on the About tab — keep it in sync cheaply.
+    setAbout((prev) => prev ? { ...prev, search_provider: updated.search_provider } : prev);
+  }, []);
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center text-text-muted text-sm">
@@ -1451,7 +1723,7 @@ export default function Settings() {
         </div>
 
         {/* Tab content */}
-        {tab === "eco" && (
+        {tab === "models" && (
           <EcoTab
             eco={eco}
             usage={usage}
@@ -1461,6 +1733,9 @@ export default function Settings() {
             onModeChange={handleEcoMode}
             onSettingsUpdate={handleEcoSettingsUpdate}
           />
+        )}
+        {tab === "search" && (
+          <SearchTab general={general} about={about} onUpdate={handleGeneralUpdate} />
         )}
         {tab === "teams" && (
           <TeamsTab
@@ -1474,6 +1749,7 @@ export default function Settings() {
         {tab === "permissions" && (
           <PermissionsTab perms={perms} onPermsUpdate={handlePermsUpdate} />
         )}
+        {tab === "about" && <AboutTab about={about} />}
       </div>
     </div>
   );

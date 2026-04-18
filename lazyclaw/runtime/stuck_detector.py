@@ -61,6 +61,12 @@ DEFAULT_LOOP_LIMITS: dict[str, int] = {
     "browser": 5,  # Browser workflows need steps — cap at 5 (was 8, but graduated recovery kicks in sooner)
     "web_search": 6,  # Research needs 3-5 searches then synthesis
     "list_directory": 3,  # Directory listing should not loop
+    # Natural sequence tools — shell debugging / file reads often chain
+    # many identical-name calls with different args (`cd`, `ls`, `cat`,
+    # `git status`...). The same-result detector still catches true loops.
+    "run_command": 8,
+    "read_file": 8,
+    "write_file": 6,
     "default": 3,
 }
 

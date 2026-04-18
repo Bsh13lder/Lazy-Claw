@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { LazyBrainNote } from "../../api";
 import { WikilinkText } from "./WikilinkText";
 import { Star, Pencil, Trash2, X, Save, Film, Clock } from "./icons";
+import { PropertiesPanel } from "./PropertiesPanel";
 
 interface Props {
   note: LazyBrainNote;
@@ -148,8 +149,22 @@ export function NoteEditor({
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto">
+      <div data-lb-scroll-root className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-8 py-6">
+          <div className="mb-4">
+            {editing ? (
+              <PropertiesPanel
+                content={content}
+                onChange={(next) => setContent(next)}
+                showEmpty
+              />
+            ) : (
+              <PropertiesPanel
+                content={note.content}
+                onChange={(next) => onSave({ content: next })}
+              />
+            )}
+          </div>
           {editing ? (
             <textarea
               ref={bodyRef}

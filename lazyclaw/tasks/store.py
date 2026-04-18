@@ -24,6 +24,9 @@ TASK_COLUMNS = [
     "id", "user_id", "title", "description", "category", "priority",
     "status", "owner", "due_date", "reminder_at", "reminder_job_id", "recurring",
     "tags", "nag_count", "created_at", "completed_at",
+    # Execution tracking — saved-but-unexecuted gap fix
+    "last_error", "attempt_count", "last_attempted_at",
+    "trace_session_id", "lazybrain_note_id",
 ]
 
 TASK_SELECT = ", ".join(TASK_COLUMNS)
@@ -65,8 +68,13 @@ async def create_task(
     reminder_at: str | None = None,
     recurring: str | None = None,
     tags: list[str] | None = None,
+    trace_session_id: str | None = None,
 ) -> dict:
-    """Create a new task. Returns the full task dict (decrypted)."""
+    """Create a new task. Returns the full task dict (decrypted).
+
+    ``trace_session_id`` lets us link a failed task back to the conversation
+    trace that created it — useful when reviewing unexecuted work.
+    """
     key = await get_user_dek(config, user_id)
     task_id = str(uuid4())
 
@@ -85,23 +93,11 @@ async def create_task(
         if not due_date:
             due_date = reminder_at[:10]
 
-    async with db_session(config) as db:
-        await db.execute(
-            f"INSERT INTO tasks ({TASK_SELECT}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                task_id, user_id, enc_title, enc_description, enc_category,
-                priority, "todo", owner, due_date, reminder_at, reminder_job_id,
-                recurring, enc_tags, 0,
-                datetime.now(timezone.utc).isoformat(), None,
-            ),
-        )
-        await db.commit()
+    created_at = datetime.now(timezone.utc).isoformat()
 
-    logger.debug("Created task %s (%s) for user %s", task_id, owner, user_id)
-
-    # Mirror into LazyBrain so the user's second brain also remembers this.
-    # Fire-and-forget; task creation must not fail if the PKM is unreachable.
+    # Mirror into LazyBrain first so we can record the note id against the task row.
+    # Fire-and-forget on failure so task creation never blocks on PKM problems.
+    lazybrain_note_id: str | None = None
     try:
         from lazyclaw.lazybrain import events as lb_events
         from lazyclaw.lazybrain import store as lb_store
@@ -135,11 +131,28 @@ async def create_task(
             tags=lb_tags,
             importance=importance_map.get(priority, 5),
         )
+        lazybrain_note_id = note["id"]
         lb_events.publish_note_saved(
             user_id, note["id"], note["title"], note["tags"], source="task",
         )
     except Exception:
         logger.debug("lazybrain task mirror failed", exc_info=True)
+
+    async with db_session(config) as db:
+        await db.execute(
+            f"INSERT INTO tasks ({TASK_SELECT}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                task_id, user_id, enc_title, enc_description, enc_category,
+                priority, "todo", owner, due_date, reminder_at, reminder_job_id,
+                recurring, enc_tags, 0,
+                created_at, None,
+                None, 0, None, trace_session_id, lazybrain_note_id,
+            ),
+        )
+        await db.commit()
+
+    logger.debug("Created task %s (%s) for user %s", task_id, owner, user_id)
 
     return {
         "id": task_id, "user_id": user_id, "title": title,
@@ -148,8 +161,11 @@ async def create_task(
         "due_date": due_date,
         "reminder_at": reminder_at, "reminder_job_id": reminder_job_id,
         "recurring": recurring, "tags": json.dumps(tags) if tags else None,
-        "nag_count": 0, "created_at": datetime.now(timezone.utc).isoformat(),
+        "nag_count": 0, "created_at": created_at,
         "completed_at": None,
+        "last_error": None, "attempt_count": 0, "last_attempted_at": None,
+        "trace_session_id": trace_session_id,
+        "lazybrain_note_id": lazybrain_note_id,
     }
 
 
@@ -346,7 +362,121 @@ async def update_task(
             params,
         )
         await db.commit()
-        return result.rowcount > 0
+
+    # Mirror any status transition to the LazyBrain note so failures/cancels
+    # don't leave the brain thinking the task is still pending.
+    if "status" in fields:
+        task = await get_task(config, user_id, task_id)
+        if task:
+            await _mirror_status_to_lazybrain(
+                config, user_id, task, fields["status"],
+                error=fields.get("last_error"),
+            )
+
+    return result.rowcount > 0
+
+
+async def fail_task(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    error: str,
+) -> bool:
+    """Mark a task as failed, record the error, bump the attempt count.
+
+    Separate from `cancelled` — failed means *tried and didn't work*, cancelled
+    means *no longer needed*. Failure state is visible in LazyBrain (❌ FAILED
+    prefix on the mirrored note) so the user sees unexecuted work in their
+    second brain, not silently-abandoned rows in the DB.
+    """
+    task = await get_task(config, user_id, task_id)
+    if not task:
+        return False
+
+    now = datetime.now(timezone.utc).isoformat()
+    attempts = int(task.get("attempt_count") or 0) + 1
+
+    async with db_session(config) as db:
+        result = await db.execute(
+            "UPDATE tasks SET status = 'failed', last_error = ?, "
+            "attempt_count = ?, last_attempted_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (error, attempts, now, task_id, user_id),
+        )
+        await db.commit()
+
+    task["status"] = "failed"
+    task["last_error"] = error
+    task["attempt_count"] = attempts
+    task["last_attempted_at"] = now
+    await _mirror_status_to_lazybrain(
+        config, user_id, task, "failed", error=error,
+    )
+    return result.rowcount > 0
+
+
+_STATUS_BADGE = {
+    "done":       ("✅ DONE",       "done"),
+    "cancelled":  ("🚫 CANCELLED",  "cancelled"),
+    "failed":     ("❌ FAILED",     "failed"),
+    "in_progress":("⏳ IN PROGRESS","in-progress"),
+    "todo":       ("📝 TODO",       "pending"),
+}
+
+
+async def _mirror_status_to_lazybrain(
+    config: Config,
+    user_id: str,
+    task: dict,
+    new_status: str,
+    error: str | None = None,
+) -> None:
+    """Stamp the mirrored LazyBrain note with the new status.
+
+    No-op when the task has no `lazybrain_note_id` (old tasks created before
+    this column existed, or notes the user deleted manually). Fire-and-forget —
+    status updates must not fail because the PKM is unreachable.
+    """
+    note_id = task.get("lazybrain_note_id")
+    if not note_id:
+        return
+    try:
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        note = await lb_store.get_note(config, user_id, note_id)
+        if not note:
+            return
+
+        badge, status_tag = _STATUS_BADGE.get(new_status, (f"• {new_status.upper()}", new_status))
+        body = note.get("content") or ""
+        # Strip any prior status badge so we don't stack them on repeated transitions.
+        for known_badge, _ in _STATUS_BADGE.values():
+            if body.startswith(f"{known_badge} —\n\n"):
+                body = body[len(f"{known_badge} —\n\n"):]
+                break
+
+        header = f"{badge} —"
+        if error:
+            header += f" {error}"
+        new_body = f"{header}\n\n{body}"
+
+        # Refresh tags: drop any prior status/* tag, add the new one.
+        old_tags = note.get("tags") or []
+        new_tags = [t for t in old_tags if not t.startswith("status/")]
+        new_tags.append(f"status/{status_tag}")
+
+        updated = await lb_store.update_note(
+            config, user_id, note_id,
+            content=new_body, tags=new_tags,
+        )
+        if updated:
+            lb_events.publish_note_saved(
+                user_id, updated["id"], updated.get("title"),
+                updated.get("tags"), source="task",
+            )
+    except Exception:
+        logger.debug("lazybrain status mirror failed for task", exc_info=True)
 
 
 async def complete_task(
@@ -371,6 +501,9 @@ async def complete_task(
             (now, task_id, user_id),
         )
         await db.commit()
+
+    # Keep LazyBrain mirror honest — stamp note with ✅ DONE.
+    await _mirror_status_to_lazybrain(config, user_id, task, "done")
 
     # Recurring: create the next occurrence
     if task.get("recurring"):

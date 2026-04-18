@@ -14,10 +14,11 @@ import re
 import time
 
 import telegram.error
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -654,6 +655,50 @@ class _TelegramCallback:
         elif kind == "token":
             self.current_phase = "streaming"
 
+        elif kind == "plan_pending":
+            # Business agent gate — show plan + inline Approve/Reject buttons.
+            plan_text = event.metadata.get("plan", event.detail) or ""
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "\u2705 Approve", callback_data="plan:approve",
+                    ),
+                    InlineKeyboardButton(
+                        "\u274c Reject", callback_data="plan:reject",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "\u26a1 Approve & trust 30min",
+                        callback_data="plan:approve_trust",
+                    ),
+                ],
+            ])
+            try:
+                await _telegram_send_with_retry(
+                    lambda: self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=f"\U0001f4cb *Plan — review before I start*\n\n{plan_text}",
+                        parse_mode="Markdown",
+                        reply_markup=keyboard,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to send plan prompt: %s", exc)
+
+        elif kind == "plan_approved":
+            try:
+                note = "\u26a1 Auto-approving next plans for 30min" if (
+                    event.metadata.get("auto_approve_session")
+                ) else "\u25b6\ufe0f Running the plan..."
+                await _telegram_send_with_retry(
+                    lambda: self._bot.send_message(
+                        chat_id=self._chat_id, text=note,
+                    )
+                )
+            except Exception:
+                pass
+
         elif kind == "done":
             self.busy = False
 
@@ -764,6 +809,12 @@ class TelegramAdapter(ChannelAdapter):
         self._app.add_handler(
             CommandHandler("status", self._handle_status_cmd),
         )
+        # Plan-mode inline button callbacks — business agent approval gate.
+        self._app.add_handler(
+            CallbackQueryHandler(
+                self._handle_plan_callback, pattern=r"^plan:",
+            )
+        )
         # Text messages → agent (must be AFTER command handlers)
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
@@ -792,6 +843,59 @@ class TelegramAdapter(ChannelAdapter):
         await self._app.stop()
         await self._app.shutdown()
         logger.info("Telegram adapter stopped")
+
+    async def _handle_plan_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle inline button taps on a plan-approval message."""
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()  # Stop the Telegram spinner immediately.
+
+        data = (query.data or "").split(":", 1)
+        action = data[1] if len(data) == 2 else ""
+
+        # Resolve the LazyClaw user_id (single primary user for now).
+        try:
+            lc_user_id = await resolve_user_id(self._config)
+        except Exception as exc:
+            logger.warning("Plan callback user resolution failed: %s", exc)
+            await query.edit_message_text("\u26a0\ufe0f Could not identify you.")
+            return
+
+        from lazyclaw.runtime import plan_checkpoint
+
+        if action == "approve":
+            released = plan_checkpoint.approve(
+                lc_user_id, reason="approved via Telegram",
+            )
+            await query.edit_message_text(
+                query.message.text_markdown +
+                ("\n\n\u2705 _Approved_" if released else "\n\n(no plan pending)"),
+                parse_mode="Markdown",
+            )
+        elif action == "approve_trust":
+            released = plan_checkpoint.approve(
+                lc_user_id,
+                reason="approved + session trust via Telegram",
+                auto_approve_session=True,
+            )
+            await query.edit_message_text(
+                query.message.text_markdown +
+                ("\n\n\u26a1 _Approved + trusting for 30min_"
+                 if released else "\n\n(no plan pending)"),
+                parse_mode="Markdown",
+            )
+        elif action == "reject":
+            released = plan_checkpoint.reject(
+                lc_user_id, reason="rejected via Telegram",
+            )
+            await query.edit_message_text(
+                query.message.text_markdown +
+                ("\n\n\u274c _Rejected_" if released else "\n\n(no plan pending)"),
+                parse_mode="Markdown",
+            )
 
     async def _handle_status_cmd(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,

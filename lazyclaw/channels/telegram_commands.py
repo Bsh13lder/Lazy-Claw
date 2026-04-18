@@ -1808,11 +1808,26 @@ class TelegramCommands:
 
         if context.args:
             arg = context.args[0].lower()
-            if arg in ("serper", "serpapi"):
-                msg = set_active_provider(arg)
-                await self._reply(update, f"\U0001f50d {msg}")
+            if arg in ("serper", "serpapi", "duckduckgo", "auto"):
+                try:
+                    from lazyclaw.settings.general import update_general_settings
+
+                    await update_general_settings(
+                        self._config, user_id, {"search_provider": arg}
+                    )
+                except Exception as exc:
+                    await self._reply(update, f"\u274c Failed to save: {exc}")
+                    return
+                # Keep the legacy global in sync for paid providers so other
+                # users who haven't set a preference still get this default.
+                if arg in ("serper", "serpapi"):
+                    set_active_provider(arg)
+                await self._reply(update, f"\U0001f50d Search provider set to: {arg}")
                 return
-            await self._reply(update, "\u2753 Usage: <code>/search serper</code> or <code>/search serpapi</code>")
+            await self._reply(
+                update,
+                "\u2753 Usage: <code>/search serper|serpapi|duckduckgo|auto</code>",
+            )
             return
 
         provider = get_active_provider()

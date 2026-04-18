@@ -113,6 +113,22 @@ class WebSocketCallback:
                 "message": event.detail,
             })
 
+        elif kind == "plan_pending":
+            # The agent produced a plan and is blocked waiting for approval.
+            await self._send({
+                "type": "plan_pending",
+                "plan": event.metadata.get("plan", event.detail),
+                "steps": event.metadata.get("steps", []),
+            })
+
+        elif kind == "plan_approved":
+            await self._send({
+                "type": "plan_approved",
+                "auto_approve_session": event.metadata.get(
+                    "auto_approve_session", False,
+                ),
+            })
+
         elif kind == "work_summary":
             from dataclasses import asdict
             raw = event.metadata.get("summary")

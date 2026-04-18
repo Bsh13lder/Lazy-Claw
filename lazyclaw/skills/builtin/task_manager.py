@@ -451,6 +451,78 @@ class CompleteTaskSkill(BaseSkill):
         return "Failed to complete task."
 
 
+class FailTaskSkill(BaseSkill):
+    """Record that a task could not be executed, with the reason."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "fail_task"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Mark a task as FAILED when you tried to execute it but couldn't "
+            "(API error, missing credentials, tool returned error, etc.). "
+            "Records the error message and bumps the attempt count. Use this "
+            "instead of silently giving up — the user will see ❌ FAILED in "
+            "LazyBrain with the reason, so they can fix and retry."
+        )
+
+    @property
+    def category(self) -> str:
+        return "tasks"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "task_name": {
+                    "type": "string",
+                    "description": "Task name or partial name to match.",
+                },
+                "error": {
+                    "type": "string",
+                    "description": (
+                        "Short error description — what went wrong in one "
+                        "sentence. E.g. 'n8n API returned 404' or 'no "
+                        "credentials for Google Sheets'."
+                    ),
+                },
+            },
+            "required": ["task_name", "error"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.tasks.store import fail_task, list_tasks
+
+        task_name = (params.get("task_name") or "").strip()
+        error = (params.get("error") or "").strip()
+        if not task_name or not error:
+            return "task_name and error are both required."
+
+        tasks = await list_tasks(self._config, user_id, status="todo")
+        tasks += await list_tasks(self._config, user_id, status="in_progress")
+        match = _fuzzy_match_task(tasks, task_name)
+        if not match:
+            available = ", ".join(t.get("title", "?") for t in tasks[:5])
+            return f"No task matching '{task_name}'. Active tasks: {available}"
+
+        ok = await fail_task(self._config, user_id, match["id"], error)
+        if not ok:
+            return "Failed to record task failure."
+
+        return (
+            f"❌ Marked failed: {match['title']}\n"
+            f"Reason: {error}\n"
+            f"Attempt #{int(match.get('attempt_count') or 0) + 1} — visible "
+            f"in LazyBrain with status/failed tag."
+        )
+
+
 class UpdateTaskSkill(BaseSkill):
     """Update task fields by name."""
 

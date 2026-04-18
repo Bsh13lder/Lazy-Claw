@@ -77,12 +77,44 @@ def get_active_provider() -> str:
 
 
 def set_active_provider(provider: str) -> str:
-    """Set active provider. Returns confirmation message."""
+    """Set the process-global active provider (legacy/system default).
+
+    NOTE: per-user preference lives in ``users.settings["general"]["search_provider"]``
+    and is resolved via ``resolve_active_provider`` on every call. This global
+    is only the system default for users who haven't picked one.
+    """
     global _active_provider
     if provider not in ("serper", "serpapi"):
         return f"Unknown provider: {provider}. Use 'serper' or 'serpapi'."
     _active_provider = provider
     return f"Search provider set to: {provider}"
+
+
+async def resolve_active_provider(user_id: str | None) -> str:
+    """Return the effective provider for this user: per-user pref → global default.
+
+    Values: ``"serper"``, ``"serpapi"``, ``"duckduckgo"``, or ``"auto"`` (which
+    means "use the global default, then fall back"). Anything else is treated
+    as ``"auto"``.
+    """
+    if not user_id:
+        return _active_provider
+    try:
+        from lazyclaw.config import load_config
+        from lazyclaw.settings.general import get_general_settings
+
+        config = load_config()
+        general = await get_general_settings(config, user_id)
+        pref = str(general.get("search_provider") or "auto").lower()
+    except Exception as exc:
+        logger.debug("resolve_active_provider fell back to global: %s", exc)
+        return _active_provider
+
+    if pref == "auto":
+        return _active_provider
+    if pref in ("serper", "serpapi", "duckduckgo"):
+        return pref
+    return _active_provider
 
 
 async def _serper_search(query: str, max_results: int, search_type: str = "search") -> str:
@@ -495,9 +527,18 @@ class WebSearchSkill(BaseSkill):
         max_results = params.get("max_results", 5)
         search_type = params.get("search_type") or _detect_search_type(query)
 
-        provider = _active_provider
+        provider = await resolve_active_provider(user_id)
         serper_key = os.getenv("SERPER_KEY", "")
         serpapi_key = os.getenv("SERPAPI_KEY", "")
+
+        # If the user explicitly picked DuckDuckGo, honor it immediately
+        # (skip the paid providers entirely — except flights, which DDG can't do).
+        if provider == "duckduckgo" and search_type != "flights":
+            try:
+                result = await _ddg_fallback(query, max_results)
+                return f"[DuckDuckGo]\n\n{result}"
+            except Exception as exc:
+                return f"DuckDuckGo search failed: {exc}"
 
         # Flights: ALWAYS use SerpAPI (only provider with Google Flights engine)
         if search_type == "flights" and serpapi_key and _usage.serpapi_available():

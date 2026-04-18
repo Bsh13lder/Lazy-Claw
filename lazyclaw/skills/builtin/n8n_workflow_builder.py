@@ -73,22 +73,80 @@ def _parse_workflow_json(content: str) -> dict:
 
 
 def _validate_workflow(wf: dict) -> list[str]:
-    """Basic validation of workflow structure. Returns list of issues."""
+    """Structural validation of an n8n workflow JSON.
+
+    Checks:
+      - top-level shape (name, nodes, connections)
+      - every node has id/name/type
+      - node names are unique (connections reference nodes by name)
+      - every connection source/target references an existing node
+      - type strings look like an n8n node type (namespace.nodeName)
+    Returns list of issues (empty list = valid).
+    """
     issues: list[str] = []
     if not isinstance(wf, dict):
         issues.append("Workflow must be a JSON object")
         return issues
     if "nodes" not in wf or not isinstance(wf.get("nodes"), list):
         issues.append("Missing or invalid 'nodes' array")
-    if "connections" not in wf:
-        issues.append("Missing 'connections' object")
+    if "connections" not in wf or not isinstance(wf.get("connections"), dict):
+        issues.append("Missing or invalid 'connections' object")
     if not wf.get("name"):
         issues.append("Missing 'name' field")
-    for i, node in enumerate(wf.get("nodes", [])):
-        if not node.get("type"):
+
+    nodes = wf.get("nodes", []) if isinstance(wf.get("nodes"), list) else []
+    node_names: set[str] = set()
+    seen_names: set[str] = set()
+
+    for i, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            issues.append(f"Node {i} is not an object")
+            continue
+        name = node.get("name")
+        node_type = node.get("type")
+        if not node_type:
             issues.append(f"Node {i} missing 'type'")
-        if not node.get("name"):
+        elif not isinstance(node_type, str) or "." not in node_type:
+            issues.append(
+                f"Node {i} ({name or '?'}) has invalid type '{node_type}' — "
+                "expected format 'n8n-nodes-base.<nodeName>'"
+            )
+        if not name:
             issues.append(f"Node {i} missing 'name'")
+        else:
+            if name in seen_names:
+                issues.append(f"Duplicate node name '{name}' — node names must be unique")
+            seen_names.add(name)
+            node_names.add(name)
+        if not node.get("id"):
+            issues.append(f"Node {i} ({name or '?'}) missing 'id'")
+
+    connections = wf.get("connections", {})
+    if isinstance(connections, dict):
+        for source_name, outputs in connections.items():
+            if source_name not in node_names:
+                issues.append(
+                    f"Connection source '{source_name}' does not match any node"
+                )
+                continue
+            if not isinstance(outputs, dict):
+                issues.append(f"Connection '{source_name}' has invalid shape")
+                continue
+            for output_type, branches in outputs.items():
+                if not isinstance(branches, list):
+                    continue
+                for branch in branches:
+                    if not isinstance(branch, list):
+                        continue
+                    for link in branch:
+                        if not isinstance(link, dict):
+                            continue
+                        target = link.get("node")
+                        if target and target not in node_names:
+                            issues.append(
+                                f"Connection {source_name} → '{target}' "
+                                "points to a node that does not exist"
+                            )
     return issues
 
 

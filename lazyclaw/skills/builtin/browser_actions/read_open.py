@@ -203,6 +203,14 @@ async def action_open(
         except Exception:
             logger.debug("Post-open verification failed", exc_info=True)
 
+    # Record the visit in LazyBrain so the user can see where the agent has
+    # been browsing. Fire-and-forget; a PKM failure must not break browsing.
+    if nav_url and config:
+        try:
+            await _record_visit_in_lazybrain(config, user_id, nav_url, backend)
+        except Exception:
+            logger.debug("lazybrain visit mirror failed", exc_info=True)
+
     return result
 
 
@@ -296,3 +304,96 @@ async def element_not_found_hint(backend, target: str) -> str:
     except Exception as exc:
         logger.debug("DOMOptimizer.extract_actionable failed: %s", exc)
     return f"Element not found: '{target}'. Use action='snapshot' to see page structure."
+
+
+# Visit tracking ----------------------------------------------------------
+#
+# Every `browser(action="open")` that actually navigates to a URL is recorded
+# as a note in LazyBrain so the user can browse *where* the agent has been
+# and *when*. Dedupe within a 30-minute window per domain — consecutive opens
+# on the same domain append a bullet to the existing note instead of creating
+# a noisy pile of one-line pages.
+
+_VISIT_WINDOW_MIN = 30
+
+
+async def _record_visit_in_lazybrain(
+    config, user_id: str, nav_url: str, backend
+) -> None:
+    """Append a timestamped visit entry to the per-domain LazyBrain note.
+
+    Fire-and-forget — caller wraps in try/except. Safe to call on every
+    successful open.
+    """
+    from datetime import datetime, timezone, timedelta
+    from urllib.parse import urlparse
+
+    parsed = urlparse(nav_url)
+    domain = parsed.hostname or nav_url
+    if not domain:
+        return
+
+    # Best-effort page title (backend.evaluate returns None on failure).
+    page_title = ""
+    try:
+        page_title = await backend.evaluate("document.title") or ""
+    except Exception:
+        logger.debug("visit title lookup failed", exc_info=True)
+    page_title = (page_title or "").strip()[:160]
+
+    now = datetime.now(timezone.utc)
+    bullet = f"- {now.strftime('%Y-%m-%d %H:%M UTC')} — [{page_title or nav_url}]({nav_url})"
+
+    from lazyclaw.lazybrain import events as lb_events
+    from lazyclaw.lazybrain import store as lb_store
+
+    # Look for an existing visit note for this domain touched in the last
+    # _VISIT_WINDOW_MIN minutes. If one exists, append; else create new.
+    tag_domain = f"site/{domain}"
+    recent = await lb_store.list_notes(config, user_id, tag=tag_domain, limit=3)
+    cutoff = now - timedelta(minutes=_VISIT_WINDOW_MIN)
+    existing = None
+    for note in recent:
+        if "visit" not in (note.get("tags") or []):
+            continue
+        updated_at = note.get("updated_at") or note.get("created_at") or ""
+        try:
+            updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if updated_dt >= cutoff:
+            existing = note
+            break
+
+    if existing:
+        body = (existing.get("content") or "").rstrip() + "\n" + bullet
+        updated = await lb_store.update_note(
+            config, user_id, existing["id"], content=body,
+        )
+        if updated:
+            lb_events.publish_note_saved(
+                user_id, updated["id"], updated.get("title"),
+                updated.get("tags"), source="site-memory",
+            )
+        return
+
+    # No recent note — create a new one. Title summarises the domain.
+    title = f"Visits: {domain}"
+    body = (
+        f"**Browser visits to `{domain}`** — auto-recorded by the agent. "
+        f"Each bullet is one landing on a URL.\n\n{bullet}"
+    )
+    note = await lb_store.save_note(
+        config, user_id,
+        content=body,
+        title=title,
+        tags=[
+            "visit", "site-memory", "auto", "owner/agent",
+            tag_domain,
+        ],
+        importance=4,
+    )
+    lb_events.publish_note_saved(
+        user_id, note["id"], note.get("title"),
+        note.get("tags"), source="site-memory",
+    )

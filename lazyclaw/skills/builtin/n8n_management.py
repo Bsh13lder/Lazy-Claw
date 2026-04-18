@@ -1,12 +1,22 @@
 """n8n workflow automation management skills.
 
-Six BaseSkill subclasses for managing n8n workflows via REST API:
+BaseSkill subclasses for managing n8n workflows via REST API:
   - n8n_status: health check + API key validation
   - n8n_list_workflows: list all workflows with status
   - n8n_create_workflow: create workflow from natural language
   - n8n_manage_workflow: activate / deactivate / delete
   - n8n_run_workflow: execute a workflow manually
   - n8n_list_executions: execution history + error inspection
+  - n8n_get_workflow / n8n_update_workflow: inspect + edit workflows
+  - n8n_list_credentials / n8n_create_credential / n8n_delete_credential
+  - n8n_get_execution: raw per-node I/O + error stacks (include_data=true)
+  - n8n_google_sheets_setup: Sheets-specific OAuth2 credential helper
+  - n8n_google_oauth_setup: generic multi-scope Google OAuth credential
+  - n8n_google_services_setup: batch per-service Google credential shells
+  - n8n_test_workflow: dry-run a workflow before activating
+  - n8n_search_templates: query the community template library
+  - n8n_install_template: import a community template by id
+  - n8n_list_webhooks: discover public webhook URLs across workflows
 """
 
 from __future__ import annotations
@@ -92,6 +102,179 @@ async def _n8n_request(
         if data is None:
             return {}
         return data
+
+
+def _summarize_node_io(run: dict) -> str:
+    """Build a compact summary of a node run's input/output payloads.
+
+    Used by n8n_get_execution when include_data=true. Truncates each payload to
+    keep the output size bounded.
+    """
+    try:
+        data_block = run.get("data", {})
+        main = data_block.get("main") if isinstance(data_block, dict) else None
+        if not main or not isinstance(main, list):
+            return ""
+        lines: list[str] = []
+        for branch_idx, branch in enumerate(main):
+            if not isinstance(branch, list) or not branch:
+                continue
+            preview = json.dumps(branch[:3], default=str, ensure_ascii=False)[:600]
+            lines.append(f"    Output[{branch_idx}]: {preview}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _normalize_scope(scope: str | list[str] | None) -> str:
+    """Collapse a scope list into a single space-separated string.
+
+    Accepts:
+      - a list of scope URLs
+      - a string with scopes separated by any mix of commas, newlines, tabs,
+        or multiple spaces
+    Returns a single-space-joined string (Google OAuth2 spec format).
+
+    Deduplicates while preserving first-occurrence order. Drops empties.
+    Fixes the common bug where pasting "scope1, scope2, scope3" produces
+    scopes with trailing commas that Google rejects as invalid.
+    """
+    if not scope:
+        return ""
+    if isinstance(scope, list):
+        parts_iter = scope
+    else:
+        raw = scope.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+        raw = raw.replace(",", " ").replace(";", " ")
+        parts_iter = raw.split(" ")
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for part in parts_iter:
+        token = (part or "").strip().strip(",;")
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        cleaned.append(token)
+    return " ".join(cleaned)
+
+
+# Curated defaults used by the generic Google OAuth setup skill. Each line is
+# one scope URL; the function joins with spaces. Keep this list conservative —
+# restricted scopes (gmail.modify, drive) require Google app verification or
+# test-user whitelisting.
+_DEFAULT_GOOGLE_SCOPES: tuple[str, ...] = (
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/analytics.readonly",
+    "https://www.googleapis.com/auth/webmasters.readonly",
+    "https://www.googleapis.com/auth/cse",
+)
+
+
+async def _find_webhook_trigger(config, user_id: str, wf_id: str) -> tuple[dict | None, dict | None, bool]:
+    """Look up a workflow and return (workflow, first_webhook_node, is_active).
+
+    Returns (None, None, False) on error; workflow always present on success.
+    """
+    wf = await _n8n_request(config, user_id, "GET", f"/api/v1/workflows/{wf_id}")
+    webhook_node = None
+    for node in wf.get("nodes", []) or []:
+        if isinstance(node, dict) and node.get("type") == "n8n-nodes-base.webhook":
+            webhook_node = node
+            break
+    return wf, webhook_node, bool(wf.get("active", False))
+
+
+def _webhook_base_urls() -> tuple[str, str]:
+    """Return (production_base, test_base) webhook URL prefixes.
+
+    The brain runs inside Docker so lazyclaw-n8n:5678 is reachable internally.
+    The public URL is only for printing to the user for external callers.
+    """
+    internal = (os.getenv("N8N_BASE_URL", _N8N_DEFAULT_BASE)).rstrip("/")
+    return internal, internal
+
+
+async def _trigger_via_webhook(
+    config,
+    user_id: str,
+    wf_id: str,
+    data: dict,
+    prefer_test_url: bool,
+    timeout: float = 60.0,
+) -> str:
+    """Trigger a workflow via its Webhook node. Returns a human-readable result.
+
+    n8n's public REST API does not expose manual workflow execution (/run
+    returns 405). The only programmatic path is a Webhook trigger node.
+    """
+    import httpx
+
+    wf, webhook_node, is_active = await _find_webhook_trigger(config, user_id, wf_id)
+    wf_name = wf.get("name", "?") if wf else "?"
+
+    if not webhook_node:
+        return (
+            f"Workflow '{wf_name}' (id: {wf_id}) cannot be triggered from the API.\n"
+            "n8n's public REST API does not support manual workflow execution — "
+            "only workflows with a Webhook trigger node can be fired programmatically.\n\n"
+            "Options:\n"
+            "  1. Add a Webhook node to the workflow (n8n_update_workflow).\n"
+            "  2. Activate it with n8n_manage_workflow(action=activate) and let its "
+            "native trigger (Schedule/Email/RSS/etc.) fire.\n"
+            "  3. Open n8n UI and click 'Execute Workflow' manually for a one-off run."
+        )
+
+    params = webhook_node.get("parameters") or {}
+    path = (params.get("path") or "").strip("/")
+    method = (params.get("httpMethod") or "POST").upper()
+    if not path:
+        return (
+            f"Workflow '{wf_name}' has a Webhook node but no path configured. "
+            "Set a path in the Webhook node before triggering."
+        )
+
+    internal, _ = _webhook_base_urls()
+    use_test = prefer_test_url or not is_active
+    prefix = "/webhook-test" if use_test else "/webhook"
+    url = f"{internal}{prefix}/{path}"
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            if method in ("GET", "DELETE"):
+                resp = await client.request(method, url, params=data or None)
+            else:
+                resp = await client.request(method, url, json=data or {})
+        except Exception as exc:
+            return f"Webhook call failed: {exc}\nURL tried: {method} {url}"
+
+    status = resp.status_code
+    body = resp.text[:1500]
+    hint = ""
+    if use_test and status == 404:
+        hint = (
+            "\n\nTip: /webhook-test/* only works while someone is clicking "
+            "'Listen for test event' in the n8n UI. For a repeatable "
+            "programmatic test, activate the workflow first (then calls "
+            "use the production /webhook/* URL automatically)."
+        )
+    elif status == 404:
+        hint = (
+            "\n\nTip: workflow is active but n8n returned 404 — double-check "
+            "the Webhook node's path parameter."
+        )
+
+    return (
+        f"Triggered '{wf_name}' via webhook.\n"
+        f"URL: {method} {url}\n"
+        f"HTTP status: {status}\n"
+        f"Response: {body or '(empty)'}{hint}"
+    )
 
 
 def _connection_error_msg(exc: Exception) -> str:
@@ -418,7 +601,13 @@ class N8nRunWorkflowSkill(BaseSkill):
 
     @property
     def description(self) -> str:
-        return "Execute an n8n workflow manually by ID and return the result."
+        return (
+            "Trigger an n8n workflow by POSTing to its Webhook node. Requires "
+            "the workflow to have a Webhook trigger and to be active. For "
+            "workflows with other trigger types (Schedule, Email, RSS) you "
+            "activate them and let the trigger fire naturally — n8n's public "
+            "API does not support manual execution directly."
+        )
 
     @property
     def parameters_schema(self) -> dict:
@@ -427,31 +616,26 @@ class N8nRunWorkflowSkill(BaseSkill):
             "properties": {
                 "workflow_id": {
                     "type": "string",
-                    "description": "The workflow ID to execute",
+                    "description": "The workflow ID to trigger",
                 },
                 "data": {
                     "type": "object",
-                    "description": "Optional input data to pass to the workflow",
+                    "description": "JSON payload to POST to the webhook.",
                 },
             },
             "required": ["workflow_id"],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        wf_id = params.get("workflow_id", "").strip()
+        if not wf_id:
+            return "Error: workflow_id is required."
+        input_data = params.get("data") or {}
         try:
-            wf_id = params["workflow_id"]
-            input_data = params.get("data", {})
-
-            result = await _n8n_request(
-                self._config, user_id, "POST",
-                f"/api/v1/workflows/{wf_id}/run",
-                body={"data": input_data} if input_data else None,
-                timeout=60.0,
+            return await _trigger_via_webhook(
+                self._config, user_id, wf_id, input_data,
+                prefer_test_url=False, timeout=60.0,
             )
-
-            execution_id = result.get("id", "?")
-            status = result.get("status", result.get("finished", "unknown"))
-            return f"Workflow {wf_id} executed. Execution ID: {execution_id}, status: {status}."
         except Exception as exc:
             return _connection_error_msg(exc)
 
@@ -754,8 +938,9 @@ class N8nGetExecutionSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Get full details of an n8n execution by ID, including "
-            "node outputs, error messages, and timing."
+            "Get full details of an n8n execution: per-node input/output data, "
+            "full error stack traces, timing. Use include_data=true for raw logs "
+            "when debugging a failing workflow."
         )
 
     @property
@@ -767,6 +952,14 @@ class N8nGetExecutionSkill(BaseSkill):
                     "type": "string",
                     "description": "The execution ID (use n8n_list_executions to find it)",
                 },
+                "include_data": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, includes raw per-node input/output payloads "
+                        "and full error stacks. Larger response — use when "
+                        "debugging a failure."
+                    ),
+                },
             },
             "required": ["execution_id"],
         }
@@ -774,7 +967,11 @@ class N8nGetExecutionSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         try:
             ex_id = params["execution_id"]
-            data = await _n8n_request(self._config, user_id, "GET", f"/api/v1/executions/{ex_id}")
+            include_data = bool(params.get("include_data", False))
+            path = f"/api/v1/executions/{ex_id}"
+            if include_data:
+                path += "?includeData=true"
+            data = await _n8n_request(self._config, user_id, "GET", path)
 
             status = data.get("status", "?")
             wf_name = data.get("workflowData", {}).get("name", "?")
@@ -791,30 +988,49 @@ class N8nGetExecutionSkill(BaseSkill):
                 "",
             ]
 
-            # Extract per-node results
             result_data = data.get("data", {}).get("resultData", {})
             run_data = result_data.get("runData", {})
             if run_data:
                 lines.append("Node Results:")
                 for node_name, node_runs in run_data.items():
-                    for run in node_runs:
+                    for idx, run in enumerate(node_runs):
                         node_status = run.get("executionStatus", "?")
-                        error = run.get("error")
-                        error_msg = ""
-                        if isinstance(error, dict):
-                            error_msg = error.get("message", "")
-                        elif error:
-                            error_msg = str(error)
-                        lines.append(f"  {node_name}: {node_status}")
-                        if error_msg:
-                            lines.append(f"    Error: {error_msg}")
+                        run_time = run.get("executionTime")
+                        time_str = f" ({run_time}ms)" if run_time is not None else ""
+                        lines.append(f"  {node_name}[{idx}]: {node_status}{time_str}")
 
-            # Show last error if present at top level
+                        error = run.get("error")
+                        if error:
+                            err_msg = ""
+                            err_stack = ""
+                            if isinstance(error, dict):
+                                err_msg = error.get("message", "")
+                                err_stack = error.get("stack", "")
+                            else:
+                                err_msg = str(error)
+                            if err_msg:
+                                lines.append(f"    Error: {err_msg}")
+                            if include_data and err_stack:
+                                stack_preview = err_stack[:800]
+                                lines.append(f"    Stack:\n{stack_preview}")
+
+                        if include_data:
+                            node_io = _summarize_node_io(run)
+                            if node_io:
+                                lines.append(node_io)
+
             last_error = result_data.get("error")
             if last_error:
-                err_msg = last_error.get("message", str(last_error)) if isinstance(last_error, dict) else str(last_error)
+                err_msg = (
+                    last_error.get("message", str(last_error))
+                    if isinstance(last_error, dict) else str(last_error)
+                )
                 lines.append("")
                 lines.append(f"Execution Error: {err_msg}")
+                if include_data and isinstance(last_error, dict):
+                    stack = last_error.get("stack", "")
+                    if stack:
+                        lines.append(f"Stack:\n{stack[:1200]}")
 
             return "\n".join(lines)
         except Exception as exc:
@@ -1053,7 +1269,10 @@ class N8nGoogleSheetsSetupSkill(BaseSkill):
                 "scope": {
                     "type": "string",
                     "description": (
-                        "OAuth scope. Default: "
+                        "OAuth scope(s). Accepts a single URL or multiple "
+                        "scopes separated by spaces, commas, or newlines — "
+                        "automatically normalized to Google's required "
+                        "space-separated format. Default: "
                         "https://www.googleapis.com/auth/spreadsheets."
                     ),
                 },
@@ -1064,8 +1283,10 @@ class N8nGoogleSheetsSetupSkill(BaseSkill):
         display_name = (params.get("name") or "Google Sheets").strip()
         client_id = (params.get("client_id") or "").strip()
         client_secret = (params.get("client_secret") or "").strip()
-        scope = (params.get("scope")
-                 or "https://www.googleapis.com/auth/spreadsheets").strip()
+        scope = _normalize_scope(
+            params.get("scope")
+            or "https://www.googleapis.com/auth/spreadsheets"
+        )
 
         # Fall back to vault for anything missing.
         if not client_id or not client_secret:
@@ -1125,4 +1346,776 @@ class N8nGoogleSheetsSetupSkill(BaseSkill):
             "that owns the Sheets you want to automate. After consent, the "
             "credential is ready — any Google Sheets node can select it."
         )
+
+
+# ---------------------------------------------------------------------------
+# 14. n8n_test_workflow — dry-run a workflow before activating
+# ---------------------------------------------------------------------------
+
+class N8nTestWorkflowSkill(BaseSkill):
+    """Execute an inactive workflow once with sample data for testing.
+
+    Distinct from n8n_run_workflow: this is framed as a preview/test step,
+    returning both the execution id and a compact summary of node outputs so
+    the brain can verify correctness before calling n8n_manage_workflow to
+    activate. The underlying endpoint is the same — n8n runs inactive
+    workflows on demand via the REST API.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_test_workflow"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Dry-run an n8n workflow with sample data before activating. Works "
+            "for workflows with a Webhook trigger: fires the webhook and "
+            "returns the HTTP response body. For workflows using Schedule / "
+            "Email / RSS triggers, activate first then let the trigger fire — "
+            "n8n's public API can't dry-run non-webhook workflows."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "workflow_id": {
+                    "type": "string",
+                    "description": "The workflow ID to test",
+                },
+                "data": {
+                    "type": "object",
+                    "description": (
+                        "Sample JSON payload to POST to the webhook. Matches "
+                        "what the first node would receive in production."
+                    ),
+                },
+            },
+            "required": ["workflow_id"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        wf_id = params.get("workflow_id", "").strip()
+        if not wf_id:
+            return "Error: workflow_id is required."
+        input_data = params.get("data") or {}
+        try:
+            result = await _trigger_via_webhook(
+                self._config, user_id, wf_id, input_data,
+                prefer_test_url=False, timeout=60.0,
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        return (
+            f"{result}\n\n"
+            "Next steps:\n"
+            f"  - If the response looks right and the workflow isn't active yet: "
+            f"n8n_manage_workflow(workflow_id=\"{wf_id}\", action=\"activate\")\n"
+            "  - For per-node debug data (on failure): check n8n_list_executions "
+            "and n8n_get_execution(include_data=true)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 15. n8n_search_templates — query the community template library
+# ---------------------------------------------------------------------------
+
+class N8nSearchTemplatesSkill(BaseSkill):
+    """Search n8n.io's public template library.
+
+    Hits https://api.n8n.io/api/templates/search — no auth needed. Returns
+    top matches the brain can then install via n8n_install_template.
+    """
+
+    _TEMPLATES_API = "https://api.n8n.io/api/templates/search"
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_search_templates"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search n8n's public template library (1500+ community workflows). "
+            "Returns top matching templates with their IDs. Use when built-in "
+            "templates don't cover the user's request — e.g. 'find an n8n "
+            "template for Notion → Slack', 'search templates for OpenAI'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search terms (service names, use case keywords).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default 10, max 25).",
+                },
+            },
+            "required": ["query"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        import httpx
+
+        query = params.get("query", "").strip()
+        if not query:
+            return "Error: query is required."
+        limit = max(1, min(int(params.get("limit") or 10), 25))
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    self._TEMPLATES_API,
+                    params={"search": query, "rows": limit},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return f"Template search failed: {exc}"
+
+        workflows = data.get("workflows") or []
+        if not workflows:
+            return f"No community templates matched '{query}'."
+
+        lines = [f"Top {len(workflows)} community templates for '{query}':", ""]
+        for wf in workflows[:limit]:
+            tpl_id = wf.get("id", "?")
+            name = wf.get("name", "(untitled)")
+            desc = (wf.get("description") or "").strip().replace("\n", " ")
+            if len(desc) > 140:
+                desc = desc[:137] + "..."
+            nodes = wf.get("nodes") or []
+            node_types = sorted({
+                (n.get("name") or "").replace("n8n-nodes-base.", "")
+                for n in nodes if isinstance(n, dict)
+            })
+            node_summary = ", ".join(node_types[:6])
+            lines.append(f"- [{tpl_id}] {name}")
+            if desc:
+                lines.append(f"  {desc}")
+            if node_summary:
+                lines.append(f"  Nodes: {node_summary}")
+        lines.append("")
+        lines.append(
+            "Install one with: n8n_install_template(template_id=<id>, activate=false)"
+        )
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 16. n8n_install_template — import a community template by id
+# ---------------------------------------------------------------------------
+
+class N8nInstallTemplateSkill(BaseSkill):
+    """Fetch a template from n8n.io and POST it to the user's n8n as a workflow.
+
+    Strips read-only fields n8n rejects on POST (id, active, credentials refs
+    that don't exist locally). Leaves the workflow inactive by default — the
+    user/brain activates it after checking credentials.
+    """
+
+    _TEMPLATE_API = "https://api.n8n.io/api/templates/workflows/{id}"
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_install_template"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Install an n8n community template by its template_id (from "
+            "n8n_search_templates). Imports the workflow inactive so the user "
+            "can wire up credentials. Use after n8n_search_templates."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "template_id": {
+                    "type": "integer",
+                    "description": "Template ID from n8n_search_templates results.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional display name override.",
+                },
+                "activate": {
+                    "type": "boolean",
+                    "description": (
+                        "Activate immediately after import. Default false — "
+                        "safer, since credentials usually need wiring first."
+                    ),
+                },
+            },
+            "required": ["template_id"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        import httpx
+
+        tpl_id = params.get("template_id")
+        if tpl_id is None:
+            return "Error: template_id is required."
+        override_name = (params.get("name") or "").strip()
+        activate = bool(params.get("activate", False))
+
+        url = self._TEMPLATE_API.format(id=tpl_id)
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                template = resp.json()
+        except Exception as exc:
+            return f"Failed to fetch template {tpl_id}: {exc}"
+
+        workflow = (template.get("workflow") or {}).copy()
+        if not workflow:
+            return f"Template {tpl_id} has no workflow payload."
+
+        for readonly_field in ("id", "active", "versionId", "createdAt", "updatedAt", "triggerCount", "tags"):
+            workflow.pop(readonly_field, None)
+        if override_name:
+            workflow["name"] = override_name
+        workflow.setdefault("settings", {"executionOrder": "v1"})
+
+        try:
+            created = await _n8n_request(
+                self._config, user_id, "POST", "/api/v1/workflows", body=workflow,
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        wf_id = created.get("id", "?")
+        wf_name = created.get("name", workflow.get("name", "(unnamed)"))
+        lines = [
+            f"Installed template {tpl_id} as workflow '{wf_name}' (id: {wf_id}).",
+            "Status: inactive.",
+            "Next: wire up any missing credentials in the n8n UI, then:",
+            f"  n8n_test_workflow(workflow_id=\"{wf_id}\")  # dry-run",
+            f"  n8n_manage_workflow(workflow_id=\"{wf_id}\", action=\"activate\")",
+        ]
+        if activate:
+            try:
+                await _n8n_request(
+                    self._config, user_id, "POST",
+                    f"/api/v1/workflows/{wf_id}/activate",
+                )
+                lines[1] = "Status: active."
+            except Exception as exc:
+                lines.append(f"Activation failed: {exc}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 17. n8n_list_webhooks — discover public webhook URLs
+# ---------------------------------------------------------------------------
+
+class N8nListWebhooksSkill(BaseSkill):
+    """List every Webhook node across all workflows with its public URL.
+
+    Useful when the user (or the brain) needs to hand out a webhook URL to an
+    external service — Stripe, Calendly, GitHub — without digging through the
+    n8n UI.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_list_webhooks"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def description(self) -> str:
+        return (
+            "List all webhook URLs exposed by n8n workflows, with method and "
+            "path. Use when an external service (Stripe, GitHub, Calendly) "
+            "needs a webhook URL to POST to, or when the user asks 'what "
+            "webhooks do I have?'."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        try:
+            listing = await _n8n_request(
+                self._config, user_id, "GET", "/api/v1/workflows",
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        rows = listing.get("data", listing) if isinstance(listing, dict) else []
+        if not rows:
+            return "No workflows found."
+
+        public_base = os.getenv("N8N_PUBLIC_URL", "http://localhost:5678").rstrip("/")
+        webhook_base = os.getenv("N8N_WEBHOOK_BASE_URL", public_base).rstrip("/")
+
+        entries: list[str] = []
+        for wf in rows:
+            if not isinstance(wf, dict):
+                continue
+            wf_id = wf.get("id", "?")
+            wf_name = wf.get("name", "(unnamed)")
+            active = wf.get("active", False)
+            for node in wf.get("nodes", []):
+                if not isinstance(node, dict):
+                    continue
+                node_type = node.get("type", "")
+                if node_type != "n8n-nodes-base.webhook":
+                    continue
+                node_params = node.get("parameters") or {}
+                path = (node_params.get("path") or "").strip("/")
+                method = (node_params.get("httpMethod") or "POST").upper()
+                production_url = f"{webhook_base}/webhook/{path}" if path else f"{webhook_base}/webhook/<unset>"
+                test_url = f"{webhook_base}/webhook-test/{path}" if path else f"{webhook_base}/webhook-test/<unset>"
+                flag = "active" if active else "INACTIVE"
+                entries.append(
+                    f"- {wf_name} (id: {wf_id}) [{flag}] "
+                    f"node '{node.get('name', '?')}'\n"
+                    f"  {method} {production_url}\n"
+                    f"  test:    {test_url}"
+                )
+
+        if not entries:
+            return "No webhook nodes found in any workflow."
+        return (
+            f"Webhook endpoints ({len(entries)} total):\n"
+            "(inactive workflows only receive on the /webhook-test/* URL until activated)\n\n"
+            + "\n".join(entries)
+        )
+
+
+# ---------------------------------------------------------------------------
+# 18. n8n_google_oauth_setup — generic multi-scope Google OAuth credential
+# ---------------------------------------------------------------------------
+
+class N8nGoogleOAuthSetupSkill(BaseSkill):
+    """Create a multi-scope googleOAuth2Api credential for any Google service.
+
+    Difference from n8n_google_sheets_setup: this creates the generic
+    googleOAuth2Api type — usable from HTTP Request nodes calling any Google
+    API (Gmail, Drive, Sheets, Calendar, YouTube, Analytics, Search Console,
+    Custom Search) with one OAuth token. Sensible multi-scope default:
+    userinfo + Sheets + Drive + Gmail + Calendar + YouTube-read +
+    Analytics-read + Search-Console-read + Custom-Search.
+
+    Scope input is auto-normalized — paste comma- or newline-separated lists
+    and it still works. That fixes the "invalid_scope" error from trailing
+    commas that Google otherwise rejects.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_google_oauth_setup"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Set up a generic multi-scope Google OAuth2 credential in n8n "
+            "(type: googleOAuth2Api). Default scopes cover Gmail, Drive, "
+            "Sheets, Calendar, YouTube, Analytics, Search Console, Custom "
+            "Search, and userinfo. Use when the user asks to 'connect "
+            "Google', 'auth all Google services', or needs cross-service "
+            "flows. Scope input is whitespace/comma/newline tolerant — paste "
+            "any format. For Sheets-only use n8n_google_sheets_setup."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Credential display name. Default: 'Google (all scopes)'.",
+                },
+                "client_id": {
+                    "type": "string",
+                    "description": (
+                        "OAuth2 clientId. If omitted, loaded from vault key "
+                        "google_oauth_client_id."
+                    ),
+                },
+                "client_secret": {
+                    "type": "string",
+                    "description": (
+                        "OAuth2 clientSecret. If omitted, loaded from vault "
+                        "key google_oauth_client_secret."
+                    ),
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of OAuth scope URLs. If omitted, uses the "
+                        "curated multi-service default (Gmail, Drive, Sheets, "
+                        "Calendar, YouTube, Analytics, Search Console, "
+                        "Custom Search, userinfo)."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Alternative to 'scopes': raw scope string. Accepts "
+                        "commas, newlines, tabs, or spaces between entries — "
+                        "normalized before sending. Prefer 'scopes' array."
+                    ),
+                },
+                "extra_scopes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Append these scopes to the default list. Ignored "
+                        "when 'scopes' or 'scope' is explicitly set."
+                    ),
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        display_name = (params.get("name") or "Google (all scopes)").strip()
+        client_id = (params.get("client_id") or "").strip()
+        client_secret = (params.get("client_secret") or "").strip()
+
+        raw_scopes = params.get("scopes")
+        raw_scope = params.get("scope")
+        extra = params.get("extra_scopes") or []
+
+        if raw_scopes:
+            scope = _normalize_scope(list(raw_scopes))
+        elif raw_scope:
+            scope = _normalize_scope(raw_scope)
+        else:
+            combined = list(_DEFAULT_GOOGLE_SCOPES) + [str(s) for s in extra if s]
+            scope = _normalize_scope(combined)
+
+        if not scope:
+            return "Error: at least one scope is required."
+
+        if not client_id or not client_secret:
+            try:
+                from lazyclaw.crypto.vault import get_credential
+                if not client_id:
+                    client_id = (await get_credential(
+                        self._config, user_id, "google_oauth_client_id",
+                    )) or ""
+                if not client_secret:
+                    client_secret = (await get_credential(
+                        self._config, user_id, "google_oauth_client_secret",
+                    )) or ""
+            except Exception:
+                logger.debug("Failed to load Google OAuth creds from vault", exc_info=True)
+
+        if not client_id or not client_secret:
+            return (
+                "Missing Google OAuth credentials. Save them first:\n"
+                "  vault_set key=google_oauth_client_id value=<your-client-id>\n"
+                "  vault_set key=google_oauth_client_secret value=<your-client-secret>\n"
+                "Or pass them to this skill as client_id / client_secret."
+            )
+
+        body = {
+            "name": display_name,
+            "type": "googleOAuth2Api",
+            "data": {
+                "clientId": client_id,
+                "clientSecret": client_secret,
+                "scope": scope,
+                "authUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+                "accessTokenUrl": "https://oauth2.googleapis.com/token",
+                "authQueryParameters": (
+                    "access_type=offline"
+                    "&prompt=select_account%20consent"
+                    "&include_granted_scopes=true"
+                ),
+                "authentication": "header",
+            },
+        }
+        try:
+            result = await _n8n_request(
+                self._config, user_id, "POST", "/api/v1/credentials", body=body,
+            )
+        except Exception as exc:
+            return _connection_error_msg(exc)
+
+        cred_id = result.get("id") or ""
+        base = os.getenv("N8N_PUBLIC_URL", "http://localhost:5678").rstrip("/")
+        consent_url = f"{base}/home/credentials/{cred_id}" if cred_id else f"{base}/home/credentials"
+
+        scope_list = scope.split(" ")
+        scope_preview = "\n".join(f"  - {s}" for s in scope_list)
+
+        return (
+            f"Created Google OAuth2 credential '{display_name}' "
+            f"(id: {cred_id or 'unknown'}, type: googleOAuth2Api).\n"
+            f"Scopes ({len(scope_list)}):\n{scope_preview}\n\n"
+            f"Finish consent here:\n  {consent_url}\n"
+            "Click 'Connect my account' and sign in with the Google account "
+            "that owns the services you want to control.\n\n"
+            "Before clicking, make sure in Google Cloud Console:\n"
+            "  1. Each requested API is ENABLED for your project.\n"
+            "  2. OAuth consent screen has each scope added.\n"
+            "  3. Your Google account is listed under 'Test users' (while the "
+            "app is in Testing mode — required for restricted scopes like "
+            "gmail.modify and drive).\n\n"
+            "If this errors with 'invalid_scope' before the chooser appears, "
+            "your OAuth client's project doesn't have all the APIs enabled. "
+            "Use n8n_google_services_setup instead — it creates per-service "
+            "credentials that piggyback on n8n's built-in OAuth and don't "
+            "need any Google Cloud Console setup."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 19. n8n_google_services_setup — per-service Google OAuth credential shells
+# ---------------------------------------------------------------------------
+
+# Mapping: service keyword -> (n8n credential type, default display name,
+# extra scopes to inject for generic googleOAuth2Api types only).
+# All type names verified against n8n 2.14.x dist/credentials/ on disk.
+_GOOGLE_SERVICE_CREDENTIAL_TYPES: dict[str, tuple[str, str, str]] = {
+    "gmail":         ("gmailOAuth2Api",             "Gmail",                ""),
+    "drive":         ("googleDriveOAuth2Api",       "Google Drive",         ""),
+    "sheets":        ("googleSheetsOAuth2Api",      "Google Sheets",        ""),
+    "calendar":      ("googleCalendarOAuth2Api",    "Google Calendar",      ""),
+    "youtube":       ("youTubeOAuth2Api",           "YouTube",              ""),
+    "analytics":     ("googleAnalyticsOAuth2Api",   "Google Analytics",     ""),
+    "docs":          ("googleDocsOAuth2Api",        "Google Docs",          ""),
+    "slides":        ("googleSlidesOAuth2Api",      "Google Slides",        ""),
+    "contacts":      ("googleContactsOAuth2Api",    "Google Contacts",      ""),
+    "tasks":         ("googleTasksOAuth2Api",       "Google Tasks",         ""),
+    "translate":     ("googleTranslateOAuth2Api",   "Google Translate",     ""),
+    "chat":          ("googleChatOAuth2Api",        "Google Chat",          ""),
+    "bigquery":      ("googleBigQueryOAuth2Api",    "Google BigQuery",      ""),
+    "ads":           ("googleAdsOAuth2Api",         "Google Ads",           ""),
+    # Search Console has no dedicated n8n credential — fall back to the
+    # generic googleOAuth2Api with webmasters scopes. Used with HTTP Request
+    # nodes against the Search Console API.
+    "searchconsole": (
+        "googleOAuth2Api",
+        "Google Search Console",
+        "https://www.googleapis.com/auth/webmasters.readonly",
+    ),
+}
+
+
+class N8nGoogleServicesSetupSkill(BaseSkill):
+    """Batch-create per-service Google credential shells.
+
+    This bypasses the generic googleOAuth2Api flow (which fails with
+    'invalid_scope' when the user's own OAuth client doesn't have all APIs
+    enabled). Instead it creates ONE credential per service — each uses
+    n8n's pre-verified OAuth app under the hood, so the user can click
+    'Sign in with Google' in the n8n UI to finish auth without touching
+    Google Cloud Console at all.
+
+    Trade-off: one credential per service to click through, but each one
+    takes ~15 seconds and works immediately.
+    """
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "n8n"
+
+    @property
+    def name(self) -> str:
+        return "n8n_google_services_setup"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create per-service Google OAuth2 credential shells in n8n for "
+            "a list of services (gmail, drive, sheets, calendar, youtube, "
+            "analytics, searchconsole, docs, contacts, tasks, translate). "
+            "Each uses n8n's built-in OAuth app — no Google Cloud Console "
+            "setup needed, no invalid_scope errors. Use this when the "
+            "user asks to 'connect all Google services' or when the generic "
+            "n8n_google_oauth_setup fails with invalid_scope. Returns a "
+            "consent URL per credential; the user opens each and clicks "
+            "'Sign in with Google' once."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        supported = ", ".join(sorted(_GOOGLE_SERVICE_CREDENTIAL_TYPES.keys()))
+        return {
+            "type": "object",
+            "properties": {
+                "services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        f"Services to set up. Supported: {supported}. "
+                        "Omit for the default set (gmail, drive, sheets, "
+                        "calendar, youtube, analytics, searchconsole)."
+                    ),
+                },
+                "prefix": {
+                    "type": "string",
+                    "description": (
+                        "Optional display-name prefix. E.g. 'Hirossa' → "
+                        "'Hirossa Gmail', 'Hirossa Google Drive'. Useful "
+                        "for users with multiple Google accounts."
+                    ),
+                },
+                "client_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Your own OAuth clientId. If omitted, "
+                        "the credential is created as a shell and n8n's "
+                        "built-in Sign-in-with-Google button is used."
+                    ),
+                },
+                "client_secret": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Your own OAuth clientSecret. Paired with "
+                        "client_id."
+                    ),
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        requested = params.get("services")
+        if not requested:
+            # Search Console has no dedicated n8n credential (confirmed in
+            # n8n 2.14.x dist/credentials). Excluded from defaults. For
+            # Search Console data, use an HTTP Request node + your own
+            # googleOAuth2Api credential, or scrape via the browser skill.
+            requested = [
+                "gmail", "drive", "sheets", "calendar",
+                "youtube", "analytics", "docs",
+            ]
+        prefix = (params.get("prefix") or "").strip()
+        client_id = (params.get("client_id") or "").strip()
+        client_secret = (params.get("client_secret") or "").strip()
+
+        unknown = [s for s in requested if s not in _GOOGLE_SERVICE_CREDENTIAL_TYPES]
+        if unknown:
+            return (
+                f"Unknown services: {unknown}. Supported: "
+                f"{sorted(_GOOGLE_SERVICE_CREDENTIAL_TYPES.keys())}"
+            )
+
+        base = os.getenv("N8N_PUBLIC_URL", "http://localhost:5678").rstrip("/")
+
+        results: list[str] = []
+        errors: list[str] = []
+        for key in requested:
+            cred_type, default_label, extra_scope = _GOOGLE_SERVICE_CREDENTIAL_TYPES[key]
+            display_name = f"{prefix} {default_label}".strip() if prefix else default_label
+
+            data: dict = {}
+            if client_id and client_secret:
+                data["clientId"] = client_id
+                data["clientSecret"] = client_secret
+
+            # Generic googleOAuth2Api types (e.g. the Search Console fallback)
+            # need scope + endpoint config; dedicated per-service types have
+            # those baked in.
+            if cred_type == "googleOAuth2Api" and extra_scope:
+                data["scope"] = _normalize_scope(extra_scope)
+                data["authUrl"] = "https://accounts.google.com/o/oauth2/v2/auth"
+                data["accessTokenUrl"] = "https://oauth2.googleapis.com/token"
+                data["authQueryParameters"] = (
+                    "access_type=offline&prompt=select_account%20consent"
+                )
+                data["authentication"] = "header"
+
+            body = {"name": display_name, "type": cred_type, "data": data}
+            try:
+                result = await _n8n_request(
+                    self._config, user_id, "POST", "/api/v1/credentials", body=body,
+                )
+            except Exception as exc:
+                errors.append(f"  - {display_name}: {exc}")
+                continue
+
+            cred_id = result.get("id") or ""
+            consent = f"{base}/home/credentials/{cred_id}" if cred_id else f"{base}/home/credentials"
+            results.append(
+                f"  - {display_name} (id: {cred_id or '?'}): {consent}"
+            )
+
+        lines = [
+            f"Created {len(results)} per-service Google credential(s) in n8n.",
+            "",
+            "Open each URL → click 'Sign in with Google' (or 'Connect my "
+            "account') → pick your Google account → done.",
+            "",
+            "Credentials:",
+            *results,
+        ]
+        if errors:
+            lines.append("")
+            lines.append("Errors:")
+            lines.extend(errors)
+        if not client_id:
+            lines.append("")
+            lines.append(
+                "Note: these credentials were created without your own "
+                "client_id, so they use n8n's built-in OAuth app. That "
+                "avoids the 'invalid_scope' error from custom OAuth "
+                "clients with missing APIs."
+            )
+        return "\n".join(lines)
+
+
 

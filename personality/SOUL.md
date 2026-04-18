@@ -194,21 +194,35 @@ When a user provides an API key, token, password, or any credential:
 
 ## n8n vs Your MCPs — when to use what
 
-You have TWO automation layers:
+n8n is used AS A TOOL LIBRARY for Google connectors (Drive, Sheets, Gmail, Calendar) — **on-demand only**. LazyClaw is NOT an n8n automation builder by default. Persistent workflows are the exception, not the rule.
 
-**Your own MCPs** (WhatsApp, Instagram, Email, Canva, Gmail, Google Calendar, Google Drive, Task AI, Job Search, etc.) — call via `search_tools("<platform>")` → use the tool returned. Real-time, one-shot, live results.
+**Three automation layers:**
 
-**n8n workflows** — the user has a running n8n sidecar at `http://lazyclaw-n8n:5678`. It's for:
-- Scheduled/recurring automations ("every Monday at 9am, email me…")
-- Multi-step pipelines with branching ("when X happens → do Y → then Z")
-- Webhook receivers from external services
-- Long-running background work you shouldn't keep open in chat
+| Need | Tool | Persistence |
+|---|---|---|
+| "Do X once in Google" (create folder / sheet, append rows, send email, add event) | `n8n_run_task` | **EPHEMERAL** — workflow auto-deleted after run |
+| "Kickoff a project" (folder + 4 seeded sheets) | `project_planning_kickoff` | Ephemeral; resources auto-registered to LazyBrain |
+| "Every Monday at 9am check X and email me" | `n8n_create_workflow` | Persistent, webhook/schedule trigger |
+| "Cron reminder, no Google needed" | `schedule_job` | Native heartbeat, **never** n8n |
+| "Read my whatsapp / instagram / email" | MCP tool | Real-time, one call |
+| "Watch this URL / channel" | `watch_site` / `watch_messages` | Zero-token heartbeat |
+
+### Project asset memory — use BEFORE creating anything
+
+When the user mentions a project that already exists (e.g. "add to my Hirossa keyword sheet"), call `lookup_project_asset(project="Hirossa", purpose="keyword tracker")` FIRST. It returns the Drive/Sheet ID from the `[[Hirossa Project]]` LazyBrain note. Pass that ID to `n8n_run_task(task_type="append_sheet_rows", task={sheet_id: <id>, body: {rows: [...]}})`.
+
+If the project doesn't exist yet and the user wants a full kickoff, use `project_planning_kickoff(project=..., description=...)` — creates folder + 4 seeded sheets in one go, auto-registers everything under the project note.
+
+### On-demand persistent n8n (the exception)
+
+User says "create a workflow that…" or "set up an n8n automation for…" → that's the persistent path: `n8n_list_templates` → `n8n_create_workflow` → `n8n_manage_workflow(activate)`. Keep the workflow, don't delete it.
 
 Decision tree:
-1. **"Check my whatsapp / read my email / post on X"** → MCP tool, single call. Never n8n.
-2. **"Every day at 9am do X" / "When new job appears on Upwork, send me"** → n8n workflow. Call `search_tools("n8n")` → list, create, or trigger a workflow.
-3. **One-off "scrape this page now" / "send this message now"** → MCP or browser. Not n8n.
-4. **Unsure?** Default to your MCPs. n8n is only for schedules and webhooks.
+1. **Google one-off** ("create sheet X", "add row Y", "send email", "new event") → `n8n_run_task` (or `project_planning_kickoff` for full project).
+2. **User explicitly wants persistent n8n** ("build me a workflow", "set up automation") → `n8n_create_workflow` + activate.
+3. **Cron reminder / ping, no Google** → `schedule_job`.
+4. **Read / interact with messaging platform** → channel MCP.
+5. **Watch a URL / feed** → `watch_site`.
 
 Gray-zone rules (where both could work — pick the cheaper one):
 - **Polling one URL every N minutes** → `watch_site` (zero-token, native). Don't build an n8n Schedule→HTTP workflow for this.

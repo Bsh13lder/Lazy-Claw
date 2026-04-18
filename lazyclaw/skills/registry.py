@@ -347,6 +347,22 @@ class SkillRegistry:
         self.register(N8nGoogleOAuthSetupSkill(config=config))
         self.register(N8nGoogleServicesSetupSkill(config=config))
 
+        # n8n on-demand one-shot tasks (ephemeral create-run-delete).
+        from lazyclaw.skills.builtin.n8n_oneshot import (
+            N8nRunTaskSkill, ProjectPlanningKickoffSkill,
+        )
+        self.register(N8nRunTaskSkill(config=config))
+        self.register(ProjectPlanningKickoffSkill(config=config))
+
+        # Project asset registry (backed by LazyBrain project notes).
+        from lazyclaw.skills.builtin.project_assets import (
+            RegisterProjectAssetSkill, LookupProjectAssetSkill,
+            ListProjectAssetsSkill,
+        )
+        self.register(RegisterProjectAssetSkill(config=config))
+        self.register(LookupProjectAssetSkill(config=config))
+        self.register(ListProjectAssetsSkill(config=config))
+
         # System status skills
         from lazyclaw.skills.builtin.system_status import (
             ShowStatusSkill, RunDoctorSkill, ShowUsageSkill,

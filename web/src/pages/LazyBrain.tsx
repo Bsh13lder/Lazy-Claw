@@ -327,6 +327,16 @@ export default function LazyBrain() {
   const visibleJournal = useMemo(() => applyFilters(journal), [applyFilters, journal]);
   const totalCount = notes.length;
 
+  // Tasks/reminders surface — any note tagged `task` (auto-mirrored from the
+  // tasks table + task_manager skill) gets pulled out into its own section so
+  // the user can see what's pending without digging through Recent.
+  const visibleTasks = useMemo(
+    () => visibleNotes.filter((n) =>
+      (n.tags || []).some((t) => t.toLowerCase() === "task" || t.toLowerCase().startsWith("task/")),
+    ),
+    [visibleNotes],
+  );
+
   // Stable dimPredicate — identity only changes when the filter actually does,
   // so the graph simulation can settle instead of re-warming on every render.
   const graphDimPredicate = useCallback(
@@ -387,6 +397,7 @@ export default function LazyBrain() {
           recent={visibleNotes}
           pinned={visiblePinned}
           journal={visibleJournal}
+          tasks={visibleTasks}
           tags={tags}
           selectedId={selectedId}
           activeTag={tagFilter}

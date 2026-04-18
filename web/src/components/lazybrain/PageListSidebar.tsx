@@ -19,12 +19,13 @@ import {
   X,
   CategoryIcon,
 } from "./icons";
-import { Download, PanelLeftClose } from "lucide-react";
+import { Download, PanelLeftClose, ListTodo } from "lucide-react";
 
 interface Props {
   recent: LazyBrainNote[];
   pinned: LazyBrainNote[];
   journal: LazyBrainNote[];
+  tasks: LazyBrainNote[];
   tags: LazyBrainTag[];
   selectedId: string | null;
   activeTag: string | null;
@@ -56,6 +57,7 @@ export function PageListSidebar({
   recent,
   pinned,
   journal,
+  tasks,
   tags,
   selectedId,
   activeTag,
@@ -204,6 +206,25 @@ export function PageListSidebar({
               <Calendar size={14} strokeWidth={1.75} />
               <span>Today's journal</span>
             </button>
+
+            {/* Tasks & reminders — auto-pulled from notes tagged `task` */}
+            {tasks.length > 0 && (
+              <SidebarSection
+                label="Tasks"
+                count={tasks.length}
+                Icon={ListTodo}
+                iconColor="#f59e0b"
+              >
+                {tasks.slice(0, 15).map((n) => (
+                  <PageRow
+                    key={n.id}
+                    note={n}
+                    selected={selectedId === n.id}
+                    onClick={() => onSelect(n)}
+                  />
+                ))}
+              </SidebarSection>
+            )}
 
             {/* Pinned */}
             {pinned.length > 0 && (

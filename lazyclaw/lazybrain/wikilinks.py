@@ -58,3 +58,43 @@ def extract_tags(markdown: str) -> list[str]:
 def parse(markdown: str) -> tuple[list[str], list[str]]:
     """Shortcut: (wikilinks, tags)."""
     return extract_wikilinks(markdown), extract_tags(markdown)
+
+
+# Code-fence-aware splitter: capturing group so re.split keeps the delimiters.
+# Even-indexed chunks are plain markdown; odd-indexed are code (skip them).
+_CODE_PART_RE = re.compile(r"(```.*?```|`[^`\n]+`)", re.DOTALL)
+
+
+def rewrite_wikilink_target(
+    markdown: str, old: str, new: str
+) -> tuple[str, int]:
+    """Rewrite ``[[old]]`` → ``[[new]]`` in plain markdown regions.
+
+    Matches are case-insensitive on the target (uses ``normalize_page`` so
+    ``[[Redis]]`` and ``[[redis]]`` both rewrite). Wikilinks inside code
+    fences or inline-code spans are left untouched, matching the rule used
+    by :func:`extract_wikilinks`.
+
+    Returns ``(new_markdown, replacement_count)``. When ``old`` is empty or
+    no match is found, the input markdown is returned unchanged with count 0.
+    """
+    if not markdown:
+        return markdown, 0
+    old_key = normalize_page(old)
+    if not old_key:
+        return markdown, 0
+
+    replacements = 0
+
+    def _substitute(match: re.Match) -> str:
+        nonlocal replacements
+        if normalize_page(match.group(1)) == old_key:
+            replacements += 1
+            return f"[[{new}]]"
+        return match.group(0)
+
+    parts = _CODE_PART_RE.split(markdown)
+    for idx, part in enumerate(parts):
+        if idx % 2 == 0:  # non-code region
+            parts[idx] = _WIKILINK_RE.sub(_substitute, part)
+    return "".join(parts), replacements

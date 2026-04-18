@@ -640,7 +640,12 @@ class Agent:
             logger.info("process_message TRACE: skills loaded, building context...")
             try:
                 system_prompt = await asyncio.wait_for(
-                    build_context(self.config, user_id, registry=self.registry),
+                    build_context(
+                        self.config,
+                        user_id,
+                        registry=self.registry,
+                        user_message=message,
+                    ),
                     timeout=15,
                 )
             except asyncio.TimeoutError:

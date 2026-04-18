@@ -107,7 +107,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Notifications** | `notifications/` | Telegram push notifications for background tasks |
 | **Pipeline** | `pipeline/` | CRM-style pipeline store for workflow tracking |
 | **Survival** | `survival/` | Gig economy tools — job matching, applications, invoices, profiles |
-| **LazyBrain** | `lazybrain/` | Python-native Logseq-style PKM — encrypted notes + `[[wikilinks]]` + backlinks + force-directed graph + daily journal + auto-capture. **Single home for every memory source**: tasks, personal_memory, daily_logs, site_memory, lessons, layers.py all auto-mirror here with `owner/{user,agent}` + kind tags. Worker-model LLM polishes user text and auto-names journal pages. |
+| **LazyBrain** | `lazybrain/` | Python-native Logseq-style PKM — encrypted notes + `[[wikilinks]]` + backlinks + force-directed graph + daily journal + auto-capture. **Single home for every memory source**: tasks, personal_memory, daily_logs, site_memory, lessons, layers.py all auto-mirror here with `owner/{user,agent}` + kind tags. Worker-model LLM polishes user text and auto-names journal pages. **21 NL skills** covering notes CRUD, journal read/rewrite/delete-line, tag & title discovery, rename-with-wikilink-rewrite, and cross-note merge. |
 
 Supporting: `llm/` (multi-provider router + ECO mode + Claude CLI provider), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool), `web/` (React 19 + TypeScript + Vite + Tailwind — 12 pages: Overview, Activity, Replay, Audit, SkillHub, Skills, Templates, Jobs, MCP, Memory, Vault, Settings + persistent chat sidebar with live BrowserCanvas), `n8n-custom/` (n8n webhook integration + 6 management skills + templates).
 
@@ -157,7 +157,10 @@ These are non-obvious architectural decisions -- read the code for implementatio
 - **Unified browser tool**: Single `browser` skill with 7 actions (read, open, click, type, screenshot, tabs, scroll). CDP-only, no Playwright.
 - **Brave browser**: Auto-detected (Brave > Chrome > Chromium). Built-in ad/tracker blocking = cleaner pages for LLM.
 - **Fast chat path**: Simple messages get last 6 messages, SOUL.md only (no capabilities/memories/tools).
+- **Hybrid memory picker**: `context_builder.py` no longer injects the top-10 personal memories by importance alone — it fetches a pool of 40 and picks 5 by importance (stable facts) + 5 by keyword overlap with the current user message (context-relevant). Zero extra LLM cost, uses EN+ES stopword filter. Falls back to pure importance when no message or no overlap. Fixes the "memory exists but agent can't find it" loop (see `_pick_hybrid_memories` in context_builder.py).
 - **Layered summaries**: Daily logs (auto, gpt-5-mini) + weekly + injected into agent context. Skips 90s LLM re-summarization.
+- **Stuck detector batch-ops**: `lazybrain_*` tools added to `_BATCH_OP_PREFIXES` in `stuck_detector.py` alongside `email_` / `whatsapp_` / `instagram_` — limit 10 consecutive calls before stuck. Natural "search → fetch each hit" patterns no longer false-trigger at 3.
+- **recall_memories vault hint**: on a miss, `recall_memories` now includes the list of vault key names (names only, never values) so the brain pivots to `vault_get(key=...)` instead of looping memory queries. Credentials live in the vault, never in memory.
 - **Shared browser profiles**: CDP uses `browser_profiles/{user_id}/` with system browser. Login once → all tools see cookies.
 - **Headless auto-launch**: Brave/Chrome launches headless automatically. `open` action launches visible for user-facing tasks.
 - **Human-like delays**: Random 0.2-1.5s between clicks, 0.03-0.12s typing, 0.8-1.5s navigation.

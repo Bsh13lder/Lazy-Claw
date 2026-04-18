@@ -171,6 +171,10 @@ class SkillRegistry:
             GetNoteSkill, SearchNotesSkill,
             FindLinkedSkill, GraphNeighborsSkill,
             AppendJournalSkill, ListJournalSkill,
+            GetJournalSkill, DeleteJournalSkill,
+            DeleteJournalLineSkill, RewriteJournalSkill,
+            ListTagsSkill, ListTitlesSkill,
+            RenamePageSkill, MergeNotesSkill,
             PinNoteSkill, UnpinNoteSkill, ListPinnedSkill,
             EnableWeeklyRollupSkill,
         )
@@ -184,6 +188,14 @@ class SkillRegistry:
         self.register(GraphNeighborsSkill(config=config))
         self.register(AppendJournalSkill(config=config))
         self.register(ListJournalSkill(config=config))
+        self.register(GetJournalSkill(config=config))
+        self.register(DeleteJournalSkill(config=config))
+        self.register(DeleteJournalLineSkill(config=config))
+        self.register(RewriteJournalSkill(config=config))
+        self.register(ListTagsSkill(config=config))
+        self.register(ListTitlesSkill(config=config))
+        self.register(RenamePageSkill(config=config))
+        self.register(MergeNotesSkill(config=config))
         self.register(PinNoteSkill(config=config))
         self.register(UnpinNoteSkill(config=config))
         self.register(ListPinnedSkill(config=config))

@@ -79,12 +79,83 @@ _mcp_cache_time: float = 0.0
 _cache_lock = asyncio.Lock()
 
 
+# Stopwords excluded from keyword-overlap scoring. Short list, English + Spanish
+# (user is bilingual — see memory: Madrid, Spain). Kept deliberately small:
+# we only need to filter words that appear in ~every message.
+_MEMORY_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
+    "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "to", "of", "in", "on", "at", "for", "with", "by", "from", "as",
+    "this", "that", "these", "those", "it", "its", "my", "me", "you",
+    "your", "we", "us", "our", "can", "could", "would", "should",
+    "will", "just", "only", "not", "no", "yes", "so", "if", "then",
+    "about", "what", "how", "why", "when", "where", "who",
+    "el", "la", "los", "las", "un", "una", "de", "del", "y", "o",
+    "que", "es", "son", "para", "por", "con", "sin", "como", "pero",
+    "si", "no", "tu", "yo", "mi", "me", "te", "se", "le", "lo",
+})
+
+_TOKEN_RE = re.compile(r"[a-z0-9]{2,}", re.IGNORECASE)
+
+
+def _tokenize_for_memory(text: str) -> set[str]:
+    """Lowercase, strip stopwords, keep tokens of length ≥ 2."""
+    if not text:
+        return set()
+    return {
+        tok for tok in _TOKEN_RE.findall(text.lower())
+        if tok not in _MEMORY_STOPWORDS
+    }
+
+
+def _pick_hybrid_memories(
+    pool: list[dict],
+    user_message: str | None,
+    n_importance: int,
+    n_relevant: int,
+) -> list[dict]:
+    """Pick top-N by importance + top-N by keyword overlap with the message.
+
+    Pool is already sorted by importance DESC (see get_memories). We slice
+    the first `n_importance` entries, then rank the remainder by token
+    overlap against the user message and append up to `n_relevant` more.
+    Falls back to pure importance when there's no message or no overlap.
+    """
+    if not pool:
+        return []
+
+    by_importance = pool[:n_importance]
+    if not user_message or len(pool) <= n_importance:
+        return by_importance
+
+    query_tokens = _tokenize_for_memory(user_message)
+    if not query_tokens:
+        return by_importance
+
+    already_chosen_ids = {m["id"] for m in by_importance}
+    remainder = [m for m in pool if m["id"] not in already_chosen_ids]
+
+    scored: list[tuple[int, int, dict]] = []
+    for idx, mem in enumerate(remainder):
+        mem_tokens = _tokenize_for_memory(mem.get("content") or "")
+        overlap = len(query_tokens & mem_tokens)
+        if overlap > 0:
+            # Secondary sort key: original pool position (lower = more important)
+            scored.append((-overlap, idx, mem))
+
+    scored.sort()
+    relevant = [m for _, _, m in scored[:n_relevant]]
+
+    return by_importance + relevant
+
+
 async def build_context(
     config: Config,
     user_id: str,
     registry=None,
     channel_id: str | None = None,
     project_id: str | None = None,
+    user_message: str | None = None,
 ) -> str:
     """Build system prompt with personality + capabilities + memories.
 
@@ -94,6 +165,9 @@ async def build_context(
         registry: Skill registry (for capabilities section).
         channel_id: Active channel (loads CHANNEL memory layer when provided).
         project_id: Active project (loads PROJECT memory layer when provided).
+        user_message: Current user input — used to re-rank personal memories by
+            keyword overlap so context-relevant facts surface even when they
+            sit below the importance cutoff.
     """
     personality = load_personality()
 
@@ -140,10 +214,13 @@ async def build_context(
     except Exception:
         logger.debug("Failed to load lazybrain context section", exc_info=True)
 
-    # 3. Personal memories (DB-backed encrypted facts — backward compat)
+    # 3. Personal memories — hybrid pick: always-on facts (importance) +
+    #    context-relevant facts (keyword overlap with the current message).
+    #    Fetch a wider pool once, then pick 5+5 with dedup.
     from lazyclaw.memory.personal import get_memories
 
-    memories = await get_memories(config, user_id, limit=10)
+    pool = await get_memories(config, user_id, limit=40)
+    memories = _pick_hybrid_memories(pool, user_message, n_importance=5, n_relevant=5)
 
     # 4. Recent activity (daily/weekly logs — agent's "diary")
     # Summaries are sanitized to remove error details that could cause

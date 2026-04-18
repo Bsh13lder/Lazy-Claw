@@ -41,6 +41,7 @@ LazyClaw takes a different approach:
 | **API keys** | Encrypted credential vault | `.env` plaintext |
 | **Conversations** | Encrypted per-user | Plaintext JSONL |
 | **Memories** | Encrypted personal facts | Plaintext markdown |
+| **Second brain** | Built-in Logseq-style PKM — encrypted notes, wikilinks, backlinks, journal, graph. Agent and user share one store. | Separate app, plaintext |
 | **Tool selection** | Smart discovery via search_tools (4 base tools, ~195 discoverable) | All tools every turn (5K+ tokens) |
 | **Cost routing** | 3-mode Brain/Worker split across 5 providers (Anthropic · MiniMax subscription · OpenAI · local Ollama · Claude CLI) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
@@ -120,6 +121,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `browser/` | CDP browser control, page reader, site memory, DOM click engine |
 | `computer/` | Native subprocess + remote WebSocket connector |
 | `memory/` | Encrypted facts, history, compression, daily/weekly summaries |
+| `lazybrain/` | Python-native Logseq-style PKM — encrypted notes, `[[wikilinks]]`, backlinks, daily journal, force-directed graph. 21 NL skills exposing full Logseq surface to the agent. |
 | `mcp/` | Native MCP client + server + skill bridge |
 | `crypto/` | AES-256-GCM, PBKDF2, credential vault |
 | `teams/` | Specialist delegation + parallel execution |

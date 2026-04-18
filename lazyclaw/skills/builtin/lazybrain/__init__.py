@@ -4,6 +4,10 @@ All skills call :mod:`lazyclaw.lazybrain.store` directly (no HTTP, no MCP).
 """
 from lazyclaw.skills.builtin.lazybrain.notes import (
     DeleteNoteSkill,
+    ListTagsSkill,
+    ListTitlesSkill,
+    MergeNotesSkill,
+    RenamePageSkill,
     SaveNoteSkill,
     UpdateNoteSkill,
 )
@@ -17,7 +21,11 @@ from lazyclaw.skills.builtin.lazybrain.graph_skill import (
 )
 from lazyclaw.skills.builtin.lazybrain.journal_skill import (
     AppendJournalSkill,
+    DeleteJournalLineSkill,
+    DeleteJournalSkill,
+    GetJournalSkill,
     ListJournalSkill,
+    RewriteJournalSkill,
 )
 from lazyclaw.skills.builtin.lazybrain.pins import (
     ListPinnedSkill,
@@ -30,12 +38,20 @@ __all__ = [
     "SaveNoteSkill",
     "UpdateNoteSkill",
     "DeleteNoteSkill",
+    "ListTagsSkill",
+    "ListTitlesSkill",
+    "RenamePageSkill",
+    "MergeNotesSkill",
     "GetNoteSkill",
     "SearchNotesSkill",
     "FindLinkedSkill",
     "GraphNeighborsSkill",
     "AppendJournalSkill",
     "ListJournalSkill",
+    "GetJournalSkill",
+    "DeleteJournalSkill",
+    "DeleteJournalLineSkill",
+    "RewriteJournalSkill",
     "PinNoteSkill",
     "UnpinNoteSkill",
     "ListPinnedSkill",

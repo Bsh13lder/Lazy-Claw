@@ -67,7 +67,9 @@ DEFAULT_LOOP_LIMITS: dict[str, int] = {
 # MCP tools that do batch operations (email organize, bulk label, etc.)
 # These need higher limits because one "organize inbox" task = many calls.
 # The same-result detector still catches true stuck loops.
-_BATCH_OP_PREFIXES = ("email_", "whatsapp_", "instagram_")
+# `lazybrain_` belongs here too: search_notes → get_note(id_a) → get_note(id_b)
+# is the normal read pattern, and each call has different args + different results.
+_BATCH_OP_PREFIXES = ("email_", "whatsapp_", "instagram_", "lazybrain_")
 
 def _effective_limit(tool_name: str, limits: dict[str, int]) -> int:
     """Get loop limit for a tool, with higher defaults for batch-op tools."""

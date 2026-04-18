@@ -3,7 +3,7 @@ import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "vault" | "settings";
+export type Page = "overview" | "activity" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -23,6 +23,7 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   watchers: { label: "Watchers", description: "Zero-token site monitors" },
   mcp: { label: "MCP", description: "Server integrations" },
   memory: { label: "Memory", description: "Personal facts & logs" },
+  lazybrain: { label: "LazyBrain", description: "Encrypted Logseq-style PKM" },
   vault: { label: "Vault", description: "Encrypted credentials" },
   settings: { label: "Settings", description: "Agent configuration" },
 };
@@ -124,6 +125,16 @@ const NAV_ITEMS: { page: Page; icon: React.ReactNode }[] = [
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
         <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z" />
         <path d="M12 16v-4M12 8h.01" />
+      </svg>
+    ),
+  },
+  {
+    page: "lazybrain",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2a7 7 0 0 0-7 7c0 2.4 1.2 4.5 3 5.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3c1.8-1.3 3-3.3 3-5.7a7 7 0 0 0-7-7Z" />
+        <path d="M9 21h6" />
+        <path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" />
       </svg>
     ),
   },
@@ -242,17 +253,19 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
 
         {/* Main workspace area */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          {/* Page header bar */}
-          <header className="shrink-0 px-6 py-3 border-b border-border bg-bg-secondary/50 backdrop-blur-sm">
-            <div className="flex items-center gap-2">
-              <span className="text-text-muted text-xs">LazyClaw</span>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-placeholder">
-                <polyline points="9 18 15 12 9 6" />
-              </svg>
-              <span className="text-sm font-medium text-text-primary">{meta.label}</span>
-              <span className="text-xs text-text-muted ml-2 hidden sm:inline">{meta.description}</span>
-            </div>
-          </header>
+          {/* Page header bar — hidden on LazyBrain so the PKM gets full canvas */}
+          {activePage !== "lazybrain" && (
+            <header className="shrink-0 px-6 py-3 border-b border-border bg-bg-secondary/50 backdrop-blur-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-text-muted text-xs">LazyClaw</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-placeholder">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span className="text-sm font-medium text-text-primary">{meta.label}</span>
+                <span className="text-xs text-text-muted ml-2 hidden sm:inline">{meta.description}</span>
+              </div>
+            </header>
+          )}
 
           {/* Page content */}
           <main className="flex-1 min-w-0 overflow-hidden">
@@ -260,8 +273,8 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
           </main>
         </div>
 
-        {/* Right chat sidebar */}
-        <ChatSidebar />
+        {/* Right chat sidebar — hidden on LazyBrain (focus mode) */}
+        {activePage !== "lazybrain" && <ChatSidebar />}
       </div>
 
       {/* Bottom status bar */}

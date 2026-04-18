@@ -1283,6 +1283,69 @@ def install_mcps_cmd() -> None:
     asyncio.run(_install_mcps())
 
 
+@main.command(name="rotate-keys")
+@click.option(
+    "--scope",
+    type=click.Choice(["lazybrain"]),
+    required=True,
+    help="Rotation scope (currently: lazybrain).",
+)
+@click.option("--user-id", default=None, help="Target a single user.")
+@click.option("--all", "all_users", is_flag=True, help="Rotate every user.")
+@click.option("--dry-run", is_flag=True, help="Report only, don't write.")
+def rotate_keys_cmd(
+    scope: str,
+    user_id: str | None,
+    all_users: bool,
+    dry_run: bool,
+) -> None:
+    """Re-roll AES-GCM nonces on encrypted notes (hygiene rotation).
+
+    Decrypts every note with the user's current DEK and re-encrypts with
+    fresh randomness. Same DEK, new nonces. Writes a `keys_rotated` entry
+    to audit_log per user. Pass --dry-run to preview without writing.
+    """
+    if not user_id and not all_users:
+        console.print(
+            "[red]Specify --user-id <id> or --all.[/red]"
+        )
+        raise SystemExit(1)
+
+    async def _run() -> None:
+        from lazyclaw.lazybrain.rotation import (
+            rotate_all_users,
+            rotate_user_notes,
+        )
+
+        config = load_config()
+        if all_users:
+            results = await rotate_all_users(config, dry_run=dry_run)
+        else:
+            assert user_id is not None
+            results = [
+                await rotate_user_notes(config, user_id, dry_run=dry_run)
+            ]
+
+        table = Table(title=f"LazyBrain rotation ({scope})")
+        table.add_column("User", style="cyan")
+        table.add_column("Rotated", justify="right")
+        table.add_column("Failed", justify="right")
+        table.add_column("Mode")
+        for r in results:
+            if "error" in r:
+                table.add_row(r["user_id"], "—", "—", f"[red]error: {r['error']}[/red]")
+                continue
+            table.add_row(
+                r["user_id"],
+                str(r.get("rotated", 0)),
+                str(r.get("failed", 0)),
+                "[yellow]dry-run[/yellow]" if r.get("dry_run") else "[green]written[/green]",
+            )
+        console.print(table)
+
+    asyncio.run(_run())
+
+
 @main.command()
 def start() -> None:
     """Start the full agent (API + Telegram + Heartbeat)."""

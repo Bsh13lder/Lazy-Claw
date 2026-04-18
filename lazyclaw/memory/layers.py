@@ -461,6 +461,33 @@ async def auto_extract(
                 results["project"] = content
                 logger.info("auto_extract: saved PROJECT context for %s", project_id)
 
+        # Mirror each extracted layer into LazyBrain as a note. In Phase 18.4
+        # the markdown layer above becomes opt-in; until then we keep both so
+        # rollback is painless.
+        try:
+            from lazyclaw.lazybrain import events as lb_events
+            from lazyclaw.lazybrain import store as lb_store
+
+            for layer_key, layer_content in results.items():
+                layer_tag = f"layer/{layer_key}"
+                if layer_key == "channel" and channel_id:
+                    layer_tag = f"layer/channel/{channel_id}"
+                elif layer_key == "project" and project_id:
+                    layer_tag = f"layer/project/{project_id}"
+                note = await lb_store.save_note(
+                    config,
+                    user_id,
+                    content=layer_content,
+                    title=f"Session learnings — {layer_key}",
+                    tags=["auto", "session-end", "owner/agent", layer_tag],
+                    importance=6,
+                )
+                lb_events.publish_note_saved(
+                    user_id, note["id"], note["title"], note["tags"], source="session-end",
+                )
+        except Exception:
+            logger.debug("lazybrain session-end mirror failed", exc_info=True)
+
         return results
 
     except Exception as exc:

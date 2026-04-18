@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ChatProvider } from "./context/ChatContext";
 import { AgentStatusProvider } from "./context/AgentStatusContext";
@@ -14,13 +14,45 @@ import Jobs from "./pages/Jobs";
 import Watchers from "./pages/Watchers";
 import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
+import LazyBrain from "./pages/LazyBrain";
 import Vault from "./pages/Vault";
 import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
 
+const VALID_PAGES: readonly Page[] = [
+  "overview", "activity", "replay", "audit", "hub", "skills",
+  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain",
+  "vault", "settings",
+];
+
+function readPageFromUrl(): Page {
+  if (typeof window === "undefined") return "overview";
+  const q = new URLSearchParams(window.location.search).get("page");
+  return (VALID_PAGES as readonly string[]).includes(q ?? "") ? (q as Page) : "overview";
+}
+
 function AppContent() {
   const { user, loading } = useAuth();
-  const [page, setPage] = useState<Page>("overview");
+  const [page, setPageState] = useState<Page>(readPageFromUrl);
+
+  const setPage = (next: Page) => {
+    setPageState(next);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      if (next === "overview") {
+        url.searchParams.delete("page");
+      } else {
+        url.searchParams.set("page", next);
+      }
+      window.history.replaceState(null, "", url.toString());
+    }
+  };
+
+  useEffect(() => {
+    const onPop = () => setPageState(readPageFromUrl());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   if (loading) {
     return (
@@ -46,10 +78,11 @@ function AppContent() {
       case "hub": return <SkillHub />;
       case "skills": return <Skills />;
       case "templates": return <BrowserTemplates />;
-      case "jobs": return <Jobs />;
+      case "jobs": return <Jobs onNavigate={setPage} />;
       case "watchers": return <Watchers />;
       case "mcp": return <Mcp />;
       case "memory": return <Memory />;
+      case "lazybrain": return <LazyBrain />;
       case "vault": return <Vault />;
       case "settings": return <Settings />;
       default: return <Overview onNavigate={setPage} />;

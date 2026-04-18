@@ -165,6 +165,30 @@ class SkillRegistry:
         self.register(WorkTodosSkill(config=config))
         self.register(StopBackgroundSkill(config=config))
 
+        # LazyBrain skills — Python-native Logseq-style PKM shared with the agent
+        from lazyclaw.skills.builtin.lazybrain import (
+            SaveNoteSkill, UpdateNoteSkill, DeleteNoteSkill,
+            GetNoteSkill, SearchNotesSkill,
+            FindLinkedSkill, GraphNeighborsSkill,
+            AppendJournalSkill, ListJournalSkill,
+            PinNoteSkill, UnpinNoteSkill, ListPinnedSkill,
+            EnableWeeklyRollupSkill,
+        )
+
+        self.register(SaveNoteSkill(config=config))
+        self.register(UpdateNoteSkill(config=config))
+        self.register(DeleteNoteSkill(config=config))
+        self.register(GetNoteSkill(config=config))
+        self.register(SearchNotesSkill(config=config))
+        self.register(FindLinkedSkill(config=config))
+        self.register(GraphNeighborsSkill(config=config))
+        self.register(AppendJournalSkill(config=config))
+        self.register(ListJournalSkill(config=config))
+        self.register(PinNoteSkill(config=config))
+        self.register(UnpinNoteSkill(config=config))
+        self.register(ListPinnedSkill(config=config))
+        self.register(EnableWeeklyRollupSkill(config=config))
+
         # Note: real_browser.py skills removed — merged into BrowserSkill above
 
         # Browser management skills
@@ -266,6 +290,8 @@ class SkillRegistry:
             N8nManageWorkflowSkill, N8nRunWorkflowSkill, N8nListExecutionsSkill,
             N8nGetWorkflowSkill, N8nUpdateWorkflowSkill,
             N8nListCredentialsSkill, N8nGetExecutionSkill,
+            N8nCreateCredentialSkill, N8nDeleteCredentialSkill,
+            N8nGoogleSheetsSetupSkill,
         )
 
         self.register(N8nStatusSkill(config=config))
@@ -278,6 +304,9 @@ class SkillRegistry:
         self.register(N8nUpdateWorkflowSkill(config=config))
         self.register(N8nListCredentialsSkill(config=config))
         self.register(N8nGetExecutionSkill(config=config))
+        self.register(N8nCreateCredentialSkill(config=config))
+        self.register(N8nDeleteCredentialSkill(config=config))
+        self.register(N8nGoogleSheetsSetupSkill(config=config))
 
         # System status skills
         from lazyclaw.skills.builtin.system_status import (

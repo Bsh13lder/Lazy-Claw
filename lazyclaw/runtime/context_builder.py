@@ -114,6 +114,32 @@ async def build_context(
     except Exception:
         logger.debug("Failed to load session context layers", exc_info=True)
 
+    # 2b. LazyBrain pinned notes + today's journal (Phase 18 — shared PKM)
+    #     Runs in parallel isolation: failures never block prompt build.
+    lazybrain_section = ""
+    try:
+        from lazyclaw.lazybrain import journal as lb_journal
+        from lazyclaw.lazybrain import store as lb_store
+
+        pinned = await lb_store.list_notes(
+            config, user_id, pinned_only=True, limit=5,
+        )
+        today = await lb_journal.get_journal(config, user_id)
+        parts: list[str] = []
+        if pinned:
+            parts.append("### 📌 Pinned notes (from user's second brain)")
+            for n in pinned:
+                title = n.get("title") or "(untitled)"
+                snippet = (n.get("content") or "").strip().splitlines()[0][:160]
+                parts.append(f"- **{title}** — {snippet}")
+        if today and today.get("content"):
+            parts.append("### 📓 Today's journal")
+            parts.append(today["content"][:600])
+        if parts:
+            lazybrain_section = "## Second Brain (LazyBrain)\n" + "\n".join(parts)
+    except Exception:
+        logger.debug("Failed to load lazybrain context section", exc_info=True)
+
     # 3. Personal memories (DB-backed encrypted facts — backward compat)
     from lazyclaw.memory.personal import get_memories
 
@@ -156,6 +182,8 @@ async def build_context(
         sections.append(capabilities)
     if layer_context:
         sections.append(layer_context)
+    if lazybrain_section:
+        sections.append(lazybrain_section)
     if activity_section:
         sections.append(activity_section)
     if memories:

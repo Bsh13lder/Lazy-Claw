@@ -15,8 +15,13 @@ async def save_memory(
     content: str,
     memory_type: str = "fact",
     importance: int = 5,
+    owner: str = "user",
 ) -> str:
-    """Save a memory. Returns the memory ID."""
+    """Save a memory. Returns the memory ID.
+
+    Also mirrors into LazyBrain as ``#memory #owner/{owner}`` so the user
+    sees every fact/preference in the PKM. Fire-and-forget mirror.
+    """
     key = await get_user_dek(config, user_id)
     memory_id = str(uuid4())
     encrypted = encrypt(content, key)
@@ -27,6 +32,25 @@ async def save_memory(
             (memory_id, user_id, memory_type, encrypted, importance),
         )
         await db.commit()
+
+    try:
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        note = await lb_store.save_note(
+            config,
+            user_id,
+            content=content,
+            title=f"{memory_type.capitalize()}: {content[:60]}",
+            tags=["memory", "auto", f"owner/{owner}", f"kind/{memory_type}"],
+            importance=importance,
+        )
+        lb_events.publish_note_saved(
+            user_id, note["id"], note["title"], note["tags"], source="memory",
+        )
+    except Exception:
+        logger.debug("lazybrain memory mirror failed", exc_info=True)
+
     return memory_id
 
 

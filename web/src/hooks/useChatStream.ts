@@ -385,6 +385,12 @@ export function useChatStream({
             detail: msg.detail as string | undefined,
             extra: msg.extra as Record<string, unknown> | undefined,
           };
+          // LazyBrain piggybacks on the browser event bus for zero-token chips,
+          // but its events are NOT browser activity — skip creating a
+          // BrowserCanvas session for note save/delete kinds.
+          if (evt.kind === "note_saved" || evt.kind === "note_deleted") {
+            break;
+          }
           const prev = browserSessionRef.current;
           const events = prev ? [...prev.events, evt].slice(-12) : [evt];
           const urlChanged = !!evt.url && evt.url !== prev?.url;

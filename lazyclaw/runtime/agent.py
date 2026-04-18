@@ -2543,4 +2543,30 @@ class Agent:
             if _dispatch_registered and self.registry:
                 self.registry.unregister("dispatch_subagents")
 
+        # LazyBrain post-processing (fire-and-forget).  Both calls swallow
+        # their own errors — we never block the reply on PKM bookkeeping.
+        if content:
+            try:
+                from lazyclaw.runtime.wikilink_injector import inject as _lb_inject
+                content = await _lb_inject(self.config, user_id, content)
+            except Exception:
+                logger.debug("wikilink_injector failed", exc_info=True)
+
+            try:
+                from lazyclaw.lazybrain.auto_capture import (
+                    capture_text_with_llm as _lb_capture_llm,
+                )
+                from lazyclaw.llm.eco_router import EcoRouter as _EcoRouter
+
+                _eco = _EcoRouter(self.config, self.router)
+                await _lb_capture_llm(
+                    self.config,
+                    user_id,
+                    message,
+                    _eco,
+                    source="chat",
+                )
+            except Exception:
+                logger.debug("lazybrain auto_capture failed", exc_info=True)
+
         return content

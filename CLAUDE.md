@@ -107,6 +107,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Notifications** | `notifications/` | Telegram push notifications for background tasks |
 | **Pipeline** | `pipeline/` | CRM-style pipeline store for workflow tracking |
 | **Survival** | `survival/` | Gig economy tools — job matching, applications, invoices, profiles |
+| **LazyBrain** | `lazybrain/` | Python-native Logseq-style PKM — encrypted notes + `[[wikilinks]]` + backlinks + force-directed graph + daily journal + auto-capture. **Single home for every memory source**: tasks, personal_memory, daily_logs, site_memory, lessons, layers.py all auto-mirror here with `owner/{user,agent}` + kind tags. Worker-model LLM polishes user text and auto-names journal pages. |
 
 Supporting: `llm/` (multi-provider router + ECO mode + Claude CLI provider), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool), `web/` (React 19 + TypeScript + Vite + Tailwind — 12 pages: Overview, Activity, Replay, Audit, SkillHub, Skills, Templates, Jobs, MCP, Memory, Vault, Settings + persistent chat sidebar with live BrowserCanvas), `n8n-custom/` (n8n webhook integration + 6 management skills + templates).
 

@@ -236,6 +236,19 @@ const BROWSER_ACTION_ICONS: Record<string, ReactNode> = {
       <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
     </svg>
   ),
+  save_note: (
+    <svg {...iconProps}>
+      <path d="M12 2a7 7 0 0 0-7 7c0 2.4 1.2 4.5 3 5.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3c1.8-1.3 3-3.3 3-5.7a7 7 0 0 0-7-7Z" />
+      <path d="M9 21h6" />
+    </svg>
+  ),
+  delete_note: (
+    <svg {...iconProps}>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    </svg>
+  ),
 };
 
 export function browserActionIcon(action: string | undefined): ReactNode {

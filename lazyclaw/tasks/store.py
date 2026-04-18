@@ -99,6 +99,48 @@ async def create_task(
         await db.commit()
 
     logger.debug("Created task %s (%s) for user %s", task_id, owner, user_id)
+
+    # Mirror into LazyBrain so the user's second brain also remembers this.
+    # Fire-and-forget; task creation must not fail if the PKM is unreachable.
+    try:
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        body_parts: list[str] = [f"**Task:** {title}"]
+        if description:
+            body_parts.append(description)
+        meta_bits: list[str] = [f"priority `{priority}`"]
+        if due_date:
+            meta_bits.append(f"due `{due_date}`")
+        if reminder_at:
+            meta_bits.append(f"reminder `{reminder_at}`")
+        if recurring:
+            meta_bits.append(f"recurring `{recurring}`")
+        body_parts.append("— " + " · ".join(meta_bits))
+        body = "\n\n".join(body_parts)
+
+        lb_tags = ["task", "auto", f"priority/{priority}"]
+        lb_tags.append(f"owner/{'user' if owner == 'user' else 'agent'}")
+        if category:
+            lb_tags.append(f"category/{category}")
+        for t in tags or []:
+            lb_tags.append(str(t))
+
+        importance_map = {"urgent": 9, "high": 7, "medium": 5, "low": 3}
+        note = await lb_store.save_note(
+            config,
+            user_id,
+            content=body,
+            title=f"Task: {title}",
+            tags=lb_tags,
+            importance=importance_map.get(priority, 5),
+        )
+        lb_events.publish_note_saved(
+            user_id, note["id"], note["title"], note["tags"], source="task",
+        )
+    except Exception:
+        logger.debug("lazybrain task mirror failed", exc_info=True)
+
     return {
         "id": task_id, "user_id": user_id, "title": title,
         "description": description, "category": category,

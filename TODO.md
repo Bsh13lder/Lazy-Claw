@@ -402,6 +402,64 @@ Zero-token daily gig monitoring across three freelance platforms + Reddit. Deliv
 - [ ] **17b.6 Malt.es / InfoJobs.es MCPs** — Spain-native boards. InfoJobs has an official API; Malt needs Apify scraper wrapper.
 - [ ] **17b.7 Per-user Gmail OAuth** — Current n8n Gmail is shared OAuth; fine for single-user self use, blocks multi-user SaaS.
 
+## Phase 18: LazyBrain — Python-native second brain (Logseq-style PKM, shared with agent)
+
+E2E-encrypted knowledge graph built inside LazyClaw (no Go fork, no Docker sidecar). User and agent share the same store: user browses at `/lazybrain`, agent auto-captures via hooks. Plan: `~/.claude/plans/hard-months-7-glimmering-kazoo.md`.
+
+### 18.1 Core (shipped)
+- [x] `lazyclaw/lazybrain/` — `store.py` (encrypted CRUD + backlink index), `wikilinks.py` (parser), `journal.py`, `events.py`, `graph.py`, `rotation.py`
+- [x] Schema: `notes` + `note_links` tables in `db/schema.sql` (AES-256-GCM per-user DEK on title + content, plaintext tags / title_key / to_page_name for queries)
+- [x] `gateway/routes/lazybrain.py` — 12 REST endpoints (notes CRUD, backlinks, search, graph, journal, tags)
+- [x] 13 NL skills in `skills/builtin/lazybrain/` (save/update/delete/get/search/find_linked/graph_neighbors/append_journal/list_journal/pin/unpin/list_pinned/enable_weekly_rollup)
+- [x] React page `web/src/pages/LazyBrain.tsx` — Timeline / Journal / Graph / Search tabs + tag tree + backlinks panel
+- [x] Force-directed `GraphView.tsx` + `ForceSimulation.ts` (Verlet, zero deps)
+- [x] `lazyclaw rotate-keys --scope lazybrain` — AES-GCM nonce rotation + audit_log entry
+- [x] Nav wiring: `NavShell.tsx` + `App.tsx` + `api.ts` typed client
+
+### 18.2 Intelligence layer (shipped with 18.1)
+- [x] `lazybrain/auto_capture.py` — regex detectors for decision / til / price / deadline / command / recipe / contact / idea (pure regex, ~0.1ms/message) + optional LLM fallback routed through `EcoRouter(role=ROLE_WORKER)` so the user's own worker model handles extraction
+- [x] `runtime/wikilink_injector.py` — 30s LRU-cached title lookup, rewrites known page names in agent responses as `[[wikilinks]]`, skips code fences + existing links, exact-case match only
+
+### 18.3 Agent auto-populate (shipped)
+- [x] **D.1** — `runtime/lesson_store.py` mirrors every stored lesson into a LazyBrain note (`#lesson #auto` + `#site/<domain>` when applicable)
+- [x] **D.2** — `memory/layers.py auto_extract` parallel-writes each extracted layer as a note tagged `#layer/<user|channel|project>`
+- [x] **D.3** — `runtime/agent.py process_message` calls `wikilink_injector.inject()` on the final response + `auto_capture.capture_text()` on the user message (both fire-and-forget)
+- [x] **D.5** — `lazybrain/rollup.py` + `lazybrain_enable_weekly_rollup` skill — opt-in cron (Sunday 22:00) that summarises the week into `#rollup/weekly/<iso-week>` with `[[wikilink]]` references to sources
+- [x] **D.6** — every write path publishes `BrowserEvent(kind="note_saved", ...)` for ChatSidebar chips (zero LLM tokens)
+- [x] **2b context injection** — `context_builder.build_context` now adds a "Second Brain" section with top-5 pinned notes + today's journal
+
+### 18.4 Migration path (shipped)
+- [x] `lazyclaw cli_migrate_lazybrain` — one-shot importer for `personal_memory` + `daily_logs` + `tasks` + `site_memory` + markdown layer files. `--dry-run` for preview. Writes `data/lazybrain_migration_<ts>.json` rollback map. Idempotent via `#imported/<source>` tag.
+- [ ] **Flip context_builder to read LazyBrain instead of `layers.py`** once the migration has been verified in production for 30 days.
+- [ ] **Mark `layers.py auto_extract` markdown write opt-in** after step above.
+
+### 18.6 Unified memory — shipped 2026-04-18
+- [x] **Every memory source auto-mirrors into LazyBrain** — `personal.save_memory`, `daily_log.save_daily_log`, `site_memory.remember`, `tasks.create_task`, `lesson_store.store_lesson`, `layers.auto_extract` all publish to `notes`.
+- [x] **Owner separation** — every write tagged `owner/user` or `owner/agent`; UI has owner tabs 👤 You / 🤖 Agent / ∞ All.
+- [x] **Category toggle filters + colors** — chip toggles for Tasks / Journal / Lessons / TIL / Decisions / Deadlines / Facts / Site knowledge / Daily logs. Each note carries a colored dot + emoji (amber task, blue journal, yellow lesson, green TIL, purple decision, red deadline, teal fact, indigo site). `web/src/components/lazybrain/noteColors.ts` + `FilterBar.tsx`.
+- [x] **LLM-polished user content** — `runtime/agent.py process_message` routes user messages through `auto_capture.capture_text_with_llm()` with `EcoRouter(role=ROLE_WORKER)` — user's own worker model (Gemma E2B / Haiku / Claude CLI) polishes broken English and skips when unclear.
+- [x] **Journal auto-titles** — `journal.append_journal()` fires a background worker-model call once the page has ≥2 bullets or ≥120 chars, rewriting "Journal — 2026-04-18" into "2026-04-18 — <what happened today>". Falls back silently if LLM unavailable.
+- [x] **Logseq-style layout** — three panes: left page list + category toggles, center editor, right backlinks. Chat sidebar hidden on LazyBrain (focus mode). `↗` pop-out button opens `?page=lazybrain` in new browser tab (URL-routable). Double-click body to edit, ⌘S saves, ⌘K search, ⌘N new, ⌘E edit.
+- [x] **note_saved events routed correctly** — `useChatStream.ts` skips `note_saved`/`note_deleted` kinds from creating a `BrowserCanvas` session (they were wrongly popping the browser canvas).
+
+### 18.5 Future
+- [ ] Block refs `((uuid))` — adds a `blocks` sub-table, requires data-model migration
+- [ ] Outliner-mode editor toggle (tiptap + indent plugin)
+- [ ] `{{query}}` inline queries (SQL-over-notes parser)
+- [ ] FTS5 migration for search past ~10k notes
+- [ ] Optional MCP-server wrapper so external Claude Desktop / IDE clients can read the graph
+- [ ] Barnes-Hut quadtree in `ForceSimulation.ts` — needed past ~1k graph nodes
+
+**Verification (post-18.3):**
+1. `sqlite3 data/lazyclaw.db ".schema notes"` — two new tables
+2. `lazyclaw --list-skills | grep lazybrain` — 13 skills
+3. Send "save a note: Redis uses LRU by default, tag it #cache" → note appears in timeline
+4. Send "[[Redis]] is an in-memory store" → backlinks panel on Redis shows the new note
+5. /lazybrain → Graph tab → drag-able force-directed layout
+6. Trigger a correction ("wait no, whatsapp login is QR not SMS") → note appears within 3s with tags `#lesson #auto`, BrowserEvent chip visible in ChatSidebar
+7. `lazybrain_enable_weekly_rollup` → cron registered
+8. `python -m lazyclaw.cli_migrate_lazybrain --dry-run --all` → importer report, no writes
+
 ## Future: Workflow Builder UI
 
 Visual drag-and-drop editor (React Flow style) for composing multi-step agent workflows. Requires web frontend — deferred until web UI exists.

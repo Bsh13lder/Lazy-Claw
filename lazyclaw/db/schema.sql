@@ -464,3 +464,46 @@ CREATE TABLE IF NOT EXISTS browser_templates (
 
 CREATE INDEX IF NOT EXISTS idx_browser_templates_user
 ON browser_templates(user_id, name);
+
+-- LazyBrain — Python-native second brain (Logseq-style PKM shared between
+-- user and agent). `title` + `content` encrypted per-user DEK; `tags`,
+-- `to_page_name`, timestamps and `trace_session_id` are plaintext because
+-- queries need them.
+CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT,                        -- encrypted (or NULL)
+    content TEXT NOT NULL,             -- encrypted markdown body
+    tags TEXT,                         -- JSON array, plaintext
+    importance INTEGER DEFAULT 5,
+    pinned INTEGER DEFAULT 0,
+    trace_session_id TEXT,             -- plaintext pointer to replay
+    title_key TEXT,                    -- lowercased plaintext title for wikilink resolve
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_user_created
+ON notes(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_notes_user_pinned
+ON notes(user_id, pinned, importance DESC);
+
+CREATE INDEX IF NOT EXISTS idx_notes_title_key
+ON notes(user_id, title_key);
+
+CREATE TABLE IF NOT EXISTS note_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    from_note_id TEXT NOT NULL,
+    to_page_name TEXT NOT NULL,        -- plaintext (lowercased)
+    to_note_id TEXT,                   -- nullable — resolved when target exists
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (from_note_id) REFERENCES notes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_links_from
+ON note_links(from_note_id);
+
+CREATE INDEX IF NOT EXISTS idx_note_links_to
+ON note_links(user_id, to_page_name);

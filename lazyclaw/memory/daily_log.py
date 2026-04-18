@@ -53,6 +53,32 @@ async def save_daily_log(
         await db.commit()
 
     logger.debug("Saved daily log for user %s date %s", user_id, date)
+
+    # Mirror into LazyBrain as an agent-owned journal entry.
+    try:
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        body_parts = [summary]
+        if key_events:
+            body_parts.append(f"\n**Key events**\n{key_events}")
+        note = await lb_store.save_note(
+            config,
+            user_id,
+            content="\n".join(body_parts),
+            title=f"Daily summary — {date}",
+            tags=[
+                "daily-log", "auto", "owner/agent",
+                f"journal/{date}",
+            ],
+            importance=4,
+        )
+        lb_events.publish_note_saved(
+            user_id, note["id"], note["title"], note["tags"], source="daily-log",
+        )
+    except Exception:
+        logger.debug("lazybrain daily_log mirror failed", exc_info=True)
+
     return log_id
 
 

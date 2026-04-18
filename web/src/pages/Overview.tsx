@@ -523,6 +523,9 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
         {/* ── Watchers strip (zero-token site monitors) ───────── */}
         <WatchersStrip onNavigate={onNavigate} />
 
+        {/* ── LazyBrain strip (encrypted PKM shared with agent) ─ */}
+        <LazyBrainStrip onNavigate={onNavigate} />
+
         {/* ── Agent Performance ──────────────────────────────── */}
         {metrics && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade-in">
@@ -696,6 +699,67 @@ function QuickAction({ label, icon, onClick }: { label: string; icon: React.Reac
     >
       <span className="text-text-muted">{icon}</span>
       {label}
+    </button>
+  );
+}
+
+function LazyBrainStrip({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const [total, setTotal] = useState<number | null>(null);
+  const [pinned, setPinned] = useState<number>(0);
+  const [latestTitle, setLatestTitle] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const [recent, pins] = await Promise.all([
+          api.listLazyBrainNotes({ limit: 1 }),
+          api.listLazyBrainNotes({ pinned: true, limit: 50 }),
+        ]);
+        if (!alive) return;
+        setTotal(recent.length === 0 ? 0 : recent.length === 1 ? (pins.length >= 1 ? pins.length + 1 : 1) : recent.length);
+        setPinned(pins.length);
+        setLatestTitle(recent[0]?.title ?? null);
+      } catch {
+        if (alive) setTotal(null);
+      }
+    };
+    load();
+    const id = window.setInterval(load, 30000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, []);
+
+  if (total === null) return null;
+  if (total === 0 && pinned === 0) return null;
+
+  return (
+    <button
+      onClick={() => onNavigate("lazybrain")}
+      className="glass-card rounded-xl px-4 py-3 flex items-center gap-4 text-left hover:border-accent/40 transition-colors group"
+      title="Open LazyBrain"
+    >
+      <div className="p-2 rounded-lg bg-accent-soft text-accent shrink-0">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2a7 7 0 0 0-7 7c0 2.4 1.2 4.5 3 5.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3c1.8-1.3 3-3.3 3-5.7a7 7 0 0 0-7-7Z" />
+          <path d="M9 21h6" />
+          <path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" />
+        </svg>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[11px] text-text-muted uppercase tracking-wider">LazyBrain</div>
+        <div className="text-sm text-text-primary truncate">
+          <span className="font-medium">{total}</span> note{total === 1 ? "" : "s"}
+          {pinned > 0 && (
+            <span className="text-text-muted"> · 📌 {pinned} pinned</span>
+          )}
+          {latestTitle && (
+            <span className="text-text-muted"> · latest <span className="text-accent">{latestTitle}</span></span>
+          )}
+        </div>
+      </div>
+      <span className="text-xs text-text-muted group-hover:text-accent transition-colors shrink-0">
+        Open →
+      </span>
     </button>
   );
 }

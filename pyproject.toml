@@ -42,6 +42,7 @@ all = ["lazyclaw[telegram,discord,voice,eco,dev]"]
 
 [project.scripts]
 lazyclaw = "lazyclaw.cli:main"
+lazyclaw-migrate-brain = "lazyclaw.cli_migrate_lazybrain:main"
 
 [tool.setuptools.packages.find]
 include = ["lazyclaw*"]

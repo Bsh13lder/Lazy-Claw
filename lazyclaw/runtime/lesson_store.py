@@ -61,6 +61,29 @@ async def store_lesson(
                 "Stored preference lesson: %s (id=%s, importance=%d)",
                 lesson.content[:60], memory_id, lesson.importance,
             )
+            # Also mirror into LazyBrain so the user can browse + backlink
+            # the lesson in the PKM UI. Fire-and-forget; matches the
+            # defensive pattern used elsewhere in this module.
+            try:
+                from lazyclaw.lazybrain import store as lb_store
+                from lazyclaw.lazybrain import events as lb_events
+
+                tags = ["lesson", "auto", "owner/agent"]
+                if lesson.lesson_type == "site" and lesson.domain:
+                    tags.append(f"site/{lesson.domain}")
+                note = await lb_store.save_note(
+                    config,
+                    user_id,
+                    content=lesson.content,
+                    title=f"Lesson: {lesson.content[:60]}",
+                    tags=tags,
+                    importance=lesson.importance,
+                )
+                lb_events.publish_note_saved(
+                    user_id, note["id"], note["title"], note["tags"], source="lesson",
+                )
+            except Exception:
+                logger.debug("lazybrain lesson mirror failed", exc_info=True)
             return memory_id
 
     except Exception as e:

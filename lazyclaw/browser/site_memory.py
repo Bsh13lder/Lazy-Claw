@@ -85,7 +85,35 @@ async def remember(
         )
         await db.commit()
         logger.info("Saved site memory %s for %s (%s)", memory_id, domain, memory_type)
-        return memory_id
+
+    # Mirror into LazyBrain (agent knowledge). Fire-and-forget.
+    try:
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        body = (
+            f"**Site knowledge:** {title}\n\n"
+            f"Domain: `{domain}` — type `{memory_type}`\n\n"
+            f"```json\n{json.dumps(content, indent=2)[:1500]}\n```"
+        )
+        note = await lb_store.save_note(
+            config,
+            user_id,
+            content=body,
+            title=f"Site: {domain} — {title[:40]}",
+            tags=[
+                "site-memory", "auto", "owner/agent",
+                f"site/{domain}", f"kind/{memory_type}",
+            ],
+            importance=5,
+        )
+        lb_events.publish_note_saved(
+            user_id, note["id"], note["title"], note["tags"], source="site-memory",
+        )
+    except Exception:
+        logger.debug("lazybrain site_memory mirror failed", exc_info=True)
+
+    return memory_id
 
 
 async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]]:

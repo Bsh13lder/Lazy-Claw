@@ -435,6 +435,20 @@ export const resumeJob = (id: string) =>
 export const deleteJob = (id: string) =>
   request<{ status: string }>(`/api/jobs/${id}`, { method: "DELETE" });
 
+export interface JobDraft {
+  name: string;
+  instruction: string;
+  job_type: "cron" | "one_off";
+  cron_expression: string | null;
+  context: string | null;
+}
+
+export const createJobFromPrompt = (prompt: string) =>
+  request<{ draft: JobDraft }>("/api/jobs/from-prompt", {
+    method: "POST",
+    body: JSON.stringify({ prompt }),
+  }).then((r) => r.draft);
+
 // ── MCP ────────────────────────────────────────────────────────────────────
 
 export const listMcpServers = () =>
@@ -874,3 +888,141 @@ export const getCompressionStats = (chatSessionId?: string) => {
 
 export const getConnectorStatus = () =>
   request<{ connected: boolean; device_info: Record<string, unknown> | null }>("/api/connector/status");
+
+// ── LazyBrain (Python-native PKM) ─────────────────────────────────────────
+
+export interface LazyBrainNote {
+  id: string;
+  title: string | null;
+  content: string;
+  tags: string[];
+  importance: number;
+  pinned: boolean;
+  trace_session_id: string | null;
+  title_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LazyBrainTag {
+  tag: string;
+  count: number;
+}
+
+export interface LazyBrainGraphNode {
+  id: string;
+  label: string;
+  pinned: boolean;
+  importance: number;
+  is_root?: boolean;
+}
+
+export interface LazyBrainGraphEdge {
+  source: string;
+  target: string;
+  label: string;
+}
+
+export interface LazyBrainGraph {
+  nodes: LazyBrainGraphNode[];
+  edges: LazyBrainGraphEdge[];
+}
+
+export const listLazyBrainNotes = (opts?: {
+  tag?: string;
+  pinned?: boolean;
+  limit?: number;
+  offset?: number;
+}) => {
+  const params = new URLSearchParams();
+  if (opts?.tag) params.set("tag", opts.tag);
+  if (opts?.pinned) params.set("pinned", "true");
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.offset) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  return request<{ notes: LazyBrainNote[] }>(
+    `/api/lazybrain/notes${qs ? `?${qs}` : ""}`,
+  ).then((r) => r.notes);
+};
+
+export const createLazyBrainNote = (body: {
+  content: string;
+  title?: string;
+  tags?: string[];
+  importance?: number;
+  pinned?: boolean;
+}) =>
+  request<LazyBrainNote>("/api/lazybrain/notes", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getLazyBrainNote = (id: string) =>
+  request<LazyBrainNote>(`/api/lazybrain/notes/${id}`);
+
+export const updateLazyBrainNote = (
+  id: string,
+  body: Partial<{
+    content: string;
+    title: string;
+    tags: string[];
+    importance: number;
+    pinned: boolean;
+  }>,
+) =>
+  request<LazyBrainNote>(`/api/lazybrain/notes/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+export const deleteLazyBrainNote = (id: string) =>
+  request<{ status: string; id: string }>(`/api/lazybrain/notes/${id}`, {
+    method: "DELETE",
+  });
+
+export const getLazyBrainBacklinks = (id: string) =>
+  request<{ note_id: string; backlinks: LazyBrainNote[] }>(
+    `/api/lazybrain/notes/${id}/backlinks`,
+  );
+
+export const searchLazyBrain = (q: string, tag?: string, limit = 20) => {
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  if (tag) params.set("tag", tag);
+  return request<{ query: string; results: LazyBrainNote[] }>(
+    `/api/lazybrain/search?${params}`,
+  );
+};
+
+export const getLazyBrainGraph = (opts?: {
+  root_id?: string;
+  depth?: number;
+  limit?: number;
+}) => {
+  const params = new URLSearchParams();
+  if (opts?.root_id) params.set("root_id", opts.root_id);
+  if (opts?.depth) params.set("depth", String(opts.depth));
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return request<LazyBrainGraph>(
+    `/api/lazybrain/graph${qs ? `?${qs}` : ""}`,
+  );
+};
+
+export const getLazyBrainJournal = (isoDate: string) =>
+  request<{ date: string; note: LazyBrainNote | null }>(
+    `/api/lazybrain/journal/${isoDate}`,
+  );
+
+export const appendLazyBrainJournal = (isoDate: string, content: string) =>
+  request<LazyBrainNote>(`/api/lazybrain/journal/${isoDate}`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+
+export const listLazyBrainJournal = (limit = 14) =>
+  request<{ notes: LazyBrainNote[] }>(
+    `/api/lazybrain/journal?limit=${limit}`,
+  ).then((r) => r.notes);
+
+export const listLazyBrainTags = () =>
+  request<{ tags: LazyBrainTag[] }>("/api/lazybrain/tags").then((r) => r.tags);

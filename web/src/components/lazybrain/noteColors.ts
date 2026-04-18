@@ -33,8 +33,12 @@ const PALETTE: Record<string, NoteColor> = {
   rollup:    { ring: "#d946ef", emoji: "📊", label: "Rollup" },
   layer:     { ring: "#84cc16", emoji: "🗂", label: "Layer" },
   imported:  { ring: "#64748b", emoji: "📥", label: "Imported" },
-  pinned:    { ring: "#ec4899", emoji: "📌", label: "Pinned" },
+  pinned:    { ring: "#fbbf24", emoji: "★",  label: "Pinned" },
   auto:      { ring: "#6366f1", emoji: "✨", label: "Auto" },
+  survival:  { ring: "#f97316", emoji: "🛡", label: "Survival" },
+  fact:      { ring: "#14b8a6", emoji: "💠", label: "Fact" },
+  learned_preference: { ring: "#a3a3a3", emoji: "🔖", label: "Preference" },
+  context:   { ring: "#64748b", emoji: "📎", label: "Context" },
 };
 
 const DEFAULT: NoteColor = {
@@ -72,7 +76,32 @@ export const FILTER_CATEGORIES: { key: string; label: string; emoji: string; rin
   { key: "memory",   label: "Facts",     emoji: "🗃", ring: "#14b8a6" },
   { key: "site-memory", label: "Site knowledge", emoji: "🌐", ring: "#6366f1" },
   { key: "daily-log", label: "Daily logs", emoji: "📅", ring: "#3b82f6" },
+  { key: "survival", label: "Survival",  emoji: "🛡", ring: "#f97316" },
+  { key: "fact",     label: "Facts (raw)", emoji: "💠", ring: "#14b8a6" },
+  { key: "learned_preference", label: "Preferences", emoji: "🔖", ring: "#a3a3a3" },
 ];
+
+/** Tags the system auto-stamps (owner/*, auto, source/chat, kind/*, layer/*,
+ *  imported/*, journal/YYYY-MM-DD, priority/*, category/*, site/*). These are
+ *  noise in the user-facing tag cloud — hidden behind a toggle. */
+export const SYSTEM_TAG_EXACT = new Set(["auto"]);
+export const SYSTEM_TAG_PREFIXES = [
+  "owner/",
+  "source/",
+  "kind/",
+  "layer/",
+  "imported/",
+  "journal/",
+  "priority/",
+  "category/",
+  "site/",
+];
+
+export function isSystemTag(tag: string): boolean {
+  const t = tag.toLowerCase();
+  if (SYSTEM_TAG_EXACT.has(t)) return true;
+  return SYSTEM_TAG_PREFIXES.some((p) => t.startsWith(p));
+}
 
 /** Does a note match the category filter key? (tag prefix match) */
 export function matchesCategory(tags: string[] | null | undefined, key: string): boolean {
@@ -93,7 +122,9 @@ export function colorForTags(
   const priority = [
     "task", "deadline", "journal", "lesson", "til",
     "decision", "price", "command", "recipe", "contact",
-    "idea", "rollup", "reference", "layer", "imported", "auto",
+    "idea", "rollup", "reference", "layer",
+    "survival", "fact", "learned_preference", "context",
+    "imported", "auto",
   ];
 
   const lower = tags.map((t) => t.toLowerCase());

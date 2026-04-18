@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LazyBrainNote } from "../../api";
 import { WikilinkText } from "./WikilinkText";
+import { Star, Pencil, Trash2, X, Save, Film, Clock } from "./icons";
 
 interface Props {
   note: LazyBrainNote;
@@ -9,6 +10,7 @@ interface Props {
   onTogglePin: () => void;
   onLinkClick: (page: string) => void;
   onTagClick: (tag: string) => void;
+  resolveLink?: (pageName: string) => LazyBrainNote | null;
 }
 
 export function NoteEditor({
@@ -18,6 +20,7 @@ export function NoteEditor({
   onTogglePin,
   onLinkClick,
   onTagClick,
+  resolveLink,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(note.title || "");
@@ -57,34 +60,41 @@ export function NoteEditor({
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Top bar */}
-      <div className="shrink-0 px-8 py-3 flex items-center gap-3 border-b border-border bg-bg-primary">
+      <div className="shrink-0 px-8 py-3 flex items-center gap-2 border-b border-border bg-bg-primary">
         {editing ? (
           <input
             autoFocus
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Page title"
-            className="flex-1 text-2xl font-semibold bg-transparent outline-none text-text-primary"
+            className="flex-1 text-2xl font-semibold bg-transparent outline-none text-text-primary tracking-tight"
           />
         ) : (
           <h1
             onDoubleClick={() => setEditing(true)}
-            className="flex-1 text-2xl font-semibold text-text-primary truncate cursor-text"
+            className="flex-1 text-2xl font-semibold text-text-primary truncate cursor-text tracking-tight flex items-center gap-2"
             title="Double-click to edit"
           >
-            {note.pinned && <span className="text-accent mr-2">📌</span>}
-            {note.title || "(untitled)"}
+            {note.pinned && <Star size={20} strokeWidth={1.75} color="#fbbf24" fill="#fbbf24" />}
+            <span className="truncate">{note.title || "(untitled)"}</span>
           </h1>
         )}
 
         <button
           onClick={onTogglePin}
-          className={`px-2 py-1 rounded text-xs transition-colors ${
-            note.pinned ? "bg-accent-soft text-accent" : "hover:bg-bg-hover text-text-muted"
+          className={`h-8 px-2.5 rounded text-xs transition-colors flex items-center gap-1.5 ${
+            note.pinned
+              ? "text-[#fbbf24] hover:bg-bg-hover"
+              : "text-text-muted hover:text-text-primary hover:bg-bg-hover"
           }`}
           title={note.pinned ? "Unpin" : "Pin"}
         >
-          {note.pinned ? "📌 pinned" : "📎 pin"}
+          <Star
+            size={14}
+            strokeWidth={1.75}
+            fill={note.pinned ? "#fbbf24" : "none"}
+          />
+          <span>{note.pinned ? "Pinned" : "Pin"}</span>
         </button>
 
         {editing ? (
@@ -95,29 +105,32 @@ export function NoteEditor({
                 setContent(note.content);
                 setEditing(false);
               }}
-              className="px-3 py-1 rounded text-xs text-text-muted hover:text-text-primary"
+              className="h-8 px-2.5 rounded text-xs text-text-muted hover:text-text-primary hover:bg-bg-hover flex items-center gap-1.5"
             >
-              Cancel
+              <X size={14} strokeWidth={1.75} />
+              <span>Cancel</span>
             </button>
             <button
               onClick={() => {
                 onSave({ title, content });
                 setEditing(false);
               }}
-              className="px-3 py-1 rounded bg-accent text-bg-primary text-xs font-medium"
+              className="h-8 px-2.5 rounded bg-accent text-bg-primary text-xs font-medium flex items-center gap-1.5 hover:opacity-90"
               title="⌘+S"
             >
-              Save
+              <Save size={14} strokeWidth={2} />
+              <span>Save</span>
             </button>
           </>
         ) : (
           <>
             <button
               onClick={() => setEditing(true)}
-              className="px-2 py-1 rounded hover:bg-bg-hover text-text-muted hover:text-accent text-xs"
+              className="h-8 px-2.5 rounded text-text-muted hover:text-accent hover:bg-bg-hover text-xs flex items-center gap-1.5"
               title="Edit  (⌘E)"
             >
-              ✏️ edit
+              <Pencil size={14} strokeWidth={1.75} />
+              <span>Edit</span>
             </button>
             <button
               onClick={() => {
@@ -125,10 +138,10 @@ export function NoteEditor({
                   onDelete();
                 }
               }}
-              className="px-2 py-1 rounded hover:bg-red-500/10 text-text-muted hover:text-red-400 text-xs"
+              className="h-8 w-8 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 flex items-center justify-center"
               title="Delete"
             >
-              🗑
+              <Trash2 size={14} strokeWidth={1.75} />
             </button>
           </>
         )}
@@ -144,7 +157,7 @@ export function NoteEditor({
               onChange={(e) => setContent(e.target.value)}
               rows={28}
               placeholder="Markdown — use [[wikilinks]] and #tags freely"
-              className="w-full min-h-[60vh] bg-transparent text-text-primary text-base font-mono leading-relaxed resize-none outline-none"
+              className="w-full min-h-[60vh] bg-transparent text-text-primary text-[15px] font-mono leading-relaxed resize-none outline-none whitespace-pre-wrap"
             />
           ) : (
             <article
@@ -156,6 +169,7 @@ export function NoteEditor({
                 content={note.content}
                 onLinkClick={onLinkClick}
                 onTagClick={onTagClick}
+                resolveLink={resolveLink}
               />
             </article>
           )}
@@ -164,18 +178,22 @@ export function NoteEditor({
 
       {/* Footer metadata */}
       <div className="shrink-0 px-8 py-2 border-t border-border bg-bg-secondary/60 flex items-center gap-4 text-[11px] text-text-muted">
-        <span>Created {created}</span>
-        <span>Importance {note.importance}/10</span>
+        <span className="flex items-center gap-1.5">
+          <Clock size={11} strokeWidth={1.75} />
+          <span className="tabular-nums">{created}</span>
+        </span>
+        <span className="tabular-nums">
+          Importance <span className="text-text-secondary">{note.importance}</span>/10
+        </span>
         {note.tags.length > 0 && (
-          <span className="truncate">
-            Tags:{" "}
+          <span className="truncate flex items-center gap-1.5">
             {note.tags.map((t) => (
               <button
                 key={t}
                 onClick={() => onTagClick(t)}
-                className="text-text-muted hover:text-accent mx-0.5"
+                className="text-text-muted hover:text-accent transition-colors"
               >
-                #{t}
+                <span className="opacity-60">#</span>{t}
               </button>
             ))}
           </span>
@@ -183,9 +201,10 @@ export function NoteEditor({
         {note.trace_session_id && (
           <a
             href={`/?page=replay&session=${encodeURIComponent(note.trace_session_id)}`}
-            className="ml-auto px-2 py-0.5 rounded bg-bg-hover hover:bg-accent hover:text-bg-primary transition-colors"
+            className="ml-auto px-2 py-0.5 rounded bg-bg-hover hover:bg-accent hover:text-bg-primary transition-colors flex items-center gap-1"
           >
-            📼 open replay
+            <Film size={11} strokeWidth={1.75} />
+            <span>replay</span>
           </a>
         )}
       </div>

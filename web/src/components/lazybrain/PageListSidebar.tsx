@@ -1,7 +1,25 @@
+import { useMemo, useState } from "react";
 import type { LazyBrainNote, LazyBrainTag } from "../../api";
 import { FilterBar } from "./FilterBar";
 import type { Owner } from "./noteColors";
-import { colorForTags } from "./noteColors";
+import { colorForTags, isSystemTag } from "./noteColors";
+import {
+  Brain,
+  Lock,
+  Plus,
+  Search,
+  Network,
+  ExternalLink,
+  Calendar,
+  Star,
+  BookOpen,
+  Clock,
+  Hash,
+  Settings2,
+  X,
+  CategoryIcon,
+} from "./icons";
+import { Download, PanelLeftClose } from "lucide-react";
 
 interface Props {
   recent: LazyBrainNote[];
@@ -23,11 +41,16 @@ interface Props {
   onOpenGraph: () => void;
   onSearchFocus: () => void;
   noteCount: number;
+  viewMode: "notes" | "graph";
+  hasMore?: boolean;
+  onLoadMore?: () => void;
+  searchQuery?: string;
+  onClearSearch?: () => void;
+  onCollapse?: () => void;
 }
 
 const MAX_RECENT = 20;
 const MAX_TAGS = 30;
-
 
 export function PageListSidebar({
   recent,
@@ -49,52 +72,71 @@ export function PageListSidebar({
   onOpenGraph,
   onSearchFocus,
   noteCount,
+  viewMode,
+  hasMore,
+  onLoadMore,
+  searchQuery,
+  onClearSearch,
+  onCollapse,
 }: Props) {
+  const [showSystemTags, setShowSystemTags] = useState(false);
+
+  const visibleTags = useMemo(
+    () => (showSystemTags ? tags : tags.filter((t) => !isSystemTag(t.tag))),
+    [tags, showSystemTags],
+  );
+
+  const journalByMonth = useMemo(() => groupJournalByMonth(journal.slice(0, 14)), [journal]);
+
   return (
     <aside className="w-60 shrink-0 h-full flex flex-col bg-bg-secondary border-r border-border">
       {/* Header */}
       <div className="px-4 py-3 border-b border-border">
         <div className="flex items-center gap-2">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
-            <path d="M12 2a7 7 0 0 0-7 7c0 2.4 1.2 4.5 3 5.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3c1.8-1.3 3-3.3 3-5.7a7 7 0 0 0-7-7Z" />
-            <path d="M9 21h6" />
-            <path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" />
-          </svg>
+          <Brain size={18} strokeWidth={1.75} className="text-accent" />
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-text-primary">LazyBrain</div>
-            <div className="text-[11px] text-text-muted">
-              {noteCount} note{noteCount === 1 ? "" : "s"} · encrypted
+            <div className="text-sm font-semibold text-text-primary tracking-tight">
+              LazyBrain
+            </div>
+            <div className="text-[11px] text-text-muted flex items-center gap-1">
+              <Lock size={9} strokeWidth={2} />
+              <span className="tabular-nums">{noteCount}</span>
             </div>
           </div>
+          {onCollapse && (
+            <button
+              onClick={onCollapse}
+              title="Hide sidebar"
+              className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
+            >
+              <PanelLeftClose size={13} strokeWidth={1.75} />
+            </button>
+          )}
         </div>
-        <div className="mt-3 flex gap-1.5">
-          <button
+        <div className="mt-3 grid grid-cols-4 gap-1">
+          <HeaderButton
             onClick={onNewPage}
-            className="flex-1 px-2 py-1.5 rounded bg-accent text-bg-primary text-xs font-medium hover:opacity-90"
-          >
-            + New
-          </button>
-          <button
+            label="New"
+            title="New page  (⌘N)"
+            primary
+            Icon={Plus}
+          />
+          <HeaderButton
             onClick={onSearchFocus}
-            className="px-2 py-1.5 rounded bg-bg-hover text-text-secondary hover:text-accent text-xs"
             title="Search  (⌘K)"
-          >
-            🔍
-          </button>
-          <button
+            Icon={Search}
+          />
+          <HeaderButton
             onClick={onOpenGraph}
-            className="px-2 py-1.5 rounded bg-bg-hover text-text-secondary hover:text-accent text-xs"
-            title="Graph"
-          >
-            🕸
-          </button>
-          <button
+            title={viewMode === "graph" ? "Back to notes (Esc)" : "Open graph"}
+            Icon={Network}
+            active={viewMode === "graph"}
+          />
+          <HeaderButton
             onClick={() => window.open("/?page=lazybrain", "_blank", "noopener")}
-            className="px-2 py-1.5 rounded bg-bg-hover text-text-secondary hover:text-accent text-xs"
             title="Open in new tab"
-          >
-            ↗
-          </button>
+            Icon={ExternalLink}
+          />
         </div>
       </div>
 
@@ -110,88 +152,155 @@ export function PageListSidebar({
 
       {/* Quick sections */}
       <div className="flex-1 overflow-y-auto py-2">
-        {/* Today */}
-        <button
-          onClick={onOpenJournalToday}
-          className="w-full flex items-center gap-2 px-4 py-1.5 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary"
-        >
-          <span>📅</span>
-          <span>Today's journal</span>
-        </button>
-
-        {/* Pinned */}
-        {pinned.length > 0 && (
-          <div className="mt-3">
-            <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-text-muted">
-              📌 Pinned · {pinned.length}
+        {searchQuery && searchQuery.trim() !== "" ? (
+          /* Search mode — single section, pinned/recent/journal hidden */
+          <div className="mt-1">
+            <div className="px-4 py-1.5 flex items-center gap-2 border-b border-border">
+              <Search size={11} strokeWidth={1.75} className="text-accent" />
+              <span className="text-[10px] uppercase tracking-wider text-text-secondary">
+                Search
+              </span>
+              <span className="text-[10px] text-text-muted truncate">
+                "{searchQuery}"
+              </span>
+              <span className="ml-auto flex items-center gap-1">
+                <span className="text-[10px] text-text-muted tabular-nums">
+                  {recent.length}
+                </span>
+                {onClearSearch && (
+                  <button
+                    onClick={onClearSearch}
+                    className="p-0.5 rounded hover:bg-bg-hover text-text-muted hover:text-text-primary transition-colors"
+                    title="Clear search"
+                  >
+                    <X size={11} strokeWidth={2} />
+                  </button>
+                )}
+              </span>
             </div>
-            {pinned.slice(0, 10).map((n) => (
-              <PageRow
-                key={n.id}
-                note={n}
-                selected={selectedId === n.id}
-                onClick={() => onSelect(n)}
-              />
-            ))}
+            {recent.length === 0 ? (
+              <div className="px-4 py-6 text-[11px] text-text-muted italic text-center leading-relaxed">
+                No results for "{searchQuery}".<br />
+                Try a different word or clear search.
+              </div>
+            ) : (
+              recent.map((n) => (
+                <PageRow
+                  key={n.id}
+                  note={n}
+                  selected={selectedId === n.id}
+                  onClick={() => onSelect(n)}
+                />
+              ))
+            )}
           </div>
-        )}
+        ) : (
+          <>
+            {/* Today's journal — feature button */}
+            <button
+              onClick={onOpenJournalToday}
+              className="w-full flex items-center gap-2 px-4 py-1.5 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors"
+            >
+              <Calendar size={14} strokeWidth={1.75} />
+              <span>Today's journal</span>
+            </button>
 
-        {/* Recent */}
-        <div className="mt-3">
-          <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-text-muted">
-            Recent
-          </div>
-          {recent.slice(0, MAX_RECENT).map((n) => (
-            <PageRow
-              key={n.id}
-              note={n}
-              selected={selectedId === n.id}
-              onClick={() => onSelect(n)}
-            />
-          ))}
-          {recent.length === 0 && (
-            <div className="px-4 py-2 text-[11px] text-text-muted italic">
-              No notes yet.
-            </div>
-          )}
-        </div>
+            {/* Pinned */}
+            {pinned.length > 0 && (
+              <SidebarSection label="Pinned" count={pinned.length} Icon={Star} iconColor="#fbbf24">
+                {pinned.slice(0, 10).map((n) => (
+                  <PageRow
+                    key={n.id}
+                    note={n}
+                    selected={selectedId === n.id}
+                    onClick={() => onSelect(n)}
+                  />
+                ))}
+              </SidebarSection>
+            )}
 
-        {/* Journal pages */}
-        {journal.length > 0 && (
-          <div className="mt-3">
-            <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-text-muted">
-              📓 Journal pages
-            </div>
-            {journal.slice(0, 7).map((n) => (
-              <PageRow
-                key={n.id}
-                note={n}
-                selected={selectedId === n.id}
-                onClick={() => onSelect(n)}
-              />
-            ))}
-          </div>
+            {/* Recent */}
+            <SidebarSection label="Recent" Icon={Clock}>
+              {recent.slice(0, MAX_RECENT).map((n) => (
+                <PageRow
+                  key={n.id}
+                  note={n}
+                  selected={selectedId === n.id}
+                  onClick={() => onSelect(n)}
+                />
+              ))}
+              {recent.length === 0 && (
+                <div className="px-4 py-2 text-[11px] text-text-muted italic">
+                  No notes yet.
+                </div>
+              )}
+              {hasMore && onLoadMore && (
+                <button
+                  onClick={onLoadMore}
+                  className="w-full flex items-center justify-center gap-1.5 px-4 py-1.5 mt-1 text-[11px] text-text-muted hover:text-accent hover:bg-bg-hover transition-colors"
+                  title="Load older notes"
+                >
+                  <Download size={11} strokeWidth={1.75} />
+                  <span>Load older notes</span>
+                </button>
+              )}
+            </SidebarSection>
+
+            {/* Journal pages — grouped by month */}
+            {journalByMonth.length > 0 && (
+              <SidebarSection label="Journal" Icon={BookOpen}>
+                {journalByMonth.map(({ month, notes }) => (
+                  <div key={month}>
+                    <div className="px-4 py-0.5 text-[10px] text-text-muted/70 tabular-nums">
+                      {month}
+                    </div>
+                    {notes.map((n) => (
+                      <PageRow
+                        key={n.id}
+                        note={n}
+                        selected={selectedId === n.id}
+                        onClick={() => onSelect(n)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </SidebarSection>
+            )}
+          </>
         )}
 
         {/* Tags */}
-        {tags.length > 0 && (
+        {visibleTags.length > 0 && (
           <div className="mt-3">
-            <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-text-muted">
-              Tags
+            <div className="px-4 py-1 flex items-center gap-2">
+              <Hash size={11} strokeWidth={1.75} className="text-text-muted" />
+              <span className="text-[10px] uppercase tracking-wider text-text-muted">
+                Tags
+              </span>
+              <button
+                onClick={() => setShowSystemTags((v) => !v)}
+                className={`ml-auto p-0.5 rounded transition-colors ${
+                  showSystemTags ? "text-accent" : "text-text-muted hover:text-text-primary"
+                }`}
+                title={showSystemTags ? "Hide system tags" : "Show system tags"}
+              >
+                <Settings2 size={11} strokeWidth={1.75} />
+              </button>
             </div>
             <div className="px-3 pb-2 flex flex-wrap gap-1">
-              {tags.slice(0, MAX_TAGS).map((t) => (
+              {visibleTags.slice(0, MAX_TAGS).map((t) => (
                 <button
                   key={t.tag}
                   onClick={() => onTagToggle(t.tag)}
-                  className={`px-1.5 py-0.5 rounded text-[11px] transition-colors ${
+                  className={`px-1.5 py-0.5 rounded text-[11px] transition-colors tabular-nums ${
                     activeTag === t.tag
                       ? "bg-accent text-bg-primary"
-                      : "bg-bg-hover text-text-muted hover:text-accent"
+                      : "bg-bg-hover/60 text-text-muted hover:text-accent hover:bg-bg-hover"
                   }`}
                 >
-                  #{t.tag}
-                  <span className="opacity-60 ml-1">{t.count}</span>
+                  <span className="opacity-60">#</span>
+                  {t.tag}
+                  <span className="opacity-50 ml-1">{t.count}</span>
                 </button>
               ))}
             </div>
@@ -202,6 +311,67 @@ export function PageListSidebar({
   );
 }
 
+import type { LucideIcon } from "lucide-react";
+
+function HeaderButton({
+  onClick,
+  title,
+  label,
+  primary,
+  active,
+  Icon,
+}: {
+  onClick: () => void;
+  title: string;
+  label?: string;
+  primary?: boolean;
+  active?: boolean;
+  Icon: LucideIcon;
+}) {
+  const base = "h-7 flex items-center justify-center gap-1 rounded text-xs transition-colors";
+  const variant = primary
+    ? "bg-accent text-bg-primary font-medium hover:opacity-90"
+    : active
+    ? "bg-accent text-bg-primary"
+    : "bg-bg-hover text-text-muted hover:text-accent";
+  return (
+    <button onClick={onClick} title={title} className={`${base} ${variant}`}>
+      <Icon size={13} strokeWidth={1.9} />
+      {label && <span>{label}</span>}
+    </button>
+  );
+}
+
+function SidebarSection({
+  label,
+  count,
+  Icon,
+  iconColor,
+  children,
+}: {
+  label: string;
+  count?: number;
+  Icon: LucideIcon;
+  iconColor?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mt-3">
+      <div className="px-4 py-1 flex items-center gap-2">
+        <Icon size={11} strokeWidth={1.75} color={iconColor} className={iconColor ? undefined : "text-text-muted"} />
+        <span className="text-[10px] uppercase tracking-wider text-text-muted">
+          {label}
+        </span>
+        {count !== undefined && (
+          <span className="text-[10px] text-text-muted/60 tabular-nums ml-auto">
+            {count}
+          </span>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 function PageRow({
   note,
@@ -214,6 +384,7 @@ function PageRow({
 }) {
   const title = note.title || "(untitled)";
   const color = colorForTags(note.tags, note.pinned);
+  const categoryKey = pickCategoryKey(note.tags, note.pinned);
   return (
     <button
       onClick={onClick}
@@ -224,13 +395,43 @@ function PageRow({
       }`}
       title={`${color.label} — ${title}`}
     >
-      <span
-        className="shrink-0 w-[6px] h-[6px] rounded-full inline-block"
-        style={{ backgroundColor: color.ring }}
-        aria-hidden
-      />
-      <span className="shrink-0 text-[10px] opacity-70">{color.emoji}</span>
+      <CategoryIcon keyName={categoryKey} size={12} color={color.ring} />
       <span className="truncate flex-1">{title}</span>
     </button>
   );
+}
+
+/** Derive the single category key that matches a note (for icon selection).
+ *  Mirrors the colorForTags priority but returns the key string. */
+function pickCategoryKey(tags: string[] | null | undefined, pinned: boolean): string {
+  if (pinned) return "pinned";
+  if (!tags || tags.length === 0) return "_default";
+  const priority = [
+    "task", "deadline", "journal", "lesson", "til",
+    "decision", "price", "command", "recipe", "contact",
+    "idea", "rollup", "reference", "layer", "imported", "auto",
+    "memory", "site-memory", "daily-log",
+  ];
+  const lower = tags.map((t) => t.toLowerCase());
+  for (const key of priority) {
+    if (lower.includes(key)) return key;
+    if (lower.some((t) => t.startsWith(`${key}/`))) return key;
+  }
+  return "_default";
+}
+
+function groupJournalByMonth(
+  notes: LazyBrainNote[],
+): { month: string; notes: LazyBrainNote[] }[] {
+  const groups = new Map<string, LazyBrainNote[]>();
+  for (const n of notes) {
+    const month = (n.created_at || "").slice(0, 7);
+    if (!month) continue;
+    const list = groups.get(month);
+    if (list) list.push(n);
+    else groups.set(month, [n]);
+  }
+  return Array.from(groups.entries())
+    .sort((a, b) => (a[0] > b[0] ? -1 : 1))
+    .map(([month, ns]) => ({ month, notes: ns }));
 }

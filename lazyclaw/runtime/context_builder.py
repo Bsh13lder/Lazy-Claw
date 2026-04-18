@@ -176,8 +176,20 @@ async def build_context(
     now_utc = datetime.now(timezone.utc)
     date_section = f"## Current date\nToday is {now_utc.strftime('%A, %B %d, %Y')} (UTC)."
 
+    # Ownership rules — without this the LLM tends to stamp user-initiated
+    # tasks/notes with owner='agent', which wipes them from the "You" tab.
+    ownership_rules = (
+        "## Ownership rules\n"
+        "- When the human asks you to do something (add task, save a note, "
+        "remember a fact), stamp it with owner='user'. It is THEIR data.\n"
+        "- Only use owner='agent' for work you self-initiate without being "
+        "asked (background research, self-scheduled checks, autonomous monitoring).\n"
+        "- Phrases like 'remind me', 'add a task for me', 'save this for me', "
+        "'I need to…' → always owner='user'."
+    )
+
     # Combine sections — layered context between capabilities and activity
-    sections = [personality, date_section]
+    sections = [personality, date_section, ownership_rules]
     if capabilities:
         sections.append(capabilities)
     if layer_context:

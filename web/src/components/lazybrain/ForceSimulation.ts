@@ -32,9 +32,9 @@ export interface SimOptions {
 }
 
 const DEFAULTS: Required<Omit<SimOptions, "width" | "height">> = {
-  repulsion: 1500,
+  repulsion: 2500,
   spring: 0.06,
-  restLength: 120,
+  restLength: 160,
   gravity: 0.015,
   damping: 0.85,
 };
@@ -45,6 +45,9 @@ export class ForceSimulation {
   private byId: Map<string, SimNode>;
   private readonly opts: Required<SimOptions>;
   private energy = Infinity;
+  private hoverId: string | null = null;
+  /** Per-node extra inflation on hover — neighbor dots bulge toward the hovered one. */
+  private adjacency: Map<string, Set<string>> = new Map();
 
   constructor(
     nodes: Array<{ id: string; pinned?: boolean }>,
@@ -73,6 +76,20 @@ export class ForceSimulation {
     this.edges = edges.filter(
       (e) => this.byId.has(e.source) && this.byId.has(e.target),
     );
+    // Precompute adjacency so hover-attractor force is O(degree) per frame
+    for (const e of this.edges) {
+      if (!this.adjacency.has(e.source)) this.adjacency.set(e.source, new Set());
+      if (!this.adjacency.has(e.target)) this.adjacency.set(e.target, new Set());
+      this.adjacency.get(e.source)!.add(e.target);
+      this.adjacency.get(e.target)!.add(e.source);
+    }
+  }
+
+  /** Tell the sim which node is being hovered. Neighbors drift toward it. */
+  setHover(id: string | null): void {
+    if (this.hoverId === id) return;
+    this.hoverId = id;
+    this.energy = Infinity; // re-heat so movement is visible
   }
 
   /** Run one integration step. Returns this for chaining. */
@@ -84,10 +101,15 @@ export class ForceSimulation {
     // Reset accumulators
     const forces = this.nodes.map(() => ({ fx: 0, fy: 0 }));
 
-    // O(n²) pairwise repulsion
-    for (let i = 0; i < this.nodes.length; i++) {
+    // Pairwise repulsion. O(n²) up to 200 nodes; beyond that we sample
+    // ~30% of pairs per frame so 500+ nodes still run at 60fps. Over many
+    // frames the approximation averages out — good enough visually.
+    const n = this.nodes.length;
+    const sample = n > 200 ? 0.3 : 1;
+    for (let i = 0; i < n; i++) {
       const a = this.nodes[i];
-      for (let j = i + 1; j < this.nodes.length; j++) {
+      for (let j = i + 1; j < n; j++) {
+        if (sample < 1 && Math.random() > sample) continue;
         const b = this.nodes[j];
         let dx = a.x - b.x;
         let dy = a.y - b.y;
@@ -98,7 +120,8 @@ export class ForceSimulation {
           dist2 = dx * dx + dy * dy;
         }
         const dist = Math.sqrt(dist2);
-        const f = repulsion / dist2;
+        // Scale up when sampling so total expected force per pair stays the same
+        const f = (repulsion / dist2) / sample;
         const fx = (dx / dist) * f;
         const fy = (dy / dist) * f;
         forces[i].fx += fx;
@@ -126,6 +149,34 @@ export class ForceSimulation {
       forces[i].fy += fy;
       forces[j].fx -= fx;
       forces[j].fy -= fy;
+    }
+
+    // Hover-attraction — when a node is hovered, its direct neighbors get
+    // pulled in toward it (shorter rest length + stiffer spring). Creates
+    // the "deep think" bulge effect users expect from Obsidian/Logseq.
+    if (this.hoverId) {
+      const hov = this.byId.get(this.hoverId);
+      const neighbors = this.adjacency.get(this.hoverId);
+      if (hov && neighbors) {
+        const hovIdx = this.nodes.indexOf(hov);
+        for (const nid of neighbors) {
+          const other = this.byId.get(nid);
+          if (!other) continue;
+          const oidx = this.nodes.indexOf(other);
+          const dx = hov.x - other.x;
+          const dy = hov.y - other.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const desired = 70;
+          const delta = dist - desired;
+          const f = 0.2 * delta;
+          const fx = (dx / dist) * f;
+          const fy = (dy / dist) * f;
+          forces[oidx].fx += fx;
+          forces[oidx].fy += fy;
+          forces[hovIdx].fx -= fx * 0.15;
+          forces[hovIdx].fy -= fy * 0.15;
+        }
+      }
     }
 
     // Gravity toward center + integration
@@ -174,5 +225,11 @@ export class ForceSimulation {
   unpin(id: string): void {
     const n = this.byId.get(id);
     if (n) n.pinned = false;
+  }
+
+  /** Re-heat the simulation so callers can trigger a fresh settle after
+   *  external changes (filter toggles, new nodes, etc.) without rebuilding. */
+  warm(): void {
+    this.energy = Infinity;
   }
 }

@@ -22,13 +22,22 @@ class ListMemoriesSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "List all stored personal memories about the user, "
-            "showing type and when they were saved."
+            "List stored personal memories about the user, "
+            "showing type, content preview, and ID. Supports an optional "
+            "`limit` (default 30, max 500)."
         )
 
     @property
     def parameters_schema(self) -> dict:
-        return {"type": "object", "properties": {}}
+        return {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max memories to return (default 30, max 500).",
+                },
+            },
+        }
 
     async def execute(self, user_id: str, params: dict) -> str:
         if not self._config:
@@ -36,14 +45,17 @@ class ListMemoriesSkill(BaseSkill):
         try:
             from lazyclaw.memory.personal import get_memories
 
-            memories = await get_memories(self._config, user_id)
+            limit = min(max(int(params.get("limit") or 30), 1), 500)
+            memories = await get_memories(self._config, user_id, limit=limit)
             if not memories:
                 return "No memories stored yet."
 
             lines = [f"Personal memories ({len(memories)}):"]
             for mem in memories:
+                content = (mem.get("content") or "")[:80]
+                mtype = mem.get("memory_type") or mem.get("type") or "?"
                 lines.append(
-                    f"  - [{mem['memory_type']}] {mem['content'][:80]} "
+                    f"  - [{mtype}] {content} "
                     f"(id: {mem['id']}, saved: {mem['created_at']})"
                 )
             return "\n".join(lines)
@@ -67,7 +79,11 @@ class DeleteMemorySkill(BaseSkill):
 
     @property
     def description(self) -> str:
-        return "Delete a specific personal memory by its ID."
+        return (
+            "Delete a specific personal memory by its ID (UUID). "
+            "Tip: prefer `delete_memories` when you want to remove by keyword — "
+            "no need to copy UUIDs."
+        )
 
     @property
     def permission_hint(self) -> str:
@@ -80,7 +96,7 @@ class DeleteMemorySkill(BaseSkill):
             "properties": {
                 "memory_id": {
                     "type": "string",
-                    "description": "ID of the memory to delete",
+                    "description": "UUID from list_memories (exact).",
                 },
             },
             "required": ["memory_id"],
@@ -89,15 +105,94 @@ class DeleteMemorySkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         if not self._config:
             return "Error: Not configured"
+        memory_id = (params or {}).get("memory_id")
+        if not memory_id:
+            return (
+                "Error: missing memory_id. Call list_memories first to see "
+                "IDs, or use delete_memories(query=...) for keyword-based delete."
+            )
         try:
             from lazyclaw.memory.personal import delete_memory
 
-            result = await delete_memory(
-                self._config, user_id, params["memory_id"]
-            )
+            result = await delete_memory(self._config, user_id, memory_id)
             if result:
-                return f"Memory {params['memory_id']} deleted."
-            return f"Memory {params['memory_id']} not found."
+                return f"Memory {memory_id} deleted."
+            return f"Memory {memory_id} not found."
+        except Exception as exc:
+            return f"Error: {exc}"
+
+
+class DeleteMemoriesByQuerySkill(BaseSkill):
+    """Delete personal memories whose content matches a keyword substring."""
+
+    def __init__(self, config=None):
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "memory"
+
+    @property
+    def name(self) -> str:
+        return "delete_memories"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Delete personal memories whose content contains a keyword "
+            "(case-insensitive substring). Useful when the user says "
+            "'delete the one about X' — no need to copy UUIDs. "
+            "Returns how many were deleted. Safe: always scoped to current user."
+        )
+
+    @property
+    def permission_hint(self) -> str:
+        return "ask"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Substring to match in memory content "
+                        "(case-insensitive). Examples: 'oauth', 'telegram chat id'."
+                    ),
+                },
+                "max_delete": {
+                    "type": "integer",
+                    "description": "Safety cap — max entries to delete (default 10).",
+                },
+            },
+            "required": ["query"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        query = (params or {}).get("query", "").strip().lower()
+        if not query:
+            return "Error: `query` is required."
+        max_delete = min(int((params or {}).get("max_delete") or 10), 100)
+        try:
+            from lazyclaw.memory.personal import get_memories, delete_memory
+
+            mems = await get_memories(self._config, user_id, limit=500)
+            targets = [
+                m for m in mems if query in (m.get("content") or "").lower()
+            ][:max_delete]
+            if not targets:
+                return f'No memories matched "{query}".'
+
+            deleted = 0
+            for m in targets:
+                if await delete_memory(self._config, user_id, m["id"]):
+                    deleted += 1
+            return (
+                f'Deleted {deleted} of {len(targets)} memories matching "{query}".'
+            )
         except Exception as exc:
             return f"Error: {exc}"
 

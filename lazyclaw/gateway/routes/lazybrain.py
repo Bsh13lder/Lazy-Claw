@@ -46,7 +46,7 @@ class JournalAppend(BaseModel):
 async def list_notes_route(
     tag: str | None = None,
     pinned: bool = False,
-    limit: int = 50,
+    limit: int = 500,
     offset: int = 0,
     user: User = Depends(get_current_user),
 ):

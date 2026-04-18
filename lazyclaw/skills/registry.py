@@ -365,12 +365,13 @@ class SkillRegistry:
 
         # Memory management skills (extends existing save_memory + recall_memories)
         from lazyclaw.skills.builtin.memory_management import (
-            ListMemoriesSkill, DeleteMemorySkill, ListDailyLogsSkill,
-            ViewDailyLogSkill, DeleteDailyLogSkill,
+            ListMemoriesSkill, DeleteMemorySkill, DeleteMemoriesByQuerySkill,
+            ListDailyLogsSkill, ViewDailyLogSkill, DeleteDailyLogSkill,
         )
 
         self.register(ListMemoriesSkill(config=config))
         self.register(DeleteMemorySkill(config=config))
+        self.register(DeleteMemoriesByQuerySkill(config=config))
         self.register(ListDailyLogsSkill(config=config))
         self.register(ViewDailyLogSkill(config=config))
         self.register(DeleteDailyLogSkill(config=config))

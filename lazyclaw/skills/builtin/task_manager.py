@@ -213,8 +213,15 @@ class AddTaskSkill(BaseSkill):
                     "type": "string",
                     "enum": ["user", "agent"],
                     "description": (
-                        "Who does this task? 'user' = human task (remind me, personal). "
-                        "'agent' = AI task (research, check, send, monitor). Default: user."
+                        "REQUIRED BEHAVIOR — pay attention: "
+                        "When the HUMAN asks you to create a task (in chat, via any "
+                        "channel), you MUST pass owner='user'. This is their task. "
+                        "ONLY use owner='agent' for tasks YOU decide to create for "
+                        "yourself (background research, self-scheduled checks, work "
+                        "the user did not explicitly ask for). "
+                        "Phrases like 'remind me', 'add a task for me', 'I need to', "
+                        "'don't let me forget' → owner='user' every time. "
+                        "Default when unsure: 'user'."
                     ),
                 },
                 "tags": {

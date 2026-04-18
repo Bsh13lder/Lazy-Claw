@@ -1,5 +1,7 @@
 import type { Owner } from "./noteColors";
 import { FILTER_CATEGORIES, OWNER_META } from "./noteColors";
+import { CategoryIcon, OWNER_ICONS } from "./icons";
+import { Infinity as InfinityIcon } from "lucide-react";
 
 interface Props {
   hiddenCategories: Set<string>;
@@ -18,22 +20,23 @@ export function FilterBar({
   counts,
   ownerCounts,
 }: Props) {
+  const allCount = ownerCounts.user + ownerCounts.agent + ownerCounts.unknown;
   return (
     <div className="px-3 py-2 border-b border-border space-y-2">
       {/* Owner tabs */}
       <div className="flex items-center gap-1">
         <OwnerTab
-          label={`All`}
+          label="All"
           active={ownerFilter === "all"}
-          emoji="∞"
-          count={ownerCounts.user + ownerCounts.agent + ownerCounts.unknown}
+          Icon={InfinityIcon}
+          count={allCount}
           ring="#64748b"
           onClick={() => onSetOwner("all")}
         />
         <OwnerTab
           label={OWNER_META.user.label}
           active={ownerFilter === "user"}
-          emoji={OWNER_META.user.emoji}
+          Icon={OWNER_ICONS.user}
           count={ownerCounts.user}
           ring={OWNER_META.user.ring}
           onClick={() => onSetOwner("user")}
@@ -41,7 +44,7 @@ export function FilterBar({
         <OwnerTab
           label={OWNER_META.agent.label}
           active={ownerFilter === "agent"}
-          emoji={OWNER_META.agent.emoji}
+          Icon={OWNER_ICONS.agent}
           count={ownerCounts.agent}
           ring={OWNER_META.agent.ring}
           onClick={() => onSetOwner("agent")}
@@ -64,10 +67,10 @@ export function FilterBar({
                   : "bg-bg-hover text-text-secondary hover:text-text-primary"
               }`}
               style={hidden ? undefined : { borderLeft: `2px solid ${c.ring}` }}
-              title={`${c.label} — ${hidden ? "hidden" : "visible"}`}
+              title={`${c.label} (${count}) — ${hidden ? "hidden" : "visible"}`}
             >
-              <span>{c.emoji}</span>
-              <span className="opacity-70">{count}</span>
+              <CategoryIcon keyName={c.key} size={12} color={hidden ? undefined : c.ring} />
+              {count >= 2 && <span className="opacity-70 tabular-nums">{count}</span>}
             </button>
           );
         })}
@@ -77,17 +80,19 @@ export function FilterBar({
 }
 
 
+import type { LucideIcon } from "lucide-react";
+
 function OwnerTab({
   label,
   active,
-  emoji,
+  Icon,
   count,
   ring,
   onClick,
 }: {
   label: string;
   active: boolean;
-  emoji: string;
+  Icon: LucideIcon;
   count: number;
   ring: string;
   onClick: () => void;
@@ -95,16 +100,16 @@ function OwnerTab({
   return (
     <button
       onClick={onClick}
-      className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-[11px] transition-colors ${
+      className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1 rounded text-[11px] transition-colors ${
         active
           ? "bg-bg-primary text-text-primary"
           : "text-text-muted hover:text-text-primary hover:bg-bg-hover"
       }`}
       style={active ? { boxShadow: `inset 0 -2px 0 ${ring}` } : undefined}
     >
-      <span>{emoji}</span>
+      <Icon size={12} strokeWidth={1.75} color={active ? ring : undefined} />
       <span>{label}</span>
-      <span className="opacity-60">{count}</span>
+      <span className="opacity-60 tabular-nums">{count}</span>
     </button>
   );
 }

@@ -273,8 +273,10 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
           </main>
         </div>
 
-        {/* Right chat sidebar — hidden on LazyBrain (focus mode) */}
-        {activePage !== "lazybrain" && <ChatSidebar />}
+        {/* Right chat sidebar — always visible so user can chat with LazyClaw
+            from any page, including LazyBrain. Toggle behavior lives inside
+            <ChatSidebar> itself (its own collapse button). */}
+        <ChatSidebar />
       </div>
 
       {/* Bottom status bar */}

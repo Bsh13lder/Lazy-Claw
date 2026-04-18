@@ -32,6 +32,22 @@ logger = logging.getLogger(__name__)
 
 _N8N_DEFAULT_BASE = "http://lazyclaw-n8n:5678"
 
+# Types that n8n counts as "trigger nodes" — a workflow needs at least
+# one of these before activation will succeed. The suffix-match above
+# catches most custom/community triggers; this set covers the base ones
+# whose type names don't end in "Trigger".
+_TRIGGER_NODE_TYPES: frozenset[str] = frozenset({
+    "n8n-nodes-base.manualTrigger",
+    "n8n-nodes-base.webhook",
+    "n8n-nodes-base.formTrigger",
+    "n8n-nodes-base.scheduleTrigger",
+    "n8n-nodes-base.cron",
+    "n8n-nodes-base.emailReadImap",
+    "n8n-nodes-base.rssFeedRead",
+    "n8n-nodes-base.executeWorkflowTrigger",
+    "n8n-nodes-base.start",
+})
+
 
 class N8nHTTPError(RuntimeError):
     """n8n API returned a non-2xx status.
@@ -355,6 +371,115 @@ async def _trigger_via_webhook(
         f"URL: {method} {url}\n"
         f"Response: {body or '(empty)'}.{hint}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Workflow node schema validation
+# ---------------------------------------------------------------------------
+#
+# When the model or a template produces a workflow node with missing
+# required parameters, n8n accepts the CREATE/UPDATE but rejects the
+# ACTIVATE with an opaque "Cannot publish workflow: N node have
+# configuration issues". We validate proactively so the agent sees a
+# specific error BEFORE n8n sees the bad payload, and the error names
+# the node + field so a one-shot fix is possible.
+#
+# The `SCHEMA_VIOLATION:` prefix is a hard-stop marker mirroring
+# STOP_OAUTH_CREDENTIAL — stuck-detector + SOUL.md rules instruct the
+# model not to loop on these.
+
+
+def _validate_workflow_nodes(nodes: list[dict]) -> list[str]:
+    """Return a list of human-readable violations for invalid nodes.
+
+    Empty list == valid. Rules covered:
+      * n8n-nodes-base.googleSheets v4+ requires `resource` + `operation`.
+        `documentId` and `sheetName` must be resource-locator dicts
+        (`__rl: True`, `value`, `mode`).
+      * n8n-nodes-base.webhook requires `parameters.path`.
+      * n8n-nodes-base.httpRequest requires `parameters.url`.
+      * n8n-nodes-base.code requires `parameters.jsCode` or `pythonCode`.
+
+    This is intentionally conservative — we block the PUT only on
+    things n8n will definitely reject on activate.
+    """
+    violations: list[str] = []
+    if not isinstance(nodes, list):
+        return violations
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type") or ""
+        name = node.get("name") or node.get("id") or "?"
+        params = node.get("parameters") or {}
+        if not isinstance(params, dict):
+            violations.append(
+                f"Node '{name}' ({ntype}): parameters is not an object."
+            )
+            continue
+
+        if ntype == "n8n-nodes-base.googleSheets":
+            if not params.get("resource"):
+                violations.append(
+                    f"Node '{name}' (googleSheets) is missing required "
+                    "`resource`. Set one of: 'sheet' (append/read/update), "
+                    "'spreadsheet' (create/delete)."
+                )
+            if not params.get("operation"):
+                violations.append(
+                    f"Node '{name}' (googleSheets) is missing required "
+                    "`operation`. For resource='sheet' use 'append' | "
+                    "'appendOrUpdate' | 'read' | 'update'; for "
+                    "resource='spreadsheet' use 'create' | 'delete'."
+                )
+            doc = params.get("documentId")
+            if isinstance(doc, dict) and doc.get("__rl") is not True:
+                violations.append(
+                    f"Node '{name}' (googleSheets) has documentId without "
+                    "`__rl: true`. Use: "
+                    "{\"__rl\": true, \"value\": \"<id>\", \"mode\": \"id\"}."
+                )
+            sn = params.get("sheetName")
+            if isinstance(sn, dict) and sn.get("__rl") is not True:
+                violations.append(
+                    f"Node '{name}' (googleSheets) has sheetName without "
+                    "`__rl: true`. Use: "
+                    "{\"__rl\": true, \"value\": \"gid=0\", \"mode\": \"list\"}."
+                )
+
+        elif ntype == "n8n-nodes-base.webhook":
+            if not (params.get("path") or "").strip():
+                violations.append(
+                    f"Node '{name}' (webhook) is missing `path`. "
+                    "Set a URL path like 'send-email'."
+                )
+
+        elif ntype == "n8n-nodes-base.httpRequest":
+            if not params.get("url"):
+                violations.append(
+                    f"Node '{name}' (httpRequest) is missing required `url`."
+                )
+
+        elif ntype == "n8n-nodes-base.code":
+            if not (params.get("jsCode") or params.get("pythonCode")):
+                violations.append(
+                    f"Node '{name}' (code) is missing `jsCode` or `pythonCode`."
+                )
+
+    return violations
+
+
+def _schema_violation_error(violations: list[str]) -> str:
+    """Format violations as a hard-stop error the brain should relay once."""
+    header = (
+        "Error: SCHEMA_VIOLATION: n8n rejected the workflow because the "
+        "nodes below would fail activation. Fix exactly these fields and "
+        "call update ONCE — do NOT rebuild the workflow, do NOT swap "
+        "resource types, do NOT loop.\n"
+    )
+    lines = "\n".join(f"  - {v}" for v in violations)
+    return header + lines
 
 
 _OAUTH_ERROR_MARKERS = (
@@ -749,6 +874,42 @@ class N8nCreateWorkflowSkill(BaseSkill):
             wf_id = result.get("id", "?")
             created_name = result.get("name", workflow_json.get("name", "Untitled"))
 
+            # Activation gating: validate node schemas AND presence of
+            # a trigger node before attempting activate. Otherwise we
+            # return a structured "created but not activated" message so
+            # the model has one clear next step instead of 25 panicky
+            # update/activate retries.
+            nodes_for_check = create_body.get("nodes") or []
+            violations = _validate_workflow_nodes(nodes_for_check)
+            has_trigger = any(
+                (n.get("type") or "").lower().endswith(
+                    ("trigger", "webhook", "form", "schedule", "cron")
+                )
+                or (n.get("type") or "") in _TRIGGER_NODE_TYPES
+                for n in nodes_for_check
+                if isinstance(n, dict)
+            )
+
+            if violations:
+                return (
+                    f"Workflow '{created_name}' created (ID: {wf_id}) "
+                    f"from {source} but NOT activated — schema issues:\n"
+                    + "\n".join(f"  - {v}" for v in violations)
+                    + f"\nFix via n8n_update_workflow(workflow_id='{wf_id}', ...) "
+                    "ONCE, then activate with "
+                    f"n8n_manage_workflow(workflow_id='{wf_id}', action='activate'). "
+                    f"Open http://localhost:5678/workflow/{wf_id} to view."
+                )
+            if not has_trigger:
+                return (
+                    f"Workflow '{created_name}' created (ID: {wf_id}) "
+                    f"from {source} but NOT activated — no trigger node. "
+                    "Add a webhook/schedule/manual trigger via "
+                    f"n8n_update_workflow(workflow_id='{wf_id}', ...), "
+                    "then call n8n_manage_workflow(action='activate'). "
+                    f"Open http://localhost:5678/workflow/{wf_id} to view."
+                )
+
             # Activate if requested
             if activate and wf_id != "?":
                 try:
@@ -1119,6 +1280,14 @@ class N8nUpdateWorkflowSkill(BaseSkill):
                     f"Error: workflow JSON invalid (not sent to n8n): "
                     f"{'; '.join(issues[:5])}. Fix the structure and retry once."
                 )
+
+            # Node-level schema pre-flight — catches missing `operation` /
+            # `resource` on googleSheets, missing webhook `path`, etc.
+            # Blocks the PUT so the model sees a specific fix hint instead
+            # of an opaque 400 from n8n's activation check.
+            node_violations = _validate_workflow_nodes(merged.get("nodes") or [])
+            if node_violations:
+                return _schema_violation_error(node_violations)
 
             result = await _n8n_request(
                 self._config, user_id, "PUT",

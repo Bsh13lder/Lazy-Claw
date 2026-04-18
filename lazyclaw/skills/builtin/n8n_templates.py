@@ -16,6 +16,61 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Shared node factories — keep params in sync with current n8n schema
+# ---------------------------------------------------------------------------
+
+# n8n googleSheets v4.5+ requires `resource` + `operation` AND the
+# documentId/sheetName fields must be "resource locator" objects with
+# `__rl: True` + `mode`. Earlier shapes (just `operation + {value: ...}`)
+# are silently accepted at create time but fail activation with
+# "Cannot publish workflow: 1 node have configuration issues".
+def _google_sheets_append_node(
+    *,
+    node_id: str,
+    name: str,
+    position: list[int],
+    sheet_id: str,
+    sheet_name: str = "gid=0",
+) -> dict:
+    """Build a valid googleSheets 4.5 append node.
+
+    `sheet_id` is the Drive document id; `sheet_name` defaults to the
+    first tab (gid=0). Credentials.id is left blank — filled when the
+    workflow is wired to a real credential.
+    """
+    return {
+        "parameters": {
+            "resource": "sheet",
+            "operation": "append",
+            "documentId": {
+                "__rl": True,
+                "value": sheet_id or "",
+                "mode": "id",
+            },
+            "sheetName": {
+                "__rl": True,
+                "value": sheet_name or "gid=0",
+                "mode": "list",
+            },
+            "columns": {
+                "mappingMode": "autoMapInputData",
+                "matchingColumns": [],
+                "schema": [],
+            },
+            "options": {},
+        },
+        "id": node_id,
+        "name": name,
+        "type": "n8n-nodes-base.googleSheets",
+        "typeVersion": 4.5,
+        "position": position,
+        "credentials": {
+            "googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"},
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Template builders
 # ---------------------------------------------------------------------------
 
@@ -171,20 +226,13 @@ def _form_to_sheets(params: dict[str, Any]) -> dict:
                 "position": [250, 300],
                 "webhookId": "",
             },
-            {
-                "parameters": {
-                    "operation": "append",
-                    "documentId": {"value": params.get("sheet_id", "")},
-                    "sheetName": {"value": params.get("sheet_name", "Sheet1")},
-                    "columns": {"mappingMode": "autoMapInputData"},
-                },
-                "id": "sheets-1",
-                "name": "Google Sheets",
-                "type": "n8n-nodes-base.googleSheets",
-                "typeVersion": 4.5,
-                "position": [500, 300],
-                "credentials": {"googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"}},
-            },
+            _google_sheets_append_node(
+                node_id="sheets-1",
+                name="Google Sheets",
+                position=[500, 300],
+                sheet_id=params.get("sheet_id", ""),
+                sheet_name=params.get("sheet_name", "gid=0"),
+            ),
         ],
         "connections": {
             "Webhook": {"main": [[{"node": "Google Sheets", "type": "main", "index": 0}]]},
@@ -294,20 +342,13 @@ def _webhook_to_sheets(params: dict[str, Any]) -> dict:
                 "position": [250, 300],
                 "webhookId": "",
             },
-            {
-                "parameters": {
-                    "operation": "append",
-                    "documentId": {"value": params.get("sheet_id", "")},
-                    "sheetName": {"value": params.get("sheet_name", "Sheet1")},
-                    "columns": {"mappingMode": "autoMapInputData"},
-                },
-                "id": "sheets-1",
-                "name": "Google Sheets",
-                "type": "n8n-nodes-base.googleSheets",
-                "typeVersion": 4.5,
-                "position": [500, 300],
-                "credentials": {"googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"}},
-            },
+            _google_sheets_append_node(
+                node_id="sheets-1",
+                name="Google Sheets",
+                position=[500, 300],
+                sheet_id=params.get("sheet_id", ""),
+                sheet_name=params.get("sheet_name", "gid=0"),
+            ),
         ],
         "connections": {
             "Webhook": {"main": [[{"node": "Google Sheets", "type": "main", "index": 0}]]},
@@ -433,20 +474,13 @@ def _keyword_research_to_sheet(params: dict[str, Any]) -> dict:
                 "typeVersion": 2,
                 "position": [500, 300],
             },
-            {
-                "parameters": {
-                    "operation": "append",
-                    "documentId": {"value": params.get("sheet_id", "")},
-                    "sheetName": {"value": params.get("sheet_name", "Keywords")},
-                    "columns": {"mappingMode": "autoMapInputData"},
-                },
-                "id": "sheets-1",
-                "name": "Google Sheets",
-                "type": "n8n-nodes-base.googleSheets",
-                "typeVersion": 4.5,
-                "position": [750, 300],
-                "credentials": {"googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"}},
-            },
+            _google_sheets_append_node(
+                node_id="sheets-1",
+                name="Google Sheets",
+                position=[750, 300],
+                sheet_id=params.get("sheet_id", ""),
+                sheet_name=params.get("sheet_name", "gid=0"),
+            ),
         ],
         "connections": {
             "Manual Trigger": {"main": [[{"node": "Build Keyword Rows", "type": "main", "index": 0}]]},

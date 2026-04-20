@@ -247,6 +247,45 @@ def _normalize_scope(scope: str | list[str] | None) -> str:
     return " ".join(cleaned)
 
 
+def _google_oauth_data(
+    client_id: str,
+    client_secret: str,
+    *,
+    scope: str | None = None,
+) -> dict:
+    """Build the `data` payload n8n's Google OAuth credential schemas accept.
+
+    Empirically derived from n8n 2.14.x by probing
+    `GET /api/v1/credentials/schema/<type>`. The schema has a 3-rule
+    `allOf` whose `if` discriminators (`useDynamicClientRegistration`,
+    `grantType`) are NOT in the allowed-property whitelist, so we can't
+    set them — yet when they're absent JSON Schema treats the `if` as
+    vacuously true and applies the `then` branch, which requires
+    *all* of: ``serverUrl``, ``clientId``, ``clientSecret``,
+    ``sendAdditionalBodyProperties``, ``additionalBodyProperties``.
+
+    Sending an empty string for ``serverUrl`` and ``additionalBodyProperties``
+    plus ``sendAdditionalBodyProperties=False`` keeps the credential safe
+    (default n8n OAuth flow with our own client) and satisfies every
+    subschema.
+
+    `scope` is only valid for ``googleOAuth2Api`` (the generic type).
+    Per-service types (``googleSheetsOAuth2Api``, ``googleDriveOAuth2Api``,
+    etc.) reject it via ``additionalProperties: false`` because the scope
+    is baked into the credential type definition.
+    """
+    data: dict = {
+        "serverUrl": "",
+        "clientId": client_id,
+        "clientSecret": client_secret,
+        "sendAdditionalBodyProperties": False,
+        "additionalBodyProperties": "",
+    }
+    if scope:
+        data["scope"] = scope
+    return data
+
+
 # Curated defaults used by the generic Google OAuth setup skill. Each line is
 # one scope URL; the function joins with spaces. Keep this list conservative —
 # restricted scopes (gmail.modify, drive) require Google app verification or
@@ -1809,14 +1848,12 @@ class N8nGoogleSheetsSetupSkill(BaseSkill):
                 "Or pass them to this skill as client_id / client_secret."
             )
 
+        # See `_google_oauth_data` for the schema shape n8n requires —
+        # the per-service Sheets type bakes the scope in, so omit it here.
         body = {
             "name": display_name,
             "type": "googleSheetsOAuth2Api",
-            "data": {
-                "clientId": client_id,
-                "clientSecret": client_secret,
-                "scope": scope,
-            },
+            "data": _google_oauth_data(client_id, client_secret),
         }
         try:
             result = await _n8n_request(
@@ -2370,22 +2407,12 @@ class N8nGoogleOAuthSetupSkill(BaseSkill):
                 "Or pass them to this skill as client_id / client_secret."
             )
 
+        # `googleOAuth2Api` IS the type that takes a custom `scope` (unlike
+        # the per-service variants). See `_google_oauth_data` for the rest.
         body = {
             "name": display_name,
             "type": "googleOAuth2Api",
-            "data": {
-                "clientId": client_id,
-                "clientSecret": client_secret,
-                "scope": scope,
-                "authUrl": "https://accounts.google.com/o/oauth2/v2/auth",
-                "accessTokenUrl": "https://oauth2.googleapis.com/token",
-                "authQueryParameters": (
-                    "access_type=offline"
-                    "&prompt=select_account%20consent"
-                    "&include_granted_scopes=true"
-                ),
-                "authentication": "header",
-            },
+            "data": _google_oauth_data(client_id, client_secret, scope=scope),
         }
         try:
             result = await _n8n_request(
@@ -2430,7 +2457,15 @@ class N8nGoogleOAuthSetupSkill(BaseSkill):
 # extra scopes to inject for generic googleOAuth2Api types only).
 # All type names verified against n8n 2.14.x dist/credentials/ on disk.
 _GOOGLE_SERVICE_CREDENTIAL_TYPES: dict[str, tuple[str, str, str]] = {
-    "gmail":         ("gmailOAuth2Api",             "Gmail",                ""),
+    # Gmail: route through the generic googleOAuth2Api with the gmail
+    # scope. The dedicated `gmailOAuth2Api` type isn't registered in
+    # this n8n custom build (the API returns "not a known type"), so
+    # using the generic OAuth credential is the only thing that lands.
+    "gmail":         (
+        "googleOAuth2Api",
+        "Gmail",
+        "https://www.googleapis.com/auth/gmail.modify",
+    ),
     "drive":         ("googleDriveOAuth2Api",       "Google Drive",         ""),
     "sheets":        ("googleSheetsOAuth2Api",      "Google Sheets",        ""),
     "calendar":      ("googleCalendarOAuth2Api",    "Google Calendar",      ""),
@@ -2542,6 +2577,9 @@ class N8nGoogleServicesSetupSkill(BaseSkill):
             # n8n 2.14.x dist/credentials). Excluded from defaults. For
             # Search Console data, use an HTTP Request node + your own
             # googleOAuth2Api credential, or scrape via the browser skill.
+            # Default service set. Gmail uses the generic OAuth credential
+            # (see _GOOGLE_SERVICE_CREDENTIAL_TYPES) because n8n's custom
+            # build doesn't register a dedicated `gmailOAuth2Api` type.
             requested = [
                 "gmail", "drive", "sheets", "calendar",
                 "youtube", "analytics", "docs",
@@ -2549,6 +2587,31 @@ class N8nGoogleServicesSetupSkill(BaseSkill):
         prefix = (params.get("prefix") or "").strip()
         client_id = (params.get("client_id") or "").strip()
         client_secret = (params.get("client_secret") or "").strip()
+
+        # Vault fallback — same pattern the single-service skills use. Without
+        # this, n8n rejects every per-service credential with
+        # `data requires "clientId"` because we'd send an empty `data: {}`.
+        if not client_id or not client_secret:
+            try:
+                from lazyclaw.crypto.vault import get_credential
+                if not client_id:
+                    client_id = (await get_credential(
+                        self._config, user_id, "google_oauth_client_id",
+                    )) or ""
+                if not client_secret:
+                    client_secret = (await get_credential(
+                        self._config, user_id, "google_oauth_client_secret",
+                    )) or ""
+            except Exception:
+                logger.debug("Failed to load Google OAuth creds from vault", exc_info=True)
+
+        if not client_id or not client_secret:
+            return (
+                "Missing Google OAuth credentials. Save them first:\n"
+                "  vault_set key=google_oauth_client_id value=<your-client-id>\n"
+                "  vault_set key=google_oauth_client_secret value=<your-client-secret>\n"
+                "Or pass them to this skill as client_id / client_secret."
+            )
 
         unknown = [s for s in requested if s not in _GOOGLE_SERVICE_CREDENTIAL_TYPES]
         if unknown:
@@ -2565,24 +2628,16 @@ class N8nGoogleServicesSetupSkill(BaseSkill):
             cred_type, default_label, extra_scope = _GOOGLE_SERVICE_CREDENTIAL_TYPES[key]
             display_name = f"{prefix} {default_label}".strip() if prefix else default_label
 
-            data: dict = {}
-            if client_id and client_secret:
-                data["clientId"] = client_id
-                data["clientSecret"] = client_secret
-
-            # Generic googleOAuth2Api types (e.g. the Search Console fallback)
-            # need scope + endpoint config; dedicated per-service types have
-            # those baked in.
-            if cred_type == "googleOAuth2Api" and extra_scope:
-                data["scope"] = _normalize_scope(extra_scope)
-                data["authUrl"] = "https://accounts.google.com/o/oauth2/v2/auth"
-                data["accessTokenUrl"] = "https://oauth2.googleapis.com/token"
-                data["authQueryParameters"] = (
-                    "access_type=offline&prompt=select_account%20consent"
-                )
-                data["authentication"] = "header"
-
-            body = {"name": display_name, "type": cred_type, "data": data}
+            # Per-service types bake the scope into their definition;
+            # only the generic googleOAuth2Api accepts a custom scope.
+            scope_arg = _normalize_scope(extra_scope) if (
+                cred_type == "googleOAuth2Api" and extra_scope
+            ) else None
+            body = {
+                "name": display_name,
+                "type": cred_type,
+                "data": _google_oauth_data(client_id, client_secret, scope=scope_arg),
+            }
             try:
                 result = await _n8n_request(
                     self._config, user_id, "POST", "/api/v1/credentials", body=body,

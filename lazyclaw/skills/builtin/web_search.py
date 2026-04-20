@@ -353,11 +353,17 @@ async def _serpapi_search(query: str, max_results: int, search_type: str = "sear
         data = resp.json()
 
     _usage.record("serpapi")
-    return _format_serpapi_results(data, search_type)
+    return _format_serpapi_results(data, search_type, max_results)
 
 
-def _format_serpapi_results(data: dict, search_type: str) -> str:
-    """Format SerpAPI response into readable text."""
+def _format_serpapi_results(data: dict, search_type: str, max_results: int) -> str:
+    """Format SerpAPI response into readable text.
+
+    `max_results` caps the number of shopping/organic rows we render — it
+    must be passed in explicitly because Python won't see the caller's
+    local. Forgetting it triggered a `NameError: max_results` for every
+    SerpAPI search and silently degraded the agent to DuckDuckGo.
+    """
     lines: list[str] = []
 
     if search_type == "flights":

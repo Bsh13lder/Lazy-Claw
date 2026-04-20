@@ -732,6 +732,11 @@ class Agent:
                 user_id=user_id,
             )
         _session_tokens = 0
+        # Last ECO fallback tag seen this turn (e.g. "overloaded" → Haiku via
+        # Claude CLI). Surfaces in the final "done" event so channels can show
+        # a "fallback → X" chip instead of silently swapping the model.
+        _last_fallback_reason: str | None = None
+        _last_model_used: str | None = None
 
         # Initialize trace recorder
         from lazyclaw.replay.recorder import TraceRecorder
@@ -1303,6 +1308,13 @@ class Agent:
         # Graduated escalation level: 0=normal, 1=soft nudge, 2=brain escalation
         # Level 3 (give up) triggers when stuck is detected at level 2.
         _escalation_level: int = 0
+        # Counts stuck signals that fired AFTER the L2 brain escalation. The
+        # 1st gets the existing HELP_NEEDED dialog (user can rescue);
+        # the 2nd hard-stops the loop with a terminal message instead of
+        # popping a second dialog. Without this, a stubborn brain (e.g.
+        # MiniMax M2.7) can flail through 10+ extra iterations after L2 has
+        # already conceded — see hirossa.com postmortem 2026-04-19.
+        _post_l2_stuck_count: int = 0
         # Browser action planner — ephemeral per-conversation, not persisted
         _plan_state = ActionPlannerState(
             plan_injected=not should_inject_plan(message, []),
@@ -1678,6 +1690,14 @@ class Agent:
                     len(response.tool_calls or []),
                 )
 
+                # Track router fallback + final model so the "done" event
+                # can tell channels when Sonnet silently became Haiku.
+                _resp_fallback = getattr(response, "fallback_reason", None)
+                if _resp_fallback:
+                    _last_fallback_reason = _resp_fallback
+                if response.model and response.model != "unknown":
+                    _last_model_used = response.model
+
                 await recorder.record_llm_response(
                     content=response.content or "",
                     model=response.model,
@@ -1696,7 +1716,8 @@ class Agent:
                     f"{total_tokens} tokens ({prompt_tokens} in, {completion_tokens} out)",
                     {"total": total_tokens, "prompt": prompt_tokens,
                      "completion": completion_tokens, "model": response.model,
-                     "eco_mode": eco_mode},
+                     "eco_mode": eco_mode,
+                     "fallback_reason": _resp_fallback},
                 ))
 
                 # ── Parse browsing plan from LLM response ─────────────
@@ -2427,6 +2448,7 @@ class Agent:
                             _escalation_level = 2
                             _escalated = True  # triggers brain model in routing
                             _escalation_iter = iteration
+                            _post_l2_stuck_count = 0  # reset window counter
                             logger.info(
                                 "Stuck level 2 (strategy change, brain escalation): %s",
                                 _stuck_signal.reason,
@@ -2456,14 +2478,32 @@ class Agent:
 
                         # Level 3: brain also stuck — give up.
                         # Background agents: break immediately (can't ask user).
-                        # Foreground agents: ask user for help.
-                        if getattr(self, "is_background", False):
-                            logger.warning("Background agent stuck after escalation — giving up")
+                        # Foreground agents: 1st post-L2 stuck → ask user for
+                        # help; 2nd → hard-stop with a terminal message
+                        # (don't keep popping help dialogs at the user).
+                        _post_l2_stuck_count += 1
+                        _is_bg = getattr(self, "is_background", False)
+                        _hard_stop = _is_bg or _post_l2_stuck_count >= 2
+                        if _hard_stop:
+                            if _is_bg:
+                                logger.warning("Background agent stuck after escalation — giving up")
+                            else:
+                                logger.warning(
+                                    "Stuck level 3 hard-stop: %d post-L2 stuck signals "
+                                    "(reason=%s, tool=%s) — terminating loop without "
+                                    "another HELP_NEEDED dialog",
+                                    _post_l2_stuck_count,
+                                    _stuck_signal.reason,
+                                    _stuck_signal.tool_name,
+                                )
+                            _failed_tool = _stuck_signal.tool_name or "the same step"
                             all_new_messages.append(LLMMessage(
                                 role="assistant",
                                 content=(
-                                    f"I got stuck and couldn't recover: {_stuck_signal.context}. "
-                                    f"The page may need manual interaction or a different approach."
+                                    f"I tried '{_failed_tool}' repeatedly and it kept "
+                                    f"failing — {_stuck_signal.context}. I'm stopping "
+                                    f"so I don't burn more time on a broken path. "
+                                    f"Tell me what you'd like me to do differently."
                                 ),
                             ))
                             break
@@ -2814,7 +2854,13 @@ class Agent:
                 else:
                     self._team_lead.fail(_fg_task_id, "Post-loop error")
 
-            await cb.on_event(AgentEvent("done", "Response ready", {}))
+            await cb.on_event(AgentEvent(
+                "done", "Response ready",
+                {
+                    "model_used": _last_model_used,
+                    "fallback_reason": _last_fallback_reason,
+                },
+            ))
 
             # Clean up per-message skills to avoid stale callback references
             if _delegate_registered and self.registry:

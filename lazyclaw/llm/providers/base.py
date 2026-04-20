@@ -25,6 +25,10 @@ class LLMResponse:
     model: str
     usage: dict | None = None
     tool_calls: list[ToolCall] | None = field(default=None)
+    # Set when the ECO router falls back to an unexpected model
+    # (e.g. Sonnet → Claude CLI after 529 overload, or paid-auth → CLI).
+    # Short machine tag: "overloaded" | "auth" | "cli_failed" | "local_failed".
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)

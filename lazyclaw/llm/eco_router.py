@@ -608,16 +608,20 @@ class EcoRouter:
                 logger.warning(
                     "Paid brain 401 — falling back to Claude CLI: %s", exc,
                 )
-                return await self._route_claude(
+                resp = await self._route_claude(
                     messages, user_id, settings=settings, **kwargs,
                 )
+                resp.fallback_reason = "auth"
+                return resp
             if "529" in exc_str or "overloaded" in exc_str.lower():
                 logger.warning(
                     "Paid brain 529 overloaded — falling back to Claude CLI: %s", exc,
                 )
-                return await self._route_claude(
+                resp = await self._route_claude(
                     messages, user_id, settings=settings, **kwargs,
                 )
+                resp.fallback_reason = "overloaded"
+                return resp
             raise
 
     # ── Claude CLI routing (all roles through claude -p) ───────────────
@@ -669,6 +673,7 @@ class EcoRouter:
                 response.content = (
                     f"[⚡ CLI error → Sonnet fallback] {response.content}"
                 )
+                response.fallback_reason = "cli_failed"
                 return response
             except Exception as paid_exc:
                 if "401" in str(paid_exc) or "authentication" in str(paid_exc).lower():
@@ -837,16 +842,26 @@ class EcoRouter:
         """Fallback to paid when local/worker fails. Always auto-fallback."""
         fallback_name = models["fallback"]
         logger.info("Auto-fallback to %s: %s", fallback_name, reason)
+        # Short machine tag for UIs — extracted from the reason prefix.
+        tag = (
+            "local_failed" if "local_" in reason
+            else "worker_failed" if "worker" in reason
+            else "fallback"
+        )
         # Claude CLI fallback — route through CLI provider ($0)
         if fallback_name == "claude-cli":
-            return await self._route_claude(
+            resp = await self._route_claude(
                 messages, user_id, settings=settings, **kwargs,
             )
-        return await self._route_paid(
+            resp.fallback_reason = tag
+            return resp
+        resp = await self._route_paid(
             messages, user_id, fallback_name,
             reason=f"auto_fallback: {reason}",
             **kwargs,
         )
+        resp.fallback_reason = tag
+        return resp
 
     # ── Free provider helper ──────────────────────────────────────────
 

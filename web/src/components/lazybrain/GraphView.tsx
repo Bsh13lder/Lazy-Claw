@@ -19,9 +19,9 @@ import {
 } from "react";
 import type { LazyBrainGraph, LazyBrainNote } from "../../api";
 import { ForceSimulation, type SimNode } from "./ForceSimulation";
-import { CATEGORY_PRIORITY, FILTER_CATEGORIES, colorForTags, readableTextOn } from "./noteColors";
-import { CategoryIcon, Star } from "./icons";
-import { Plus, Minus, RotateCcw, ChevronDown, ChevronUp, MousePointer2, Move, ZoomIn } from "lucide-react";
+import { CATEGORY_PRIORITY, FILTER_CATEGORIES, colorForTags } from "./noteColors";
+import { CategoryIcon, Star, CATEGORY_ICONS, DEFAULT_CATEGORY_ICON } from "./icons";
+import { Plus, Minus, RotateCcw, ChevronDown, ChevronUp, MousePointer2, Move, ZoomIn, Search, X as XIcon } from "lucide-react";
 
 interface Props {
   graph: LazyBrainGraph;
@@ -31,7 +31,12 @@ interface Props {
   /** Preferred: clicking a node shows a preview card without leaving graph. */
   onPeek?: (nodeId: string) => void;
   selectedId?: string | null;
+  /** Dismiss the current peek card (background click or Esc). */
+  onClearPeek?: () => void;
   highlightQuery?: string;
+  /** When provided, GraphView renders a floating search overlay on the
+   *  canvas. Changes to the input are emitted via this callback. */
+  onSearchChange?: (q: string) => void;
   /** Called per-note — return true to dim this node (e.g. filtered out). */
   dimPredicate?: (note: LazyBrainNote | undefined) => boolean;
   showLegend?: boolean;
@@ -52,10 +57,16 @@ interface DragState {
   /** Furthest distance moved during this gesture (px). Used to suppress
    *  the click that fires after a drag-release on the same node. */
   maxMoved: number;
+  /** performance.now() at pointerdown — used for hold-based drag detection. */
+  downTime: number;
 }
 
 /** Below this px threshold a pointer-down/up counts as a click, not a drag. */
-const DRAG_THRESHOLD = 4;
+const DRAG_THRESHOLD = 3;
+/** If the pointer is held down longer than this AND the user moves at all,
+ *  treat as a drag even if the movement is sub-pixel-threshold. This catches
+ *  trackpad drags that barely move the cursor. */
+const DRAG_HOLD_MS = 180;
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4;
@@ -77,6 +88,48 @@ function pickCategoryKey(
   }
   return "_default";
 }
+
+/** Which concentric orbit a category lives on.
+ *  0 CORE — urgent anchors (pinned, deadlines)
+ *  1 DOING — active work (tasks, decisions, commands)
+ *  2 LIVED — reflection (journal, daily-log, memory)
+ *  3 LEARNED — knowledge (lessons, facts, ideas)
+ */
+const CATEGORY_ORBIT: Record<string, number> = {
+  pinned: 0,
+  deadline: 0,
+  task: 1,
+  decision: 1,
+  price: 1,
+  command: 1,
+  recipe: 1,
+  contact: 1,
+  journal: 2,
+  "daily-log": 2,
+  memory: 2,
+  "site-memory": 2,
+  rollup: 2,
+  context: 2,
+  imported: 2,
+  auto: 2,
+  lesson: 3,
+  til: 3,
+  fact: 3,
+  idea: 3,
+  reference: 3,
+  layer: 3,
+  survival: 3,
+  learned_preference: 3,
+  _default: 3,
+};
+
+/** Labels drawn along each orbit ring (upper case). */
+const ORBIT_LABELS: { title: string; subtitle: string; color: string }[] = [
+  { title: "CORE",      subtitle: "URGENT",    color: "#f0a060" },
+  { title: "DOING",     subtitle: "TASKS",     color: "#d4a26a" },
+  { title: "LIVED",     subtitle: "MEMORY",    color: "#a8906a" },
+  { title: "LEARNED",   subtitle: "KNOWLEDGE", color: "#8a7a6a" },
+];
 
 const BADGE_MAP: Record<string, string> = {
   task: "T",
@@ -126,7 +179,9 @@ export function GraphView({
   onSelect,
   onPeek,
   selectedId,
+  onClearPeek,
   highlightQuery,
+  onSearchChange,
   dimPredicate,
   showLegend = true,
   hiddenCategories,
@@ -145,6 +200,9 @@ export function GraphView({
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [legendOpen, setLegendOpen] = useState(true);
   const [, setTick] = useState(0);
+  // Pulse ticker — dedicated 60fps loop that advances the traveling
+  // synapse signals. Only runs while there's a focus so idle CPU is zero.
+  const [pulseTick, setPulseTick] = useState(0);
 
   // ── Resize observer ─────────────────────────────────────────────────────
   useLayoutEffect(() => {
@@ -164,44 +222,84 @@ export function GraphView({
 
   // ── Build simulation when graph shape changes ──────────────────────────
   const sim = useMemo(() => {
+    const orbitOf = (id: string): number => {
+      const note = notesById?.[id];
+      const key = pickCategoryKey(note?.tags, !!note?.pinned);
+      return CATEGORY_ORBIT[key] ?? CATEGORY_ORBIT._default;
+    };
     const s = new ForceSimulation(
       graph.nodes.map((n) => ({ id: n.id, pinned: false })),
       graph.edges.map((e) => ({ source: e.source, target: e.target })),
-      { width: size.width, height: size.height },
+      { width: size.width, height: size.height, orbitOf },
     );
-    // Pre-settle a few hundred frames so the first paint isn't a circle —
-    // but stop early so the rest of the layout animates in. Obsidian does
-    // this and it makes the graph feel alive instead of frozen.
-    let iters = 0;
-    while (!s.cooled(1.0) && iters < 600) {
-      s.step();
-      iters++;
-    }
     simRef.current = s;
     return s;
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph, size.width, size.height]);
+
+  // Currently-isolated orbit (click a ring chip to focus). Forwarded
+  // into the sim so non-isolated rings slow to near-stop.
+  const [isolatedOrbit, setIsolatedOrbit] = useState<number | null>(null);
+  useEffect(() => {
+    simRef.current?.isolateOrbit(isolatedOrbit);
+  }, [isolatedOrbit, sim]);
+
+  // Hub ids — top-5 by degree. Rendered with a warm pulse ring.
+  const hubIds = useMemo(() => new Set(sim.hubIds(5)), [sim]);
+
+  // ── Pulse loop — advances a per-frame counter used to animate synapse
+  //    signals. Always-on at ~30fps (skips every other RAF) so the graph
+  //    feels alive in the background even when the user isn't hovering.
+  //    162 edges × 1 pulse ≈ 162 circles/frame — well within budget.
+  useEffect(() => {
+    let raf = 0;
+    let skip = false;
+    const loop = () => {
+      skip = !skip;
+      if (!skip) setPulseTick((t) => (t + 1) % 1_000_000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // ── Starfield — deterministic seeded dots behind the graph.
+  //    Pure cosmetic. Generated once per graph (cheap).
+  const starfield = useMemo(() => {
+    // Mulberry32 — 32-bit deterministic PRNG.
+    const seed = 0x9e3779b9 ^ graph.nodes.length;
+    let a = seed;
+    const rand = () => {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const stars: { x: number; y: number; r: number; o: number }[] = [];
+    // Sparse warm specks — barely-there atmospheric dust. Not a starfield,
+    // more like motes of light in a candlelit room.
+    for (let i = 0; i < 55; i++) {
+      stars.push({
+        x: (rand() - 0.5) * 2400,
+        y: (rand() - 0.5) * 2400,
+        r: 0.5 + rand() * 0.8,
+        o: 0.04 + rand() * 0.07,
+      });
+    }
+    return stars;
   }, [graph]);
 
   // ── Animation loop ─────────────────────────────────────────────────────
-  // Runs until sim cools (~10 idle frames), then stops. CPU-free when idle.
+  // Always-on at 60fps. Perpetual drift + orbital force in the sim keep
+  // the graph gently rotating so the network feels alive — never freezes.
   useEffect(() => {
     let alive = true;
-    let idle = 0;
     const loop = () => {
       if (!alive) return;
       const s = simRef.current;
       if (!s) return;
       s.step();
       setTick((t) => (t + 1) % 1_000_000);
-      if (s.cooled(1.0)) {
-        idle += 1;
-        if (idle > 10 && !dragRef.current) {
-          frameRef.current = null;
-          return;
-        }
-      } else {
-        idle = 0;
-      }
       frameRef.current = requestAnimationFrame(loop);
     };
     frameRef.current = requestAnimationFrame(loop);
@@ -276,6 +374,14 @@ export function GraphView({
     };
   }, [highlightQuery, notesById]);
 
+  // Live match count for the floating search overlay.
+  const matchCount = useMemo(() => {
+    if (!matcher) return 0;
+    let n = 0;
+    for (const node of graph.nodes) if (matcher(node.id)) n++;
+    return n;
+  }, [matcher, graph.nodes]);
+
   // ── Coord transforms ───────────────────────────────────────────────────
   const screenToSim = useCallback(
     (sx: number, sy: number) => ({
@@ -322,7 +428,7 @@ export function GraphView({
         return;
       }
       const { x, y } = clientToSvg(e.clientX, e.clientY);
-      dragRef.current = { kind: "pan", startX: x, startY: y, lastX: x, lastY: y, maxMoved: 0 };
+      dragRef.current = { kind: "pan", startX: x, startY: y, lastX: x, lastY: y, maxMoved: 0, downTime: performance.now() };
       justDraggedRef.current = false;
       (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
     },
@@ -333,7 +439,7 @@ export function GraphView({
     (e: React.PointerEvent<SVGGElement>, id: string) => {
       e.stopPropagation();
       const { x, y } = clientToSvg(e.clientX, e.clientY);
-      dragRef.current = { kind: "node", id, startX: x, startY: y, lastX: x, lastY: y, maxMoved: 0 };
+      dragRef.current = { kind: "node", id, startX: x, startY: y, lastX: x, lastY: y, maxMoved: 0, downTime: performance.now() };
       justDraggedRef.current = false;
       (e.currentTarget as SVGGElement).setPointerCapture(e.pointerId);
     },
@@ -351,19 +457,19 @@ export function GraphView({
         const dx = sx - drag.lastX;
         const dy = sy - drag.lastY;
         setView((v) => ({ ...v, tx: v.tx + dx, ty: v.ty + dy }));
-      } else if (drag.kind === "node" && drag.id && maxMoved > DRAG_THRESHOLD) {
-        // Only start moving the node once we've crossed the click threshold.
-        // Below that, a tiny jitter shouldn't yank the node off its position.
-        const { x, y } = screenToSim(sx, sy);
-        sim.pin(drag.id, x, y);
-        sim.warm();
-        if (frameRef.current === null) {
-          const loop = () => {
-            sim.step();
-            setTick((t) => (t + 1) % 1_000_000);
-            frameRef.current = requestAnimationFrame(loop);
-          };
-          frameRef.current = requestAnimationFrame(loop);
+      } else if (drag.kind === "node" && drag.id) {
+        // Drag is active if EITHER (a) the user moved more than the pixel
+        // threshold OR (b) they've been holding the pointer down for longer
+        // than DRAG_HOLD_MS with any non-zero movement. (b) catches trackpad
+        // drags that barely travel on screen.
+        const held = performance.now() - drag.downTime;
+        const isDragging =
+          maxMoved > DRAG_THRESHOLD ||
+          (held > DRAG_HOLD_MS && maxMoved > 0.5);
+        if (isDragging) {
+          justDraggedRef.current = true;
+          const { x, y } = screenToSim(sx, sy);
+          sim.pin(drag.id, x, y);
         }
       }
       dragRef.current = { ...drag, lastX: sx, lastY: sy, maxMoved };
@@ -373,12 +479,25 @@ export function GraphView({
 
   const handlePointerUp = useCallback(() => {
     const drag = dragRef.current;
-    // Mark "just dragged" so the click event browser fires after pointerup
-    // can be suppressed in the node onClick handler.
-    justDraggedRef.current = !!drag && drag.maxMoved > DRAG_THRESHOLD;
-    if (drag?.kind === "node" && drag.id) sim.unpin(drag.id);
+    const held = drag ? performance.now() - drag.downTime : 0;
+    // Drag detected if movement exceeds threshold OR gesture was held a while
+    // with any movement. justDraggedRef may also have been set to true during
+    // pointermove — respect that (don't flip it back to false).
+    const wasDrag =
+      !!drag &&
+      (drag.maxMoved > DRAG_THRESHOLD ||
+        (held > DRAG_HOLD_MS && drag.maxMoved > 0.5));
+    if (wasDrag) justDraggedRef.current = true;
+    // Release dragged nodes back into their orbit.
+    if (drag?.kind === "node" && drag.id && wasDrag) {
+      simRef.current?.unpin(drag.id);
+    }
+    // Background tap (pan gesture with no meaningful movement) = dismiss peek.
+    if (drag?.kind === "pan" && !wasDrag && onClearPeek) {
+      onClearPeek();
+    }
     dragRef.current = null;
-  }, [sim]);
+  }, [onClearPeek]);
 
   // Enter/leave handlers — DO NOT pin the node on hover. Pinning was
   // there to make the node "freeze" so it could be clicked reliably, but
@@ -399,11 +518,13 @@ export function GraphView({
   const clearHoverNow = useCallback(() => {
     cancelHoverClear();
     setHoverId(null);
+    simRef.current?.setHover(null);
   }, []);
 
   const handleNodeEnter = useCallback((id: string) => {
     cancelHoverClear();
     setHoverId(id);
+    simRef.current?.setHover(id);
   }, []);
 
   const handleNodeLeave = useCallback((id: string) => {
@@ -412,38 +533,60 @@ export function GraphView({
     cancelHoverClear();
     hoverClearRef.current = window.setTimeout(() => {
       hoverClearRef.current = null;
-      setHoverId((cur) => (cur === id ? null : cur));
+      setHoverId((cur) => {
+        if (cur === id) {
+          simRef.current?.setHover(null);
+          return null;
+        }
+        return cur;
+      });
     }, 40);
   }, []);
 
   // Cleanup on unmount — never leak the timer.
   useEffect(() => () => cancelHoverClear(), []);
 
-  // Re-heat on filter/search change. `dimPredicate` MUST be stable (useCallback
-  // in the parent) or the sim will re-warm on every render and burn CPU.
+  // Orbital sim animates continuously via the main loop — filter/search
+  // changes don't need to re-heat anything.
+
+  // Keyboard shortcuts: 1..4 isolate an orbit, Esc clears isolation/search,
+  // `/` focuses the search input. Ignored when typing in any input.
   useEffect(() => {
-    simRef.current?.warm();
-    if (frameRef.current === null) {
-      let idle = 0;
-      const loop = () => {
-        const s = simRef.current;
-        if (!s) return;
-        s.step();
-        setTick((t) => (t + 1) % 1_000_000);
-        if (s.cooled(1.0)) {
-          idle += 1;
-          if (idle > 10 && !dragRef.current) {
-            frameRef.current = null;
-            return;
-          }
-        } else {
-          idle = 0;
+    const isEditable = (el: EventTarget | null) => {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (isEditable(e.target)) {
+        // Allow Esc to blur an input for quick clear-then-navigate.
+        if (e.key === "Escape" && e.target instanceof HTMLElement) {
+          (e.target as HTMLElement).blur();
         }
-        frameRef.current = requestAnimationFrame(loop);
-      };
-      frameRef.current = requestAnimationFrame(loop);
-    }
-  }, [highlightQuery, dimPredicate]);
+        return;
+      }
+      if (e.key === "Escape") {
+        // Close peek first — most likely what the user wants to dismiss.
+        if (selectedId && onClearPeek) {
+          onClearPeek();
+          return;
+        }
+        if (isolatedOrbit !== null) setIsolatedOrbit(null);
+        if (highlightQuery && onSearchChange) onSearchChange("");
+      } else if (e.key === "/" && onSearchChange) {
+        e.preventDefault();
+        const input = containerRef.current?.querySelector<HTMLInputElement>(
+          "input.lb-floating-search",
+        );
+        input?.focus();
+      } else if (/^[1-4]$/.test(e.key)) {
+        const idx = Number(e.key) - 1;
+        setIsolatedOrbit((cur) => (cur === idx ? null : idx));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isolatedOrbit, highlightQuery, onSearchChange, selectedId, onClearPeek]);
 
   // Tooltip position — relative to hovered node's on-screen position (stable,
   // doesn't jitter with every pointermove).
@@ -478,21 +621,29 @@ export function GraphView({
   // (0.35) so the whole graph stays readable while your current page is
   // clearly highlighted.
   const NON_FOCUS_DIM = isHoverFocus ? 0.08 : 0.35;
+  /** Dim factor for orbits other than the isolated one (null = no isolation). */
+  const orbitDim = (noteId: string): number => {
+    if (isolatedOrbit === null) return 1;
+    const sn = nodeById.get(noteId);
+    if (!sn) return 1;
+    return sn.orbit === isolatedOrbit ? 1 : 0.12;
+  };
   const opacityFor = (noteId: string): number => {
+    const oDim = orbitDim(noteId);
     if (noteId === hoverId) return 1; // hovered always fully lit
     const note = notesById?.[noteId];
     const dimmed = dimPredicate?.(note) ?? false;
     const match = matcher ? matcher(noteId) : true;
-    if (dimmed || !match) return 0.08;
+    if (dimmed || !match) return 0.08 * oDim;
     if (depths) {
       const d = depths.get(noteId);
-      if (d === undefined) return NON_FOCUS_DIM;
+      if (d === undefined) return NON_FOCUS_DIM * oDim;
       if (d === 0) return 1;
-      if (d === 1) return 0.95;
-      if (d === 2) return 0.7;
-      return Math.max(NON_FOCUS_DIM, 0.45);
+      if (d === 1) return 0.95 * oDim;
+      if (d === 2) return 0.7 * oDim;
+      return Math.max(NON_FOCUS_DIM, 0.45) * oDim;
     }
-    return 0.85;
+    return 0.85 * oDim;
   };
 
   const edgeState = (src: string, tgt: string) => {
@@ -527,13 +678,19 @@ export function GraphView({
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full overflow-hidden bg-bg-primary"
+      className="relative w-full h-full overflow-hidden"
+      style={{
+        // Warm charcoal with the faintest ember glow at the core — the
+        // "cozy observatory" atmosphere. No harsh black, no cold blue.
+        background:
+          "radial-gradient(ellipse at center, #1b1620 0%, #12101a 45%, #0a0910 100%)",
+      }}
     >
       <svg
         ref={svgRef}
         width={size.width}
         height={size.height}
-        className="block bg-bg-primary select-none cursor-grab active:cursor-grabbing"
+        className="block select-none cursor-grab active:cursor-grabbing"
         onWheel={handleWheel}
         onPointerDown={handlePointerDownBg}
         onPointerMove={handlePointerMove}
@@ -546,10 +703,32 @@ export function GraphView({
         }}
       >
         <defs>
-          <radialGradient id="node-glow" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="rgba(16,185,129,0.35)" />
-            <stop offset="100%" stopColor="rgba(16,185,129,0)" />
+          {/* Soft halo — just enough to lift each dot off the charcoal
+              background, nothing like a neon bloom. */}
+          <filter id="lb-neural-glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+
+          {/* Slightly stronger halo for the central ember core. */}
+          <filter id="lb-core-glow" x="-75%" y="-75%" width="250%" height="250%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+
+          {/* Warm ember radial — the central glow. Candlelight, not neon. */}
+          <radialGradient id="lb-ember" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#d4a26a" stopOpacity="0.55" />
+            <stop offset="40%" stopColor="#a8754c" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="#a8754c" stopOpacity="0" />
           </radialGradient>
+
         </defs>
 
         <rect
@@ -568,24 +747,275 @@ export function GraphView({
         />
 
         <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
-          {/* Edges */}
+          {/* Sparse warm motes — atmospheric dust, not stars. */}
+          <g pointerEvents="none" aria-hidden>
+            {starfield.map((s, i) => (
+              <circle
+                key={`star-${i}`}
+                cx={s.x}
+                cy={s.y}
+                r={s.r}
+                fill="#e8d5b0"
+                opacity={s.o}
+              />
+            ))}
+          </g>
+
+          {/* Observatory furniture — orbit rings, labels, ember core, and
+              the single "now" marker at 12 o'clock on the innermost ring.
+              All decorative: no pointer events. */}
+          {(() => {
+            const { cx, cy } = sim.center();
+            const radii = sim.orbitRadii();
+            const coreBreath = 1 + 0.05 * Math.sin(pulseTick * 0.03);
+            const coreR = 24 * coreBreath;
+            const ringOpacity = (i: number) =>
+              isolatedOrbit === null
+                ? 0.08 + i * 0.008
+                : isolatedOrbit === i
+                  ? 0.26
+                  : 0.03;
+            return (
+              <g pointerEvents="none" aria-hidden>
+                {/* SVG textPath anchors — one invisible circle per orbit
+                    so the label can ride the ring. Rendered above the
+                    visible rings so the text draws on top. */}
+                <defs>
+                  {radii.map((r, i) => (
+                    <path
+                      key={`ring-path-${i}`}
+                      id={`lb-orbit-path-${i}`}
+                      d={`M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy}`}
+                    />
+                  ))}
+                </defs>
+                {/* Orbit guide rings — dashed warm strokes. */}
+                {radii.map((r, i) => (
+                  <circle
+                    key={`orbit-${i}`}
+                    cx={cx}
+                    cy={cy}
+                    r={r}
+                    fill="none"
+                    stroke={ORBIT_LABELS[i].color}
+                    strokeOpacity={ringOpacity(i)}
+                    strokeWidth={isolatedOrbit === i ? 1.2 : 0.8}
+                    strokeDasharray={isolatedOrbit === i ? "3 5" : "2 7"}
+                  />
+                ))}
+                {/* Orbit labels — static text parked at the TOP of each
+                    ring, OUTSIDE the orbit path, so they never cross the
+                    ember core or other rings. Skipped for empty orbits
+                    and for any ring too small to comfortably hold the
+                    label. */}
+                {(() => {
+                  const metas = sim.orbitMeta();
+                  return radii.map((r, i) => {
+                    if ((metas[i]?.nodeCount ?? 0) === 0) return null;
+                    if (r < 80) return null;
+                    const op =
+                      isolatedOrbit === null
+                        ? 0.55
+                        : isolatedOrbit === i
+                          ? 0.92
+                          : 0.12;
+                    const label = ORBIT_LABELS[i];
+                    return (
+                      <text
+                        key={`orbit-label-${i}`}
+                        x={cx}
+                        y={cy - r - 8}
+                        textAnchor="middle"
+                        fill={label.color}
+                        opacity={op}
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          letterSpacing: "0.28em",
+                          fontFamily: "var(--font-display, inherit)",
+                        }}
+                      >
+                        {label.title}
+                        <tspan
+                          dx={6}
+                          fill={label.color}
+                          opacity={0.6}
+                          style={{ fontSize: 9, fontWeight: 500 }}
+                        >
+                          · {label.subtitle}
+                        </tspan>
+                      </text>
+                    );
+                  });
+                })()}
+                {/* Outer ember halo + disk + hot center */}
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 3.4}
+                  fill="url(#lb-ember)"
+                  opacity={0.82}
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR}
+                  fill="#d4a26a"
+                  opacity={0.3}
+                  filter="url(#lb-core-glow)"
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 0.42}
+                  fill="#f5d19a"
+                  opacity={0.55}
+                />
+                {/* "Now" marker — a small amber tick at 12 o'clock on the
+                    innermost orbit. Represents the current focus axis. */}
+                <g transform={`translate(${cx} ${cy - radii[0]})`}>
+                  <line
+                    x1={0}
+                    y1={-6}
+                    x2={0}
+                    y2={6}
+                    stroke="#f5d19a"
+                    strokeWidth={1.5}
+                    strokeOpacity={0.9}
+                    strokeLinecap="round"
+                  />
+                  <circle
+                    cx={0}
+                    cy={-10}
+                    r={2.2}
+                    fill="#f5d19a"
+                    opacity={0.95}
+                  />
+                </g>
+              </g>
+            );
+          })()}
+
+          {/* Edges — thin curved synapse arcs. Each path is a quadratic
+              Bezier bowed gently perpendicular to the straight line, so as
+              the orbits rotate, the arcs sweep and flex organically. No
+              blur halo — the cozy palette doesn't need it, and removing it
+              drops visual noise massively. */}
+          {graph.edges.map((edge, idx) => {
+            const a = nodeById.get(edge.source);
+            const b = nodeById.get(edge.target);
+            if (!a || !b) return null;
+            const srcNote = notesById?.[edge.source];
+            const tgtNote = notesById?.[edge.target];
+            const srcColor = srcNote ? colorForTags(srcNote.tags, srcNote.pinned).ring : "#6b5e4a";
+            const tgtColor = tgtNote ? colorForTags(tgtNote.tags, tgtNote.pinned).ring : "#6b5e4a";
+            return (
+              <linearGradient
+                key={`g-${idx}`}
+                id={`e-grad-${idx}`}
+                gradientUnits="userSpaceOnUse"
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+              >
+                <stop offset="0%" stopColor={srcColor} stopOpacity={0.6} />
+                <stop offset="100%" stopColor={tgtColor} stopOpacity={0.6} />
+              </linearGradient>
+            );
+          })}
           {graph.edges.map((edge, idx) => {
             const a = nodeById.get(edge.source);
             const b = nodeById.get(edge.target);
             if (!a || !b) return null;
             const st = edgeState(edge.source, edge.target);
+            const isActive =
+              !!focusId &&
+              depths !== null &&
+              ((depths.get(edge.source) ?? 99) <= 1 ||
+                (depths.get(edge.target) ?? 99) <= 1);
+            // Quadratic Bezier — bow the line perpendicular to the straight
+            // path. Control point sits at the midpoint, pushed outward by
+            // ~12% of the edge length. Side (sign) chosen deterministically
+            // from the edge index so curves don't all bend the same way.
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const len = Math.hypot(dx, dy) || 1;
+            const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1);
+            const mx = (a.x + b.x) / 2 + (-dy / len) * bow;
+            const my = (a.y + b.y) / 2 + (dx / len) * bow;
+            const d = `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
+            // Very gentle breathing opacity — barely perceptible, just
+            // enough to feel alive. No bright strobe.
+            const phase = Math.sin((pulseTick + idx * 13) * 0.04);
+            const dimmed = st.opacity < 0.1;
+            const baseOp = dimmed
+              ? st.opacity * 0.5
+              : (isActive ? 0.62 : 0.22) + 0.06 * phase;
             return (
-              <line
+              <path
                 key={`e-${idx}`}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={st.stroke}
-                strokeWidth={st.width}
-                strokeOpacity={st.opacity}
+                d={d}
+                fill="none"
+                stroke={`url(#e-grad-${idx})`}
+                strokeWidth={isActive ? 1.3 : 0.8}
+                strokeOpacity={baseOp}
                 strokeLinecap="round"
+                pointerEvents="none"
               />
+            );
+          })}
+
+          {/* Traveling synapse motes — one soft dot per edge, follows the
+              curve. Active (1-hop of focus) gets a warmer, slightly brighter
+              mote. No paired flashes, no neon. */}
+          {graph.edges.map((edge, idx) => {
+            const a = nodeById.get(edge.source);
+            const b = nodeById.get(edge.target);
+            if (!a || !b) return null;
+            const st = edgeState(edge.source, edge.target);
+            if (st.opacity < 0.1) return null;
+            const isActive =
+              !!focusId &&
+              depths !== null &&
+              ((depths.get(edge.source) ?? 99) <= 1 ||
+                (depths.get(edge.target) ?? 99) <= 1);
+            // Active edges flow TOWARD the focus node. Ambient flow
+            // alternates direction by edge index to avoid a uniform drift.
+            let flipped = (idx % 2) === 0;
+            if (isActive && depths) {
+              const dSrc = depths.get(edge.source) ?? 99;
+              const dTgt = depths.get(edge.target) ?? 99;
+              flipped = dSrc < dTgt;
+            }
+            const fromX = flipped ? b.x : a.x;
+            const fromY = flipped ? b.y : a.y;
+            const toX   = flipped ? a.x : b.x;
+            const toY   = flipped ? a.y : b.y;
+            // Same bow as the curve so the mote rides the arc, not the chord
+            const dx = toX - fromX;
+            const dy = toY - fromY;
+            const len = Math.hypot(dx, dy) || 1;
+            const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1) * (flipped ? -1 : 1);
+            const mx = (fromX + toX) / 2 + (-dy / len) * bow;
+            const my = (fromY + toY) / 2 + (dx / len) * bow;
+            // Cozy slow pace — every edge finishes a trip in ~3.5s (active)
+            // or ~7s (ambient), offset per edge so motes don't pulse in sync.
+            const dur = isActive ? 200 : 400;
+            const t = ((pulseTick + idx * 17) % dur) / dur;
+            // Quadratic Bezier point at parameter t.
+            const omt = 1 - t;
+            const px = omt * omt * fromX + 2 * omt * t * mx + t * t * toX;
+            const py = omt * omt * fromY + 2 * omt * t * my + t * t * toY;
+            const fill = isActive ? "#f5d19a" : "#d4b388";
+            const op = isActive ? 0.75 : 0.28;
+            const rOuter = isActive ? 2.4 : 1.6;
+            const rInner = isActive ? 1.1 : 0.7;
+            return (
+              <g key={`pulse-${idx}`} pointerEvents="none">
+                <circle cx={px} cy={py} r={rOuter} fill={fill} opacity={op * 0.5} />
+                <circle cx={px} cy={py} r={rInner} fill="#fdf2d9" opacity={op} />
+              </g>
             );
           })}
 
@@ -620,15 +1050,27 @@ export function GraphView({
             const isNeighbor = depth === 1;
             const isSelected = node.id === selectedId;
             const label = (note?.title || node.label || "").trim();
-            // Side-label only for the currently selected node — keeps the
-            // graph clean; full detail shows via hover tooltip otherwise.
-            const showSideLabel = isSelected;
+            // Completed-task detection — mirrors the tooltip logic so the
+            // two views agree. A task is done if any of: done/completed
+            // tag, leading markdown checkbox `- [x]`, or starts with ~~.
+            const taskDone = (() => {
+              if (categoryKey !== "task") return false;
+              const tagsLower = (note?.tags || []).map((t) => t.toLowerCase());
+              if (tagsLower.includes("done") || tagsLower.includes("completed")) return true;
+              const content = note?.content || "";
+              return /^\s*-\s*\[x\]/im.test(content);
+            })();
+            // Always-visible labels for just your anchor notes + whatever
+            // you're hovering. Hubs identify themselves with the pulse
+            // ring — no need for a permanent label. Keeps the graph
+            // readable instead of a wall of text on every orbit.
+            const showSideLabel =
+              isSelected || isFocus || isNeighbor || !!note?.pinned;
 
-            // Hover scale — use the SVG transform attribute with both
-            // translate + scale combined. Putting a CSS `style.transform`
-            // on the same element OVERRIDES the attribute, which would
-            // collapse every node to (0,0). Attribute is the safe path.
-            const scale = isFocus ? 1.28 : isSelected ? 1.12 : 1;
+            // Gentle hover scale — noticeable but not jumpy. The hover
+            // also freezes the node's orbit via sim.setHover, so the user
+            // doesn't need aggressive scaling to identify the target.
+            const scale = isFocus ? 1.18 : isSelected ? 1.08 : 1;
 
             return (
               <g
@@ -639,43 +1081,72 @@ export function GraphView({
                 onPointerLeave={() => handleNodeLeave(node.id)}
                 onClick={(e) => {
                   // Suppress the click that browsers fire after a drag-release
-                  // — `justDraggedRef` is set in handlePointerUp when the
-                  // gesture exceeded DRAG_THRESHOLD.
+                  // — `justDraggedRef` is set the moment DRAG_THRESHOLD is
+                  // crossed in handlePointerMove AND again in handlePointerUp.
                   if (justDraggedRef.current || dragRef.current) {
                     justDraggedRef.current = false;
                     return;
                   }
                   e.stopPropagation();
+                  // Clicking the currently-peeked node closes the peek
+                  // (toggle UX). Otherwise open it.
+                  if (node.id === selectedId && onClearPeek) {
+                    onClearPeek();
+                    return;
+                  }
                   if (onPeek) onPeek(node.id);
                   else onSelect?.(node.id);
                 }}
                 opacity={op}
                 className="cursor-pointer"
               >
-                {/* Pulsing focus glow — only rendered when hovered/selected-focus */}
-                {isFocus && (
-                  <circle
-                    r={r + 14}
-                    fill={color.ring}
-                    opacity={0.35}
-                    pointerEvents="none"
-                    style={{ filter: "blur(6px)" }}
-                  >
-                    <animate
-                      attributeName="r"
-                      values={`${r + 10};${r + 22};${r + 10}`}
-                      dur="1.8s"
-                      repeatCount="indefinite"
+                {/* Whisper-soft halo — a breath of color around the dot,
+                    never a bloom. Cozy, not clinical. */}
+                <circle
+                  r={r + 1 + deg * 0.15}
+                  fill={color.ring}
+                  opacity={isFocus ? 0.18 : isNeighbor ? 0.11 : 0.055}
+                  pointerEvents="none"
+                  filter="url(#lb-neural-glow)"
+                />
+                {/* Hub ring — top-5 most connected notes get a warm
+                    concentric pulse marking them as anchors of the graph.
+                    Now slightly brighter + a static inner ring so they
+                    read as hubs even between pulse cycles. */}
+                {hubIds.has(node.id) && !note?.pinned && (
+                  <>
+                    <circle
+                      r={r + 1.6}
+                      fill="none"
+                      stroke="#d4a26a"
+                      strokeWidth={1.2}
+                      strokeOpacity={0.5}
+                      pointerEvents="none"
                     />
-                    <animate
-                      attributeName="opacity"
-                      values="0.55;0.18;0.55"
-                      dur="1.8s"
-                      repeatCount="indefinite"
-                    />
-                  </circle>
+                    <circle
+                      r={r + 2}
+                      fill="none"
+                      stroke="#d4a26a"
+                      strokeWidth={1.4}
+                      strokeOpacity={0.8}
+                      pointerEvents="none"
+                    >
+                      <animate
+                        attributeName="r"
+                        values={`${r + 2};${r + 10};${r + 2}`}
+                        dur="3.2s"
+                        repeatCount="indefinite"
+                      />
+                      <animate
+                        attributeName="stroke-opacity"
+                        values="0.8;0;0.8"
+                        dur="3.2s"
+                        repeatCount="indefinite"
+                      />
+                    </circle>
+                  </>
                 )}
-                {/* Pinned halo */}
+                {/* Pinned halo — now with a slow pulse (±1px) */}
                 {note?.pinned && (
                   <circle
                     r={r + 4}
@@ -683,7 +1154,14 @@ export function GraphView({
                     stroke="#fbbf24"
                     strokeWidth={2}
                     strokeOpacity={0.9}
-                  />
+                  >
+                    <animate
+                      attributeName="r"
+                      values={`${r + 3};${r + 5};${r + 3}`}
+                      dur="2.4s"
+                      repeatCount="indefinite"
+                    />
+                  </circle>
                 )}
                 {/* Selected ring */}
                 {isSelected && !isFocus && (
@@ -694,75 +1172,115 @@ export function GraphView({
                     strokeWidth={2}
                   />
                 )}
-                {/* Body — brightness boosts "deep" (high-importance) nodes,
-                    drop-shadow lifts focused node. */}
+                {/* Muted body — cozy palette keeps the saturation gentle.
+                    A thin warm-white ring replaces the harsh stroke. */}
                 <circle
                   r={r}
                   fill={color.ring}
-                  stroke={isFocus ? "var(--color-bg-primary)" : "rgba(0,0,0,0.3)"}
-                  strokeWidth={isFocus ? 2 : 1}
-                  style={{
-                    filter: isFocus
-                      ? `drop-shadow(0 0 8px ${color.ring}) brightness(${brightness + 0.1})`
-                      : isNeighbor
-                      ? `drop-shadow(0 0 4px ${color.ring}) brightness(${brightness + 0.05})`
-                      : `brightness(${brightness})`,
-                  }}
+                  opacity={isFocus ? 0.88 : isNeighbor ? 0.78 : 0.66}
+                  stroke={isFocus ? "rgba(240,228,200,0.3)" : "rgba(240,228,200,0.08)"}
+                  strokeWidth={isFocus ? 0.9 : 0.5}
+                  style={{ filter: `brightness(${brightness * 0.9})` }}
                 />
-                {/* In-dot badge — the 1–3 char code (T, P, 04/18, etc.).
-                    Text color picks itself against the dot fill so it
-                    reads on both bright and dark categories. */}
-                <text
-                  x={0}
-                  y={0}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  className="pointer-events-none select-none"
-                  style={{
-                    fontSize: `${Math.max(10, r * 0.55)}px`,
-                    fontWeight: 700,
-                    fill: readableTextOn(color.ring),
-                    letterSpacing: badge.length >= 2 ? "-0.03em" : "0",
-                  }}
-                >
-                  {badge}
-                </text>
-                {/* Side-label ONLY for selected node — a small pill so the
-                    user knows which page they've opened. Bounds-checked
-                    against the SVG viewport so it can never clip the right
-                    edge: when the node sits in the right ~third of the
-                    canvas, the pill anchors to its LEFT side instead. */}
+                {/* Black icon / date text stamped on the colored dot —
+                    high contrast against the bright fill so the category
+                    reads instantly. Journal/daily-log show their date. */}
+                {(() => {
+                  const isDateBadge =
+                    (categoryKey === "journal" || categoryKey === "daily-log") &&
+                    /\d/.test(badge);
+                  if (isDateBadge) {
+                    return (
+                      <text
+                        x={0}
+                        y={0}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        className="pointer-events-none select-none"
+                        style={{
+                          fontSize: `${Math.max(9, r * 0.48)}px`,
+                          fontWeight: 700,
+                          fill: "#0a0a0a",
+                          letterSpacing: "-0.03em",
+                        }}
+                      >
+                        {badge}
+                      </text>
+                    );
+                  }
+                  const IconComp = CATEGORY_ICONS[categoryKey] ?? DEFAULT_CATEGORY_ICON;
+                  const iconSize = Math.max(12, r * 0.9);
+                  return (
+                    <g
+                      transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
+                      pointerEvents="none"
+                    >
+                      <IconComp
+                        size={iconSize}
+                        color="#0a0a0a"
+                        strokeWidth={2}
+                        aria-hidden
+                      />
+                    </g>
+                  );
+                })()}
+                {/* Side-label — variable weight by role.
+                    • selected / focused → solid pill, readable across the canvas
+                    • hub / pinned / neighbor → bare text, quieter, doesn't crowd
+                    Right-edge flip: if the node sits in the right third of
+                    the canvas, label anchors LEFT so it never clips out. */}
                 {showSideLabel && label && (() => {
-                  const labelW = Math.min(280, label.length * 7 + 14);
+                  const emphasized = isSelected || isFocus;
+                  const maxChars = emphasized ? 36 : 18;
+                  const truncated =
+                    label.length > maxChars
+                      ? label.slice(0, maxChars - 2) + "…"
+                      : label;
+                  const labelW = truncated.length * 7 + (emphasized ? 14 : 8);
                   const snScreenX = sn.x * view.k + view.tx;
                   const wouldOverflow =
                     snScreenX + (r + 12 + labelW) * view.k > size.width - 8;
                   const offsetX = wouldOverflow
                     ? -(r + 8 + labelW - 4)
                     : r + 8;
+                  const textColor = taskDone
+                    ? "rgba(232,213,176,0.5)"
+                    : emphasized
+                      ? "rgba(245,209,154,0.95)"
+                      : "rgba(232,213,176,0.68)";
                   return (
-                    <g transform={`translate(${offsetX} ${-8})`}>
-                      <rect
-                        x={-4}
-                        y={-2}
-                        rx={4}
-                        ry={4}
-                        width={labelW}
-                        height={18}
-                        fill="var(--color-bg-secondary)"
-                        stroke="var(--color-border)"
-                        strokeWidth={1}
-                      />
+                    <g transform={`translate(${offsetX} ${-8})`} pointerEvents="none">
+                      {emphasized && (
+                        <rect
+                          x={-4}
+                          y={-2}
+                          rx={4}
+                          ry={4}
+                          width={labelW}
+                          height={18}
+                          fill="rgba(27,22,32,0.9)"
+                          stroke="rgba(212,162,106,0.45)"
+                          strokeWidth={1}
+                        />
+                      )}
                       <text
-                        x={3}
+                        x={emphasized ? 3 : 0}
                         y={11}
-                        className="fill-text-primary pointer-events-none"
                         style={{
-                          fontSize: `${Math.max(10, labelFontSize)}px`,
-                          fontWeight: 500,
+                          fontSize: `${Math.max(emphasized ? 11 : 10, labelFontSize * (emphasized ? 1 : 0.92))}px`,
+                          fontWeight: emphasized ? 600 : 500,
+                          fill: textColor,
+                          fontFamily: "var(--font-display, inherit)",
+                          letterSpacing: "-0.01em",
+                          textShadow: emphasized
+                            ? "none"
+                            : "0 1px 3px rgba(0,0,0,0.85), 0 0 2px rgba(0,0,0,0.6)",
+                          textDecoration: taskDone ? "line-through" : "none",
+                          textDecorationColor: "rgba(110,181,131,0.9)",
+                          textDecorationThickness: "1.5px",
                         }}
                       >
-                        {label.length > 38 ? label.slice(0, 36) + "…" : label}
+                        {truncated}
                       </text>
                     </g>
                   );
@@ -773,35 +1291,366 @@ export function GraphView({
         </g>
       </svg>
 
-      {/* Hover tooltip — short preview. Click for full peek card. */}
-      {hoverId && hoverNote && tooltipPos && (
-        <div
-          className="absolute z-20 pointer-events-none rounded-lg border border-border bg-bg-secondary shadow-2xl p-3 w-[280px] animate-fade-in"
-          style={{
-            left: Math.max(8, Math.min(size.width - 296, tooltipPos.sx)),
-            top: Math.max(8, Math.min(size.height - 160, tooltipPos.sy)),
-          }}
-        >
-          <div className="flex items-center gap-2 mb-1.5">
-            <span
-              className="w-2 h-2 rounded-full inline-block shrink-0"
-              style={{ backgroundColor: colorForTags(hoverNote.tags, hoverNote.pinned).ring }}
-            />
-            {hoverNote.pinned && <Star size={10} strokeWidth={2} fill="#fbbf24" color="#fbbf24" />}
-            <div className="text-sm font-semibold text-text-primary truncate tracking-tight">
-              {hoverNote.title || "(untitled)"}
+      {/* Micro-tooltip — compact card. Hidden during an active node drag
+          so the user can see the dot clearly while repositioning. */}
+      {hoverId && hoverNote && tooltipPos && !(
+        dragRef.current?.kind === "node" && dragRef.current.maxMoved > DRAG_THRESHOLD
+      ) && (() => {
+        const catKey = pickCategoryKey(hoverNote.tags, !!hoverNote.pinned);
+        const catLabel = (FILTER_CATEGORIES.find((c) => c.key === catKey)?.label)
+          ?? catKey.replace(/[-_]/g, " ");
+        const links = degree[hoverId] ?? 0;
+        // Importance → filled-dot count (1..5). 1–2=1, 3–4=2, 5–6=3, 7–8=4, 9–10=5.
+        const filledDots = Math.max(1, Math.min(5, Math.ceil((hoverNote.importance ?? 5) / 2)));
+        // Task completion: tags include done/completed, OR body starts
+        // with a markdown-checked checkbox.
+        const tagsLower = (hoverNote.tags || []).map((t) => t.toLowerCase());
+        const doneByTag = tagsLower.includes("done") || tagsLower.includes("completed");
+        const doneByCheckbox = /^\s*-\s*\[x\]/im.test(hoverNote.content || "");
+        const isTask = catKey === "task";
+        const isDeadline = catKey === "deadline";
+        const status: "done" | "open" | "pinned" | "deadline" | null =
+          hoverNote.pinned ? "pinned"
+          : isDeadline ? "deadline"
+          : isTask ? (doneByTag || doneByCheckbox ? "done" : "open")
+          : null;
+        return (
+          <div
+            className="lb-tooltip absolute z-20 pointer-events-none rounded-md border bg-bg-secondary/95 backdrop-blur shadow-2xl px-2.5 py-2 w-[216px] animate-fade-in"
+            style={{
+              left: Math.max(8, Math.min(size.width - 224, tooltipPos.sx)),
+              top: Math.max(8, Math.min(size.height - 96, tooltipPos.sy)),
+              borderColor: "rgba(168,144,106,0.24)",
+            }}
+          >
+            {/* Row 1: status-icon · title (strikethrough if done)
+                Open tasks show the task icon itself (not an empty circle).
+                Completed tasks get a line-through on the title. */}
+            <div className="flex items-center gap-1.5">
+              <span
+                className="w-2 h-2 rounded-full inline-block shrink-0"
+                style={{
+                  backgroundColor: colorForTags(hoverNote.tags, hoverNote.pinned).ring,
+                  boxShadow: `0 0 6px ${colorForTags(hoverNote.tags, hoverNote.pinned).ring}66`,
+                }}
+              />
+              {status === "open" && (
+                <CategoryIcon
+                  keyName="task"
+                  size={12}
+                  color="rgba(232,213,176,0.85)"
+                />
+              )}
+              {status === "pinned" && (
+                <Star size={11} strokeWidth={2} fill="#fbbf24" color="#fbbf24" />
+              )}
+              {status === "deadline" && (
+                <span
+                  title="deadline"
+                  className="shrink-0 text-[10px] leading-none"
+                  style={{ color: "#f0a060" }}
+                >
+                  ⏰
+                </span>
+              )}
+              <div
+                className="text-[12px] font-semibold truncate flex-1 tracking-tight leading-tight"
+                style={{
+                  fontFamily: "var(--font-display, inherit)",
+                  color:
+                    status === "done"
+                      ? "rgba(232,213,176,0.55)"
+                      : "var(--color-text-primary)",
+                  textDecoration: status === "done" ? "line-through" : "none",
+                  textDecorationColor: "rgba(110,181,131,0.85)",
+                  textDecorationThickness: "1.5px",
+                }}
+              >
+                {(hoverNote.title || "(untitled)").slice(0, 38)}
+                {(hoverNote.title || "").length > 38 ? "…" : ""}
+              </div>
+            </div>
+            {/* Row 2: importance meter — 5 dots, filled by importance/2. */}
+            <div className="flex items-center gap-1 mt-1.5" title={`importance ${hoverNote.importance}/10`}>
+              <span className="text-[9px] uppercase tracking-wider text-text-muted/80 mr-0.5">
+                impact
+              </span>
+              {Array.from({ length: 5 }).map((_, i) => (
+                <span
+                  key={i}
+                  className="w-1.5 h-1.5 rounded-full inline-block"
+                  style={{
+                    background: i < filledDots ? "#d4a26a" : "transparent",
+                    border: i < filledDots ? "none" : "1px solid rgba(168,144,106,0.3)",
+                  }}
+                />
+              ))}
+            </div>
+            {/* Row 3: category · link count. Minimal meta. */}
+            <div className="mt-1.5 text-[9px] uppercase tracking-[0.08em] text-text-muted/80 flex items-center gap-1.5 tabular-nums">
+              <span>{catLabel}</span>
+              <span className="opacity-40">·</span>
+              <span>{links} link{links === 1 ? "" : "s"}</span>
             </div>
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5 tabular-nums">
-            {degree[hoverId] ?? 0} link{(degree[hoverId] ?? 0) === 1 ? "" : "s"} · importance {hoverNote.importance}/10
+        );
+      })()}
+
+      {/* Floating search — anchored top-center, over the brain canvas.
+          Connects to the parent via onSearchChange; the parent may also
+          drive the same searchQ from its top bar — both stay in sync. */}
+      {onSearchChange && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-[340px] max-w-[calc(100%-120px)]">
+          <div
+            className="relative flex items-center gap-2 h-10 px-3 rounded-full backdrop-blur-md transition-shadow"
+            style={{
+              background: "rgba(27, 22, 32, 0.82)",
+              border: "1px solid rgba(168,144,106,0.28)",
+              boxShadow:
+                "0 10px 30px -12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(240,228,200,0.04)",
+            }}
+          >
+            <Search
+              size={13}
+              strokeWidth={1.9}
+              className="text-text-muted shrink-0"
+            />
+            <input
+              value={highlightQuery || ""}
+              onChange={(e) => onSearchChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") onSearchChange("");
+              }}
+              placeholder="search the brain"
+              className="lb-floating-search flex-1 bg-transparent outline-none text-[13px] tracking-tight text-text-primary placeholder:text-text-muted/70"
+              spellCheck={false}
+              style={{ fontFamily: "var(--font-display, inherit)" }}
+            />
+            {(highlightQuery || "").trim() && (
+              <>
+                <span
+                  className="text-[10px] uppercase tracking-[0.08em] tabular-nums shrink-0"
+                  style={{
+                    color: matchCount > 0 ? "#d4a26a" : "rgba(200,180,140,0.55)",
+                  }}
+                >
+                  {matchCount > 0
+                    ? `${matchCount} match${matchCount === 1 ? "" : "es"}`
+                    : "no matches"}
+                </span>
+                <button
+                  onClick={() => onSearchChange("")}
+                  className="shrink-0 text-text-muted hover:text-text-primary transition-colors -mr-1"
+                  title="Clear (Esc)"
+                >
+                  <XIcon size={12} strokeWidth={2} />
+                </button>
+              </>
+            )}
           </div>
-          <div className="text-xs text-text-secondary line-clamp-3 whitespace-pre-wrap leading-relaxed">
-            {hoverNote.content.slice(0, 160)}
-            {hoverNote.content.length > 160 ? "…" : ""}
-          </div>
-          <div className="text-[10px] text-text-muted mt-2 italic">click to open preview</div>
         </div>
       )}
+
+      {/* Stats HUD — observatory telemetry. Lives top-left. Shows:
+          nodes · links · density · pinned · hubs · +today · [focus links] */}
+      {(() => {
+        const totalNodes = graph.nodes.length;
+        const totalEdges = graph.edges.length;
+        // Graph density — ratio of real edges to max possible edges (per-mille).
+        const density =
+          totalNodes > 1
+            ? Math.round(
+                (2000 * totalEdges) / (totalNodes * (totalNodes - 1)),
+              ) / 10
+            : 0;
+        // Pinned + today's additions (last 24h) derived from notesById.
+        let pinnedCount = 0;
+        let todayCount = 0;
+        const nowMs = Date.now();
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        if (notesById) {
+          for (const node of graph.nodes) {
+            const n = notesById[node.id];
+            if (!n) continue;
+            if (n.pinned) pinnedCount++;
+            const ts = n.updated_at || n.created_at;
+            if (ts) {
+              const t = new Date(ts).getTime();
+              if (!isNaN(t) && nowMs - t < DAY_MS) todayCount++;
+            }
+          }
+        }
+        const hoverDegree = hoverId ? (degree[hoverId] ?? 0) : null;
+        const hubCount = hubIds.size;
+        return (
+          <div className="absolute top-[58px] left-3 z-10 pointer-events-none">
+            <div
+              className="rounded-md backdrop-blur-md px-2.5 py-1.5 flex items-center gap-2.5 text-[10px] uppercase tracking-[0.12em] tabular-nums"
+              style={{
+                background: "rgba(27,22,32,0.82)",
+                border: "1px solid rgba(168,144,106,0.22)",
+                color: "rgba(232,213,176,0.86)",
+                fontFamily: "var(--font-display, inherit)",
+              }}
+            >
+              <div className="flex items-baseline gap-1">
+                <span className="text-[13px] font-semibold text-[#f5d19a]">
+                  {totalNodes}
+                </span>
+                <span className="opacity-60">nodes</span>
+              </div>
+              <span className="opacity-20">│</span>
+              <div className="flex items-baseline gap-1">
+                <span className="text-[13px] font-semibold text-[#d4a26a]">
+                  {totalEdges}
+                </span>
+                <span className="opacity-60">links</span>
+              </div>
+              <span className="opacity-20">│</span>
+              <div className="flex items-baseline gap-1" title="graph density (‰)">
+                <span className="text-[13px] font-semibold text-[#a8906a]">
+                  {density}‰
+                </span>
+                <span className="opacity-60">density</span>
+              </div>
+              {pinnedCount > 0 && (
+                <>
+                  <span className="opacity-20">│</span>
+                  <div
+                    className="flex items-baseline gap-1"
+                    title="pinned notes"
+                    style={{ color: "#fbbf24" }}
+                  >
+                    <span className="text-[13px] font-semibold">
+                      ★ {pinnedCount}
+                    </span>
+                    <span className="opacity-70">pinned</span>
+                  </div>
+                </>
+              )}
+              <span className="opacity-20">│</span>
+              <div
+                className="flex items-baseline gap-1"
+                title="hubs — top 5 most-connected notes"
+              >
+                <span className="text-[13px] font-semibold text-[#d4a26a]">
+                  ◌ {hubCount}
+                </span>
+                <span className="opacity-60">hubs</span>
+              </div>
+              {todayCount > 0 && (
+                <>
+                  <span className="opacity-20">│</span>
+                  <div
+                    className="flex items-baseline gap-1"
+                    title="notes touched in the last 24h"
+                    style={{ color: "#7fd4a6" }}
+                  >
+                    <span className="text-[13px] font-semibold">
+                      +{todayCount}
+                    </span>
+                    <span className="opacity-70">today</span>
+                  </div>
+                </>
+              )}
+              {hoverDegree !== null && (
+                <>
+                  <span className="opacity-20">│</span>
+                  <div
+                    className="flex items-baseline gap-1"
+                    style={{ color: "#f0a060" }}
+                  >
+                    <span className="text-[13px] font-semibold">
+                      {hoverDegree}
+                    </span>
+                    <span className="opacity-80">links in focus</span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Orbit chip stack — left-middle edge. Click to isolate a ring,
+          click again to release. Hover highlights. Shows per-orbit count. */}
+      {(() => {
+        const meta = sim.orbitMeta();
+        return (
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1.5">
+            {meta.map((m, i) => {
+              // Skip empty orbits — no need to show a chip for "CORE 0".
+              if (m.nodeCount === 0) return null;
+              const label = ORBIT_LABELS[i];
+              const isIso = isolatedOrbit === i;
+              const dim = isolatedOrbit !== null && !isIso;
+              return (
+                <button
+                  key={`ochip-${i}`}
+                  onClick={() => setIsolatedOrbit(isIso ? null : i)}
+                  className="group relative flex items-center gap-2 pl-2 pr-2.5 py-1.5 rounded-r-md text-left transition-all"
+                  style={{
+                    background: isIso
+                      ? "rgba(212,162,106,0.16)"
+                      : "rgba(27,22,32,0.72)",
+                    border: "1px solid",
+                    borderColor: isIso
+                      ? "rgba(212,162,106,0.55)"
+                      : "rgba(168,144,106,0.18)",
+                    borderLeft: `3px solid ${label.color}`,
+                    opacity: dim ? 0.5 : 1,
+                    backdropFilter: "blur(8px)",
+                  }}
+                  title={
+                    isIso
+                      ? `Release ${label.title} orbit (${i + 1})`
+                      : `Isolate ${label.title} orbit (press ${i + 1})`
+                  }
+                >
+                  <div className="flex flex-col leading-none">
+                    <span
+                      className="text-[10px] font-semibold tracking-[0.18em]"
+                      style={{
+                        color: label.color,
+                        fontFamily: "var(--font-display, inherit)",
+                      }}
+                    >
+                      {label.title}
+                    </span>
+                    <span
+                      className="text-[8px] opacity-60 mt-0.5"
+                      style={{ color: label.color }}
+                    >
+                      {label.subtitle}
+                    </span>
+                  </div>
+                  <span
+                    className="ml-1 text-[10px] tabular-nums px-1 rounded"
+                    style={{
+                      background: "rgba(240,228,200,0.08)",
+                      color: "rgba(232,213,176,0.78)",
+                      minWidth: 20,
+                      textAlign: "center",
+                    }}
+                  >
+                    {m.nodeCount}
+                  </span>
+                </button>
+              );
+            })}
+            {isolatedOrbit !== null && (
+              <button
+                onClick={() => setIsolatedOrbit(null)}
+                className="text-[9px] uppercase tracking-[0.15em] text-text-muted hover:text-text-primary transition-colors mt-1 px-2 py-1"
+                style={{ fontFamily: "var(--font-display, inherit)" }}
+                title="Show all orbits (Esc)"
+              >
+                ✕ clear focus
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Zoom controls */}
       <div className="absolute top-3 right-3 flex flex-col gap-1 z-10">
@@ -818,7 +1667,13 @@ export function GraphView({
           <Minus size={13} strokeWidth={1.9} />
         </IconButton>
         <IconButton
-          onClick={() => setView({ tx: 0, ty: 0, k: 1 })}
+          onClick={() => {
+            setView({ tx: 0, ty: 0, k: 1 });
+            // Release any nodes the user had dragged out of their orbits.
+            simRef.current?.nodes.forEach((n) => {
+              if (n.pinned) simRef.current?.unpin(n.id);
+            });
+          }}
           title="Reset view"
         >
           <RotateCcw size={11} strokeWidth={1.9} />

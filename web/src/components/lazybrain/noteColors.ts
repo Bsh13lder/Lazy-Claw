@@ -40,7 +40,7 @@ const PALETTE: Record<string, NoteColor> = {
   pinned:             { ring: "#f59e0b", emoji: "★",  label: "Pinned" },        // amber-500
   auto:               { ring: "#6366f1", emoji: "✨", label: "Auto" },          // indigo-500
   survival:           { ring: "#d97706", emoji: "🛡", label: "Survival" },
-  fact:               { ring: "#0d9488", emoji: "💠", label: "Fact" },          // teal-600
+  fact:               { ring: "#14b8a6", emoji: "💠", label: "Fact" },          // teal-500 — distinct from memory's teal-600
   learned_preference: { ring: "#94a3b8", emoji: "🔖", label: "Preference" },    // slate-400
   context:            { ring: "#64748b", emoji: "📎", label: "Context" },
   memory:             { ring: "#0d9488", emoji: "🗃", label: "Memory" },        // teal-600

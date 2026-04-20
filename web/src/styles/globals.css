@@ -196,6 +196,44 @@ html, body {
   --color-border: var(--color-lb-border);
   --color-border-light: var(--color-lb-border-strong);
   background: var(--color-lb-bg-primary);
+
+  /* Claude.ai-style warmth tokens — softer off-white text + muted parchment
+     accent used for one focused cue (search ring + cursor) so the surface
+     feels warm without going cream/light. */
+  --color-lb-text-primary: #f5f1ea;
+  --color-lb-text-secondary: #cfc7b9;
+  --color-lb-accent-cream: #e4d4b0;
+  --color-lb-accent-cream-soft: rgba(228, 212, 176, 0.14);
+  --color-lb-border-warm: rgba(255, 245, 220, 0.08);
+
+  color: var(--color-lb-text-primary);
+}
+
+/* Warmer border + softer text on glass chrome inside LazyBrain only. */
+.lazybrain-root .glass-card {
+  border-color: var(--color-lb-border-warm);
+}
+.lazybrain-root .text-text-primary {
+  color: var(--color-lb-text-primary);
+}
+.lazybrain-root .text-text-secondary {
+  color: var(--color-lb-text-secondary);
+}
+
+/* Relaxed body prose — the note surface reads like long-form Claude.ai. */
+.lazybrain-root .prose-lazybrain {
+  line-height: 1.78;
+  letter-spacing: 0.005em;
+}
+
+/* One deliberate Claude.ai cue — focused search bar gets a cream ring
+   instead of the emerald accent. Subtle, not loud. */
+.lazybrain-root input:focus {
+  outline: none;
+}
+.lazybrain-root input.lb-search-input:focus {
+  border-color: var(--color-lb-accent-cream) !important;
+  box-shadow: 0 0 0 3px var(--color-lb-accent-cream-soft);
 }
 
 /* ── LazyBrain editor prose (Obsidian-inspired) ───────────────────── */

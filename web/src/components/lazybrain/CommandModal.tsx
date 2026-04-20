@@ -29,6 +29,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 
 export type CommandModalMode = "palette" | "switcher";
 
@@ -257,16 +258,27 @@ export function CommandModal({
     el?.scrollIntoView({ block: "nearest" });
   }, [clampedCursor, selectableIndex]);
 
-  if (!open) return null;
-
   return (
-    <div
+    <AnimatePresence>
+    {open && (
+    <motion.div
       className="lb-cmdk-backdrop"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.14, ease: "easeOut" }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="lb-cmdk-panel" onMouseDown={(e) => e.stopPropagation()}>
+      <motion.div
+        className="lb-cmdk-panel"
+        initial={{ opacity: 0, scale: 0.96, y: -6 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.97, y: -4 }}
+        transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center gap-2 px-5 pt-0.5">
           <Search size={15} strokeWidth={1.75} color="#10b981" />
           <input
@@ -346,8 +358,10 @@ export function CommandModal({
             {mode === "palette" ? "Command Palette" : "Quick Switcher"}
           </span>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
+    )}
+    </AnimatePresence>
   );
 }
 

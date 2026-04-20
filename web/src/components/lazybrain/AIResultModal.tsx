@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import type { LazyBrainNote } from "../../api";
 import { WikilinkText } from "./WikilinkText";
+import { motion, AnimatePresence } from "framer-motion";
 
 interface Props {
   open: boolean;
@@ -63,21 +64,30 @@ export function AIResultModal({
     return () => window.removeEventListener("keydown", esc);
   }, [open, onClose]);
 
-  if (!open) return null;
-
   return (
-    <div
+    <AnimatePresence>
+    {open && (
+    <motion.div
       className="fixed inset-0 z-[70] flex items-start justify-center pt-[10vh]"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.14 }}
       style={{
         background: "rgba(10,8,18,0.6)",
         backdropFilter: "blur(6px)",
+        WebkitBackdropFilter: "blur(6px)",
       }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div
+      <motion.div
         className="w-[min(720px,94vw)] max-h-[80vh] rounded-xl overflow-hidden flex flex-col"
+        initial={{ opacity: 0, scale: 0.96, y: -6 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.97, y: -4 }}
+        transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
         style={{
           background: "rgba(30,27,43,0.98)",
           border: "1px solid rgba(16, 185, 129, 0.22)",
@@ -133,7 +143,9 @@ export function AIResultModal({
             </article>
           )}
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
+    )}
+    </AnimatePresence>
   );
 }

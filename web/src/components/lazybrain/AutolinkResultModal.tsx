@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Sparkles, X, Check, Zap, RotateCcw } from "lucide-react";
 import * as api from "../../api";
 import type { AutolinkSuggestion } from "../../api";
+import { motion, AnimatePresence } from "framer-motion";
 
 interface Props {
   open: boolean;
@@ -85,8 +86,6 @@ export function AutolinkResultModal({
     [phase],
   );
 
-  if (!open) return null;
-
   const acceptOne = (idx: number) => {
     if (phase.kind !== "ok") return;
     const row = phase.rows[idx];
@@ -132,15 +131,29 @@ export function AutolinkResultModal({
   };
 
   return (
-    <div
+    <AnimatePresence>
+    {open && (
+    <motion.div
       className="fixed inset-0 z-[70] flex items-start justify-center pt-[10vh]"
-      style={{ background: "rgba(10,8,18,0.6)", backdropFilter: "blur(6px)" }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.14 }}
+      style={{
+        background: "rgba(10,8,18,0.6)",
+        backdropFilter: "blur(6px)",
+        WebkitBackdropFilter: "blur(6px)",
+      }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div
+      <motion.div
         className="w-[min(680px,94vw)] max-h-[80vh] rounded-xl overflow-hidden flex flex-col"
+        initial={{ opacity: 0, scale: 0.96, y: -6 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.97, y: -4 }}
+        transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
         style={{
           background: "rgba(30,27,43,0.98)",
           border: "1px solid rgba(16, 185, 129, 0.22)",
@@ -316,8 +329,10 @@ export function AutolinkResultModal({
             <span className="ml-auto opacity-60">Changes save automatically.</span>
           </div>
         )}
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
+    )}
+    </AnimatePresence>
   );
 }
 

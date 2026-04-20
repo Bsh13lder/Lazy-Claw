@@ -20,6 +20,7 @@ import { AIResultModal } from "../components/lazybrain/AIResultModal";
 import { AutolinkResultModal } from "../components/lazybrain/AutolinkResultModal";
 import { Canvas } from "../components/lazybrain/Canvas";
 import { Sparkles, MessageSquare, Zap, RefreshCw, Layout } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 
 const LS_LEFT = "lazybrain.leftCollapsed";
 const LS_RIGHT = "lazybrain.rightCollapsed";
@@ -129,8 +130,15 @@ export default function LazyBrain() {
     refresh();
   }, [refresh]);
 
-  // Auto-select something the first time
+  // Auto-select something the FIRST time notes load — and only once.
+  // Previous version re-fired every time selectedId changed, so
+  // deselecting instantly re-selected pinned[0]. Now it runs once,
+  // when notes first arrive, and never interferes with user choice.
+  const didAutoSelectRef = useRef(false);
   useEffect(() => {
+    if (didAutoSelectRef.current) return;
+    if (notes.length === 0 && pinned.length === 0) return;
+    didAutoSelectRef.current = true;
     if (selectedId) return;
     const candidate = pinned[0] || notes[0];
     if (candidate) {
@@ -213,8 +221,14 @@ export default function LazyBrain() {
 
   // ─── Actions ────────────────────────────────────────────────────────────
   const handleSelect = useCallback((note: LazyBrainNote) => {
-    setSelectedId(note.id);
-  }, []);
+    // In graph mode, tapping the same sidebar item toggles selection off
+    // (gives users a quick deselect from the sidebar). In notes mode,
+    // keep it selected — we don't want to close the editor on re-click.
+    setSelectedId((cur) =>
+      cur === note.id && viewMode === "graph" ? null : note.id,
+    );
+    setPeekId((cur) => (cur === note.id ? null : cur));
+  }, [viewMode]);
 
   const handleLinkClick = useCallback(
     async (pageName: string) => {
@@ -770,7 +784,7 @@ export default function LazyBrain() {
                       ? "Semantic search — ask by meaning…"
                       : "Search notes…"
                 }
-                className="w-full pl-9 pr-32 py-2 rounded bg-bg-primary border border-border text-sm outline-none focus:border-accent transition-colors"
+                className="lb-search-input w-full pl-9 pr-32 py-2 rounded bg-bg-primary border border-border text-sm outline-none transition-colors"
               />
               <button
                 onClick={() => {
@@ -819,8 +833,16 @@ export default function LazyBrain() {
           </div>
         )}
 
+        <AnimatePresence mode="wait" initial={false}>
         {viewMode === "canvas" ? (
-          <div className="flex-1 min-h-0">
+          <motion.div
+            key="view-canvas"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+            className="flex-1 min-h-0"
+          >
             <Canvas
               onOpenNote={(id) => {
                 setSelectedId(id);
@@ -828,29 +850,36 @@ export default function LazyBrain() {
               }}
               resolveLink={resolveLink}
             />
-          </div>
+          </motion.div>
         ) : viewMode === "graph" ? (
-          <div className="flex-1 min-h-0 relative">
+          <motion.div
+            key="view-graph"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+            className="flex-1 min-h-0 relative"
+          >
             <GraphView
               graph={graph}
               notesById={notesById}
               selectedId={peekId ?? selectedId}
               highlightQuery={searchQ}
+              onSearchChange={setSearchQ}
               dimPredicate={graphDimPredicate}
               onPeek={(id) => setPeekId(id)}
+              onClearPeek={() => {
+                setPeekId(null);
+                setSelectedId(null);
+              }}
               hiddenCategories={hiddenCategories}
               onToggleCategory={toggleCategory}
               onSetHiddenCategories={setHiddenCategories}
               categoryCounts={categoryCounts}
             />
-            <div className="absolute top-3 left-3 text-xs text-text-muted bg-bg-secondary/80 backdrop-blur px-2.5 py-1.5 rounded z-10 flex items-center gap-2 border border-border">
-              <Network size={12} strokeWidth={1.75} />
-              <span className="tabular-nums">
-                {graph.nodes.length} notes · {graph.edges.length} links
-              </span>
-            </div>
-            {/* Phase 3.4 — importance filter slider */}
-            <div className="absolute top-3 right-3 z-10 bg-bg-secondary/80 backdrop-blur px-3 py-1.5 rounded border border-border flex items-center gap-2 text-[11px] text-text-muted">
+            {/* Importance slider — parked bottom-right to avoid colliding
+                with GraphView's top-left stats HUD + top-right zoom stack. */}
+            <div className="absolute bottom-3 right-[120px] z-10 bg-bg-secondary/80 backdrop-blur px-3 py-1.5 rounded border border-border flex items-center gap-2 text-[11px] text-text-muted">
               <span className="tabular-nums">importance ≥</span>
               <input
                 type="range"
@@ -885,9 +914,16 @@ export default function LazyBrain() {
                 resolveLink={resolveLink}
               />
             )}
-          </div>
+          </motion.div>
         ) : (
-          <div className="flex-1 min-h-0">
+          <motion.div
+            key="view-notes"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+            className="flex-1 min-h-0"
+          >
             {selected ? (
               <NoteEditor
                 note={selected}
@@ -907,8 +943,9 @@ export default function LazyBrain() {
                 onOpenJournal={handleOpenJournalToday}
               />
             )}
-          </div>
+          </motion.div>
         )}
+        </AnimatePresence>
       </div>
 
       {/* AI result modal — Ask / Rollup / Briefing / Reindex */}

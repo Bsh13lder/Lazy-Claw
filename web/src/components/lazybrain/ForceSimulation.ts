@@ -1,11 +1,12 @@
-/** Tiny force-directed layout engine, zero deps.
+/** Orbital "observatory" simulation — nodes on concentric rings that
+ *  slowly rotate at distinct cadences. Adds richer introspection than the
+ *  previous version so the UI can render orbit labels, per-orbit counts,
+ *  and identify "hub" nodes (top-k by degree) with zero extra passes.
  *
- *  Velocity-Verlet integration with three forces:
- *    - Repulsion (Coulomb-like, O(n²) — swap for Barnes-Hut past 1k nodes)
- *    - Spring attraction along edges
- *    - Gravity toward origin so disconnected components don't drift off-screen
- *
- *  Call `step()` on every animation frame until `cooled()` is true.
+ *  Public API:
+ *    nodes, edges, step(), cooled(), pin(id,x,y), unpin(id), warm(),
+ *    setHover(id|null), center(), orbitRadii(), orbitMeta(),
+ *    isolateOrbit(idx|null), hubIds(k), degreeOf(id)
  */
 export interface SimNode {
   id: string;
@@ -14,6 +15,10 @@ export interface SimNode {
   vx: number;
   vy: number;
   pinned?: boolean;
+  orbit: number;
+  angle: number;
+  radius: number;
+  wobblePhase: number;
 }
 
 export interface SimEdge {
@@ -24,202 +29,161 @@ export interface SimEdge {
 export interface SimOptions {
   width: number;
   height: number;
-  repulsion?: number;   // higher = nodes push apart more (default 1500)
-  spring?: number;      // 0..1 edge stiffness (default 0.06)
-  restLength?: number;  // desired edge length in px (default 120)
-  gravity?: number;     // center-pull strength (default 0.015)
-  damping?: number;     // velocity decay per step (default 0.85)
+  /** Map a node id to an orbit index (0 inner .. NUM_ORBITS-1 outer). */
+  orbitOf?: (id: string) => number;
 }
 
-const DEFAULTS: Required<Omit<SimOptions, "width" | "height">> = {
-  repulsion: 2500,
-  spring: 0.06,
-  restLength: 220,
-  gravity: 0.010,
-  damping: 0.78,
-};
+export interface OrbitMeta {
+  index: number;
+  radius: number;
+  nodeCount: number;
+  /** Period in seconds at 60fps. */
+  periodSec: number;
+}
+
+export const NUM_ORBITS = 4;
+
+// Angular velocity per orbit, radians per step at ~60fps. Outer = slower.
+// Periods: ~42s, ~58s, ~77s, ~104s. Slow enough to feel calm, visible.
+const OMEGA = [0.0025, 0.00181, 0.00136, 0.00101];
 
 export class ForceSimulation {
   readonly nodes: SimNode[];
   readonly edges: SimEdge[];
   private byId: Map<string, SimNode>;
-  private readonly opts: Required<SimOptions>;
-  private energy = Infinity;
-  private hoverId: string | null = null;
-  /** Per-node extra inflation on hover — neighbor dots bulge toward the hovered one. */
-  private adjacency: Map<string, Set<string>> = new Map();
+  private cx: number;
+  private cy: number;
+  private w: number;
+  private h: number;
+  private orbitSpeedMul: number[] = new Array(NUM_ORBITS).fill(1);
+  private tick = 0;
+  /** Per-orbit counts — computed once at construction. */
+  private _orbitCounts: number[] = new Array(NUM_ORBITS).fill(0);
+  /** Per-node degree — computed once at construction. */
+  private _degree: Map<string, number> = new Map();
+  /** Node ids sorted by degree desc — precomputed for hubIds(). */
+  private _byDegreeDesc: string[] = [];
+  /** When set, only this orbit's nodes rotate / are visible. */
+  private _isolatedOrbit: number | null = null;
 
   constructor(
     nodes: Array<{ id: string; pinned?: boolean }>,
     edges: SimEdge[],
     options: SimOptions,
   ) {
-    this.opts = { ...DEFAULTS, ...options };
-    const cx = this.opts.width / 2;
-    const cy = this.opts.height / 2;
-    const radius = Math.min(this.opts.width, this.opts.height) / 3;
+    this.w = options.width;
+    this.h = options.height;
+    this.cx = this.w / 2;
+    this.cy = this.h / 2;
+    const orbitOf = options.orbitOf ?? (() => 3);
 
-    this.nodes = nodes.map((n, idx) => {
-      const angle = (idx / Math.max(1, nodes.length)) * Math.PI * 2;
-      return {
-        id: n.id,
-        x: cx + Math.cos(angle) * radius + (Math.random() - 0.5) * 10,
-        y: cy + Math.sin(angle) * radius + (Math.random() - 0.5) * 10,
-        vx: 0,
-        vy: 0,
-        pinned: n.pinned,
-      };
-    });
+    // Bucket by orbit with stable hash-based order so rebuilds don't
+    // reshuffle positions visually.
+    const buckets: Array<Array<{ id: string; pinned?: boolean }>> =
+      Array.from({ length: NUM_ORBITS }, () => []);
+    for (const n of nodes) {
+      const o = Math.max(0, Math.min(NUM_ORBITS - 1, orbitOf(n.id)));
+      buckets[o].push(n);
+    }
+    for (const b of buckets) b.sort((a, c) => hash(a.id) - hash(c.id));
+
+    // Orbit radii — tuned so the four rings feel distinct at typical
+    // window sizes. Slightly denser inner ring (core is smaller).
+    const base = Math.min(this.w, this.h) * 0.13;
+    const radii = [base * 1.0, base * 1.75, base * 2.5, base * 3.2];
+
+    this.nodes = [];
+    for (let o = 0; o < NUM_ORBITS; o++) {
+      const bucket = buckets[o];
+      const count = bucket.length;
+      this._orbitCounts[o] = count;
+      bucket.forEach((n, idx) => {
+        const angle = (idx / Math.max(1, count)) * Math.PI * 2 + o * 0.41;
+        const rJitter = (hash(n.id + "r") - 0.5) * 14;
+        const r = radii[o] + rJitter;
+        this.nodes.push({
+          id: n.id,
+          orbit: o,
+          angle,
+          radius: r,
+          wobblePhase: hash(n.id + "w") * Math.PI * 2,
+          x: this.cx + Math.cos(angle) * r,
+          y: this.cy + Math.sin(angle) * r,
+          vx: 0,
+          vy: 0,
+          pinned: n.pinned,
+        });
+      });
+    }
 
     this.byId = new Map(this.nodes.map((n) => [n.id, n]));
-    // Filter edges to nodes that actually exist
+
+    // Filter edges to known nodes, then compute degree.
     this.edges = edges.filter(
       (e) => this.byId.has(e.source) && this.byId.has(e.target),
     );
-    // Precompute adjacency so hover-attractor force is O(degree) per frame
     for (const e of this.edges) {
-      if (!this.adjacency.has(e.source)) this.adjacency.set(e.source, new Set());
-      if (!this.adjacency.has(e.target)) this.adjacency.set(e.target, new Set());
-      this.adjacency.get(e.source)!.add(e.target);
-      this.adjacency.get(e.target)!.add(e.source);
+      this._degree.set(e.source, (this._degree.get(e.source) ?? 0) + 1);
+      this._degree.set(e.target, (this._degree.get(e.target) ?? 0) + 1);
     }
+    this._byDegreeDesc = [...this.byId.keys()].sort(
+      (a, b) => (this._degree.get(b) ?? 0) - (this._degree.get(a) ?? 0),
+    );
   }
 
-  /** Tell the sim which node is being hovered. Neighbors drift toward it. */
   setHover(id: string | null): void {
-    if (this.hoverId === id) return;
-    this.hoverId = id;
-    this.energy = Infinity; // re-heat so movement is visible
+    this.orbitSpeedMul = new Array(NUM_ORBITS).fill(1);
+    if (id) {
+      const n = this.byId.get(id);
+      if (n) this.orbitSpeedMul[n.orbit] = 0;
+    }
   }
 
-  /** Run one integration step. Returns this for chaining. */
+  /** Isolate one orbit (others freeze and are dimmed by the renderer).
+   *  Pass null to release. */
+  isolateOrbit(idx: number | null): void {
+    this._isolatedOrbit = idx;
+  }
+
+  isolatedOrbit(): number | null {
+    return this._isolatedOrbit;
+  }
+
   step(): this {
-    const { repulsion, spring, restLength, gravity, damping, width, height } = this.opts;
-    const cx = width / 2;
-    const cy = height / 2;
-
-    // Reset accumulators
-    const forces = this.nodes.map(() => ({ fx: 0, fy: 0 }));
-
-    // Pairwise repulsion. O(n²) up to 200 nodes; beyond that we sample
-    // ~30% of pairs per frame so 500+ nodes still run at 60fps. Over many
-    // frames the approximation averages out — good enough visually.
-    const n = this.nodes.length;
-    const sample = n > 200 ? 0.3 : 1;
-    for (let i = 0; i < n; i++) {
-      const a = this.nodes[i];
-      for (let j = i + 1; j < n; j++) {
-        if (sample < 1 && Math.random() > sample) continue;
-        const b = this.nodes[j];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        let dist2 = dx * dx + dy * dy;
-        if (dist2 < 0.01) {
-          dx = (Math.random() - 0.5) * 2;
-          dy = (Math.random() - 0.5) * 2;
-          dist2 = dx * dx + dy * dy;
-        }
-        const dist = Math.sqrt(dist2);
-        // Scale up when sampling so total expected force per pair stays the same
-        const f = (repulsion / dist2) / sample;
-        const fx = (dx / dist) * f;
-        const fy = (dy / dist) * f;
-        forces[i].fx += fx;
-        forces[i].fy += fy;
-        forces[j].fx -= fx;
-        forces[j].fy -= fy;
+    this.tick += 1;
+    const t = this.tick;
+    for (const n of this.nodes) {
+      if (n.pinned) continue;
+      // Orbit rotation — frozen for non-isolated rings when isolation
+      // is active, so attention lands on the isolated one.
+      let mul = this.orbitSpeedMul[n.orbit];
+      if (this._isolatedOrbit !== null && n.orbit !== this._isolatedOrbit) {
+        mul = 0.15;
       }
+      n.angle += OMEGA[n.orbit] * mul;
+      const breath =
+        1 + 0.016 * Math.sin(t * 0.008 + n.orbit * 1.4 + n.wobblePhase);
+      const r = n.radius * breath;
+      n.x = this.cx + Math.cos(n.angle) * r;
+      n.y = this.cy + Math.sin(n.angle) * r;
     }
-
-    // Spring attraction along edges
-    for (const edge of this.edges) {
-      const a = this.byId.get(edge.source);
-      const b = this.byId.get(edge.target);
-      if (!a || !b) continue;
-      const i = this.nodes.indexOf(a);
-      const j = this.nodes.indexOf(b);
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const delta = dist - restLength;
-      const f = spring * delta;
-      const fx = (dx / dist) * f;
-      const fy = (dy / dist) * f;
-      forces[i].fx += fx;
-      forces[i].fy += fy;
-      forces[j].fx -= fx;
-      forces[j].fy -= fy;
-    }
-
-    // Hover-attraction — when a node is hovered, its direct neighbors get
-    // pulled in toward it (shorter rest length + stiffer spring). Creates
-    // the "deep think" bulge effect users expect from Obsidian/Logseq.
-    if (this.hoverId) {
-      const hov = this.byId.get(this.hoverId);
-      const neighbors = this.adjacency.get(this.hoverId);
-      if (hov && neighbors) {
-        const hovIdx = this.nodes.indexOf(hov);
-        for (const nid of neighbors) {
-          const other = this.byId.get(nid);
-          if (!other) continue;
-          const oidx = this.nodes.indexOf(other);
-          const dx = hov.x - other.x;
-          const dy = hov.y - other.y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const desired = 70;
-          const delta = dist - desired;
-          const f = 0.2 * delta;
-          const fx = (dx / dist) * f;
-          const fy = (dy / dist) * f;
-          forces[oidx].fx += fx;
-          forces[oidx].fy += fy;
-          forces[hovIdx].fx -= fx * 0.15;
-          forces[hovIdx].fy -= fy * 0.15;
-        }
-      }
-    }
-
-    // Gravity toward center + integration
-    let totalEnergy = 0;
-    for (let i = 0; i < this.nodes.length; i++) {
-      const n = this.nodes[i];
-      if (n.pinned) {
-        n.vx = 0;
-        n.vy = 0;
-        continue;
-      }
-      forces[i].fx += (cx - n.x) * gravity;
-      forces[i].fy += (cy - n.y) * gravity;
-
-      n.vx = (n.vx + forces[i].fx) * damping;
-      n.vy = (n.vy + forces[i].fy) * damping;
-      n.x += n.vx;
-      n.y += n.vy;
-
-      // Clamp into viewport
-      n.x = Math.max(20, Math.min(width - 20, n.x));
-      n.y = Math.max(20, Math.min(height - 20, n.y));
-
-      totalEnergy += n.vx * n.vx + n.vy * n.vy;
-    }
-    this.energy = totalEnergy;
     return this;
   }
 
-  /** True when the simulation has settled. Tune threshold by dataset size. */
-  cooled(threshold = 0.5): boolean {
-    return this.energy < threshold * this.nodes.length;
+  cooled(): boolean {
+    return false;
   }
 
-  /** Pin a node to a specific screen position (drag support). */
   pin(id: string, x: number, y: number): void {
     const n = this.byId.get(id);
     if (!n) return;
     n.x = x;
     n.y = y;
-    n.vx = 0;
-    n.vy = 0;
     n.pinned = true;
+    const dx = x - this.cx;
+    const dy = y - this.cy;
+    n.angle = Math.atan2(dy, dx);
+    n.radius = Math.max(40, Math.sqrt(dx * dx + dy * dy));
   }
 
   unpin(id: string): void {
@@ -227,9 +191,44 @@ export class ForceSimulation {
     if (n) n.pinned = false;
   }
 
-  /** Re-heat the simulation so callers can trigger a fresh settle after
-   *  external changes (filter toggles, new nodes, etc.) without rebuilding. */
   warm(): void {
-    this.energy = Infinity;
+    /* no-op */
   }
+
+  orbitRadii(): number[] {
+    const base = Math.min(this.w, this.h) * 0.13;
+    return [base * 1.0, base * 1.75, base * 2.5, base * 3.2];
+  }
+
+  orbitMeta(): OrbitMeta[] {
+    const radii = this.orbitRadii();
+    return radii.map((r, i) => ({
+      index: i,
+      radius: r,
+      nodeCount: this._orbitCounts[i] ?? 0,
+      periodSec: (Math.PI * 2) / OMEGA[i] / 60,
+    }));
+  }
+
+  center(): { cx: number; cy: number } {
+    return { cx: this.cx, cy: this.cy };
+  }
+
+  /** Top-k node ids by degree (precomputed). Zero-cost at call time. */
+  hubIds(k: number): string[] {
+    return this._byDegreeDesc.slice(0, k);
+  }
+
+  degreeOf(id: string): number {
+    return this._degree.get(id) ?? 0;
+  }
+}
+
+function hash(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return ((h >>> 0) % 10000) / 10000;
 }

@@ -22,9 +22,38 @@ _CREDENTIAL_PATTERNS = [
 ]
 
 
+# Phrase-based catchers — match when an LLM phrases credential-storage intent
+# in plain language (e.g. "api_key: xxx", "bearer xxx", "n8n api key is xxx").
+# Catches custom auth tokens that don't match any branded shape above.
+# The value group requires ≥16 chars of dense alnum/punct — filters out
+# short sentence fragments.
+_CREDENTIAL_PHRASES = [
+    # Specific vendors first so the error message mentions the right one.
+    (re.compile(r"\bn8n[_ -]?(?:api[_ -]?key|key|token)"
+                r"(?:\s*(?:is|=|:))?\s*['\"`]?"
+                r"([A-Za-z0-9._\-]{16,})", re.IGNORECASE),
+     "n8n API key assignment"),
+    (re.compile(r"\b(?:client[_ -]?secret|secret[_ -]?key)"
+                r"(?:\s*(?:is|=|:))?\s*['\"`]?"
+                r"([A-Za-z0-9._\-]{16,})", re.IGNORECASE),
+     "client_secret / secret_key assignment"),
+    (re.compile(r"\bbearer\s+([A-Za-z0-9._\-]{20,})", re.IGNORECASE),
+     "Bearer token"),
+    (re.compile(r"\baccess[_ -]?token(?:\s*(?:is|=|:))?\s*['\"`]?"
+                r"([A-Za-z0-9._\-]{16,})", re.IGNORECASE),
+     "access_token assignment"),
+    (re.compile(r"\bapi[_ -]?key(?:\s*(?:is|=|:))?\s*['\"`]?"
+                r"([A-Za-z0-9._\-]{16,})", re.IGNORECASE),
+     "api_key assignment"),
+]
+
+
 def _looks_like_credential(content: str) -> str | None:
     """Return human-readable name of the credential type, or None."""
     for pattern, label in _CREDENTIAL_PATTERNS:
+        if pattern.search(content):
+            return label
+    for pattern, label in _CREDENTIAL_PHRASES:
         if pattern.search(content):
             return label
     return None

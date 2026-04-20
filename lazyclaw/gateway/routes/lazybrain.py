@@ -187,6 +187,32 @@ async def backlinks_route(
     return {"note_id": note_id, "backlinks": linked}
 
 
+@router.post("/notes/{note_id}/mark-task-done")
+async def mark_task_done_route(
+    note_id: str, user: User = Depends(get_current_user)
+):
+    """Mark the task mirrored by this LazyBrain note as done.
+
+    Resolves the note id back to the underlying task via the
+    ``lazybrain_note_id`` column, then calls ``complete_task`` so the
+    tasks table, reminder jobs, and the LazyBrain mirror all update
+    consistently. Returns ``{ status: "completed", task_id }`` on success
+    or 404 when no matching task exists for that note.
+    """
+    from lazyclaw.tasks import store as task_store
+
+    task_id = await task_store.find_task_id_by_note(_config, user.id, note_id)
+    if not task_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No task is linked to this note. The note may not be a task mirror.",
+        )
+    ok = await task_store.complete_task(_config, user.id, task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found or already deleted")
+    return {"status": "completed", "task_id": task_id, "note_id": note_id}
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------

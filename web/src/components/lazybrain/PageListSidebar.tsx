@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
+import * as api from "../../api";
 import type { LazyBrainNote, LazyBrainTag } from "../../api";
 import { FilterBar } from "./FilterBar";
 import type { Owner } from "./noteColors";
-import { colorForTags, isSystemTag } from "./noteColors";
+import { CATEGORY_PRIORITY, colorForTags, isSystemTag } from "./noteColors";
 import {
   Brain,
   Lock,
@@ -20,6 +21,7 @@ import {
   CategoryIcon,
 } from "./icons";
 import { Download, PanelLeftClose, ListTodo } from "lucide-react";
+import { TaskSymbol } from "./TaskSymbol";
 
 interface Props {
   recent: LazyBrainNote[];
@@ -48,6 +50,9 @@ interface Props {
   searchQuery?: string;
   onClearSearch?: () => void;
   onCollapse?: () => void;
+  /** Called after a task checkbox flips to "done" so the parent can refresh
+   *  task lists. Optional — section degrades to read-only without it. */
+  onTaskCompleted?: (noteId: string) => void;
 }
 
 const MAX_RECENT = 20;
@@ -80,8 +85,29 @@ export function PageListSidebar({
   searchQuery,
   onClearSearch,
   onCollapse,
+  onTaskCompleted,
 }: Props) {
   const [showSystemTags, setShowSystemTags] = useState(false);
+  const [completingIds, setCompletingIds] = useState<Set<string>>(new Set());
+  const [completedIds, setCompletedIds] = useState<Set<string>>(new Set());
+
+  const handleCompleteTask = async (noteId: string) => {
+    if (completingIds.has(noteId) || completedIds.has(noteId)) return;
+    setCompletingIds((prev) => new Set(prev).add(noteId));
+    try {
+      await api.completeTaskByNoteId(noteId);
+      setCompletedIds((prev) => new Set(prev).add(noteId));
+      onTaskCompleted?.(noteId);
+    } catch {
+      // Show the row again in pending state so the user can retry.
+    } finally {
+      setCompletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(noteId);
+        return next;
+      });
+    }
+  };
 
   const visibleTags = useMemo(
     () => (showSystemTags ? tags : tags.filter((t) => !isSystemTag(t.tag))),
@@ -207,20 +233,26 @@ export function PageListSidebar({
               <span>Today's journal</span>
             </button>
 
-            {/* Tasks & reminders — auto-pulled from notes tagged `task` */}
+            {/* Tasks & reminders — auto-pulled from notes tagged `task`.
+                Each row gets an inline checkbox that calls the
+                mark-task-done endpoint, so the user can complete tasks
+                without opening the note. */}
             {tasks.length > 0 && (
               <SidebarSection
                 label="Tasks"
-                count={tasks.length}
+                count={tasks.length - completedIds.size}
                 Icon={ListTodo}
-                iconColor="#f59e0b"
+                iconColor="var(--color-lb-cat-task)"
               >
                 {tasks.slice(0, 15).map((n) => (
-                  <PageRow
+                  <TaskRow
                     key={n.id}
                     note={n}
                     selected={selectedId === n.id}
+                    completing={completingIds.has(n.id)}
+                    done={completedIds.has(n.id)}
                     onClick={() => onSelect(n)}
+                    onComplete={() => handleCompleteTask(n.id)}
                   />
                 ))}
               </SidebarSection>
@@ -423,22 +455,161 @@ function PageRow({
 }
 
 /** Derive the single category key that matches a note (for icon selection).
- *  Mirrors the colorForTags priority but returns the key string. */
+ *  Walks the shared CATEGORY_PRIORITY so it never drifts from
+ *  GraphView's pickCategoryKey or noteColors.colorForTags. */
 function pickCategoryKey(tags: string[] | null | undefined, pinned: boolean): string {
   if (pinned) return "pinned";
   if (!tags || tags.length === 0) return "_default";
-  const priority = [
-    "task", "deadline", "journal", "lesson", "til",
-    "decision", "price", "command", "recipe", "contact",
-    "idea", "rollup", "reference", "layer", "imported", "auto",
-    "memory", "site-memory", "daily-log",
-  ];
   const lower = tags.map((t) => t.toLowerCase());
-  for (const key of priority) {
+  for (const key of CATEGORY_PRIORITY) {
     if (lower.includes(key)) return key;
     if (lower.some((t) => t.startsWith(`${key}/`))) return key;
   }
   return "_default";
+}
+
+/** Format a `due/YYYY-MM-DD` tag relative to today. Returns null if no due tag. */
+function dueLabel(tags: string[]): { text: string; tone: "overdue" | "today" | "future" } | null {
+  const due = tags
+    .map((t) => t.toLowerCase())
+    .find((t) => t.startsWith("due/"))
+    ?.slice(4);
+  if (!due || !/^\d{4}-\d{2}-\d{2}$/.test(due)) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  if (due < today) return { text: "overdue", tone: "overdue" };
+  if (due === today) return { text: "today", tone: "today" };
+  // Show short date (M/D) for future
+  const [, m, d] = due.split("-");
+  return { text: `${parseInt(m, 10)}/${parseInt(d, 10)}`, tone: "future" };
+}
+
+/** Strip markdown noise + title repetition so the preview line under the
+ *  task title actually says something useful. Returns "" when the body
+ *  is just the title or boilerplate. */
+function previewFor(note: LazyBrainNote): string {
+  const raw = (note.content || "").trim();
+  if (!raw) return "";
+  // Drop a leading `# Title` (matching note.title) — that's what the
+  // sidebar already shows; repeating it is noise.
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#") && !/^[-*+]\s+\[/i.test(l));
+  const first = lines[0] || "";
+  // Strip markdown link/wikilink wrappers for compactness.
+  const clean = first
+    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_`]/g, "")
+    .trim();
+  return clean.length > 70 ? clean.slice(0, 68) + "…" : clean;
+}
+
+/** Pick a priority color from a `priority/<level>` tag. */
+function priorityRail(tags: string[]): string | null {
+  const lower = tags.map((t) => t.toLowerCase());
+  if (lower.includes("priority/high") || lower.includes("priority/urgent")) {
+    return "var(--color-lb-cat-deadline)";
+  }
+  if (lower.includes("priority/medium")) return "var(--color-lb-cat-task)";
+  if (lower.includes("priority/low")) return "var(--color-lb-cat-learned-preference)";
+  return null;
+}
+
+function TaskRow({
+  note,
+  selected,
+  completing,
+  done,
+  onClick,
+  onComplete,
+}: {
+  note: LazyBrainNote;
+  selected: boolean;
+  completing: boolean;
+  done: boolean;
+  onClick: () => void;
+  onComplete: () => void;
+}) {
+  const title = note.title || "(untitled)";
+  const due = dueLabel(note.tags || []);
+  const preview = previewFor(note);
+  const priority = priorityRail(note.tags || []);
+  const completedColor = "var(--color-lb-cat-til)";
+  const checkboxColor = done
+    ? completedColor
+    : due?.tone === "overdue"
+    ? "var(--color-lb-cat-deadline)"
+    : due?.tone === "today"
+    ? "var(--color-lb-cat-task)"
+    : "var(--color-lb-cat-task)";
+  return (
+    <div
+      onClick={onClick}
+      className={`group w-full flex items-start gap-2.5 pl-3 pr-3 py-1.5 cursor-pointer transition-colors border-l-2 ${
+        selected
+          ? "bg-accent-soft border-l-[color:var(--color-accent)]"
+          : "border-l-transparent hover:bg-bg-hover"
+      }`}
+      style={priority && !selected ? { borderLeftColor: priority } : undefined}
+    >
+      <TaskSymbol
+        done={done}
+        busy={completing}
+        color={checkboxColor}
+        size={16}
+        title={done ? "Completed" : "Mark task done"}
+        onClick={() => {
+          if (!done && !completing) onComplete();
+        }}
+      />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span
+            className={`text-[13px] truncate ${
+              done
+                ? "text-text-muted line-through"
+                : selected
+                ? "text-accent font-medium"
+                : "text-text-primary"
+            }`}
+            title={title}
+          >
+            {title}
+          </span>
+          {due && !done && (
+            <span
+              className="ml-auto shrink-0 text-[10px] px-1.5 py-0.5 rounded-md tabular-nums font-medium"
+              style={{
+                color:
+                  due.tone === "overdue"
+                    ? "var(--color-lb-cat-deadline)"
+                    : due.tone === "today"
+                    ? "var(--color-lb-cat-task)"
+                    : "var(--color-text-muted)",
+                background:
+                  due.tone === "overdue"
+                    ? "color-mix(in srgb, var(--color-lb-cat-deadline) 14%, transparent)"
+                    : due.tone === "today"
+                    ? "color-mix(in srgb, var(--color-lb-cat-task) 14%, transparent)"
+                    : "rgba(255,255,255,0.04)",
+              }}
+            >
+              {due.text}
+            </span>
+          )}
+        </div>
+        {preview && !done && (
+          <div
+            className="text-[11px] text-text-muted truncate leading-snug mt-0.5"
+            title={preview}
+          >
+            {preview}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function groupJournalByMonth(

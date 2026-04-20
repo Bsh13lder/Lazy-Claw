@@ -64,15 +64,15 @@ export function PropertiesPanel({ content, onChange, showEmpty }: Props) {
     <div
       className="rounded-lg border border-border"
       style={{
-        background: "rgba(167, 139, 250, 0.04)",
-        borderColor: "rgba(167, 139, 250, 0.18)",
+        background: "rgba(16, 185, 129, 0.04)",
+        borderColor: "rgba(16, 185, 129, 0.18)",
         fontFamily: "Inter, system-ui, sans-serif",
       }}
     >
       <div
         onClick={() => setOpen((v) => !v)}
         className="px-3 py-1.5 flex items-center gap-2 cursor-pointer text-[11px] uppercase tracking-wider"
-        style={{ color: "#a78bfa", fontWeight: 600 }}
+        style={{ color: "#10b981", fontWeight: 600 }}
       >
         <span style={{ opacity: 0.7 }}>{open ? "▾" : "▸"}</span>
         <span>Properties</span>
@@ -213,8 +213,8 @@ function TagsInput({
           key={t}
           className="inline-flex items-center gap-1 px-1.5 rounded text-[11px]"
           style={{
-            background: "rgba(167, 139, 250, 0.14)",
-            color: "#c4b5fd",
+            background: "rgba(16, 185, 129, 0.14)",
+            color: "var(--color-accent)",
           }}
         >
           {t}

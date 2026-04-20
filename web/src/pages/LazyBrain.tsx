@@ -17,6 +17,7 @@ import { PanelLeftOpen, PanelRightClose, PanelRightOpen, Command as CommandIcon 
 import { CommandModal, type CommandAction } from "../components/lazybrain/CommandModal";
 import { OutlinePane } from "../components/lazybrain/OutlinePane";
 import { AIResultModal } from "../components/lazybrain/AIResultModal";
+import { AutolinkResultModal } from "../components/lazybrain/AutolinkResultModal";
 import { Canvas } from "../components/lazybrain/Canvas";
 import { Sparkles, MessageSquare, Zap, RefreshCw, Layout } from "lucide-react";
 
@@ -67,6 +68,9 @@ export default function LazyBrain() {
     hint?: string;
     run: () => Promise<string>;
   }>(null);
+  // Autolink modal — separate because it renders structured rows with
+  // per-row Accept/Skip rather than a flat markdown dump.
+  const [autolinkOpen, setAutolinkOpen] = useState(false);
 
   // Collapsible side panels (persisted in localStorage)
   const [leftCollapsed, setLeftCollapsed] = useState<boolean>(() => {
@@ -571,29 +575,7 @@ export default function LazyBrain() {
           hint: "AI",
           Icon: Zap,
           keywords: "autolink wikilinks suggest connect",
-          run: () => {
-            setAiModal({
-              title: `Autolink — ${selected.title || "(untitled)"}`,
-              hint: "⚡ Autolink",
-              run: async () => {
-                const r = await api.suggestLazyBrainLinks(
-                  selected.content || "",
-                );
-                if (r.suggestions.length === 0)
-                  return `No autolink candidates found (source: _${r.source}_).`;
-                const lines = [
-                  `Found **${r.suggestions.length}** candidate(s) — source _${r.source}_:`,
-                  "",
-                  ...r.suggestions.map(
-                    (s) => `- "${s.text}" → [[${s.page}]]`,
-                  ),
-                  "",
-                  "_Edit the page and wrap these yourself, or accept them manually._",
-                ];
-                return lines.join("\n");
-              },
-            });
-          },
+          run: () => setAutolinkOpen(true),
         },
       );
     }
@@ -755,6 +737,11 @@ export default function LazyBrain() {
             setSearchResults(null);
           }}
           onCollapse={() => setLeftCollapsed(true)}
+          onTaskCompleted={() => {
+            // Re-pull notes so the freshly-completed task drops out of the
+            // sidebar list (the backend marks it done + updates the mirror).
+            void refresh();
+          }}
         />
       )}
 
@@ -910,6 +897,8 @@ export default function LazyBrain() {
                 onLinkClick={handleLinkClick}
                 onTagClick={handleTagClick}
                 resolveLink={resolveLink}
+                backlinks={backlinks}
+                notes={modalNotes}
               />
             ) : (
               <EmptyState
@@ -933,6 +922,17 @@ export default function LazyBrain() {
         onTagClick={handleTagClick}
         resolveLink={resolveLink}
       />
+
+      {/* Structured autolink modal — per-row Accept/Skip + Accept-all. */}
+      {selected && (
+        <AutolinkResultModal
+          open={autolinkOpen}
+          noteTitle={selected.title || ""}
+          noteContent={selected.content || ""}
+          onClose={() => setAutolinkOpen(false)}
+          onApplyContent={(next) => handleSave({ content: next })}
+        />
+      )}
 
       {/* Command modal (⌘K palette / ⌘O switcher).
           Keyed on mode so state resets cleanly between palette ↔ switcher. */}

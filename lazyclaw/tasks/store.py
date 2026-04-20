@@ -244,6 +244,25 @@ async def get_task(
     return _row_to_dict(row, key) if row else None
 
 
+async def find_task_id_by_note(
+    config: Config, user_id: str, note_id: str,
+) -> str | None:
+    """Resolve a LazyBrain note id back to its mirrored task id, if any.
+
+    LazyBrain notes auto-mirror tasks via ``lazybrain_note_id`` on the tasks
+    table — this is the inverse lookup used by the web UI's sidebar
+    "tick to complete" interaction.
+    """
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            "SELECT id FROM tasks WHERE lazybrain_note_id = ? AND user_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (note_id, user_id),
+        )
+        row = await cursor.fetchone()
+    return row[0] if row else None
+
+
 async def get_task_owner(
     config: Config, task_id: str
 ) -> str | None:

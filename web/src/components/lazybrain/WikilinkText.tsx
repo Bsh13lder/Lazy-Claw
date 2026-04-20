@@ -259,9 +259,9 @@ function Transclusion({
       style={{
         margin: "0.8em 0",
         border: "1px solid var(--color-border)",
-        borderLeft: "3px solid #a78bfa",
+        borderLeft: "3px solid #10b981",
         borderRadius: 8,
-        background: "rgba(167, 139, 250, 0.04)",
+        background: "rgba(16, 185, 129, 0.04)",
         overflow: "hidden",
       }}
     >
@@ -274,7 +274,7 @@ function Transclusion({
           alignItems: "center",
           gap: 8,
           fontSize: 12,
-          color: "#a78bfa",
+          color: "#10b981",
           fontWeight: 600,
           fontFamily: "Inter, system-ui, sans-serif",
           borderBottom: open ? "1px solid var(--color-border)" : "none",

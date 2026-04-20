@@ -19,7 +19,7 @@ import {
 } from "react";
 import type { LazyBrainGraph, LazyBrainNote } from "../../api";
 import { ForceSimulation, type SimNode } from "./ForceSimulation";
-import { FILTER_CATEGORIES, colorForTags } from "./noteColors";
+import { CATEGORY_PRIORITY, FILTER_CATEGORIES, colorForTags, readableTextOn } from "./noteColors";
 import { CategoryIcon, Star } from "./icons";
 import { Plus, Minus, RotateCcw, ChevronDown, ChevronUp, MousePointer2, Move, ZoomIn } from "lucide-react";
 
@@ -49,23 +49,21 @@ interface DragState {
   startY: number;
   lastX: number;
   lastY: number;
+  /** Furthest distance moved during this gesture (px). Used to suppress
+   *  the click that fires after a drag-release on the same node. */
+  maxMoved: number;
 }
+
+/** Below this px threshold a pointer-down/up counts as a click, not a drag. */
+const DRAG_THRESHOLD = 4;
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4;
 const MAX_DEPTH = 3;
 
-// Category priority for picking a single category key per note — mirrors
-// noteColors.ts colorForTags priority so icon, color, badge all agree.
-const CATEGORY_PRIORITY = [
-  "task", "deadline", "journal", "lesson", "til",
-  "decision", "price", "command", "recipe", "contact",
-  "idea", "rollup", "reference", "layer",
-  "survival", "fact", "learned_preference", "context",
-  "memory", "site-memory", "daily-log",
-  "imported", "auto",
-];
-
+// Single source of truth for category priority lives in noteColors.ts —
+// imported above so this file's pickCategoryKey, color, icon, and the
+// filter chips can never drift apart again.
 function pickCategoryKey(
   tags: string[] | null | undefined,
   pinned: boolean,
@@ -171,10 +169,11 @@ export function GraphView({
       graph.edges.map((e) => ({ source: e.source, target: e.target })),
       { width: size.width, height: size.height },
     );
-    // Pre-settle synchronously until the sim is fully cool or we hit a
-    // safety cap. First paint shows a static graph — no settle-drift at all.
+    // Pre-settle a few hundred frames so the first paint isn't a circle —
+    // but stop early so the rest of the layout animates in. Obsidian does
+    // this and it makes the graph feel alive instead of frozen.
     let iters = 0;
-    while (!s.cooled(1.0) && iters < 2000) {
+    while (!s.cooled(1.0) && iters < 600) {
       s.step();
       iters++;
     }
@@ -313,13 +312,18 @@ export function GraphView({
   );
 
   // ── Pan / node drag ────────────────────────────────────────────────────
+  // Track whether the most recent pointer-up came from a drag — so the
+  // click event that follows can be suppressed. Cleared on next pointer-down.
+  const justDraggedRef = useRef(false);
+
   const handlePointerDownBg = useCallback(
     (e: React.PointerEvent<SVGElement>) => {
       if (e.target !== e.currentTarget && !(e.target as Element).classList?.contains("lb-bg")) {
         return;
       }
       const { x, y } = clientToSvg(e.clientX, e.clientY);
-      dragRef.current = { kind: "pan", startX: x, startY: y, lastX: x, lastY: y };
+      dragRef.current = { kind: "pan", startX: x, startY: y, lastX: x, lastY: y, maxMoved: 0 };
+      justDraggedRef.current = false;
       (e.currentTarget as SVGElement).setPointerCapture(e.pointerId);
     },
     [clientToSvg],
@@ -329,7 +333,8 @@ export function GraphView({
     (e: React.PointerEvent<SVGGElement>, id: string) => {
       e.stopPropagation();
       const { x, y } = clientToSvg(e.clientX, e.clientY);
-      dragRef.current = { kind: "node", id, startX: x, startY: y, lastX: x, lastY: y };
+      dragRef.current = { kind: "node", id, startX: x, startY: y, lastX: x, lastY: y, maxMoved: 0 };
+      justDraggedRef.current = false;
       (e.currentTarget as SVGGElement).setPointerCapture(e.pointerId);
     },
     [clientToSvg],
@@ -340,11 +345,15 @@ export function GraphView({
       const { x: sx, y: sy } = clientToSvg(e.clientX, e.clientY);
       const drag = dragRef.current;
       if (!drag) return;
+      const moved = Math.hypot(sx - drag.startX, sy - drag.startY);
+      const maxMoved = Math.max(drag.maxMoved, moved);
       if (drag.kind === "pan") {
         const dx = sx - drag.lastX;
         const dy = sy - drag.lastY;
         setView((v) => ({ ...v, tx: v.tx + dx, ty: v.ty + dy }));
-      } else if (drag.kind === "node" && drag.id) {
+      } else if (drag.kind === "node" && drag.id && maxMoved > DRAG_THRESHOLD) {
+        // Only start moving the node once we've crossed the click threshold.
+        // Below that, a tiny jitter shouldn't yank the node off its position.
         const { x, y } = screenToSim(sx, sy);
         sim.pin(drag.id, x, y);
         sim.warm();
@@ -357,34 +366,58 @@ export function GraphView({
           frameRef.current = requestAnimationFrame(loop);
         }
       }
-      dragRef.current = { ...drag, lastX: sx, lastY: sy };
+      dragRef.current = { ...drag, lastX: sx, lastY: sy, maxMoved };
     },
     [clientToSvg, screenToSim, sim],
   );
 
   const handlePointerUp = useCallback(() => {
     const drag = dragRef.current;
+    // Mark "just dragged" so the click event browser fires after pointerup
+    // can be suppressed in the node onClick handler.
+    justDraggedRef.current = !!drag && drag.maxMoved > DRAG_THRESHOLD;
     if (drag?.kind === "node" && drag.id) sim.unpin(drag.id);
     dragRef.current = null;
   }, [sim]);
 
-  // Enter/leave: set hover state + freeze the hovered node in place so
-  // the user can reliably click it. Pin at the node's current simulation
-  // position (no jump).
-  const handleNodeEnter = useCallback(
-    (id: string) => {
-      setHoverId(id);
-      const s = simRef.current;
-      if (!s) return;
-      const n = s.nodes.find((x) => x.id === id);
-      if (n) s.pin(id, n.x, n.y);
-    },
-    [],
-  );
-  const handleNodeLeave = useCallback((id: string) => {
-    setHoverId((cur) => (cur === id ? null : cur));
-    simRef.current?.unpin(id);
+  // Enter/leave handlers — DO NOT pin the node on hover. Pinning was
+  // there to make the node "freeze" so it could be clicked reliably, but
+  // it caused a sticky-tooltip race: when the leave timer fired and
+  // unpinned the node, the simulation would drift it back under the
+  // cursor, retriggering enter and re-pinning. Without pinning, the node
+  // either stays put (cooled sim) or drifts away (cursor naturally loses
+  // hover), both of which are correct behavior.
+  const hoverClearRef = useRef<number | null>(null);
+
+  const cancelHoverClear = () => {
+    if (hoverClearRef.current !== null) {
+      window.clearTimeout(hoverClearRef.current);
+      hoverClearRef.current = null;
+    }
+  };
+
+  const clearHoverNow = useCallback(() => {
+    cancelHoverClear();
+    setHoverId(null);
   }, []);
+
+  const handleNodeEnter = useCallback((id: string) => {
+    cancelHoverClear();
+    setHoverId(id);
+  }, []);
+
+  const handleNodeLeave = useCallback((id: string) => {
+    // Tiny grace so a fast cursor crossing a 1-2px gap between sibling
+    // nodes doesn't flicker the tooltip off and back on.
+    cancelHoverClear();
+    hoverClearRef.current = window.setTimeout(() => {
+      hoverClearRef.current = null;
+      setHoverId((cur) => (cur === id ? null : cur));
+    }, 40);
+  }, []);
+
+  // Cleanup on unmount — never leak the timer.
+  useEffect(() => () => cancelHoverClear(), []);
 
   // Re-heat on filter/search change. `dimPredicate` MUST be stable (useCallback
   // in the parent) or the sim will re-warm on every render and burn CPU.
@@ -505,7 +538,12 @@ export function GraphView({
         onPointerDown={handlePointerDownBg}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
+        onPointerLeave={() => {
+          // Cursor left the SVG entirely — clear drag and hover both,
+          // otherwise the last hover tooltip + pin can stick around.
+          handlePointerUp();
+          clearHoverNow();
+        }}
       >
         <defs>
           <radialGradient id="node-glow" cx="50%" cy="50%" r="50%">
@@ -522,6 +560,11 @@ export function GraphView({
           fill="transparent"
           className="lb-bg"
           onPointerDown={handlePointerDownBg}
+          onPointerEnter={() => {
+            // Cursor crossed into bare canvas — drop any lingering hover
+            // even if a per-node leave was missed (fast-move, scaled halos).
+            if (!dragRef.current) clearHoverNow();
+          }}
         />
 
         <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
@@ -595,7 +638,13 @@ export function GraphView({
                 onPointerEnter={() => handleNodeEnter(node.id)}
                 onPointerLeave={() => handleNodeLeave(node.id)}
                 onClick={(e) => {
-                  if (dragRef.current) return;
+                  // Suppress the click that browsers fire after a drag-release
+                  // — `justDraggedRef` is set in handlePointerUp when the
+                  // gesture exceeded DRAG_THRESHOLD.
+                  if (justDraggedRef.current || dragRef.current) {
+                    justDraggedRef.current = false;
+                    return;
+                  }
                   e.stopPropagation();
                   if (onPeek) onPeek(node.id);
                   else onSelect?.(node.id);
@@ -660,7 +709,9 @@ export function GraphView({
                       : `brightness(${brightness})`,
                   }}
                 />
-                {/* In-dot badge — the 1–3 char code (T, P, 04/18, etc.) */}
+                {/* In-dot badge — the 1–3 char code (T, P, 04/18, etc.).
+                    Text color picks itself against the dot fill so it
+                    reads on both bright and dark categories. */}
                 <text
                   x={0}
                   y={0}
@@ -670,40 +721,52 @@ export function GraphView({
                   style={{
                     fontSize: `${Math.max(10, r * 0.55)}px`,
                     fontWeight: 700,
-                    fill: "#fff",
+                    fill: readableTextOn(color.ring),
                     letterSpacing: badge.length >= 2 ? "-0.03em" : "0",
                   }}
                 >
                   {badge}
                 </text>
                 {/* Side-label ONLY for selected node — a small pill so the
-                    user knows which page they've opened. */}
-                {showSideLabel && label && (
-                  <g transform={`translate(${r + 8} ${-8})`}>
-                    <rect
-                      x={-4}
-                      y={-2}
-                      rx={4}
-                      ry={4}
-                      width={Math.min(280, label.length * 7 + 14)}
-                      height={18}
-                      fill="var(--color-bg-secondary)"
-                      stroke="var(--color-border)"
-                      strokeWidth={1}
-                    />
-                    <text
-                      x={3}
-                      y={11}
-                      className="fill-text-primary pointer-events-none"
-                      style={{
-                        fontSize: `${Math.max(10, labelFontSize)}px`,
-                        fontWeight: 500,
-                      }}
-                    >
-                      {label.length > 38 ? label.slice(0, 36) + "…" : label}
-                    </text>
-                  </g>
-                )}
+                    user knows which page they've opened. Bounds-checked
+                    against the SVG viewport so it can never clip the right
+                    edge: when the node sits in the right ~third of the
+                    canvas, the pill anchors to its LEFT side instead. */}
+                {showSideLabel && label && (() => {
+                  const labelW = Math.min(280, label.length * 7 + 14);
+                  const snScreenX = sn.x * view.k + view.tx;
+                  const wouldOverflow =
+                    snScreenX + (r + 12 + labelW) * view.k > size.width - 8;
+                  const offsetX = wouldOverflow
+                    ? -(r + 8 + labelW - 4)
+                    : r + 8;
+                  return (
+                    <g transform={`translate(${offsetX} ${-8})`}>
+                      <rect
+                        x={-4}
+                        y={-2}
+                        rx={4}
+                        ry={4}
+                        width={labelW}
+                        height={18}
+                        fill="var(--color-bg-secondary)"
+                        stroke="var(--color-border)"
+                        strokeWidth={1}
+                      />
+                      <text
+                        x={3}
+                        y={11}
+                        className="fill-text-primary pointer-events-none"
+                        style={{
+                          fontSize: `${Math.max(10, labelFontSize)}px`,
+                          fontWeight: 500,
+                        }}
+                      >
+                        {label.length > 38 ? label.slice(0, 36) + "…" : label}
+                      </text>
+                    </g>
+                  );
+                })()}
               </g>
             );
           })}

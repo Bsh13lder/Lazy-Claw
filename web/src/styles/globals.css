@@ -25,19 +25,40 @@
   --color-error: #ef4444;
   --color-error-soft: rgba(239, 68, 68, 0.12);
 
-  /* LazyBrain palette — violet accent for the PKM surface only.
-     Scoped via `.lazybrain-root`, see overrides below. The rest of the
-     app keeps its emerald identity. */
-  --color-lb-violet: #a78bfa;
-  --color-lb-violet-soft: rgba(167, 139, 250, 0.15);
-  --color-lb-violet-dim: #7c3aed;
-  --color-lb-violet-halo: rgba(167, 139, 250, 0.35);
-  --color-lb-bg-primary: #16141e;
-  --color-lb-bg-secondary: #1e1b2b;
-  --color-lb-bg-panel: #24212f;
-  --color-lb-bg-hover: #2c2839;
+  /* LazyBrain palette — matches the LazyClaw emerald theme so the PKM
+     surface feels like part of the same product, not a separate Obsidian
+     skin. Var names kept for diff continuity (still prefixed `lb-violet*`)
+     but values now point at LazyClaw's emerald `#10b981`. */
+  --color-lb-violet: #10b981;
+  --color-lb-violet-soft: rgba(16, 185, 129, 0.15);
+  --color-lb-violet-dim: #059669;
+  --color-lb-violet-halo: rgba(16, 185, 129, 0.35);
+  --color-lb-bg-primary: #0f0f0f;
+  --color-lb-bg-secondary: #181818;
+  --color-lb-bg-panel: #212121;
+  --color-lb-bg-hover: #2a2a2a;
   --color-lb-border: rgba(255, 255, 255, 0.06);
   --color-lb-border-strong: rgba(255, 255, 255, 0.12);
+
+  /* Aurora category palette — every category the LazyBrain UI knows about
+     has a color here. Mirrored 1:1 in noteColors.ts PALETTE so filter
+     chips, graph nodes, and sidebar dots agree. Tuned as one luminance
+     band so the graph reads as a constellation against #0f0f0f, not a
+     clown chart. */
+  --color-lb-cat-task:               #e0742a;
+  --color-lb-cat-journal:            #2dd4bf;
+  --color-lb-cat-lesson:             #d4a015;
+  --color-lb-cat-til:                #22c55e;
+  --color-lb-cat-decision:           #9333ea;
+  --color-lb-cat-deadline:           #e11d48;
+  --color-lb-cat-memory:             #0d9488;
+  --color-lb-cat-site-memory:        #6366f1;
+  --color-lb-cat-daily-log:          #0284c7;
+  --color-lb-cat-survival:           #d97706;
+  --color-lb-cat-fact:               #0d9488;
+  --color-lb-cat-learned-preference: #94a3b8;
+  --color-lb-cat-pinned:             #f59e0b;
+  --color-lb-cat-default:            #475569;
 }
 
 * {
@@ -160,9 +181,10 @@ html, body {
   margin: 16px 0;
 }
 
-/* ── LazyBrain Root Theme (Obsidian-Minimal inspired) ──────────────
-   Scope: any descendant of `.lazybrain-root` gets the violet accent
-   + deeper indigo bg. Doesn't leak to chat, admin, or other pages. */
+/* ── LazyBrain Root Theme ──────────────────────────────────────────
+   Scope: any descendant of `.lazybrain-root` gets the LazyClaw emerald
+   accent + neutral dark bg, so the PKM surface looks like part of the
+   same app rather than a transplanted Obsidian skin. */
 .lazybrain-root {
   --color-bg-primary: var(--color-lb-bg-primary);
   --color-bg-secondary: var(--color-lb-bg-secondary);
@@ -530,7 +552,7 @@ html, body {
 
 /* Soft ambient halo behind pinned wikilinks. */
 .lazybrain-root .lb-wikilink {
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.15);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.15);
 }
 
 /* ── Obsidian-style callouts ─────────────────────────────────────────
@@ -539,9 +561,9 @@ html, body {
 .lb-callout {
   margin: 1em 0;
   border-radius: 8px;
-  border: 1px solid var(--lb-cl-border, rgba(167, 139, 250, 0.25));
-  border-left: 3px solid var(--lb-cl-ring, #a78bfa);
-  background: var(--lb-cl-bg, rgba(167, 139, 250, 0.06));
+  border: 1px solid var(--lb-cl-border, rgba(16, 185, 129, 0.25));
+  border-left: 3px solid var(--lb-cl-ring, #10b981);
+  background: var(--lb-cl-bg, rgba(16, 185, 129, 0.06));
   overflow: hidden;
 }
 .lb-callout-head {
@@ -549,7 +571,7 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
-  color: var(--lb-cl-ring, #a78bfa);
+  color: var(--lb-cl-ring, #10b981);
   font-weight: 600;
   font-size: 13px;
   letter-spacing: 0.01em;
@@ -618,9 +640,9 @@ html, body {
   --lb-cl-border: rgba(244, 114, 182, 0.25);
 }
 .lb-callout[data-kind="example"] {
-  --lb-cl-ring: #a78bfa;
-  --lb-cl-bg: rgba(167, 139, 250, 0.07);
-  --lb-cl-border: rgba(167, 139, 250, 0.25);
+  --lb-cl-ring: #10b981;
+  --lb-cl-bg: rgba(16, 185, 129, 0.07);
+  --lb-cl-border: rgba(16, 185, 129, 0.25);
 }
 .lb-callout[data-kind="abstract"],
 .lb-callout[data-kind="summary"] {
@@ -647,11 +669,11 @@ html, body {
   width: min(640px, 94vw);
   max-height: 70vh;
   background: rgba(30, 27, 43, 0.98);
-  border: 1px solid rgba(167, 139, 250, 0.18);
+  border: 1px solid rgba(16, 185, 129, 0.18);
   border-radius: 14px;
   box-shadow:
     0 32px 64px -12px rgba(0, 0, 0, 0.65),
-    0 0 0 1px rgba(167, 139, 250, 0.08) inset;
+    0 0 0 1px rgba(16, 185, 129, 0.08) inset;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -685,7 +707,7 @@ html, body {
   font-size: 13.5px;
 }
 .lb-cmdk-row[data-active="true"] {
-  background: rgba(167, 139, 250, 0.12);
+  background: rgba(16, 185, 129, 0.12);
   color: #fff;
 }
 .lb-cmdk-row .lb-cmdk-hint {
@@ -729,12 +751,12 @@ html, body {
   border-left: 2px solid transparent;
 }
 .lb-outline-row:hover {
-  background: rgba(167, 139, 250, 0.08);
+  background: rgba(16, 185, 129, 0.08);
   color: #ececec;
 }
 .lb-outline-row[data-active="true"] {
-  background: rgba(167, 139, 250, 0.14);
-  border-left-color: #a78bfa;
+  background: rgba(16, 185, 129, 0.14);
+  border-left-color: #10b981;
   color: #ececec;
 }
 
@@ -742,4 +764,100 @@ html, body {
 .lb-graph-halo {
   filter: blur(6px);
   opacity: 0.55;
+}
+
+/* ── Round task symbol (LazyBrain sidebar tasks) ────────────────────
+   Used for "task" rows where a circular indicator reads as "actionable
+   task" rather than "form field". Square checkbox below is reserved for
+   inline markdown `- [ ]` items. */
+.lb-task-symbol {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+.lb-task-symbol:hover:not(:disabled) {
+  border-color: var(--lb-ts-color);
+  background: color-mix(in srgb, var(--lb-ts-color) 14%, transparent);
+}
+.lb-task-symbol:active:not(:disabled) {
+  transform: scale(0.92);
+}
+.lb-task-symbol[data-state="done"] {
+  background: var(--lb-ts-color);
+  border-color: var(--lb-ts-color);
+}
+.lb-task-symbol[data-state="busy"] {
+  border-color: var(--lb-ts-color);
+  animation: lb-cb-pulse 0.9s ease-in-out infinite;
+}
+.lb-task-symbol:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.lb-task-symbol-tick {
+  color: #ffffff;
+  opacity: 0;
+  transform: scale(0.5);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.lb-task-symbol[data-state="done"] .lb-task-symbol-tick {
+  opacity: 1;
+  transform: scale(1);
+}
+.lb-task-symbol:hover:not(:disabled) .lb-task-symbol-tick {
+  opacity: 0.45;
+  transform: scale(0.85);
+  color: var(--lb-ts-color);
+}
+
+/* ── Polished checkbox (LazyBrain task lists + context strip) ──────── */
+.lb-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1.5px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+  padding: 0;
+}
+.lb-checkbox:hover:not(:disabled) {
+  border-color: var(--lb-cb-color);
+  background: color-mix(in srgb, var(--lb-cb-color) 12%, transparent);
+}
+.lb-checkbox:active:not(:disabled) {
+  transform: scale(0.92);
+}
+.lb-checkbox[data-state="checked"] {
+  background: var(--lb-cb-color);
+  border-color: var(--lb-cb-color);
+}
+.lb-checkbox[data-state="busy"] {
+  border-color: var(--lb-cb-color);
+  animation: lb-cb-pulse 0.9s ease-in-out infinite;
+}
+.lb-checkbox:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.lb-checkbox-tick {
+  color: #ffffff;
+  animation: lb-cb-tick 0.18s ease-out;
+}
+@keyframes lb-cb-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lb-cb-color) 50%, transparent); }
+  50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--lb-cb-color) 0%, transparent); }
+}
+@keyframes lb-cb-tick {
+  from { transform: scale(0.6); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
 }

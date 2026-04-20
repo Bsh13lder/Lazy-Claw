@@ -80,7 +80,7 @@ export function AIResultModal({
         className="w-[min(720px,94vw)] max-h-[80vh] rounded-xl overflow-hidden flex flex-col"
         style={{
           background: "rgba(30,27,43,0.98)",
-          border: "1px solid rgba(167, 139, 250, 0.22)",
+          border: "1px solid rgba(16, 185, 129, 0.22)",
           boxShadow: "0 32px 64px -12px rgba(0,0,0,0.65)",
           fontFamily: "Inter, system-ui, sans-serif",
         }}
@@ -89,7 +89,7 @@ export function AIResultModal({
           className="flex items-center gap-2 px-5 py-3"
           style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}
         >
-          <Sparkles size={16} strokeWidth={1.75} color="#a78bfa" />
+          <Sparkles size={16} strokeWidth={1.75} color="#10b981" />
           <div className="text-sm font-semibold text-text-primary truncate">
             {hint ? `${hint} · ` : ""}
             {title}
@@ -110,7 +110,7 @@ export function AIResultModal({
               <div
                 className="w-3 h-3 rounded-full"
                 style={{
-                  background: "#a78bfa",
+                  background: "#10b981",
                   animation: "pulse-dot 1.4s ease-in-out infinite",
                 }}
               />

@@ -34,9 +34,9 @@ export interface SimOptions {
 const DEFAULTS: Required<Omit<SimOptions, "width" | "height">> = {
   repulsion: 2500,
   spring: 0.06,
-  restLength: 160,
-  gravity: 0.015,
-  damping: 0.85,
+  restLength: 220,
+  gravity: 0.010,
+  damping: 0.78,
 };
 
 export class ForceSimulation {

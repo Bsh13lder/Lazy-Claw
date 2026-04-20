@@ -254,7 +254,7 @@ export function Canvas({ onOpenNote, resolveLink }: Props) {
       {/* Toolbar */}
       <div
         className="shrink-0 px-4 py-2 flex items-center gap-2 border-b border-border"
-        style={{ background: "rgba(167,139,250,0.04)" }}
+        style={{ background: "rgba(16,185,129,0.04)" }}
       >
         <select
           value={activeId ?? ""}
@@ -335,20 +335,20 @@ export function Canvas({ onOpenNote, resolveLink }: Props) {
           nodeTypes={nodeTypes}
           fitView
           proOptions={{ hideAttribution: true }}
-          style={{ background: "#16141e" }}
+          style={{ background: "#0f0f0f" }}
           defaultEdgeOptions={{
-            style: { stroke: "#a78bfa", strokeWidth: 1.5 },
+            style: { stroke: "#10b981", strokeWidth: 1.5 },
           }}
         >
           <Background
             variant={BackgroundVariant.Dots}
             gap={18}
             size={1}
-            color="rgba(167,139,250,0.12)"
+            color="rgba(16,185,129,0.12)"
           />
           <Controls
             style={{
-              background: "rgba(30,27,43,0.92)",
+              background: "rgba(24,24,24,0.92)",
               border: "1px solid rgba(255,255,255,0.08)",
               borderRadius: 8,
             }}
@@ -358,12 +358,12 @@ export function Canvas({ onOpenNote, resolveLink }: Props) {
             pannable
             zoomable
             style={{
-              background: "rgba(30,27,43,0.92)",
+              background: "rgba(24,24,24,0.92)",
               border: "1px solid rgba(255,255,255,0.08)",
               borderRadius: 8,
             }}
-            nodeStrokeColor={() => "#a78bfa"}
-            nodeColor={() => "rgba(167,139,250,0.4)"}
+            nodeStrokeColor={() => "#10b981"}
+            nodeColor={() => "rgba(16,185,129,0.4)"}
           />
         </ReactFlow>
       </div>
@@ -383,8 +383,8 @@ function TextNode({
     <div
       className="px-3 py-2 rounded-lg min-w-[160px] max-w-[320px]"
       style={{
-        background: "rgba(30,27,43,0.95)",
-        border: "1px solid rgba(167,139,250,0.25)",
+        background: "rgba(24,24,24,0.95)",
+        border: "1px solid rgba(16,185,129,0.25)",
         color: "#ececec",
         fontSize: 13,
         lineHeight: 1.5,
@@ -415,8 +415,8 @@ function NoteNode({
     <div
       className="px-3 py-2 rounded-lg min-w-[180px] max-w-[320px] cursor-pointer hover:opacity-90 transition-opacity"
       style={{
-        background: "rgba(167,139,250,0.12)",
-        border: "1px solid rgba(167,139,250,0.5)",
+        background: "rgba(16,185,129,0.12)",
+        border: "1px solid rgba(16,185,129,0.5)",
         color: "#ececec",
         fontFamily: "Inter, system-ui, sans-serif",
         fontSize: 13,
@@ -427,7 +427,7 @@ function NoteNode({
     >
       <div
         className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider"
-        style={{ color: "#c4b5fd", fontWeight: 600 }}
+        style={{ color: "var(--color-accent)", fontWeight: 600 }}
       >
         <FileText size={10} strokeWidth={1.75} />
         {data.noteId ? "note" : "unresolved"}

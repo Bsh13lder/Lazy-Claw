@@ -1,15 +1,14 @@
-/** Deterministic color palette by note type.
+/** Deterministic color palette by note type — Aurora palette.
  *
- *  Derived from the first tag that matches a known category. Used on:
- *  - MemoCard left border
- *  - PageListSidebar bullet dot
- *  - Chip next to title
+ *  Designed as one luminance band so the graph reads as a constellation
+ *  against the dark `#0f0f0f` LazyBrain background. Anchored on the
+ *  existing violet theme so chrome and content stay cohesive.
  *
- *  Keep this list tight — too many colors becomes noise. Unknown types
- *  fall through to neutral.
+ *  All hex values mirror the `--color-lb-cat-*` CSS vars declared in
+ *  `globals.css` under `.lazybrain-root`. Keep the two in sync.
  */
 export type NoteColor = {
-  /** Tailwind-friendly dot / border class (hex for safety against JIT purging). */
+  /** CSS hex used for: graph node fill, MemoCard left border, sidebar dot, chip. */
   ring: string;
   /** Small emoji to represent the category (shown before title). */
   emoji: string;
@@ -17,28 +16,36 @@ export type NoteColor = {
   label: string;
 };
 
+// Aurora v2 — deeper, less neon. Each color sits in the saturated mid-band
+// (Tailwind ~500) so white badge text reads clearly against it. Bright
+// pastels were burning the eye and washing out the in-dot letters; this
+// drops the brightness to "Obsidian-Minimal vibe with a hint of color"
+// instead of "Logseq tag salad". Anchored on the existing violet theme.
 const PALETTE: Record<string, NoteColor> = {
-  task:      { ring: "#f59e0b", emoji: "📋", label: "Task" },
-  journal:   { ring: "#3b82f6", emoji: "📓", label: "Journal" },
-  lesson:    { ring: "#eab308", emoji: "💡", label: "Lesson" },
-  til:       { ring: "#22c55e", emoji: "🧠", label: "TIL" },
-  decision:  { ring: "#a855f7", emoji: "✔️", label: "Decision" },
-  price:     { ring: "#06b6d4", emoji: "💰", label: "Price" },
-  deadline:  { ring: "#ef4444", emoji: "⏰", label: "Deadline" },
-  command:   { ring: "#94a3b8", emoji: "⚡", label: "Command" },
-  recipe:    { ring: "#f97316", emoji: "🍳", label: "Recipe" },
-  contact:   { ring: "#14b8a6", emoji: "📇", label: "Contact" },
-  idea:      { ring: "#8b5cf6", emoji: "💭", label: "Idea" },
-  reference: { ring: "#64748b", emoji: "🔗", label: "Reference" },
-  rollup:    { ring: "#d946ef", emoji: "📊", label: "Rollup" },
-  layer:     { ring: "#84cc16", emoji: "🗂", label: "Layer" },
-  imported:  { ring: "#64748b", emoji: "📥", label: "Imported" },
-  pinned:    { ring: "#fbbf24", emoji: "★",  label: "Pinned" },
-  auto:      { ring: "#6366f1", emoji: "✨", label: "Auto" },
-  survival:  { ring: "#f97316", emoji: "🛡", label: "Survival" },
-  fact:      { ring: "#14b8a6", emoji: "💠", label: "Fact" },
-  learned_preference: { ring: "#a3a3a3", emoji: "🔖", label: "Preference" },
-  context:   { ring: "#64748b", emoji: "📎", label: "Context" },
+  task:               { ring: "#e0742a", emoji: "📋", label: "Task" },          // deeper coral
+  journal:            { ring: "#2dd4bf", emoji: "📓", label: "Journal" },       // teal-400
+  lesson:             { ring: "#d4a015", emoji: "💡", label: "Lesson" },        // muted gold
+  til:                { ring: "#22c55e", emoji: "🧠", label: "TIL" },           // green-500
+  decision:           { ring: "#9333ea", emoji: "✔️", label: "Decision" },     // violet-600 (distinct from emerald accent)
+  price:              { ring: "#0891b2", emoji: "💰", label: "Price" },         // cyan-700
+  deadline:           { ring: "#e11d48", emoji: "⏰", label: "Deadline" },      // rose-600
+  command:            { ring: "#64748b", emoji: "⚡", label: "Command" },       // slate-500
+  recipe:             { ring: "#d97706", emoji: "🍳", label: "Recipe" },        // amber-700
+  contact:            { ring: "#0ea5e9", emoji: "📇", label: "Contact" },       // sky-500
+  idea:               { ring: "#9333ea", emoji: "💭", label: "Idea" },          // violet-700
+  reference:          { ring: "#64748b", emoji: "🔗", label: "Reference" },
+  rollup:             { ring: "#c026d3", emoji: "📊", label: "Rollup" },        // fuchsia-600
+  layer:              { ring: "#65a30d", emoji: "🗂", label: "Layer" },         // lime-700
+  imported:           { ring: "#64748b", emoji: "📥", label: "Imported" },
+  pinned:             { ring: "#f59e0b", emoji: "★",  label: "Pinned" },        // amber-500
+  auto:               { ring: "#6366f1", emoji: "✨", label: "Auto" },          // indigo-500
+  survival:           { ring: "#d97706", emoji: "🛡", label: "Survival" },
+  fact:               { ring: "#0d9488", emoji: "💠", label: "Fact" },          // teal-600
+  learned_preference: { ring: "#94a3b8", emoji: "🔖", label: "Preference" },    // slate-400
+  context:            { ring: "#64748b", emoji: "📎", label: "Context" },
+  memory:             { ring: "#0d9488", emoji: "🗃", label: "Memory" },        // teal-600
+  "site-memory":      { ring: "#6366f1", emoji: "🌐", label: "Site knowledge" }, // indigo-500
+  "daily-log":        { ring: "#0284c7", emoji: "📅", label: "Daily log" },     // sky-600
 };
 
 const DEFAULT: NoteColor = {
@@ -46,6 +53,33 @@ const DEFAULT: NoteColor = {
   emoji: "📝",
   label: "Note",
 };
+
+/** Single source of truth for which category a note belongs to.
+ *  Both `colorForTags()` and `GraphView.pickCategoryKey()` walk this list,
+ *  so a note's color, badge, icon, and filter row always agree. */
+export const CATEGORY_PRIORITY: string[] = [
+  "task", "deadline", "journal", "lesson", "til",
+  "decision", "price", "command", "recipe", "contact",
+  "idea", "rollup", "reference", "layer",
+  "survival", "fact", "learned_preference", "context",
+  "memory", "site-memory", "daily-log",
+  "imported", "auto",
+];
+
+/** Resolve a category key from a tag list. Returns null if no match. */
+export function categoryKeyFor(
+  tags: string[] | null | undefined,
+  pinned = false,
+): string | null {
+  if (pinned) return "pinned";
+  if (!tags || tags.length === 0) return null;
+  const lower = tags.map((t) => t.toLowerCase());
+  for (const key of CATEGORY_PRIORITY) {
+    if (lower.includes(key)) return key;
+    if (lower.some((t) => t.startsWith(`${key}/`))) return key;
+  }
+  return null;
+}
 
 /** Who saved this note — derived from `owner/user` or `owner/agent` tags. */
 export type Owner = "user" | "agent" | "unknown";
@@ -60,25 +94,26 @@ export function ownerOf(tags: string[] | null | undefined): Owner {
 
 /** Human label + emoji for the owner badge. */
 export const OWNER_META: Record<Owner, { emoji: string; label: string; ring: string }> = {
-  user:    { emoji: "👤", label: "You",     ring: "#ec4899" },
-  agent:   { emoji: "🤖", label: "Agent",   ring: "#0ea5e9" },
+  user:    { emoji: "👤", label: "You",     ring: "#f472b6" },
+  agent:   { emoji: "🤖", label: "Agent",   ring: "#38bdf8" },
   unknown: { emoji: "📝", label: "Unknown", ring: "#64748b" },
 };
 
-/** Every category chip the filter UI offers. Keep ordered by priority. */
+/** Every category chip the filter UI offers. Colors mirror PALETTE 1:1
+ *  so a filter row's swatch and its graph node's color always match. */
 export const FILTER_CATEGORIES: { key: string; label: string; emoji: string; ring: string }[] = [
-  { key: "task",     label: "Tasks",     emoji: "📋", ring: "#f59e0b" },
-  { key: "journal",  label: "Journal",   emoji: "📓", ring: "#3b82f6" },
-  { key: "lesson",   label: "Lessons",   emoji: "💡", ring: "#eab308" },
-  { key: "til",      label: "TIL",       emoji: "🧠", ring: "#22c55e" },
-  { key: "decision", label: "Decisions", emoji: "✔️", ring: "#a855f7" },
-  { key: "deadline", label: "Deadlines", emoji: "⏰", ring: "#ef4444" },
-  { key: "memory",   label: "Facts",     emoji: "🗃", ring: "#14b8a6" },
-  { key: "site-memory", label: "Site knowledge", emoji: "🌐", ring: "#6366f1" },
-  { key: "daily-log", label: "Daily logs", emoji: "📅", ring: "#3b82f6" },
-  { key: "survival", label: "Survival",  emoji: "🛡", ring: "#f97316" },
-  { key: "fact",     label: "Facts (raw)", emoji: "💠", ring: "#14b8a6" },
-  { key: "learned_preference", label: "Preferences", emoji: "🔖", ring: "#a3a3a3" },
+  { key: "task",               label: "Tasks",         emoji: "📋", ring: PALETTE.task.ring },
+  { key: "journal",            label: "Journal",       emoji: "📓", ring: PALETTE.journal.ring },
+  { key: "lesson",             label: "Lessons",       emoji: "💡", ring: PALETTE.lesson.ring },
+  { key: "til",                label: "TIL",           emoji: "🧠", ring: PALETTE.til.ring },
+  { key: "decision",           label: "Decisions",     emoji: "✔️", ring: PALETTE.decision.ring },
+  { key: "deadline",           label: "Deadlines",     emoji: "⏰", ring: PALETTE.deadline.ring },
+  { key: "memory",             label: "Facts",         emoji: "🗃", ring: PALETTE.memory.ring },
+  { key: "site-memory",        label: "Site knowledge",emoji: "🌐", ring: PALETTE["site-memory"].ring },
+  { key: "daily-log",          label: "Daily logs",    emoji: "📅", ring: PALETTE["daily-log"].ring },
+  { key: "survival",           label: "Survival",      emoji: "🛡", ring: PALETTE.survival.ring },
+  { key: "fact",               label: "Facts (raw)",   emoji: "💠", ring: PALETTE.fact.ring },
+  { key: "learned_preference", label: "Preferences",   emoji: "🔖", ring: PALETTE.learned_preference.ring },
 ];
 
 /** Tags the system auto-stamps (owner/*, auto, source/chat, kind/*, layer/*,
@@ -110,29 +145,51 @@ export function matchesCategory(tags: string[] | null | undefined, key: string):
   return lower.includes(key) || lower.some((t) => t.startsWith(`${key}/`));
 }
 
-/** Pick the best color for a note based on its tags. Priority: task > deadline > journal > lesson > til > decision > rest. */
+/** Pick the best color for a note based on its tags. Walks CATEGORY_PRIORITY
+ *  so it agrees with `categoryKeyFor()` and the graph's `pickCategoryKey()`. */
 export function colorForTags(
   tags: string[] | null | undefined,
   pinned = false,
 ): NoteColor {
   if (pinned) return { ...PALETTE.pinned };
-  if (!tags || tags.length === 0) return DEFAULT;
+  const key = categoryKeyFor(tags, false);
+  if (!key) return DEFAULT;
+  return PALETTE[key] ?? DEFAULT;
+}
 
-  // Priority order — more specific categories first
-  const priority = [
-    "task", "deadline", "journal", "lesson", "til",
-    "decision", "price", "command", "recipe", "contact",
-    "idea", "rollup", "reference", "layer",
-    "survival", "fact", "learned_preference", "context",
-    "imported", "auto",
-  ];
+/** Halo (drop-shadow) color for a category — same hue, ~35% alpha so nodes
+ *  glow against the dark bg without smearing into neighbors. */
+export function haloForKey(key: string | null | undefined): string {
+  const ring = key && PALETTE[key] ? PALETTE[key].ring : DEFAULT.ring;
+  return hexToRgba(ring, 0.35);
+}
 
-  const lower = tags.map((t) => t.toLowerCase());
+/** Pick a high-contrast text color (white or near-black) for a given
+ *  background hex — uses perceived luminance (rec. 709) so the in-dot
+ *  badge text is legible against both bright and dark category colors. */
+export function readableTextOn(hex: string): string {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return "#fff";
+  const r = parseInt(m[1], 16) / 255;
+  const g = parseInt(m[2], 16) / 255;
+  const b = parseInt(m[3], 16) / 255;
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return lum > 0.62 ? "#1a1625" : "#ffffff";
+}
 
-  for (const key of priority) {
-    if (lower.includes(key)) return PALETTE[key];
-    // Hierarchical tags like "journal/2026-04-18" or "category/foo"
-    if (lower.some((t) => t.startsWith(`${key}/`))) return PALETTE[key];
+/** Hex (#rrggbb or #rgb) → rgba string. Defensive — falls back to bg-muted. */
+function hexToRgba(hex: string, alpha: number): string {
+  const m3 = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(hex);
+  const m6 = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  let r = 100, g = 116, b = 139;
+  if (m6) {
+    r = parseInt(m6[1], 16);
+    g = parseInt(m6[2], 16);
+    b = parseInt(m6[3], 16);
+  } else if (m3) {
+    r = parseInt(m3[1] + m3[1], 16);
+    g = parseInt(m3[2] + m3[2], 16);
+    b = parseInt(m3[3] + m3[3], 16);
   }
-  return DEFAULT;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }

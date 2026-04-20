@@ -268,7 +268,7 @@ export function CommandModal({
     >
       <div className="lb-cmdk-panel" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2 px-5 pt-0.5">
-          <Search size={15} strokeWidth={1.75} color="#a78bfa" />
+          <Search size={15} strokeWidth={1.75} color="#10b981" />
           <input
             ref={inputRef}
             className="lb-cmdk-input"
@@ -354,7 +354,7 @@ export function CommandModal({
 function RowIcon({ row }: { row: Row }) {
   if (row.kind === "action") {
     const I = row.action.Icon ?? Sparkles;
-    return <I size={14} strokeWidth={1.75} color="#a78bfa" />;
+    return <I size={14} strokeWidth={1.75} color="#10b981" />;
   }
   if (row.kind === "note") {
     const isJournal = (row.note.tags || []).some(
@@ -366,12 +366,12 @@ function RowIcon({ row }: { row: Row }) {
     return <FileText size={14} strokeWidth={1.75} color="#9ca3af" />;
   }
   if (row.kind === "tag") {
-    return <Hash size={14} strokeWidth={1.75} color="#a78bfa" />;
+    return <Hash size={14} strokeWidth={1.75} color="#10b981" />;
   }
   if (row.kind === "create") {
     return <Plus size={14} strokeWidth={2} color="#34d399" />;
   }
-  return <Brain size={14} strokeWidth={1.75} color="#a78bfa" />;
+  return <Brain size={14} strokeWidth={1.75} color="#10b981" />;
 }
 
 function RowLabel({ row }: { row: Row }) {

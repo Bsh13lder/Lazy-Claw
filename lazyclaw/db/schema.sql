@@ -47,8 +47,19 @@ CREATE TABLE IF NOT EXISTS agent_chat_sessions (
     title TEXT,
     message_count INTEGER DEFAULT 0,
     archived_at TEXT,
+    -- Primary session flag. Telegram / CLI / TUI / REPL all write into the
+    -- user's primary session so history is shared across channels. Exactly
+    -- one row per user may be primary (enforced by the partial unique index
+    -- below). Web UI "New Chat" creates non-primary branches.
+    is_primary INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- NOTE: the partial unique index for `is_primary = 1` is created in
+-- `connection.init_db()` AFTER the column migration runs. Putting it
+-- here as well crashes `executescript` on legacy DBs where the column
+-- doesn't exist yet (because CREATE TABLE IF NOT EXISTS preserves the
+-- old shape). Don't move it back without first dropping the migration.
 
 CREATE TABLE IF NOT EXISTS credential_vault (
     id TEXT PRIMARY KEY,

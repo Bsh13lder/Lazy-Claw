@@ -39,6 +39,10 @@ class WebSocketCallback:
     _buffer: str = field(default="", init=False)
     _closed: bool = field(default=False, init=False)
     _work_summary: dict | None = field(default=None, init=False)
+    # Set by the agent's "done" event so the WS "done" payload can expose
+    # model_used + fallback_reason to the client (fallback chip in Web UI).
+    _final_model: str | None = field(default=None, init=False)
+    _fallback_reason: str | None = field(default=None, init=False)
     # Side-channel notes the user typed while the agent was already running.
     # Drained by the agent loop between TAOR iterations and injected as
     # system messages so the agent can acknowledge or pivot mid-run.
@@ -156,8 +160,10 @@ class WebSocketCallback:
             await self._send({"type": "cancelled"})
 
         elif kind == "done":
-            # Final done event sent by the endpoint after processing completes
-            pass
+            # Capture model + fallback so _run_agent_turn can include them
+            # on the "done" payload the client listens for.
+            self._final_model = event.metadata.get("model_used") or self._final_model
+            self._fallback_reason = event.metadata.get("fallback_reason")
 
     async def on_approval_request(self, skill_name: str, arguments: dict) -> bool:
         # Auto-approve from web UI for now
@@ -389,6 +395,10 @@ async def chat_websocket(ws: WebSocket):
             }
             if cb._work_summary:
                 done_payload["usage"] = cb._work_summary
+            if cb._final_model:
+                done_payload["model_used"] = cb._final_model
+            if cb._fallback_reason:
+                done_payload["fallback_reason"] = cb._fallback_reason
             await cb._send(done_payload)
         except asyncio.CancelledError:
             await cb._send({"type": "cancelled"})

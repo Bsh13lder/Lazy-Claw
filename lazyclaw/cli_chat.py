@@ -839,10 +839,32 @@ async def run_chat_loop(
             break
 
         if stripped.lower() == "/clear":
-            ctx.chat_session_id = None
+            # Branch off to an isolated session so we don't wipe the shared
+            # primary bucket that Telegram / Web UI / TUI also read from.
+            from uuid import uuid4
+
+            from lazyclaw.db.connection import db_session
+
+            branch_id = str(uuid4())
+            try:
+                async with db_session(ctx.config) as db:
+                    await db.execute(
+                        "INSERT INTO agent_chat_sessions (id, user_id, title) "
+                        "VALUES (?, ?, ?)",
+                        (branch_id, ctx.user_id, "CLI branch"),
+                    )
+                    await db.commit()
+                ctx.chat_session_id = branch_id
+                con.print(
+                    "[green]Chat session cleared — continuing in a fresh "
+                    "isolated branch (shared history preserved).[/green]"
+                )
+            except Exception:
+                logger.warning("Failed to create CLI branch session", exc_info=True)
+                ctx.chat_session_id = None
+                con.print("[green]Chat session cleared.[/green]")
             for k in ctx.session_usage:
                 ctx.session_usage[k] = 0
-            con.print("[green]Chat session cleared.[/green]")
             continue
 
         if stripped.startswith("/"):

@@ -1032,6 +1032,19 @@ async def _chat_loop() -> None:
 
     # Delegate to non-blocking chat loop in cli_chat.py
     from lazyclaw.cli_chat import ChatContext, run_chat_loop
+    from lazyclaw.runtime.session_resolver import get_primary_session_id
+
+    # Resolve the user's primary session so the REPL / TUI share history with
+    # Telegram and Web UI. /clear branches off to an isolated session id.
+    _cli_logger = logging.getLogger(__name__)
+    try:
+        primary_session_id = await get_primary_session_id(config, user_id)
+    except Exception:
+        _cli_logger.warning(
+            "Failed to resolve primary session for user %s — using NULL bucket",
+            user_id, exc_info=True,
+        )
+        primary_session_id = None
 
     ctx = ChatContext(
         config=config,
@@ -1041,6 +1054,7 @@ async def _chat_loop() -> None:
         pt_session=pt_session,
         team_lead=team_lead,
         session_usage=_session_usage,
+        chat_session_id=primary_session_id,
     )
 
     await run_chat_loop(ctx, _handle_slash_command)

@@ -54,6 +54,8 @@ async def init_db(config: Config) -> None:
             ("tasks", "lazybrain_note_id", "ALTER TABLE tasks ADD COLUMN lazybrain_note_id TEXT"),
             # Plan Mode — per-user toggle for Claude-Code-style approval gate.
             ("users", "auto_plan", "ALTER TABLE users ADD COLUMN auto_plan INTEGER NOT NULL DEFAULT 1"),
+            # Cross-channel history — primary session flag on chat sessions.
+            ("agent_chat_sessions", "is_primary", "ALTER TABLE agent_chat_sessions ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0"),
         ]
         for table, column, sql in migrations:
             try:
@@ -63,6 +65,17 @@ async def init_db(config: Config) -> None:
                     await db.execute(sql)
             except Exception:
                 logger.debug("Migration %s.%s skipped (column may already exist)", table, column, exc_info=True)
+
+        # Partial unique index — enforces one primary session per user.
+        # Created after the column migration above in case we're upgrading an
+        # older DB where the column didn't exist when schema.sql first ran.
+        try:
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_primary "
+                "ON agent_chat_sessions(user_id) WHERE is_primary = 1"
+            )
+        except Exception:
+            logger.debug("idx_chat_sessions_primary creation skipped", exc_info=True)
 
         await db.commit()
 

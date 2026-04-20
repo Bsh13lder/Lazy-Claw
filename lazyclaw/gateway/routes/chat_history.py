@@ -14,6 +14,10 @@ from lazyclaw.crypto.encryption import decrypt_field
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 from lazyclaw.gateway.auth import User, get_current_user
+from lazyclaw.runtime.session_resolver import (
+    get_primary_session_id,
+    invalidate_primary_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +40,14 @@ async def list_sessions(user: User = Depends(get_current_user)):
     """List user's chat sessions (non-archived, newest first).
 
     Also repairs orphaned messages — creates missing session rows
-    for any chat_session_id that has messages but no session entry.
+    for any chat_session_id that has messages but no session entry —
+    and ensures the user has a primary session (the shared bucket that
+    Telegram / CLI / TUI / REPL all write into).
     """
+    # Ensure the user has a primary session. First call on a fresh DB
+    # promotes the oldest existing session or creates "Main".
+    await get_primary_session_id(_config, user.id)
+
     async with db_session(_config) as db:
         # Repair orphaned messages — create missing session rows
         await db.execute(
@@ -46,16 +56,17 @@ async def list_sessions(user: User = Depends(get_current_user)):
             "FROM agent_messages m "
             "LEFT JOIN agent_chat_sessions s ON s.id = m.chat_session_id "
             "WHERE m.user_id = ? AND s.id IS NULL "
+            "AND m.chat_session_id IS NOT NULL "
             "GROUP BY m.chat_session_id",
             (user.id,),
         )
         await db.commit()
 
         rows = await db.execute(
-            "SELECT id, title, message_count, created_at "
+            "SELECT id, title, message_count, is_primary, created_at "
             "FROM agent_chat_sessions "
             "WHERE user_id = ? AND archived_at IS NULL "
-            "ORDER BY created_at DESC",
+            "ORDER BY is_primary DESC, created_at DESC",
             (user.id,),
         )
         sessions = [
@@ -63,7 +74,8 @@ async def list_sessions(user: User = Depends(get_current_user)):
                 "id": r[0],
                 "title": r[1] or "New Chat",
                 "message_count": r[2] or 0,
-                "created_at": r[3],
+                "is_primary": bool(r[3]),
+                "created_at": r[4],
             }
             for r in await rows.fetchall()
         ]
@@ -92,14 +104,29 @@ async def update_session(
     body: UpdateSessionRequest,
     user: User = Depends(get_current_user),
 ):
-    """Rename or archive a chat session."""
+    """Rename or archive a chat session.
+
+    Archiving the primary session is blocked: it would hide the shared
+    cross-channel history from the Web UI while Telegram / CLI keep writing
+    into it — a confusing silent failure.
+    """
     async with db_session(_config) as db:
         row = await db.execute(
-            "SELECT id FROM agent_chat_sessions WHERE id = ? AND user_id = ?",
+            "SELECT id, is_primary FROM agent_chat_sessions WHERE id = ? AND user_id = ?",
             (session_id, user.id),
         )
-        if not await row.fetchone():
+        found = await row.fetchone()
+        if not found:
             raise HTTPException(status_code=404, detail="Session not found")
+
+        if body.archived is True and found[1]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot archive the primary session — it's the shared "
+                    "history bucket for Telegram, CLI, TUI, and REPL."
+                ),
+            )
 
         if body.title is not None:
             await db.execute(
@@ -120,14 +147,30 @@ async def delete_session(
     session_id: str,
     user: User = Depends(get_current_user),
 ):
-    """Delete a chat session and all its messages."""
+    """Delete a chat session and all its messages.
+
+    The primary session (shared across channels) cannot be deleted. Empty it
+    with PATCH { archived: true } or clear the messages via the agent's
+    /clear flow instead — deleting it would orphan Telegram/CLI history.
+    """
     async with db_session(_config) as db:
         row = await db.execute(
-            "SELECT id FROM agent_chat_sessions WHERE id = ? AND user_id = ?",
+            "SELECT id, is_primary FROM agent_chat_sessions WHERE id = ? AND user_id = ?",
             (session_id, user.id),
         )
-        if not await row.fetchone():
+        found = await row.fetchone()
+        if not found:
             raise HTTPException(status_code=404, detail="Session not found")
+
+        if found[1]:  # is_primary = 1
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot delete the primary session — it's the shared "
+                    "history bucket for Telegram, CLI, TUI, and REPL. "
+                    "Archive or clear its messages instead."
+                ),
+            )
 
         await db.execute(
             "DELETE FROM agent_messages WHERE chat_session_id = ? AND user_id = ?",
@@ -138,6 +181,8 @@ async def delete_session(
             (session_id, user.id),
         )
         await db.commit()
+
+    invalidate_primary_session(user.id)
     return {"status": "deleted"}
 
 

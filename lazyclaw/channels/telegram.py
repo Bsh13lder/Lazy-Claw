@@ -29,6 +29,7 @@ from lazyclaw.channels.base import ChannelAdapter, OutboundMessage
 from lazyclaw.config import Config
 from lazyclaw.runtime.agent import Agent
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.session_resolver import get_primary_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,31 @@ def get_telegram_adapter() -> "TelegramAdapter | None":
 # Retry config for network-flaky Telegram sends
 _SEND_MAX_RETRIES = 3
 _SEND_RETRY_BASE_DELAY = 2.0  # seconds
+
+
+def _friendly_model_name(model: str | None) -> str:
+    """Condense a raw model id into a short human-facing label."""
+    if not model:
+        return ""
+    m = model.lower()
+    if "sonnet-4-6" in m or "sonnet-4.6" in m:
+        return "Sonnet 4.6"
+    if "haiku-4-5" in m or "haiku-4.5" in m:
+        return "Haiku 4.5"
+    if "opus" in m:
+        return "Opus"
+    if "sonnet" in m:
+        return "Sonnet"
+    if "haiku" in m:
+        return "Haiku"
+    if "gemma" in m or "e2b" in m:
+        return "Gemma E2B"
+    if m == "claude-cli":
+        return "Claude CLI"
+    if m in ("unknown", "error"):
+        return ""
+    # Last-ditch: strip known vendor/date noise
+    return model.replace("claude-", "").split("-2025")[0][:24]
 
 
 async def _telegram_send_with_retry(coro_factory, max_retries=_SEND_MAX_RETRIES):
@@ -145,6 +171,9 @@ class _TelegramCallback:
         self.llm_call_count = 0
         self.tool_count = 0
         self.total_tokens = 0
+        # Final model + ECO fallback (set on the "done" event, used in footer)
+        self.final_model: str = ""
+        self.fallback_reason: str | None = None
         # Work summary (stored for footer, not sent separately)
         self._work_summary = None
         # Fast dispatch flag — background task still running after process_message returns
@@ -324,13 +353,32 @@ class _TelegramCallback:
     # ── Footer builder ────────────────────────────────────────────────
 
     def _build_footer(self) -> str:
-        """Build inline footer for response message."""
+        """Build inline footer for response message.
+
+        Shows the final model used + an explicit fallback chip if the ECO
+        router had to swap away from the user's configured brain (e.g. 529
+        overload → Claude CLI). Surfacing this prevents the silent "why am
+        I suddenly getting Haiku?" confusion.
+        """
         elapsed_s = time.monotonic() - self._started
         parts = [f"\u2705 {elapsed_s:.1f}s"]
         if self.llm_call_count:
             parts.append(f"{self.llm_call_count} LLM")
         if self.total_tokens:
             parts.append(f"{self.total_tokens:,} tokens")
+        model_label = _friendly_model_name(self.final_model)
+        if self.fallback_reason:
+            reason_label = {
+                "overloaded": "Sonnet overloaded",
+                "auth": "auth error",
+                "cli_failed": "CLI failed",
+                "local_failed": "local model failed",
+                "worker_failed": "worker failed",
+            }.get(self.fallback_reason, self.fallback_reason)
+            chip = f"\u26a0\ufe0f fallback \u2192 {model_label or '?'} ({reason_label})"
+            parts.append(chip)
+        elif model_label:
+            parts.append(model_label)
         return " \u2502 ".join(parts)
 
     def _build_error_footer(self) -> str:
@@ -720,6 +768,8 @@ class _TelegramCallback:
 
         elif kind == "done":
             self.busy = False
+            self.final_model = event.metadata.get("model_used") or self.final_model
+            self.fallback_reason = event.metadata.get("fallback_reason")
 
 
 def _format_specialist_line(name: str, state: dict) -> str:
@@ -1340,17 +1390,30 @@ class TelegramAdapter(ChannelAdapter):
         except Exception:
             logger.warning("Failed to inject watcher channel context for user %s", user_id, exc_info=True)
 
+        # Resolve the user's primary session so Telegram shares history with
+        # Web UI / CLI / TUI / REPL. Cached after first resolve.
+        try:
+            primary_session_id = await get_primary_session_id(self._config, user_id)
+        except Exception:
+            logger.warning(
+                "Failed to resolve primary session for user %s — using NULL bucket",
+                user_id, exc_info=True,
+            )
+            primary_session_id = None
+
         try:
             logger.debug("Telegram: awaiting agent response for chat %s", chat_id)
             if self._lane_queue:
                 response = await self._lane_queue.enqueue(
                     user_id, text, callback=effective_cb,
                     channel_context=channel_context,
+                    chat_session_id=primary_session_id,
                 )
             else:
                 response = await self._agent.process_message(
                     user_id, text, callback=effective_cb,
                     channel_context=channel_context,
+                    chat_session_id=primary_session_id,
                 )
             logger.debug("Telegram: got response for chat %s (len=%d)", chat_id, len(response or ""))
             if not response or not response.strip():

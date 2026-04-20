@@ -143,6 +143,7 @@ export interface ChatSession {
   id: string;
   title: string;
   message_count: number;
+  is_primary?: boolean;
   created_at: string;
 }
 
@@ -1092,6 +1093,12 @@ export const deleteLazyBrainNote = (id: string) =>
 export const getLazyBrainBacklinks = (id: string) =>
   request<{ note_id: string; backlinks: LazyBrainNote[] }>(
     `/api/lazybrain/notes/${id}/backlinks`,
+  );
+
+export const completeTaskByNoteId = (noteId: string) =>
+  request<{ status: string; task_id: string; note_id: string }>(
+    `/api/lazybrain/notes/${noteId}/mark-task-done`,
+    { method: "POST" },
   );
 
 export const searchLazyBrain = (q: string, tag?: string, limit = 20) => {

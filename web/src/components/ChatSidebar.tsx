@@ -173,6 +173,8 @@ export default function ChatSidebar() {
                 cost={m.cost}
                 model={m.model}
                 latency_ms={m.latency_ms}
+                modelUsed={m.modelUsed}
+                fallbackReason={m.fallbackReason}
               />
             ))}
 

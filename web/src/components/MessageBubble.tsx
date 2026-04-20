@@ -15,6 +15,31 @@ interface MessageBubbleProps {
   cost?: number;
   model?: string;
   latency_ms?: number;
+  // ECO router fallback surfacing — see agent.py "done" event + chat_ws payload.
+  fallbackReason?: string;
+  modelUsed?: string;
+}
+
+const FALLBACK_REASON_LABELS: Record<string, string> = {
+  overloaded: "Sonnet overloaded",
+  auth: "auth error",
+  cli_failed: "CLI failed",
+  local_failed: "local model failed",
+  worker_failed: "worker failed",
+};
+
+function friendlyModel(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const m = raw.toLowerCase();
+  if (m.includes("sonnet-4-6") || m.includes("sonnet-4.6")) return "Sonnet 4.6";
+  if (m.includes("haiku-4-5") || m.includes("haiku-4.5")) return "Haiku 4.5";
+  if (m.includes("opus")) return "Opus";
+  if (m.includes("sonnet")) return "Sonnet";
+  if (m.includes("haiku")) return "Haiku";
+  if (m.includes("gemma") || m.includes("e2b")) return "Gemma E2B";
+  if (m === "claude-cli") return "Claude CLI";
+  if (m === "unknown" || m === "error") return undefined;
+  return raw.replace("claude-", "").split("-2025")[0].slice(0, 24);
 }
 
 function formatTime(ts: number): string {
@@ -62,9 +87,12 @@ export default function MessageBubble({
   cost,
   model,
   latency_ms,
+  fallbackReason,
+  modelUsed,
 }: MessageBubbleProps) {
   const isUser = role === "user";
   const hasMeta = !isUser && !isStreaming && (tokens != null || cost != null || model != null);
+  const showFallbackChip = !isUser && !isStreaming && !!fallbackReason;
 
   return (
     <div className="animate-fade-in py-4 group">
@@ -135,6 +163,22 @@ export default function MessageBubble({
                 {content}
               </ReactMarkdown>
               {isStreaming && <span className="typing-cursor" />}
+            </div>
+          )}
+
+          {/* Fallback chip — always visible when the router swapped models */}
+          {showFallbackChip && (
+            <div className="mt-2 flex items-center gap-2">
+              <span
+                className="msg-meta-pill bg-amber-soft text-amber"
+                title={
+                  "The ECO router had to fall back because your brain model " +
+                  "was unavailable. See Settings → ECO to configure."
+                }
+              >
+                ⚠️ fallback → {friendlyModel(modelUsed) || "?"} (
+                {FALLBACK_REASON_LABELS[fallbackReason!] ?? fallbackReason})
+              </span>
             </div>
           )}
 

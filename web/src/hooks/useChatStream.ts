@@ -94,6 +94,8 @@ interface OnCompletePayload {
   toolCalls: ToolCallInfo[];
   usage?: UsageInfo | null;
   latency_ms?: number;
+  modelUsed?: string;
+  fallbackReason?: string;
 }
 
 export interface BackgroundCompletePayload {
@@ -407,8 +409,17 @@ export function useChatStream({
           const latency_ms = firstTokenTimeRef.current && sendTimeRef.current
             ? firstTokenTimeRef.current - sendTimeRef.current
             : undefined;
+          const modelUsed = msg.model_used as string | undefined;
+          const fallbackReason = msg.fallback_reason as string | undefined;
           resetStream();
-          onCompleteRef.current({ content, toolCalls: tools, usage, latency_ms });
+          onCompleteRef.current({
+            content,
+            toolCalls: tools,
+            usage,
+            latency_ms,
+            modelUsed,
+            fallbackReason,
+          });
           break;
         }
 

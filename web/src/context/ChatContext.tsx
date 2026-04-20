@@ -29,6 +29,10 @@ export interface Message {
   cost?: number;
   model?: string;
   latency_ms?: number;
+  // Present when the ECO router silently swapped away from the configured
+  // brain (e.g. Sonnet → Haiku via Claude CLI on 529 overload).
+  fallbackReason?: string;
+  modelUsed?: string;
 }
 
 export interface ChatSessionLocal {
@@ -90,6 +94,7 @@ function makeMessage(
   toolCalls?: ToolCallInfo[],
   usage?: UsageInfo | null,
   latency_ms?: number,
+  extra?: { modelUsed?: string; fallbackReason?: string },
 ): Message {
   return {
     id: crypto.randomUUID(),
@@ -101,6 +106,8 @@ function makeMessage(
     cost: usage?.cost,
     model: usage?.model,
     latency_ms,
+    modelUsed: extra?.modelUsed,
+    fallbackReason: extra?.fallbackReason,
   };
 }
 
@@ -162,7 +169,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Case 2: no persisted id
+      // Case 2: no persisted id — prefer the primary session (shared with
+      // Telegram / CLI / TUI / REPL) over "most recent" so the first thing
+      // the user sees is the unified conversation.
       if (local.length === 0) {
         api.createChatSession("New Chat").then((created) => {
           if (!alive) return;
@@ -171,8 +180,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           setActiveSessionId(s.id);
         });
       } else {
+        const primary = remote.find((r) => r.is_primary);
+        const chosenId = primary?.id ?? local[0].id;
         setSessions(local);
-        setActiveSessionId(local[0].id);
+        setActiveSessionId(chosenId);
       }
     }).catch(() => {
       if (!alive) return;
@@ -242,9 +253,23 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // ── Streaming ──────────────────────────────────────────────────────────
 
   const handleComplete = useCallback(
-    (payload: { content: string; toolCalls: ToolCallInfo[]; usage?: UsageInfo | null; latency_ms?: number }) => {
+    (payload: {
+      content: string;
+      toolCalls: ToolCallInfo[];
+      usage?: UsageInfo | null;
+      latency_ms?: number;
+      modelUsed?: string;
+      fallbackReason?: string;
+    }) => {
       const sid = activeIdRef.current;
-      const msg = makeMessage("assistant", payload.content, payload.toolCalls, payload.usage, payload.latency_ms);
+      const msg = makeMessage(
+        "assistant",
+        payload.content,
+        payload.toolCalls,
+        payload.usage,
+        payload.latency_ms,
+        { modelUsed: payload.modelUsed, fallbackReason: payload.fallbackReason },
+      );
       updateSession(sid, (s) => ({ ...s, messages: [...s.messages, msg] }));
     },
     [updateSession],

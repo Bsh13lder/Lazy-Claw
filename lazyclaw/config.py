@@ -27,7 +27,7 @@ class Config:
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     minimax_api_key: str | None = None
-    minimax_base_url: str = "https://api.minimax.io/v1"
+    minimax_base_url: str = "https://api.minimax.io/anthropic"
     telegram_bot_token: str | None = None
     browser_timeout: int = 300
     computer_timeout: int = 30
@@ -47,9 +47,12 @@ def load_config() -> Config:
     openai_key = os.getenv("OPENAI_API_KEY") or None
     anthropic_key = os.getenv("ANTHROPIC_API_KEY") or None
     minimax_key = os.getenv("MINIMAX_API_KEY") or None
+    # MiniMax is reached via its Anthropic-compatible endpoint — MiniMax themselves
+    # recommend it for full system/tool/thinking support. Override for China:
+    # https://api.minimaxi.com/anthropic
     minimax_base_url = os.getenv(
-        "MINIMAX_BASE_URL", "https://api.minimax.io/v1"
-    ) or "https://api.minimax.io/v1"
+        "MINIMAX_BASE_URL", "https://api.minimax.io/anthropic"
+    ) or "https://api.minimax.io/anthropic"
 
     # Brain model: main agent, team lead, complex fallback
     explicit_brain = os.getenv("BRAIN_MODEL") or os.getenv("DEFAULT_MODEL")

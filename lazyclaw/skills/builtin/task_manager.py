@@ -893,10 +893,14 @@ class WorkTodosSkill(BaseSkill):
             lines.append("")
 
         lines.append(
-            "INSTRUCTIONS: Execute these tasks NOW using your available tools. "
-            "For each task: do the work, then call complete_task(task_name='...'). "
-            "Use run_background for tasks that can run in parallel. "
-            "If a task needs info you don't have, skip it and explain why."
+            "INSTRUCTIONS (POST-CONDITION — not optional): Execute these tasks NOW. "
+            "For EACH task above you MUST, before ending your turn, call either "
+            "complete_task(task_name='...') when the work succeeded, OR "
+            "fail_task(task_name='...', error='...') when you tried and it didn't "
+            "work (missing creds, API error, tool returned error, blocked). "
+            "Do NOT skip silently — if you can't do it, fail_task is the right "
+            "answer. Use run_background only for tasks that truly run in parallel. "
+            "Unmarked task-bound turns will be auto-failed by the runtime."
         )
 
         return "\n".join(lines)

@@ -74,10 +74,15 @@ class DispatchSubagentsSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Dispatch 2+ independent subtasks to parallel subagents and collect "
-            "results. Use for 3+ concurrent research or execution tasks. "
-            "Types: 'explore' (read-only, fast), 'general_purpose' (full access), "
-            "'specialist' (scoped tools). Each subagent has isolated context."
+            "Dispatch independent subtasks to parallel subagents and collect "
+            "results. Runs all of them concurrently via asyncio.gather — no hard "
+            "cap, so fan out aggressively: 5, 8, even 10 subagents is fine when "
+            "the work is genuinely independent (researching 10 companies, "
+            "scraping 8 sites, drafting 6 proposals). Each subagent has isolated "
+            "context — cheap to spawn, doesn't bloat yours. "
+            "Types: 'explore' (read-only, fastest, use liberally), "
+            "'general_purpose' (full access, heavier), "
+            "'specialist' (scoped tools via tool_names)."
         )
 
     @property
@@ -92,7 +97,7 @@ class DispatchSubagentsSkill(BaseSkill):
                 "tasks": {
                     "type": "array",
                     "minItems": 2,
-                    "description": "Independent tasks to run in parallel (minimum 2)",
+                    "description": "Independent tasks to run in parallel (min 2, no hard max — aggressive fan-out encouraged for independent work)",
                     "items": {
                         "type": "object",
                         "properties": {

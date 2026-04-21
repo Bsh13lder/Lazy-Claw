@@ -85,8 +85,15 @@ class LLMRouter:
             from lazyclaw.llm.providers.ollama_provider import OllamaProvider
             return OllamaProvider()
         elif provider_name == "minimax":
-            from lazyclaw.llm.providers.minimax_provider import MinimaxProvider
-            return MinimaxProvider(api_key, base_url=self._config.minimax_base_url)
+            # MiniMax runs through their Anthropic-compatible endpoint — they
+            # recommend it over OpenAI-compat for full system/tool/thinking
+            # support. Same API key works on both compat layers.
+            return AnthropicProvider(
+                api_key=api_key,
+                base_url=self._config.minimax_base_url,
+                disable_prompt_cache=True,
+                default_model="MiniMax-M2.7",
+            )
         raise ValueError(f"Unknown provider: {provider_name}")
 
     async def chat(

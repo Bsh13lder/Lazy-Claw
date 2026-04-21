@@ -426,8 +426,25 @@ def _keyword_research_to_sheet(params: dict[str, Any]) -> dict:
     produces a Code node that returns an empty list — the user can
     fill it in n8n UI. This keeps the flow valid for POST even if
     the brain hasn't finished the research yet.
+
+    This is an **append-to-existing-sheet** template. If `sheet_id`
+    is not provided, instantiating with `sheet_id=""` produces an
+    empty `documentId.value` that n8n accepts on POST but rejects on
+    activate with an opaque "1 issue". Raise so `n8n_create_workflow`
+    falls through to the LLM path (which has the create-spreadsheet
+    cheat sheet) or surfaces the miss to the user — never silently
+    bake an unactivatable workflow.
     """
     import json as _json
+
+    if not (params.get("sheet_id") or "").strip():
+        raise ValueError(
+            "Keyword Research to Google Sheets template requires a "
+            "`sheet_id` — it appends rows to an existing sheet. "
+            "To CREATE a new sheet, use n8n_run_task("
+            "task_type='create_google_sheet', task={title: <name>}) "
+            "first, then pass its id as sheet_id."
+        )
 
     rows_raw = params.get("rows") or []
     safe_rows: list[dict] = []

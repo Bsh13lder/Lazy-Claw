@@ -363,6 +363,12 @@ class SkillRegistry:
         self.register(LookupProjectAssetSkill(config=config))
         self.register(ListProjectAssetsSkill(config=config))
 
+        # Cross-topic skill-outcome lessons — agent-visible recall path
+        # for the learning loop (writes happen automatically; this is
+        # the explicit "what worked before?" handle for small models).
+        from lazyclaw.skills.builtin.topic_lessons import RecallTopicLessonsSkill
+        self.register(RecallTopicLessonsSkill(config=config))
+
         # System status skills
         from lazyclaw.skills.builtin.system_status import (
             ShowStatusSkill, RunDoctorSkill, ShowUsageSkill,

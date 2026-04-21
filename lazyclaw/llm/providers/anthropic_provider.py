@@ -6,8 +6,20 @@ from lazyclaw.llm.providers.base import BaseLLMProvider, LLMMessage, LLMResponse
 
 
 class AnthropicProvider(BaseLLMProvider):
-    def __init__(self, api_key: str) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str | None = None,
+        *,
+        disable_prompt_cache: bool = False,
+        default_model: str = "claude-sonnet-4-6",
+    ) -> None:
+        client_kwargs: dict = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = anthropic.AsyncAnthropic(**client_kwargs)
+        self._disable_prompt_cache = disable_prompt_cache
+        self._default_model = default_model
 
     @staticmethod
     def _convert_tools(openai_tools: list[dict]) -> list[dict]:
@@ -93,6 +105,18 @@ class AnthropicProvider(BaseLLMProvider):
 
         return system, cached_tools
 
+    @staticmethod
+    def _plain_system_and_tools(
+        system_parts: list[str], tools: list[dict] | None,
+    ) -> tuple:
+        """Build system/tools payloads without any cache_control breakpoints.
+
+        Used when talking to Anthropic-compatible endpoints (e.g. MiniMax) that
+        don't implement prompt caching and reject unknown fields.
+        """
+        system = "\n\n".join(p for p in system_parts if p) if system_parts else None
+        return system or None, tools
+
     async def chat(self, messages: list[LLMMessage], model: str, **kwargs) -> LLMResponse:
         system_parts = [m.content for m in messages if m.role == "system"]
 
@@ -100,7 +124,7 @@ class AnthropicProvider(BaseLLMProvider):
         tool_choice = kwargs.pop("tool_choice", None)
 
         if not model:
-            model = "claude-sonnet-4-6"
+            model = self._default_model
 
         create_kwargs: dict = {
             "model": model,
@@ -109,13 +133,17 @@ class AnthropicProvider(BaseLLMProvider):
             **kwargs,
         }
 
-        # Apply prompt caching to system + tools
         converted_tools = self._convert_tools(tools) if tools else None
-        cached_system, cached_tools = self._with_cache(system_parts, converted_tools)
-        if cached_system:
-            create_kwargs["system"] = cached_system
-        if cached_tools:
-            create_kwargs["tools"] = cached_tools
+        if self._disable_prompt_cache:
+            system_payload, tools_payload = self._plain_system_and_tools(
+                system_parts, converted_tools,
+            )
+        else:
+            system_payload, tools_payload = self._with_cache(system_parts, converted_tools)
+        if system_payload:
+            create_kwargs["system"] = system_payload
+        if tools_payload:
+            create_kwargs["tools"] = tools_payload
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
@@ -163,7 +191,7 @@ class AnthropicProvider(BaseLLMProvider):
         tool_choice = kwargs.pop("tool_choice", None)
 
         if not model:
-            model = "claude-sonnet-4-6"
+            model = self._default_model
 
         create_kwargs: dict = {
             "model": model,
@@ -172,13 +200,17 @@ class AnthropicProvider(BaseLLMProvider):
             **kwargs,
         }
 
-        # Apply prompt caching to system + tools
         converted_tools = self._convert_tools(tools) if tools else None
-        cached_system, cached_tools = self._with_cache(system_parts, converted_tools)
-        if cached_system:
-            create_kwargs["system"] = cached_system
-        if cached_tools:
-            create_kwargs["tools"] = cached_tools
+        if self._disable_prompt_cache:
+            system_payload, tools_payload = self._plain_system_and_tools(
+                system_parts, converted_tools,
+            )
+        else:
+            system_payload, tools_payload = self._with_cache(system_parts, converted_tools)
+        if system_payload:
+            create_kwargs["system"] = system_payload
+        if tools_payload:
+            create_kwargs["tools"] = tools_payload
         if tool_choice is not None:
             create_kwargs["tool_choice"] = tool_choice
 
@@ -263,7 +295,7 @@ class AnthropicProvider(BaseLLMProvider):
     async def verify_key(self) -> bool:
         try:
             await self._client.messages.create(
-                model="claude-sonnet-4-6",
+                model=self._default_model,
                 messages=[{"role": "user", "content": "hi"}],
                 max_tokens=1,
             )

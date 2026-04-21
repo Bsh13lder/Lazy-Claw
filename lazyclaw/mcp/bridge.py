@@ -14,6 +14,31 @@ logger = logging.getLogger(__name__)
 _MCP_PREFIX = "mcp_"
 
 
+def _mcp_topic_for(tool_name: str, server_name: str) -> str | None:
+    """Map an MCP tool to a learning topic, or None to skip recording.
+
+    Kept narrow — only the topics LazyBrain recall is wired for. Inspects
+    both the tool name and the server name so e.g. `mcp-email` with a
+    custom tool like `send_draft` still maps to `email`.
+    """
+    hay = f"{server_name or ''} {tool_name or ''}".lower()
+    for topic in ("whatsapp", "instagram", "email", "gmail"):
+        if topic in hay:
+            # Collapse "gmail" into "email" — same topic bucket for recall.
+            return "email" if topic == "gmail" else topic
+    return None
+
+
+def _mcp_result_indicates_error(text: str) -> bool:
+    """Heuristic: the MCP bridge returns error prose as a normal string,
+    so we can't rely on an exception to decide success. A handful of
+    stable prefixes cover the 99% case without parsing JSON."""
+    if not text:
+        return True
+    lead = text.lstrip()[:32]
+    return lead.startswith(("[MCP ERROR]", "[NO DATA]", "Error:", "error:"))
+
+
 class MCPToolSkill(BaseSkill):
     """Wraps a single MCP tool as a LazyClaw BaseSkill.
 
@@ -61,9 +86,12 @@ class MCPToolSkill(BaseSkill):
         """Execute the MCP tool via the client connection.
 
         On 401, attempts token refresh and retries once.
+        Records a skill_lesson on success for learning-enabled topics
+        (whatsapp / instagram / email) so future calls can replay a
+        known-good parameter shape. Lesson save is fire-and-forget.
         """
         try:
-            return await self._client.call_tool(self._tool_name, params)
+            result = await self._client.call_tool(self._tool_name, params)
         except Exception as exc:
             if not self._config or not _is_auth_error(exc):
                 raise
@@ -74,7 +102,30 @@ class MCPToolSkill(BaseSkill):
             new_client = await self._refresh_and_reconnect(user_id)
             # Update to the new active client (old one is disconnected)
             self._client = new_client
-            return await self._client.call_tool(self._tool_name, params)
+            result = await self._client.call_tool(self._tool_name, params)
+
+        # Fire-and-forget: log what worked, once per successful call, so
+        # small models can replay the shape on the next similar request.
+        try:
+            topic = _mcp_topic_for(self._tool_name, self._client.name)
+            if (
+                topic is not None
+                and self._config is not None
+                and not _mcp_result_indicates_error(result)
+            ):
+                from lazyclaw.runtime.skill_lesson import save_skill_lesson
+                await save_skill_lesson(
+                    self._config, user_id,
+                    topic=topic,
+                    action=self._tool_name,
+                    intent=f"call {self._tool_name} via {self._client.name}",
+                    params=params,
+                    outcome="success",
+                )
+        except Exception:
+            logger.debug("mcp bridge lesson save failed", exc_info=True)
+
+        return result
 
     async def _refresh_and_reconnect(self, user_id: str) -> MCPClient:
         """Refresh OAuth token and reconnect the MCP client.

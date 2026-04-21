@@ -161,14 +161,43 @@ async def generate_workflow_json(
     Returns a dict ready to POST to /api/v1/workflows.
     Raises ValueError if generation or validation fails after retries.
     """
+    from lazyclaw.llm.eco_router import EcoRouter, ROLE_BRAIN
     from lazyclaw.llm.providers.base import LLMMessage
     from lazyclaw.llm.router import LLMRouter
 
-    router = LLMRouter(config)
+    # Route through EcoRouter with ROLE_BRAIN so workflow generation
+    # uses the SAME model the user is already talking to. EcoRouter
+    # resolves brain by reading the user's per-user settings (set via
+    # `/mode`), so MiniMax users get MiniMax, CLAUDE-mode users get
+    # Haiku-via-CLI, HYBRID users get Sonnet.
+    #
+    # Do NOT route to ROLE_WORKER — that resolves to gemma4 / Haiku
+    # regardless of what the user picked, bypassing their explicit
+    # model choice.
+    paid_router = LLMRouter(config)
+    router = EcoRouter(config, paid_router)
+
+    # Learning loop: pull known-good past shapes for this kind of task
+    # and prepend them as few-shot exemplars. This is what lets a small
+    # model that doesn't memorize n8n's schema still emit correct JSON —
+    # the product supplies the memory instead of the weights.
+    exemplars = ""
+    try:
+        from lazyclaw.runtime.skill_lesson import (
+            recall_skill_lessons, format_lessons_as_exemplars,
+        )
+        past = await recall_skill_lessons(
+            config, user_id, topic="n8n", intent=description, k=3,
+        )
+        exemplars = format_lessons_as_exemplars(past)
+    except Exception:
+        logger.debug("n8n lesson recall failed", exc_info=True)
 
     user_msg = f"Create an n8n workflow: {description}"
     if name:
         user_msg += f"\nWorkflow name: {name}"
+    if exemplars:
+        user_msg = f"{exemplars}\n\n{user_msg}"
 
     messages = [
         LLMMessage(role="system", content=_SYSTEM_PROMPT),
@@ -185,7 +214,28 @@ async def generate_workflow_json(
                 content=f"The previous output had issues: {last_error}. Fix and output valid JSON only.",
             ))
 
-        response = await router.chat(messages, user_id=user_id)
+        try:
+            response = await router.chat(messages, user_id=user_id, role=ROLE_BRAIN)
+        except Exception as chat_exc:
+            # Detect Anthropic credit exhaustion and surface a clear
+            # billing error instead of falling through to the minimal
+            # webhook scaffold — which would silently activate an empty
+            # workflow and let the model claim success (see 20:14:38
+            # log for the failure mode this guards against).
+            msg = str(chat_exc).lower()
+            if (
+                "credit balance is too low" in msg
+                or "insufficient credit" in msg
+                or "billing" in msg
+            ):
+                raise ValueError(
+                    "BILLING: Your Anthropic API credit balance is empty. "
+                    "Top up at https://console.anthropic.com/settings/billing, "
+                    "or switch to MiniMax / local via `/mode`. Workflow "
+                    "generation can't proceed until the brain model is "
+                    "reachable."
+                ) from chat_exc
+            raise
         content = response.content if hasattr(response, "content") else str(response)
 
         try:

@@ -37,6 +37,7 @@ from lazyclaw.gateway.routes.chat_ws import ws_chat_router, set_chat_ws_deps
 from lazyclaw.gateway.routes.lazybrain import router as lazybrain_router
 from lazyclaw.gateway.routes.system import router as system_router
 from lazyclaw.gateway.routes.agent import router as agent_router
+from lazyclaw.gateway.routes.tasks import router as tasks_router
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ app.include_router(ws_chat_router)
 app.include_router(lazybrain_router)
 app.include_router(system_router)
 app.include_router(agent_router)
+app.include_router(tasks_router)
 
 
 class ChatRequest(BaseModel):

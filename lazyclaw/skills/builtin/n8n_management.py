@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from lazyclaw.skills.base import BaseSkill
@@ -56,6 +57,106 @@ _MANUAL_ONLY_TRIGGER_TYPES: frozenset[str] = frozenset({
 
 # Back-compat alias used elsewhere in the module.
 _TRIGGER_NODE_TYPES = _ACTIVATABLE_TRIGGER_TYPES | _MANUAL_ONLY_TRIGGER_TYPES
+
+
+# Service-specific Google credential types can fall back to the generic
+# multi-scope googleOAuth2Api credential when the specific type isn't present.
+# n8n will accept any of these as long as the OAuth scope covers the service.
+_CRED_TYPE_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "googleSheetsOAuth2Api":  ("googleSheetsOAuth2Api",  "googleOAuth2Api", "googleApi"),
+    "googleDriveOAuth2Api":   ("googleDriveOAuth2Api",   "googleOAuth2Api", "googleApi"),
+    "gmailOAuth2":            ("gmailOAuth2",            "googleOAuth2Api", "googleApi"),
+    "googleCalendarOAuth2Api":("googleCalendarOAuth2Api","googleOAuth2Api", "googleApi"),
+    "googleDocsOAuth2Api":    ("googleDocsOAuth2Api",    "googleOAuth2Api", "googleApi"),
+}
+
+
+async def _auto_bind_credentials(
+    config: Any, user_id: str, workflow: dict,
+) -> tuple[list[str], list[str]]:
+    """Fill in empty credential ids on workflow nodes from existing n8n creds.
+
+    Templates (and LLM-generated workflows) emit nodes with
+    ``credentials: {<type>: {"id": "", "name": "..."}}``. n8n rejects
+    activation unless the ``id`` is a real credential id of that type. This
+    helper queries ``/api/v1/credentials``, groups by type, and binds each
+    empty-id reference to the most-recent credential of its type — falling
+    back to the generic ``googleOAuth2Api`` / ``googleApi`` when a
+    service-specific type isn't set up (common: user has one multi-scope
+    Google credential instead of per-service ones).
+
+    Mutates ``workflow["nodes"]`` in place. Returns ``(bindings, missing)``
+    where ``bindings`` are human-readable success lines and ``missing`` are
+    node:type pairs we couldn't bind (caller logs both).
+    """
+    nodes = workflow.get("nodes") or []
+    if not isinstance(nodes, list) or not nodes:
+        return [], []
+
+    needed: set[str] = set()
+    for node in nodes:
+        creds = (node or {}).get("credentials") or {}
+        for cred_type, ref in creds.items():
+            if isinstance(ref, dict) and not ref.get("id"):
+                needed.add(cred_type)
+    if not needed:
+        return [], []
+
+    try:
+        data = await _n8n_request(config, user_id, "GET", "/api/v1/credentials")
+    except Exception:
+        logger.debug("auto-bind: failed to list n8n credentials", exc_info=True)
+        return [], sorted(needed)
+
+    all_creds = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(all_creds, list):
+        return [], sorted(needed)
+
+    by_type: dict[str, list[dict]] = {}
+    for c in all_creds:
+        if isinstance(c, dict) and c.get("type"):
+            by_type.setdefault(c["type"], []).append(c)
+    for type_creds in by_type.values():
+        type_creds.sort(
+            key=lambda c: c.get("createdAt") or c.get("updatedAt") or "",
+            reverse=True,
+        )
+
+    bindings: list[str] = []
+    missing: list[str] = []
+    for node in nodes:
+        node_label = node.get("name") or node.get("id") or "?"
+        creds = (node or {}).get("credentials") or {}
+        for cred_type, ref in list(creds.items()):
+            if not isinstance(ref, dict) or ref.get("id"):
+                continue
+            # Try exact type first, then fall back to compatible types.
+            candidate_types = _CRED_TYPE_FALLBACKS.get(cred_type, (cred_type,))
+            chosen: dict | None = None
+            chosen_type: str | None = None
+            for ct in candidate_types:
+                if by_type.get(ct):
+                    chosen = by_type[ct][0]
+                    chosen_type = ct
+                    break
+            if not chosen or not chosen_type:
+                missing.append(f"{node_label}:{cred_type}")
+                continue
+            cid = str(chosen.get("id") or "")
+            if not cid:
+                missing.append(f"{node_label}:{cred_type}")
+                continue
+            cname = chosen.get("name") or ref.get("name") or cred_type
+            # Rewrite the credential entry to whatever type actually exists.
+            # n8n accepts the fallback type as long as the OAuth scope covers
+            # the node's needs — for Google services this is the standard fix.
+            creds.pop(cred_type, None)
+            creds[chosen_type] = {"id": cid, "name": cname}
+            suffix = "" if chosen_type == cred_type else f" (via {chosen_type} fallback)"
+            bindings.append(
+                f"{node_label}:{cred_type} -> id={cid} ({cname}){suffix}"
+            )
+    return bindings, missing
 
 
 class N8nHTTPError(RuntimeError):
@@ -468,13 +569,15 @@ def _validate_workflow_nodes(nodes: list[dict]) -> list[str]:
             continue
 
         if ntype == "n8n-nodes-base.googleSheets":
-            if not params.get("resource"):
+            resource = params.get("resource")
+            operation = params.get("operation")
+            if not resource:
                 violations.append(
                     f"Node '{name}' (googleSheets) is missing required "
                     "`resource`. Set one of: 'sheet' (append/read/update), "
                     "'spreadsheet' (create/delete)."
                 )
-            if not params.get("operation"):
+            if not operation:
                 violations.append(
                     f"Node '{name}' (googleSheets) is missing required "
                     "`operation`. For resource='sheet' use 'append' | "
@@ -488,6 +591,25 @@ def _validate_workflow_nodes(nodes: list[dict]) -> list[str]:
                     "`__rl: true`. Use: "
                     "{\"__rl\": true, \"value\": \"<id>\", \"mode\": \"id\"}."
                 )
+            # Any sheet-level op other than 'create' needs a non-empty
+            # spreadsheet id. Empty string is what templates and LLMs
+            # emit when they don't have one — n8n accepts on POST but
+            # rejects on activate with an opaque "1 issue".
+            if (
+                resource == "sheet"
+                and operation
+                and isinstance(doc, dict)
+                and doc.get("__rl") is True
+                and not (doc.get("value") or "").strip()
+            ):
+                violations.append(
+                    f"Node '{name}' (googleSheets sheet {operation}) "
+                    "has documentId.value empty — this op needs the id "
+                    "of an existing spreadsheet. Either pass the id "
+                    "explicitly, or create a spreadsheet first via a "
+                    "resource='spreadsheet' + operation='create' node "
+                    "(or n8n_run_task(task_type='create_google_sheet'))."
+                )
             sn = params.get("sheetName")
             if isinstance(sn, dict) and sn.get("__rl") is not True:
                 violations.append(
@@ -495,6 +617,42 @@ def _validate_workflow_nodes(nodes: list[dict]) -> list[str]:
                     "`__rl: true`. Use: "
                     "{\"__rl\": true, \"value\": \"gid=0\", \"mode\": \"list\"}."
                 )
+
+            # Operation-aware required-parameter checks. n8n's activate
+            # endpoint rejects with an opaque "1 issue" when these are
+            # missing — catching them here gives the model a specific
+            # fix hint instead of a panic retry loop.
+            if resource == "spreadsheet" and operation == "create":
+                title = params.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    violations.append(
+                        f"Node '{name}' (googleSheets create spreadsheet) "
+                        "is missing required `title`. Example: "
+                        "`parameters.title = 'hirossa keyword research'`. "
+                        "Recommended alongside: "
+                        "`parameters.sheetsUi = {\"sheetValues\": "
+                        "[{\"title\": \"Sheet1\"}]}`."
+                    )
+            elif resource == "spreadsheet" and operation == "delete":
+                if not isinstance(doc, dict) or not doc.get("value"):
+                    violations.append(
+                        f"Node '{name}' (googleSheets delete spreadsheet) "
+                        "is missing required `documentId`. Use: "
+                        "{\"__rl\": true, \"value\": \"<spreadsheet_id>\", "
+                        "\"mode\": \"id\"}."
+                    )
+            elif resource == "sheet" and operation in {
+                "append", "appendOrUpdate", "update",
+            }:
+                cols = params.get("columns")
+                if not isinstance(cols, dict) or not cols.get("mappingMode"):
+                    violations.append(
+                        f"Node '{name}' (googleSheets sheet {operation}) "
+                        "is missing required `columns.mappingMode`. Use: "
+                        "`parameters.columns = {\"mappingMode\": "
+                        "\"autoMapInputData\", \"matchingColumns\": [], "
+                        "\"schema\": []}`."
+                    )
 
         elif ntype == "n8n-nodes-base.webhook":
             if not (params.get("path") or "").strip():
@@ -528,6 +686,208 @@ def _schema_violation_error(violations: list[str]) -> str:
     )
     lines = "\n".join(f"  - {v}" for v in violations)
     return header + lines
+
+
+# n8n 1.x's workflow schema validator rejects nodes that carry any
+# top-level key it doesn't recognise with
+# `request/body/nodes/N must NOT have additional properties`. Mirror
+# the top-level workflow allowlist one level down so an LLM's extra
+# fields (e.g. `executable`, `description`, `color`) don't bounce the
+# entire POST.
+_NODE_ALLOWED_KEYS: frozenset[str] = frozenset({
+    "parameters", "id", "name", "type", "typeVersion", "position",
+    "credentials", "disabled", "notes", "notesInFlow", "continueOnFail",
+    "retryOnFail", "maxTries", "waitBetweenTries", "executeOnce",
+    "alwaysOutputData", "onError", "webhookId",
+})
+
+
+def _sanitize_node(node: dict) -> dict:
+    """Return a copy of ``node`` with only keys n8n 1.x accepts.
+
+    Logs stripped keys at DEBUG for forensics. Non-dict input is
+    returned unchanged so caller pipelines don't explode on garbage.
+    """
+    if not isinstance(node, dict):
+        return node
+    stripped = {k: v for k, v in node.items() if k in _NODE_ALLOWED_KEYS}
+    removed = [k for k in node if k not in _NODE_ALLOWED_KEYS]
+    if removed:
+        logger.debug(
+            "sanitize_node '%s': stripped unsupported keys %s",
+            node.get("name") or node.get("id") or "?", removed,
+        )
+    return stripped
+
+
+def _sanitize_nodes(nodes: list) -> list:
+    if not isinstance(nodes, list):
+        return nodes
+    return [_sanitize_node(n) for n in nodes]
+
+
+# Pick the dominant non-trigger node in a workflow for lesson tagging
+# purposes. A workflow is most usefully described by its "what does it
+# actually do" node — create a sheet, post a message, send an email —
+# not by its webhook trigger. Returns "" when we can't identify one.
+_TRIVIAL_NODE_TYPES: frozenset[str] = frozenset({
+    "n8n-nodes-base.webhook",
+    "n8n-nodes-base.manualTrigger",
+    "n8n-nodes-base.scheduleTrigger",
+    "n8n-nodes-base.respondToWebhook",
+    "n8n-nodes-base.set",
+    "n8n-nodes-base.noOp",
+    "n8n-nodes-base.code",
+})
+
+
+def _n8n_action_label(nodes: list) -> str:
+    """Return a `:<node>.<resource>.<operation>` suffix for lesson action.
+
+    Example: `:googleSheets.spreadsheet.create`. Empty when indeterminate.
+    Keeps lesson tags consistent across runs that targeted the same op.
+    """
+    if not isinstance(nodes, list):
+        return ""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type") or ""
+        if not ntype or ntype in _TRIVIAL_NODE_TYPES:
+            continue
+        short = ntype.split(".")[-1] if "." in ntype else ntype
+        params = node.get("parameters") or {}
+        parts = [short]
+        if isinstance(params, dict):
+            res = params.get("resource")
+            op = params.get("operation")
+            if res:
+                parts.append(str(res))
+            if op:
+                parts.append(str(op))
+        return ":" + ".".join(parts)
+    return ""
+
+
+def _n8n_lesson_params(nodes: list) -> dict:
+    """Compact serialisable view of a workflow for lesson storage.
+
+    Captures only node type + parameters. Credentials, position, ids,
+    typeVersion are dropped — they're either noise or per-tenant and
+    would make the lesson look different for structurally-identical
+    replays. Secrets pre-redacted by skill_lesson._redact on save.
+    """
+    if not isinstance(nodes, list):
+        return {}
+    out: list[dict] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        out.append({
+            "type": node.get("type") or "",
+            "name": node.get("name") or "",
+            "parameters": node.get("parameters") or {},
+        })
+    return {"nodes": out}
+
+
+# Pulls `Node "Google Sheets":` out of n8n's activation-failure body.
+# The surrounding text varies ("Cannot publish workflow: 1 node have
+# configuration issues:"), but the quoted node name is stable across
+# n8n versions.
+_ACTIVATION_NODE_RE = re.compile(r'Node\s+"([^"]+)"\s*:', re.IGNORECASE)
+
+
+def _truncate(text: str, limit: int = 400) -> str:
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+async def _enrich_activation_error(
+    config: Any,
+    user_id: str,
+    wf_id: str,
+    created_name: str,
+    act_exc: Exception,
+    source: str | None = None,
+) -> str:
+    """Turn n8n's opaque activation 400 into a specific fix hint.
+
+    Strategy:
+      1. Refetch the workflow we just created/updated (server-side shape
+         may differ from what we sent after n8n's normalization).
+      2. Re-run `_validate_workflow_nodes` on the live node list — most
+         of the time activation fails because of a missing required
+         param our pre-flight caught only loosely, and now has full
+         information to name.
+      3. Regex n8n's error body for `Node "X":` and, if the fetched
+         workflow has that node, append its current `parameters` dict
+         truncated to 400 chars so the model can diff.
+      4. Fall back to the original exception text if neither helped.
+
+    Returns a human-readable string — never raises.
+    """
+    err_str = str(act_exc)
+    from_phrase = f"from {source} " if source else ""
+
+    fetched_nodes: list[dict] = []
+    try:
+        fetched = await _n8n_request(
+            config, user_id, "GET", f"/api/v1/workflows/{wf_id}",
+            timeout=15.0,
+        )
+        if isinstance(fetched, dict):
+            fetched_nodes = fetched.get("nodes") or []
+    except Exception:
+        logger.debug(
+            "enrich_activation_error: workflow refetch failed for %s",
+            wf_id, exc_info=True,
+        )
+
+    violations = _validate_workflow_nodes(fetched_nodes) if fetched_nodes else []
+    if violations:
+        return (
+            f"Workflow '{created_name}' created (ID: {wf_id}) {from_phrase}"
+            "but activation failed because the saved node shape still "
+            f"has schema issues:\n"
+            + "\n".join(f"  - {v}" for v in violations)
+            + f"\nFix via n8n_update_workflow(workflow_id='{wf_id}', ...) "
+            "ONCE with the corrected `parameters` dict, then retry activate."
+        )
+
+    # Try to name the node and expose its current params.
+    m = _ACTIVATION_NODE_RE.search(err_str) or _ACTIVATION_NODE_RE.search(
+        getattr(act_exc, "body_text", "") or "",
+    )
+    if m and fetched_nodes:
+        node_name = m.group(1)
+        match = next(
+            (n for n in fetched_nodes if isinstance(n, dict)
+             and n.get("name") == node_name),
+            None,
+        )
+        if match is not None:
+            try:
+                params_preview = _truncate(
+                    json.dumps(match.get("parameters") or {}, ensure_ascii=False),
+                )
+            except Exception:
+                params_preview = str(match.get("parameters") or {})[:400]
+            return (
+                f"Workflow '{created_name}' created (ID: {wf_id}) "
+                f"{from_phrase}but activation failed on node "
+                f"'{node_name}' (type={match.get('type')}). n8n reported: "
+                f"{err_str}. Current parameters: {params_preview}. "
+                "Diff against the required schema (see n8n_create_workflow "
+                "description) and update via "
+                f"n8n_update_workflow(workflow_id='{wf_id}', ...) ONCE."
+            )
+
+    return (
+        f"Workflow '{created_name}' created (ID: {wf_id}) {from_phrase}"
+        f"but activation failed: {err_str}. Inspect in n8n UI or fix "
+        "node params and retry activate once."
+    )
 
 
 _OAUTH_ERROR_MARKERS = (
@@ -810,9 +1170,35 @@ class N8nCreateWorkflowSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Create an n8n workflow from a natural language description. "
+            "Create an n8n **workflow** (persistent, multi-step automation) "
+            "from a natural language description. "
             "Tries pre-built templates first, falls back to LLM generation. "
-            "Example: 'Watch my email and notify me on Telegram when I get a new message'"
+            "Example: 'Watch my email and notify me on Telegram when I get a new message'.\n"
+            "\n"
+            "DO NOT use this for one-shot Google operations. If the user just "
+            "wants to **create a single new Google Sheet / Drive folder / "
+            "Calendar event / Gmail message**, use `n8n_run_task("
+            "task_type='create_google_sheet', task={title: '<name>'})` "
+            "(or `create_drive_folder` / `send_gmail` / `create_calendar_event`) "
+            "— that tool returns the resource id and cleans up, no activation "
+            "gymnastics. Reach for `n8n_create_workflow` only when the user "
+            "wants a recurring workflow (webhook / schedule / multi-step pipeline).\n"
+            "\n"
+            "Google Sheets node (type=n8n-nodes-base.googleSheets, typeVersion=4.5):\n"
+            "  • Create spreadsheet: resource=\"spreadsheet\", operation=\"create\", "
+            "title=<name>, sheetsUi={sheetValues:[{title:\"Sheet1\"}]}\n"
+            "  • Delete spreadsheet: resource=\"spreadsheet\", operation=\"delete\", "
+            "documentId={__rl:true, value:<id>, mode:\"id\"}\n"
+            "  • Append rows: resource=\"sheet\", operation=\"append\", "
+            "documentId={__rl:true, value:<id>, mode:\"id\"}, "
+            "sheetName={__rl:true, value:\"gid=0\", mode:\"list\"}, "
+            "columns={mappingMode:\"autoMapInputData\", matchingColumns:[], schema:[]}\n"
+            "  • Read/Update: same __rl shape as append; operation=\"read\"|\"update\".\n"
+            "Credentials: {googleSheetsOAuth2Api:{id:\"\", name:\"Google Sheets\"}} — "
+            "leave id empty; the runtime auto-binds to an existing credential of the "
+            "same (or compatible) type.\n"
+            "Nodes must ONLY carry these keys: parameters, id, name, type, typeVersion, "
+            "position, credentials, disabled, notes (optional). Extra keys are stripped."
         )
 
     @property
@@ -854,18 +1240,54 @@ class N8nCreateWorkflowSkill(BaseSkill):
             from lazyclaw.skills.builtin.n8n_templates import match_template, TEMPLATES
             template = match_template(description)
 
-            workflow_json: dict
+            workflow_json: dict | None = None
+            source = ""
             if template:
                 build_params = {**extra_params}
                 if wf_name:
                     build_params["name"] = wf_name
-                workflow_json = template["build"](build_params)
-                source = f"template: {template['name']}"
-                logger.info(
-                    "n8n_create_workflow: matched template '%s' for description %r",
-                    template["name"], description[:80],
-                )
-            else:
+                try:
+                    workflow_json = template["build"](build_params)
+                    # Validate the template's output against the same pre-flight
+                    # that guards create_body. Templates share node factories
+                    # (_google_sheets_append_node etc.) that default missing
+                    # params to empty strings — this catches "documentId.value
+                    # is empty" for any append-template the matcher picked
+                    # without a sheet_id, before we POST a workflow the user
+                    # can never activate.
+                    tmpl_violations = _validate_workflow_nodes(
+                        workflow_json.get("nodes") or [],
+                    )
+                    if tmpl_violations:
+                        logger.info(
+                            "n8n_create_workflow: template '%s' produced %d "
+                            "schema violation(s) given params — falling back "
+                            "to LLM generation. Violations: %s",
+                            template["name"], len(tmpl_violations),
+                            "; ".join(tmpl_violations[:3]),
+                        )
+                        workflow_json = None
+                        template = None
+                    else:
+                        source = f"template: {template['name']}"
+                        logger.info(
+                            "n8n_create_workflow: matched template '%s' for "
+                            "description %r",
+                            template["name"], description[:80],
+                        )
+                except ValueError as tmpl_exc:
+                    # Template refused to instantiate — typically missing a
+                    # required param (e.g. sheet_id for append-templates when
+                    # the user actually wants a create). Fall through to the
+                    # LLM path which has the create-spreadsheet cheat sheet.
+                    logger.info(
+                        "n8n_create_workflow: template '%s' declined: %s — "
+                        "falling back to LLM generation",
+                        template["name"], tmpl_exc,
+                    )
+                    workflow_json = None
+                    template = None
+            if workflow_json is None and not template:
                 logger.info(
                     "n8n_create_workflow: no template match for %r (of %d built-ins), "
                     "falling back to LLM generation",
@@ -903,12 +1325,35 @@ class N8nCreateWorkflowSkill(BaseSkill):
             if wf_name and "name" not in workflow_json:
                 workflow_json["name"] = wf_name
 
+            # Auto-bind node credentials to existing n8n credentials of the
+            # same type (or a compatible fallback like googleOAuth2Api).
+            # Templates emit empty-id refs; without this pass, activation
+            # fails with "Credential not configured" even when the user
+            # already set up Google / Telegram / etc. in n8n.
+            _bind_missing: list[str] = []
+            try:
+                bindings, _bind_missing = await _auto_bind_credentials(
+                    self._config, user_id, workflow_json,
+                )
+                logger.info(
+                    "n8n_create_workflow: auto-bind — bound=%d missing=%d "
+                    "(bindings=%s; missing=%s)",
+                    len(bindings), len(_bind_missing),
+                    "; ".join(bindings) or "none",
+                    ", ".join(_bind_missing) or "none",
+                )
+            except Exception:
+                logger.debug("auto-bind credentials pass failed", exc_info=True)
+
             # n8n 1.x POST /workflows accepts ONLY these four top-level
             # fields — same allowlist as the PUT path. Strips anything the
             # LLM hallucinated (e.g. "active", "tags", "triggerCount").
+            # Node-level also gets scrubbed to the n8n-accepted key set
+            # so extra fields (description, color, executable, ...) don't
+            # trigger `must NOT have additional properties` on POST.
             create_body = {
                 "name": workflow_json.get("name") or wf_name or "Untitled",
-                "nodes": workflow_json.get("nodes") or [],
+                "nodes": _sanitize_nodes(workflow_json.get("nodes") or []),
                 "connections": workflow_json.get("connections") or {},
                 "settings": workflow_json.get("settings") or {"executionOrder": "v1"},
             }
@@ -986,11 +1431,28 @@ class N8nCreateWorkflowSkill(BaseSkill):
                         f"/api/v1/workflows/{wf_id}/activate",
                     )
                 except Exception as act_exc:
-                    return (
-                        f"Workflow '{created_name}' created (ID: {wf_id}) "
-                        f"from {source}, but activation failed: {act_exc}. "
-                        f"Some nodes may need credentials configured in n8n first."
+                    return await _enrich_activation_error(
+                        self._config, user_id, wf_id, created_name,
+                        act_exc, source=source,
                     )
+
+            # Learning loop: record the working shape so the next model
+            # (even a small worker) can replay it via recall_skill_lessons.
+            # Fire-and-forget — never block a successful response on the
+            # lesson writer.
+            try:
+                from lazyclaw.runtime.skill_lesson import save_skill_lesson
+                action_label = _n8n_action_label(create_body.get("nodes") or [])
+                await save_skill_lesson(
+                    self._config, user_id,
+                    topic="n8n",
+                    action=f"n8n_create_workflow{action_label}",
+                    intent=description,
+                    params=_n8n_lesson_params(create_body.get("nodes") or []),
+                    outcome="success",
+                )
+            except Exception:
+                logger.debug("n8n_create_workflow lesson save failed", exc_info=True)
 
             status = "active" if activate else "inactive"
             return (
@@ -1077,7 +1539,57 @@ class N8nManageWorkflowSkill(BaseSkill):
                 except Exception:
                     # Pre-check is best-effort; fall through to activate.
                     pass
-                await _n8n_request(self._config, user_id, "POST", f"/api/v1/workflows/{wf_id}/activate")
+                try:
+                    await _n8n_request(
+                        self._config, user_id, "POST",
+                        f"/api/v1/workflows/{wf_id}/activate",
+                    )
+                except Exception as act_exc:
+                    # Same enrichment as N8nCreateWorkflowSkill — turn
+                    # n8n's opaque "1 issue" into a specific field hint.
+                    wf_name = "Unknown"
+                    try:
+                        probe = await _n8n_request(
+                            self._config, user_id, "GET",
+                            f"/api/v1/workflows/{wf_id}", timeout=10.0,
+                        )
+                        if isinstance(probe, dict):
+                            wf_name = probe.get("name") or wf_name
+                    except Exception:
+                        pass
+                    return await _enrich_activation_error(
+                        self._config, user_id, wf_id, wf_name, act_exc,
+                    )
+
+                # Learning loop: record the activated shape so a future
+                # model can skip the trial-and-error. We fetch once more
+                # to capture whatever params survived n8n's normalization.
+                try:
+                    from lazyclaw.runtime.skill_lesson import save_skill_lesson
+                    probe_nodes: list = []
+                    wf_name = "Unknown"
+                    try:
+                        probe = await _n8n_request(
+                            self._config, user_id, "GET",
+                            f"/api/v1/workflows/{wf_id}", timeout=10.0,
+                        )
+                        if isinstance(probe, dict):
+                            wf_name = probe.get("name") or wf_name
+                            probe_nodes = probe.get("nodes") or []
+                    except Exception:
+                        pass
+                    action_label = _n8n_action_label(probe_nodes)
+                    await save_skill_lesson(
+                        self._config, user_id,
+                        topic="n8n",
+                        action=f"n8n_manage_workflow:activate{action_label}",
+                        intent=wf_name,
+                        params=_n8n_lesson_params(probe_nodes),
+                        outcome="success",
+                    )
+                except Exception:
+                    logger.debug("n8n_manage activate lesson save failed", exc_info=True)
+
                 return f"Workflow {wf_id} activated."
             elif action == "deactivate":
                 await _n8n_request(self._config, user_id, "POST", f"/api/v1/workflows/{wf_id}/deactivate")
@@ -1356,9 +1868,12 @@ class N8nUpdateWorkflowSkill(BaseSkill):
             # "request/body must NOT have additional properties".
             # Allowlist is the robust approach — the blocklist we had before
             # always missed whatever version-specific field n8n added next.
+            # Per-node keys get the same allowlist treatment via
+            # `_sanitize_nodes` so LLM-hallucinated node fields don't bounce
+            # the whole PUT.
             merged: dict = {
                 "name": full.get("name") or "Untitled",
-                "nodes": full.get("nodes") or [],
+                "nodes": _sanitize_nodes(full.get("nodes") or []),
                 "connections": full.get("connections") or {},
                 "settings": full.get("settings") or {"executionOrder": "v1"},
             }
@@ -2144,11 +2659,30 @@ class N8nInstallTemplateSkill(BaseSkill):
 
         if override_name:
             workflow["name"] = override_name
+
+        # Auto-bind node credentials to existing n8n credentials of the same
+        # type so imported community templates are activatable out of the box.
+        try:
+            bindings, missing = await _auto_bind_credentials(
+                self._config, user_id, workflow,
+            )
+            logger.info(
+                "n8n_install_template: auto-bind — bound=%d missing=%d "
+                "(bindings=%s; missing=%s)",
+                len(bindings), len(missing),
+                "; ".join(bindings) or "none",
+                ", ".join(missing) or "none",
+            )
+        except Exception:
+            logger.debug("auto-bind credentials pass failed", exc_info=True)
+
         # Same allowlist as n8n_create_workflow — n8n 1.x POST /workflows
-        # only accepts these four top-level fields.
+        # only accepts these four top-level fields. Per-node keys get
+        # scrubbed too (community templates often carry UI-only fields
+        # that n8n's POST schema rejects).
         post_body = {
             "name": workflow.get("name") or "Imported template",
-            "nodes": workflow.get("nodes") or [],
+            "nodes": _sanitize_nodes(workflow.get("nodes") or []),
             "connections": workflow.get("connections") or {},
             "settings": workflow.get("settings") or {"executionOrder": "v1"},
         }
@@ -2177,7 +2711,11 @@ class N8nInstallTemplateSkill(BaseSkill):
                 )
                 lines[1] = "Status: active."
             except Exception as exc:
-                lines.append(f"Activation failed: {exc}")
+                enriched = await _enrich_activation_error(
+                    self._config, user_id, wf_id, wf_name, exc,
+                    source=f"template {tpl_id}",
+                )
+                lines.append(enriched)
         return "\n".join(lines)
 
 

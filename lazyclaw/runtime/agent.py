@@ -59,6 +59,12 @@ _CHAT_ONLY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Heartbeat daemon prefixes task-bound reminders with [TASK_REMINDER:<task_id>]
+# (see lazyclaw/tasks/store.py:609).  When a turn starts with this marker we
+# bind it to that task so the finally-block safety net can auto-fail the row
+# if the agent exits without calling complete_task / fail_task.
+_TASK_REMINDER_RE = re.compile(r"^\[TASK_REMINDER:([^\]]+)\]")
+
 
 # ── Meta-Tool Pattern ─────────────────────────────────────────────────
 # Instead of regex-guessing which tools the LLM needs (brittle, 5K tokens),
@@ -720,6 +726,15 @@ class Agent:
                         return status_msg
                     # All foreground — run sequentially inline, don't background
                     # (fall through to normal processing with the full original message)
+
+        # Bind turn to a task if message carries the heartbeat reminder prefix.
+        # Only the daemon's task-linked reminder path (tasks/store.py:609) emits
+        # `[TASK_REMINDER:<task_id>]`; plain `[REMINDER]` has no id and stays
+        # unbound.  Populated here, read by the safety net in the finally block.
+        _bound_task_id: str | None = None
+        _m = _TASK_REMINDER_RE.match(message or "")
+        if _m:
+            _bound_task_id = _m.group(1).strip() or None
 
         # Register foreground task with TeamLead (skip for background agents)
         _fg_task_id: str | None = None
@@ -2845,6 +2860,34 @@ class Agent:
             ))
 
         finally:
+            # Safety net: if this turn was bound to a task (via the
+            # [TASK_REMINDER:<id>] prefix) and the agent ended without calling
+            # complete_task or fail_task, auto-fail the row so LazyBrain and
+            # the tasks table stop lying about outcome.  Only auto-fails —
+            # never auto-completes (preserves graph honesty).
+            if _bound_task_id and not (
+                {"complete_task", "fail_task"} & set(_all_tools_used)
+            ):
+                try:
+                    from lazyclaw.tasks.store import fail_task as _fail_task
+                    await _fail_task(
+                        self.config,
+                        user_id,
+                        _bound_task_id,
+                        error="agent exited without marking",
+                    )
+                    logger.info(
+                        "TAOR safety net: auto-failed bound task %s "
+                        "(user=%s) — agent turn ended without "
+                        "complete_task/fail_task",
+                        _bound_task_id, user_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "auto-fail of bound task %s failed",
+                        _bound_task_id, exc_info=True,
+                    )
+
             # ALWAYS mark foreground task done/failed in TeamLead
             if self._team_lead and _fg_task_id:
                 if content:

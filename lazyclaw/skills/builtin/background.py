@@ -50,7 +50,9 @@ class RunBackgroundSkill(BaseSkill):
             "or anything a single tool call could answer. Answer those inline instead. "
             "NOT for monitoring/watching — use watch_site or watch_messages. "
             "Results stream back into THIS chat when done (and to Telegram). "
-            "Can run up to 2 background tasks at once."
+            "Runtime supports up to 10 concurrent background tasks per user — "
+            "don't hold back on fan-out: if the user asks for 5 independent "
+            "long-running actions, start all 5 in parallel."
         )
 
     @property

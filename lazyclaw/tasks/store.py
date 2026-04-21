@@ -443,6 +443,47 @@ _STATUS_BADGE = {
 }
 
 
+def _build_task_mirror_body(task: dict) -> str:
+    """Rebuild a LazyBrain note body from a task row. Shared by create and heal."""
+    body_parts: list[str] = [f"**Task:** {task.get('title') or '(untitled)'}"]
+    desc = task.get("description")
+    if desc:
+        body_parts.append(desc)
+    meta_bits: list[str] = [f"priority `{task.get('priority') or 'medium'}`"]
+    if task.get("due_date"):
+        meta_bits.append(f"due `{task['due_date']}`")
+    if task.get("reminder_at"):
+        meta_bits.append(f"reminder `{task['reminder_at']}`")
+    if task.get("recurring"):
+        meta_bits.append(f"recurring `{task['recurring']}`")
+    body_parts.append("— " + " · ".join(meta_bits))
+    return "\n\n".join(body_parts)
+
+
+def _build_task_mirror_tags(task: dict) -> list[str]:
+    """Rebuild the base tag list for a task's mirror note. No status/* tag —
+    that is appended by the caller so it stays canonical across paths."""
+    owner = task.get("owner") or "user"
+    priority = task.get("priority") or "medium"
+    tags: list[str] = [
+        "task", "auto",
+        f"priority/{priority}",
+        f"owner/{'user' if owner == 'user' else 'agent'}",
+    ]
+    if task.get("category"):
+        tags.append(f"category/{task['category']}")
+    raw_tags = task.get("tags")
+    if raw_tags:
+        # task row stores tags as a JSON string (encrypted → decrypted). Best-effort parse.
+        try:
+            parsed = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+            for t in parsed or []:
+                tags.append(str(t))
+        except Exception:
+            pass
+    return tags
+
+
 async def _mirror_status_to_lazybrain(
     config: Config,
     user_id: str,
@@ -452,32 +493,83 @@ async def _mirror_status_to_lazybrain(
 ) -> None:
     """Stamp the mirrored LazyBrain note with the new status.
 
-    No-op when the task has no `lazybrain_note_id` (old tasks created before
-    this column existed, or notes the user deleted manually). Fire-and-forget —
-    status updates must not fail because the PKM is unreachable.
+    If the task has no `lazybrain_note_id` (create-time mirror failed silently,
+    or the user deleted the note manually), this heals retroactively by
+    creating a fresh mirror carrying the new status — PKM integrity is the
+    product, so a missing note is fixed on next status change instead of
+    silently dropped. Still fire-and-forget on exception.
     """
-    note_id = task.get("lazybrain_note_id")
-    if not note_id:
-        return
     try:
         from lazyclaw.lazybrain import events as lb_events
         from lazyclaw.lazybrain import store as lb_store
 
-        note = await lb_store.get_note(config, user_id, note_id)
-        if not note:
+        badge, status_tag = _STATUS_BADGE.get(
+            new_status, (f"• {new_status.upper()}", new_status),
+        )
+        header = f"{badge} —"
+        if error:
+            header += f" {error}"
+
+        note_id = task.get("lazybrain_note_id")
+        note = await lb_store.get_note(config, user_id, note_id) if note_id else None
+
+        if note is None:
+            # Heal path — note missing or never created. Build fresh mirror
+            # with the current status already baked in, then persist the new
+            # note id against the task row so future transitions use the
+            # update path below.
+            base_body = _build_task_mirror_body(task)
+            new_body = f"{header}\n\n{base_body}"
+            tags = _build_task_mirror_tags(task)
+            tags.append(f"status/{status_tag}")
+
+            importance_map = {"urgent": 9, "high": 7, "medium": 5, "low": 3}
+            importance = importance_map.get(task.get("priority") or "medium", 5)
+
+            created = await lb_store.save_note(
+                config, user_id,
+                content=new_body,
+                title=f"Task: {task.get('title') or '(untitled)'}",
+                tags=tags,
+                importance=importance,
+            )
+            async with db_session(config) as db:
+                await db.execute(
+                    "UPDATE tasks SET lazybrain_note_id = ? "
+                    "WHERE id = ? AND user_id = ?",
+                    (created["id"], task.get("id"), user_id),
+                )
+                await db.commit()
+            task["lazybrain_note_id"] = created["id"]
+            lb_events.publish_note_saved(
+                user_id, created["id"], created.get("title"),
+                created.get("tags"), source="task",
+            )
+            logger.info(
+                "lazybrain mirror healed for task %s (user=%s) — created "
+                "note %s on status transition to %s",
+                task.get("id"), user_id, created["id"], new_status,
+            )
             return
 
-        badge, status_tag = _STATUS_BADGE.get(new_status, (f"• {new_status.upper()}", new_status))
+        # Normal path — note exists, update in place.
         body = note.get("content") or ""
         # Strip any prior status badge so we don't stack them on repeated transitions.
         for known_badge, _ in _STATUS_BADGE.values():
             if body.startswith(f"{known_badge} —\n\n"):
                 body = body[len(f"{known_badge} —\n\n"):]
                 break
+        # Also strip a prior badge that already carries an error payload
+        # (e.g. `❌ FAILED — timeout\n\n...`) so we don't accidentally keep
+        # the old error in the body when the new status provides a new one.
+        for known_badge, _ in _STATUS_BADGE.values():
+            prefix = f"{known_badge} — "
+            if body.startswith(prefix):
+                nl = body.find("\n\n")
+                if nl != -1:
+                    body = body[nl + 2:]
+                break
 
-        header = f"{badge} —"
-        if error:
-            header += f" {error}"
         new_body = f"{header}\n\n{body}"
 
         # Refresh tags: drop any prior status/* tag, add the new one.

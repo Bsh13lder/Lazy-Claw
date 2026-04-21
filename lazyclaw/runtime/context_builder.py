@@ -265,6 +265,15 @@ async def build_context(
         "'I need to…' → always owner='user'."
     )
 
+    # 4b. Skill-outcome lessons — if the current message mentions a
+    #     learning topic (n8n / instagram / email / whatsapp), inject
+    #     the top-2 past working shapes so the model doesn't have to
+    #     rediscover them. Keyword match keeps this zero-cost for
+    #     unrelated turns.
+    topic_lesson_section = await _build_topic_lessons_section(
+        config, user_id, user_message,
+    )
+
     # Combine sections — layered context between capabilities and activity
     sections = [personality, date_section, ownership_rules]
     if capabilities:
@@ -275,6 +284,8 @@ async def build_context(
         sections.append(lazybrain_section)
     if activity_section:
         sections.append(activity_section)
+    if topic_lesson_section:
+        sections.append(topic_lesson_section)
     if memories:
         lines = [f"- {m['content']}" for m in memories]
         sections.append(
@@ -282,6 +293,61 @@ async def build_context(
         )
 
     return "\n\n---\n\n".join(sections)
+
+
+_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "n8n":       ("n8n", "workflow", "webhook"),
+    "instagram": ("instagram", "insta", "reel", " ig "),
+    "email":     ("email", "gmail", "inbox", "imap"),
+    "whatsapp":  ("whatsapp", "wa msg", "whats app"),
+}
+
+
+async def _build_topic_lessons_section(
+    config: Config,
+    user_id: str,
+    user_message: str | None,
+) -> str:
+    """Topic-keyword triggered injection of past-success skill shapes.
+
+    Each matching topic contributes up to 2 exemplars. Total injected
+    text is bounded by the lesson formatter itself (≤2 KB per topic by
+    construction). Never raises — any recall failure just skips injection.
+    """
+    if not user_message:
+        return ""
+    hay = f" {user_message.lower()} "
+    topics_hit: list[str] = [
+        topic for topic, kws in _TOPIC_KEYWORDS.items()
+        if any(kw in hay for kw in kws)
+    ]
+    if not topics_hit:
+        return ""
+    try:
+        from lazyclaw.runtime.skill_lesson import (
+            recall_skill_lessons, format_lessons_as_exemplars,
+        )
+    except Exception:
+        logger.debug("skill_lesson import failed", exc_info=True)
+        return ""
+
+    blocks: list[str] = []
+    for topic in topics_hit:
+        try:
+            hits = await recall_skill_lessons(
+                config, user_id, topic=topic, intent=user_message, k=2,
+            )
+        except Exception:
+            logger.debug("recall failed for topic %s", topic, exc_info=True)
+            continue
+        if not hits:
+            continue
+        block = format_lessons_as_exemplars(hits)
+        if block:
+            blocks.append(f"### Past working shapes for {topic}\n{block}")
+    if not blocks:
+        return ""
+    return "## Learned skill shapes\n" + "\n\n".join(blocks)
 
 
 async def _build_capabilities_cached(

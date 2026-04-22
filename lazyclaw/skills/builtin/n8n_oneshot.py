@@ -38,6 +38,7 @@ from lazyclaw.skills.builtin import project_assets
 from lazyclaw.skills.builtin.n8n_management import (
     _n8n_request,
     _N8N_DEFAULT_BASE,
+    _auto_bind_credentials,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,8 +87,17 @@ async def _post_webhook_sync(
 # ---------------------------------------------------------------------------
 
 def _webhook_node(path: str, position=(250, 300)) -> dict:
+    # responseMode=responseNode routes the HTTP response through the
+    # downstream Respond node. Without it, n8n returns default JSON
+    # immediately and rejects the workflow at activation with
+    # "Unused Respond to Webhook node found in the workflow".
     return {
-        "parameters": {"httpMethod": "POST", "path": path, "options": {}},
+        "parameters": {
+            "httpMethod": "POST",
+            "path": path,
+            "responseMode": "responseNode",
+            "options": {},
+        },
         "id": "webhook-1",
         "name": "Webhook",
         "type": "n8n-nodes-base.webhook",
@@ -441,6 +451,27 @@ async def run_oneshot(
         )
     builder, interpret = _ONESHOTS[task_type]
     workflow_json, webhook_path = builder(task)
+
+    # Oneshot templates emit nodes with `credentials: {<type>: {"id": ""}}`.
+    # Without this pre-bind, n8n rejects activation with
+    # "Credential not configured" and leaves an orphan workflow behind.
+    # `_auto_bind_credentials` mutates the workflow in place, preferring
+    # authorized creds (updatedAt > createdAt) over fresh blank shells.
+    bindings, missing = await _auto_bind_credentials(
+        config, user_id, workflow_json,
+    )
+    if bindings:
+        logger.info("oneshot '%s' auto-bound: %s", task_type, "; ".join(bindings))
+    if missing:
+        # No authorized credential of the required type(s). Raise the
+        # STOP_OAUTH_CREDENTIAL marker BEFORE creating the workflow, so
+        # we don't leak a debug artifact n8n can't activate.
+        raise RuntimeError(
+            f"STOP_OAUTH_CREDENTIAL: oneshot '{task_type}' needs an "
+            f"authorized credential of type `{', '.join(missing)}` but "
+            "none was found. Call `n8n_google_services_setup` to get a "
+            "consent URL and STOP. Do NOT create another credential shell."
+        )
 
     # Create the workflow (inactive).
     create_body = {

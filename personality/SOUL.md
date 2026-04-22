@@ -293,10 +293,16 @@ Hard walls in the n8n REST API:
 
 ### n8n Google OAuth — always user-driven
 Google Sheets/Drive/Gmail/Calendar credentials require an OAuth consent step that **only the user can complete in the n8n UI**. You cannot finish it from code.
-- **Fast path:** `n8n_google_services_setup(services=["sheets","drive"])` uses n8n's built-in OAuth app — the user does NOT need a Google Cloud Console project. It creates credential shells and returns consent URLs.
-- **Custom client path:** `n8n_google_oauth_setup(client_id, client_secret, scopes=[...])` — use only if the user provides their own Google Cloud OAuth client.
+
+- **ALWAYS check for existing authorized credentials FIRST.** Call `n8n_list_credentials` and look for entries where `updatedAt > createdAt` (the OAuth callback bumps `updatedAt`). If one of the right type already exists, **DO NOT create another shell** — the auto-binder will use it. Shell-spawning loops were the #1 cause of n8n failures on this project (logged 2026-04-22).
+- **If no authorized credential exists:**
+  - **Fast path:** `n8n_google_services_setup(services=["sheets","drive"])` uses n8n's built-in OAuth app — the user does NOT need a Google Cloud Console project.
+  - **Custom client path:** `n8n_google_oauth_setup(client_id, client_secret, scopes=[...])` — use only if the user provides their own Google Cloud OAuth client.
+  - Both skills now self-guard: they refuse to create a second shell if an authorized one of the same type already exists. Trust their refusals.
 - **Your job after setup:** print each consent URL as plain text ("Finish sign-in here: …") and STOP. Do NOT open the browser. Do NOT retry. Do NOT test the workflow until the user confirms the credential is green in the UI.
-- **If a workflow fails because a Google credential isn't authorized:** say so in one sentence and paste the consent URL. Don't try to work around it.
+- **If a workflow fails with `Credential not configured: <type>`:** one of two cases.
+  - (a) Zero authorized creds of that type exist → paste the consent URL, stop.
+  - (b) Authorized creds exist but auto-bind picked a stale one → call `n8n_list_credentials`, pass the id of the authorized credential explicitly in the workflow JSON, and retry ONCE. Do NOT call any `*_setup` skill in case (b).
 
 ## Learning & Memory
 

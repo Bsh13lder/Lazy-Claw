@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -469,13 +470,35 @@ async def run_oneshot(
         await asyncio.sleep(1.0)
 
         payload = await _post_webhook_sync(webhook_path, task.get("body") or {})
-    except Exception:
+    except Exception as exc:
         # Keep the workflow for debugging if firing failed — user can
         # inspect in n8n UI.
         logger.exception(
             "oneshot '%s' failed; keeping workflow id=%s for debug",
             task_type, wf_id,
         )
+        # Recognise n8n's "Credential not configured: <type>" activation
+        # failure and raise a hard-stop marker the brain can't paper over
+        # by spawning another credential shell. SOUL.md's
+        # `STOP_OAUTH_CREDENTIAL:` prefix makes the stuck detector +
+        # brain instructions route straight to "tell user to authorize"
+        # instead of the 3-day shell-spawning loop.
+        text = str(exc)
+        m = re.search(
+            r"Credential not configured:\s*([A-Za-z0-9_]+)", text,
+        )
+        if m:
+            cred_type = m.group(1)
+            raise RuntimeError(
+                f"STOP_OAUTH_CREDENTIAL: n8n rejected activation because "
+                f"no authorized credential of type `{cred_type}` is "
+                "connected. Before doing anything else, call "
+                "`n8n_list_credentials` — if any entry of that type has "
+                "`updatedAt > createdAt`, bind to it explicitly (don't "
+                "create a new one). If none does, paste the consent URL "
+                "from `n8n_google_services_setup` and STOP. "
+                "Do NOT create another credential shell."
+            ) from exc
         raise
 
     result = interpret(payload)

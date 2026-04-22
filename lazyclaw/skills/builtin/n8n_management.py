@@ -71,6 +71,70 @@ _CRED_TYPE_FALLBACKS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _credential_is_authorized(cred: dict) -> bool:
+    """Return True if ``cred`` looks like an OAuth-completed credential.
+
+    n8n's public /credentials listing doesn't expose the encrypted `data`
+    blob, so we can't see the refresh token directly. But the OAuth
+    callback ALWAYS updates the credential row (to persist the
+    refresh_token + access_token), which bumps `updatedAt` past
+    `createdAt`. When a credential shell is created but never signed
+    into, `updatedAt == createdAt` to within the same millisecond.
+
+    This is the same signal the n8n UI uses to paint the green "connected"
+    dot. Not 100% airtight (a user re-saving the shell without finishing
+    consent would also bump updatedAt), but strong enough to stop the
+    agent preferring freshly-created empty shells over the actual
+    working credential — the specific loop that ate 3 days of the user's
+    time (2026-04-22).
+    """
+    created = cred.get("createdAt") or ""
+    updated = cred.get("updatedAt") or ""
+    return bool(updated and created and updated > created)
+
+
+async def _find_authorized_credential(
+    config: Any, user_id: str, cred_type: str,
+) -> dict | None:
+    """Return the most-recently-authorized credential of ``cred_type`` (or
+    a compatible fallback type per ``_CRED_TYPE_FALLBACKS``), or None.
+
+    Skill-level pre-check used by every credential-creating skill to
+    avoid spawning yet another empty shell when the user has already
+    completed OAuth consent for the same service.
+    """
+    try:
+        data = await _n8n_request(config, user_id, "GET", "/api/v1/credentials")
+    except Exception:
+        logger.debug(
+            "find_authorized_credential: listing failed", exc_info=True,
+        )
+        return None
+    all_creds = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(all_creds, list):
+        return None
+    candidate_types = _CRED_TYPE_FALLBACKS.get(cred_type, (cred_type,))
+    authorized = [
+        c for c in all_creds
+        if isinstance(c, dict)
+        and c.get("type") in candidate_types
+        and _credential_is_authorized(c)
+    ]
+    if not authorized:
+        return None
+    # Prefer exact-type matches over fallbacks, newest updatedAt within
+    # each group.
+    exact = sorted(
+        (c for c in authorized if c.get("type") == cred_type),
+        key=lambda c: c.get("updatedAt") or "", reverse=True,
+    )
+    fallback = sorted(
+        (c for c in authorized if c.get("type") != cred_type),
+        key=lambda c: c.get("updatedAt") or "", reverse=True,
+    )
+    return (exact or fallback)[0]
+
+
 async def _auto_bind_credentials(
     config: Any, user_id: str, workflow: dict,
 ) -> tuple[list[str], list[str]]:
@@ -117,8 +181,17 @@ async def _auto_bind_credentials(
         if isinstance(c, dict) and c.get("type"):
             by_type.setdefault(c["type"], []).append(c)
     for type_creds in by_type.values():
+        # Authorized credentials (OAuth callback completed -> updatedAt >
+        # createdAt) win over empty shells. Among equally-authorized
+        # candidates, pick the most-recently-updated. This replaces the
+        # old "newest createdAt wins" logic which reliably picked the
+        # blank shell the agent created 200ms earlier over the real
+        # credential the user signed into a week ago.
         type_creds.sort(
-            key=lambda c: c.get("createdAt") or c.get("updatedAt") or "",
+            key=lambda c: (
+                1 if _credential_is_authorized(c) else 0,
+                c.get("updatedAt") or c.get("createdAt") or "",
+            ),
             reverse=True,
         )
 
@@ -2530,6 +2603,25 @@ class N8nCreateCredentialSkill(BaseSkill):
         if not isinstance(data, dict):
             return "Error: data must be a JSON object."
 
+        # Pre-check: reuse an existing authorized credential of the same
+        # type instead of spawning another shell. Prevents the credential
+        # shell explosion we logged on 2026-04-22 (10 empty Google Sheets
+        # shells accumulated over 3 days because every retry created a
+        # fresh one and auto-bind picked the newest blank).
+        existing = await _find_authorized_credential(
+            self._config, user_id, cred_type,
+        )
+        if existing:
+            return (
+                f"Credential of type '{cred_type}' is already authorized in n8n "
+                f"— '{existing.get('name')}' (id: {existing.get('id')}, "
+                f"type: {existing.get('type')}). "
+                "Workflows will auto-bind to it. No new credential created. "
+                "If you intentionally want a second one (e.g. a different "
+                "account), delete the existing first via "
+                f"n8n_delete_credential(id='{existing.get('id')}')."
+            )
+
         try:
             result = await _n8n_request(
                 self._config, user_id, "POST", "/api/v1/credentials",
@@ -2706,6 +2798,27 @@ class N8nGoogleSheetsSetupSkill(BaseSkill):
             params.get("scope")
             or "https://www.googleapis.com/auth/spreadsheets"
         )
+
+        # Pre-check: do NOT create another empty shell if the user has
+        # already authorized a Google Sheets credential (or a compatible
+        # googleOAuth2Api / googleApi fallback). This was the 3-day loop
+        # that burned a lot of time — every call here spawned a fresh
+        # blank shell, auto-bind picked the blank over the real cred,
+        # activate failed, agent retried, repeat.
+        existing = await _find_authorized_credential(
+            self._config, user_id, "googleSheetsOAuth2Api",
+        )
+        if existing:
+            return (
+                "Google Sheets is already authorized in n8n — "
+                f"credential '{existing.get('name')}' "
+                f"(id: {existing.get('id')}, type: {existing.get('type')}). "
+                "Workflows that reference googleSheetsOAuth2Api will auto-bind "
+                "to this one. No new credential was created. "
+                "If you want to force a fresh one (e.g. re-authorize with a "
+                "different Google account), delete this first via "
+                f"n8n_delete_credential(id='{existing.get('id')}')."
+            )
 
         # Fall back to vault for anything missing.
         if not client_id or not client_secret:

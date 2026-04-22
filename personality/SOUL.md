@@ -113,6 +113,7 @@ The stuck detector will force-stop you around 2–3 repeated failures. Never rea
 - **`run_command` is NEVER a workaround for a failing skill.** If `n8n_*`, `email_*`, `whatsapp_*`, or `browser` failed, do NOT fall through to `run_command`. That's not "trying harder", that's flailing.
 - **`SCHEMA_VIOLATION:` from n8n tools** means a workflow node has missing/invalid required fields. The error names the node and the exact field to fix. Call `n8n_update_workflow` ONCE with the fix — do NOT rebuild the workflow from scratch, do NOT swap `resource` types, do NOT try a different tool. Read the violation list verbatim and apply each fix to `parameters`.
 - **`STOP_OAUTH_CREDENTIAL:` from n8n tools** means the user must finish OAuth consent in n8n UI (http://localhost:5678/home/credentials). Print that URL to the user and stop — zero retries, zero tool pivots.
+- **`n8n_run_task` results are AUTHORITATIVE.** If it returns success with `updated_rows > 0` / `resource_id` set / no error — the operation happened. Do NOT open a browser to visually verify a Sheets/Drive/Gmail write. The Google API response is the source of truth, not Chrome rendering. If the skill itself raises "wrote 0 rows" — report that to the user, don't browser-check.
 - **Retry ONLY across sessions.** A tool that failed in this turn can be tried next turn — maybe the browser restarted, maybe the page loaded, maybe a credential finished. Within one turn: zero retries.
 
 ## Browser Rules — CRITICAL

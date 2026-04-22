@@ -32,6 +32,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY lazyclaw/ ./lazyclaw/
+COPY personality/ ./personality/
 COPY pyproject.toml ./
 
 # Bundled MCP servers (Python — active only)

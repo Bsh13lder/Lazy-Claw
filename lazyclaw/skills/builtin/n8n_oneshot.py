@@ -209,10 +209,21 @@ def _build_create_google_sheet(task: dict) -> tuple[dict, str]:
 
 
 def _build_append_sheet_rows(task: dict) -> tuple[dict, str]:
-    """Append rows to an existing Sheet. Rows come in via webhook body."""
+    """Append rows to an existing Sheet. Rows come in via webhook body.
+
+    Uses n8n's HTTP Request node against the raw Google Sheets API
+    instead of the native Google Sheets node, because v4.5's
+    resource-locator for `sheetName` rejects every format we've tried
+    (``gid=0``, ``Sheet1``, ``"0"`` in ``list`` and ``id`` modes all
+    fail with "Sheet with ID X not found" or "Missing required
+    parameters"). Direct API call is deterministic and avoids the n8n
+    schema entirely.
+    """
     path = f"oneshot-append-{uuid.uuid4().hex[:8]}"
     sheet_id = task.get("sheet_id") or task.get("spreadsheet_id") or ""
-    sheet_name = task.get("sheet_name") or "gid=0"
+    # Sheet range: user can override (e.g. "Sheet2!A:A"); default appends
+    # into column A of the whole first sheet.
+    sheet_range = task.get("range") or "A:A"
     if not sheet_id:
         raise ValueError("append_sheet_rows requires sheet_id")
     return (
@@ -222,11 +233,20 @@ def _build_append_sheet_rows(task: dict) -> tuple[dict, str]:
                 _webhook_node(path),
                 {
                     "parameters": {
+                        # Extract the value(s) to write and emit one JSON
+                        # item with a `values` 2-D array — the exact
+                        # shape the Sheets API wants in its body.
                         "jsCode": (
-                            "const body = $input.first().json.body || $input.first().json;\n"
-                            "const rows = Array.isArray(body) ? body "
-                            ": Array.isArray(body && body.rows) ? body.rows : [body];\n"
-                            "return rows.map(r => ({ json: r }));\n"
+                            "const b = $input.first().json.body || $input.first().json || {};\n"
+                            "const rowsIn = Array.isArray(b) ? b "
+                            ": Array.isArray(b && b.rows) ? b.rows "
+                            ": Array.isArray(b && b.values) ? b.values : [b];\n"
+                            "const toCells = r => Array.isArray(r) ? r\n"
+                            "  : (r && typeof r === 'object') "
+                            "? [r.text ?? r.value ?? r.message "
+                            "?? JSON.stringify(r)]\n"
+                            "  : [String(r)];\n"
+                            "return [{ json: { values: rowsIn.map(toCells) } }];\n"
                         ),
                     },
                     "id": "code-1",
@@ -236,22 +256,32 @@ def _build_append_sheet_rows(task: dict) -> tuple[dict, str]:
                     "position": [500, 300],
                 },
                 {
+                    # Direct call to Sheets API —
+                    # POST /v4/spreadsheets/{id}/values/{range}:append
                     "parameters": {
-                        "resource": "sheet",
-                        "operation": "append",
-                        "documentId": {"__rl": True, "value": sheet_id, "mode": "id"},
-                        "sheetName": {"__rl": True, "value": sheet_name, "mode": "list"},
-                        "columns": {
-                            "mappingMode": "autoMapInputData",
-                            "matchingColumns": [],
-                            "schema": [],
+                        "method": "POST",
+                        "url": (
+                            f"https://sheets.googleapis.com/v4/spreadsheets/"
+                            f"{sheet_id}/values/{sheet_range}:append"
+                        ),
+                        "authentication": "predefinedCredentialType",
+                        "nodeCredentialType": "googleSheetsOAuth2Api",
+                        "sendQuery": True,
+                        "queryParameters": {
+                            "parameters": [
+                                {"name": "valueInputOption", "value": "RAW"},
+                                {"name": "insertDataOption", "value": "INSERT_ROWS"},
+                            ],
                         },
+                        "sendBody": True,
+                        "specifyBody": "json",
+                        "jsonBody": "={{ JSON.stringify({ values: $json.values }) }}",
                         "options": {},
                     },
                     "id": "sheet-1",
                     "name": "Append Rows",
-                    "type": "n8n-nodes-base.googleSheets",
-                    "typeVersion": 4.5,
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
                     "position": [750, 300],
                     "credentials": {
                         "googleSheetsOAuth2Api": {"id": "", "name": "Google Sheets"},
@@ -391,10 +421,29 @@ def _result_google_sheet(payload: dict) -> dict:
 
 
 def _result_append_rows(payload: dict) -> dict:
+    # Guard against n8n Append returning success with zero updated rows.
+    # Happens when mappingMode can't resolve column targets (e.g.
+    # autoMapInputData on a sheet with no header row). Raising here stops
+    # the brain from reporting "Done!" on an empty sheet.
+    updates = (payload or {}).get("updates") or {}
+    updated_rows = updates.get("updatedRows") or updates.get("updatedCells") or 0
+    # Some n8n versions return the Sheets API response one level up.
+    if not updated_rows and isinstance(payload, dict):
+        updated_rows = payload.get("updatedRows") or payload.get("updatedCells") or 0
+    if not updated_rows:
+        raise RuntimeError(
+            "append_sheet_rows completed but wrote 0 rows. Likely causes: "
+            "(1) payload didn't include a 'text' / 'value' / 'message' "
+            "field the template maps to column A, (2) n8n append response "
+            "lacked `updates.updatedRows`, or (3) Sheets API silently "
+            "ignored the write. Inspect the workflow execution in n8n for "
+            f"the raw response. payload={payload!r}"
+        )
     return {
         "resource_type": "google_sheet_rows",
         "resource_id": "",
         "url": "",
+        "updated_rows": updated_rows,
         "raw": payload,
     }
 
@@ -448,6 +497,37 @@ async def run_oneshot(
         raise ValueError(
             f"Unknown oneshot task '{task_type}'. Valid: "
             + ", ".join(sorted(_ONESHOTS))
+        )
+    # LLMs occasionally pass `task` as a JSON-encoded string or a plain
+    # description string instead of an object. Parse or wrap so the
+    # builder always sees a dict and the agent gets a clear message
+    # instead of `AttributeError: 'str' object has no attribute 'get'`.
+    if isinstance(task, str):
+        stripped = task.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                task = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"oneshot '{task_type}': `task` was a string that "
+                    f"looked like JSON but couldn't be parsed ({exc}). "
+                    "Pass `task` as an object, e.g. "
+                    '`task={"sheet_id": "...", "body": {"rows": [...]}}`.'
+                ) from exc
+        else:
+            raise ValueError(
+                f"oneshot '{task_type}': `task` must be an object, got "
+                f"string {task!r}. Required fields per task_type — "
+                "create_drive_folder: name, optional parent_id; "
+                "create_google_sheet: title; "
+                "append_sheet_rows: sheet_id, body; "
+                "send_gmail: to, subject, text; "
+                "create_calendar_event: summary, start, end."
+            )
+    if not isinstance(task, dict):
+        raise ValueError(
+            f"oneshot '{task_type}': `task` must be a dict, got "
+            f"{type(task).__name__}."
         )
     builder, interpret = _ONESHOTS[task_type]
     workflow_json, webhook_path = builder(task)
@@ -532,6 +612,10 @@ async def run_oneshot(
             ) from exc
         raise
 
+    logger.info(
+        "oneshot '%s' webhook payload: %r",
+        task_type, payload,
+    )
     result = interpret(payload)
     result["task_type"] = task_type
     result["workflow_id"] = wf_id
@@ -706,7 +790,12 @@ class N8nRunTaskSkill(BaseSkill):
             "the result. Auto-registers created resources under a "
             "LazyBrain project note so you can look them up later "
             "(`lookup_project_asset`). Use this instead of n8n_create_workflow "
-            "+ n8n_run_workflow + delete for any one-off Google operation."
+            "+ n8n_run_workflow + delete for any one-off Google operation. "
+            "The result it returns is AUTHORITATIVE — if it succeeds "
+            "(`updated_rows > 0`, `resource_id` set, or no error), the "
+            "operation happened. Do NOT open a browser afterwards to "
+            "visually verify a Google Sheets / Drive / Gmail write; the "
+            "Google API is the source of truth, not Chrome rendering."
         )
 
     @property

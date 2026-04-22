@@ -538,16 +538,32 @@ async def _trigger_via_webhook(
 # model not to loop on these.
 
 
-def _validate_workflow_nodes(nodes: list[dict]) -> list[str]:
+def _validate_workflow_nodes(
+    nodes: list[dict],
+    connections: dict | None = None,
+) -> list[str]:
     """Return a list of human-readable violations for invalid nodes.
 
     Empty list == valid. Rules covered:
-      * n8n-nodes-base.googleSheets v4+ requires `resource` + `operation`.
-        `documentId` and `sheetName` must be resource-locator dicts
-        (`__rl: True`, `value`, `mode`).
-      * n8n-nodes-base.webhook requires `parameters.path`.
-      * n8n-nodes-base.httpRequest requires `parameters.url`.
-      * n8n-nodes-base.code requires `parameters.jsCode` or `pythonCode`.
+      Generic (any node type — catches the 10 common workflow-JSON
+      footguns independent of service):
+        * `type` must be bare `n8n-nodes-base.X` or
+          `@n8n/n8n-nodes-langchain.X` (after _sanitize_node has
+          normalised the shape).
+        * `typeVersion` must be numeric (int or float).
+        * `position` must be a `[x, y]` pair.
+        * `id` non-empty str, unique in the workflow.
+        * `name` non-empty str, unique in the workflow (n8n's
+          `connections` map is keyed by node name, not id).
+        * When `connections` is passed: every source key matches an
+          existing node name, every target `node` field matches too.
+      Service-specific (fast path for the known pain points):
+        * n8n-nodes-base.googleSheets v4+ requires `resource` + `operation`.
+          `documentId` and `sheetName` must be resource-locator dicts
+          (`__rl: True`, `value`, `mode`).
+        * n8n-nodes-base.webhook requires `parameters.path`.
+        * n8n-nodes-base.httpRequest requires `parameters.url`.
+        * n8n-nodes-base.code requires `parameters.jsCode` or `pythonCode`.
 
     This is intentionally conservative — we block the PUT only on
     things n8n will definitely reject on activate.
@@ -556,6 +572,117 @@ def _validate_workflow_nodes(nodes: list[dict]) -> list[str]:
     if not isinstance(nodes, list):
         return violations
 
+    # --- Generic pre-pass: type-agnostic footguns (any node) --------------
+    seen_ids: dict[str, int] = {}
+    seen_names: dict[str, int] = {}
+    for idx, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            continue
+        label = node.get("name") or node.get("id") or f"node[{idx}]"
+        ntype = node.get("type")
+        if not isinstance(ntype, str) or not ntype.strip():
+            violations.append(
+                f"Node '{label}' is missing `type`. Set a node-type id "
+                "like `n8n-nodes-base.webhook` or "
+                "`@n8n/n8n-nodes-langchain.agent`."
+            )
+        else:
+            t = ntype.strip()
+            if not (
+                t.startswith("n8n-nodes-base.")
+                or t.startswith("@n8n/n8n-nodes-langchain.")
+            ):
+                hint = ""
+                if t.startswith("@n8n/n8n-nodes-base."):
+                    hint = (
+                        " — drop the `@n8n/` scope: "
+                        f"`n8n-nodes-base.{t.split('.', 1)[1]}`."
+                    )
+                elif t.startswith("n8n-nodes-langchain."):
+                    hint = (
+                        " — prepend `@n8n/`: "
+                        f"`@n8n/n8n-nodes-langchain.{t.split('.', 1)[1]}`."
+                    )
+                violations.append(
+                    f"Node '{label}' has invalid type `{t}`. Core nodes "
+                    "use bare `n8n-nodes-base.X`, langchain/AI nodes use "
+                    "`@n8n/n8n-nodes-langchain.X`." + hint
+                )
+        tv = node.get("typeVersion")
+        if tv is not None and not isinstance(tv, (int, float)):
+            violations.append(
+                f"Node '{label}' has non-numeric typeVersion `{tv!r}`. "
+                "Must be a number like `1` or `4.5`."
+            )
+        pos = node.get("position")
+        if pos is not None:
+            if not (
+                isinstance(pos, list)
+                and len(pos) == 2
+                and all(isinstance(v, (int, float)) for v in pos)
+            ):
+                violations.append(
+                    f"Node '{label}' has invalid position `{pos!r}`. "
+                    "Must be a `[x, y]` pair of numbers."
+                )
+        nid = node.get("id")
+        if nid is not None:
+            if not isinstance(nid, str) or not nid.strip():
+                violations.append(
+                    f"Node '{label}' has empty id. Set a stable "
+                    "string id (uuid recommended)."
+                )
+            else:
+                seen_ids[nid] = seen_ids.get(nid, 0) + 1
+        nname = node.get("name")
+        if nname is not None:
+            if not isinstance(nname, str) or not nname.strip():
+                violations.append(
+                    f"Node at index {idx} has empty name. Names are "
+                    "required — n8n's connections map is keyed by name."
+                )
+            else:
+                seen_names[nname] = seen_names.get(nname, 0) + 1
+    for nid, count in seen_ids.items():
+        if count > 1:
+            violations.append(
+                f"Duplicate node id `{nid}` ({count} occurrences). "
+                "Every node needs a unique id."
+            )
+    for nname, count in seen_names.items():
+        if count > 1:
+            violations.append(
+                f"Duplicate node name `{nname}` ({count} occurrences). "
+                "Connections are keyed by name — duplicates break the "
+                "execution graph."
+            )
+    if isinstance(connections, dict) and seen_names:
+        known_names = set(seen_names.keys())
+        for src_name, mapping in connections.items():
+            if src_name not in known_names:
+                violations.append(
+                    f"connections key `{src_name}` doesn't match any "
+                    "node name. Keys must be node names exactly."
+                )
+            if not isinstance(mapping, dict):
+                continue
+            for out_kind, branches in mapping.items():
+                if not isinstance(branches, list):
+                    continue
+                for branch in branches:
+                    if not isinstance(branch, list):
+                        continue
+                    for edge in branch:
+                        if not isinstance(edge, dict):
+                            continue
+                        tgt = edge.get("node")
+                        if isinstance(tgt, str) and tgt not in known_names:
+                            violations.append(
+                                f"connections[{src_name}] -> `{tgt}` "
+                                "doesn't match any node name."
+                            )
+
+    # --- Service-specific checks (fast path) -------------------------------
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -688,6 +815,92 @@ def _schema_violation_error(violations: list[str]) -> str:
     return header + lines
 
 
+_MCP_NODE_CATALOG_SERVER = "n8n-nodes"
+
+
+async def _mcp_second_pass_validate(
+    config: Any, user_id: str, workflow_json: dict,
+) -> list[str]:
+    """Ask czlonkowski/n8n-mcp to validate ``workflow_json``.
+
+    Runs AFTER our native fast-path validator has passed — catches the
+    long-tail of per-node param issues across all ~1,505 node types
+    without our having to hand-code each one. Returns a list of
+    human-readable issue strings (empty when clean).
+
+    Non-fatal — any failure (MCP server unreachable, tool missing,
+    parse error) returns ``[]`` and logs at DEBUG. The native validator
+    is the source of truth; this is extra coverage.
+    """
+    try:
+        from lazyclaw.mcp.manager import (
+            connect_server, get_server_id_by_name,
+        )
+    except Exception:
+        return []
+    try:
+        sid = await get_server_id_by_name(
+            config, user_id, _MCP_NODE_CATALOG_SERVER,
+        )
+    except Exception:
+        return []
+    if not sid:
+        return []
+    try:
+        import asyncio as _asyncio
+        client = await _asyncio.wait_for(
+            connect_server(config, user_id, sid),
+            timeout=10,
+        )
+    except Exception:
+        logger.debug(
+            "mcp_second_pass_validate: connect_server failed", exc_info=True,
+        )
+        return []
+    try:
+        # n8n-mcp exposes `validate_workflow` on the server. Payload
+        # shape: {"workflow": {...}} — see czlonkowski/n8n-mcp tool
+        # registry. We cap the call at 8s so a stalled MCP never
+        # blocks a user POST.
+        import asyncio as _asyncio
+        raw = await _asyncio.wait_for(
+            client.call_tool("validate_workflow", {"workflow": workflow_json}),
+            timeout=8,
+        )
+    except Exception:
+        logger.debug(
+            "mcp_second_pass_validate: validate_workflow call failed",
+            exc_info=True,
+        )
+        return []
+    # The MCP tool returns text content. Be liberal about parsing —
+    # if it's JSON with an `issues` array, extract; otherwise split
+    # on newlines and filter blank lines.
+    text = raw if isinstance(raw, str) else ""
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            issues = parsed.get("issues") or parsed.get("errors") or []
+            if isinstance(issues, list):
+                return [
+                    str(i) if not isinstance(i, dict)
+                    else (i.get("message") or json.dumps(i))
+                    for i in issues
+                ]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Fallback: treat non-empty non-success lines as issues.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if any(
+        lead in text.lower()
+        for lead in ("✓", "valid", "no issues", "passed")
+    ):
+        return []
+    return lines[:10]  # cap surface area
+
+
 # n8n 1.x's workflow schema validator rejects nodes that carry any
 # top-level key it doesn't recognise with
 # `request/body/nodes/N must NOT have additional properties`. Mirror
@@ -702,11 +915,63 @@ _NODE_ALLOWED_KEYS: frozenset[str] = frozenset({
 })
 
 
+def _normalize_node_type(raw: str) -> str:
+    """Normalize an LLM-emitted node type to what n8n actually accepts.
+
+    Rules (verified from n8n-io/n8n source, packages/core/src/constants.ts
+    and AI_NODES_PACKAGE_NAME):
+      * core nodes: bare `n8n-nodes-base.X` — `@n8n/` prefix is the npm
+        package name, never the node-type id.
+      * langchain nodes: `@n8n/n8n-nodes-langchain.X` — the `@n8n/`
+        prefix IS required here.
+      * anything else passes through unchanged.
+    """
+    if not isinstance(raw, str):
+        return raw
+    t = raw.strip()
+    if not t:
+        return t
+    # Base-node: strip the `@n8n/` or `n8n/` scope prefix.
+    if t.startswith("@n8n/n8n-nodes-base."):
+        return "n8n-nodes-base." + t[len("@n8n/n8n-nodes-base."):]
+    if t.startswith("n8n/n8n-nodes-base."):
+        return "n8n-nodes-base." + t[len("n8n/n8n-nodes-base."):]
+    # Langchain: ADD the `@n8n/` scope if missing.
+    if t.startswith("@n8n/n8n-nodes-langchain."):
+        return t
+    if t.startswith("n8n-nodes-langchain."):
+        return "@n8n/n8n-nodes-langchain." + t[len("n8n-nodes-langchain."):]
+    if t.startswith("n8n/n8n-nodes-langchain."):
+        return "@n8n/n8n-nodes-langchain." + t[len("n8n/n8n-nodes-langchain."):]
+    return t
+
+
+def _coerce_type_version(raw: Any) -> Any:
+    """n8n requires numeric typeVersion. Accept int, float, numeric str."""
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return raw
+        try:
+            # Prefer int when possible, else float.
+            if "." in s:
+                return float(s)
+            return int(s)
+        except ValueError:
+            return raw
+    return raw
+
+
 def _sanitize_node(node: dict) -> dict:
     """Return a copy of ``node`` with only keys n8n 1.x accepts.
 
-    Logs stripped keys at DEBUG for forensics. Non-dict input is
-    returned unchanged so caller pipelines don't explode on garbage.
+    Also normalises `type` (strips the `@n8n/` prefix from base nodes,
+    adds it to langchain nodes) and coerces `typeVersion` to a number.
+    Logs stripped/normalised changes at DEBUG for forensics. Non-dict
+    input is returned unchanged so caller pipelines don't explode on
+    garbage.
     """
     if not isinstance(node, dict):
         return node
@@ -717,6 +982,24 @@ def _sanitize_node(node: dict) -> dict:
             "sanitize_node '%s': stripped unsupported keys %s",
             node.get("name") or node.get("id") or "?", removed,
         )
+    if "type" in stripped:
+        normalized = _normalize_node_type(stripped["type"])
+        if normalized != stripped["type"]:
+            logger.debug(
+                "sanitize_node '%s': normalized type %r -> %r",
+                node.get("name") or node.get("id") or "?",
+                stripped["type"], normalized,
+            )
+            stripped["type"] = normalized
+    if "typeVersion" in stripped:
+        coerced = _coerce_type_version(stripped["typeVersion"])
+        if coerced != stripped["typeVersion"]:
+            logger.debug(
+                "sanitize_node '%s': coerced typeVersion %r -> %r",
+                node.get("name") or node.get("id") or "?",
+                stripped["typeVersion"], coerced,
+            )
+            stripped["typeVersion"] = coerced
     return stripped
 
 
@@ -831,6 +1114,7 @@ async def _enrich_activation_error(
     from_phrase = f"from {source} " if source else ""
 
     fetched_nodes: list[dict] = []
+    fetched_connections: dict | None = None
     try:
         fetched = await _n8n_request(
             config, user_id, "GET", f"/api/v1/workflows/{wf_id}",
@@ -838,13 +1122,20 @@ async def _enrich_activation_error(
         )
         if isinstance(fetched, dict):
             fetched_nodes = fetched.get("nodes") or []
+            conns = fetched.get("connections")
+            if isinstance(conns, dict):
+                fetched_connections = conns
     except Exception:
         logger.debug(
             "enrich_activation_error: workflow refetch failed for %s",
             wf_id, exc_info=True,
         )
 
-    violations = _validate_workflow_nodes(fetched_nodes) if fetched_nodes else []
+    violations = (
+        _validate_workflow_nodes(fetched_nodes, fetched_connections)
+        if fetched_nodes
+        else []
+    )
     if violations:
         return (
             f"Workflow '{created_name}' created (ID: {wf_id}) {from_phrase}"
@@ -1184,6 +1475,19 @@ class N8nCreateWorkflowSkill(BaseSkill):
             "gymnastics. Reach for `n8n_create_workflow` only when the user "
             "wants a recurring workflow (webhook / schedule / multi-step pipeline).\n"
             "\n"
+            "Node-type id format (applies to EVERY node you emit — not just Google):\n"
+            "  • Core nodes use bare `n8n-nodes-base.X`   "
+            "(webhook, httpRequest, googleSheets, set, if, code, ...)\n"
+            "  • LangChain/AI nodes use `@n8n/n8n-nodes-langchain.X`   "
+            "(agent, lmChatOpenAi, toolCalculator, ...)\n"
+            "  • `@n8n/n8n-nodes-base.X` is NEVER valid — it's the npm package name, "
+            "not the node-type id. n8n will 400 with \"Unrecognized node type\".\n"
+            "If you don't know a node cold, call the `get_node` tool "
+            "(from the n8n-nodes MCP server, name suffix `_get_node`) with "
+            "`{node_type, detail=\"standard\"}` BEFORE emitting it. For "
+            "patterns you've seen before, `search_templates` (suffix "
+            "`_search_templates`) returns known-good exemplars to diff-edit.\n"
+            "\n"
             "Google Sheets node (type=n8n-nodes-base.googleSheets, typeVersion=4.5):\n"
             "  • Create spreadsheet: resource=\"spreadsheet\", operation=\"create\", "
             "title=<name>, sheetsUi={sheetValues:[{title:\"Sheet1\"}]}\n"
@@ -1257,6 +1561,7 @@ class N8nCreateWorkflowSkill(BaseSkill):
                     # can never activate.
                     tmpl_violations = _validate_workflow_nodes(
                         workflow_json.get("nodes") or [],
+                        workflow_json.get("connections") if isinstance(workflow_json, dict) else None,
                     )
                     if tmpl_violations:
                         logger.info(
@@ -1373,7 +1678,25 @@ class N8nCreateWorkflowSkill(BaseSkill):
             # the model has one clear next step instead of 25 panicky
             # update/activate retries.
             nodes_for_check = create_body.get("nodes") or []
-            violations = _validate_workflow_nodes(nodes_for_check)
+            violations = _validate_workflow_nodes(
+                nodes_for_check,
+                create_body.get("connections") if isinstance(create_body, dict) else None,
+            )
+            # Second-pass via czlonkowski/n8n-mcp — catches long-tail
+            # per-node param issues across all ~1,505 node types. Merged
+            # into `violations` so the same "created but not activated"
+            # path surfaces them to the brain.
+            try:
+                _mcp_viols = await _mcp_second_pass_validate(
+                    self._config, user_id, create_body,
+                )
+                for v in _mcp_viols:
+                    if v not in violations:
+                        violations.append(v)
+            except Exception:
+                logger.debug(
+                    "create: mcp second-pass failed", exc_info=True,
+                )
 
             def _node_type(n: dict) -> str:
                 return (n.get("type") or "") if isinstance(n, dict) else ""
@@ -1823,7 +2146,34 @@ class N8nUpdateWorkflowSkill(BaseSkill):
         return (
             "Update an n8n workflow by ID. Fetches the current workflow, "
             "merges your changes, and PUTs the result. "
-            "Pass the full or partial workflow JSON to update."
+            "Pass the full or partial workflow JSON to update.\n"
+            "\n"
+            "Node-type id format (applies to EVERY node you emit — not just Google):\n"
+            "  • Core nodes use bare `n8n-nodes-base.X`   "
+            "(webhook, httpRequest, googleSheets, set, if, code, ...)\n"
+            "  • LangChain/AI nodes use `@n8n/n8n-nodes-langchain.X`   "
+            "(agent, lmChatOpenAi, toolCalculator, ...)\n"
+            "  • `@n8n/n8n-nodes-base.X` is NEVER valid — it's the npm package name, "
+            "not the node-type id. n8n will 400 with \"Unrecognized node type\".\n"
+            "If you don't know a node cold, call the `get_node` tool "
+            "(from the n8n-nodes MCP server, name suffix `_get_node`) with "
+            "`{node_type, detail=\"standard\"}` BEFORE emitting it.\n"
+            "\n"
+            "Google Sheets node (type=n8n-nodes-base.googleSheets, typeVersion=4.5):\n"
+            "  • Create spreadsheet: resource=\"spreadsheet\", operation=\"create\", "
+            "title=<name>, sheetsUi={sheetValues:[{title:\"Sheet1\"}]}\n"
+            "  • Delete spreadsheet: resource=\"spreadsheet\", operation=\"delete\", "
+            "documentId={__rl:true, value:<id>, mode:\"id\"}\n"
+            "  • Append rows: resource=\"sheet\", operation=\"append\", "
+            "documentId={__rl:true, value:<id>, mode:\"id\"}, "
+            "sheetName={__rl:true, value:\"gid=0\", mode:\"list\"}, "
+            "columns={mappingMode:\"autoMapInputData\", matchingColumns:[], schema:[]}\n"
+            "  • Read/Update: same __rl shape as append; operation=\"read\"|\"update\".\n"
+            "Credentials: {googleSheetsOAuth2Api:{id:\"\", name:\"Google Sheets\"}} — "
+            "leave id empty; the runtime auto-binds to an existing credential of the "
+            "same (or compatible) type.\n"
+            "Nodes must ONLY carry these keys: parameters, id, name, type, typeVersion, "
+            "position, credentials, disabled, notes (optional). Extra keys are stripped."
         )
 
     @property
@@ -1895,9 +2245,26 @@ class N8nUpdateWorkflowSkill(BaseSkill):
             # `resource` on googleSheets, missing webhook `path`, etc.
             # Blocks the PUT so the model sees a specific fix hint instead
             # of an opaque 400 from n8n's activation check.
-            node_violations = _validate_workflow_nodes(merged.get("nodes") or [])
-            if node_violations:
-                return _schema_violation_error(node_violations)
+            node_violations = _validate_workflow_nodes(
+                merged.get("nodes") or [],
+                merged.get("connections") if isinstance(merged, dict) else None,
+            )
+            # Second-pass: ask czlonkowski/n8n-mcp to validate the same
+            # payload. It has schemas for ~1,505 node types and catches
+            # per-node param issues beyond our 4-type fast path. Fails
+            # silent when MCP is unreachable — native pass is the source
+            # of truth.
+            try:
+                mcp_violations = await _mcp_second_pass_validate(
+                    self._config, user_id, merged,
+                )
+            except Exception:
+                mcp_violations = []
+            all_violations = list(node_violations) + [
+                v for v in mcp_violations if v not in node_violations
+            ]
+            if all_violations:
+                return _schema_violation_error(all_violations)
 
             result = await _n8n_request(
                 self._config, user_id, "PUT",

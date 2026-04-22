@@ -124,6 +124,27 @@ BUNDLED_MCPS = {
         "env_required": ["N8N_API_KEY"],
         "env": {"N8N_HOST": "http://lazyclaw-n8n:5678"},
     },
+    # Node-catalog + schema intelligence (czlonkowski/n8n-mcp).
+    # Ships a prebuilt SQLite catalog of 1,505 n8n node types + 2,709
+    # templates, exposes progressive-disclosure tools the agent uses
+    # BEFORE emitting workflow JSON. Apache 2.0.
+    # Exposes: search_nodes, get_node, validate_node, validate_workflow,
+    # search_templates, get_template, tools_documentation + its own
+    # n8n-management CRUD (we keep our native n8n_* skills — both
+    # layers coexist).
+    # Runs in `stdio` / "documentation mode" by default — no n8n
+    # instance required just to read schemas. Our native n8n_* skills
+    # still handle create/update/activate against the user's n8n.
+    "n8n-nodes": {
+        "npx": "n8n-mcp",
+        "description": (
+            "n8n node catalog & schema lookup — search 1,505 node types, "
+            "fetch per-node parameter schemas, validate workflow JSON "
+            "before POST. Call `search_nodes` / `get_node` BEFORE emitting "
+            "any node you don't know cold."
+        ),
+        "env": {"MCP_MODE": "stdio", "LOG_LEVEL": "error"},
+    },
 }
 
 # -- Install locks (prevent concurrent installs of same MCP) -------------------

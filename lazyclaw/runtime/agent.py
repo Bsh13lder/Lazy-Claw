@@ -181,7 +181,29 @@ _N8N_TOOL_NAMES = frozenset({
     "n8n_google_services_setup",
     "n8n_test_workflow", "n8n_search_templates",
     "n8n_install_template", "n8n_list_webhooks",
+    # One-shot task runner — referenced from n8n_create_workflow's
+    # cheat sheet. Was missing from this bundle; without it the brain
+    # would narrate `<invoke name="n8n_run_task">…</invoke>` as text
+    # instead of calling the tool. (logged 2026-04-22).
+    "n8n_run_task",
 })
+
+# Suffixes of the czlonkowski/n8n-mcp tools we care about when n8n
+# keywords fire. The MCP bridge prefixes every tool with
+# `mcp_<server_id>_`, so we match on suffix instead of full name.
+# Keeping this tight (6 tools, not the full 39 exposed by n8n-mcp)
+# protects the tool budget — agent already runs with ~36 tools on
+# n8n turns. These six cover: discover → describe → validate → find
+# example, which is the full progressive-disclosure flow.
+_N8N_MCP_TOOL_SUFFIXES: tuple[str, ...] = (
+    "_search_nodes",
+    "_get_node",
+    "_validate_node",
+    "_validate_workflow",
+    "_search_templates",
+    "_get_template",
+)
+_N8N_MCP_SERVER_NAME = "n8n-nodes"
 
 # Channel name → bundled MCP server name (for on-demand connect)
 _CHANNEL_TO_MCP: dict[str, str] = {
@@ -1103,10 +1125,86 @@ class Agent:
                     schema = self.registry.get_tool_schema(nname)
                     if schema is not None:
                         _n8n_tools.append(schema)
+                # Also inject n8n-nodes MCP tools (search_nodes / get_node
+                # / validate_workflow / ...) so the brain can discover
+                # node schemas for ANY of the ~1,505 node types instead
+                # of guessing from memory. Matched by tool-name suffix
+                # because the MCP bridge prefixes with `mcp_<uuid>_`.
+                _n8n_mcp_attached = 0
+                for tool_info in self.registry.list_mcp_tools():
+                    func = tool_info.get("function", {})
+                    tname = func.get("name", "")
+                    tdesc = func.get("description", "").lower()
+                    if not any(tname.endswith(s) for s in _N8N_MCP_TOOL_SUFFIXES):
+                        continue
+                    # Tighten: only from the n8n-nodes MCP server (not
+                    # from e.g. another MCP that happens to expose a
+                    # `get_node` tool).
+                    if _N8N_MCP_SERVER_NAME not in tdesc:
+                        continue
+                    schema = self.registry.get_tool_schema(tname)
+                    if schema is not None:
+                        _n8n_tools.append(schema)
+                        _n8n_mcp_attached += 1
+                # On-demand connect the n8n-nodes MCP server if nothing
+                # was found but the user asked for n8n work.
+                if _n8n_mcp_attached == 0:
+                    try:
+                        from lazyclaw.mcp.manager import (
+                            connect_server, get_server_id_by_name,
+                        )
+                        from lazyclaw.mcp.bridge import (
+                            cache_tool_schemas, register_mcp_tools,
+                        )
+                        sid = await get_server_id_by_name(
+                            self.config, user_id, _N8N_MCP_SERVER_NAME,
+                        )
+                        if sid:
+                            logger.info(
+                                "On-demand connecting %s (id=%s)…",
+                                _N8N_MCP_SERVER_NAME, sid[:8],
+                            )
+                            client = await asyncio.wait_for(
+                                connect_server(self.config, user_id, sid),
+                                timeout=20,
+                            )
+                            tools_list = await client.list_tools()
+                            await cache_tool_schemas(
+                                self.config, _N8N_MCP_SERVER_NAME, tools_list,
+                            )
+                            await register_mcp_tools(
+                                client, self.registry,
+                                config=self.config, user_id=user_id,
+                            )
+                            # Re-scan after registration.
+                            for tool_info in self.registry.list_mcp_tools():
+                                func = tool_info.get("function", {})
+                                tname = func.get("name", "")
+                                tdesc = func.get("description", "").lower()
+                                if not any(
+                                    tname.endswith(s)
+                                    for s in _N8N_MCP_TOOL_SUFFIXES
+                                ):
+                                    continue
+                                if _N8N_MCP_SERVER_NAME not in tdesc:
+                                    continue
+                                schema = self.registry.get_tool_schema(tname)
+                                if schema is not None:
+                                    _n8n_tools.append(schema)
+                                    _n8n_mcp_attached += 1
+                    except Exception:
+                        # Don't fail the whole n8n turn if the catalog
+                        # MCP can't start — the native n8n_* skills still
+                        # work, brain just loses the describe-before-emit
+                        # primitive.
+                        logger.debug(
+                            "n8n-nodes MCP on-demand connect failed",
+                            exc_info=True,
+                        )
                 if _n8n_tools:
                     logger.info(
-                        "n8n/automation keywords detected — %d n8n tools injected",
-                        len(_n8n_tools),
+                        "n8n/automation keywords detected — %d n8n tools injected (of which %d MCP node-catalog)",
+                        len(_n8n_tools), _n8n_mcp_attached,
                     )
                 # n8n wins over raw channel MCP tools — suppress channel injection
                 # to avoid ambiguous tool sets (e.g. "automate email notifications"

@@ -3,7 +3,7 @@ import * as api from "../../api";
 import type { LazyBrainNote, LazyBrainTag } from "../../api";
 import { FilterBar } from "./FilterBar";
 import type { Owner } from "./noteColors";
-import { CATEGORY_PRIORITY, colorForTags, isSystemTag } from "./noteColors";
+import { categoryKeysFor, colorForTags, isSystemTag } from "./noteColors";
 import {
   Brain,
   Lock,
@@ -455,17 +455,10 @@ function PageRow({
 }
 
 /** Derive the single category key that matches a note (for icon selection).
- *  Walks the shared CATEGORY_PRIORITY so it never drifts from
- *  GraphView's pickCategoryKey or noteColors.colorForTags. */
+ *  Thin wrapper around noteColors.categoryKeysFor so the sidebar, GraphView,
+ *  and filter legend all agree on which category wins. */
 function pickCategoryKey(tags: string[] | null | undefined, pinned: boolean): string {
-  if (pinned) return "pinned";
-  if (!tags || tags.length === 0) return "_default";
-  const lower = tags.map((t) => t.toLowerCase());
-  for (const key of CATEGORY_PRIORITY) {
-    if (lower.includes(key)) return key;
-    if (lower.some((t) => t.startsWith(`${key}/`))) return key;
-  }
-  return "_default";
+  return categoryKeysFor(tags, pinned)[0] ?? "_default";
 }
 
 /** Format a `due/YYYY-MM-DD` tag relative to today. Returns null if no due tag. */
@@ -478,9 +471,9 @@ function dueLabel(tags: string[]): { text: string; tone: "overdue" | "today" | "
   const today = new Date().toISOString().slice(0, 10);
   if (due < today) return { text: "overdue", tone: "overdue" };
   if (due === today) return { text: "today", tone: "today" };
-  // Show short date (M/D) for future
+  // Short date (D/M — European format, matches Madrid locale) for future.
   const [, m, d] = due.split("-");
-  return { text: `${parseInt(m, 10)}/${parseInt(d, 10)}`, tone: "future" };
+  return { text: `${parseInt(d, 10)}/${parseInt(m, 10)}`, tone: "future" };
 }
 
 /** Strip markdown noise + title repetition so the preview line under the

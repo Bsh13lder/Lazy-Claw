@@ -33,12 +33,12 @@ const PALETTE: Record<string, NoteColor> = {
   recipe:             { ring: "#d97706", emoji: "🍳", label: "Recipe" },        // amber-700
   contact:            { ring: "#0ea5e9", emoji: "📇", label: "Contact" },       // sky-500
   idea:               { ring: "#9333ea", emoji: "💭", label: "Idea" },          // violet-700
-  reference:          { ring: "#64748b", emoji: "🔗", label: "Reference" },
+  reference:          { ring: "#64748b", emoji: "🔗", label: "Links" },
   rollup:             { ring: "#c026d3", emoji: "📊", label: "Rollup" },        // fuchsia-600
   layer:              { ring: "#65a30d", emoji: "🗂", label: "Layer" },         // lime-700
   imported:           { ring: "#64748b", emoji: "📥", label: "Imported" },
   pinned:             { ring: "#f59e0b", emoji: "★",  label: "Pinned" },        // amber-500
-  auto:               { ring: "#6366f1", emoji: "✨", label: "Auto" },          // indigo-500
+  auto:               { ring: "#6366f1", emoji: "✨", label: "Auto-captured" },// indigo-500
   survival:           { ring: "#d97706", emoji: "🛡", label: "Survival" },
   fact:               { ring: "#14b8a6", emoji: "💠", label: "Fact" },          // teal-500 — distinct from memory's teal-600
   learned_preference: { ring: "#94a3b8", emoji: "🔖", label: "Preference" },    // slate-400
@@ -66,19 +66,56 @@ export const CATEGORY_PRIORITY: string[] = [
   "imported", "auto",
 ];
 
-/** Resolve a category key from a tag list. Returns null if no match. */
+/** Upper bound on how many category slices a single graph node renders.
+ *  Three slices at 120° each stay legible; anything past that gets a `+N`
+ *  overflow chip drawn by the node renderer. */
+export const MAX_SLICES = 3;
+
+/** Walk CATEGORY_PRIORITY and return every matching key (capped at MAX_SLICES).
+ *  - pinned short-circuits to ["pinned"] so halos stay a single color.
+ *  - callers can compare the returned list length against actual match count
+ *    by re-running categoryMatchCount() when the "+N more" indicator matters. */
+export function categoryKeysFor(
+  tags: string[] | null | undefined,
+  pinned = false,
+): string[] {
+  if (pinned) return ["pinned"];
+  if (!tags || tags.length === 0) return [];
+  const lower = tags.map((t) => t.toLowerCase());
+  const hit: string[] = [];
+  for (const key of CATEGORY_PRIORITY) {
+    if (hit.length >= MAX_SLICES) break;
+    if (lower.includes(key) || lower.some((t) => t.startsWith(`${key}/`))) {
+      hit.push(key);
+    }
+  }
+  return hit;
+}
+
+/** Total number of categories that match the tag list (ignoring MAX_SLICES).
+ *  Drives the "+N more" overflow indicator on graph nodes. */
+export function categoryMatchCount(
+  tags: string[] | null | undefined,
+  pinned = false,
+): number {
+  if (pinned) return 1;
+  if (!tags || tags.length === 0) return 0;
+  const lower = tags.map((t) => t.toLowerCase());
+  let n = 0;
+  for (const key of CATEGORY_PRIORITY) {
+    if (lower.includes(key) || lower.some((t) => t.startsWith(`${key}/`))) n += 1;
+  }
+  return n;
+}
+
+/** Resolve a single (primary) category key from a tag list. Returns null if
+ *  no match. Keeps every legacy caller pointing at one winning category. */
 export function categoryKeyFor(
   tags: string[] | null | undefined,
   pinned = false,
 ): string | null {
-  if (pinned) return "pinned";
-  if (!tags || tags.length === 0) return null;
-  const lower = tags.map((t) => t.toLowerCase());
-  for (const key of CATEGORY_PRIORITY) {
-    if (lower.includes(key)) return key;
-    if (lower.some((t) => t.startsWith(`${key}/`))) return key;
-  }
-  return null;
+  const keys = categoryKeysFor(tags, pinned);
+  return keys[0] ?? null;
 }
 
 /** Who saved this note — derived from `owner/user` or `owner/agent` tags. */
@@ -99,22 +136,57 @@ export const OWNER_META: Record<Owner, { emoji: string; label: string; ring: str
   unknown: { emoji: "📝", label: "Unknown", ring: "#64748b" },
 };
 
-/** Every category chip the filter UI offers. Colors mirror PALETTE 1:1
- *  so a filter row's swatch and its graph node's color always match. */
-export const FILTER_CATEGORIES: { key: string; label: string; emoji: string; ring: string }[] = [
-  { key: "task",               label: "Tasks",         emoji: "📋", ring: PALETTE.task.ring },
-  { key: "journal",            label: "Journal",       emoji: "📓", ring: PALETTE.journal.ring },
-  { key: "lesson",             label: "Lessons",       emoji: "💡", ring: PALETTE.lesson.ring },
-  { key: "til",                label: "TIL",           emoji: "🧠", ring: PALETTE.til.ring },
-  { key: "decision",           label: "Decisions",     emoji: "✔️", ring: PALETTE.decision.ring },
-  { key: "deadline",           label: "Deadlines",     emoji: "⏰", ring: PALETTE.deadline.ring },
-  { key: "memory",             label: "Facts",         emoji: "🗃", ring: PALETTE.memory.ring },
-  { key: "site-memory",        label: "Site knowledge",emoji: "🌐", ring: PALETTE["site-memory"].ring },
-  { key: "daily-log",          label: "Daily logs",    emoji: "📅", ring: PALETTE["daily-log"].ring },
-  { key: "survival",           label: "Survival",      emoji: "🛡", ring: PALETTE.survival.ring },
-  { key: "fact",               label: "Facts (raw)",   emoji: "💠", ring: PALETTE.fact.ring },
-  { key: "learned_preference", label: "Preferences",   emoji: "🔖", ring: PALETTE.learned_preference.ring },
+/** Every category chip the filter UI offers. Derived from PALETTE so a
+ *  chip's icon/swatch, its filter row, and its graph-node color always
+ *  agree — no hand-curated drift. Ordered by narrative grouping:
+ *    1. work: task → til
+ *    2. artifacts: decision → layer
+ *    3. life/system: survival → daily-log
+ *    4. ambient: context → auto
+ *  `pinned` is excluded because it renders as a halo, not a filter chip. */
+const FILTER_ORDER: string[] = [
+  "task", "deadline", "journal", "lesson", "til",
+  "decision", "idea", "price", "command", "recipe", "contact",
+  "reference", "rollup", "layer",
+  "survival", "fact", "memory", "learned_preference",
+  "site-memory", "daily-log",
+  "context", "imported", "auto",
 ];
+
+/** User-facing display label per filter key. Falls back to `PALETTE[key].label`
+ *  when a key isn't listed — so new kinds inherit the PALETTE label by default
+ *  without forcing a second touch-point. Pluralize list-style kinds (Tasks,
+ *  Lessons, Decisions) but keep collective nouns (Journal, Survival) singular. */
+const FILTER_LABEL_OVERRIDE: Record<string, string> = {
+  task:               "Tasks",
+  deadline:           "Deadlines",
+  lesson:             "Lessons",
+  decision:           "Decisions",
+  idea:               "Ideas",
+  price:              "Prices",
+  command:            "Commands",
+  recipe:             "Recipes",
+  contact:            "Contacts",
+  reference:          "Links",
+  rollup:             "Rollups",
+  layer:              "Layers",
+  fact:               "Facts (raw)",
+  memory:             "Facts",
+  learned_preference: "Preferences",
+  "site-memory":      "Site knowledge",
+  "daily-log":        "Daily logs",
+};
+
+export const FILTER_CATEGORIES: { key: string; label: string; emoji: string; ring: string }[] =
+  FILTER_ORDER.map((key) => {
+    const p = PALETTE[key];
+    return {
+      key,
+      label: FILTER_LABEL_OVERRIDE[key] ?? p.label,
+      emoji: p.emoji,
+      ring:  p.ring,
+    };
+  });
 
 /** Tags the system auto-stamps (owner/*, auto, source/chat, kind/*, layer/*,
  *  imported/*, journal/YYYY-MM-DD, priority/*, category/*, site/*). These are
@@ -162,6 +234,12 @@ export function colorForTags(
 export function haloForKey(key: string | null | undefined): string {
   const ring = key && PALETTE[key] ? PALETTE[key].ring : DEFAULT.ring;
   return hexToRgba(ring, 0.35);
+}
+
+/** Solid ring hex for a category key (or DEFAULT when unknown). Callers that
+ *  need the pie-slice fill or the stroke color on a graph node use this. */
+export function ringForKey(key: string | null | undefined): string {
+  return key && PALETTE[key] ? PALETTE[key].ring : DEFAULT.ring;
 }
 
 /** Pick a high-contrast text color (white or near-black) for a given

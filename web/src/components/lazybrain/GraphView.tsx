@@ -19,7 +19,14 @@ import {
 } from "react";
 import type { LazyBrainGraph, LazyBrainNote } from "../../api";
 import { ForceSimulation, type SimNode } from "./ForceSimulation";
-import { CATEGORY_PRIORITY, FILTER_CATEGORIES, colorForTags } from "./noteColors";
+import {
+  CATEGORY_PRIORITY,
+  FILTER_CATEGORIES,
+  colorForTags,
+  categoryKeysFor,
+  categoryMatchCount,
+  ringForKey,
+} from "./noteColors";
 import { CategoryIcon, Star, CATEGORY_ICONS, DEFAULT_CATEGORY_ICON } from "./icons";
 import { Plus, Minus, RotateCcw, ChevronDown, ChevronUp, MousePointer2, Move, ZoomIn, Search, X as XIcon } from "lucide-react";
 
@@ -123,7 +130,9 @@ const CATEGORY_ORBIT: Record<string, number> = {
   _default: 3,
 };
 
-/** Labels drawn along each orbit ring (upper case). */
+/** Labels drawn along each orbit ring (upper case). Only used in
+ *  category layout mode — neural-link mode hides the orbit chrome
+ *  entirely since its layout is force-directed, not ring-based. */
 const ORBIT_LABELS: { title: string; subtitle: string; color: string }[] = [
   { title: "CORE",      subtitle: "URGENT",    color: "#f0a060" },
   { title: "DOING",     subtitle: "TASKS",     color: "#d4a26a" },
@@ -159,16 +168,20 @@ const BADGE_MAP: Record<string, string> = {
   _default: "•",
 };
 
-/** 1–3 char badge that goes INSIDE the dot. Dates for journals. */
+/** 1–5 char badge that goes INSIDE the dot. Journal / daily-log nodes show
+ *  `DD/MM` (European format — matches the user's Madrid locale); every other
+ *  category renders its letter/symbol from BADGE_MAP. */
 function dotBadge(
   title: string | null | undefined,
   categoryKey: string,
 ): string {
   if (categoryKey === "journal" || categoryKey === "daily-log") {
+    // Trailing `MM-DD` — short titles like "Journal 04-21".
     const m = (title || "").match(/(\d{2})-(\d{2})$/);
-    if (m) return `${m[1]}/${m[2]}`;
+    if (m) return `${m[2]}/${m[1]}`;
+    // Full `YYYY-MM-DD` anywhere in the title.
     const m2 = (title || "").match(/\d{4}-(\d{2})-(\d{2})/);
-    if (m2) return `${m2[1]}/${m2[2]}`;
+    if (m2) return `${m2[2]}/${m2[1]}`;
   }
   return BADGE_MAP[categoryKey] ?? "?";
 }
@@ -220,8 +233,47 @@ export function GraphView({
     return () => ro.disconnect();
   }, []);
 
-  // ── Build simulation when graph shape changes ──────────────────────────
+  // ── Layout mode — "category" (orbits by note kind) or "neural-link"
+  //     (force-directed clustering with a decorative sun at center).
+  //     Flipped via the on-canvas toggle below. Persisted in localStorage
+  //     so the user's last choice is the default on next reload.
+  const [layoutMode, setLayoutMode] = useState<"category" | "neural-link">(() => {
+    if (typeof window === "undefined") return "category";
+    try {
+      const saved = window.localStorage.getItem("lazybrain-layout-mode");
+      return saved === "neural-link" || saved === "category" ? saved : "category";
+    } catch {
+      return "category";
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("lazybrain-layout-mode", layoutMode);
+    } catch {
+      // Private-mode Safari throws on setItem — session-only is fine.
+    }
+  }, [layoutMode]);
+
+  // Top hub — highest-degree node. Used as the "sun" in neural-link mode.
+  // Computed from graph.edges directly so it's available before the sim.
+  const topHubId = useMemo(() => {
+    const deg: Record<string, number> = {};
+    for (const e of graph.edges) {
+      deg[e.source] = (deg[e.source] ?? 0) + 1;
+      deg[e.target] = (deg[e.target] ?? 0) + 1;
+    }
+    let best: string | null = null;
+    let bestDeg = -1;
+    for (const [id, d] of Object.entries(deg)) {
+      if (d > bestDeg) { best = id; bestDeg = d; }
+    }
+    return best;
+  }, [graph.edges]);
+
+  // ── Build simulation when graph shape, size, or layout mode changes ────
   const sim = useMemo(() => {
+    const useForce = layoutMode === "neural-link" && !!topHubId;
+    // Category-bucketed orbits (used by orbital mode + as fallback).
     const orbitOf = (id: string): number => {
       const note = notesById?.[id];
       const key = pickCategoryKey(note?.tags, !!note?.pinned);
@@ -230,12 +282,21 @@ export function GraphView({
     const s = new ForceSimulation(
       graph.nodes.map((n) => ({ id: n.id, pinned: false })),
       graph.edges.map((e) => ({ source: e.source, target: e.target })),
-      { width: size.width, height: size.height, orbitOf },
+      {
+        width: size.width,
+        height: size.height,
+        orbitOf,
+        mode: useForce ? "force" : "orbital",
+        // No forced sun at center — let the most-connected note end up
+        // central naturally via gravity + degree, not pinned. Forcing
+        // the top-degree node (which can be a random task) was the
+        // mistake the user flagged.
+      },
     );
     simRef.current = s;
     return s;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, size.width, size.height]);
+  }, [graph, size.width, size.height, layoutMode, topHubId]);
 
   // Currently-isolated orbit (click a ring chip to focus). Forwarded
   // into the sim so non-isolated rings slow to near-stop.
@@ -256,17 +317,18 @@ export function GraphView({
     let skip = false;
     const loop = () => {
       skip = !skip;
-      if (!skip) setPulseTick((t) => (t + 1) % 1_000_000);
+      if (!skip) {
+        setPulseTick((t) => (t + 1) % 1_000_000);
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // ── Starfield — deterministic seeded dots behind the graph.
-  //    Pure cosmetic. Generated once per graph (cheap).
+  // ── Starfield — deterministic seeded warm specks behind the graph.
+  //    Sparse atmospheric dust, not a Webb deep-field. Pure cosmetic.
   const starfield = useMemo(() => {
-    // Mulberry32 — 32-bit deterministic PRNG.
     const seed = 0x9e3779b9 ^ graph.nodes.length;
     let a = seed;
     const rand = () => {
@@ -276,8 +338,6 @@ export function GraphView({
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
     const stars: { x: number; y: number; r: number; o: number }[] = [];
-    // Sparse warm specks — barely-there atmospheric dust. Not a starfield,
-    // more like motes of light in a candlelit room.
     for (let i = 0; i < 55; i++) {
       stars.push({
         x: (rand() - 0.5) * 2400,
@@ -289,17 +349,97 @@ export function GraphView({
     return stars;
   }, [graph]);
 
+  // Memoized starfield JSX — computed once per graph. 55 tiny dots never
+  // need to reconcile on every animation tick; keeping this memo stops
+  // React from walking them at 30fps for zero benefit.
+  const starfieldJsx = useMemo(
+    () => (
+      <g pointerEvents="none" aria-hidden>
+        {starfield.map((s, i) => (
+          <circle
+            key={`star-${i}`}
+            cx={s.x}
+            cy={s.y}
+            r={s.r}
+            fill="#e8d5b0"
+            opacity={s.o}
+          />
+        ))}
+      </g>
+    ),
+    [starfield],
+  );
+
+  // ── Territorial backdrop ────────────────────────────────────────────────
+  // Faint white dot grid + 4 thin radial sector divider lines. Together they
+  // give the canvas a sense of mapped territory (Obsidian-style cartography)
+  // without ever competing with the nodes. Memoized by canvas size so the
+  // 200+ background circles don't reconcile per animation tick.
+  const territorialBackdrop = useMemo(() => {
+    const span = Math.max(size.width, size.height) * 1.6;
+    const step = 70;
+    const dots: { x: number; y: number }[] = [];
+    for (let x = -span; x <= span; x += step) {
+      for (let y = -span; y <= span; y += step) {
+        dots.push({ x, y });
+      }
+    }
+    const cx = size.width / 2;
+    const cy = size.height / 2;
+    const sectorLen = Math.max(size.width, size.height) * 0.7;
+    return (
+      <g pointerEvents="none" aria-hidden>
+        {/* White dot grid — sparse, almost-invisible territory markers. */}
+        {dots.map((d, i) => (
+          <circle
+            key={`td-${i}`}
+            cx={d.x}
+            cy={d.y}
+            r={0.6}
+            fill="#f5ecd0"
+            opacity={0.06}
+          />
+        ))}
+        {/* Sector divider lines — at 45/135/225/315° so they sit BETWEEN
+            the orbit labels (which live at 12 o'clock). Dashed, near-zero
+            opacity, just enough to suggest "this side vs. that side". */}
+        {[45, 135, 225, 315].map((deg) => {
+          const rad = (deg * Math.PI) / 180;
+          return (
+            <line
+              key={`sec-${deg}`}
+              x1={cx}
+              y1={cy}
+              x2={cx + Math.cos(rad) * sectorLen}
+              y2={cy + Math.sin(rad) * sectorLen}
+              stroke="#f5ecd0"
+              strokeOpacity={0.04}
+              strokeWidth={0.6}
+              strokeDasharray="1 14"
+            />
+          );
+        })}
+      </g>
+    );
+  }, [size.width, size.height]);
+
   // ── Animation loop ─────────────────────────────────────────────────────
-  // Always-on at 60fps. Perpetual drift + orbital force in the sim keep
-  // the graph gently rotating so the network feels alive — never freezes.
+  // Always-on, ~30fps (skip every other RAF). When the force sim cools
+  // (force-mode equilibrium), we skip the React state update entirely —
+  // there's nothing to redraw. Orbital mode never cools (perpetual spin).
   useEffect(() => {
     let alive = true;
+    let skip = false;
     const loop = () => {
       if (!alive) return;
       const s = simRef.current;
       if (!s) return;
+      // Physics pass is skipped internally when the force sim is cooled,
+      // but the cheap rigid rotation keeps running — so we always tick
+      // React so the orbital motion stays visible.
       s.step();
-      setTick((t) => (t + 1) % 1_000_000);
+      skip = !skip;
+      if (!skip) setTick((t) => (t + 1) % 1_000_000);
       frameRef.current = requestAnimationFrame(loop);
     };
     frameRef.current = requestAnimationFrame(loop);
@@ -470,6 +610,9 @@ export function GraphView({
           justDraggedRef.current = true;
           const { x, y } = screenToSim(sx, sy);
           sim.pin(drag.id, x, y);
+          // Wake the force sim — dragging a node should re-stir its
+          // neighbors via the spring forces.
+          sim.warm();
         }
       }
       dragRef.current = { ...drag, lastX: sx, lastY: sy, maxMoved };
@@ -491,6 +634,9 @@ export function GraphView({
     // Release dragged nodes back into their orbit.
     if (drag?.kind === "node" && drag.id && wasDrag) {
       simRef.current?.unpin(drag.id);
+      // Wake — released node will accelerate from rest under the
+      // spring/repulsion forces; the renderer needs to keep ticking.
+      simRef.current?.warm();
     }
     // Background tap (pan gesture with no meaningful movement) = dismiss peek.
     if (drag?.kind === "pan" && !wasDrag && onClearPeek) {
@@ -519,12 +665,15 @@ export function GraphView({
     cancelHoverClear();
     setHoverId(null);
     simRef.current?.setHover(null);
+    simRef.current?.warm();
   }, []);
 
   const handleNodeEnter = useCallback((id: string) => {
     cancelHoverClear();
     setHoverId(id);
     simRef.current?.setHover(id);
+    // Wake the sim so the renderer paints the hover halo on the next frame.
+    simRef.current?.warm();
   }, []);
 
   const handleNodeLeave = useCallback((id: string) => {
@@ -536,6 +685,7 @@ export function GraphView({
       setHoverId((cur) => {
         if (cur === id) {
           simRef.current?.setHover(null);
+          simRef.current?.warm();
           return null;
         }
         return cur;
@@ -613,8 +763,6 @@ export function GraphView({
   // Labels — Logseq-style, always visible. Overlap is tolerated; clarity
   // wins over a clean layout. User can zoom/pan to resolve overlaps.
   const hoverNote = hoverId ? notesById?.[hoverId] : undefined;
-  // Label font size for the selected-only side label.
-  const labelFontSize = Math.max(10, 11 / view.k);
 
   // Compute per-node opacity using depth, filter, and search.
   // Hover dims hard (0.08) for strong momentary focus. Selection dims soft
@@ -703,8 +851,8 @@ export function GraphView({
         }}
       >
         <defs>
-          {/* Soft halo — just enough to lift each dot off the charcoal
-              background, nothing like a neon bloom. */}
+          {/* Soft synapse bloom — lifts edges + node halos just enough so
+              the graph reads as luminous wire rather than painted ink. */}
           <filter id="lb-neural-glow" x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="blur" />
             <feMerge>
@@ -728,7 +876,6 @@ export function GraphView({
             <stop offset="40%" stopColor="#a8754c" stopOpacity="0.22" />
             <stop offset="100%" stopColor="#a8754c" stopOpacity="0" />
           </radialGradient>
-
         </defs>
 
         <rect
@@ -747,49 +894,65 @@ export function GraphView({
         />
 
         <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
-          {/* Sparse warm motes — atmospheric dust, not stars. */}
-          <g pointerEvents="none" aria-hidden>
-            {starfield.map((s, i) => (
-              <circle
-                key={`star-${i}`}
-                cx={s.x}
-                cy={s.y}
-                r={s.r}
-                fill="#e8d5b0"
-                opacity={s.o}
-              />
-            ))}
-          </g>
+          {/* Sparse warm motes — atmospheric dust, not stars. Memoized
+              upstream so 55 dots don't walk React each animation tick. */}
+          {starfieldJsx}
 
-          {/* Observatory furniture — orbit rings, labels, ember core, and
-              the single "now" marker at 12 o'clock on the innermost ring.
-              All decorative: no pointer events. */}
-          {(() => {
+          {/* Territorial dot grid + sector divider lines — Obsidian-style
+              faint cartography behind everything. Both layers are memoized
+              upstream + drawn at very low opacity so they read as "this
+              canvas has territory" without ever competing with the nodes. */}
+          {territorialBackdrop}
+
+          {/* Decorative sun — ember core at canvas center. Shown in BOTH
+              modes because both modes orbit around the center: orbital
+              mode has concentric rings around it, force mode has a
+              force-directed cluster slowly rotating around it. The sun
+              is never a real note (that was the "big task at center"
+              mistake) — just a gravitational anchor visual.           */}
+          {layoutMode === "neural-link" && (() => {
+            const { cx, cy } = sim.center();
+            const coreBreath = 1 + 0.05 * Math.sin(pulseTick * 0.03);
+            const coreR = 24 * coreBreath;
+            return (
+              <g pointerEvents="none" aria-hidden>
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 3.4}
+                  fill="url(#lb-ember)"
+                  opacity={0.82}
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR}
+                  fill="#d4a26a"
+                  opacity={0.3}
+                  filter="url(#lb-core-glow)"
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 0.42}
+                  fill="#f5d19a"
+                  opacity={0.55}
+                />
+              </g>
+            );
+          })()}
+
+          {/* Observatory furniture — orbit guide rings, ring labels, ember
+              core, "now" tick. Only in category mode (orbital layout).  */}
+          {layoutMode === "category" && (() => {
             const { cx, cy } = sim.center();
             const radii = sim.orbitRadii();
             const coreBreath = 1 + 0.05 * Math.sin(pulseTick * 0.03);
             const coreR = 24 * coreBreath;
-            const ringOpacity = (i: number) =>
-              isolatedOrbit === null
-                ? 0.08 + i * 0.008
-                : isolatedOrbit === i
-                  ? 0.26
-                  : 0.03;
             return (
               <g pointerEvents="none" aria-hidden>
-                {/* SVG textPath anchors — one invisible circle per orbit
-                    so the label can ride the ring. Rendered above the
-                    visible rings so the text draws on top. */}
-                <defs>
-                  {radii.map((r, i) => (
-                    <path
-                      key={`ring-path-${i}`}
-                      id={`lb-orbit-path-${i}`}
-                      d={`M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy}`}
-                    />
-                  ))}
-                </defs>
-                {/* Orbit guide rings — dashed warm strokes. */}
+                {/* Orbit guide rings — dashed warm strokes in each ring's
+                    label color. Subtle, never compete with the nodes. */}
                 {radii.map((r, i) => (
                   <circle
                     key={`orbit-${i}`}
@@ -798,16 +961,19 @@ export function GraphView({
                     r={r}
                     fill="none"
                     stroke={ORBIT_LABELS[i].color}
-                    strokeOpacity={ringOpacity(i)}
+                    strokeOpacity={
+                      isolatedOrbit === null
+                        ? 0.10 + i * 0.012
+                        : isolatedOrbit === i
+                          ? 0.32
+                          : 0.04
+                    }
                     strokeWidth={isolatedOrbit === i ? 1.2 : 0.8}
                     strokeDasharray={isolatedOrbit === i ? "3 5" : "2 7"}
                   />
                 ))}
-                {/* Orbit labels — static text parked at the TOP of each
-                    ring, OUTSIDE the orbit path, so they never cross the
-                    ember core or other rings. Skipped for empty orbits
-                    and for any ring too small to comfortably hold the
-                    label. */}
+                {/* Orbit labels — static text parked at the TOP of each ring,
+                    OUTSIDE the orbit path. Empty orbits are skipped. */}
                 {(() => {
                   const metas = sim.orbitMeta();
                   return radii.map((r, i) => {
@@ -815,10 +981,10 @@ export function GraphView({
                     if (r < 80) return null;
                     const op =
                       isolatedOrbit === null
-                        ? 0.55
+                        ? 0.6
                         : isolatedOrbit === i
-                          ? 0.92
-                          : 0.12;
+                          ? 0.95
+                          : 0.14;
                     const label = ORBIT_LABELS[i];
                     return (
                       <text
@@ -848,7 +1014,10 @@ export function GraphView({
                     );
                   });
                 })()}
-                {/* Outer ember halo + disk + hot center */}
+                {/* Outer ember halo + warm core + hot center pupil. Only
+                    visible in category mode; neural-link mode hides the
+                    whole observatory chrome since the hub star is the
+                    actual center anchor there. */}
                 <circle
                   cx={cx}
                   cy={cy}
@@ -919,8 +1088,8 @@ export function GraphView({
                 x2={b.x}
                 y2={b.y}
               >
-                <stop offset="0%" stopColor={srcColor} stopOpacity={0.6} />
-                <stop offset="100%" stopColor={tgtColor} stopOpacity={0.6} />
+                <stop offset="0%" stopColor={srcColor} stopOpacity={0.78} />
+                <stop offset="100%" stopColor={tgtColor} stopOpacity={0.78} />
               </linearGradient>
             );
           })}
@@ -951,14 +1120,14 @@ export function GraphView({
             const dimmed = st.opacity < 0.1;
             const baseOp = dimmed
               ? st.opacity * 0.5
-              : (isActive ? 0.62 : 0.22) + 0.06 * phase;
+              : (isActive ? 0.72 : 0.34) + 0.06 * phase;
             return (
               <path
                 key={`e-${idx}`}
                 d={d}
                 fill="none"
                 stroke={`url(#e-grad-${idx})`}
-                strokeWidth={isActive ? 1.3 : 0.8}
+                strokeWidth={isActive ? 1.4 : 0.95}
                 strokeOpacity={baseOp}
                 strokeLinecap="round"
                 pointerEvents="none"
@@ -1036,7 +1205,8 @@ export function GraphView({
               Math.min(11, Math.sqrt(deg) * 2) +
               Math.min(5, importance / 2) +
               (note?.pinned ? 1 : 0);
-            const categoryKey = pickCategoryKey(note?.tags, !!note?.pinned);
+            const categoryKeys = categoryKeysFor(note?.tags, !!note?.pinned);
+            const categoryKey = categoryKeys[0] ?? pickCategoryKey(note?.tags, !!note?.pinned);
             const badge = dotBadge(note?.title, categoryKey);
             // Brightness filter — higher importance nodes "glow" more.
             // Also boosts the hovered 1-hop neighbors so deep things pop.
@@ -1060,12 +1230,12 @@ export function GraphView({
               const content = note?.content || "";
               return /^\s*-\s*\[x\]/im.test(content);
             })();
-            // Always-visible labels for just your anchor notes + whatever
-            // you're hovering. Hubs identify themselves with the pulse
-            // ring — no need for a permanent label. Keeps the graph
-            // readable instead of a wall of text on every orbit.
-            const showSideLabel =
-              isSelected || isFocus || isNeighbor || !!note?.pinned;
+            // Always-on labels — every node carries a short title beneath
+            // it so the user can read the constellation without hovering.
+            // Selected / focus / neighbor / pinned get the bright pill;
+            // everyone else gets a dim ghost label.
+            const showSideLabel = !!label;
+            const labelEmphasized = isSelected || isFocus || isNeighbor || !!note?.pinned;
 
             // Gentle hover scale — noticeable but not jumpy. The hover
             // also freezes the node's orbit via sim.setHover, so the user
@@ -1110,9 +1280,7 @@ export function GraphView({
                   filter="url(#lb-neural-glow)"
                 />
                 {/* Hub ring — top-5 most connected notes get a warm
-                    concentric pulse marking them as anchors of the graph.
-                    Now slightly brighter + a static inner ring so they
-                    read as hubs even between pulse cycles. */}
+                    concentric pulse marking them as anchors of the graph. */}
                 {hubIds.has(node.id) && !note?.pinned && (
                   <>
                     <circle
@@ -1172,85 +1340,161 @@ export function GraphView({
                     strokeWidth={2}
                   />
                 )}
-                {/* Muted body — cozy palette keeps the saturation gentle.
-                    A thin warm-white ring replaces the harsh stroke. */}
-                <circle
-                  r={r}
-                  fill={color.ring}
-                  opacity={isFocus ? 0.88 : isNeighbor ? 0.78 : 0.66}
-                  stroke={isFocus ? "rgba(240,228,200,0.3)" : "rgba(240,228,200,0.08)"}
-                  strokeWidth={isFocus ? 0.9 : 0.5}
-                  style={{ filter: `brightness(${brightness * 0.9})` }}
-                />
-                {/* Black icon / date text stamped on the colored dot —
-                    high contrast against the bright fill so the category
-                    reads instantly. Journal/daily-log show their date. */}
+                {/* Single-planet node body. One colored circle, one centered
+                    icon (or date text for journal/daily-log). Secondary
+                    category signals live as corner markers below — NEVER as
+                    inner slices — so the graph reads like a constellation
+                    of distinct stars, not a pie-chart garden.                */}
                 {(() => {
+                  const bodyOpacity = isFocus ? 0.88 : isNeighbor ? 0.78 : 0.66;
+                  const bodyStroke = isFocus
+                    ? "rgba(240,228,200,0.3)"
+                    : "rgba(240,228,200,0.08)";
+                  const bodyStrokeW = isFocus ? 0.9 : 0.5;
+                  const bodyFilter = { filter: `brightness(${brightness * 0.9})` };
                   const isDateBadge =
                     (categoryKey === "journal" || categoryKey === "daily-log") &&
                     /\d/.test(badge);
-                  if (isDateBadge) {
-                    return (
-                      <text
-                        x={0}
-                        y={0}
-                        textAnchor="middle"
-                        dominantBaseline="central"
-                        className="pointer-events-none select-none"
-                        style={{
-                          fontSize: `${Math.max(9, r * 0.48)}px`,
-                          fontWeight: 700,
-                          fill: "#0a0a0a",
-                          letterSpacing: "-0.03em",
-                        }}
-                      >
-                        {badge}
-                      </text>
-                    );
-                  }
-                  const IconComp = CATEGORY_ICONS[categoryKey] ?? DEFAULT_CATEGORY_ICON;
-                  const iconSize = Math.max(12, r * 0.9);
                   return (
-                    <g
-                      transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
-                      pointerEvents="none"
-                    >
-                      <IconComp
-                        size={iconSize}
-                        color="#0a0a0a"
-                        strokeWidth={2}
-                        aria-hidden
+                    <>
+                      <circle
+                        r={r}
+                        fill={color.ring}
+                        opacity={bodyOpacity}
+                        stroke={bodyStroke}
+                        strokeWidth={bodyStrokeW}
+                        style={bodyFilter}
                       />
+                      {isDateBadge ? (
+                        <text
+                          x={0}
+                          y={0}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          className="pointer-events-none select-none"
+                          style={{
+                            fontSize: `${Math.max(9, r * 0.48)}px`,
+                            fontWeight: 700,
+                            fill: "#0a0a0a",
+                            letterSpacing: "-0.03em",
+                          }}
+                        >
+                          {badge}
+                        </text>
+                      ) : (() => {
+                        const IconComp = CATEGORY_ICONS[categoryKey] ?? DEFAULT_CATEGORY_ICON;
+                        const iconSize = Math.max(12, r * 0.9);
+                        return (
+                          <g
+                            transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
+                            pointerEvents="none"
+                          >
+                            <IconComp
+                              size={iconSize}
+                              color="#0a0a0a"
+                              strokeWidth={2}
+                              aria-hidden
+                            />
+                          </g>
+                        );
+                      })()}
+                    </>
+                  );
+                })()}
+                {/* Deadline attendant — a tiny rose moon stamped in the
+                    top-right when the note carries a deadline that isn't
+                    already its primary category (e.g. a task with a due
+                    date). Keeps the primary-icon solar aesthetic intact
+                    while still whispering "this has a time pressure".     */}
+                {(() => {
+                  const hasDeadline =
+                    categoryKeys.includes("deadline") && categoryKey !== "deadline";
+                  const hasDueTag = (note?.tags || []).some((t) =>
+                    t.toLowerCase().startsWith("due/"),
+                  );
+                  if (!hasDeadline && !hasDueTag) return null;
+                  // Chase the 45° diagonal out from center so the chip sits
+                  // on the node's skin, flush against the top-right arc.
+                  const cx = Math.cos(-Math.PI / 4) * r;
+                  const cy = Math.sin(-Math.PI / 4) * r;
+                  const chipR = Math.max(5.5, r * 0.32);
+                  const iconSize = chipR * 1.25;
+                  const AlarmIcon = CATEGORY_ICONS.deadline ?? DEFAULT_CATEGORY_ICON;
+                  return (
+                    <g transform={`translate(${cx} ${cy})`} pointerEvents="none">
+                      {/* Soft outer glow — rose luminance sold as a tiny
+                          nebula without competing with the node proper. */}
+                      <circle
+                        r={chipR + 2}
+                        fill={ringForKey("deadline")}
+                        opacity={0.22}
+                        filter="url(#lb-neural-glow)"
+                      />
+                      <circle
+                        r={chipR}
+                        fill={ringForKey("deadline")}
+                        stroke="rgba(240,228,200,0.35)"
+                        strokeWidth={0.7}
+                        opacity={isFocus ? 0.98 : 0.9}
+                      />
+                      <g
+                        transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
+                      >
+                        <AlarmIcon
+                          size={iconSize}
+                          color="#0a0a0a"
+                          strokeWidth={2.2}
+                          aria-hidden
+                        />
+                      </g>
                     </g>
                   );
                 })()}
-                {/* Side-label — variable weight by role.
-                    • selected / focused → solid pill, readable across the canvas
-                    • hub / pinned / neighbor → bare text, quieter, doesn't crowd
-                    Right-edge flip: if the node sits in the right third of
-                    the canvas, label anchors LEFT so it never clips out. */}
+                {/* Always-on label — every node carries a short title under
+                    it so the constellation reads at a glance. Three weights:
+                    • selected / focused / pinned → solid pill, full opacity
+                    • neighbor of focus           → bright text, no pill
+                    • everything else             → dim ghost text          */}
                 {showSideLabel && label && (() => {
-                  const emphasized = isSelected || isFocus;
-                  const maxChars = emphasized ? 36 : 18;
+                  const emphasized = labelEmphasized;
+                  const maxChars =
+                    isSelected || isFocus ? 32 : labelEmphasized ? 18 : 14;
                   const truncated =
                     label.length > maxChars
                       ? label.slice(0, maxChars - 2) + "…"
                       : label;
-                  const labelW = truncated.length * 7 + (emphasized ? 14 : 8);
+                  const fontPx = isSelected || isFocus ? 11 : labelEmphasized ? 10 : 9;
+                  const labelW = truncated.length * (fontPx * 0.62) + (emphasized ? 14 : 6);
+                  // Anchor the label BELOW the node by default so even
+                  // tightly clustered notes can read their titles without
+                  // colliding into other nodes' bodies. Selected/focused
+                  // nodes get the side-pill so the eye can rest on them.
+                  const placeBelow = !emphasized;
                   const snScreenX = sn.x * view.k + view.tx;
                   const wouldOverflow =
+                    !placeBelow &&
                     snScreenX + (r + 12 + labelW) * view.k > size.width - 8;
-                  const offsetX = wouldOverflow
-                    ? -(r + 8 + labelW - 4)
-                    : r + 8;
+                  const offsetX = placeBelow
+                    ? -labelW / 2
+                    : wouldOverflow
+                      ? -(r + 8 + labelW - 4)
+                      : r + 8;
+                  const offsetY = placeBelow ? r + 6 : -8;
+                  const baseTextOp = isSelected || isFocus
+                    ? 0.96
+                    : labelEmphasized ? 0.78 : 0.42;
                   const textColor = taskDone
-                    ? "rgba(232,213,176,0.5)"
+                    ? `rgba(232,213,176,${baseTextOp * 0.55})`
                     : emphasized
-                      ? "rgba(245,209,154,0.95)"
-                      : "rgba(232,213,176,0.68)";
+                      ? `rgba(245,209,154,${baseTextOp})`
+                      : `rgba(232,213,176,${baseTextOp})`;
                   return (
-                    <g transform={`translate(${offsetX} ${-8})`} pointerEvents="none">
-                      {emphasized && (
+                    <g
+                      transform={`translate(${offsetX} ${offsetY})`}
+                      pointerEvents="none"
+                      opacity={op}
+                    >
+                      {emphasized && (isSelected || isFocus) && !placeBelow && (
                         <rect
                           x={-4}
                           y={-2}
@@ -1264,17 +1508,17 @@ export function GraphView({
                         />
                       )}
                       <text
-                        x={emphasized ? 3 : 0}
-                        y={11}
+                        x={placeBelow ? labelW / 2 : (emphasized ? 3 : 0)}
+                        y={placeBelow ? 0 : 11}
+                        textAnchor={placeBelow ? "middle" : "start"}
+                        dominantBaseline={placeBelow ? "hanging" : "auto"}
                         style={{
-                          fontSize: `${Math.max(emphasized ? 11 : 10, labelFontSize * (emphasized ? 1 : 0.92))}px`,
+                          fontSize: `${fontPx}px`,
                           fontWeight: emphasized ? 600 : 500,
                           fill: textColor,
                           fontFamily: "var(--font-display, inherit)",
                           letterSpacing: "-0.01em",
-                          textShadow: emphasized
-                            ? "none"
-                            : "0 1px 3px rgba(0,0,0,0.85), 0 0 2px rgba(0,0,0,0.6)",
+                          textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.7)",
                           textDecoration: taskDone ? "line-through" : "none",
                           textDecorationColor: "rgba(110,181,131,0.9)",
                           textDecorationThickness: "1.5px",
@@ -1297,8 +1541,12 @@ export function GraphView({
         dragRef.current?.kind === "node" && dragRef.current.maxMoved > DRAG_THRESHOLD
       ) && (() => {
         const catKey = pickCategoryKey(hoverNote.tags, !!hoverNote.pinned);
-        const catLabel = (FILTER_CATEGORIES.find((c) => c.key === catKey)?.label)
+        const catLabelBase = (FILTER_CATEGORIES.find((c) => c.key === catKey)?.label)
           ?? catKey.replace(/[-_]/g, " ");
+        const hoverTotalCats = categoryMatchCount(hoverNote.tags, !!hoverNote.pinned);
+        const catLabel = hoverTotalCats > 1
+          ? `${catLabelBase} · +${hoverTotalCats - 1} more`
+          : catLabelBase;
         const links = degree[hoverId] ?? 0;
         // Importance → filled-dot count (1..5). 1–2=1, 3–4=2, 5–6=3, 7–8=4, 9–10=5.
         const filledDots = Math.max(1, Math.min(5, Math.ceil((hoverNote.importance ?? 5) / 2)));
@@ -1573,8 +1821,9 @@ export function GraphView({
       })()}
 
       {/* Orbit chip stack — left-middle edge. Click to isolate a ring,
-          click again to release. Hover highlights. Shows per-orbit count. */}
-      {(() => {
+          click again to release. Hover highlights. Shows per-orbit count.
+          Hidden in neural-link mode where there are no orbits. */}
+      {layoutMode === "category" && (() => {
         const meta = sim.orbitMeta();
         return (
           <div className="absolute left-3 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1.5">
@@ -1653,6 +1902,44 @@ export function GraphView({
       })()}
 
       {/* Zoom controls */}
+      {/* Layout-mode toggle — flip between category orbits (each kind on
+          its own ring) and neural-link orbits (top-hub at center, others
+          on BFS-distance rings). Top-left corner so it doesn't crash into
+          the search bar (center) or zoom controls (right). */}
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-0 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-0.5 py-0.5 text-[10px]">
+        {(["category", "neural-link"] as const).map((mode) => {
+          const active = layoutMode === mode;
+          const label = mode === "category" ? "Categories" : "Neural-links";
+          const title =
+            mode === "category"
+              ? "Group notes by kind (task / lesson / memory)"
+              : topHubId
+                ? "Pin the most-linked note at center; others orbit by distance"
+                : "Neural-link mode — needs at least one link";
+          return (
+            <button
+              key={mode}
+              type="button"
+              disabled={mode === "neural-link" && !topHubId}
+              onClick={() => setLayoutMode(mode)}
+              title={title}
+              className={`px-2.5 py-1 rounded-full transition-colors tracking-wide ${
+                active
+                  ? "bg-bg-hover text-text-primary"
+                  : "text-text-muted hover:text-text-primary"
+              } ${mode === "neural-link" && !topHubId ? "opacity-40 cursor-not-allowed" : ""}`}
+              style={
+                active
+                  ? { boxShadow: `inset 0 -2px 0 ${mode === "neural-link" ? "#f0a060" : "#d4a26a"}` }
+                  : undefined
+              }
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="absolute top-3 right-3 flex flex-col gap-1 z-10">
         <IconButton
           onClick={() => setView((v) => ({ ...v, k: Math.min(MAX_ZOOM, v.k * 1.2) }))}

@@ -535,6 +535,53 @@ html, body {
   letter-spacing: -0.02em;
 }
 
+/* ── Ops Deck: lane columns + live tickers ──────────────────────── */
+
+/* Lane column — used in Overview deck + Activity top region. Keeps the
+   three lanes visually distinct without the heavier glass-card treatment
+   (the cards INSIDE the lane carry the glass). */
+.lane-column {
+  background: rgba(23, 23, 23, 0.35);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 170px;
+  transition: border-color 0.25s ease, background 0.25s ease;
+}
+.lane-column[data-lane="foreground"][data-active="true"] { border-color: rgba(59, 130, 246, 0.35); }
+.lane-column[data-lane="background"][data-active="true"] { border-color: rgba(168, 85, 247, 0.35); }
+.lane-column[data-lane="specialist"][data-active="true"] { border-color: rgba(251, 146, 60, 0.35); }
+
+/* Ticker — tabular digits with a 1Hz subtle opacity dip on the separating
+   colon so the eye knows the number is live without a full pulse animation. */
+.ticker {
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.ticker .tick {
+  display: inline-block;
+  animation: live-tick 1s ease-in-out infinite;
+}
+@keyframes live-tick {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Countdown — used for "next run in …" on saved agents. Muted by default
+   but turns amber when under a minute to flag imminent runs. */
+.countdown {
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--color-text-secondary);
+}
+.countdown.due-soon { color: var(--color-amber); }
+.countdown.overdue { color: var(--color-error); }
+
 /* Message metadata row */
 .msg-meta {
   display: flex;
@@ -899,3 +946,4 @@ html, body {
   from { transform: scale(0.6); opacity: 0; }
   to   { transform: scale(1);   opacity: 1; }
 }
+

@@ -113,7 +113,7 @@ The stuck detector will force-stop you around 2–3 repeated failures. Never rea
 - **`run_command` is NEVER a workaround for a failing skill.** If `n8n_*`, `email_*`, `whatsapp_*`, or `browser` failed, do NOT fall through to `run_command`. That's not "trying harder", that's flailing.
 - **`SCHEMA_VIOLATION:` from n8n tools** means a workflow node has missing/invalid required fields. The error names the node and the exact field to fix. Call `n8n_update_workflow` ONCE with the fix — do NOT rebuild the workflow from scratch, do NOT swap `resource` types, do NOT try a different tool. Read the violation list verbatim and apply each fix to `parameters`.
 - **`STOP_OAUTH_CREDENTIAL:` from n8n tools** means the user must finish OAuth consent in n8n UI (http://localhost:5678/home/credentials). Print that URL to the user and stop — zero retries, zero tool pivots.
-- **`n8n_run_task` results are AUTHORITATIVE.** If it returns success with `updated_rows > 0` / `resource_id` set / no error — the operation happened. Do NOT open a browser to visually verify a Sheets/Drive/Gmail write. The Google API response is the source of truth, not Chrome rendering. If the skill itself raises "wrote 0 rows" — report that to the user, don't browser-check.
+- **`google_run_task` results are AUTHORITATIVE.** If it returns success with `updated_rows > 0` / `resource_id` set / no error — the operation happened. Do NOT open a browser to visually verify a Sheets/Drive/Gmail write. The Google API response is the source of truth, not Chrome rendering. If the skill itself raises "wrote 0 rows" — report that to the user, don't browser-check. (Same rule applies to any remaining legacy `n8n_run_task` calls if re-enabled.)
 - **Retry ONLY across sessions.** A tool that failed in this turn can be tried next turn — maybe the browser restarted, maybe the page loaded, maybe a credential finished. Within one turn: zero retries.
 
 ## Browser Rules — CRITICAL
@@ -233,25 +233,27 @@ n8n is used AS A TOOL LIBRARY for Google connectors (Drive, Sheets, Gmail, Calen
 
 | Need | Tool | Persistence |
 |---|---|---|
-| "Do X once in Google" (create folder / sheet, append rows, send email, add event) | `n8n_run_task` | **EPHEMERAL** — workflow auto-deleted after run |
-| "Kickoff a project" (folder + 4 seeded sheets) | `project_planning_kickoff` | Ephemeral; resources auto-registered to LazyBrain |
+| "Do X once in Google" (create folder / sheet, append rows, send email, add event) | `google_run_task` | Direct Google API — no workflow, no cleanup |
+| "Kickoff a project" (folder + 4 seeded sheets) | `google_project_planning_kickoff` | Direct API; resources auto-registered to LazyBrain |
 | "Every Monday at 9am check X and email me" | `n8n_create_workflow` | Persistent, webhook/schedule trigger |
 | "Cron reminder, no Google needed" | `schedule_job` | Native heartbeat, **never** n8n |
 | "Read my whatsapp / instagram / email" | MCP tool | Real-time, one call |
 | "Watch this URL / channel" | `watch_site` / `watch_messages` | Zero-token heartbeat |
 
+**Atomic Google ops: always `google_run_task`** (Drive, Sheets, Gmail, Calendar single-call operations). The n8n-backed `n8n_run_task` / `project_planning_kickoff` variants are **deprecated and unregistered** — the agent will not see them. Rationale: ADR-0003 — direct Google API skips n8n's create-activate-webhook-run-delete ceremony for calls that never needed a workflow engine. The result `google_run_task` returns is AUTHORITATIVE; do not open a browser afterwards to "visually verify."
+
 ### Project asset memory — use BEFORE creating anything
 
-When the user mentions a project that already exists (e.g. "add to my Hirossa keyword sheet"), call `lookup_project_asset(project="Hirossa", purpose="keyword tracker")` FIRST. It returns the Drive/Sheet ID from the `[[Hirossa Project]]` LazyBrain note. Pass that ID to `n8n_run_task(task_type="append_sheet_rows", task={sheet_id: <id>, body: {rows: [...]}})`.
+When the user mentions a project that already exists (e.g. "add to my Hirossa keyword sheet"), call `lookup_project_asset(project="Hirossa", purpose="keyword tracker")` FIRST. It returns the Drive/Sheet ID from the `[[Hirossa Project]]` LazyBrain note. Pass that ID to `google_run_task(task_type="append_sheet_rows", task={sheet_id: <id>, values: [...]})`.
 
-If the project doesn't exist yet and the user wants a full kickoff, use `project_planning_kickoff(project=..., description=...)` — creates folder + 4 seeded sheets in one go, auto-registers everything under the project note.
+If the project doesn't exist yet and the user wants a full kickoff, use `google_project_planning_kickoff(project=..., description=...)` — creates folder + 4 seeded sheets via direct Google API, auto-registers everything under the project note.
 
 ### On-demand persistent n8n (the exception)
 
 User says "create a workflow that…" or "set up an n8n automation for…" → that's the persistent path: `n8n_list_templates` → `n8n_create_workflow` → `n8n_manage_workflow(activate)`. Keep the workflow, don't delete it.
 
 Decision tree:
-1. **Google one-off** ("create sheet X", "add row Y", "send email", "new event") → `n8n_run_task` (or `project_planning_kickoff` for full project).
+1. **Google one-off** ("create sheet X", "add row Y", "send email", "new event") → `google_run_task` (or `google_project_planning_kickoff` for full project). Never `n8n_run_task` — that path is deprecated.
 2. **User explicitly wants persistent n8n** ("build me a workflow", "set up automation") → `n8n_create_workflow` + activate.
 3. **Cron reminder / ping, no Google** → `schedule_job`.
 4. **Read / interact with messaging platform** → channel MCP.
@@ -292,18 +294,13 @@ Hard walls in the n8n REST API:
 - **If a workflow run fails twice in the same turn, STOP.** Report what broke (node name + error from `n8n_get_execution`) and ask the user how to proceed.
 - **Never chain `n8n_create_workflow → n8n_update_workflow → n8n_manage_workflow → n8n_create_workflow` in a repair loop.** One attempt, one test, one report.
 
-### n8n Google OAuth — always user-driven
-Google Sheets/Drive/Gmail/Calendar credentials require an OAuth consent step that **only the user can complete in the n8n UI**. You cannot finish it from code.
+### Google Workspace auth — use `workspace-mcp`, not n8n
+Google Sheets/Drive/Gmail/Calendar are served by the **`workspace-mcp` MCP server** (bundled, auto-connects at boot). A token for the user's primary account is already cached on disk and refreshes silently. In almost every case, the user is already logged in — **just call the Google tool directly**.
 
-- **ALWAYS check for existing authorized credentials FIRST.** Call `n8n_list_credentials` and look for entries where `updatedAt > createdAt` (the OAuth callback bumps `updatedAt`). If one of the right type already exists, **DO NOT create another shell** — the auto-binder will use it. Shell-spawning loops were the #1 cause of n8n failures on this project (logged 2026-04-22).
-- **If no authorized credential exists:**
-  - **Fast path:** `n8n_google_services_setup(services=["sheets","drive"])` uses n8n's built-in OAuth app — the user does NOT need a Google Cloud Console project.
-  - **Custom client path:** `n8n_google_oauth_setup(client_id, client_secret, scopes=[...])` — use only if the user provides their own Google Cloud OAuth client.
-  - Both skills now self-guard: they refuse to create a second shell if an authorized one of the same type already exists. Trust their refusals.
-- **Your job after setup:** print each consent URL as plain text ("Finish sign-in here: …") and STOP. Do NOT open the browser. Do NOT retry. Do NOT test the workflow until the user confirms the credential is green in the UI.
-- **If a workflow fails with `Credential not configured: <type>`:** one of two cases.
-  - (a) Zero authorized creds of that type exist → paste the consent URL, stop.
-  - (b) Authorized creds exist but auto-bind picked a stale one → call `n8n_list_credentials`, pass the id of the authorized credential explicitly in the workflow JSON, and retry ONCE. Do NOT call any `*_setup` skill in case (b).
+- **Google tools to prefer** (via `workspace-mcp`): `list_spreadsheets`, `read_sheet_values`, `modify_sheet_values`, `create_spreadsheet`, `send_gmail`, `search_gmail_messages`, `list_calendars`, `create_calendar_event`, `search_drive_files`, etc. Discover them with `search_tools("google sheet")` or `search_tools("gmail")`.
+- **Only if a tool call returns "credentials not found / revoked":** call `start_google_auth(user_google_email="<email>")`. It returns a consent URL — paste that to the user as plain text ("Finish sign-in here: …") and STOP. Do NOT open the browser. Do NOT retry.
+- **Never use `n8n_google_services_setup`, `n8n_google_oauth_setup`, or `n8n_google_sheets_setup`.** Those skills are deprecated and unregistered. Reaching for them is a sign you went down the wrong path — back up and call `search_tools("google …")` instead.
+- **Never use `n8n_run_task` or `n8n_create_workflow` for atomic Google ops** (single sheet read, one email send, one event create). Those belong to `workspace-mcp` now. n8n is only for multi-step visual workflows or webhook receivers.
 
 ## Learning & Memory
 

@@ -32,7 +32,7 @@ dependencies = [
     # Google Workspace MCP server (Sheets / Drive / Gmail / Calendar / Docs).
     # Installed inside the container so it's launchable as `workspace-mcp`
     # via the Web UI's MCP → Add Server flow. See ADR-0003.
-    "workspace-mcp>=1.19.0",
+    "workspace-mcp>=1.19.0,<1.21.0",
 ]
 
 [project.optional-dependencies]

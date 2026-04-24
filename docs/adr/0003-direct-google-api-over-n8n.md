@@ -57,21 +57,48 @@ temporary fallback. n8n itself stays in the stack — for **multi-step
 chains, scheduled workflows, and webhook ingress**. The user-visible
 workflow editor is still n8n's unique value.
 
-### 3. OAuth is a fork of `taylorwilsdon/google_workspace_mcp`, not a new LazyClaw module
+### 3. OAuth is a patched `taylorwilsdon/google_workspace_mcp`, not a new LazyClaw module
 
-For the consent / account-picker problem we fork the upstream MCP
-server (MIT, actively maintained) and patch one thing: the
-authorization URL construction. We add `prompt=select_account` and
-`login_hint=<email>` so the consent page reliably offers the right
-Google account even when the browser is signed into a different
-default. The fork is registered in LazyClaw's MCP server list. Credentials
+For the consent / account-picker problem we patch the upstream MCP
+server (MIT, actively maintained) with one change: add
+`login_hint=<email>` to the authorization URL construction. Upstream
+already passes `prompt=select_account consent`, but that alone is not
+enough — when the user's default browser has exactly one Google
+session and it's the wrong account, Google skips the picker. Adding
+`login_hint` makes Google pre-select the correct account (and offers
+a "Use a different account" escape if that account isn't signed in).
+
+The fork is registered in LazyClaw's MCP server list. Credentials
 already live in the file format the fork writes (see
 `~/.google_workspace_mcp/credentials/{email}.json`), so no adapter is
 needed — `google_direct.py` and the fork read/write the same files.
 
-Fork work itself (clone, patch, vendor or self-host, register in MCP
-config) is scoped to a dedicated session — this ADR only commits to
-the direction, not the implementation order.
+### Patch strategy (2026-04-24)
+
+We apply the fix as a `.patch` file inside the lazyclaw Docker image,
+not as a public GitHub fork or vendored source tree. Concretely:
+
+- `patches/workspace-mcp-login-hint.patch` — unified diff against
+  `auth/google_auth.py`, ~15 lines.
+- `Dockerfile` — after `pip install -r requirements.txt`, a
+  `patch -p1` line applies the diff to the installed package inside
+  site-packages. Build fails loudly if the patch doesn't apply
+  (upstream line drift), so regressions are visible.
+- `requirements.txt` + `pyproject.toml` — `workspace-mcp>=1.19.0,<1.21.0`
+  upper-bounds the pin so a surprise major release can't silently break
+  the patch target.
+
+Why not a public GH fork: the diff is two lines. Fork overhead
+(repository to maintain, rebasing on tags, releases) would dwarf the
+change. If upstream PR `taylorwilsdon/google_workspace_mcp#556` merges
+(open since March 2026, same fix), we revert the patch file + the
+Dockerfile lines and bump the pin. Until then, the local patch gives
+us the fix immediately without waiting for review.
+
+Why not vendor the full source: workspace-mcp ships ~500KB of Python
+across `auth/`, `core/`, `gsheets/`, `gmail/`, etc. Vendoring to change
+two lines would bloat the repo and make upstream sync painful. The
+patch file is the minimal correct representation of what we're doing.
 
 ## Alternatives Considered
 

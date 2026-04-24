@@ -24,12 +24,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         x11vnc \
         python3-websockify \
         novnc \
+        patch \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Apply local patches to pip-installed packages. Right now: workspace-mcp
+# login_hint fix so Google's consent screen pre-selects the correct
+# account (see docs/adr/0003-direct-google-api-over-n8n.md and upstream
+# PR taylorwilsdon/google_workspace_mcp#556).
+COPY patches/ ./patches/
+RUN SITE="$(python3 -c 'import auth, os; print(os.path.abspath(os.path.dirname(auth.__file__) + "/.."))')" \
+    && echo "patching workspace-mcp in $SITE" \
+    && patch -p1 -d "$SITE" < patches/workspace-mcp-login-hint.patch
 
 COPY lazyclaw/ ./lazyclaw/
 COPY personality/ ./personality/

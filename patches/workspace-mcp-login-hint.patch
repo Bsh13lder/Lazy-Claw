@@ -1,0 +1,33 @@
+Subject: workspace-mcp: pass login_hint on Google consent URL
+
+When the caller already knows which Google account to use
+(`user_google_email` is provided to `start_auth_flow`), forward it as
+`login_hint` on the authorization URL so Google's consent page
+pre-selects that account. Without this, the consent page uses whichever
+Google account happens to be signed into the user's default browser
+profile, which is often the wrong account for a Cloud project.
+
+Upstream equivalent: github.com/taylorwilsdon/google_workspace_mcp PR #556.
+When that merges, revert this patch.
+
+See: docs/adr/0003-direct-google-api-over-n8n.md
+
+--- a/auth/google_auth.py
++++ b/auth/google_auth.py
+@@ -515,7 +515,15 @@ async def start_auth_flow(
+             required_scopes=current_scopes,
+             session_id=session_id,
+         )
+-        auth_url, _ = flow.authorization_url(access_type="offline", prompt=prompt_type)
++        # LazyClaw patch: pass `login_hint` when the caller already
++        # named an account, so Google pre-selects it on the consent
++        # screen and the user can always click "Use a different
++        # account" to escape. Fixes the "consent opens on wrong
++        # profile" bug — see ADR-0003.
++        auth_kwargs = {"access_type": "offline", "prompt": prompt_type}
++        if user_google_email:
++            auth_kwargs["login_hint"] = user_google_email
++        auth_url, _ = flow.authorization_url(**auth_kwargs)
+
+         store = get_oauth21_session_store()
+         store.store_oauth_state(

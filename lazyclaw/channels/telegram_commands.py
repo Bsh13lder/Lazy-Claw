@@ -93,6 +93,7 @@ class TelegramCommands:
             "resetpass": self._handle_resetpass,
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
             "search": self._handle_search,
+            "whoami": self._handle_whoami, "link": self._handle_link,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -105,7 +106,7 @@ class TelegramCommands:
 
     async def _resolve_user(self, chat_id: str) -> str:
         from lazyclaw.channels.telegram import resolve_user_id
-        return await resolve_user_id(self._config)
+        return await resolve_user_id(self._config, chat_id=chat_id)
 
     async def _auth(self, update: Update) -> str | None:
         chat_id = str(update.effective_chat.id)
@@ -313,6 +314,143 @@ class TelegramCommands:
                 )
                 return
         await self._reply(update, "\U0001f9e0 Usage: <code>/model brain MODEL</code> or <code>/model worker MODEL</code>")
+
+    # -- /whoami -----------------------------------------------------------
+
+    async def _handle_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show which user_id this Telegram chat is bound to + active models.
+
+        Useful to diagnose Telegram/Web-UI model drift — both paths must
+        resolve to the same user_id to share eco settings.
+        """
+        chat_id = str(update.effective_chat.id)
+        if not self._is_allowed(chat_id):
+            return
+        user_id = await self._resolve_user(chat_id)
+
+        from lazyclaw.db.connection import db_session
+        from lazyclaw.llm.eco_settings import get_eco_settings
+        from lazyclaw.llm.model_registry import get_mode_models
+
+        username = "?"
+        bound = False
+        try:
+            async with db_session(self._config) as db:
+                cur = await db.execute(
+                    "SELECT username, "
+                    "json_extract(settings, '$.telegram_chat_id') "
+                    "FROM users WHERE id = ?",
+                    (user_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    username = row[0] or "?"
+                    bound = bool(row[1]) and str(row[1]) == chat_id
+        except Exception:
+            logger.warning("whoami: user lookup failed", exc_info=True)
+
+        eco = await get_eco_settings(self._config, user_id)
+        mode = eco.get("mode", "hybrid")
+        defaults = get_mode_models(mode)
+
+        def pick(role: str) -> tuple[str, str]:
+            per_mode = eco.get(f"{mode}_{role}_model")
+            if per_mode:
+                return per_mode, f"{mode}_{role}_model"
+            generic = eco.get(f"{role}_model")
+            if generic:
+                return generic, f"{role}_model"
+            return defaults.get(role, "?"), "mode default"
+
+        brain, brain_src = pick("brain")
+        worker, worker_src = pick("worker")
+        fallback, fallback_src = pick("fallback")
+
+        bind_hint = (
+            "✅ bound"
+            if bound
+            else "⚠️ <b>not bound</b> — run <code>/link USERNAME</code> "
+                 "to point this chat at your Web-UI user"
+        )
+        await self._reply(
+            update,
+            f"\U0001f464 <b>User</b>: <code>{user_id[:8]}</code> ({username})\n"
+            f"\U0001f4ac <b>Chat</b>: <code>{chat_id}</code> — {bind_hint}\n\n"
+            f"\U0001f9e0 <b>Mode</b>: {mode}\n"
+            f"Brain:    <code>{brain}</code>  <i>[{brain_src}]</i>\n"
+            f"Worker:   <code>{worker}</code>  <i>[{worker_src}]</i>\n"
+            f"Fallback: <code>{fallback}</code>  <i>[{fallback_src}]</i>",
+        )
+
+    # -- /link -------------------------------------------------------------
+
+    async def _handle_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Bind this Telegram chat_id to a specific Web-UI user by username.
+
+        Writes users.settings.telegram_chat_id for that user, so
+        resolve_user_id(chat_id) routes this chat to the same account the
+        user logs into the Web UI with. Fixes multi-user divergence
+        (admin placeholder vs real personal account).
+        """
+        chat_id = str(update.effective_chat.id)
+        if not self._is_allowed(chat_id):
+            return
+        args = context.args or []
+        if not args:
+            await self._reply(
+                update,
+                "\U0001f517 <b>Link this chat to a Web-UI user</b>\n\n"
+                "<code>/link USERNAME</code>\n\n"
+                "Once bound, Telegram + Web UI + CLI all read the same "
+                "eco settings (brain/worker/fallback models, mode, "
+                "memory, skills).",
+            )
+            return
+
+        username = args[0].strip()
+        from lazyclaw.db.connection import db_session
+        try:
+            async with db_session(self._config) as db:
+                cur = await db.execute(
+                    "SELECT id, settings FROM users WHERE username = ?",
+                    (username,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    await self._reply(update, f"❌ No user <code>{username}</code>")
+                    return
+                target_id, raw_settings = row[0], row[1]
+
+                # Clear any previous binding to this chat on other users.
+                await db.execute(
+                    "UPDATE users SET settings = json_remove(settings, '$.telegram_chat_id') "
+                    "WHERE json_extract(settings, '$.telegram_chat_id') = ?",
+                    (chat_id,),
+                )
+
+                import json
+                try:
+                    current = json.loads(raw_settings) if raw_settings else {}
+                except (json.JSONDecodeError, TypeError):
+                    current = {}
+                new_settings = dict(current)
+                new_settings["telegram_chat_id"] = chat_id
+                await db.execute(
+                    "UPDATE users SET settings = ? WHERE id = ?",
+                    (json.dumps(new_settings), target_id),
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.exception("/link failed")
+            await self._reply(update, f"❌ Link failed: {exc}")
+            return
+
+        await self._reply(
+            update,
+            f"✅ Chat <code>{chat_id}</code> → <b>{username}</b>\n\n"
+            f"Telegram now shares eco settings + memory with the Web UI "
+            f"login <b>{username}</b>. Run <code>/whoami</code> to confirm.",
+        )
 
     # -- /mode (alias: /eco) ------------------------------------------------
 

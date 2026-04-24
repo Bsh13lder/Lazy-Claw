@@ -116,6 +116,25 @@ BUNDLED_MCPS = {
         "optional": True,
         "persistent": True,  # Keep connected — tools must be in registry for keyword detection
     },
+    # Google Workspace — Sheets, Drive, Gmail, Calendar, Docs. Installed via
+    # `workspace-mcp>=1.19.0` pip dep in requirements.txt; launched as the
+    # `workspace-mcp` CLI from PATH (its package ships `main.py` at top-level,
+    # which doesn't import cleanly as a module). Credentials live in
+    # `~/.google_workspace_mcp/credentials/{email}.json` — mounted from the
+    # host via docker-compose.yml so no re-consent is needed on rebuild.
+    "workspace-mcp": {
+        "bin": "workspace-mcp",
+        "extra_args": [
+            "--single-user",
+            "--transport", "stdio",
+            "--tools", "sheets", "drive", "gmail", "calendar",
+        ],
+        "description": (
+            "Google Workspace — Sheets, Drive, Gmail, Calendar (49 tools via "
+            "direct Google APIs, no n8n). See ADR-0003."
+        ),
+        "persistent": True,
+    },
     "n8n": {
         "module": "n8n_mcp",
         "pip_name": "n8n-mcp-server",
@@ -826,7 +845,7 @@ async def auto_register_bundled_mcps(
             )
             continue
 
-        # Determine transport type: Python module, npx, or remote URL
+        # Determine transport type: Python module, CLI binary, npx, or remote URL
         if "module" in info:
             # Python module — check if importable
             try:
@@ -836,7 +855,19 @@ async def auto_register_bundled_mcps(
             transport = "stdio"
             server_config = {
                 "command": sys.executable,
-                "args": ["-m", info["module"]],
+                "args": ["-m", info["module"], *info.get("extra_args", [])],
+            }
+        elif "bin" in info:
+            # CLI binary on PATH (installed via pip console_script / apt / etc.)
+            import shutil
+            bin_path = shutil.which(info["bin"])
+            if not bin_path:
+                logger.debug("Skipping %s: binary '%s' not on PATH", name, info["bin"])
+                continue
+            transport = "stdio"
+            server_config = {
+                "command": bin_path,
+                "args": list(info.get("extra_args", [])),
             }
         elif "node" in info:
             # Local Node.js script — check if node is available
@@ -973,6 +1004,9 @@ async def connect_and_register_bundled_mcps(
             try:
                 __import__(info["module"])
             except ImportError:
+                return False
+        elif "bin" in info:
+            if not shutil.which(info["bin"]):
                 return False
         elif "node" in info:
             if not shutil.which("node"):

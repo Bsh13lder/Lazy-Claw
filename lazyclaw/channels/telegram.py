@@ -819,11 +819,32 @@ def _is_status_query(text: str) -> bool:
     return lower in _STATUS_KEYWORDS or lower == "/status"
 
 
-async def resolve_user_id(config) -> str:
-    """Resolve the primary user_id from database. Shared by adapter + commands."""
+async def resolve_user_id(config, chat_id: str | None = None) -> str:
+    """Resolve the LazyClaw user_id for a Telegram chat.
+
+    Priority:
+      1. Explicit binding — user whose settings.telegram_chat_id matches chat_id
+         (set via /link USERNAME, persisted once per chat).
+      2. Legacy fallback — first registered user by created_at.
+
+    Rationale: with multiple users in the DB (admin placeholder + real
+    personal account), the old "first user" heuristic routed Telegram to a
+    different user_id than the Web UI session, so the two channels read
+    different eco settings and appeared to use different models.
+    """
     from lazyclaw.db.connection import db_session
     try:
         async with db_session(config) as db:
+            if chat_id:
+                cursor = await db.execute(
+                    "SELECT id FROM users "
+                    "WHERE json_extract(settings, '$.telegram_chat_id') = ? "
+                    "LIMIT 1",
+                    (str(chat_id),),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    return row[0]
             cursor = await db.execute(
                 "SELECT id FROM users ORDER BY created_at LIMIT 1"
             )
@@ -925,9 +946,10 @@ class TelegramAdapter(ChannelAdapter):
         data = (query.data or "").split(":", 1)
         action = data[1] if len(data) == 2 else ""
 
-        # Resolve the LazyClaw user_id (single primary user for now).
+        # Resolve the LazyClaw user_id (chat-bound via /link, else legacy).
         try:
-            lc_user_id = await resolve_user_id(self._config)
+            cb_chat_id = str(query.message.chat_id) if query.message else None
+            lc_user_id = await resolve_user_id(self._config, chat_id=cb_chat_id)
         except Exception as exc:
             logger.warning("Plan callback user resolution failed: %s", exc)
             await query.edit_message_text("\u26a0\ufe0f Could not identify you.")
@@ -1035,8 +1057,9 @@ class TelegramAdapter(ChannelAdapter):
             await update.message.reply_text(active_cbs[0].get_status_report())
             return
 
-        # Resolve actual user_id from database (not hardcoded "default")
-        user_id = await resolve_user_id(self._config)
+        # Resolve actual user_id from database — prefer explicit chat->user
+        # binding set via /link so Telegram matches the Web UI session user.
+        user_id = await resolve_user_id(self._config, chat_id=chat_id)
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
 
         # ── Recovery phrase: intercept password message ──

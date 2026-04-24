@@ -101,6 +101,17 @@ export default function Mcp() {
     finally { markAction(id, false); }
   };
 
+  const handleToggleFavorite = async (id: string, next: boolean) => {
+    // Optimistic update so the star flips instantly.
+    setServers((prev) => prev.map((s) => s.id === id ? { ...s, favorite: next } : s));
+    try {
+      await api.favoriteMcp(id, next);
+    } catch {
+      // Roll back on failure.
+      setServers((prev) => prev.map((s) => s.id === id ? { ...s, favorite: !next } : s));
+    }
+  };
+
   const handleDisconnect = async (id: string) => {
     markAction(id, true);
     try { await api.disconnectMcp(id); await load(); } catch { /* ignore */ }
@@ -313,6 +324,25 @@ export default function Mcp() {
 
                       {/* Actions */}
                       <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => handleToggleFavorite(server.id, !server.favorite)}
+                          title={server.favorite
+                            ? "Favorite — auto-connects at boot, never idle-disconnects. Click to unfavorite."
+                            : "Mark favorite — auto-connect on every boot, always on."}
+                          className={`p-1.5 rounded-lg hover:bg-bg-hover transition-colors ${
+                            server.favorite ? "text-yellow-400" : "text-text-muted hover:text-yellow-400"
+                          }`}
+                          aria-label={server.favorite ? "Unfavorite" : "Mark as favorite"}
+                        >
+                          <svg
+                            width="14" height="14" viewBox="0 0 24 24"
+                            fill={server.favorite ? "currentColor" : "none"}
+                            stroke="currentColor" strokeWidth="2"
+                            strokeLinecap="round" strokeLinejoin="round"
+                          >
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                          </svg>
+                        </button>
                         {server.status === "connected" ? (
                           <button
                             onClick={() => handleDisconnect(server.id)}

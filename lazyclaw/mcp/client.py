@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_MCP_COMMANDS = frozenset({
     "python", "python3", "node", "npx", "uvx", "docker",
+    # pip console-script entry points for bundled MCPs
+    "workspace-mcp",
 })
 
 

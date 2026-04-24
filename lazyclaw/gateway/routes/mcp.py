@@ -77,6 +77,31 @@ async def remove_server(server_id: str, user: User = Depends(get_current_user)):
     return {"status": "deleted"}
 
 
+class FavoriteRequest(BaseModel):
+    favorite: bool
+
+
+@router.post("/servers/{server_id}/favorite")
+async def set_server_favorite(
+    server_id: str, body: FavoriteRequest,
+    user: User = Depends(get_current_user),
+):
+    """Mark / unmark an MCP server as favorite.
+
+    Favorites auto-connect at boot and are exempt from idle-disconnect —
+    see `lazyclaw/mcp/manager.py:set_favorite`.
+    """
+    from lazyclaw.mcp.manager import get_server, set_favorite
+
+    server = await get_server(_config, user.id, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="Server not found")
+    updated = await set_favorite(_config, user.id, server["name"], body.favorite)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Server not found")
+    return {"status": "ok", "favorite": body.favorite}
+
+
 @router.post("/servers/{server_id}/connect")
 async def connect_server(server_id: str, user: User = Depends(get_current_user)):
     """Connect to an MCP server."""

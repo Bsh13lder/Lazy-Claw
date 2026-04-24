@@ -339,20 +339,41 @@ class SkillRegistry:
         self.register(N8nGetExecutionSkill(config=config))
         self.register(N8nCreateCredentialSkill(config=config))
         self.register(N8nDeleteCredentialSkill(config=config))
-        self.register(N8nGoogleSheetsSetupSkill(config=config))
         self.register(N8nTestWorkflowSkill(config=config))
         self.register(N8nSearchTemplatesSkill(config=config))
         self.register(N8nInstallTemplateSkill(config=config))
         self.register(N8nListWebhooksSkill(config=config))
-        self.register(N8nGoogleOAuthSetupSkill(config=config))
-        self.register(N8nGoogleServicesSetupSkill(config=config))
+        # n8n Google OAuth setup skills — DEPRECATED. workspace-mcp now
+        # handles Google Sheets/Drive/Gmail/Calendar via its own tools
+        # (start_google_auth, list_spreadsheets, …). These n8n-specific
+        # OAuth shells caused a loop where the agent spawned credentials
+        # instead of actually doing Google work. See ADR-0003.
+        # Re-enable here if n8n Google nodes are ever needed again.
+        # self.register(N8nGoogleSheetsSetupSkill(config=config))
+        # self.register(N8nGoogleOAuthSetupSkill(config=config))
+        # self.register(N8nGoogleServicesSetupSkill(config=config))
 
-        # n8n on-demand one-shot tasks (ephemeral create-run-delete).
-        from lazyclaw.skills.builtin.n8n_oneshot import (
-            N8nRunTaskSkill, ProjectPlanningKickoffSkill,
+        # n8n on-demand one-shot tasks — DEPRECATED in favor of the direct
+        # Google Workspace API path (see ADR-0003). The two skills below
+        # are unregistered, NOT deleted — files remain in n8n_oneshot.py
+        # so re-enabling is a one-line change if we ever need to fall
+        # back. Use `google_run_task` + `google_project_planning_kickoff`
+        # instead. n8n itself stays for multi-step / visual workflows.
+        # from lazyclaw.skills.builtin.n8n_oneshot import (
+        #     N8nRunTaskSkill, ProjectPlanningKickoffSkill,
+        # )
+        # self.register(N8nRunTaskSkill(config=config))
+        # self.register(ProjectPlanningKickoffSkill(config=config))
+
+        # Direct Google Workspace API path (no n8n). See ADR-0003.
+        # Prefer this over n8n_run_task for atomic Google ops, and
+        # google_project_planning_kickoff over the legacy n8n composite
+        # for "start a project from scratch" flows.
+        from lazyclaw.skills.builtin.google_direct import (
+            GoogleDirectTaskSkill, GoogleProjectPlanningKickoffSkill,
         )
-        self.register(N8nRunTaskSkill(config=config))
-        self.register(ProjectPlanningKickoffSkill(config=config))
+        self.register(GoogleDirectTaskSkill(config=config))
+        self.register(GoogleProjectPlanningKickoffSkill(config=config))
 
         # Project asset registry (backed by LazyBrain project notes).
         from lazyclaw.skills.builtin.project_assets import (

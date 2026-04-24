@@ -27,6 +27,10 @@ services:
       - ./skills:/app/skills
       - ~/.claude:/home/lazyclaw/.claude:ro  # Mount Claude auth (Max subscription)
       - ${HOME}/Desktop:/host/Desktop
+      # Google Workspace OAuth credentials (shared with workspace-mcp MCP server).
+      # Cached token lives at ~/.google_workspace_mcp/credentials/{email}.json
+      # on the host; mounting it in means no re-consent is needed after rebuild.
+      - ${HOME}/.google_workspace_mcp:/home/lazyclaw/.google_workspace_mcp
   lazyclaw-web:
     build:
       context: ./web

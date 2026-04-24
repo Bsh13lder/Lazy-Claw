@@ -46,7 +46,7 @@ LazyClaw takes a different approach:
 | **Cost routing** | 3-mode Brain/Worker split across 5 providers (Anthropic · MiniMax subscription · OpenAI · local Ollama · Claude CLI) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
 | **MCP** | Native client + server + 6 bundled servers | Community plugins |
-| **Integrations** | n8n native (full workflow CRUD, 6 skills, templates, Docker) | Manual API wiring |
+| **Integrations** | Google Workspace direct API (Gmail/Drive/Calendar/Sheets/Docs) + n8n for visual workflows | Manual API wiring |
 | **Channels** | Telegram + WhatsApp + Instagram + Email MCPs | Browser-only for most |
 | **Browser control** | Live canvas + checkpoints + saved templates + noVNC takeover (zero extra tokens) | Screenshots or nothing |
 | **Web UI** | React control panel (12 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming | Varies |
@@ -180,6 +180,9 @@ Specialists run in parallel via `asyncio.gather`. Results merge back into the co
 
 Encrypted tasks with nagging reminders and due-date escalation:
 
+- **AI quick-add** — type `"pay electricity bill wednesday 3pm"` in the Tasks page input → LLM extracts title, due date, category, priority in one pass; single click to confirm.
+- **Live countdown** — every task card ticks the time-remaining label in real time (`in 2h 14m` → `in 2h 13m`) without re-fetching.
+- **Markdown notes** — rich description field renders `[[wikilinks]]` into LazyBrain, checkboxes, code blocks, and links inline on the card.
 - **Nag pattern** — 15min → 30min → 1hr, capped at 5 (no spam spiral)
 - **Relative time parsing** — `remind me in +1h30m drink water`, parsed server-side so the LLM never does time math
 - **User/agent separation** — the agent's own todos are tracked separately from yours
@@ -196,11 +199,12 @@ A Python-native, E2E-encrypted knowledge base the user and the agent share. Open
 - **Core Logseq surface** — `[[wikilinks]]`, `#tags`, backlinks panel, force-directed graph, daily journal with auto-naming, **21 NL skills** for notes / journal / graph / tags / pinning.
 - **Obsidian-style markdown** — callouts (`> [!info|tip|warning|danger|question|quote|todo|bug|example|success|abstract|note]`), transclusion (`![[Note]]` renders inline collapsibly), YAML frontmatter parsed into a typed **Properties panel** (date picker, tag chips, status dropdown).
 - **Spatial canvas** — React Flow board with text nodes + note-reference nodes + arrows. Autosaves. Encrypted JSON payload.
+- **Galaxy graph + persistent positions** — two graph modes. *Categories* mode clusters by `kind/*` tag around a decorative sun with orbital spring layout. *Neural-links* mode is a classic force-directed wikilink graph. Node positions are saved per user + per mode — drag a note, reload, find it where you left it. Also follows you across devices (plaintext coords only; content stays encrypted).
 - **AI-native** (7 skills Obsidian can't ship natively) — autolink suggestions, auto-title/tag on save, **semantic search** via local embeddings (`nomic-embed-text` over Ollama, encrypted 768-d vectors), **"Ask your notes"** RAG with `[[citations]]`, topic rollups, morning briefings. Every feature degrades to substring/offline when Ollama's down.
 - **UX chrome** — ⌘K command palette, ⌘O quick switcher, outline pane, hover preview, importance-slider graph filter, violet Obsidian-Minimal-inspired theme scoped under `.lazybrain-root` (rest of app keeps emerald).
 - **Single source of truth** — tasks, personal memory, daily logs, site memory, lessons all auto-mirror here with `owner/{user,agent}` + `kind/*` tags, so the graph grows while you work.
 
-All content encrypted per user (AES-256-GCM with AAD=`notes:{title,content,embedding}`). 28 NL skills + 17 REST endpoints total.
+All content encrypted per user (AES-256-GCM with AAD=`notes:{title,content,embedding}`). 28 NL skills + 19 REST endpoints total.
 
 ### Context Compression
 
@@ -259,11 +263,16 @@ Or install Ollama and `ollama pull` one of the bundled models. Or `claude login`
 
 CDP-based control of the user's real Brave/Chrome browser. No separate Chromium instance — the agent uses your actual browser with your logins, cookies, and sessions.
 
+- **Host Brave bridge (Docker-aware)** — when LazyClaw runs inside a container, the agent auto-detects the host's running Brave/Chrome via the `host.docker.internal` CDP bridge. Same browser, same cookies, zero extra login.
 - **Live BrowserCanvas** — embedded in the chat sidebar. See the URL, action timeline (click / type / goto), and a thumbnail of the current page as the agent works. **Zero extra LLM tokens** — events flow UI-only, never enter the agent's context.
 - **Live mode** — one-tap toggle on the canvas. Captures a fresh screenshot after every action for 5 minutes. Use it when the agent is stuck or you just want to watch.
 - **Checkpoints** — the agent calls `request_user_approval` before risky actions (submit, pay, book, delete, sign). The canvas shows an inline Approve / Reject banner; agent blocks until you decide. Same name auto-approves on re-call.
 - **Saved templates** — reusable recipes for recurring flows. `Templates` page lets you save a playbook + setup URLs + checkpoints + optional zero-token slot watcher. Ships seed examples for Cita Previa Spain (DGT), Doctoralia, and freelance gig feeds (Upwork · Workana · PeoplePerHour) with login + submit checkpoints.
 - **Slot polling** — `watch_appointment_slots` hooks a template to the watcher daemon. Zero LLM tokens per check; Telegram + canvas alert fires when slots open.
+- **OCR action** — `browser(action="ocr")` reads on-screen text from tricky pages (captchas, PDF viewers, canvas-rendered UIs) without screenshots entering LLM context.
+- **Network inspector** — captures in-page XHR/fetch traffic so the agent can pull JSON out of any page that talks to an API, even when the DOM is hostile.
+- **Frame access** — reads content from iframes (Stripe checkout, embedded calendars, reCAPTCHA, ad containers) with the same ref-ID model as top-level pages.
+- **Structured error capture** — every failed action returns a typed error (`NavigationTimeout`, `SelectorMissing`, `DetachedFrame`, etc.) so the agent knows *why* something broke and can recover, not just retry blindly.
 - **Remote takeover** — noVNC via the `share_browser_control` NL skill or the canvas `🎮 Take control` button. Works from Telegram, web chat, and CLI identically.
 - **Shared profiles** — login once, all tools see it
 - **Brave auto-detect** — Brave > Chrome > Chromium (built-in ad blocking = cleaner pages for LLM)
@@ -297,24 +306,36 @@ First-class MCP support — both client and server.
 
 ## Integrations
 
-### n8n — Full Workflow Automation (Native)
+### Google Workspace — Direct API (Native)
 
-> **LazyClaw + n8n = AI agent that creates, edits, and manages automation workflows by voice.**
+> **Gmail, Calendar, Drive, Sheets, Docs — called directly. No n8n round-trip for atomic ops.** (See [ADR-0003](docs/adr/0003-google-workspace-direct-api.md).)
 
-Deep native integration — not just a connection. The agent has 6 management skills for full workflow CRUD:
+Atomic Google operations go through `lazyclaw/integrations/google_direct.py` — a thin Python client that calls the Google APIs over HTTPS with the user's OAuth token from the encrypted vault. This is **~10× faster** than routing the same call through an n8n oneshot workflow.
 
-- **Create workflows** from natural language ("automate daily sales report to Slack")
+- **Gmail** — send / reply / forward / search / read / delete / label / draft
+- **Drive** — list / upload / download / create folder / share / **delete / trash / empty-trash** (new)
+- **Calendar** — list events / create / update / delete / RSVP / find-free-slot
+- **Sheets** — read range / append rows / update cells / create sheet / clear
+- **Docs** — create / read / append text / replace-text
+
+**OAuth flow:** forked upstream [`workspace-mcp`](https://github.com/taylorwilsdon/google_workspace_mcp) (MIT) handles the consent URL + callback. Patched to pass `login_hint` so users don't pick the wrong account, and to reuse an existing browser instead of opening a fresh tab. Refresh tokens live encrypted in the vault; access tokens auto-refresh without user action.
+
+### n8n — Visual Workflow Editor
+
+n8n is kept for **multi-step visual workflows** — anything where you want a drag-and-drop editor, branching, loops, or sub-workflows. The 6 management skills for workflow CRUD are still here:
+
+- **Create workflows** from natural language ("every day at 9am, pull yesterday's sales, summarize, post to Slack")
 - **Edit existing workflows** — add/remove nodes, change triggers, update credentials
 - **Delete, activate, deactivate** workflows on command
 - **Templates** — pre-built workflow patterns the agent can deploy instantly
 - **Docker sidecar** — n8n runs alongside LazyClaw via `n8n-custom/`
 
 ```
-You: create a workflow that checks my email every hour and sends a summary to Telegram
-Bot: ✅ Created workflow "Email Hourly Summary" — trigger: every 60min, nodes: Gmail → summarize → Telegram
+You: every day at 9am pull yesterday's sales from Sheets, summarize, post to Slack
+Bot: ✅ Created workflow "Daily Sales Summary" — cron 0 9 * * *, nodes: Sheets → LLM summarize → Slack
 ```
 
-This is a first-class integration with 6 dedicated skills, not a generic MCP passthrough.
+> **Rule of thumb** — if it's one API call (send email, create event, append row), the agent uses the direct Google path. If it's a chain of steps you want to edit visually later, it goes through n8n.
 
 ---
 
@@ -414,6 +435,12 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] BIP-39 recovery phrase at registration
 - [x] Agent Skills compatibility (import Claude Code skills)
 - [x] n8n native integration (6 skills — full workflow CRUD, templates, Docker sidecar)
+- [x] Direct Google Workspace API (Gmail/Calendar/Drive/Sheets/Docs) — atomic ops no longer round-trip through n8n (ADR-0003)
+- [x] workspace-mcp OAuth fork — login_hint patching + consent flow + encrypted refresh tokens
+- [x] Browser OCR + network inspector + frame access + structured error capture
+- [x] Host Brave CDP bridge — container-side agent talks to host browser via `host.docker.internal`
+- [x] Task Manager AI quick-add + live countdown + markdown notes
+- [x] LazyBrain galaxy graph + persistent node positions (per-user, per-mode, cross-device)
 - [x] WebSocket streaming (`/ws/chat`) for real-time Web UI chat
 - [ ] Skill Hub — universal skill/MCP registry (cross-framework, works with OpenClaw and others)
 - [ ] More channels (Discord, Signal, SimpleX)

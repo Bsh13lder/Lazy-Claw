@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { TaskItem } from "../api";
-import { listTasks, completeTask, addTask } from "../api";
+import { listTasks, completeTask } from "../api";
 import type { Page } from "./NavShell";
+import { QuickAddBar } from "./tasks/QuickAddBar";
+import { useLiveCountdown } from "./tasks/useLiveCountdown";
 
 /**
  * My Tasks — the user's personal todo list.
@@ -63,6 +65,7 @@ function TaskRow({
 }) {
   const [busy, setBusy] = useState(false);
   const [ticked, setTicked] = useState(false);
+  useLiveCountdown(task.due_date, task.reminder_at);
   const due = formatDue(task.due_date);
 
   const onTick = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -132,53 +135,6 @@ function TaskRow({
         </span>
       )}
     </label>
-  );
-}
-
-function QuickAdd({ onAdded }: { onAdded: () => void }) {
-  const [value, setValue] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  const submit = async () => {
-    const title = value.trim();
-    if (!title || submitting) return;
-    setSubmitting(true);
-    try {
-      await addTask({ title, priority: "medium" });
-      setValue("");
-      onAdded();
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <form
-      onSubmit={(e) => { e.preventDefault(); void submit(); }}
-      className="flex items-center gap-2 px-3 py-2 border-t border-border/60"
-    >
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-text-muted shrink-0">
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </svg>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="Add a task…"
-        disabled={submitting}
-        className="flex-1 text-[13px] bg-transparent text-text-primary placeholder:text-text-placeholder focus:outline-none"
-      />
-      {value.trim() && (
-        <button
-          type="submit"
-          disabled={submitting}
-          className="text-[10px] uppercase tracking-wider text-accent hover:text-accent-dim transition-colors disabled:opacity-40"
-        >
-          {submitting ? "…" : "add"}
-        </button>
-      )}
-    </form>
   );
 }
 
@@ -308,8 +264,14 @@ export function MyTasksPanel({ onNavigate }: { onNavigate?: (p: Page) => void } 
         )}
       </div>
 
-      {/* Quick-add */}
-      <QuickAdd onAdded={triggerReload} />
+      {/* Quick-add — shared component with NL parsing */}
+      <div className="p-2 border-t border-border/60">
+        <QuickAddBar
+          onAdded={triggerReload}
+          variant="compact"
+          placeholder='Add a task — "tomorrow 9am call mom #family"'
+        />
+      </div>
     </div>
   );
 }

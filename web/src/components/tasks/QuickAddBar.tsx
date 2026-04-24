@@ -1,18 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { addTask, parseTask } from "../../api";
 import type { TaskDraft } from "../../api";
-import { formatDueChip, DUE_TONE_CLASS } from "./taskHelpers";
+import {
+  DATE_HINT_RE,
+  DUE_TONE_CLASS,
+  formatDueChip,
+} from "./taskHelpers";
 
 /**
  * Quick-add bar with a live parse ghost line.
  *
- * As the user types, we debounce-parse via the local regex (fast path). A
- * ghost line under the input shows what the backend will save — time chip,
- * priority, tags — so the user can course-correct before hitting ⏎.
+ * Typing fires the fast regex parser (220 ms debounce). If the regex misses
+ * but the text looks date-ish (EN + ES keywords in `DATE_HINT_RE`), we quietly
+ * escalate to the AI parser after an extra ~800 ms. That way the user still
+ * sees a chip for phrases the regex can't handle ("next Friday at 3pm",
+ * "in 2 weeks", "dentro de dos horas") without having to click anything.
  *
- * If the regex didn't extract a time but the user wants the AI to read
- * the phrase properly, clicking ✨ AI routes the same text through the
- * ECO worker for structured extraction.
+ * Variants:
+ *   • "full"    — used on the Tasks page. Wide ghost row beneath the input.
+ *   • "compact" — used on the Overview widget and in the MyTasksPanel sidebar.
+ *                 Single tight row with the ghost summary inline on the right.
  */
 
 const PRIORITY_DOT: Record<NonNullable<TaskDraft["priority"]>, string> = {
@@ -22,49 +29,109 @@ const PRIORITY_DOT: Record<NonNullable<TaskDraft["priority"]>, string> = {
   low: "bg-text-muted",
 };
 
-export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
+const REGEX_DEBOUNCE_MS = 220;
+const AUTO_AI_DEBOUNCE_MS = 1_000;
+
+function formatReminderTime(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+export function QuickAddBar({
+  onAdded,
+  variant = "full",
+  placeholder,
+}: {
+  onAdded: () => void;
+  variant?: "full" | "compact";
+  placeholder?: string;
+}) {
   const [value, setValue] = useState("");
   const [draft, setDraft] = useState<TaskDraft | null>(null);
   const [parsing, setParsing] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
+  const [autoAiRunning, setAutoAiRunning] = useState(false);
+  const [draftSource, setDraftSource] = useState<"regex" | "ai" | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const debounceRef = useRef<number | null>(null);
 
+  const regexTimerRef = useRef<number | null>(null);
+  const aiTimerRef = useRef<number | null>(null);
+  const activeRequestIdRef = useRef(0);
+
+  // Fast-regex parse on every keystroke change.
   useEffect(() => {
-    if (!value.trim()) {
+    const trimmed = value.trim();
+    if (!trimmed) {
       setDraft(null);
+      setDraftSource(null);
       return;
     }
-    if (debounceRef.current) {
-      window.clearTimeout(debounceRef.current);
-    }
-    debounceRef.current = window.setTimeout(async () => {
+
+    if (regexTimerRef.current) window.clearTimeout(regexTimerRef.current);
+    if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
+
+    regexTimerRef.current = window.setTimeout(async () => {
+      const requestId = ++activeRequestIdRef.current;
       setParsing(true);
       try {
-        const d = await parseTask(value, "fast");
+        const d = await parseTask(trimmed, "fast");
+        if (requestId !== activeRequestIdRef.current) return;
         setDraft(d);
+        setDraftSource("regex");
+
+        // If regex didn't extract a time but the phrase has date-ish keywords,
+        // silently escalate to the AI parser so the user still sees a chip.
+        const regexMissedTime = !d.due_date && !d.reminder_at;
+        if (regexMissedTime && DATE_HINT_RE.test(trimmed) && trimmed.length >= 6) {
+          if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
+          aiTimerRef.current = window.setTimeout(async () => {
+            if (requestId !== activeRequestIdRef.current) return;
+            setAutoAiRunning(true);
+            try {
+              const aiDraft = await parseTask(trimmed, "ai");
+              if (requestId !== activeRequestIdRef.current) return;
+              // Only accept the AI draft if it actually added time signal or
+              // broke the task into steps — otherwise keep the regex draft.
+              if (aiDraft.due_date || aiDraft.reminder_at || (aiDraft.steps && aiDraft.steps.length)) {
+                setDraft(aiDraft);
+                setDraftSource("ai");
+              }
+            } catch {
+              /* keep regex draft */
+            } finally {
+              if (requestId === activeRequestIdRef.current) setAutoAiRunning(false);
+            }
+          }, AUTO_AI_DEBOUNCE_MS);
+        }
       } catch {
-        setDraft(null);
+        if (requestId === activeRequestIdRef.current) setDraft(null);
       } finally {
-        setParsing(false);
+        if (requestId === activeRequestIdRef.current) setParsing(false);
       }
-    }, 220);
+    }, REGEX_DEBOUNCE_MS);
 
     return () => {
-      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+      if (regexTimerRef.current) window.clearTimeout(regexTimerRef.current);
+      if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
     };
   }, [value]);
 
   const runAi = async () => {
     if (!value.trim() || aiLoading) return;
+    if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
+    const requestId = ++activeRequestIdRef.current;
     setAiLoading(true);
     try {
       const d = await parseTask(value, "ai");
+      if (requestId !== activeRequestIdRef.current) return;
       setDraft(d);
+      setDraftSource("ai");
     } catch {
       /* stays on fast draft */
     } finally {
-      setAiLoading(false);
+      if (requestId === activeRequestIdRef.current) setAiLoading(false);
     }
   };
 
@@ -72,7 +139,6 @@ export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
     const raw = value.trim();
     if (!raw || submitting) return;
 
-    // Prefer the parsed draft — falls back to raw title if nothing parsed.
     const title = draft?.title || raw;
     const priority = draft?.priority ?? "medium";
 
@@ -85,12 +151,11 @@ export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
         reminder_at: draft?.reminder_at ?? undefined,
         tags: draft?.tags?.length ? draft.tags : undefined,
         category: draft?.category ?? undefined,
-        steps: draft?.steps?.length
-          ? draft.steps.map((s) => ({ title: s }))
-          : undefined,
+        steps: draft?.steps?.length ? draft.steps.map((s) => ({ title: s })) : undefined,
       });
       setValue("");
       setDraft(null);
+      setDraftSource(null);
       onAdded();
     } finally {
       setSubmitting(false);
@@ -98,9 +163,26 @@ export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
   };
 
   const chip = formatDueChip(draft?.due_date ?? null, draft?.reminder_at ?? null);
+  const reminderTime = formatReminderTime(draft?.reminder_at ?? null);
+  const stepCount = draft?.steps?.length ?? 0;
   const hasDraft = !!draft && (
-    !!draft.due_date || !!draft.reminder_at || !!draft.priority || (draft.tags?.length ?? 0) > 0
+    !!draft.due_date || !!draft.reminder_at || !!draft.priority ||
+    (draft.tags?.length ?? 0) > 0 || stepCount > 0
   );
+  const regexMissedButTried = !hasDraft && !parsing && !autoAiRunning &&
+    value.trim().length >= 6 && DATE_HINT_RE.test(value);
+
+  const aiButtonClass = [
+    "text-[10px] uppercase tracking-wider transition-colors disabled:opacity-40 px-2 py-1 rounded border",
+    regexMissedButTried
+      ? "border-amber/50 bg-amber/10 text-amber hover:text-amber-dim hover:border-amber"
+      : "border-border text-text-muted hover:text-accent hover:border-accent/40",
+  ].join(" ");
+
+  const effectivePlaceholder =
+    placeholder ?? 'Add a task — "tomorrow at 9 buy milk urgent", "in 2 hours call mom #work"';
+
+  const compact = variant === "compact";
 
   return (
     <div className="rounded-xl border border-border bg-bg-secondary overflow-hidden">
@@ -116,21 +198,20 @@ export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
           type="text"
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder='Add a task — "tomorrow at 9 buy milk urgent", "in 2 hours call mom #work"'
+          placeholder={effectivePlaceholder}
           disabled={submitting}
           className="flex-1 text-sm bg-transparent text-text-primary placeholder:text-text-placeholder focus:outline-none"
-          autoFocus
         />
         {value.trim() && (
           <>
             <button
               type="button"
               onClick={runAi}
-              disabled={aiLoading || submitting}
-              title="Let the AI parse the phrase"
-              className="text-[10px] uppercase tracking-wider text-text-muted hover:text-accent transition-colors disabled:opacity-40 px-2 py-1 rounded border border-border hover:border-accent/40"
+              disabled={aiLoading || submitting || autoAiRunning}
+              title={regexMissedButTried ? "Let the AI read this — regex couldn't find a time" : "Let the AI parse the phrase"}
+              className={aiButtonClass}
             >
-              {aiLoading ? "…" : "✨ AI"}
+              {aiLoading || autoAiRunning ? "…" : "✨ AI"}
             </button>
             <button
               type="submit"
@@ -143,20 +224,33 @@ export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
         )}
       </form>
 
-      {/* Live parse preview */}
       {value.trim() && (
-        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-bg-tertiary/30 text-[11px] min-h-[28px]">
+        <div className={`flex items-center gap-2 px-3 ${compact ? "py-1" : "py-1.5"} border-t border-border/50 bg-bg-tertiary/30 text-[11px] min-h-[26px]`}>
           {parsing && !hasDraft ? (
             <span className="text-text-muted italic">parsing…</span>
-          ) : !hasDraft ? (
-            <span className="text-text-muted">
-              no time detected — press ⏎ to save as-is, or ✨ AI for a deeper read
+          ) : autoAiRunning ? (
+            <span className="text-amber italic inline-flex items-center gap-1">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber animate-pulse" />
+              ai reading "{value.trim().slice(0, 28)}"…
             </span>
+          ) : !hasDraft ? (
+            regexMissedButTried ? (
+              <span className="text-amber">
+                no time detected — ⏎ saves as-is · ✨ AI can read this phrase
+              </span>
+            ) : (
+              <span className="text-text-muted">
+                no time detected — press ⏎ to save as-is, or ✨ AI for a deeper read
+              </span>
+            )
           ) : (
             <>
               {chip.label && (
                 <span className={`ticker ${DUE_TONE_CLASS[chip.tone]}`}>
                   🗓 {chip.label}
+                  {reminderTime && chip.label !== reminderTime && !chip.label.includes(reminderTime) && (
+                    <span className="text-text-muted ml-1">· {reminderTime}</span>
+                  )}
                 </span>
               )}
               {draft?.priority && (
@@ -181,8 +275,21 @@ export function QuickAddBar({ onAdded }: { onAdded: () => void }) {
                   ))}
                 </span>
               )}
-              {draft?.title && (
-                <span className="ml-auto text-text-secondary truncate max-w-[60%]" title={draft.title}>
+              {stepCount > 0 && (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-soft text-accent"
+                  title={draft?.steps?.join(" · ")}
+                >
+                  ✨ +{stepCount} step{stepCount > 1 ? "s" : ""}
+                </span>
+              )}
+              {draftSource === "ai" && (
+                <span className="text-[9px] uppercase tracking-wider text-accent/70" title="Parsed by the AI reader">
+                  · ai
+                </span>
+              )}
+              {draft?.title && !compact && (
+                <span className="ml-auto text-text-secondary truncate max-w-[55%]" title={draft.title}>
                   → "{draft.title}"
                 </span>
               )}

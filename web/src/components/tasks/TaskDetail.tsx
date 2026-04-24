@@ -8,7 +8,15 @@ import {
   toggleTaskStep,
   updateTask,
 } from "../../api";
-import { PRIORITY_GUTTER, parseTags } from "./taskHelpers";
+import {
+  DUE_TONE_CLASS,
+  PRIORITY_GUTTER,
+  formatDueChip,
+  parseTags,
+} from "./taskHelpers";
+import { AiStepsButton } from "./AiStepsButton";
+import { MarkdownNotes } from "./MarkdownNotes";
+import { useLiveCountdown } from "./useLiveCountdown";
 
 /**
  * Right pane — full control over a single task.
@@ -140,6 +148,23 @@ export function TaskDetail({
     }
   };
 
+  const moveStep = async (stepId: string, dir: -1 | 1) => {
+    const idx = steps.findIndex((s) => s.id === stepId);
+    if (idx < 0) return;
+    const swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= steps.length) return;
+    const next = [...steps];
+    [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+    setSteps(next);
+    try {
+      const saved = await setTaskSteps(task.id, next);
+      setSteps(saved);
+      onChanged();
+    } catch {
+      setSteps(steps);
+    }
+  };
+
   const doDelete = async () => {
     try {
       await deleteTask(task.id);
@@ -155,6 +180,9 @@ export function TaskDetail({
   };
 
   const done = task.status === "done";
+
+  useLiveCountdown(dueDate || null, reminderAt || null);
+  const dueChip = formatDueChip(dueDate || null, reminderAt || null);
 
   return (
     <div className="relative rounded-xl bg-bg-secondary border border-border overflow-hidden">
@@ -203,6 +231,15 @@ export function TaskDetail({
             ))}
           </div>
 
+          {dueChip.label && (
+            <span
+              className={`text-[10px] ticker ${DUE_TONE_CLASS[dueChip.tone]}`}
+              title="Live countdown"
+            >
+              🗓 {dueChip.label}
+            </span>
+          )}
+
           <div className="ml-auto flex items-center gap-2 text-[11px]">
             <label className="flex items-center gap-1 text-text-muted">
               <span className="uppercase tracking-wider text-[10px]">Due</span>
@@ -246,9 +283,12 @@ export function TaskDetail({
                 {steps.filter((s) => s.done).length}/{steps.length}
               </span>
             )}
+            <div className="ml-auto">
+              <AiStepsButton task={task} onAdded={onChanged} />
+            </div>
           </div>
           <div className="space-y-1">
-            {steps.map((s) => (
+            {steps.map((s, idx) => (
               <div
                 key={s.id}
                 className="group flex items-center gap-2 px-2 py-1 rounded hover:bg-bg-hover/40"
@@ -269,13 +309,34 @@ export function TaskDetail({
                 <span className={`text-[13px] flex-1 ${s.done ? "line-through text-text-muted" : "text-text-primary"}`}>
                   {s.title}
                 </span>
-                <button
-                  onClick={() => removeStep(s.id)}
-                  className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] text-text-muted hover:text-red-400 transition-all px-1"
-                  aria-label="Remove step"
-                >
-                  ×
-                </button>
+                <div className="flex items-center opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                  <button
+                    onClick={() => moveStep(s.id, -1)}
+                    disabled={idx === 0}
+                    className="text-[11px] text-text-muted hover:text-accent px-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                    aria-label="Move step up"
+                    title="Move up"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    onClick={() => moveStep(s.id, 1)}
+                    disabled={idx === steps.length - 1}
+                    className="text-[11px] text-text-muted hover:text-accent px-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                    aria-label="Move step down"
+                    title="Move down"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    onClick={() => removeStep(s.id)}
+                    className="text-[10px] text-text-muted hover:text-red-400 transition-colors px-1"
+                    aria-label="Remove step"
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
             ))}
 
@@ -308,17 +369,14 @@ export function TaskDetail({
           <h3 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary mb-1.5">
             Notes
           </h3>
-          <textarea
+          <MarkdownNotes
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={setDescription}
             onBlur={async () => {
               if (description !== (task.description ?? "")) {
                 await patch({ description: description || null });
               }
             }}
-            placeholder="Add context, links, reminders for future you…"
-            rows={3}
-            className="w-full bg-bg-tertiary border border-border rounded-md px-3 py-2 text-[13px] text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-accent/40 resize-y"
           />
         </div>
 

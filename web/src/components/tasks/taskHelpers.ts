@@ -103,6 +103,46 @@ export const DUE_TONE_CLASS: Record<"overdue" | "soon" | "future" | "none", stri
   none: "text-text-muted",
 };
 
+/**
+ * How often a chip bound to this deadline should re-render so the relative
+ * label stays accurate. Fine-grained (30s) when the deadline is inside today
+ * or in minutes/hours; coarse (5min) for anything further out. 0 means "no
+ * ticking needed" — no deadline at all.
+ */
+export function COUNTDOWN_REFRESH_MS(
+  dueDate: string | null,
+  reminderAt: string | null,
+): number {
+  if (!dueDate && !reminderAt) return 0;
+
+  if (reminderAt) {
+    const when = new Date(reminderAt).getTime();
+    if (!Number.isNaN(when)) {
+      const diff = Math.abs(when - Date.now());
+      if (diff < 24 * 3_600_000) return 30_000;
+      return 300_000;
+    }
+  }
+
+  if (dueDate) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const d = new Date(`${dueDate}T00:00:00`).getTime();
+    if (!Number.isNaN(d)) {
+      const diffDays = Math.abs(d - today.getTime()) / 864e5;
+      if (diffDays <= 1) return 60_000;
+      return 300_000;
+    }
+  }
+  return 0;
+}
+
+/** Date-ish keywords (EN + ES) used to decide if we should auto-fire the AI
+ * parser when the fast regex misses. Kept here so both QuickAddBar and its
+ * tests can import it. */
+export const DATE_HINT_RE =
+  /\b(tomorrow|today|tonight|morning|evening|afternoon|yesterday|next|in|after|before|at|on|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|am|pm|\d+\s*(?:h|hr|hour|hours|m|min|mins|minute|minutes|d|day|days|w|wk|week|weeks|mo|month|months)|manana|ma[nñ]ana|hoy|ayer|proximo|pr[oó]xima|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|hora|horas|d[ií]a|d[ií]as|semana|mes)\b/i;
+
 export function parseTags(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {

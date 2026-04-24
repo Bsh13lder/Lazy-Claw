@@ -7,6 +7,7 @@ import { LaneColumn } from "../components/LaneColumn";
 import { SavedAgentsRail } from "../components/SavedAgentsRail";
 import { HistoryPanel } from "../components/HistoryPanel";
 import { MyTasksPanel } from "../components/MyTasksPanel";
+import { TaskDashboardWidget } from "../components/tasks/TaskDashboardWidget";
 import type { Page } from "../components/NavShell";
 
 /**
@@ -296,6 +297,9 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
               Todos I've dictated + what I'm asking AI right now
             </span>
           </div>
+
+          <TaskDashboardWidget onNavigate={onNavigate} />
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <MyTasksPanel onNavigate={onNavigate} />
             <LaneColumn

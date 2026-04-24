@@ -9,6 +9,7 @@ import {
   DUE_TONE_CLASS,
   parseTags,
 } from "./taskHelpers";
+import { useLiveCountdown } from "./useLiveCountdown";
 
 /**
  * A single task row in the list pane of the Tasks page.
@@ -49,6 +50,7 @@ export function TaskCard({
     }
   };
 
+  useLiveCountdown(task.due_date, task.reminder_at);
   const chip = formatDueChip(task.due_date, task.reminder_at);
   const tags = parseTags(task.tags);
   const steps = parseSteps(task.steps);

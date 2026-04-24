@@ -318,6 +318,33 @@ export const startBrowserRemoteSession = () =>
 export const stopBrowserRemoteSession = () =>
   request<{ status: string }>("/api/browser/remote-session/stop", { method: "POST" });
 
+// ── Host browser bridge (CDP to the user's real Brave) ─────────────────
+
+export interface HostBrowserStatus {
+  mode: "off" | "auto" | "ask";
+  runtime: "docker" | "native";
+  reachable: boolean;
+  last_source: "host" | "local" | null;
+  token_set: boolean;
+}
+
+export type HostBrowserStartResponse =
+  | { status: "connected"; origin: string }
+  | { status: "needs_launch"; command: string; warning: string };
+
+export const getHostBrowserStatus = () =>
+  request<HostBrowserStatus>("/api/browser/host-session");
+
+export const startHostBrowserSession = () =>
+  request<HostBrowserStartResponse>("/api/browser/host-session/start", {
+    method: "POST",
+  });
+
+export const stopHostBrowserSession = () =>
+  request<{ status: string }>("/api/browser/host-session/stop", {
+    method: "POST",
+  });
+
 export interface PendingCheckpoint {
   name: string;
   detail?: string | null;
@@ -1268,6 +1295,22 @@ export const getLazyBrainGraph = (opts?: {
     `/api/lazybrain/graph${qs ? `?${qs}` : ""}`,
   );
 };
+
+export type GraphLayoutMode = "category" | "neural-link";
+
+export const getGraphPositions = (mode: GraphLayoutMode) =>
+  request<{ mode: GraphLayoutMode; positions: Record<string, [number, number]> }>(
+    `/api/lazybrain/graph/positions?mode=${encodeURIComponent(mode)}`,
+  );
+
+export const saveGraphPositions = (
+  mode: GraphLayoutMode,
+  positions: Record<string, [number, number]>,
+) =>
+  request<{ saved: number }>("/api/lazybrain/graph/positions", {
+    method: "POST",
+    body: JSON.stringify({ mode, positions }),
+  });
 
 export const getLazyBrainJournal = (isoDate: string) =>
   request<{ date: string; note: LazyBrainNote | null }>(

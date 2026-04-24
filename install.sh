@@ -124,6 +124,35 @@ install_lazyclaw() {
     ok "lazyclaw installed globally"
 }
 
+# ── Phase 4b: Optional OCR binary ─────────────────────────────────────────
+# The `browser(action="ocr")` skill uses Tesseract for local text extraction
+# on canvas-heavy pages / PDFs. Without the binary the action gracefully
+# falls back to `ask_vision` — so this step is best-effort, never fatal.
+install_tesseract() {
+    if command -v tesseract &>/dev/null; then
+        ok "tesseract found (OCR action ready)"
+        return 0
+    fi
+
+    if [[ "$(uname)" == "Darwin" ]] && command -v brew &>/dev/null; then
+        info "Installing tesseract for browser OCR action (optional)..."
+        if brew install tesseract 2>/dev/null; then
+            ok "tesseract installed"
+        else
+            warn "tesseract install failed — browser(action='ocr') will return [dependency_missing]; agent will fall back to ask_vision."
+        fi
+    elif command -v apt-get &>/dev/null; then
+        info "Installing tesseract-ocr for browser OCR action (optional)..."
+        if sudo apt-get install -y tesseract-ocr 2>/dev/null; then
+            ok "tesseract-ocr installed"
+        else
+            warn "tesseract-ocr install failed — browser(action='ocr') will return [dependency_missing]; agent will fall back to ask_vision."
+        fi
+    else
+        warn "No brew/apt detected — skipping tesseract. browser(action='ocr') will fall back to ask_vision."
+    fi
+}
+
 # ── Phase 5: Run setup wizard ─────────────────────────────────────────────
 run_setup() {
     if [[ -f "$REPO_DIR/.env" ]]; then
@@ -174,6 +203,9 @@ LOGO
 
     # Phase 4: Install
     install_lazyclaw
+
+    # Phase 4b: Optional tesseract for OCR browser action
+    install_tesseract
 
     # Phase 5: Setup
     run_setup

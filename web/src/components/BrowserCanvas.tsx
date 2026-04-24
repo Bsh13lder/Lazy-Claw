@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { BrowserSession } from "../hooks/useChatStream";
+import type { BrowserFramePair, BrowserSession } from "../hooks/useChatStream";
 import { browserActionIcon } from "./toolIcons";
 import * as api from "./../api";
 
@@ -36,6 +36,11 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
   const [saveResult, setSaveResult] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [vncUrl, setVncUrl] = useState<string | null>(session.takeoverUrl ?? null);
+  const [hostStatus, setHostStatus] = useState<api.HostBrowserStatus | null>(null);
+  const [hostSetup, setHostSetup] = useState<
+    | null
+    | { command: string; warning: string }
+  >(null);
   const [liveMode, setLiveMode] = useState<{ active: boolean; remaining: number }>({
     active: false, remaining: 0,
   });
@@ -137,6 +142,56 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Poll the host-browser status on mount + every 10s so the badge reflects
+  // reality when the user relaunches Brave outside this UI.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchStatus = () => {
+      api.getHostBrowserStatus()
+        .then((s) => { if (!cancelled) setHostStatus(s); })
+        .catch(() => {/* best-effort */});
+    };
+    fetchStatus();
+    const id = window.setInterval(fetchStatus, 10_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, []);
+
+  const useHostBrowser = async () => {
+    setBusy(true);
+    try {
+      const r = await api.startHostBrowserSession();
+      if (r.status === "connected") {
+        setHostSetup(null);
+        setHostStatus((prev) => prev ? { ...prev, mode: "auto", reachable: true, last_source: "host" } : prev);
+      } else {
+        setHostSetup({ command: r.command, warning: r.warning });
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Could not enable host browser:\n${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopHostBrowser = async () => {
+    setBusy(true);
+    try {
+      await api.stopHostBrowserSession();
+      setHostStatus((prev) => prev ? { ...prev, mode: "off", last_source: "local" } : prev);
+      setHostSetup(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copySetupCommand = async () => {
+    if (!hostSetup) return;
+    try {
+      await navigator.clipboard.writeText(hostSetup.command);
+    } catch {/* clipboard may be unavailable */}
   };
 
   const sendHelp = () => {
@@ -286,6 +341,11 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
             )}
           </div>
 
+          {/* Pre/post flipbook — shown only when Live mode emits frame pairs */}
+          {session.lastFramePair && (session.lastFramePair.preB64 || session.lastFramePair.postB64) && (
+            <FramePair pair={session.lastFramePair} />
+          )}
+
           {/* Action timeline */}
           {recent.length > 0 && (
             <ul className="flex flex-col gap-1 text-[11px]">
@@ -359,6 +419,7 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
                 onClick={startTakeover}
                 disabled={busy}
                 className="text-[11px] px-2 py-1 rounded border border-border hover:bg-bg-hover text-text-secondary disabled:opacity-50"
+                title="Watch + take control via VNC. Private: no cookies shared."
               >
                 🎮 Take control
               </button>
@@ -381,7 +442,37 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
                 </button>
               </>
             )}
+            {hostStatus?.mode === "off" ? (
+              <button
+                onClick={useHostBrowser}
+                disabled={busy}
+                className="text-[11px] px-2 py-1 rounded border border-sky-400/50 bg-sky-400/10 hover:bg-sky-400/20 text-sky-400 disabled:opacity-50"
+                title="Let the agent drive your real Brave with your cookies + logins."
+              >
+                🖥️ Use my Brave
+              </button>
+            ) : hostStatus ? (
+              <button
+                onClick={stopHostBrowser}
+                disabled={busy}
+                className="text-[11px] px-2 py-1 rounded border border-sky-400/40 bg-sky-400/10 hover:bg-sky-400/20 text-sky-400 disabled:opacity-50"
+                title="Revert to the container Brave. Your host Brave stays open."
+              >
+                {hostStatus.reachable ? "🖥️ Using your Brave (stop)" : "🖥️ Waiting for Brave (stop)"}
+              </button>
+            ) : null}
           </div>
+
+          {hostSetup && (
+            <HostBrowserSetupCard
+              command={hostSetup.command}
+              warning={hostSetup.warning}
+              busy={busy}
+              onCopy={copySetupCommand}
+              onRetry={useHostBrowser}
+              onDismiss={() => setHostSetup(null)}
+            />
+          )}
 
           {helpOpen && (
             <div className="flex flex-col gap-1.5">
@@ -458,6 +549,102 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+interface HostBrowserSetupCardProps {
+  command: string;
+  warning: string;
+  busy: boolean;
+  onCopy: () => void;
+  onRetry: () => void;
+  onDismiss: () => void;
+}
+
+function HostBrowserSetupCard({
+  command, warning, busy, onCopy, onRetry, onDismiss,
+}: HostBrowserSetupCardProps) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    await onCopy();
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="rounded-md border border-sky-400/40 bg-sky-400/5 p-2 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium text-sky-400">
+          🖥️ Host Brave setup
+        </span>
+        <button
+          onClick={onDismiss}
+          className="text-[10px] text-text-muted hover:text-text-primary"
+          title="Hide"
+        >
+          ✕
+        </button>
+      </div>
+      <p className="text-[11px] text-text-secondary">
+        Quit Brave completely (Cmd+Q) first, then paste this into Terminal:
+      </p>
+      <pre className="text-[10px] leading-tight p-2 rounded bg-bg-primary border border-border text-text-secondary overflow-x-auto whitespace-pre-wrap">
+{command}
+      </pre>
+      <p className="text-[10px] text-amber/80">⚠️ {warning}</p>
+      <div className="flex gap-1.5">
+        <button
+          onClick={copy}
+          disabled={busy}
+          className="text-[11px] px-2 py-1 rounded border border-border hover:bg-bg-hover text-text-secondary disabled:opacity-50"
+        >
+          {copied ? "✓ Copied" : "📋 Copy"}
+        </button>
+        <button
+          onClick={onRetry}
+          disabled={busy}
+          className="text-[11px] px-2 py-1 rounded border border-sky-400/50 bg-sky-400/10 hover:bg-sky-400/20 text-sky-400 disabled:opacity-50"
+        >
+          🔄 I did it — connect now
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface FramePairProps {
+  pair: BrowserFramePair;
+}
+
+function FramePair({ pair }: FramePairProps) {
+  const preSrc = pair.preB64 ? `data:image/webp;base64,${pair.preB64}` : undefined;
+  const postSrc = pair.postB64 ? `data:image/webp;base64,${pair.postB64}` : undefined;
+  const label = `${pair.action}${pair.target ? ` → ${pair.target.slice(0, 30)}` : ""}`;
+  return (
+    <div className="rounded-md border border-border/70 bg-bg-primary/60 p-2">
+      <div className="text-[10px] uppercase tracking-wide text-text-muted mb-1 flex items-center justify-between">
+        <span>Last action · before / after</span>
+        <span className="truncate ml-2 text-text-secondary" title={label}>{label}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-1.5">
+        <FrameCell label="before" src={preSrc} />
+        <FrameCell label="after" src={postSrc} />
+      </div>
+    </div>
+  );
+}
+
+function FrameCell({ label, src }: { label: string; src?: string }) {
+  return (
+    <div className="aspect-[16/10] rounded border border-border/60 bg-bg-secondary overflow-hidden flex items-center justify-center relative">
+      {src ? (
+        <img src={src} alt={label} className="w-full h-full object-contain" />
+      ) : (
+        <span className="text-[10px] text-text-muted">capturing…</span>
+      )}
+      <span className="absolute bottom-0 left-0 right-0 text-center text-[9px] uppercase tracking-wide text-text-muted bg-bg-primary/70 py-[1px]">
+        {label}
+      </span>
     </div>
   );
 }

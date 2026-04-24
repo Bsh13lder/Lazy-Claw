@@ -38,6 +38,14 @@ export interface BrowserEvent {
   extra?: Record<string, unknown>;
 }
 
+export interface BrowserFramePair {
+  action: string;
+  target?: string;
+  preB64?: string;   // WebP before the action
+  postB64?: string;  // WebP after the action
+  ts: number;
+}
+
 export interface BrowserSession {
   url?: string;
   title?: string;
@@ -47,6 +55,7 @@ export interface BrowserSession {
   pendingCheckpoint?: { name: string; detail?: string; ts: number };
   active: boolean;
   updatedAt: number;
+  lastFramePair?: BrowserFramePair; // Live-mode-only pre/post flipbook
 }
 
 export interface TemplateSuggest {
@@ -482,6 +491,52 @@ export function useChatStream({
             break;
           }
           const prev = browserSessionRef.current;
+          // Frame events feed the pre/post flipbook, not the action timeline.
+          let nextFramePair: BrowserFramePair | undefined = prev?.lastFramePair;
+          if (evt.kind === "frame") {
+            const phase = evt.extra?.phase as string | undefined;
+            const frameB64 = evt.extra?.frame_b64 as string | undefined;
+            if (phase === "pre") {
+              nextFramePair = {
+                action: evt.action ?? "action",
+                target: evt.target,
+                preB64: frameB64,
+                ts: evt.ts,
+              };
+            } else if (phase === "post") {
+              if (
+                nextFramePair &&
+                nextFramePair.action === (evt.action ?? "action") &&
+                nextFramePair.target === evt.target &&
+                !nextFramePair.postB64
+              ) {
+                nextFramePair = { ...nextFramePair, postB64: frameB64, ts: evt.ts };
+              } else {
+                // Post without matching pre — show just the post as a single frame.
+                nextFramePair = {
+                  action: evt.action ?? "action",
+                  target: evt.target,
+                  postB64: frameB64,
+                  ts: evt.ts,
+                };
+              }
+            }
+            // Skip the usual timeline/event-ring updates for frame-only events.
+            const next: BrowserSession = {
+              url: prev?.url,
+              title: prev?.title,
+              events: prev?.events ?? [],
+              thumbnailVersion: prev?.thumbnailVersion ?? 0,
+              takeoverUrl: prev?.takeoverUrl,
+              pendingCheckpoint: prev?.pendingCheckpoint,
+              active: true,
+              updatedAt: Date.now(),
+              lastFramePair: nextFramePair,
+            };
+            browserSessionRef.current = next;
+            scheduleFlush();
+            break;
+          }
           const events = prev ? [...prev.events, evt].slice(-12) : [evt];
           const urlChanged = !!evt.url && evt.url !== prev?.url;
           // A checkpoint event with extra.resolved means it was handled —
@@ -513,6 +568,7 @@ export function useChatStream({
             pendingCheckpoint: nextCheckpoint,
             active: true,
             updatedAt: Date.now(),
+            lastFramePair: nextFramePair,
           };
           browserSessionRef.current = next;
           // Auto-clear after 5 minutes idle so the canvas disappears.

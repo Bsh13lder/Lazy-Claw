@@ -67,6 +67,11 @@ class CDPBackend:
         self._last_activity: float = 0.0
         self._connect_lock = asyncio.Lock()
         self._last_thumb_url: str | None = None  # Throttle thumb captures per URL change
+        # Source of the active CDP connection: "host" (user's real Brave on the
+        # host via host.docker.internal), "local" (container-launched Brave),
+        # or None until the first connect. Gates apply_stealth and drives the
+        # UI badge so the user knows which browser identity the agent is using.
+        self._cdp_source: str | None = None
 
     def set_user_id(self, user_id: str | None) -> None:
         """Late-bind user_id (used by the shared singleton when user switches)."""
@@ -166,11 +171,103 @@ class CDPBackend:
         # Force capture even if URL is unchanged — that's the whole point of live mode.
         asyncio.create_task(self._capture_thumbnail(url, force=True))
 
+    async def _grab_frame_b64(self, max_width: int = 480) -> str | None:
+        """Capture the current viewport as a base64-encoded WebP.
+
+        Used for per-action before/after flipbook frames. Returns None on
+        any failure — the caller should continue the action regardless, since
+        frames are a UX nicety, never a correctness requirement.
+        """
+        if not self._conn:
+            return None
+        try:
+            result = await self._conn.send(
+                "Page.captureScreenshot", {"format": "png", "quality": 75},
+            )
+            raw = result.get("data", "")
+            if not raw:
+                return None
+            try:
+                import io as _io
+                from PIL import Image
+                img = Image.open(_io.BytesIO(base64.b64decode(raw)))
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    img = img.resize((max_width, int(img.height * ratio)))
+                buf = _io.BytesIO()
+                img.save(buf, format="WEBP", quality=65)
+                return base64.b64encode(buf.getvalue()).decode("ascii")
+            except Exception:
+                # Fall back to the original PNG if Pillow isn't available /
+                # chokes on the buffer — smaller is nice but correctness wins.
+                return raw
+        except Exception:
+            logger.debug("frame grab failed (non-fatal)", exc_info=True)
+            return None
+
+    async def _emit_action_with_frames(
+        self,
+        *,
+        action: str,
+        target: str | None,
+        detail: str | None,
+        coro,
+        url: str | None = None,
+        title: str | None = None,
+    ):
+        """Wrap a CDP input coroutine with pre/post frame capture.
+
+        Frames are captured only when the user is in live mode — no cost
+        to background sessions. The existing ``kind="action"`` event is
+        still emitted after the action finishes so downstream consumers
+        that only care about action tracking don't regress.
+        """
+        capture_frames = False
+        if self._user_id:
+            try:
+                from lazyclaw.browser.event_bus import is_live_mode
+                capture_frames = is_live_mode(self._user_id)
+            except Exception:
+                capture_frames = False
+
+        if capture_frames:
+            pre = await self._grab_frame_b64()
+            if pre:
+                self._emit(
+                    kind="frame", action=action, target=target,
+                    extra={"phase": "pre", "frame_b64": pre},
+                )
+
+        result = await coro
+
+        if capture_frames:
+            post = await self._grab_frame_b64()
+            if post:
+                self._emit(
+                    kind="frame", action=action, target=target,
+                    extra={"phase": "post", "frame_b64": post},
+                )
+
+        self._emit(
+            kind="action", action=action, target=target,
+            url=url, title=title, detail=detail,
+        )
+        return result
+
     async def _ensure_connected(self) -> CDPConnection:
         """Lazy connect: discover Chrome and connect to active tab.
 
-        If no Chrome is running, auto-launches headless Chrome.
-        If Chrome has no tabs, creates a new blank tab automatically.
+        Resolution order (see host_bridge.find_cdp_with_preference):
+          1. If the user opted in to host-browser mode, probe
+             ``host.docker.internal:{port}`` — that's their real Brave with
+             their cookies, saved logins, extensions.
+          2. Probe ``localhost:{port}`` for an existing CDP endpoint.
+          3. Auto-launch a headless Chromium inside the container.
+
+        When connected via the host, we also skip ``apply_stealth`` (their
+        real browser should look like themselves, not a fake mobile UA) and
+        send the Origin header matching ``--remote-allow-origins``.
+
         Uses asyncio.Lock to prevent duplicate Chrome launches from
         concurrent coroutines.
         """
@@ -185,47 +282,135 @@ class CDPBackend:
                 self._last_activity = time.monotonic()
                 return self._conn
 
-            ws_url = await find_chrome_cdp(self._port)
-            if not ws_url:
-                # Auto-launch headless Chrome instead of asking the user
+            prefer_host, host_token = await self._resolve_host_preference()
+            ws_url, source = await self._find_cdp_endpoint(prefer_host, host_token)
+
+            origin: str | None = None
+            if source == "host" and host_token:
+                from lazyclaw.browser.host_bridge import origin_for_token
+                origin = origin_for_token(host_token)
+                self._current_tab = CDPTab(id="host-browser", title="",
+                                           url="", ws_url=ws_url,
+                                           tab_type="page")
+            elif source == "local":
+                # Connect to the first (active) page tab using the regular
+                # discovery endpoint so CDPTab metadata comes through.
+                tabs = await list_chrome_tabs(self._port)
+                page_tabs = [t for t in tabs if t.tab_type == "page"]
+
+                if not page_tabs:
+                    logger.info("Chrome has no tabs, creating a new one")
+                    page_tabs = await self._create_tab()
+                    if not page_tabs:
+                        raise ConnectionError("Chrome has no open tabs and failed to create one.")
+
+                self._current_tab = page_tabs[0]
+                ws_url = self._current_tab.ws_url
+            else:
+                # Nothing reachable — auto-launch the container's own Brave.
                 ws_url = await self._auto_launch_chrome()
                 if not ws_url:
                     raise ConnectionError(
                         f"Could not launch Chrome with debugging port {self._port}."
                     )
-
-            # Connect to the first (active) page tab
-            tabs = await list_chrome_tabs(self._port)
-            page_tabs = [t for t in tabs if t.tab_type == "page"]
-
-            if not page_tabs:
-                # No tabs — create one via CDP /json/new endpoint
-                logger.info("Chrome has no tabs, creating a new one")
-                page_tabs = await self._create_tab()
+                source = "local"
+                tabs = await list_chrome_tabs(self._port)
+                page_tabs = [t for t in tabs if t.tab_type == "page"]
                 if not page_tabs:
-                    raise ConnectionError("Chrome has no open tabs and failed to create one.")
+                    page_tabs = await self._create_tab()
+                    if not page_tabs:
+                        raise ConnectionError("Chrome has no open tabs and failed to create one.")
+                self._current_tab = page_tabs[0]
+                ws_url = self._current_tab.ws_url
 
-            self._current_tab = page_tabs[0]
             self._conn = CDPConnection()
-            await self._conn.connect(self._current_tab.ws_url)
+            await self._conn.connect(ws_url, origin=origin)
+            self._cdp_source = source
 
             # Enable required CDP domains
             await self._conn.send("Page.enable")
             await self._conn.send("Runtime.enable")
 
-            # Apply stealth (mobile UA, anti-detection, touch emulation)
-            try:
-                from lazyclaw.browser.stealth import apply_stealth
-                await apply_stealth(self._conn)
-            except Exception as exc:
-                logger.warning("Stealth injection failed (non-fatal): %s", exc)
+            # Subscribe to Network events for the inspector ring buffer
+            await self._subscribe_network_events()
+
+            # Apply stealth only on the container Brave. On the user's real
+            # browser stealth would trip anomaly detection (Gmail, banks) and
+            # persist weird navigator overrides for the debug session.
+            if source == "local":
+                try:
+                    from lazyclaw.browser.stealth import apply_stealth
+                    await apply_stealth(self._conn)
+                except Exception as exc:
+                    logger.warning("Stealth injection failed (non-fatal): %s", exc)
+            else:
+                logger.info("Connected to host browser — skipping stealth injection")
+
+            # Record the resolved source so status endpoints can show it.
+            await self._persist_last_host_source(source)
+
+            # Let the UI know which browser identity we're driving.
+            self._emit(
+                kind="host_cdp",
+                detail=f"CDP source: {source}",
+                extra={"source": source},
+            )
 
             self._last_activity = time.monotonic()
             logger.info(
-                "CDP connected to tab: %s (%s)",
-                self._current_tab.title, self._current_tab.url,
+                "CDP connected (source=%s) to tab: %s (%s)",
+                source, self._current_tab.title, self._current_tab.url,
             )
             return self._conn
+
+    async def _resolve_host_preference(self) -> tuple[bool, str | None]:
+        """Read the user's host-browser setting + token.
+
+        Best-effort — any error means we default to container behaviour so
+        the browser skill never fails for settings-lookup reasons.
+        """
+        if not self._user_id:
+            return False, None
+        try:
+            from lazyclaw.browser.browser_settings import get_browser_settings
+            from lazyclaw.config import load_config
+
+            settings = await get_browser_settings(load_config(), self._user_id)
+            mode = settings.get("use_host_browser", "off")
+            token = settings.get("host_cdp_token")
+            prefer_host = mode in ("auto", "ask") and bool(token)
+            return prefer_host, token
+        except Exception:
+            logger.debug("host-browser settings lookup failed (falling back to local)", exc_info=True)
+            return False, None
+
+    async def _find_cdp_endpoint(
+        self, prefer_host: bool, host_token: str | None,
+    ) -> tuple[str | None, str]:
+        """Delegate to host_bridge.find_cdp_with_preference.
+
+        Kept as a thin method wrapper so tests can patch it without pulling
+        in httpx network calls.
+        """
+        from lazyclaw.browser.host_bridge import find_cdp_with_preference
+
+        return await find_cdp_with_preference(
+            port=self._port, prefer_host=prefer_host, token=host_token,
+        )
+
+    async def _persist_last_host_source(self, source: str) -> None:
+        """Record the last-resolved CDP source for diagnostics in /status."""
+        if not self._user_id:
+            return
+        try:
+            from lazyclaw.browser.browser_settings import update_browser_settings
+            from lazyclaw.config import load_config
+
+            await update_browser_settings(
+                load_config(), self._user_id, {"last_host_cdp_source": source},
+            )
+        except Exception:
+            logger.debug("persist last_host_cdp_source failed (non-fatal)", exc_info=True)
 
     async def _auto_launch_chrome(self) -> str | None:
         """Launch headless browser with remote debugging. Returns CDP ws_url or None.
@@ -531,11 +716,10 @@ class CDPBackend:
 
         # Human-like click: Bezier movement + complete event chain
         from lazyclaw.browser.human_input import human_click
-        await human_click(conn, x, y, target_size=target_size)
-
-        self._emit(
-            kind="action", action="click", target=selector[:80],
+        await self._emit_action_with_frames(
+            action="click", target=selector[:80],
             detail=f"Clicked {selector[:60]}",
+            coro=human_click(conn, x, y, target_size=target_size),
         )
 
     async def type_text(self, selector: str, text: str) -> None:
@@ -557,19 +741,21 @@ class CDPBackend:
 
         # Type with human-like keystroke timing
         from lazyclaw.browser.human_input import human_type
-        await human_type(
-            conn, text,
-            field_x=coords["x"] if coords else None,
-            field_y=coords["y"] if coords else None,
-        )
 
-        # Mask passwords/secrets in the visible detail line
+        # Mask passwords/secrets in the visible detail line (build before the
+        # emit wrapper so the pre-frame and action event share the same label)
         masked = text if len(text) <= 40 else text[:37] + "…"
         if any(s in selector.lower() for s in ("password", "passwd", "pin", "secret")):
             masked = "•" * min(len(text), 8)
-        self._emit(
-            kind="action", action="type", target=selector[:80],
+
+        await self._emit_action_with_frames(
+            action="type", target=selector[:80],
             detail=f"Typed '{masked}' into {selector[:40]}",
+            coro=human_type(
+                conn, text,
+                field_x=coords["x"] if coords else None,
+                field_y=coords["y"] if coords else None,
+            ),
         )
 
     async def press_key(self, key: str) -> None:
@@ -609,27 +795,31 @@ class CDPBackend:
         # CDP rejects text="" — only include when non-empty
         if text:
             key_down["text"] = text
-        await conn.send("Input.dispatchKeyEvent", key_down)
-        await asyncio.sleep(random.uniform(0.03, 0.08))
-        await conn.send("Input.dispatchKeyEvent", {
-            "type": "keyUp",
-            "key": key_name,
-            "windowsVirtualKeyCode": code,
-            "nativeVirtualKeyCode": code,
-        })
-        self._emit(
-            kind="action", action="press_key", target=key,
+
+        async def _do_press() -> None:
+            await conn.send("Input.dispatchKeyEvent", key_down)
+            await asyncio.sleep(random.uniform(0.03, 0.08))
+            await conn.send("Input.dispatchKeyEvent", {
+                "type": "keyUp",
+                "key": key_name,
+                "windowsVirtualKeyCode": code,
+                "nativeVirtualKeyCode": code,
+            })
+
+        await self._emit_action_with_frames(
+            action="press_key", target=key,
             detail=f"Pressed {key}",
+            coro=_do_press(),
         )
 
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         conn = await self._ensure_connected()
         # Human-like scroll with momentum deceleration
         from lazyclaw.browser.human_input import human_scroll
-        await human_scroll(conn, direction=direction, amount=amount)
-        self._emit(
-            kind="action", action="scroll", target=direction,
+        await self._emit_action_with_frames(
+            action="scroll", target=direction,
             detail=f"Scrolled {direction} {amount}px",
+            coro=human_scroll(conn, direction=direction, amount=amount),
         )
 
     async def wait_for_selector(
@@ -681,10 +871,72 @@ class CDPBackend:
         await self._conn.send("Page.enable")
         await self._conn.send("Runtime.enable")
 
+        # Re-subscribe to Network events on the new connection — without this,
+        # the inspector ring buffer silently stops after any tab switch.
+        await self._subscribe_network_events()
+
         # Bring tab to front
         await self._conn.send("Page.bringToFront")
 
         logger.info("Switched to tab: %s (%s)", target.title, target.url)
+
+    async def _subscribe_network_events(self) -> None:
+        """Enable CDP Network domain and wire handlers into the inspector.
+
+        Called from both _ensure_connected and switch_tab — the connection
+        object (and its _event_handlers dict) is fresh in both cases, so we
+        never double-register.
+        """
+        if not self._conn:
+            return
+        try:
+            await self._conn.send("Network.enable", {})
+        except Exception:
+            logger.debug("Network.enable failed (non-fatal)", exc_info=True)
+            return
+
+        from lazyclaw.browser import network_inspector
+
+        user_id = self._user_id
+
+        def on_request(params: dict) -> None:
+            req = params.get("request", {}) or {}
+            network_inspector.record_request(
+                user_id,
+                params.get("requestId", ""),
+                req.get("url", ""),
+                req.get("method", "GET"),
+            )
+
+        def on_response(params: dict) -> None:
+            resp = params.get("response", {}) or {}
+            network_inspector.record_response(
+                user_id,
+                params.get("requestId", ""),
+                resp.get("status", 0),
+                resp.get("mimeType"),
+                resp.get("encodedDataLength"),
+                resp.get("fromDiskCache", False) or resp.get("fromServiceWorker", False),
+            )
+
+        def on_finished(params: dict) -> None:
+            network_inspector.record_finished(
+                user_id,
+                params.get("requestId", ""),
+                params.get("encodedDataLength"),
+            )
+
+        def on_failed(params: dict) -> None:
+            network_inspector.record_failed(
+                user_id,
+                params.get("requestId", ""),
+                params.get("errorText"),
+            )
+
+        self._conn.register_event_handler("Network.requestWillBeSent", on_request)
+        self._conn.register_event_handler("Network.responseReceived", on_response)
+        self._conn.register_event_handler("Network.loadingFinished", on_finished)
+        self._conn.register_event_handler("Network.loadingFailed", on_failed)
 
     # ── Accessibility tree ────────────────────────────────────────────
 
@@ -967,8 +1219,16 @@ class CDPBackend:
 
         # Human-like Bezier movement to hover position
         from lazyclaw.browser.human_input import human_move_to
-        await human_move_to(conn, coords["x"], coords["y"])
-        await asyncio.sleep(random.uniform(0.3, 0.8))
+
+        async def _do_hover() -> None:
+            await human_move_to(conn, coords["x"], coords["y"])
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+        await self._emit_action_with_frames(
+            action="hover", target=selector[:80],
+            detail=f"Hovered {selector[:60]}",
+            coro=_do_hover(),
+        )
 
     async def drag_and_drop(
         self, source_selector: str, target_selector: str
@@ -999,31 +1259,35 @@ class CDPBackend:
 
         # Move to source with Bezier curve
         from lazyclaw.browser.human_input import human_move_to, _generate_bezier_path
-        await human_move_to(conn, sx, sy)
 
-        # Press and hold
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mousePressed", "x": round(sx), "y": round(sy),
-            "button": "left", "clickCount": 1,
-        })
-        await asyncio.sleep(random.uniform(0.1, 0.2))
-
-        # Drag along Bezier curve to target
-        path = _generate_bezier_path(sx, sy, tx, ty)
-        for point in path:
+        async def _do_drag() -> None:
+            await human_move_to(conn, sx, sy)
             await conn.send("Input.dispatchMouseEvent", {
-                "type": "mouseMoved",
-                "x": round(point.x),
-                "y": round(point.y),
+                "type": "mousePressed", "x": round(sx), "y": round(sy),
+                "button": "left", "clickCount": 1,
             })
-            await asyncio.sleep(random.uniform(0.02, 0.06))
+            await asyncio.sleep(random.uniform(0.1, 0.2))
 
-        # Release at target
-        await conn.send("Input.dispatchMouseEvent", {
-            "type": "mouseReleased", "x": round(tx), "y": round(ty),
-            "button": "left", "clickCount": 1,
-        })
-        await asyncio.sleep(random.uniform(0.2, 0.5))
+            path = _generate_bezier_path(sx, sy, tx, ty)
+            for point in path:
+                await conn.send("Input.dispatchMouseEvent", {
+                    "type": "mouseMoved",
+                    "x": round(point.x),
+                    "y": round(point.y),
+                })
+                await asyncio.sleep(random.uniform(0.02, 0.06))
+
+            await conn.send("Input.dispatchMouseEvent", {
+                "type": "mouseReleased", "x": round(tx), "y": round(ty),
+                "button": "left", "clickCount": 1,
+            })
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+
+        await self._emit_action_with_frames(
+            action="drag", target=f"{source_selector[:40]}→{target_selector[:40]}",
+            detail=f"Dragged {source_selector[:30]} to {target_selector[:30]}",
+            coro=_do_drag(),
+        )
 
     async def is_connected(self) -> bool:
         if not self._conn:

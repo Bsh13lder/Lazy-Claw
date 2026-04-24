@@ -33,6 +33,13 @@ dependencies = [
     # Installed inside the container so it's launchable as `workspace-mcp`
     # via the Web UI's MCP → Add Server flow. See ADR-0003.
     "workspace-mcp>=1.19.0,<1.21.0",
+    # Python wrapper for the Tesseract OCR binary. The wrapper is tiny and
+    # always installs; the binary itself is opt-in via `brew install tesseract`
+    # (or `apt install tesseract-ocr`). When missing, the `browser(action="ocr")`
+    # action returns a structured [dependency_missing] error that tells the
+    # agent to fall back to `ask_vision` — OCR is a cheap optimisation, not
+    # a correctness requirement.
+    "pytesseract>=0.3.10",
 ]
 
 [project.optional-dependencies]

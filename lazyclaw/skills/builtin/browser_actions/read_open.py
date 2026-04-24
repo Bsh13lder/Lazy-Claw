@@ -9,6 +9,12 @@ import asyncio
 import logging
 import random
 
+from lazyclaw.browser.action_errors import (
+    RETRY_GIVE_UP,
+    RETRY_RE_READ,
+    ActionError,
+    ActionErrorCode,
+)
 from lazyclaw.browser.action_verifier import (
     capture_error_text,
     capture_state,
@@ -35,7 +41,12 @@ async def action_read(
                 await backend.goto(nav_url)
                 await asyncio.sleep(3)
             else:
-                return f"Couldn't resolve '{target}' to a URL."
+                return str(ActionError(
+                    code=ActionErrorCode.NOT_FOUND,
+                    message=f"Couldn't resolve '{target}' to a URL.",
+                    hint="Pass a full URL (https://...) or a known shortcut like 'twitter'.",
+                    retry_strategy=RETRY_GIVE_UP,
+                ))
         else:
             tab_list = await backend.tabs()
             match = next(
@@ -53,7 +64,12 @@ async def action_read(
                     await backend.goto(nav_url)
                     await asyncio.sleep(3)
                 else:
-                    return f"No tab found matching '{target}' and couldn't resolve to a URL."
+                    return str(ActionError(
+                        code=ActionErrorCode.NOT_FOUND,
+                        message=f"No tab matching '{target}' and couldn't resolve to a URL.",
+                        hint="Pass a full URL or use action='open', target='https://...'.",
+                        retry_strategy=RETRY_GIVE_UP,
+                    ))
 
     result = await run_extractor(backend)
     title = result.get("title", "")
@@ -98,7 +114,12 @@ async def action_open(
 
     nav_url = query_to_url(target)
     if not nav_url:
-        return f"Couldn't resolve '{target}' to a URL."
+        return str(ActionError(
+            code=ActionErrorCode.NOT_FOUND,
+            message=f"Couldn't resolve '{target}' to a URL.",
+            hint="Pass a full URL (https://...) or a shortcut like 'twitter'.",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
 
     backend = await get_backend(user_id, tab_context, visible=visible)
     if visible:
@@ -290,20 +311,31 @@ async def _page_context_summary(
 
 
 async def element_not_found_hint(backend, target: str) -> str:
-    """When an element isn't found, return actionable elements for self-correction."""
+    """When an element isn't found, return actionable elements for self-correction.
+
+    Prefixes with the structured `[not_found]` error code so the agent can
+    branch retry strategy without regexing the prose.
+    """
     from lazyclaw.browser.dom_optimizer import DOMOptimizer
+
+    err = ActionError(
+        code=ActionErrorCode.NOT_FOUND,
+        message=f"Element not found: '{target}'.",
+        hint="Use action='snapshot' to see page structure, or try a different selector.",
+        retry_strategy=RETRY_RE_READ,
+    )
 
     try:
         elements = await DOMOptimizer.extract_actionable(backend)
         if elements:
             hint_text = format_actionable_elements(elements, limit=25)
             return (
-                f"Element not found: '{target}'. "
+                f"{err}\n"
                 f"Here are the interactive elements on the page:\n{hint_text}"
             )
     except Exception as exc:
         logger.debug("DOMOptimizer.extract_actionable failed: %s", exc)
-    return f"Element not found: '{target}'. Use action='snapshot' to see page structure."
+    return str(err)
 
 
 # Visit tracking ----------------------------------------------------------

@@ -1,10 +1,21 @@
 """Unified browser skill — single CDP-based tool for all browser interactions.
 
-Actions: read, open, click, type, screenshot, tabs, scroll, snapshot,
-         hover, drag, console_logs, chain, close, show, press_key, ask_vision.
+Actions are grouped into four categories:
+    READ:     read, snapshot, screenshot, console_logs, network, ocr
+    INTERACT: click, type, press_key, hover, drag
+    NAVIGATE: open, close, show, tabs, scroll, chain
+    ESCALATE: ask_vision
 
 Controls user's real Brave browser via Chrome DevTools Protocol.
 Action implementations live in browser_actions/ submodules.
+
+Error handling: every handler returns a string. When something goes wrong,
+the response starts with a structured ``[error_code]`` prefix (see
+``lazyclaw/browser/action_errors.py``). The agent should branch retry
+strategy on that code — e.g. wait on ``[timeout]``, scroll on
+``[occluded]``, re-snapshot on ``[stale_snapshot]``, give up on
+``[not_found]``, escalate to ``action=ask_vision`` on
+``[dependency_missing]``.
 """
 
 from __future__ import annotations
@@ -21,6 +32,8 @@ from .browser_actions.backends import get_cdp_backend, reset_backend
 from .browser_actions.capture import action_console_logs, action_screenshot, action_snapshot
 from .browser_actions.interact import action_click, action_drag, action_hover, action_press_key, action_type
 from .browser_actions.navigation import action_chain, action_close, action_scroll, action_show, action_tabs
+from .browser_actions.network import action_network
+from .browser_actions.ocr import action_ocr
 from .browser_actions.read_open import action_open, action_read
 
 logger = logging.getLogger(__name__)
@@ -60,7 +73,13 @@ class BrowserSkill(BaseSkill):
             "Use for reading pages, navigating, clicking, typing, "
             "taking screenshots, listing tabs, scrolling. Shortcuts: "
             "'twitter', 'facebook', 'linkedin'. "
-            "NOT for messaging or email apps — those have dedicated MCP tools."
+            "NOT for messaging or email apps — those have dedicated MCP tools. "
+            "\n\nIMPORTANT — identity routing: if the user says 'use my browser', "
+            "'use mybrowser', 'my brave', 'use my cookies', 'login as me', or "
+            "similar (any language, any typo), call the `use_host_browser` skill "
+            "FIRST with action='start' before any browser action — that bridges "
+            "to their real Brave with their cookies. Without that call, this "
+            "skill drives a fresh container Brave with no user cookies."
         )
 
     @property
@@ -78,28 +97,44 @@ class BrowserSkill(BaseSkill):
                         "read", "open", "click", "type", "press_key",
                         "screenshot", "tabs", "scroll", "close", "show",
                         "snapshot", "hover", "drag", "console_logs", "chain",
-                        "ask_vision",
+                        "network", "ocr", "ask_vision",
                     ],
                     "description": (
-                        "read: get page CONTENT (text, emails, messages) — no interactive refs. "
-                        "open: navigate + get content summary AND interactive refs [e1],[e2]. "
-                        "snapshot: get interactive element refs [e1],[e2] ONLY — use before clicking/typing. "
-                        "click: click element by ref (e5) or description. Returns fresh refs if page changed. "
-                        "type: type text into element. Returns fresh refs if page changed. "
-                        "press_key: press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown). "
-                        "screenshot: capture screenshot (ONLY when user asks). "
-                        "tabs: list all open tabs. "
-                        "scroll: scroll up or down. "
-                        "close: close/hide the browser. "
-                        "show: make the browser window visible on screen. "
-                        "hover: hover over element. "
-                        "drag: drag element from source to target. "
-                        "console_logs: get browser console output. "
-                        "chain: execute multiple steps in one call. "
-                        "ask_vision: delegate a visual question to a local vision model "
-                        "(gemma4:e2b). Use ONLY when snapshot/read can't answer — layout "
+                        "READ actions — gather information:\n"
+                        "  read: get page CONTENT (text, emails, messages) — no interactive refs.\n"
+                        "  snapshot: get interactive element refs [e1],[e2] ONLY — use before clicking/typing.\n"
+                        "  screenshot: capture screenshot (ONLY when user asks).\n"
+                        "  console_logs: get browser console output.\n"
+                        "  network: list recent XHR/fetch requests (url, status, size, body preview). "
+                        "Best tool on SPAs where the DOM looks empty but data loaded via fetch. "
+                        "Filters: url_substring, method, status_min/max, only_failed, limit (default 20), "
+                        "include_body (default false). Returns JSON.\n"
+                        "  ocr: local Tesseract text extraction from the viewport. Use for canvas-heavy "
+                        "pages, in-browser PDFs, banking/gov portals where accessibility tree is weak. "
+                        "Optional region={x, y, width, height}. Free, ~200ms. Falls back to ask_vision "
+                        "with a clear [dependency_missing] error if tesseract isn't installed.\n"
+                        "INTERACT actions — change page state:\n"
+                        "  click: click element by ref (e5) or description. Returns fresh refs if page changed.\n"
+                        "  type: type text into element. Returns fresh refs if page changed.\n"
+                        "  press_key: press a keyboard key (Enter, Escape, Tab, Backspace, ArrowDown).\n"
+                        "  hover: hover over element.\n"
+                        "  drag: drag element from source to target.\n"
+                        "NAVIGATE actions — move between pages/tabs:\n"
+                        "  open: navigate + get content summary AND interactive refs [e1],[e2].\n"
+                        "  close: close/hide the browser.\n"
+                        "  show: make the browser window visible on screen.\n"
+                        "  tabs: list all open tabs.\n"
+                        "  scroll: scroll up or down.\n"
+                        "  chain: execute multiple steps in one call.\n"
+                        "ESCALATE — when nothing else works:\n"
+                        "  ask_vision: delegate a visual question to a local vision model "
+                        "(gemma4:e2b). Use ONLY when snapshot/read/ocr can't answer — layout "
                         "bugs, visual-only elements, CAPTCHAs, unexpected popups, disabled "
-                        "buttons, image content. Requires 'question' param. Free, ~3-5s."
+                        "buttons, image content. Requires 'question' param. Free, ~3-5s.\n\n"
+                        "All errors start with a `[code]` prefix (e.g. [not_found], [timeout], "
+                        "[stale_snapshot], [dependency_missing]) plus a Retry hint. Branch retry "
+                        "strategy on the code — don't retry [not_found], re-snapshot on "
+                        "[stale_snapshot], escalate to ask_vision on [dependency_missing]."
                     ),
                 },
                 "target": {
@@ -157,6 +192,55 @@ class BrowserSkill(BaseSkill):
                         "For ask_vision: the specific visual question to answer "
                         "(e.g. 'is the submit button enabled?', 'what error does "
                         "the modal show?'). Be specific — avoid 'describe this'."
+                    ),
+                },
+                "region": {
+                    "type": "object",
+                    "description": (
+                        "For ocr: optional crop region {x, y, width, height} in viewport pixels. "
+                        "Omit for the whole viewport. Regions bigger than ~2000×2000 are rejected "
+                        "— use ask_vision for full-page reads instead."
+                    ),
+                    "properties": {
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                        "width": {"type": "integer"},
+                        "height": {"type": "integer"},
+                    },
+                },
+                "url_substring": {
+                    "type": "string",
+                    "description": (
+                        "For network: case-insensitive substring filter on request URL."
+                    ),
+                },
+                "method": {
+                    "type": "string",
+                    "description": (
+                        "For network: HTTP method filter (GET, POST, PUT, DELETE…)."
+                    ),
+                },
+                "status_min": {
+                    "type": "integer",
+                    "description": "For network: minimum response status (e.g. 400 for errors).",
+                },
+                "status_max": {
+                    "type": "integer",
+                    "description": "For network: maximum response status.",
+                },
+                "only_failed": {
+                    "type": "boolean",
+                    "description": "For network: only include requests that failed (loadingFailed).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "For network: max records to return (1-50, default 20).",
+                },
+                "include_body": {
+                    "type": "boolean",
+                    "description": (
+                        "For network: when true, lazily fetches a ~2KB response body preview "
+                        "for JSON/text requests. Capped at 200KB total per query."
                     ),
                 },
             },
@@ -247,13 +331,17 @@ class BrowserSkill(BaseSkill):
             return await action_console_logs(user_id, params, tab_context)
         elif action == "chain":
             return await action_chain(user_id, params, tab_context, mgr)
+        elif action == "network":
+            return await action_network(user_id, params, tab_context, self._config, mgr)
+        elif action == "ocr":
+            return await action_ocr(user_id, params, tab_context, self._config, mgr)
         elif action == "ask_vision":
             return await action_ask_vision(user_id, params, tab_context)
         else:
             return (
                 f"Unknown action: {action}. Use: read, open, click, type, "
                 f"press_key, screenshot, tabs, scroll, close, snapshot, "
-                f"hover, drag, console_logs, chain, ask_vision"
+                f"hover, drag, console_logs, chain, network, ocr, ask_vision"
             )
 
     async def _auto_connect_and_retry(self, user_id: str, params: dict) -> str:

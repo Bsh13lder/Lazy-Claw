@@ -9,9 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Union
 
 import httpx
+
+# Event handler signature: sync or async callable taking CDP event params.
+EventHandler = Callable[[dict], Union[None, Awaitable[None]]]
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +93,33 @@ class CDPConnection:
         self._pending: dict[int, asyncio.Future] = {}
         self._listener_task: asyncio.Task | None = None
         self._connected = False
+        # CDP event subscriptions: method name -> list of handlers.
+        # Events without an id (e.g. Network.requestWillBeSent) are dispatched
+        # to all registered handlers; exceptions from one handler never kill
+        # the listener or interfere with the others.
+        self._event_handlers: dict[str, list[EventHandler]] = {}
 
-    async def connect(self, ws_url: str) -> None:
-        """Connect to a CDP target via WebSocket."""
+    def register_event_handler(self, method: str, handler: EventHandler) -> None:
+        """Subscribe a callback to a CDP event method.
+
+        Multiple handlers per method are allowed. Handlers may be sync or
+        async; async handlers are scheduled via asyncio.create_task so the
+        listener loop is never blocked.
+        """
+        self._event_handlers.setdefault(method, []).append(handler)
+
+    def clear_event_handlers(self) -> None:
+        """Drop all event subscriptions — call on reconnect / tab switch."""
+        self._event_handlers.clear()
+
+    async def connect(self, ws_url: str, origin: str | None = None) -> None:
+        """Connect to a CDP target via WebSocket.
+
+        ``origin`` sets the ``Origin`` header on the handshake. Required when
+        the remote Chromium was launched with ``--remote-allow-origins=<value>``
+        (host-browser bridge). For connections to ``localhost`` this is almost
+        always ``None`` — Chromium auto-accepts any Origin from loopback.
+        """
         try:
             import websockets
         except ImportError:
@@ -99,15 +128,29 @@ class CDPConnection:
                 "Install with: pip install websockets"
             )
 
-        self._ws = await websockets.connect(
-            ws_url,
-            max_size=50 * 1024 * 1024,  # 50MB for large screenshots
-            ping_interval=30,
-            ping_timeout=10,
-        )
+        connect_kwargs: dict = {
+            "max_size": 50 * 1024 * 1024,  # 50MB for large screenshots
+            "ping_interval": 30,
+            "ping_timeout": 10,
+        }
+        if origin:
+            # websockets v12+ uses ``additional_headers``; older v10/11 use
+            # ``extra_headers``. Try the new name first, fall back to legacy.
+            header = [("Origin", origin)]
+            try:
+                self._ws = await websockets.connect(
+                    ws_url, additional_headers=header, **connect_kwargs,
+                )
+            except TypeError:
+                self._ws = await websockets.connect(
+                    ws_url, extra_headers=header, **connect_kwargs,
+                )
+        else:
+            self._ws = await websockets.connect(ws_url, **connect_kwargs)
+
         self._connected = True
         self._listener_task = asyncio.create_task(self._listen())
-        logger.info("CDP connected to %s", ws_url)
+        logger.info("CDP connected to %s%s", ws_url, " (with Origin)" if origin else "")
 
     async def send(
         self,
@@ -197,8 +240,26 @@ class CDPConnection:
                     fut = self._pending.pop(msg_id)
                     if not fut.done():
                         fut.set_result(msg)
-                # Events (no id) are ignored for now — can add event
-                # handlers later if needed (e.g., Page.loadEventFired)
+                    continue
+
+                # Event dispatch. Method-less messages get dropped silently.
+                method = msg.get("method")
+                if not method:
+                    continue
+                handlers = self._event_handlers.get(method)
+                if not handlers:
+                    continue
+                params = msg.get("params", {}) or {}
+                for cb in handlers:
+                    try:
+                        result = cb(params)
+                        if asyncio.iscoroutine(result):
+                            asyncio.create_task(result)
+                    except Exception:
+                        logger.debug(
+                            "CDP event handler for %s raised (non-fatal)",
+                            method, exc_info=True,
+                        )
 
         except asyncio.CancelledError:
             # Intentional: listener task cancelled during close()

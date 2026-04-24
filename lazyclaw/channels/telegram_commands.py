@@ -37,6 +37,7 @@ BOT_COMMANDS = [
     BotCommand("history", "\U0001f4ac Recent messages"),
     BotCommand("logs", "\U0001f4dd Activity log"),
     BotCommand("browser", "\U0001f310 Browser control"),
+    BotCommand("usebrowser", "\U0001f5a5️ Host Brave bridge"),
     BotCommand("survival", "\U0001f4bc Job hunting"),
     BotCommand("profile", "\U0001f464 Freelance profile"),
     BotCommand("doctor", "\U0001fa7a Diagnostics"),
@@ -87,6 +88,7 @@ class TelegramCommands:
             "email": self._handle_platform,
             "survival": self._handle_survival, "profile": self._handle_profile,
             "browser": self._handle_browser, "screen": self._handle_screen,
+            "usebrowser": self._handle_usebrowser,
             "local": self._handle_local,
             "ram": self._handle_ram, "qr": self._handle_qr,
             "recovery": self._handle_recovery,
@@ -1614,6 +1616,82 @@ class TelegramCommands:
             await self._agent_dispatch(update, chat_id, user_id, "take a screenshot and send it")
         else:
             await self._reply(update, "\U0001f310 Usage: <code>/browser status|close|screenshot</code>")
+
+    # -- /usebrowser -------------------------------------------------------
+
+    async def _handle_usebrowser(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Bridge the agent to the user's REAL host Brave via CDP."""
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        subcmd = (context.args[0].lower() if context.args else "start")
+
+        from lazyclaw.browser import host_bridge
+        from lazyclaw.browser.browser_settings import (
+            get_browser_settings, update_browser_settings,
+        )
+
+        port = getattr(self._config, "cdp_port", 9222)
+
+        if subcmd == "status":
+            settings = await get_browser_settings(self._config, user_id)
+            ws = await host_bridge.probe_host_cdp(port)
+            mode = settings.get("use_host_browser", "off")
+            last = settings.get("last_host_cdp_source") or "never"
+            runtime = "docker" if host_bridge.is_docker_runtime() else "native"
+            await self._reply(
+                update,
+                f"\U0001f5a5️ <b>Host browser bridge</b>\n"
+                f"Mode: <code>{mode}</code>\n"
+                f"Runtime: <code>{runtime}</code>\n"
+                f"Reachable now: <code>{'yes' if ws else 'no'}</code>\n"
+                f"Last source: <code>{last}</code>",
+            )
+            return
+
+        if subcmd == "stop":
+            await update_browser_settings(
+                self._config, user_id, {"use_host_browser": "off"},
+            )
+            await self._reply(
+                update,
+                "✅ Host browser bridge stopped. Next browser action uses the container Brave.",
+            )
+            return
+
+        # start (default)
+        settings = await get_browser_settings(self._config, user_id)
+        token = settings.get("host_cdp_token") or host_bridge.generate_host_token()
+        if token != settings.get("host_cdp_token"):
+            await update_browser_settings(
+                self._config, user_id, {"host_cdp_token": token},
+            )
+        await update_browser_settings(
+            self._config, user_id, {"use_host_browser": "auto"},
+        )
+
+        ws = await host_bridge.probe_host_cdp(port)
+        if ws:
+            await self._reply(
+                update,
+                "✅ <b>Using your real Brave</b>\n"
+                "All your cookies, saved logins, and extensions are in play. "
+                "Send <code>/usebrowser stop</code> to revert.",
+            )
+            return
+
+        cmd = host_bridge.build_launch_command(token)
+        warning = host_bridge.security_warning()
+        # Telegram needs HTML-escaping for <code>; we send as plain text with
+        # a code block to keep the one-liner pasteable.
+        await self._reply(
+            update,
+            "\U0001f5a5️ <b>Host Brave not reachable yet</b>\n\n"
+            "Run this on your Mac (paste into Terminal):\n"
+            f"<pre>{cmd}</pre>\n"
+            f"⚠️ {warning}\n\n"
+            "Once Brave is running with those flags, send <code>/usebrowser</code> again.",
+        )
 
     # -- /screen -----------------------------------------------------------
 

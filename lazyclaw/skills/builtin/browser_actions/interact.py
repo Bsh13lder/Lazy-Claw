@@ -10,6 +10,12 @@ import logging
 import random
 import re
 
+from lazyclaw.browser.action_errors import (
+    RETRY_GIVE_UP,
+    RETRY_RE_READ,
+    ActionError,
+    ActionErrorCode,
+)
 from lazyclaw.browser.action_verifier import (
     capture_error_text,
     capture_state,
@@ -54,7 +60,12 @@ async def action_click(
     target = (params.get("target") or "").strip()
 
     if not ref and not target:
-        return "ref or target required for click. Use ref='e5' from snapshot, or a CSS selector/description."
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="click requires either ref or target.",
+            hint="Pass ref='e5' from a prior snapshot, or target='CSS selector / natural description'.",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
 
     backend = await get_backend(user_id, tab_context)
 
@@ -99,7 +110,13 @@ async def action_click(
 
         # Ref not found — record failure and try vision
         count = _record_failure()
-        hint = f"Ref '{ref}' not found or element is gone. Take a new snapshot to get fresh refs."
+        err = ActionError(
+            code=ActionErrorCode.STALE_SNAPSHOT,
+            message=f"Ref '{ref}' not found or element is gone.",
+            hint="Take a new snapshot (action='snapshot') to get fresh refs.",
+            retry_strategy=RETRY_RE_READ,
+        )
+        hint = str(err)
         vision = await _try_vision_fallback(backend, count, f"ref {ref} not found")
         if vision:
             hint += f"\n\nVISION: {vision.description}\nSuggestion: {vision.suggestion}"
@@ -143,7 +160,12 @@ async def action_type(
     target = (params.get("target") or "").strip()
     text = params.get("text", "")
     if (not ref and not target) or not text:
-        return "ref (or target) and text required for type action."
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="type requires ref (or target) AND text.",
+            hint="Example: action='type', ref='e5', text='hello'",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
 
     backend = await get_backend(user_id, tab_context)
 
@@ -183,7 +205,12 @@ async def action_type(
                 except Exception as exc:
                     logger.debug("Post-type verification failed: %s", exc)
             return confirm
-        return f"Ref '{ref}' not found or couldn't focus. Take a new snapshot."
+        return str(ActionError(
+            code=ActionErrorCode.STALE_SNAPSHOT,
+            message=f"Ref '{ref}' not found or couldn't focus.",
+            hint="Take a new snapshot to get fresh refs, or scroll the element into view.",
+            retry_strategy=RETRY_RE_READ,
+        ))
 
     # CSS selector path
     is_css = bool(re.search(r'[#\.\[\]>:=~^$*]', target))
@@ -198,7 +225,12 @@ async def action_type(
     # Natural description path
     match = await backend.find_element_by_role(target)
     if not match:
-        return f"No element found matching '{target}'. Try a CSS selector."
+        return str(ActionError(
+            code=ActionErrorCode.NOT_FOUND,
+            message=f"No element found matching '{target}'.",
+            hint="Try a CSS selector, or action='snapshot' to see refs.",
+            retry_strategy=RETRY_RE_READ,
+        ))
 
     conn = await backend._ensure_connected()
     await conn.send("Input.dispatchMouseEvent", {
@@ -227,7 +259,12 @@ async def action_press_key(
     """Press a keyboard key (Enter, Escape, Tab, etc)."""
     key = (params.get("target") or params.get("text") or "").strip()
     if not key:
-        return "Key name required (e.g. Enter, Escape, Tab, Backspace, ArrowDown)."
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="press_key requires a key name.",
+            hint="Example: action='press_key', target='Enter' (also Escape, Tab, Backspace, ArrowDown).",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
     backend = await get_backend(user_id, tab_context)
     _before_state = None
     try:
@@ -254,9 +291,22 @@ async def action_hover(user_id: str, params: dict, tab_context) -> str:
     """Hover over an element."""
     target = (params.get("target") or "").strip()
     if not target:
-        return "Target (CSS selector) required for hover."
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="hover requires a target (CSS selector).",
+            hint="Example: action='hover', target='.menu-item'",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
     backend = await get_backend(user_id, tab_context)
-    await backend.hover(target)
+    try:
+        await backend.hover(target)
+    except ValueError:
+        return str(ActionError(
+            code=ActionErrorCode.NOT_FOUND,
+            message=f"Hover target not found: {target}",
+            hint="Take a fresh snapshot or try a different selector.",
+            retry_strategy=RETRY_RE_READ,
+        ))
     return f"Hovering over: {target}"
 
 
@@ -265,7 +315,20 @@ async def action_drag(user_id: str, params: dict, tab_context) -> str:
     source = (params.get("target") or "").strip()
     dest = (params.get("destination") or "").strip()
     if not source or not dest:
-        return "Both target (source selector) and destination (target selector) required for drag."
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="drag requires both target (source) and destination.",
+            hint="Example: action='drag', target='.card-1', destination='.column-2'",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
     backend = await get_backend(user_id, tab_context)
-    await backend.drag_and_drop(source, dest)
+    try:
+        await backend.drag_and_drop(source, dest)
+    except ValueError:
+        return str(ActionError(
+            code=ActionErrorCode.NOT_FOUND,
+            message="Source or destination element not found for drag.",
+            hint="Take a fresh snapshot, check both selectors, and retry.",
+            retry_strategy=RETRY_RE_READ,
+        ))
     return f"Dragged {source} -> {dest}"

@@ -295,3 +295,82 @@ async def remote_session_stop(user: User = Depends(get_current_user)):
         extra={"url": None},
     ))
     return {"status": "stopped"}
+
+
+# ── Host browser bridge (CDP to user's real Brave) ────────────────────────
+#
+# Sibling of /remote-session/* but a different mechanism: the agent drives
+# the host browser directly over CDP instead of giving the user a VNC link.
+
+
+@router.get("/host-session")
+async def host_session_status(user: User = Depends(get_current_user)):
+    """Report current host-bridge mode + whether host Brave is reachable."""
+    from lazyclaw.browser import host_bridge
+    from lazyclaw.browser.browser_settings import get_browser_settings
+
+    settings = await get_browser_settings(_config, user.id)
+    port = getattr(_config, "cdp_port", 9222)
+    reachable_ws = await host_bridge.probe_host_cdp(port)
+    return {
+        "mode": settings.get("use_host_browser", "off"),
+        "runtime": "docker" if host_bridge.is_docker_runtime() else "native",
+        "reachable": reachable_ws is not None,
+        "last_source": settings.get("last_host_cdp_source"),
+        "token_set": bool(settings.get("host_cdp_token")),
+    }
+
+
+@router.post("/host-session/start")
+async def host_session_start(user: User = Depends(get_current_user)):
+    """Enable host-browser mode; return setup command if Brave isn't reachable.
+
+    Response shapes:
+      - ``{"status": "connected", "origin": "..."}`` — ready to use
+      - ``{"status": "needs_launch", "command": "...", "warning": "..."}``
+        user has to paste the shell one-liner and retry
+    """
+    from lazyclaw.browser import host_bridge
+    from lazyclaw.browser.browser_settings import (
+        get_browser_settings, update_browser_settings,
+    )
+
+    settings = await get_browser_settings(_config, user.id)
+    token = settings.get("host_cdp_token") or host_bridge.generate_host_token()
+    if token != settings.get("host_cdp_token"):
+        await update_browser_settings(_config, user.id, {"host_cdp_token": token})
+
+    await update_browser_settings(_config, user.id, {"use_host_browser": "auto"})
+
+    port = getattr(_config, "cdp_port", 9222)
+    ws_url = await host_bridge.probe_host_cdp(port)
+    if ws_url:
+        event_bus.publish(event_bus.BrowserEvent(
+            user_id=user.id, kind="host_cdp",
+            detail="Using your real Brave on the host",
+            extra={"source": "host"},
+        ))
+        return {
+            "status": "connected",
+            "origin": host_bridge.origin_for_token(token),
+        }
+
+    return {
+        "status": "needs_launch",
+        "command": host_bridge.build_launch_command(token),
+        "warning": host_bridge.security_warning(),
+    }
+
+
+@router.post("/host-session/stop")
+async def host_session_stop(user: User = Depends(get_current_user)):
+    """Revert to the container Brave (does NOT close host Brave)."""
+    from lazyclaw.browser.browser_settings import update_browser_settings
+
+    await update_browser_settings(_config, user.id, {"use_host_browser": "off"})
+    event_bus.publish(event_bus.BrowserEvent(
+        user_id=user.id, kind="host_cdp",
+        detail="Host browser bridge stopped",
+        extra={"source": "local"},
+    ))
+    return {"status": "stopped"}

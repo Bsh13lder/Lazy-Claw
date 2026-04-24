@@ -10,6 +10,12 @@ import logging
 import random
 import re
 
+from lazyclaw.browser.action_errors import (
+    RETRY_GIVE_UP,
+    RETRY_WAIT,
+    ActionError,
+    ActionErrorCode,
+)
 from lazyclaw.browser.browser_settings import touch_browser_activity
 
 from .backends import (
@@ -27,7 +33,12 @@ async def action_tabs(user_id: str, params: dict) -> str:
     backend = await get_cdp_backend(user_id)
     tab_list = await backend.tabs()
     if not tab_list:
-        return "No tabs found. Is Brave/Chrome running?"
+        return str(ActionError(
+            code=ActionErrorCode.FRAME_DETACHED,
+            message="No tabs found.",
+            hint="Start the browser with action='open' first, or check Brave/Chrome is running.",
+            retry_strategy=RETRY_WAIT,
+        ))
 
     lines = [f"Open tabs ({len(tab_list)}):"]
     for i, tab in enumerate(tab_list, 1):
@@ -101,7 +112,12 @@ async def action_chain(
     """Execute multiple steps in one call — reduces LLM round-trips."""
     steps = params.get("steps", [])
     if not steps or not isinstance(steps, list):
-        return "steps array required for chain action. Example: ['click e2', 'wait 1', 'click e5']"
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="chain requires a steps array.",
+            hint="Example: steps=['click e2', 'wait 1', 'click e5']",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
 
     backend = await get_backend(user_id, tab_context)
     results: list[str] = []

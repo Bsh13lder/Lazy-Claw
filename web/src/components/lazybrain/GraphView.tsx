@@ -17,7 +17,13 @@ import {
   useRef,
   useState,
 } from "react";
-import type { LazyBrainGraph, LazyBrainNote } from "../../api";
+import {
+  getGraphPositions,
+  saveGraphPositions,
+  type LazyBrainGraph,
+  type LazyBrainNote,
+  type GraphLayoutMode,
+} from "../../api";
 import { ForceSimulation, type SimNode } from "./ForceSimulation";
 import {
   CATEGORY_PRIORITY,
@@ -78,6 +84,57 @@ const DRAG_HOLD_MS = 180;
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 4;
 const MAX_DEPTH = 3;
+
+// ── localStorage: cached node positions, keyed per layout mode ──────────
+// Stored separately from `lazybrain-layout-mode` so clearing one doesn't
+// nuke the other. JSON shape: { [nodeId]: [x, y] }. Private-mode Safari
+// throws on setItem — wrap every call in try/catch so the graph never
+// crashes because storage is unavailable.
+const POSITIONS_KEY_PREFIX = "lazybrain-graph-positions:";
+
+function readPositionsFromLocalStorage(
+  mode: string,
+): Record<string, [number, number]> | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const raw = window.localStorage.getItem(POSITIONS_KEY_PREFIX + mode);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return undefined;
+    // Light validation — drop obviously malformed rows instead of handing
+    // the sim NaN coords that would blow up the force pass.
+    const out: Record<string, [number, number]> = {};
+    for (const [id, v] of Object.entries(parsed)) {
+      if (
+        Array.isArray(v) &&
+        v.length === 2 &&
+        Number.isFinite(v[0]) &&
+        Number.isFinite(v[1])
+      ) {
+        out[id] = [v[0] as number, v[1] as number];
+      }
+    }
+    return Object.keys(out).length ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writePositionsToLocalStorage(
+  mode: string,
+  positions: Record<string, [number, number]>,
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      POSITIONS_KEY_PREFIX + mode,
+      JSON.stringify(positions),
+    );
+  } catch {
+    // Quota exceeded or private-mode Safari — non-fatal, the server copy
+    // (or a fresh in-memory layout) picks up the slack on next reload.
+  }
+}
 
 // Single source of truth for category priority lives in noteColors.ts —
 // imported above so this file's pickCategoryKey, color, icon, and the
@@ -270,7 +327,11 @@ export function GraphView({
     return best;
   }, [graph.edges]);
 
-  // ── Build simulation when graph shape, size, or layout mode changes ────
+  // ── Build simulation when graph shape or layout mode changes ──────────
+  // Note: size.width/height are intentionally NOT dependencies. Resizes
+  // go through sim.resize() (below) which rescales positions in place
+  // instead of discarding them. Rebuilding on resize made window drags
+  // feel like a full reset every time.
   const sim = useMemo(() => {
     const useForce = layoutMode === "neural-link" && !!topHubId;
     // Category-bucketed orbits (used by orbital mode + as fallback).
@@ -279,6 +340,10 @@ export function GraphView({
       const key = pickCategoryKey(note?.tags, !!note?.pinned);
       return CATEGORY_ORBIT[key] ?? CATEGORY_ORBIT._default;
     };
+    // Synchronous localStorage read so the first frame already has the
+    // previously-settled layout. The async server fetch below overlays
+    // anything newer — server is authoritative, localStorage is a cache.
+    const savedPositions = readPositionsFromLocalStorage(layoutMode);
     const s = new ForceSimulation(
       graph.nodes.map((n) => ({ id: n.id, pinned: false })),
       graph.edges.map((e) => ({ source: e.source, target: e.target })),
@@ -287,6 +352,7 @@ export function GraphView({
         height: size.height,
         orbitOf,
         mode: useForce ? "force" : "orbital",
+        savedPositions,
         // No forced sun at center — let the most-connected note end up
         // central naturally via gravity + degree, not pinned. Forcing
         // the top-degree node (which can be a random task) was the
@@ -296,7 +362,88 @@ export function GraphView({
     simRef.current = s;
     return s;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, size.width, size.height, layoutMode, topHubId]);
+  }, [graph, layoutMode, topHubId]);
+
+  // Forward size changes to the existing sim so positions are preserved.
+  useEffect(() => {
+    simRef.current?.resize(size.width, size.height);
+  }, [size.width, size.height]);
+
+  // Async server overlay — fetch saved positions on mount + mode change
+  // and apply them on top of the localStorage cache. Server wins on
+  // conflict; unknown nodes (new since last save) keep their seed.
+  useEffect(() => {
+    let cancelled = false;
+    const mode: GraphLayoutMode =
+      layoutMode === "neural-link" ? "neural-link" : "category";
+    getGraphPositions(mode)
+      .then((res) => {
+        if (cancelled) return;
+        const positions = res.positions ?? {};
+        if (Object.keys(positions).length === 0) return;
+        simRef.current?.applyPositions(positions);
+        // Also refresh the localStorage cache so offline next-load matches.
+        writePositionsToLocalStorage(mode, positions);
+      })
+      .catch(() => {
+        // Offline or 401 — localStorage-only is still a valid fallback.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sim, layoutMode]);
+
+  // ── Persist positions after the sim cools ─────────────────────────────
+  // Polls sim.cooled() once a second. When it flips true, snapshot +
+  // write to localStorage instantly (cheap) and debounce a POST to
+  // the server (3s after the last cool event). Orbital mode never cools,
+  // so this effectively runs for neural-link only — which is where the
+  // user actively arranges the layout.
+  useEffect(() => {
+    let cancelled = false;
+    let lastSignature = "";
+    let postTimer: ReturnType<typeof setTimeout> | null = null;
+    const mode: GraphLayoutMode =
+      layoutMode === "neural-link" ? "neural-link" : "category";
+
+    const persist = () => {
+      const s = simRef.current;
+      if (!s) return;
+      if (mode === "neural-link" && !s.cooled()) return;
+      const snapshot = s.positionsSnapshot();
+      // Cheap signature — length + rounded centroid — catches "no change
+      // since last save" without a deep diff.
+      let sumX = 0;
+      let sumY = 0;
+      const keys = Object.keys(snapshot);
+      for (const k of keys) {
+        sumX += snapshot[k][0];
+        sumY += snapshot[k][1];
+      }
+      const sig =
+        `${keys.length}|${Math.round(sumX)}|${Math.round(sumY)}`;
+      if (sig === lastSignature) return;
+      lastSignature = sig;
+
+      writePositionsToLocalStorage(mode, snapshot);
+      if (postTimer !== null) clearTimeout(postTimer);
+      postTimer = setTimeout(() => {
+        if (cancelled) return;
+        saveGraphPositions(mode, snapshot).catch(() => {
+          // Server down or auth gone — localStorage already has it.
+        });
+      }, 3000);
+    };
+
+    // Category mode persists on every drag cooldown (1s poll) too, so
+    // moving a journal node out of its orbit sticks.
+    const interval = window.setInterval(persist, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      if (postTimer !== null) clearTimeout(postTimer);
+    };
+  }, [sim, layoutMode]);
 
   // Currently-isolated orbit (click a ring chip to focus). Forwarded
   // into the sim so non-isolated rings slow to near-stop.
@@ -424,22 +571,41 @@ export function GraphView({
   }, [size.width, size.height]);
 
   // ── Animation loop ─────────────────────────────────────────────────────
-  // Always-on, ~30fps (skip every other RAF). When the force sim cools
-  // (force-mode equilibrium), we skip the React state update entirely —
-  // there's nothing to redraw. Orbital mode never cools (perpetual spin).
+  // Two regimes:
+  //   - HOT (orbital mode, or force mode still settling): ~15fps React
+  //     reconciles so motion stays visible.
+  //   - COOLED (force mode, equilibrium reached): physics is skipped
+  //     internally; we also skip React reconciles entirely for ~60 ticks,
+  //     then fire one setTick so the slow rigid rotation advances. Net
+  //     effect: idle CPU drops from ~15fps-of-React to ~0.5fps, but the
+  //     constellation still visibly revolves over ~150s.
   useEffect(() => {
     let alive = true;
     let skip = false;
+    let idleTicks = 0;
+    const COOLED_REDRAW_EVERY = 60; // ~2s between React reconciles at 30fps
     const loop = () => {
       if (!alive) return;
       const s = simRef.current;
       if (!s) return;
-      // Physics pass is skipped internally when the force sim is cooled,
-      // but the cheap rigid rotation keeps running — so we always tick
-      // React so the orbital motion stays visible.
-      s.step();
-      skip = !skip;
-      if (!skip) setTick((t) => (t + 1) % 1_000_000);
+      const cooled = s.cooled();
+      if (cooled) {
+        // Skip the expensive force pass — already gated inside s.step().
+        // Run the O(N) rotation only every Nth tick so we aren't mutating
+        // positions 60× per second just to draw a picture that didn't
+        // meaningfully change. Then reconcile React at the same low cadence.
+        idleTicks += 1;
+        if (idleTicks >= COOLED_REDRAW_EVERY) {
+          idleTicks = 0;
+          s.step();
+          setTick((t) => (t + 1) % 1_000_000);
+        }
+      } else {
+        s.step();
+        skip = !skip;
+        if (!skip) setTick((t) => (t + 1) % 1_000_000);
+        idleTicks = 0;
+      }
       frameRef.current = requestAnimationFrame(loop);
     };
     frameRef.current = requestAnimationFrame(loop);

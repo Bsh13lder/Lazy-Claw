@@ -45,6 +45,10 @@ export interface SimOptions {
   /** Optional node id to anchor at the canvas center (skipped by every
    *  force pass — perfect for "the hub is the sun" in force mode).      */
   pinCenter?: string;
+  /** Previously-saved positions, keyed by node id. Applied after the
+   *  default seeding so known nodes skip the random scatter and open at
+   *  the coordinates the user left them. Unknown nodes keep their seed. */
+  savedPositions?: Record<string, [number, number]>;
 }
 
 export interface OrbitMeta {
@@ -90,6 +94,15 @@ export class ForceSimulation {
   private _isolatedOrbit: number | null = null;
   private _mode: SimMode;
   private _pinCenter: string | null;
+  // Reusable scratch buffers — allocated ONCE in the constructor and zeroed
+  // each tick. Previously stepForce allocated fresh `new Array(N).fill(0)`
+  // every frame (≈500 entries × 30fps × 2 arrays = heavy GC pressure).
+  // Float32Array is also cheaper to iterate than boxed number arrays.
+  private _fx!: Float32Array;
+  private _fy!: Float32Array;
+  // Edge list as index pairs — precomputed in the constructor so stepForce
+  // doesn't rebuild a Map<string, number> from scratch every frame.
+  private _edgePairs!: Int32Array;
   /** Force-mode cooldown — counts consecutive ticks where total kinetic
    *  energy is below COOL_THRESHOLD. Once it crosses COOL_TICKS the sim
    *  is "cooled" and the renderer can stop reconciling React on every
@@ -194,6 +207,33 @@ export class ForceSimulation {
 
     this.byId = new Map(this.nodes.map((n) => [n.id, n]));
 
+    // Restore previously-saved coordinates. Applied AFTER the default
+    // scatter/orbit seed so nodes the user has already arranged open at
+    // their last known spot; nodes not in the map keep the seed and
+    // settle in via the force pass.
+    const saved = options.savedPositions;
+    if (saved) {
+      for (const n of this.nodes) {
+        const p = saved[n.id];
+        if (!p) continue;
+        const [sx, sy] = p;
+        if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+        n.x = sx;
+        n.y = sy;
+        n.vx = 0;
+        n.vy = 0;
+        if (this._mode === "orbital") {
+          // Keep the orbit metadata coherent with the restored position
+          // so orbital rotation math doesn't snap the node back to its
+          // seeded angle on the next tick.
+          const dx = sx - this.cx;
+          const dy = sy - this.cy;
+          n.angle = Math.atan2(dy, dx);
+          n.radius = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        }
+      }
+    }
+
     // Pin the requested center node (force mode hub). Skipped in orbital
     // mode because GraphView pins via its own pin() call there.
     if (this._mode === "force" && this._pinCenter) {
@@ -218,6 +258,28 @@ export class ForceSimulation {
     this._byDegreeDesc = [...this.byId.keys()].sort(
       (a, b) => (this._degree.get(b) ?? 0) - (this._degree.get(a) ?? 0),
     );
+
+    // Scratch buffers + precomputed edge index pairs. Allocated once here
+    // so the hot loop in stepForce() stays allocation-free.
+    const N = this.nodes.length;
+    this._fx = new Float32Array(N);
+    this._fy = new Float32Array(N);
+    const nodeIndex: Map<string, number> = new Map(
+      this.nodes.map((n, i) => [n.id, i]),
+    );
+    this._edgePairs = new Int32Array(this.edges.length * 2);
+    let ep = 0;
+    for (const e of this.edges) {
+      const i = nodeIndex.get(e.source);
+      const j = nodeIndex.get(e.target);
+      if (i === undefined || j === undefined) continue;
+      this._edgePairs[ep++] = i;
+      this._edgePairs[ep++] = j;
+    }
+    // Trim trailing unused slots if any edges were dropped after the filter.
+    if (ep < this._edgePairs.length) {
+      this._edgePairs = this._edgePairs.slice(0, ep);
+    }
   }
 
   setHover(id: string | null): void {
@@ -315,8 +377,13 @@ export class ForceSimulation {
     const R_TARGET      = Math.min(this.w, this.h) * 0.28;
 
     const N = this.nodes.length;
-    const fx = new Array(N).fill(0);
-    const fy = new Array(N).fill(0);
+    // Reuse preallocated scratch buffers — zero in place instead of
+    // allocating fresh arrays every tick. Float32Array.fill is faster
+    // than a loop in V8 and doesn't churn the GC.
+    const fx = this._fx;
+    const fy = this._fy;
+    fx.fill(0);
+    fy.fill(0);
 
     // Radial spring — pull each node toward distance R_TARGET from the
     // canvas center. Replaces linear "pull to origin" so nodes form a
@@ -325,7 +392,9 @@ export class ForceSimulation {
       const n = this.nodes[i];
       const dxC = n.x - this.cx;
       const dyC = n.y - this.cy;
-      const r = Math.hypot(dxC, dyC) || 0.001;
+      // Inline sqrt — Math.hypot is polymorphic + overflow-safe, slow in
+      // tight loops. Our coords never overflow float32, so plain sqrt wins.
+      const r = Math.sqrt(dxC * dxC + dyC * dyC) || 0.001;
       const rErr = r - R_TARGET;       // +ve: too far out, -ve: too close in
       const rad = -GRAVITY_K * rErr;   // -ve pulls toward center, +ve pushes out
       fx[i] += (dxC / r) * rad;
@@ -333,14 +402,16 @@ export class ForceSimulation {
     }
 
     // Pairwise repulsion — O(N²), fine up to ~500 nodes.
+    const minD2 = REPULSION_MIN * REPULSION_MIN;
     for (let i = 0; i < N; i++) {
       const a = this.nodes[i];
+      const ax = a.x;
+      const ay = a.y;
       for (let j = i + 1; j < N; j++) {
         const b = this.nodes[j];
-        let dx = b.x - a.x;
-        let dy = b.y - a.y;
+        let dx = b.x - ax;
+        let dy = b.y - ay;
         let d2 = dx * dx + dy * dy;
-        const minD2 = REPULSION_MIN * REPULSION_MIN;
         if (d2 < minD2) {
           if (d2 < 0.0001) { dx = (i - j) * 0.5; dy = (j - i) * 0.5; d2 = 1; }
           const scale = Math.sqrt(minD2 / d2);
@@ -355,19 +426,19 @@ export class ForceSimulation {
     }
 
     // Edge springs — pull linked endpoints to SPRING_LEN apart. This is
-    // what makes related notes cluster together as moons.
-    const idxOf: Map<string, number> = new Map(
-      this.nodes.map((n, i) => [n.id, i]),
-    );
-    for (const e of this.edges) {
-      const i = idxOf.get(e.source);
-      const j = idxOf.get(e.target);
-      if (i === undefined || j === undefined) continue;
+    // what makes related notes cluster together as moons. We iterate a
+    // preflattened Int32Array of [i0,j0,i1,j1,...] pairs built in the
+    // constructor, so no Map lookups in the hot path.
+    const edgePairs = this._edgePairs;
+    const EP = edgePairs.length;
+    for (let k = 0; k < EP; k += 2) {
+      const i = edgePairs[k];
+      const j = edgePairs[k + 1];
       const a = this.nodes[i];
       const b = this.nodes[j];
       const dx = b.x - a.x;
       const dy = b.y - a.y;
-      const d = Math.hypot(dx, dy) || 0.001;
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
       const delta = d - SPRING_LEN;
       const f = SPRING_K * delta;
       const ux = dx / d, uy = dy / d;
@@ -389,7 +460,7 @@ export class ForceSimulation {
       unpinnedCount += 1;
       n.vx = (n.vx + fx[i]) * DAMPING;
       n.vy = (n.vy + fy[i]) * DAMPING;
-      const speed = Math.hypot(n.vx, n.vy);
+      const speed = Math.sqrt(n.vx * n.vx + n.vy * n.vy);
       if (speed > V_MAX) {
         n.vx = (n.vx / speed) * V_MAX;
         n.vy = (n.vy / speed) * V_MAX;
@@ -448,6 +519,70 @@ export class ForceSimulation {
    *  starts ticking again. Called on hover, drag, filter change, etc.
    *  No-op in orbital mode (which never cools). */
   warm(): void {
+    this._quietTicks = 0;
+  }
+
+  /** Overlay saved positions onto existing nodes without rebuilding the
+   *  sim. Used when server-side positions arrive after construction —
+   *  localStorage gives us an instant first paint, server data wins on
+   *  the overlay. Nodes not in the map are left alone so the force pass
+   *  can continue settling them. */
+  applyPositions(saved: Record<string, [number, number]>): void {
+    for (const n of this.nodes) {
+      const p = saved[n.id];
+      if (!p) continue;
+      const [sx, sy] = p;
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      n.x = sx;
+      n.y = sy;
+      n.vx = 0;
+      n.vy = 0;
+      if (this._mode === "orbital") {
+        const dx = sx - this.cx;
+        const dy = sy - this.cy;
+        n.angle = Math.atan2(dy, dx);
+        n.radius = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      }
+    }
+    // Settle any unscaled neighbours.
+    this._quietTicks = 0;
+  }
+
+  /** Snapshot {id: [x, y]} for persistence. */
+  positionsSnapshot(): Record<string, [number, number]> {
+    const out: Record<string, [number, number]> = {};
+    for (const n of this.nodes) out[n.id] = [n.x, n.y];
+    return out;
+  }
+
+  /** Rescale all node positions to a new canvas size without rebuilding
+   *  the sim. Previously every resize event re-seeded positions from
+   *  scratch, which made window-drag feel like a full reset. This
+   *  proportionally moves each node relative to the new center so the
+   *  layout the user settled on is preserved. Called from GraphView when
+   *  the ResizeObserver fires. */
+  resize(w: number, h: number): void {
+    if (w <= 0 || h <= 0) return;
+    if (w === this.w && h === this.h) return;
+    const oldCx = this.cx;
+    const oldCy = this.cy;
+    const newCx = w / 2;
+    const newCy = h / 2;
+    // Scale around the old center, then translate to the new center. If
+    // the aspect ratio changed, scale by min() to keep nodes visible.
+    const sx = w / this.w;
+    const sy = h / this.h;
+    const s = Math.min(sx, sy);
+    for (const n of this.nodes) {
+      n.x = newCx + (n.x - oldCx) * s;
+      n.y = newCy + (n.y - oldCy) * s;
+    }
+    this.w = w;
+    this.h = h;
+    this.cx = newCx;
+    this.cy = newCy;
+    // Resize may unsettle tight clusters — re-warm so any residual
+    // forces can redistribute instead of snapping suddenly.
     this._quietTicks = 0;
   }
 

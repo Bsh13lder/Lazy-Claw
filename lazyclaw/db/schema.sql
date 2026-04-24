@@ -560,3 +560,22 @@ CREATE TABLE IF NOT EXISTS canvas_boards (
 );
 CREATE INDEX IF NOT EXISTS idx_canvas_boards_user
 ON canvas_boards(user_id, updated_at);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- LazyBrain: graph node positions (Phase 19.1)
+-- Remembers where each note sat in the graph view so the layout survives
+-- reloads and follows the user across devices. Positions are plaintext
+-- — just coordinates in the canvas coord space, no private content.
+-- Keyed by (user_id, mode, note_id) because Categories and Neural-link
+-- modes are independent layouts.
+CREATE TABLE IF NOT EXISTS note_layout_positions (
+    user_id    TEXT NOT NULL,
+    mode       TEXT NOT NULL,
+    note_id    TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    x          REAL NOT NULL,
+    y          REAL NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, mode, note_id)
+);
+CREATE INDEX IF NOT EXISTS idx_note_layout_positions_user_mode
+ON note_layout_positions(user_id, mode);

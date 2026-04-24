@@ -249,6 +249,49 @@ async def graph_route(
 
 
 # ---------------------------------------------------------------------------
+# Graph node positions — survive reloads + cross-device sync.
+# ---------------------------------------------------------------------------
+
+class GraphPositionsUpsert(BaseModel):
+    mode: str = Field(pattern=r"^(category|neural-link)$")
+    # {note_id: [x, y]} — tuple decodes as a 2-element list over JSON.
+    positions: dict[str, list[float]] = Field(default_factory=dict)
+
+
+@router.get("/graph/positions")
+async def get_graph_positions_route(
+    mode: str,
+    user: User = Depends(get_current_user),
+):
+    try:
+        pos = await graph.get_positions(_config, user.id, mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"mode": mode, "positions": {k: [x, y] for k, (x, y) in pos.items()}}
+
+
+@router.post("/graph/positions")
+async def save_graph_positions_route(
+    body: GraphPositionsUpsert,
+    user: User = Depends(get_current_user),
+):
+    # Cap payload size — 2000 nodes is already way beyond the 500-node graph
+    # cap, so anything larger is either a bug or abuse.
+    if len(body.positions) > 2000:
+        raise HTTPException(status_code=413, detail="too many positions")
+    shaped: dict[str, tuple[float, float]] = {}
+    for note_id, coords in body.positions.items():
+        if not isinstance(coords, list) or len(coords) != 2:
+            continue
+        shaped[note_id] = (float(coords[0]), float(coords[1]))
+    try:
+        written = await graph.save_positions(_config, user.id, body.mode, shaped)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"saved": written}
+
+
+# ---------------------------------------------------------------------------
 # Journal
 # ---------------------------------------------------------------------------
 

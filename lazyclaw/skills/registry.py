@@ -37,6 +37,10 @@ class SkillRegistry:
                 return skill
         return None
 
+    def list_names_by_prefix(self, prefix: str) -> list[str]:
+        """Return skill names starting with `prefix`, sorted."""
+        return sorted(n for n in self._skills if n.startswith(prefix))
+
     def list_tools(self) -> list[dict]:
         """Return all skills in OpenAI function-calling format (cached)."""
         if self._all_cache is None:
@@ -230,6 +234,10 @@ class SkillRegistry:
         # Remote browser takeover (noVNC link, works in Telegram + web)
         from lazyclaw.skills.builtin.browser_share import ShareBrowserControlSkill
         self.register(ShareBrowserControlSkill(config=config))
+
+        # Host-browser CDP bridge — agent drives user's real Brave/Chrome
+        from lazyclaw.skills.builtin.host_browser_skill import UseHostBrowserSkill
+        self.register(UseHostBrowserSkill(config=config))
 
         # Checkpoint approval — agent pauses for user OK before risky actions
         from lazyclaw.skills.builtin.checkpoint_skill import RequestUserApprovalSkill

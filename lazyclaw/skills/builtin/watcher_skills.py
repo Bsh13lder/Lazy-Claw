@@ -345,15 +345,17 @@ class ListWatchersSkill(BaseSkill):
             except (json.JSONDecodeError, TypeError):
                 pass  # intentional: malformed context JSON, default {} is fine
 
-            interval = ctx.get("check_interval", 300) // 60
+            interval = int(ctx.get("check_interval", 300) or 300) // 60
             expires = ctx.get("expires_at", "never")
             if expires and expires != "never":
-                expires = expires[:16].replace("T", " ")
+                expires = str(expires)[:16].replace("T", " ")
 
             stats = watcher_history.get_stats(user_id, w["id"])
             last_ck = ctx.get("last_check")
-            last_ck = last_ck[:16].replace("T", " ") if last_ck else "never"
+            last_ck = str(last_ck)[:16].replace("T", " ") if last_ck else "never"
             last_val = stats.get("last_value_preview") or ctx.get("last_value")
+            if last_val is not None and not isinstance(last_val, str):
+                last_val = str(last_val)
             if last_val and len(last_val) > 80:
                 last_val = last_val[:80] + "…"
 

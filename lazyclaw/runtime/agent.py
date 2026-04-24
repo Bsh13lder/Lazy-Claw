@@ -503,6 +503,88 @@ class _PlanRejected(Exception):
         super().__init__(reason or "plan rejected")
 
 
+# Matches internal MCP tool names: mcp_<uuid4>_<bare_tool_name>.
+# See lazyclaw/mcp/bridge.py:14,67 and mcp/manager.py:485 where server_id = uuid4().
+_MCP_TOOL_NAME_RE = re.compile(
+    r"^mcp_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_(.+)$"
+)
+
+
+def _parse_mcp_name(name: str) -> tuple[str, str] | None:
+    """Return (server_id, bare_tool_name) if `name` is an MCP tool, else None."""
+    m = _MCP_TOOL_NAME_RE.match(name)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def _build_hallucination_correction(
+    bad_name: str, valid_names: set[str], registry,
+) -> str:
+    """Craft a correction message that surfaces the RIGHT alternatives.
+
+    Handles two shapes:
+      - Plain hallucinated name (`foo_bar`) → search_tools(bar).
+      - MCP-shaped name (`mcp_<uuid>_delete_spreadsheet`) → list actual
+        sibling tools on the same server so the LLM sees what is real.
+    """
+    parsed = _parse_mcp_name(bad_name)
+    if parsed is not None and registry is not None:
+        server_id, bare = parsed
+        prefix = f"mcp_{server_id}_"
+        sibling_names = registry.list_names_by_prefix(prefix)
+        # Surface the short form (strip the uuid prefix) so the LLM sees
+        # familiar names.
+        siblings_bare = [n[len(prefix):] for n in sibling_names][:40]
+        available_display = ", ".join(siblings_bare) if siblings_bare else "(none)"
+        return (
+            f"[SYSTEM: The tool '{bad_name}' does NOT exist. "
+            f"You called a non-existent operation on MCP server "
+            f"{server_id[:8]}…. Tools ACTUALLY available on that server: "
+            f"{available_display}. "
+            f"If '{bare}' is what you need and it's not in that list, "
+            f"the MCP server does not support it — try a native skill "
+            f"(e.g. google_run_task for Drive/Sheets delete or trash ops) "
+            f"or tell the user the operation is unsupported.]"
+        )
+
+    # Plain hallucination — use the last name segment as a search hint
+    # instead of splitting at the first '_' (old bug: 'mcp_x'.split('_')[0] = 'mcp').
+    bare_hint = bad_name.rsplit("_", 1)[-1] or bad_name
+    _avail = sorted(valid_names - {"search_tools", "delegate"})[:10]
+    return (
+        f"[SYSTEM: The tool '{bad_name}' is not available in your current toolset. "
+        f"Use search_tools('{bare_hint}') to discover available tools — "
+        f"it may exist under a different name. "
+        f"Your current tools: {', '.join(_avail)}. "
+        f"Try search_tools FIRST, then use what you find, or respond with text if nothing fits.]"
+    )
+
+
+def _correction_hint_for_user(bad_name: str, registry) -> str:
+    """Short user-facing hint pointing at the real alternative."""
+    parsed = _parse_mcp_name(bad_name)
+    if parsed is None:
+        return (
+            "Try rephrasing the request, or tell me explicitly which tool "
+            "to use."
+        )
+    _server_id, bare = parsed
+    # Known mappings: when the LLM wanted a delete/trash op on workspace-mcp,
+    # point at the native direct-API path.
+    if bare in {"delete_spreadsheet", "trash_spreadsheet", "delete_drive_item",
+                "trash_drive_item", "delete_file", "trash_file"}:
+        return (
+            "The Google MCP server exposes create/read/list only. For "
+            "delete or trash, I can use `google_run_task` with "
+            "`task_type='trash_drive_item'`. Confirm and I'll proceed."
+        )
+    return (
+        "That MCP server doesn't expose this operation. Tell me explicitly "
+        "what you want done and I'll find a tool that actually fits."
+    )
+
+
 async def _load_auto_plan_setting(user_id: str) -> bool:
     """Read the user's auto_plan toggle. Default True (plan mode ON)."""
     try:
@@ -1449,6 +1531,15 @@ class Agent:
         )
         _research_prompt_injected = False
 
+        # Hallucination-retry guard. Each time the LLM calls a tool that
+        # doesn't exist, we inject a correction and retry. Without a cap,
+        # a model fixated on a non-existent tool (e.g. a Claude.ai-style
+        # `mcp_<uuid>_delete_spreadsheet` that upstream doesn't expose)
+        # burns the full 50 outer iterations silently. 2 attempts = one
+        # genuine correction chance, then bail with a user-visible message.
+        _HALLUC_MAX_RETRIES = 2
+        _halluc_retries = 0
+
         response = None
         iteration = 0
         try:
@@ -1929,6 +2020,8 @@ class Agent:
                             _dropped, _dropped_names,
                         )
                         if _valid_calls:
+                            # Mixed success — reset the hallucination counter.
+                            _halluc_retries = 0
                             response = _LLMResp(
                                 content=response.content,
                                 model=response.model,
@@ -1936,19 +2029,46 @@ class Agent:
                                 tool_calls=_valid_calls,
                             )
                         else:
-                            # ALL tool calls were hallucinated — inject correction and retry
-                            _avail = sorted(_valid_names - {"search_tools", "delegate"})[:10]
-                            _correction = (
-                                f"[SYSTEM: The tool '{_dropped_names[0]}' is not available in your current toolset. "
-                                f"Use search_tools('{_dropped_names[0].split('_')[0]}') to discover available tools — "
-                                f"it may exist under a different name. "
-                                f"Your current tools: {', '.join(_avail)}. "
-                                f"Try search_tools FIRST, then use what you find, or respond with text if nothing fits.]"
+                            # ALL tool calls were hallucinated.
+                            _halluc_retries += 1
+                            _first_bad = _dropped_names[0]
+                            _correction = _build_hallucination_correction(
+                                _first_bad, _valid_names, self.registry,
                             )
+
+                            if _halluc_retries > _HALLUC_MAX_RETRIES:
+                                # Bail — LLM is stuck on non-existent tool(s).
+                                # Surface to user instead of burning more iterations.
+                                _bail_msg = (
+                                    f"I tried to use **{_first_bad}** but that tool "
+                                    f"doesn't exist in my current toolset. "
+                                    f"{_correction_hint_for_user(_first_bad, self.registry)}"
+                                )
+                                logger.warning(
+                                    "Hallucination cap reached (%d retries on %r) — bailing",
+                                    _halluc_retries, _first_bad,
+                                )
+                                await cb.on_event(AgentEvent(
+                                    "tool_result",
+                                    f"Bailed: tool {_first_bad!r} does not exist",
+                                    {"reason": "hallucination_cap",
+                                     "requested_tool": _first_bad,
+                                     "retries": _halluc_retries},
+                                ))
+                                await cb.on_event(AgentEvent("done", _bail_msg, {}))
+                                return _bail_msg
+
                             messages.append(LLMMessage(role="assistant", content=response.content or ""))
                             messages.append(LLMMessage(role="user", content=_correction))
-                            logger.warning("Injecting correction for hallucinated tools, retrying LLM")
+                            logger.warning(
+                                "Injecting correction for hallucinated tools (retry %d/%d)",
+                                _halluc_retries, _HALLUC_MAX_RETRIES,
+                            )
                             continue  # Retry the agentic loop iteration
+                    else:
+                        # No hallucinations this round — reset the counter so
+                        # a mid-session slip doesn't carry over to new tasks.
+                        _halluc_retries = 0
 
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""

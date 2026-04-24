@@ -201,6 +201,94 @@ def send_gmail(
     }
 
 
+def list_drive_items(
+    user_email: str, *, query: str | None = None,
+    mime_type: str | None = None, page_size: int = 100,
+) -> dict[str, Any]:
+    """List Drive items matching a query. `mime_type` is a convenience
+    filter (e.g. 'application/vnd.google-apps.spreadsheet' for sheets)."""
+    svc = _build("drive", "v3", user_email)
+    q_parts: list[str] = ["trashed = false"]
+    if mime_type:
+        q_parts.append(f"mimeType = '{mime_type}'")
+    if query:
+        # Allow the caller to pass raw Drive query fragments AND plain text.
+        # If it looks like a query clause (contains '='), use as-is; else
+        # treat as a substring name match.
+        if "=" in query or " contains " in query:
+            q_parts.append(f"({query})")
+        else:
+            safe = query.replace("'", "\\'")
+            q_parts.append(f"name contains '{safe}'")
+    q = " and ".join(q_parts)
+    resp = svc.files().list(
+        q=q,
+        pageSize=max(1, min(1000, int(page_size))),
+        fields="files(id,name,mimeType,webViewLink,modifiedTime)",
+    ).execute()
+    items = resp.get("files") or []
+    return {
+        "resource_type": "google_drive_item_list",
+        "count": len(items),
+        "items": [
+            {
+                "id": it.get("id"),
+                "name": it.get("name"),
+                "mime_type": it.get("mimeType"),
+                "url": it.get("webViewLink") or "",
+                "modified": it.get("modifiedTime") or "",
+            }
+            for it in items
+        ],
+    }
+
+
+def trash_drive_item(user_email: str, *, file_id: str) -> dict[str, Any]:
+    """Move a Drive file/folder to Trash. Reversible — user can restore
+    from Drive's Trash within 30 days. Preferred over permanent delete."""
+    if not file_id:
+        raise ValueError("trash_drive_item requires `file_id`")
+    svc = _build("drive", "v3", user_email)
+    updated = svc.files().update(
+        fileId=file_id, body={"trashed": True},
+        fields="id,name,trashed",
+    ).execute()
+    return {
+        "resource_type": "google_drive_trash",
+        "resource_id": updated.get("id") or file_id,
+        "name": updated.get("name") or "",
+        "trashed": bool(updated.get("trashed")),
+        "raw": updated,
+    }
+
+
+def delete_drive_item(
+    user_email: str, *, file_id: str, confirm: bool = False,
+) -> dict[str, Any]:
+    """PERMANENTLY delete a Drive file/folder. Requires `confirm=True`.
+    Without confirm, falls back to `trash_drive_item` for safety."""
+    if not file_id:
+        raise ValueError("delete_drive_item requires `file_id`")
+    if not confirm:
+        # Safety net — a missing confirm flag means the LLM reached for
+        # 'delete' when 'trash' was the right tool. Downgrade silently.
+        logger.info(
+            "delete_drive_item(confirm=False) → trashing instead for safety"
+        )
+        result = trash_drive_item(user_email, file_id=file_id)
+        result["note"] = (
+            "Trashed (not deleted). Pass `confirm: true` to delete permanently."
+        )
+        return result
+    svc = _build("drive", "v3", user_email)
+    svc.files().delete(fileId=file_id).execute()
+    return {
+        "resource_type": "google_drive_delete",
+        "resource_id": file_id,
+        "deleted": True,
+    }
+
+
 def create_calendar_event(
     user_email: str, *, summary: str, start: str, end: str,
     description: str | None = None, calendar_id: str = "primary",
@@ -234,6 +322,9 @@ _TASKS = {
     "append_sheet_rows": append_sheet_rows,
     "send_gmail": send_gmail,
     "create_calendar_event": create_calendar_event,
+    "list_drive_items": list_drive_items,
+    "trash_drive_item": trash_drive_item,
+    "delete_drive_item": delete_drive_item,
 }
 
 
@@ -263,6 +354,16 @@ async def run_task(
             f"Unknown google_direct task_type '{task_type}'. "
             f"Valid: {', '.join(sorted(_TASKS))}"
         )
+    # Some models (Haiku, MiniMax) serialize nested objects as JSON strings
+    # when emitting tool_use args. Accept either shape — parse if string.
+    if isinstance(task, str):
+        try:
+            task = json.loads(task)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"google_direct '{task_type}': `task` came as a string "
+                f"but is not valid JSON: {exc}. Pass a JSON object."
+            ) from exc
     if not isinstance(task, dict):
         raise ValueError(
             f"google_direct '{task_type}': `task` must be a dict, got "
@@ -303,6 +404,20 @@ async def run_task(
                   start=task.get("start") or "",
                   end=task.get("end") or "",
                   description=task.get("description"))
+    if task_type == "list_drive_items":
+        return fn(email,
+                  query=task.get("query") or task.get("name") or None,
+                  mime_type=task.get("mime_type") or task.get("mimeType"),
+                  page_size=int(task.get("page_size") or task.get("limit") or 100))
+    if task_type == "trash_drive_item":
+        file_id = (task.get("file_id") or task.get("id")
+                   or task.get("resource_id") or "")
+        return fn(email, file_id=file_id)
+    if task_type == "delete_drive_item":
+        file_id = (task.get("file_id") or task.get("id")
+                   or task.get("resource_id") or "")
+        return fn(email, file_id=file_id,
+                  confirm=bool(task.get("confirm")))
     raise RuntimeError(f"unreachable: {task_type}")
 
 
@@ -333,7 +448,13 @@ class GoogleDirectTaskSkill(BaseSkill):
         return (
             "Atomic Google Workspace operation via direct API (no n8n). "
             "task_type ∈ {create_drive_folder, create_google_sheet, "
-            "append_sheet_rows, send_gmail, create_calendar_event}. "
+            "append_sheet_rows, send_gmail, create_calendar_event, "
+            "list_drive_items, trash_drive_item, delete_drive_item}. "
+            "Use list_drive_items + trash_drive_item for bulk cleanup "
+            "('delete all sheets' → list with "
+            "mime_type='application/vnd.google-apps.spreadsheet' then "
+            "trash each id). delete_drive_item requires confirm=true; "
+            "without it, it trashes (reversible) for safety. "
             "Returns resource_id + url + updated_rows (for appends). "
             "Result is AUTHORITATIVE — if it succeeds, the operation "
             "happened. Do NOT open a browser to visually verify."
@@ -352,7 +473,13 @@ class GoogleDirectTaskSkill(BaseSkill):
                         "create_google_sheet: {title}. "
                         "append_sheet_rows: {sheet_id, values|rows|text, range?}. "
                         "send_gmail: {to, subject, text}. "
-                        "create_calendar_event: {summary, start, end, description?}."
+                        "create_calendar_event: {summary, start, end, description?}. "
+                        "list_drive_items: {query?, mime_type?, page_size?} — "
+                        "pass mime_type='application/vnd.google-apps.spreadsheet' "
+                        "to list every Google Sheet; combine with query for name match. "
+                        "trash_drive_item: {file_id} — reversible, sends to Drive Trash. "
+                        "delete_drive_item: {file_id, confirm?} — PERMANENT "
+                        "only if confirm=true; otherwise downgrades to trash."
                     ),
                 },
                 "task": {
@@ -382,7 +509,27 @@ class GoogleDirectTaskSkill(BaseSkill):
             logger.warning("google_run_task failed", exc_info=True)
             return f"Error: {exc}"
 
-        lines = [f"Done ({result.get('resource_type','?')}):"]
+        rtype = result.get("resource_type", "?")
+        lines = [f"Done ({rtype}):"]
+        if rtype == "google_drive_item_list":
+            lines.append(f"  count: {result.get('count', 0)}")
+            for it in result.get("items") or []:
+                lines.append(
+                    f"  - {it.get('id','?')}  {it.get('name','')}"
+                    f"  [{(it.get('mime_type') or '').split('.')[-1]}]"
+                )
+            return "\n".join(lines)
+        if rtype == "google_drive_trash":
+            lines.append(f"  id:       {result.get('resource_id','?')}")
+            lines.append(f"  name:     {result.get('name','')}")
+            lines.append(f"  trashed:  {result.get('trashed')}")
+            if result.get("note"):
+                lines.append(f"  note:     {result['note']}")
+            return "\n".join(lines)
+        if rtype == "google_drive_delete":
+            lines.append(f"  id:      {result.get('resource_id','?')}")
+            lines.append(f"  deleted: permanent")
+            return "\n".join(lines)
         if result.get("resource_id"):
             lines.append(f"  id:  {result['resource_id']}")
         if result.get("url"):

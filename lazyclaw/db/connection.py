@@ -52,6 +52,8 @@ async def init_db(config: Config) -> None:
             ("tasks", "last_attempted_at", "ALTER TABLE tasks ADD COLUMN last_attempted_at TEXT"),
             ("tasks", "trace_session_id", "ALTER TABLE tasks ADD COLUMN trace_session_id TEXT"),
             ("tasks", "lazybrain_note_id", "ALTER TABLE tasks ADD COLUMN lazybrain_note_id TEXT"),
+            # Sub-task steps — encrypted JSON array of {id, title, done}.
+            ("tasks", "steps", "ALTER TABLE tasks ADD COLUMN steps TEXT"),
             # Plan Mode — per-user toggle for Claude-Code-style approval gate.
             ("users", "auto_plan", "ALTER TABLE users ADD COLUMN auto_plan INTEGER NOT NULL DEFAULT 1"),
             # Cross-channel history — primary session flag on chat sessions.

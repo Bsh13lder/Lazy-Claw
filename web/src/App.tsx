@@ -5,6 +5,7 @@ import { AgentStatusProvider } from "./context/AgentStatusContext";
 import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
+import Tasks from "./pages/Tasks";
 import Replay from "./pages/Replay";
 import Audit from "./pages/Audit";
 import SkillHub from "./pages/SkillHub";
@@ -20,7 +21,7 @@ import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
 
 const VALID_PAGES: readonly Page[] = [
-  "overview", "activity", "replay", "audit", "hub", "skills",
+  "overview", "activity", "tasks", "replay", "audit", "hub", "skills",
   "templates", "jobs", "watchers", "mcp", "memory", "lazybrain",
   "vault", "settings",
 ];
@@ -73,6 +74,7 @@ function AppContent() {
     switch (page) {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
+      case "tasks": return <Tasks />;
       case "replay": return <Replay />;
       case "audit": return <Audit />;
       case "hub": return <SkillHub />;

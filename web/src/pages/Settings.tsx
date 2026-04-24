@@ -238,9 +238,16 @@ function ModelAssignment({
 
   const handleModelChange = async (role: string, value: string) => {
     const key = modeKey(role);
+    const genericKey = `${role}_model`;
     const newVal = value === "" ? null : value;
     try {
-      await onSettingsUpdate({ [key]: newVal });
+      // Dual-write: per-mode override keeps advanced mode isolation,
+      // generic mirror ensures Telegram / CLI fall back to the same
+      // choice when the active mode has no per-mode key set.
+      await onSettingsUpdate({
+        [key]: newVal,
+        [genericKey]: newVal,
+      });
       toast.success(`${ROLE_INFO[role]?.label ?? role} model updated`);
     } catch {
       toast.error("Failed to update model");
@@ -1664,6 +1671,7 @@ export default function Settings() {
     try {
       const updated = await api.updateEcoSettings({ mode });
       setEco(updated);
+      window.dispatchEvent(new CustomEvent("lazyclaw:eco-changed"));
       toast.success(`Switched to ${mode.toUpperCase()} mode`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update mode");
@@ -1673,6 +1681,7 @@ export default function Settings() {
   const handleEcoSettingsUpdate = useCallback(async (updates: Partial<EcoSettings>) => {
     const updated = await api.updateEcoSettings(updates);
     setEco(updated);
+    window.dispatchEvent(new CustomEvent("lazyclaw:eco-changed"));
   }, []);
 
   const handleTeamUpdate = useCallback(async (updates: Partial<TeamSettings>) => {

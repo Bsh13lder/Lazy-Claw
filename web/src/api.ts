@@ -38,6 +38,7 @@ export interface McpServer {
   url?: string;
   status: string;
   tool_count: number;
+  favorite?: boolean;
 }
 
 export interface Memory {
@@ -59,6 +60,12 @@ export interface EcoSettings {
   monthly_paid_budget: number;
   locked_provider?: string;
   allowed_providers?: string[];
+  // Generic "last-picked" mirror — read by Telegram / CLI as fallback when
+  // the active mode has no per-mode override. Web UI Settings writes this
+  // alongside the per-mode key on every change.
+  brain_model?: string | null;
+  worker_model?: string | null;
+  fallback_model?: string | null;
   // Per-mode model overrides
   hybrid_brain_model?: string | null;
   hybrid_worker_model?: string | null;
@@ -538,6 +545,12 @@ export const reconnectMcp = (id: string) =>
 export const disconnectMcp = (id: string) =>
   request<void>(`/api/mcp/servers/${id}/disconnect`, { method: "POST" });
 
+export const favoriteMcp = (id: string, favorite: boolean) =>
+  request<{ status: string; favorite: boolean }>(
+    `/api/mcp/servers/${id}/favorite`,
+    { method: "POST", body: JSON.stringify({ favorite }) },
+  );
+
 export const getMcpServerTools = (id: string) =>
   request<{ tools: McpTool[] }>(`/api/mcp/servers/${id}/tools`).then((r) => r.tools);
 
@@ -560,6 +573,138 @@ export const generateDailyLog = (date: string) =>
 
 export const deleteDailyLog = (date: string) =>
   request<{ status: string }>(`/api/memory/daily-logs/${date}`, { method: "DELETE" });
+
+// ── Tasks (user todo list) ────────────────────────────────────────────────
+
+export interface TaskStep {
+  id: string;
+  title: string;
+  done: boolean;
+}
+
+export interface TaskItem {
+  id: string;
+  user_id: string;
+  title: string;
+  description: string | null;
+  category: string | null;
+  priority: "low" | "medium" | "high" | "urgent";
+  status: "todo" | "in_progress" | "done" | "failed" | "cancelled";
+  owner: "user" | "agent";
+  due_date: string | null;
+  reminder_at: string | null;
+  reminder_job_id: string | null;
+  recurring: string | null;
+  tags: string | null;
+  nag_count: number;
+  created_at: string;
+  completed_at: string | null;
+  last_error?: string | null;
+  attempt_count?: number;
+  last_attempted_at?: string | null;
+  trace_session_id?: string | null;
+  lazybrain_note_id?: string | null;
+  /** JSON-encoded list of TaskStep. Parse via `parseSteps(task.steps)`. */
+  steps?: string | null;
+}
+
+export interface TaskDraft {
+  title: string;
+  due_date: string | null;
+  reminder_at: string | null;
+  priority: "low" | "medium" | "high" | "urgent" | null;
+  category?: string | null;
+  tags: string[];
+  steps?: string[] | null;
+  matched_time: string | null;
+}
+
+export function parseSteps(raw: string | null | undefined): TaskStep[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export const listTasks = (opts?: {
+  owner?: "user" | "agent" | "all";
+  status?: "todo" | "in_progress" | "done" | "all";
+  bucket?: "today" | "upcoming" | "someday" | "all";
+}) => {
+  const params = new URLSearchParams();
+  if (opts?.owner) params.set("owner", opts.owner);
+  if (opts?.status) params.set("status", opts.status);
+  if (opts?.bucket) params.set("bucket", opts.bucket);
+  const qs = params.toString();
+  return request<{ tasks: TaskItem[]; count: number }>(
+    `/api/tasks${qs ? `?${qs}` : ""}`,
+  ).then((r) => r.tasks);
+};
+
+export const addTask = (body: {
+  title: string;
+  description?: string;
+  category?: string;
+  priority?: "low" | "medium" | "high" | "urgent";
+  due_date?: string;
+  reminder_at?: string;
+  recurring?: string;
+  tags?: string[];
+  steps?: { title: string; done?: boolean }[];
+}) =>
+  request<{ task: TaskItem }>("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }).then((r) => r.task);
+
+export const parseTask = (text: string, mode: "fast" | "ai" = "fast") =>
+  request<{ draft: TaskDraft; mode: string }>("/api/tasks/parse", {
+    method: "POST",
+    body: JSON.stringify({ text, mode }),
+  }).then((r) => r.draft);
+
+export const setTaskSteps = (taskId: string, steps: TaskStep[]) =>
+  request<{ steps: TaskStep[] }>(`/api/tasks/${taskId}/steps`, {
+    method: "PUT",
+    body: JSON.stringify({ steps }),
+  }).then((r) => r.steps);
+
+export const toggleTaskStep = (taskId: string, stepId: string) =>
+  request<{ task: TaskItem }>(`/api/tasks/${taskId}/steps/${stepId}/toggle`, {
+    method: "POST",
+  }).then((r) => r.task);
+
+export const updateTask = (
+  id: string,
+  // `null` on any string field clears it server-side.
+  body: Partial<{
+    title: string;
+    description: string | null;
+    category: string | null;
+    priority: "low" | "medium" | "high" | "urgent";
+    status: "todo" | "in_progress" | "done";
+    due_date: string | null;
+    reminder_at: string | null;
+    tags: string[];
+  }>,
+) =>
+  request<{ task: TaskItem }>(`/api/tasks/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  }).then((r) => r.task);
+
+export const completeTask = (id: string) =>
+  request<{ status: string; id: string }>(`/api/tasks/${id}/complete`, {
+    method: "POST",
+  });
+
+export const deleteTask = (id: string) =>
+  request<{ status: string; id: string }>(`/api/tasks/${id}`, {
+    method: "DELETE",
+  });
 
 // ── Vault ──────────────────────────────────────────────────────────────────
 

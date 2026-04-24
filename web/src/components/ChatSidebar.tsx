@@ -8,6 +8,7 @@ import BrowserCanvas from "./BrowserCanvas";
 import TemplateSuggestBanner from "./TemplateSuggestBanner";
 import PlanApprovalCard from "./PlanApprovalCard";
 import PlanModeToggle from "./PlanModeToggle";
+import BrainBadge from "./BrainBadge";
 
 export default function ChatSidebar() {
   const {
@@ -78,6 +79,9 @@ export default function ChatSidebar() {
         <span className="text-xs font-medium text-text-primary truncate flex-1 min-w-0">
           {activeSession.title || "Chat"}
         </span>
+
+        {/* Active brain model — matches what Telegram uses, visible drift check */}
+        <BrainBadge />
 
         {/* Plan mode toggle — quick switch between Plan ↔ Auto */}
         <PlanModeToggle />

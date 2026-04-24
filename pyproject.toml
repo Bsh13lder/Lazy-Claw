@@ -29,6 +29,10 @@ dependencies = [
     "prompt_toolkit>=3.0.0",
     "textual>=0.50.0",
     "mcp>=1.0.0",
+    # Google Workspace MCP server (Sheets / Drive / Gmail / Calendar / Docs).
+    # Installed inside the container so it's launchable as `workspace-mcp`
+    # via the Web UI's MCP → Add Server flow. See ADR-0003.
+    "workspace-mcp>=1.19.0",
 ]
 
 [project.optional-dependencies]

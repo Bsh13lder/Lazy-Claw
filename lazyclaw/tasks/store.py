@@ -18,7 +18,7 @@ from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
 
-ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags"})
+ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags", "steps"})
 
 TASK_COLUMNS = [
     "id", "user_id", "title", "description", "category", "priority",
@@ -27,6 +27,8 @@ TASK_COLUMNS = [
     # Execution tracking — saved-but-unexecuted gap fix
     "last_error", "attempt_count", "last_attempted_at",
     "trace_session_id", "lazybrain_note_id",
+    # Sub-task checklist (encrypted JSON: [{id, title, done}])
+    "steps",
 ]
 
 TASK_SELECT = ", ".join(TASK_COLUMNS)
@@ -52,6 +54,35 @@ def _row_to_dict(row, key: bytes) -> dict:
     return result
 
 
+def _normalize_steps(steps: list[dict] | None) -> list[dict]:
+    """Coerce a steps payload into the canonical shape [{id, title, done}].
+
+    Accepts loose input (plain strings, partial dicts) so callers — including
+    the NL parser and the AI quick-add — don't need to pre-shape everything.
+    """
+    if not steps:
+        return []
+    out: list[dict] = []
+    for i, raw in enumerate(steps):
+        if isinstance(raw, str):
+            title = raw.strip()
+            if not title:
+                continue
+            out.append({"id": f"s{i}-{uuid4().hex[:6]}", "title": title, "done": False})
+            continue
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title", "")).strip()
+        if not title:
+            continue
+        out.append({
+            "id": str(raw.get("id") or f"s{i}-{uuid4().hex[:6]}"),
+            "title": title,
+            "done": bool(raw.get("done", False)),
+        })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -69,11 +100,15 @@ async def create_task(
     recurring: str | None = None,
     tags: list[str] | None = None,
     trace_session_id: str | None = None,
+    steps: list[dict] | None = None,
 ) -> dict:
     """Create a new task. Returns the full task dict (decrypted).
 
     ``trace_session_id`` lets us link a failed task back to the conversation
     trace that created it — useful when reviewing unexecuted work.
+
+    ``steps`` is an optional list of sub-task dicts shaped ``{id, title, done}``.
+    IDs are auto-assigned when missing.
     """
     key = await get_user_dek(config, user_id)
     task_id = str(uuid4())
@@ -82,6 +117,13 @@ async def create_task(
     enc_description = _encrypt_field(description, key)
     enc_category = _encrypt_field(category, key)
     enc_tags = _encrypt_field(json.dumps(tags), key) if tags else None
+
+    # Normalize + encrypt steps payload.
+    normalized_steps = _normalize_steps(steps) if steps else None
+    enc_steps = (
+        _encrypt_field(json.dumps(normalized_steps), key)
+        if normalized_steps else None
+    )
 
     # Create a reminder job if reminder_at is set
     reminder_job_id = None
@@ -138,16 +180,17 @@ async def create_task(
     except Exception:
         logger.debug("lazybrain task mirror failed", exc_info=True)
 
+    placeholders = ", ".join(["?"] * len(TASK_COLUMNS))
     async with db_session(config) as db:
         await db.execute(
-            f"INSERT INTO tasks ({TASK_SELECT}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO tasks ({TASK_SELECT}) VALUES ({placeholders})",
             (
                 task_id, user_id, enc_title, enc_description, enc_category,
                 priority, "todo", owner, due_date, reminder_at, reminder_job_id,
                 recurring, enc_tags, 0,
                 created_at, None,
                 None, 0, None, trace_session_id, lazybrain_note_id,
+                enc_steps,
             ),
         )
         await db.commit()
@@ -166,6 +209,7 @@ async def create_task(
         "last_error": None, "attempt_count": 0, "last_attempted_at": None,
         "trace_session_id": trace_session_id,
         "lazybrain_note_id": lazybrain_note_id,
+        "steps": json.dumps(normalized_steps) if normalized_steps else None,
     }
 
 
@@ -722,3 +766,71 @@ async def _delete_reminder_job(
         await delete_job(config, user_id, job_id)
     except Exception:
         logger.debug("Failed to delete reminder job %s", job_id, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Sub-task steps — encrypted JSON checklist attached to each task.
+# ---------------------------------------------------------------------------
+
+def _parse_steps(raw: str | None) -> list[dict]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+async def set_steps(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    steps: list[dict],
+) -> list[dict] | None:
+    """Replace the full sub-task checklist for a task.
+
+    Returns the normalized list, or None if the task does not exist.
+    """
+    task = await get_task(config, user_id, task_id)
+    if not task:
+        return None
+
+    key = await get_user_dek(config, user_id)
+    normalized = _normalize_steps(steps)
+    enc = encrypt(json.dumps(normalized), key) if normalized else None
+
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE tasks SET steps = ? WHERE id = ? AND user_id = ?",
+            (enc, task_id, user_id),
+        )
+        await db.commit()
+
+    return normalized
+
+
+async def toggle_step(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    step_id: str,
+) -> dict | None:
+    """Flip the `done` flag on a single step. Returns the updated task dict."""
+    task = await get_task(config, user_id, task_id)
+    if not task:
+        return None
+
+    current = _parse_steps(task.get("steps"))
+    matched = False
+    for step in current:
+        if step.get("id") == step_id:
+            step["done"] = not bool(step.get("done"))
+            matched = True
+            break
+
+    if not matched:
+        return None
+
+    await set_steps(config, user_id, task_id, current)
+    return await get_task(config, user_id, task_id)

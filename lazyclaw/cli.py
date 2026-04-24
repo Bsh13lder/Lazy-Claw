@@ -227,6 +227,29 @@ async def run_agent(config: Config) -> None:
     _default_uid = await _resolve_uid(config)
     set_webhook_deps(lane_queue, _default_uid)
 
+    # ── Headless vs TUI branch ───────────────────────────────────────
+    # Docker + systemd + any non-interactive shell has no real terminal,
+    # so the Textual TUI ends up pegging 100% of a CPU core just
+    # redrawing its status dashboard to a pipe that nothing reads. Detect
+    # server mode (env flag OR non-tty stdin) and run the services
+    # directly without Textual.
+    import sys as _sys
+    server_mode = (
+        os.getenv("LAZYCLAW_SERVER_MODE", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        or not _sys.stdin.isatty()
+    )
+
+    if server_mode:
+        await _run_headless(
+            config=config,
+            agent=agent,
+            lane_queue=lane_queue,
+            task_runner=task_runner,
+            team_lead=team_lead,
+        )
+        return
+
     # ── Textual TUI Dashboard ────────────────────────────────────────
     # Full interactive terminal: live agent activity, system overview,
     # scrollable logs, admin input. Replaces the old Rich Live panel.
@@ -250,6 +273,104 @@ async def run_agent(config: Config) -> None:
         await app.run_async()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass  # Graceful shutdown handled by app.action_quit()
+
+
+async def _run_headless(
+    *,
+    config: "Config",
+    agent: "Agent",
+    lane_queue: "LaneQueue",
+    task_runner: "TaskRunner",
+    team_lead: "TeamLead",
+) -> None:
+    """Run uvicorn + Telegram + heartbeat WITHOUT the Textual TUI.
+
+    Used inside Docker and any non-interactive shell — the TUI redraw
+    loop otherwise burns ~100% of a CPU core painting ANSI to a pipe
+    that nothing ever reads. Same services come up, same ports bind,
+    telegram + heartbeat behave identically — just no terminal UI.
+    """
+    import uvicorn
+
+    logger = logging.getLogger(__name__)
+    logger.info("Starting LazyClaw in HEADLESS mode (no TUI)")
+    console.print("[cyan]→ Running headless (server mode). No TUI.[/cyan]")
+
+    uvi_config = uvicorn.Config(
+        "lazyclaw.gateway.app:app",
+        host="0.0.0.0",
+        port=config.port,
+        log_level="warning",
+    )
+    server = uvicorn.Server(uvi_config)
+    console.print(
+        f"[green]✓[/green] API on http://0.0.0.0:{config.port}"
+    )
+
+    telegram = None
+    telegram_push = None
+    if config.telegram_bot_token:
+        try:
+            from lazyclaw.channels.telegram import TelegramAdapter
+
+            telegram = TelegramAdapter(
+                config.telegram_bot_token, agent, config,
+                lane_queue=lane_queue,
+                server_dashboard=None,
+                task_runner=task_runner,
+                team_lead=team_lead,
+            )
+            await telegram.start()
+            console.print("[green]✓[/green] Telegram adapter running")
+
+            from lazyclaw.notifications.telegram_notifier import TelegramNotifier
+            notifier = TelegramNotifier(
+                bot=telegram._app.bot,
+                admin_chat_id_fn=lambda: telegram._admin_chat_id,
+            )
+            if task_runner and task_runner._default_callback is None:
+                task_runner._default_callback = notifier
+
+            _tg = telegram
+
+            async def _telegram_push_fn(text: str, reply_markup=None) -> None:
+                chat_id = _tg._admin_chat_id
+                if not chat_id or not _tg._app or not _tg._app.bot:
+                    return
+                try:
+                    from lazyclaw.channels.telegram import _telegram_send_with_retry
+                    await _telegram_send_with_retry(
+                        lambda: _tg._app.bot.send_message(
+                            chat_id=int(chat_id), text=text,
+                            reply_markup=reply_markup,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("Telegram push failed: %s", exc)
+
+            telegram_push = _telegram_push_fn
+        except Exception as exc:
+            logger.warning("Telegram startup failed in headless: %s", exc)
+            console.print(f"[yellow]Telegram adapter failed: {exc}[/yellow]")
+
+    try:
+        from lazyclaw.heartbeat.daemon import HeartbeatDaemon
+        heartbeat = HeartbeatDaemon(config, lane_queue, telegram_push=telegram_push)
+        await heartbeat.start()
+        console.print("[green]✓[/green] Heartbeat daemon started")
+    except Exception as exc:
+        logger.warning("Heartbeat startup failed: %s", exc)
+        console.print(f"[yellow]Heartbeat failed: {exc}[/yellow]")
+
+    try:
+        await server.serve()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Headless shutdown requested")
+        if telegram:
+            try:
+                await telegram.stop()
+            except Exception:
+                logger.debug("Telegram stop errored", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

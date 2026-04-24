@@ -823,9 +823,12 @@ async def resolve_user_id(config, chat_id: str | None = None) -> str:
     """Resolve the LazyClaw user_id for a Telegram chat.
 
     Priority:
-      1. Explicit binding — user whose settings.telegram_chat_id matches chat_id
-         (set via /link USERNAME, persisted once per chat).
-      2. Legacy fallback — first registered user by created_at.
+      1. Explicit binding — user whose settings.telegram_chat_id matches chat_id.
+      2. Web-UI-configured user — oldest user with any brain_model set in eco
+         settings. Auto-binds chat_id on match so future routes are stable
+         (no `/link` step required). This is the path that makes Telegram
+         inherit Web UI model choices automatically.
+      3. Legacy fallback — oldest registered user by created_at.
 
     Rationale: with multiple users in the DB (admin placeholder + real
     personal account), the old "first user" heuristic routed Telegram to a
@@ -845,6 +848,50 @@ async def resolve_user_id(config, chat_id: str | None = None) -> str:
                 row = await cursor.fetchone()
                 if row:
                     return row[0]
+
+            # Prefer user who configured a brain model in the Web UI.
+            # Any of generic / per-mode keys counts as "real setup".
+            cursor = await db.execute(
+                "SELECT id FROM users "
+                "WHERE COALESCE(json_extract(settings, '$.eco.brain_model'), "
+                "               json_extract(settings, '$.eco.full_brain_model'), "
+                "               json_extract(settings, '$.eco.hybrid_brain_model'), "
+                "               json_extract(settings, '$.eco.claude_brain_model')) "
+                "      IS NOT NULL "
+                "ORDER BY created_at LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            if row:
+                user_id = row[0]
+                if chat_id:
+                    try:
+                        await db.execute(
+                            "UPDATE users SET settings = "
+                            "json_set(COALESCE(settings, '{}'), "
+                            "         '$.telegram_chat_id', ?) "
+                            "WHERE id = ?",
+                            (str(chat_id), user_id),
+                        )
+                        # Clear any stale binding on other rows.
+                        await db.execute(
+                            "UPDATE users SET settings = "
+                            "json_remove(settings, '$.telegram_chat_id') "
+                            "WHERE id != ? "
+                            "AND json_extract(settings, '$.telegram_chat_id') = ?",
+                            (user_id, str(chat_id)),
+                        )
+                        await db.commit()
+                        logger.info(
+                            "Telegram chat %s auto-bound to user %s "
+                            "(first user with configured brain model)",
+                            chat_id, user_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Auto-bind of Telegram chat failed", exc_info=True,
+                        )
+                return user_id
+
             cursor = await db.execute(
                 "SELECT id FROM users ORDER BY created_at LIMIT 1"
             )

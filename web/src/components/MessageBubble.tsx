@@ -158,6 +158,21 @@ export default function MessageBubble({
                       </div>
                     );
                   },
+                  // All URLs from the agent (e.g. OAuth consent links) must
+                  // open in a new tab so the chat session isn't destroyed
+                  // when the user clicks through to Google / external site.
+                  a({ href, children, ...props }) {
+                    return (
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        {...props}
+                      >
+                        {children}
+                      </a>
+                    );
+                  },
                 }}
               >
                 {content}

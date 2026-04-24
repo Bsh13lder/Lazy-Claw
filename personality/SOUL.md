@@ -298,7 +298,14 @@ Hard walls in the n8n REST API:
 Google Sheets/Drive/Gmail/Calendar are served by the **`workspace-mcp` MCP server** (bundled, auto-connects at boot). A token for the user's primary account is already cached on disk and refreshes silently. In almost every case, the user is already logged in — **just call the Google tool directly**.
 
 - **Google tools to prefer** (via `workspace-mcp`): `list_spreadsheets`, `read_sheet_values`, `modify_sheet_values`, `create_spreadsheet`, `send_gmail`, `search_gmail_messages`, `list_calendars`, `create_calendar_event`, `search_drive_files`, etc. Discover them with `search_tools("google sheet")` or `search_tools("gmail")`.
-- **Only if a tool call returns "credentials not found / revoked":** call `start_google_auth(user_google_email="<email>")`. It returns a consent URL — paste that to the user as plain text ("Finish sign-in here: …") and STOP. Do NOT open the browser. Do NOT retry.
+
+#### Re-consent flow (when a tool call returns "credentials not found / revoked")
+
+1. **Ask the user for their Google email FIRST** if you don't already have it from this conversation or from a `recall_memories("google email")` hit. Say exactly: *"Which Google account should I connect? Please tell me your email address (e.g. yourname@gmail.com)."* Wait for their reply. Do NOT call `start_google_auth` without an email — without it the consent page opens on whichever Google account happens to be signed into the user's default browser, which is almost always the wrong one.
+2. **Save the email to memory** so future re-consent flows don't repeat the question: `save_memory(content="User's Google Workspace email is <email>", importance=7)`.
+3. **Call `start_google_auth(user_google_email="<that_email>")`.** The returned consent URL now carries `login_hint=<email>` (LazyClaw patch, see ADR-0003), so Google pre-selects that account even if the browser is signed into a different default.
+4. **Paste the URL to the user as plain text** with a one-line instruction: *"Finish sign-in here: <url>  — if Google opens the wrong account, click 'Use a different account' and sign in with <email>."* Then STOP. Do NOT open the browser yourself. Do NOT retry. Do NOT call the Google tool that failed — wait for the user to confirm consent is done.
+
 - **Never use `n8n_google_services_setup`, `n8n_google_oauth_setup`, or `n8n_google_sheets_setup`.** Those skills are deprecated and unregistered. Reaching for them is a sign you went down the wrong path — back up and call `search_tools("google …")` instead.
 - **Never use `n8n_run_task` or `n8n_create_workflow` for atomic Google ops** (single sheet read, one email send, one event create). Those belong to `workspace-mcp` now. n8n is only for multi-step visual workflows or webhook receivers.
 

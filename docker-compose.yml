@@ -8,6 +8,7 @@ services:
     ports:
       - "18789:18789"
       - "6080:6080"    # noVNC remote takeover (browser control from phone)
+      - "8000:8000"    # workspace-mcp OAuth callback (MinimalOAuthServer, stdio mode)
     env_file: .env
     environment:
       # n8n MCP connection (inside docker network)
@@ -16,6 +17,13 @@ services:
       - OLLAMA_HOST=http://host.docker.internal:11434
       # Enable server mode for VNC remote takeover in Docker
       - LAZYCLAW_SERVER_MODE=true
+      # workspace-mcp: bind the OAuth callback server to 0.0.0.0 so Docker
+      # port-forwarding from host:8000 can reach it. The redirect URI that
+      # Google sees must stay `localhost` (what's registered in GCP), so
+      # override that explicitly — otherwise workspace-mcp would derive
+      # it from WORKSPACE_MCP_BASE_URI and Google would reject.
+      - WORKSPACE_MCP_BASE_URI=http://0.0.0.0
+      - GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/oauth2callback
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:18789/api/health"]
       interval: 30s

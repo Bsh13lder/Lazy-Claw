@@ -1,30 +1,41 @@
-Subject: workspace-mcp: pass login_hint on Google consent URL
+Subject: workspace-mcp: always show account picker + pass login_hint
 
-When the caller already knows which Google account to use
-(`user_google_email` is provided to `start_auth_flow`), forward it as
-`login_hint` on the authorization URL so Google's consent page
-pre-selects that account. Without this, the consent page uses whichever
-Google account happens to be signed into the user's default browser
-profile, which is often the wrong account for a Cloud project.
+Two related UX fixes for the Google consent flow:
 
-Upstream equivalent: github.com/taylorwilsdon/google_workspace_mcp PR #556.
-When that merges, revert this patch.
+1. Always pass `prompt="select_account consent"` on the authorization
+   URL, overriding upstream's `_determine_oauth_prompt()` choice.
+   Upstream picks `"consent"` (no picker) when no cached credentials
+   exist for the given email — but that's exactly the first-login
+   case where the user most needs an account picker. Without the
+   picker, Google uses whichever Google session the browser already
+   has, which is usually the wrong account for a Cloud project.
+
+2. Pass `login_hint=user_google_email` when the caller already named
+   an account, so Google pre-selects it on the picker and the user
+   can always click "Use a different account" to escape.
+
+Upstream equivalent for (2): github.com/taylorwilsdon/google_workspace_mcp PR #556.
+(1) has no upstream PR yet — a stronger default than upstream's per-state logic.
 
 See: docs/adr/0003-direct-google-api-over-n8n.md
 
 --- a/auth/google_auth.py
 +++ b/auth/google_auth.py
-@@ -515,7 +515,15 @@ async def start_auth_flow(
+@@ -515,7 +515,19 @@ async def start_auth_flow(
              required_scopes=current_scopes,
              session_id=session_id,
          )
 -        auth_url, _ = flow.authorization_url(access_type="offline", prompt=prompt_type)
-+        # LazyClaw patch: pass `login_hint` when the caller already
-+        # named an account, so Google pre-selects it on the consent
-+        # screen and the user can always click "Use a different
-+        # account" to escape. Fixes the "consent opens on wrong
-+        # profile" bug — see ADR-0003.
-+        auth_kwargs = {"access_type": "offline", "prompt": prompt_type}
++        # LazyClaw patch: (1) always force `select_account consent` so
++        # Google shows an account picker even on first-time consent —
++        # upstream's `_determine_oauth_prompt` returns plain "consent"
++        # when no creds are cached for the email, which skips the
++        # picker entirely and opens on whichever Google session the
++        # browser already has. (2) pass `login_hint` when the caller
++        # named an account, so the picker pre-selects it and the
++        # user can always click "Use a different account" to escape.
++        # See ADR-0003.
++        auth_kwargs = {"access_type": "offline", "prompt": "select_account consent"}
 +        if user_google_email:
 +            auth_kwargs["login_hint"] = user_google_email
 +        auth_url, _ = flow.authorization_url(**auth_kwargs)

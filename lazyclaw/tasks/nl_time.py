@@ -167,10 +167,13 @@ def _rule_today(text: str) -> ParsedTime | None:
 
 
 def _rule_in_duration(text: str) -> ParsedTime | None:
-    # "in 2 hours", "in 30 minutes", "en 2 horas", "dentro de 3 días",
-    # "after 2 hours"
+    # "in 2 hours", "within 2 days", "after 2 hours", "en 2 horas",
+    # "dentro de 3 días", "por 2 días", "before 30 minutes" — all collapse
+    # to the same semantics (deadline = now + N units). Spanish "por" is a
+    # bit loose but the worst case is over-matching, which the title
+    # rebuilder cleans up.
     pattern = re.compile(
-        r"\b(?:in|after|en|dentro\s+de)\s+(\d+)\s*"
+        r"\b(?:in|after|within|before|en|dentro\s+de|por)\s+(\d+)\s*"
         r"(minutes?|mins?|hours?|hrs?|hs?|days?|weeks?|"
         r"minutos?|horas?|días?|dias?|semanas?)\b",
         re.IGNORECASE,
@@ -195,6 +198,79 @@ def _rule_in_duration(text: str) -> ParsedTime | None:
     rest = _strip_phrase(text, m.start(), m.end())
     return ParsedTime(
         due_date=dt_local.date().isoformat(),
+        reminder_at=_to_utc_iso(dt_local),
+        remaining=rest,
+        matched=m.group(0),
+    )
+
+
+def _rule_n_unit_deadline(text: str) -> ParsedTime | None:
+    """Match "2 days deadline", "1 day deadline", "3 horas límite".
+
+    Phrasing the agent or user types when stating *how long they have*
+    rather than *when something is due*. Resolves to now + N units.
+    """
+    pattern = re.compile(
+        r"\b(\d+)\s*(minutes?|mins?|hours?|hrs?|days?|weeks?|"
+        r"minutos?|horas?|días?|dias?|semanas?)\s+"
+        r"(deadline|deadlines?|due|max|limit|límite|limite)\b",
+        re.IGNORECASE,
+    )
+    m = pattern.search(text)
+    if not m:
+        return None
+    qty = int(m.group(1))
+    unit = m.group(2).lower()
+    if unit.startswith(("min", "minu")):
+        delta = timedelta(minutes=qty)
+    elif unit.startswith(("hour", "hr", "hora")):
+        delta = timedelta(hours=qty)
+    elif unit.startswith(("day", "día", "dia")):
+        delta = timedelta(days=qty)
+    elif unit.startswith(("week", "semana")):
+        delta = timedelta(weeks=qty)
+    else:
+        return None
+    now_local = datetime.now(_LOCAL_TZ)
+    dt_local = now_local + delta
+    rest = _strip_phrase(text, m.start(), m.end())
+    return ParsedTime(
+        due_date=dt_local.date().isoformat(),
+        reminder_at=_to_utc_iso(dt_local),
+        remaining=rest,
+        matched=m.group(0),
+    )
+
+
+def _rule_by_weekday(text: str) -> ParsedTime | None:
+    """Match "by Friday", "before Monday", "antes del viernes".
+
+    Resolves to the *coming* weekday (today if matches and not past 09:00,
+    else the next occurrence). Distinct from "next Monday" which always
+    pushes a week forward.
+    """
+    names = "|".join(sorted(WEEKDAYS.keys(), key=len, reverse=True))
+    pattern = re.compile(
+        rf"\b(?:by|before|antes\s+de(?:l)?)\s+({names})\b",
+        re.IGNORECASE,
+    )
+    m = pattern.search(text)
+    if not m:
+        return None
+    target = WEEKDAYS[m.group(1).lower()]
+    today = _today_local()
+    days = (target - today.weekday()) % 7
+    # Same weekday as today and it's still morning → keep today; otherwise
+    # roll forward. Avoids "by Monday" (typed Monday afternoon) silently
+    # resolving to today and being instantly overdue.
+    d = today + timedelta(days=days if days > 0 else 7)
+    if days == 0 and datetime.now(_LOCAL_TZ).time() < time(9, 0):
+        d = today
+    rest = _strip_phrase(text, m.start(), m.end())
+    t, rest = _extract_time(rest)
+    dt_local = _combine_local(d, t)
+    return ParsedTime(
+        due_date=d.isoformat(),
         reminder_at=_to_utc_iso(dt_local),
         remaining=rest,
         matched=m.group(0),
@@ -307,7 +383,13 @@ _RULES: tuple[Rule, ...] = (
     _rule_tomorrow,
     _rule_today,
     _rule_tonight,
+    # "2 days deadline" must beat _rule_in_duration which would otherwise
+    # not even match (no preposition), and beat _rule_absolute_date which
+    # would interpret a bare "2" as a day-of-month.
+    _rule_n_unit_deadline,
     _rule_in_duration,
+    # "by Friday" must beat _rule_next_weekday which only matches "next/on/el".
+    _rule_by_weekday,
     _rule_next_weekday,
     _rule_bare_time,
     _rule_absolute_date,

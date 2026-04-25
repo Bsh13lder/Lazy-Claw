@@ -187,7 +187,7 @@ class SkillRegistry:
             ListTagsSkill, ListTitlesSkill,
             RenamePageSkill, MergeNotesSkill,
             PinNoteSkill, UnpinNoteSkill, ListPinnedSkill,
-            EnableWeeklyRollupSkill,
+            EnableWeeklyRollupSkill, MorningReviewSkill,
         )
 
         self.register(SaveNoteSkill(config=config))
@@ -220,6 +220,7 @@ class SkillRegistry:
         self.register(TopicRollupSkill(config=config))
         self.register(MorningBriefingSkill(config=config))
         self.register(ReindexEmbeddingsSkill(config=config))
+        self.register(MorningReviewSkill(config=config))
 
         # Note: real_browser.py skills removed — merged into BrowserSkill above
 

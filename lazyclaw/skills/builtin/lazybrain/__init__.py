@@ -42,6 +42,7 @@ from lazyclaw.skills.builtin.lazybrain.ai_skills import (
     SuggestMetadataSkill,
     TopicRollupSkill,
 )
+from lazyclaw.skills.builtin.lazybrain.morning_review import MorningReviewSkill
 
 __all__ = [
     "SaveNoteSkill",
@@ -72,4 +73,5 @@ __all__ = [
     "SuggestLinksSkill",
     "SuggestMetadataSkill",
     "TopicRollupSkill",
+    "MorningReviewSkill",
 ]

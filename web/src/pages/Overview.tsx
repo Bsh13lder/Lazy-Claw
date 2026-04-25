@@ -6,7 +6,6 @@ import { useAgentStatus } from "../context/AgentStatusContext";
 import { LaneColumn } from "../components/LaneColumn";
 import { SavedAgentsRail } from "../components/SavedAgentsRail";
 import { HistoryPanel } from "../components/HistoryPanel";
-import { MyTasksPanel } from "../components/MyTasksPanel";
 import { TaskDashboardWidget } from "../components/tasks/TaskDashboardWidget";
 import type { Page } from "../components/NavShell";
 
@@ -281,8 +280,9 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
 
         {/* ═══════════════════════════════════════════════════════════
             2. MY TASKS — what the user dictated.
-               Left: the encrypted todo list (MyTasksPanel).
-               Right: the foreground chat lane (what I'm asking AI right now).
+               Single TaskDashboardWidget (consolidated). Foreground chat
+               lane sits to the right so live-AI work and todos read at
+               the same glance.
            ═══════════════════════════════════════════════════════════ */}
         <section className="rounded-2xl bg-bg-secondary/40 border border-border/60 p-4 space-y-3">
           <div className="flex items-baseline gap-2">
@@ -298,10 +298,10 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             </span>
           </div>
 
-          <TaskDashboardWidget onNavigate={onNavigate} />
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <MyTasksPanel onNavigate={onNavigate} />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div className="lg:col-span-2">
+              <TaskDashboardWidget onNavigate={onNavigate} />
+            </div>
             <LaneColumn
               lane="foreground"
               tasks={foreground}

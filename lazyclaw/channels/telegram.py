@@ -1151,6 +1151,12 @@ class TelegramAdapter(ChannelAdapter):
         if await self._handle_instant_done(update, user_id, raw_text):
             return
 
+        # ── Quick note capture: "note: …" / "idea: …" / "remember: …" ──
+        # Direct save to LazyBrain, no agent LLM, no tokens. Mirrors the
+        # /note slash command but lets the user type naturally.
+        if await self._handle_quick_note(update, user_id, raw_text):
+            return
+
         # Launch concurrently — LaneQueue serializes per user, fast dispatch
         # returns in <2s so the queue drains quickly for heavy tasks
         import asyncio as _aio
@@ -1388,6 +1394,39 @@ class TelegramAdapter(ChannelAdapter):
             return True
 
         await update.message.reply_text(f"\u2705 Done: {title}")
+        return True
+
+    async def _handle_quick_note(
+        self, update: Update, user_id: str, raw_text: str,
+    ) -> bool:
+        """Detect ``note: \u2026`` / ``idea: \u2026`` / ``remember: \u2026`` / ``nota: \u2026``
+        / ``recuerda: \u2026`` and save direct to LazyBrain. Zero LLM calls.
+
+        Returns True when handled \u2014 caller stops so the agent never sees it.
+        """
+        from lazyclaw.channels.note_capture import (
+            detect_trigger,
+            kind_label,
+            save_quick_note,
+        )
+
+        match = detect_trigger(raw_text)
+        if not match:
+            return False
+        kind_tag, content = match
+        try:
+            note = await save_quick_note(
+                self._config, user_id, content, kind_tag, source="telegram",
+            )
+        except Exception as exc:
+            logger.warning("quick note save (trigger phrase) failed", exc_info=True)
+            await update.message.reply_text(f"\u26a0\ufe0f Could not save: {exc}")
+            return True
+        label = kind_label(kind_tag)
+        snippet = content if len(content) <= 80 else content[:77] + "\u2026"
+        await update.message.reply_text(
+            f"\U0001f4dd {label} saved\n{snippet}"
+        )
         return True
 
     async def _process_and_reply(

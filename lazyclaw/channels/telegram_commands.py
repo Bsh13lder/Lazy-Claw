@@ -50,6 +50,9 @@ BOT_COMMANDS = [
     BotCommand("recovery", "\U0001f510 Recovery phrase"),
     BotCommand("search", "\U0001f50d Search provider"),
     BotCommand("resetpass", "\U0001f510 Reset web UI password"),
+    BotCommand("note", "\U0001f4dd Save a quick note"),
+    BotCommand("idea", "\U0001f4a1 Save an idea"),
+    BotCommand("remember", "\U0001f9e0 Save to memory"),
 ]
 
 
@@ -96,6 +99,9 @@ class TelegramCommands:
             "addadmin": self._handle_addadmin, "removeadmin": self._handle_removeadmin,
             "search": self._handle_search,
             "whoami": self._handle_whoami, "link": self._handle_link,
+            "note": self._handle_note,
+            "idea": self._handle_idea,
+            "remember": self._handle_remember,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -2054,6 +2060,63 @@ class TelegramCommands:
             f"Usage this month: {usage.status()}\n\n"
             f"Switch: <code>/search serper</code> or <code>/search serpapi</code>"
         )
+
+    # -- /note, /idea, /remember -------------------------------------------
+
+    async def _save_quick_note(
+        self, update: Update, kind_tag: str, content: str,
+    ) -> None:
+        """Shared backend for the three note-capture commands. Talks
+        directly to LazyBrain — no agent LLM, no tokens."""
+        from lazyclaw.channels.note_capture import (
+            kind_label,
+            save_quick_note,
+        )
+
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        content = (content or "").strip()
+        if not content:
+            await self._reply(
+                update,
+                f"✍️ Type the {kind_label(kind_tag).lower()} after the command.\n\n"
+                f"<code>/note buy organic eggs at the market</code>",
+            )
+            return
+        try:
+            note = await save_quick_note(
+                self._config, user_id, content, kind_tag,
+                source="telegram",
+            )
+        except Exception as exc:
+            logger.warning("quick note save failed", exc_info=True)
+            await self._reply(
+                update, f"⚠️ Could not save: {exc}",
+            )
+            return
+        label = kind_label(kind_tag)
+        snippet = content if len(content) <= 80 else content[:77] + "…"
+        await self._reply(
+            update,
+            f"\U0001f4dd <b>{label} saved</b>\n<code>{snippet}</code>\n\n"
+            f"<i>Open the Notes page on the Web UI to edit.</i>",
+        )
+
+    async def _handle_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = (update.message.text or "")
+        body = text.partition(" ")[2]  # everything after "/note "
+        await self._save_quick_note(update, "kind/note", body)
+
+    async def _handle_idea(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = (update.message.text or "")
+        body = text.partition(" ")[2]
+        await self._save_quick_note(update, "kind/idea", body)
+
+    async def _handle_remember(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = (update.message.text or "")
+        body = text.partition(" ")[2]
+        await self._save_quick_note(update, "kind/memory", body)
 
     # -- Callback query handler (inline keyboards) -------------------------
 

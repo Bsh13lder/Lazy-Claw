@@ -16,12 +16,13 @@ import Watchers from "./pages/Watchers";
 import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
 import LazyBrain from "./pages/LazyBrain";
+import Notes from "./pages/Notes";
 import Vault from "./pages/Vault";
 import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
 
 const VALID_PAGES: readonly Page[] = [
-  "overview", "activity", "tasks", "replay", "audit", "hub", "skills",
+  "overview", "activity", "tasks", "notes", "replay", "audit", "hub", "skills",
   "templates", "jobs", "watchers", "mcp", "memory", "lazybrain",
   "vault", "settings",
 ];
@@ -75,6 +76,7 @@ function AppContent() {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
       case "tasks": return <Tasks />;
+      case "notes": return <Notes />;
       case "replay": return <Replay />;
       case "audit": return <Audit />;
       case "hub": return <SkillHub />;

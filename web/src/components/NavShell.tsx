@@ -4,7 +4,7 @@ import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "tasks" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
+export type Page = "overview" | "activity" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -16,6 +16,7 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   overview: { label: "Overview", description: "System health & activity" },
   activity: { label: "Activity", description: "Live agent & task monitor" },
   tasks: { label: "Tasks", description: "Encrypted todos with NL time + steps" },
+  notes: { label: "Notes", description: "Quick notes, ideas, memory — capture from anywhere" },
   replay: { label: "Replay", description: "Session traces & debugging" },
   audit: { label: "Audit", description: "Action log & security" },
   hub: { label: "Skill Hub", description: "Discover & install skills" },
@@ -50,6 +51,13 @@ const ICONS: Record<Page, NavIcon> = {
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 11l3 3L22 4" />
       <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+    </svg>
+  ),
+  notes: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M9 13h6M9 17h6" />
     </svg>
   ),
   lazybrain: (
@@ -129,7 +137,7 @@ const ICONS: Record<Page, NavIcon> = {
 // Disciplined grouping — read top-to-bottom as the typical user journey:
 // start on Home, work in your brain, run automations, configure tools, debug.
 const NAV_GROUPS: { label: string; items: Page[] }[] = [
-  { label: "Home",       items: ["overview", "activity", "tasks"] },
+  { label: "Home",       items: ["overview", "activity", "tasks", "notes"] },
   { label: "Knowledge",  items: ["lazybrain", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
   { label: "Tools",      items: ["hub", "skills", "mcp"] },

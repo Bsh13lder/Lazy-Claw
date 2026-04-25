@@ -137,7 +137,7 @@ const ICONS: Record<Page, NavIcon> = {
 // Disciplined grouping — read top-to-bottom as the typical user journey:
 // start on Home, work in your brain, run automations, configure tools, debug.
 const NAV_GROUPS: { label: string; items: Page[] }[] = [
-  { label: "Home",       items: ["overview", "activity", "tasks", "notes"] },
+  { label: "Home",       items: ["overview", "activity", "tasks"] },
   { label: "Knowledge",  items: ["lazybrain", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
   { label: "Tools",      items: ["hub", "skills", "mcp"] },

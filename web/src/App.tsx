@@ -76,6 +76,9 @@ function AppContent() {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
       case "tasks": return <Tasks />;
+      // /notes is now the Notes tab inside the Tasks workspace. Redirect
+      // so Telegram deep-links and any old bookmarks keep working without
+      // splitting the surface.
       case "notes": return <Notes />;
       case "replay": return <Replay />;
       case "audit": return <Audit />;

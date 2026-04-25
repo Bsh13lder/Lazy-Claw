@@ -5,6 +5,7 @@ import { QuickAddBar } from "../components/tasks/QuickAddBar";
 import { TaskCard } from "../components/tasks/TaskCard";
 import { TaskDetail } from "../components/tasks/TaskDetail";
 import { PRIORITY_RANK } from "../components/tasks/taskHelpers";
+import { NotesView } from "../components/notes/NotesView";
 
 /**
  * Tasks page — three-pane layout that degrades gracefully:
@@ -43,6 +44,37 @@ const BUCKETS: { id: Bucket; label: string; sub: string }[] = [
 ];
 
 const DETAIL_OPEN_KEY = "lazyclaw.tasks.detailOpen";
+const TAB_KEY = "lazyclaw.tasks.tab";
+
+type WorkspaceTab = "tasks" | "notes";
+
+function readActiveTab(): WorkspaceTab {
+  // URL wins so deep-links land on the right tab.
+  if (typeof window !== "undefined") {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t === "notes" || t === "tasks") return t;
+  }
+  try {
+    const v = localStorage.getItem(TAB_KEY);
+    if (v === "notes" || v === "tasks") return v;
+  } catch {
+    /* ignore */
+  }
+  return "tasks";
+}
+function writeActiveTab(t: WorkspaceTab) {
+  try {
+    localStorage.setItem(TAB_KEY, t);
+  } catch {
+    /* ignore */
+  }
+  if (typeof window !== "undefined") {
+    const url = new URL(window.location.href);
+    if (t === "tasks") url.searchParams.delete("tab");
+    else url.searchParams.set("tab", t);
+    window.history.replaceState(null, "", url.toString());
+  }
+}
 
 function readDetailOpen(): boolean {
   try {
@@ -103,6 +135,7 @@ function groupByDueBucket(tasks: TaskItem[]): Record<string, TaskItem[]> {
 }
 
 export default function Tasks() {
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>(readActiveTab);
   const [channel, setChannel] = useState<Channel>("mine");
   const [bucket, setBucket] = useState<Bucket>("today");
   const [search, setSearch] = useState("");
@@ -115,6 +148,14 @@ export default function Tasks() {
   const aliveRef = useRef(true);
 
   useEffect(() => { writeDetailOpen(detailOpen); }, [detailOpen]);
+  useEffect(() => { writeActiveTab(activeTab); }, [activeTab]);
+
+  // React to popstate so back/forward buttons swap the tab cleanly.
+  useEffect(() => {
+    const onPop = () => setActiveTab(readActiveTab());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -327,79 +368,123 @@ export default function Tasks() {
     <div className="h-full overflow-hidden grid-bg">
       <div className="h-full max-w-[1400px] mx-auto px-4 sm:px-5 py-4 sm:py-5 flex flex-col gap-4">
 
-        {/* Header */}
-        <header className="flex flex-wrap items-center gap-3">
-          <h1 className="text-lg font-semibold text-text-primary">Tasks</h1>
-          <p className="hidden sm:block text-[11px] text-text-muted">
-            Encrypted · NL time detection · markdown notes · AI sub-steps
-          </p>
-          <div className="ml-auto flex items-center gap-2">
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search…"
-              className="w-40 sm:w-64 px-3 py-1.5 text-xs rounded-md bg-bg-tertiary border border-border text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-accent/40"
-            />
+        {/* Workspace header — tab strip lives where the H1 used to.
+            "Tasks" / "Notes" toggle keeps both surfaces side-by-side
+            without leaving the page. URL ?tab=notes deep-links the
+            Notes tab so Telegram links land where expected. */}
+        <header className="flex flex-wrap items-center gap-3 border-b border-border/40 pb-3">
+          <div className="flex items-center gap-1 bg-bg-tertiary/40 rounded-lg p-0.5">
             <button
               type="button"
-              onClick={() => setRailDrawerOpen((o) => !o)}
-              className="lg:hidden text-[11px] uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-bg-tertiary border border-border text-text-secondary hover:text-accent hover:border-accent/40 transition-colors"
-              aria-expanded={railDrawerOpen}
-              aria-controls="tasks-filter-drawer"
+              onClick={() => setActiveTab("tasks")}
+              className={`px-3 py-1.5 rounded-md text-[14px] font-semibold transition-colors flex items-center gap-2 ${
+                activeTab === "tasks"
+                  ? "bg-bg-primary text-text-primary shadow-[0_1px_0_rgba(255,255,255,0.04)_inset]"
+                  : "text-text-muted hover:text-text-primary"
+              }`}
             >
-              ☰ Filters
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={activeTab === "tasks" ? "text-accent" : ""}>
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+              </svg>
+              Tasks
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("notes")}
+              className={`px-3 py-1.5 rounded-md text-[14px] font-semibold transition-colors flex items-center gap-2 ${
+                activeTab === "notes"
+                  ? "bg-bg-primary text-text-primary shadow-[0_1px_0_rgba(255,255,255,0.04)_inset]"
+                  : "text-text-muted hover:text-text-primary"
+              }`}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={activeTab === "notes" ? "text-accent" : ""}>
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M9 13h6M9 17h6" />
+              </svg>
+              Notes
             </button>
           </div>
-        </header>
 
-        {/* Quick add */}
-        <QuickAddBar onAdded={() => setReloadTick((n) => n + 1)} />
+          <p className="hidden sm:block text-[11px] text-text-muted">
+            {activeTab === "tasks"
+              ? "Encrypted · NL time · markdown · AI sub-steps"
+              : "Encrypted · markdown · [[wikilinks]] · no AI"}
+          </p>
 
-        {/* Mobile filter drawer (below lg) */}
-        {railDrawerOpen && (
-          <div
-            id="tasks-filter-drawer"
-            className="lg:hidden rounded-xl bg-bg-secondary/60 border border-border p-4"
-          >
-            {filterRail}
-          </div>
-        )}
-
-        {/* 3-pane (lg) / 2-pane (md) / stacked (sm) */}
-        <div className={`flex-1 grid grid-cols-1 ${lgGrid} gap-4 min-h-0 relative`}>
-          {/* Filter rail — only visible at lg+. Narrow screens use the drawer above. */}
-          <aside className="hidden lg:block">
-            {filterRail}
-          </aside>
-
-          {/* List */}
-          {listPane}
-
-          {/* Detail pane (lg+ only when open) */}
-          {detailOpen && (
-            <aside className="hidden lg:block min-h-0 overflow-y-auto">
-              {detailPane}
-            </aside>
-          )}
-
-          {/* Narrow-screen overlay detail (<lg) when a task is selected */}
-          {selectedTask && (
-            <div className="lg:hidden absolute inset-0 z-30 bg-bg-primary/95 backdrop-blur-sm rounded-xl overflow-y-auto p-3">
-              <div className="flex items-center gap-2 mb-3">
-                <button
-                  type="button"
-                  onClick={() => setSelectedId(null)}
-                  className="text-[11px] uppercase tracking-wider px-2.5 py-1 rounded-md bg-bg-tertiary border border-border text-text-secondary hover:text-accent hover:border-accent/40 transition-colors"
-                >
-                  ← back
-                </button>
-                <span className="text-[10px] text-text-muted">task detail</span>
-              </div>
-              {detailPane}
+          {activeTab === "tasks" && (
+            <div className="ml-auto flex items-center gap-2">
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search tasks…"
+                className="w-40 sm:w-64 px-3 py-1.5 text-xs rounded-md bg-bg-tertiary border border-border text-text-primary placeholder:text-text-placeholder focus:outline-none focus:border-accent/40"
+              />
+              <button
+                type="button"
+                onClick={() => setRailDrawerOpen((o) => !o)}
+                className="lg:hidden text-[11px] uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-bg-tertiary border border-border text-text-secondary hover:text-accent hover:border-accent/40 transition-colors"
+                aria-expanded={railDrawerOpen}
+                aria-controls="tasks-filter-drawer"
+              >
+                ☰ Filters
+              </button>
             </div>
           )}
-        </div>
+        </header>
+
+        {activeTab === "tasks" ? (
+          <>
+            {/* Quick add */}
+            <QuickAddBar onAdded={() => setReloadTick((n) => n + 1)} />
+
+            {/* Mobile filter drawer (below lg) */}
+            {railDrawerOpen && (
+              <div
+                id="tasks-filter-drawer"
+                className="lg:hidden rounded-xl bg-bg-secondary/60 border border-border p-4"
+              >
+                {filterRail}
+              </div>
+            )}
+
+            {/* 3-pane (lg) / 2-pane (md) / stacked (sm) */}
+            <div className={`flex-1 grid grid-cols-1 ${lgGrid} gap-4 min-h-0 relative`}>
+              <aside className="hidden lg:block">
+                {filterRail}
+              </aside>
+
+              {listPane}
+
+              {detailOpen && (
+                <aside className="hidden lg:block min-h-0 overflow-y-auto">
+                  {detailPane}
+                </aside>
+              )}
+
+              {selectedTask && (
+                <div className="lg:hidden absolute inset-0 z-30 bg-bg-primary/95 backdrop-blur-sm rounded-xl overflow-y-auto p-3">
+                  <div className="flex items-center gap-2 mb-3">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(null)}
+                      className="text-[11px] uppercase tracking-wider px-2.5 py-1 rounded-md bg-bg-tertiary border border-border text-text-secondary hover:text-accent hover:border-accent/40 transition-colors"
+                    >
+                      ← back
+                    </button>
+                    <span className="text-[10px] text-text-muted">task detail</span>
+                  </div>
+                  {detailPane}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <NotesView variant="embedded" />
+          </div>
+        )}
       </div>
     </div>
   );

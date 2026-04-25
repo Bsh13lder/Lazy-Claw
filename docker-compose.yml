@@ -23,6 +23,10 @@ services:
       - OLLAMA_HOST=http://host.docker.internal:11434
       # Enable server mode for VNC remote takeover in Docker
       - LAZYCLAW_SERVER_MODE=true
+      # Pin container clock + LazyBrain date math to the user's timezone so
+      # daily journals and morning briefings land on the correct day.
+      - TZ=Europe/Madrid
+      - LAZYCLAW_DEFAULT_TZ=Europe/Madrid
       # workspace-mcp: bind the OAuth callback server to 0.0.0.0 so Docker
       # port-forwarding from host:8000 can reach it. The redirect URI that
       # Google sees must stay `localhost` (what's registered in GCP), so

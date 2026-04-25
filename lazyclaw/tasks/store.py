@@ -178,7 +178,10 @@ async def create_task(
             user_id, note["id"], note["title"], note["tags"], source="task",
         )
     except Exception:
-        logger.debug("lazybrain task mirror failed", exc_info=True)
+        logger.warning(
+            "lazybrain task mirror failed for task %s (user=%s)",
+            task_id, user_id, exc_info=True,
+        )
 
     placeholders = ", ".join(["?"] * len(TASK_COLUMNS))
     async with db_session(config) as db:
@@ -500,7 +503,11 @@ def _build_task_mirror_body(task: dict) -> str:
         meta_bits.append(f"reminder `{task['reminder_at']}`")
     if task.get("recurring"):
         meta_bits.append(f"recurring `{task['recurring']}`")
+    if task.get("completed_at"):
+        meta_bits.append(f"completed `{task['completed_at']}`")
     body_parts.append("— " + " · ".join(meta_bits))
+    if task.get("last_error"):
+        body_parts.append(f"**Last error:** {task['last_error']}")
     return "\n\n".join(body_parts)
 
 
@@ -524,7 +531,10 @@ def _build_task_mirror_tags(task: dict) -> list[str]:
             for t in parsed or []:
                 tags.append(str(t))
         except Exception:
-            pass
+            logger.debug(
+                "malformed task tags json on task %s", task.get("id"),
+                exc_info=True,
+            )
     return tags
 
 
@@ -631,7 +641,10 @@ async def _mirror_status_to_lazybrain(
                 updated.get("tags"), source="task",
             )
     except Exception:
-        logger.debug("lazybrain status mirror failed for task", exc_info=True)
+        logger.warning(
+            "lazybrain status mirror failed for task %s (user=%s, status=%s)",
+            task.get("id"), user_id, new_status, exc_info=True,
+        )
 
 
 async def complete_task(
@@ -658,6 +671,10 @@ async def complete_task(
         await db.commit()
 
     # Keep LazyBrain mirror honest — stamp note with ✅ DONE.
+    # Refresh in-memory task fields the mirror body builder reads on the
+    # heal path so the brain note carries the completion timestamp.
+    task["status"] = "done"
+    task["completed_at"] = now
     await _mirror_status_to_lazybrain(config, user_id, task, "done")
 
     # Recurring: create the next occurrence

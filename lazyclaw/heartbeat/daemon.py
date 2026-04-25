@@ -57,6 +57,9 @@ class HeartbeatDaemon:
         self._lane_queue = lane_queue
         self._telegram_push = telegram_push  # async fn(text) → send to Telegram admin
         self._task: asyncio.Task | None = None
+        # In-memory record of "we already seeded today's journal for this user".
+        # Resets on restart (idempotent re-seed via tag lookup is cheap).
+        self._last_journal_seed_iso: dict[str, str] = {}
 
     async def start(self) -> None:
         """Launch the heartbeat loop as a background task."""
@@ -123,6 +126,9 @@ class HeartbeatDaemon:
 
         # Check task reminders that need nagging (Due App-style)
         await self._check_task_nagging()
+
+        # Seed today's LazyBrain journal for each registered user (once/day).
+        await self._seed_today_journals()
 
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
@@ -769,6 +775,41 @@ class HeartbeatDaemon:
 
                 logger.debug(
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
+                )
+
+    async def _seed_today_journals(self) -> None:
+        """Ensure each registered user has a journal note for today.
+
+        Idempotent: keyed off ``self._last_journal_seed_iso[user_id]`` so we
+        only call into LazyBrain once per user per day. The marker resets on
+        restart, but ``ensure_today_journal`` itself looks up by tag before
+        inserting, so a re-seed just re-finds the existing note — no dupes.
+        """
+        from lazyclaw.lazybrain import journal as _journal
+        from lazyclaw.lazybrain import timezone_util as _tzu
+
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute("SELECT id FROM users")
+                users = [r[0] for r in await cursor.fetchall()]
+        except Exception:
+            logger.warning("Could not list users for journal seed", exc_info=True)
+            return
+
+        for user_id in users:
+            today = _tzu.today_iso(user_id)
+            if self._last_journal_seed_iso.get(user_id) == today:
+                continue
+            try:
+                await _journal.ensure_today_journal(self._config, user_id)
+                self._last_journal_seed_iso[user_id] = today
+                logger.debug(
+                    "seeded today's journal for user %s (%s)", user_id, today,
+                )
+            except Exception:
+                logger.warning(
+                    "Could not seed today's journal for user %s",
+                    user_id, exc_info=True,
                 )
 
     async def _ensure_persistent_browser(self) -> None:

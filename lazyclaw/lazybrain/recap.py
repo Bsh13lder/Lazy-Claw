@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from lazyclaw.config import Config
-from lazyclaw.lazybrain import journal, store
+from lazyclaw.lazybrain import journal, store, timezone_util
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +47,12 @@ callout block. No greeting, no meta commentary. Cite pinned notes as
 """
 
 
-def _iso_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def _iso_today(user_id: str | None = None) -> str:
+    return timezone_util.today_iso(user_id)
 
 
-def _iso_yesterday() -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+def _iso_yesterday(user_id: str | None = None) -> str:
+    return timezone_util.yesterday_iso(user_id)
 
 
 async def build_morning_briefing(
@@ -66,8 +66,8 @@ async def build_morning_briefing(
     ``force=False`` (default) skips if today's journal already contains the
     briefing marker — keeps the daemon idempotent.
     """
-    today = _iso_today()
-    yesterday_iso = _iso_yesterday()
+    today = _iso_today(user_id)
+    yesterday_iso = _iso_yesterday(user_id)
 
     today_note = await journal.get_journal(config, user_id, today)
     if today_note and _MORNING_MARKER in (today_note.get("content") or "") and not force:

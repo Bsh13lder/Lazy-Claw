@@ -17,6 +17,7 @@ from lazyclaw.lazybrain import (
     metadata_suggest,
     recap,
     store,
+    timezone_util,
     topic_rollup,
 )
 
@@ -304,6 +305,13 @@ async def get_journal_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not note:
+        # Auto-create today's journal stub on first read so the page is
+        # never blank when the user opens LazyBrain. Past dates stay null —
+        # we don't backfill history.
+        today = timezone_util.today_iso(user.id)
+        if iso_date in ("today", today):
+            note = await journal.ensure_today_journal(_config, user.id)
+            return {"date": today, "note": note}
         return {"date": iso_date, "note": None}
     return {"date": iso_date, "note": note}
 

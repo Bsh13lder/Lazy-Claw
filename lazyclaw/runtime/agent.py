@@ -71,11 +71,15 @@ _TASK_REMINDER_RE = re.compile(r"^\[TASK_REMINDER:([^\]]+)\]")
 # send only 3-4 base tools. LLM discovers others via search_tools on demand.
 # Schemas for discovered tools are injected dynamically.
 
-# Base tools always sent — everything the brain needs to work
+# Base tools always sent — everything the brain needs to work.
+# NOTE: `browser` is intentionally NOT here. It's injected on keyword match
+# only (see _BROWSER_RE below + line where `_wants_browser` is handled).
+# Training bias pushes "scrape" → `browser`; keeping it out of the default
+# set forces the brain to reach for `web_search` / `dispatch_subagents` /
+# `run_background` first.
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
-    "dispatch_subagents",
-    "browser",
+    "dispatch_subagents", "run_background",
     "read_file", "write_file", "run_command", "list_directory",
     "connect_mcp_server", "disconnect_mcp_server",
     "watch_messages", "watch_site", "list_watchers", "stop_watcher",
@@ -87,19 +91,49 @@ _LOCAL_TOOL_NAMES = frozenset({
     "delegate", "web_search", "recall_memories", "save_memory", "search_tools",
 })
 
-# Browser only when user explicitly asks — prevents unwanted visible browser popups
-_BROWSER_KEYWORDS = frozenset({
-    "browser", "open", "show me", "show it", "visible", "wallapop",
-    "navigate to", "go to", "visit", "open the", "open a",
-    "qr", "scan", "log in", "login", "sign in",
-})
+# Browser only when user explicitly asks — prevents unwanted visible browser popups.
+# Word-bounded regex to avoid substring collisions ("scan" → "scanner",
+# "open" → "open-source", "visit" → "visitor").
+_BROWSER_RE = re.compile(
+    r"\b(browser|wallapop|navigate\s+to|go\s+to|open\s+(?:the|a|url|tab|website|page)|"
+    r"visit\s+the|visit\s+a|show\s+me|show\s+it|make\s+visible|qr\s+code|"
+    r"log\s*in|sign\s+in|login)\b",
+    re.IGNORECASE,
+)
 
-# Channel keywords → prefer MCP tools over browser
-# When message matches, auto-inject matching MCP tools and drop browser
-_CHANNEL_KEYWORDS: dict[str, list[str]] = {
-    "whatsapp": ["whatsapp", "wa msg", "wa message"],
-    "instagram": ["instagram", "ig msg", "ig message", "insta"],
-    "email": ["email", "gmail", "mail", "inbox"],
+# Detects when the brain produces ASSISTANT TEXT claiming a tool was called
+# while emitting zero tool_calls — i.e. the "Already on it! Background task
+# is running…" hallucination. Cheap brains (MiniMax-M2.7, Gemma) sometimes
+# narrate the action as text instead of emitting tool_use blocks. When this
+# regex matches AND tool_calls is empty AND tools were available, we inject
+# a correction system message and re-roll the iteration.
+#
+# Phrases that imply state mutation has already happened (or is in flight)
+# AND should ALWAYS be backed by a real tool_use block:
+_ACTION_CLAIM_RE = re.compile(
+    r"\b("
+    r"already on it"
+    r"|background\s+(?:task|job|run)\s+(?:is\s+running|started|kicked\s+off|launched|in\s+progress)"
+    r"|i'?ll\s+(?:ping|notify|message|telegram|let\s+you\s+know)\s+you\b"
+    r"|ping\s+you\s+(?:on\s+telegram|when\s+(?:it'?s|done|finished)|once)"
+    r"|no\s+action\s+needed\s+from\s+you"
+    r"|sit\s+tight"
+    r"|kicked\s+off\s+(?:a|the)\s+(?:background|async|search|task|job|run)"
+    r"|started:?\s*(?:~|just\s+now|a\s+(?:moment|minute|few)|\d+\s*(?:minute|second|hour))"
+    r"|i'?ve\s+(?:started|kicked\s+off|dispatched|launched|fired\s+off|sent|created|added|scheduled|appended|saved\s+to\s+(?:your|the)\s+sheet)"
+    r"|i\s+(?:just\s+)?(?:dispatched|launched|fired\s+off|kicked\s+off|started\s+a\s+background)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Channel keywords → prefer MCP tools over browser.
+# Compiled regexes with \b word boundaries so "mail" doesn't match "airmail",
+# "insta" doesn't match "install/instant", etc. (Fixed 2026-04-24 after the
+# scraping task was mis-routed as "email" due to substring match.)
+_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = {
+    "whatsapp":  re.compile(r"\b(whatsapp|wa\s+(?:msg|message))\b", re.IGNORECASE),
+    "instagram": re.compile(r"\b(instagram|insta|ig\s+(?:msg|message))\b", re.IGNORECASE),
+    "email":     re.compile(r"\b(e-?mail|gmail|inbox)\b", re.IGNORECASE),
 }
 
 # Channel tool suffixes to include for simple status/read queries.
@@ -188,6 +222,37 @@ _N8N_TOOL_NAMES = frozenset({
     "n8n_run_task",
 })
 
+# Scraper keywords → inject mcp-scraper tools. Triggered for "scrape /
+# crawl / extract email / extract phone / find contact" intents. Without
+# this, the agent burns iterations on web_search + browser before
+# remembering scraper exists. Matched with word boundaries.
+_SCRAPER_KEYWORDS_RE = re.compile(
+    r"\b(scrape|scraper|scraping|crawl|crawler|crawling|extract\s+(?:email|phone|contact|entit)|"
+    r"find\s+(?:emails?|phones?|contacts?)|fetch\s+page|page\s+content|markdown\s+of\s+(?:this|the))\b",
+    re.IGNORECASE,
+)
+
+# Suffixes for mcp-scraper tools (server_id is a UUID, so we match on
+# the plain tool name suffix). Subset of the 19 tools the wrapper exposes —
+# the high-leverage ones for LazyClaw's "find contact / read page" needs.
+_SCRAPER_MCP_TOOL_SUFFIXES: tuple[str, ...] = (
+    "_extract_entities",
+    "_crawl_url",
+    "_deep_crawl_site",
+    "_crawl_url_with_fallback",
+    "_intelligent_extract",
+    "_batch_crawl",
+    "_search_and_crawl",
+    # Search tools — scraper now also handles plain Google search,
+    # not just page reads. The `web_search` skill calls `search_google`
+    # under the hood as the primary provider, but the brain also gets
+    # direct access to `search_google` / `batch_search_google` so it can
+    # call them explicitly when it needs structured search results.
+    "_search_google",
+    "_batch_search_google",
+)
+_SCRAPER_MCP_SERVER_NAME = "mcp-scraper"
+
 # Suffixes of the czlonkowski/n8n-mcp tools we care about when n8n
 # keywords fire. The MCP bridge prefixes every tool with
 # `mcp_<server_id>_`, so we match on suffix instead of full name.
@@ -204,6 +269,45 @@ _N8N_MCP_TOOL_SUFFIXES: tuple[str, ...] = (
     "_get_template",
 )
 _N8N_MCP_SERVER_NAME = "n8n-nodes"
+
+# Google Workspace — auto-inject google_run_task + relevant workspace-mcp tools
+# when the user message mentions Sheets / Drive / Gmail / Calendar. Without this
+# the brain can only reach Google by `search_tools("google")` first, which it
+# usually skips in favor of `delegate(specialist="browser", ...)` — and the
+# browser specialist has no Google tools, so it ends up driving Chrome at
+# sheets.google.com. See ADR-0003.
+_GOOGLE_KEYWORDS = frozenset({
+    "google sheet", "google sheets", "spreadsheet", "spreadsheets",
+    "google drive", "drive folder", "drive file",
+    "gmail", "google calendar", "calendar event",
+    "google doc", "google docs", "google workspace",
+    "add row", "append row", "create sheet", "share sheet",
+})
+
+# Static skills exposed by lazyclaw/skills/builtin/google_direct.py
+_GOOGLE_TOOL_NAMES = frozenset({
+    "google_run_task",
+    "google_project_planning_kickoff",
+})
+
+# Workspace-mcp tools are registered as `mcp_<uuid>_<name>`. Suffix-match
+# the relevant subset so the brain sees the right tools without flooding
+# the schema with all 49 exposed by workspace-mcp.
+_GOOGLE_MCP_TOOL_SUFFIXES: tuple[str, ...] = (
+    # Sheets
+    "_list_spreadsheets", "_get_spreadsheet_info", "_read_sheet_values",
+    "_modify_sheet_values", "_create_spreadsheet", "_create_sheet",
+    "_append_table_rows",
+    # Drive
+    "_search_drive_files", "_get_drive_file_content", "_list_drive_items",
+    "_create_drive_folder", "_create_drive_file",
+    # Gmail
+    "_search_gmail_messages", "_get_gmail_message_content",
+    "_send_gmail_message", "_draft_gmail_message",
+    # Calendar
+    "_list_calendars", "_get_events", "_manage_event", "_query_freebusy",
+)
+_GOOGLE_MCP_SERVER_NAME = "workspace-mcp"
 
 # Channel name → bundled MCP server name (for on-demand connect)
 _CHANNEL_TO_MCP: dict[str, str] = {
@@ -316,6 +420,25 @@ _HISTORY_ERROR_RE = re.compile(
     r"AuthenticationError|rate_limit_error)",
     re.IGNORECASE,
 )
+
+
+def _is_rate_limit_exception(exc: BaseException) -> bool:
+    """Check if an LLM provider exception indicates a rate limit / 429.
+
+    Catches MiniMax Token Plan 429s (`rate_limit_error`, code 2062) and
+    generic provider 429s. We use this to decide whether to auto-escalate
+    to the configured fallback model instead of bailing the whole turn
+    with a JSON dump in the user's chat.
+    """
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "rate_limit_error" in msg
+        or "rate limit" in msg
+        or "rate-limit" in msg
+        or "too many requests" in msg
+        or "(2062)" in msg  # MiniMax Token Plan signature
+    )
 
 
 def _filter_error_messages(history: list[LLMMessage]) -> list[LLMMessage]:
@@ -625,6 +748,7 @@ class Agent:
                 registry,
                 permission_checker=permission_checker,
                 timeout=config.tool_timeout,
+                config=config,
             )
             if registry
             else None
@@ -640,6 +764,7 @@ class Agent:
         messages_so_far: list,
         cb,
         cancel_token,
+        enumeration_hint: bool = False,
     ) -> str:
         """Generate a user-facing plan, show it, block until approval.
 
@@ -665,7 +790,9 @@ class Agent:
             except Exception:
                 tool_names = []
 
-        plan_instruction = make_user_facing_plan_prompt(message, tool_names)
+        plan_instruction = make_user_facing_plan_prompt(
+            message, tool_names, enumeration_hint=enumeration_hint,
+        )
         # LLMMessage is imported at the top of this module.
         plan_messages = list(messages_so_far) + [
             LLMMessage(role="system", content=plan_instruction),
@@ -896,17 +1023,23 @@ class Agent:
         needs_tools_early = self.registry is not None and _wants_any_tools(message)
 
         async def _load_history():
+            # ORDER BY created_at, rowid: created_at is second-precision, so
+            # multiple inserts in the same second tie. Without rowid as
+            # tiebreaker, SQLite returns rows in arbitrary order — which can
+            # split a tool_use from its tool_result and trigger Anthropic's
+            # 400 "tool call result does not follow tool call" error.
             async with db_session(self.config) as db:
                 if chat_session_id:
                     rows = await db.execute(
                         "SELECT id, role, content, tool_name, metadata FROM agent_messages "
-                        "WHERE user_id = ? AND chat_session_id = ? ORDER BY created_at ASC",
+                        "WHERE user_id = ? AND chat_session_id = ? "
+                        "ORDER BY created_at ASC, rowid ASC",
                         (user_id, chat_session_id),
                     )
                 else:
                     rows = await db.execute(
                         "SELECT id, role, content, tool_name, metadata FROM agent_messages "
-                        "WHERE user_id = ? ORDER BY created_at ASC",
+                        "WHERE user_id = ? ORDER BY created_at ASC, rowid ASC",
                         (user_id,),
                     )
                 return await rows.fetchall()
@@ -967,6 +1100,7 @@ class Agent:
                 eco_router=self.eco_router,
                 permission_checker=self.executor._checker if self.executor else None,
                 callback=cb,
+                team_lead=self._team_lead,
             )
             self.registry.register(delegate_skill)
             _delegate_registered = True
@@ -978,6 +1112,8 @@ class Agent:
                 registry=self.registry,
                 eco_router=self.eco_router,
                 permission_checker=self.executor._checker if self.executor else None,
+                callback=cb,
+                team_lead=self._team_lead,
             )
             self.registry.register(dispatch_skill)
             _dispatch_registered = True
@@ -990,6 +1126,10 @@ class Agent:
         # Channel detection: if message mentions whatsapp/instagram/email, prefer MCP tools over browser.
         needs_tools = self.registry is not None and _wants_any_tools(message)
         tools: list = []
+        # Enumeration hint — set inside the needs_tools branch below, but we
+        # initialize here so the plan-gate call path never trips on NameError
+        # in the (defensive) case the branch was skipped.
+        _wants_enumeration: bool = False
 
         if needs_tools:
             from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
@@ -1003,8 +1143,8 @@ class Agent:
             _is_planning = any(pw in _msg_lower for pw in _planning_words)
             _matched_channels: list[str] = []
             if not _is_planning:
-                for channel, keywords in _CHANNEL_KEYWORDS.items():
-                    if any(kw in _msg_lower for kw in keywords):
+                for channel, pattern in _CHANNEL_KEYWORDS.items():
+                    if pattern.search(_msg_lower):
                         _matched_channels.append(channel)
 
             # Re-inject channel tools if the LAST assistant response used them
@@ -1012,9 +1152,12 @@ class Agent:
             # Without the continuation check, one-shot tool calls (e.g. mute from
             # a notification reply) make channel tools "sticky" for all future messages.
             if not _matched_channels:
+                # "ok" removed — too generic, was re-injecting channel tools
+                # on unrelated short replies (e.g. "ok tell me about bitcoin"
+                # would re-grab whatever the last assistant call touched).
                 _continuation_signals = {
                     "reply", "tell", "say", "send", "forward", "yes", "no",
-                    "ok", "read", "check", "show", "next", "more",
+                    "read", "check", "show", "next", "more",
                 }
                 _words = set(_msg_lower.split())
                 _looks_like_continuation = bool(_words & _continuation_signals) and len(_msg_lower) < 40
@@ -1161,6 +1304,20 @@ class Agent:
                     for tc in msg.tool_calls:
                         _history_tool_names.add(tc.name)
 
+            # Enumeration intent detection. When the user asks for multi-target
+            # work ("scrape N salons", "find all X", "for each Y"), the plan
+            # prompt in taor.py uses this flag to bias toward dispatch_subagents
+            # / run_background instead of a foreground browser loop. Regex is
+            # the single source of truth, shared from task_splitter.
+            from lazyclaw.runtime.task_splitter import _looks_enumerative
+            _wants_enumeration = _looks_enumerative(message)
+            if _wants_enumeration:
+                logger.info(
+                    "Enumeration keywords detected — plan prompt will bias "
+                    "toward dispatch_subagents + run_background for: %s",
+                    message[:60],
+                )
+
             # Task manager keyword detection → inject task tools
             _task_tools_extra: list = []
             _wants_tasks = any(kw in _msg_lower for kw in _TASK_KEYWORDS)
@@ -1299,6 +1456,121 @@ class Agent:
                     _matched_channels = []
                     _channel_tools = []
 
+            # Scraper auto-inject — mcp-scraper is `optional: true`, so its
+            # tools are only registered when explicitly connected. We do BOTH
+            # sides here: (a) on-demand connect the server if scrape/crawl
+            # keywords fire, (b) suffix-match the resulting tool schemas.
+            _scraper_tools: list[dict] = []
+            _wants_scraper = bool(_SCRAPER_KEYWORDS_RE.search(message))
+            if not _wants_scraper:
+                # Re-trigger if recent history called any scraper tool
+                for tname in _history_tool_names:
+                    if any(tname.endswith(s) for s in _SCRAPER_MCP_TOOL_SUFFIXES):
+                        _wants_scraper = True
+                        logger.info("Scraper tools re-injected from recent history context")
+                        break
+            if _wants_scraper and self.registry is not None:
+                # First, scan already-registered MCP tools for scraper suffixes
+                for tool_info in self.registry.list_mcp_tools():
+                    func = tool_info.get("function", {})
+                    tname = func.get("name", "")
+                    tdesc = func.get("description", "").lower()
+                    if not any(tname.endswith(s) for s in _SCRAPER_MCP_TOOL_SUFFIXES):
+                        continue
+                    if _SCRAPER_MCP_SERVER_NAME not in tdesc:
+                        continue
+                    schema = self.registry.get_tool_schema(tname)
+                    if schema is not None:
+                        _scraper_tools.append(schema)
+                # On-demand connect mcp-scraper if nothing matched
+                if not _scraper_tools:
+                    try:
+                        from lazyclaw.mcp.manager import (
+                            connect_server, get_server_id_by_name,
+                        )
+                        from lazyclaw.mcp.bridge import (
+                            cache_tool_schemas, register_mcp_tools,
+                        )
+                        sid = await get_server_id_by_name(
+                            self.config, user_id, _SCRAPER_MCP_SERVER_NAME,
+                        )
+                        if sid:
+                            logger.info(
+                                "On-demand connecting %s (id=%s)…",
+                                _SCRAPER_MCP_SERVER_NAME, sid[:8],
+                            )
+                            client = await asyncio.wait_for(
+                                connect_server(self.config, user_id, sid),
+                                timeout=20,
+                            )
+                            tools_list = await client.list_tools()
+                            await cache_tool_schemas(
+                                self.config, _SCRAPER_MCP_SERVER_NAME, tools_list,
+                            )
+                            await register_mcp_tools(
+                                client, self.registry,
+                                config=self.config, user_id=user_id,
+                            )
+                            for tool_info in self.registry.list_mcp_tools():
+                                func = tool_info.get("function", {})
+                                tname = func.get("name", "")
+                                tdesc = func.get("description", "").lower()
+                                if not any(
+                                    tname.endswith(s)
+                                    for s in _SCRAPER_MCP_TOOL_SUFFIXES
+                                ):
+                                    continue
+                                if _SCRAPER_MCP_SERVER_NAME not in tdesc:
+                                    continue
+                                schema = self.registry.get_tool_schema(tname)
+                                if schema is not None:
+                                    _scraper_tools.append(schema)
+                    except Exception:
+                        logger.debug(
+                            "mcp-scraper on-demand connect failed",
+                            exc_info=True,
+                        )
+                if _scraper_tools:
+                    logger.info(
+                        "Scraper keywords detected — %d scraper tools injected",
+                        len(_scraper_tools),
+                    )
+
+            # Google Workspace auto-inject — mirror of the n8n block above.
+            # Surfaces google_run_task + the workspace-mcp Sheets/Drive/Gmail/
+            # Calendar subset on the first turn, so the brain stops falling
+            # back to delegate(specialist="browser", …) for Google ops.
+            _google_tools: list[dict] = []
+            _wants_google = any(kw in _msg_lower for kw in _GOOGLE_KEYWORDS)
+            if not _wants_google and _history_tool_names & _GOOGLE_TOOL_NAMES:
+                _wants_google = True
+                logger.info("Google tools re-injected from recent history context")
+            if _wants_google and self.registry is not None:
+                for gname in _GOOGLE_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(gname)
+                    if schema is not None:
+                        _google_tools.append(schema)
+                # workspace-mcp is a startup favorite, so the tools are
+                # already registered. Suffix-match them, tightened by
+                # description so we don't grab unrelated MCP tools that
+                # happen to share a suffix.
+                for tool_info in self.registry.list_mcp_tools():
+                    func = tool_info.get("function", {})
+                    tname = func.get("name", "")
+                    tdesc = func.get("description", "").lower()
+                    if not any(tname.endswith(s) for s in _GOOGLE_MCP_TOOL_SUFFIXES):
+                        continue
+                    if _GOOGLE_MCP_SERVER_NAME not in tdesc:
+                        continue
+                    schema = self.registry.get_tool_schema(tname)
+                    if schema is not None:
+                        _google_tools.append(schema)
+                if _google_tools:
+                    logger.info(
+                        "Google keywords detected — %d Google tools injected",
+                        len(_google_tools),
+                    )
+
             # Build base tools + conditionally add browser.
             # Smart tool selection: same for all models. LLM discovers extras via search_tools().
             # When channel MCP tools dominate, trim base set to reduce noise.
@@ -1311,10 +1583,10 @@ class Agent:
                 }
                 logger.info("Channel-focused: trimmed base tools to %d", len(_base_names))
 
-            # Browser only when user explicitly asks (keyword match).
+            # Browser only when user explicitly asks (word-boundary match).
             # No re-injection from history — if the user has moved on, the LLM
             # should not reach for the browser on its own.
-            _wants_browser = any(kw in _msg_lower for kw in _BROWSER_KEYWORDS)
+            _wants_browser = bool(_BROWSER_RE.search(_msg_lower))
             _wants_visible = any(kw in _msg_lower for kw in (
                 "visible", "show me", "show it", "let me see", "make visible",
             ))
@@ -1354,22 +1626,60 @@ class Agent:
                 if nt.get("function", {}).get("name") not in _existing_names:
                     tools.append(nt)
 
+            # Add Google Workspace tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for gt in _google_tools:
+                if gt.get("function", {}).get("name") not in _existing_names:
+                    tools.append(gt)
+
+            # Add mcp-scraper tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for sct in _scraper_tools:
+                if sct.get("function", {}).get("name") not in _existing_names:
+                    tools.append(sct)
+
             # Include favorite MCP tools ONLY when channel keywords matched
-            # (not on every message — the meta-tool pattern uses search_tools for discovery)
+            # AND the tool name contains one of the matched channels. Without
+            # the channel-name filter this loop attached every favorite tool
+            # (Instagram + WhatsApp + Google on an email-matched turn), which
+            # blew the context up to 123 tools on 2026-04-24 19:27.
+            _MAX_TOTAL_TOOLS = 40
             _fav_prefixes = tuple(
                 f"mcp_{sid}_" for sid in _favorite_server_ids
                 if sid in _active_clients
             )
             _existing_names = {t.get("function", {}).get("name") for t in tools}
+            _cap_hit = False
             if _fav_prefixes and _matched_channels:
+                _channel_name_set = {ch.lower() for ch in _matched_channels}
                 for tool_info in self.registry.list_mcp_tools():
+                    if len(tools) >= _MAX_TOTAL_TOOLS:
+                        _cap_hit = True
+                        break
                     func = tool_info.get("function", {})
                     tname = func.get("name", "")
-                    if tname.startswith(_fav_prefixes) and tname not in _existing_names:
-                        schema = self.registry.get_tool_schema(tname)
-                        if schema is not None:
-                            tools.append(schema)
-            logger.info("%s mode: %d tools for: %s", "LOCAL" if _is_local_model else "META", len(tools), message[:50])
+                    tname_lower = tname.lower()
+                    if not tname.startswith(_fav_prefixes):
+                        continue
+                    if not any(ch in tname_lower for ch in _channel_name_set):
+                        continue
+                    if tname in _existing_names:
+                        continue
+                    schema = self.registry.get_tool_schema(tname)
+                    if schema is not None:
+                        tools.append(schema)
+                        _existing_names.add(tname)
+            # Hard trim anywhere we're over the budget (defends against
+            # task/survival/n8n bundles pushing us over even when no favorites
+            # were attached).
+            if len(tools) > _MAX_TOTAL_TOOLS:
+                _cap_hit = True
+                tools = tools[:_MAX_TOTAL_TOOLS]
+            logger.info(
+                "%s mode: %d tools (cap=%d hit=%s) for: %s",
+                "LOCAL" if _is_local_model else "META",
+                len(tools), _MAX_TOTAL_TOOLS, _cap_hit, message[:50],
+            )
             if tools:
                 logger.info("Tool names sent: %s", [t.get("function", {}).get("name") for t in tools])
             else:
@@ -1477,6 +1787,7 @@ class Agent:
                     messages_so_far=messages,
                     cb=cb,
                     cancel_token=cancel_token,
+                    enumeration_hint=_wants_enumeration,
                 )
                 _plan_mode_used = True
             except _PlanRejected as pr:
@@ -1776,9 +2087,41 @@ class Agent:
                                     "token", _display_content, {"model": response.model},
                                 ))
                     except Exception as exc:
+                        # Rate-limit auto-escalation: MiniMax Token Plan 429s
+                        # (`rate_limit_error`, code 2062) and generic provider
+                        # 429s should re-route to the configured fallback
+                        # model instead of dumping JSON into the user's chat.
+                        if _is_rate_limit_exception(exc) and not _escalated:
+                            try:
+                                _fallback_name = (
+                                    await self.eco_router.get_fallback_model(user_id)
+                                )
+                            except Exception:
+                                _fallback_name = None
+                            if _fallback_name:
+                                logger.warning(
+                                    "Brain rate-limited (%s) — escalating to fallback %s",
+                                    type(exc).__name__, _fallback_name,
+                                )
+                                _escalated = True
+                                _escalation_iter = iteration
+                                iter_model = _fallback_name
+                                _iter_role = "escalation"
+                                streamed_content = ""
+                                continue
                         logger.error("Chat failed: %s", exc, exc_info=True)
+                        # Sanitize 429 payloads — never paste raw provider JSON
+                        # into the user-facing message.
+                        if _is_rate_limit_exception(exc):
+                            _user_msg = (
+                                "Brain is rate-limited right now. "
+                                "Retry in a minute, or set a fallback model "
+                                "with `/mode` so this re-routes automatically."
+                            )
+                        else:
+                            _user_msg = f"Sorry, an error occurred: {exc}"
                         response = _LLMResp(
-                            content=f"Sorry, an error occurred: {exc}",
+                            content=_user_msg,
                             model="unknown",
                             tool_calls=[],
                         )
@@ -1876,10 +2219,39 @@ class Agent:
                                     tool_calls=chunk.tool_calls,
                                 )
                     except Exception as exc:
+                        # Mirror the chat-path rate-limit escalation: switch
+                        # to the configured fallback model on first 429.
+                        if _is_rate_limit_exception(exc) and not _escalated:
+                            try:
+                                _fallback_name = (
+                                    await self.eco_router.get_fallback_model(user_id)
+                                )
+                            except Exception:
+                                _fallback_name = None
+                            if _fallback_name:
+                                logger.warning(
+                                    "Stream rate-limited (%s) — escalating to fallback %s",
+                                    type(exc).__name__, _fallback_name,
+                                )
+                                _escalated = True
+                                _escalation_iter = iteration
+                                iter_model = _fallback_name
+                                _iter_role = "escalation"
+                                streamed_content = ""
+                                await cb.on_event(AgentEvent("stream_done", "", {}))
+                                continue
                         logger.error("Streaming failed: %s", exc, exc_info=True)
                         await cb.on_event(AgentEvent("stream_done", "", {}))
+                        if _is_rate_limit_exception(exc):
+                            _user_msg = (
+                                "Brain is rate-limited right now. "
+                                "Retry in a minute, or set a fallback model "
+                                "with `/mode` so this re-routes automatically."
+                            )
+                        else:
+                            _user_msg = f"Sorry, an error occurred: {exc}"
                         response = _LLMResp(
-                            content=f"Sorry, an error occurred: {exc}",
+                            content=_user_msg,
                             model="unknown",
                             tool_calls=[],
                         )
@@ -2072,6 +2444,55 @@ class Agent:
 
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""
+
+                    # Action-claim hallucination: the brain returned text
+                    # like "Already on it! Background task is running…" or
+                    # "I'll ping you on Telegram when done" but emitted ZERO
+                    # tool_use blocks. Catches cheap brains (MiniMax-M2.7,
+                    # Gemma) narrating actions instead of dispatching them.
+                    # Inject a correction and re-roll up to _HALLUC_MAX_RETRIES
+                    # times; after that, surface a corrected message so the
+                    # user sees honesty rather than the lie.
+                    _claim_match = (
+                        _ACTION_CLAIM_RE.search(_final_content)
+                        if _final_content else None
+                    )
+                    if (
+                        _claim_match
+                        and tools
+                        and _halluc_retries < _HALLUC_MAX_RETRIES
+                    ):
+                        _halluc_retries += 1
+                        _matched_phrase = _claim_match.group(0)[:60]
+                        _correction = (
+                            "[SYSTEM: You wrote text claiming a task was "
+                            f"started or dispatched (\"{_matched_phrase}\"…) "
+                            "but you did NOT emit any tool_use block. The "
+                            "user has not had any work done yet. Either:\n"
+                            "  1. Call the right tool NOW (run_background, "
+                            "google_run_task, dispatch_subagents, "
+                            "send_gmail, append_sheet_rows, etc.), OR\n"
+                            "  2. Rewrite your reply to honestly tell the "
+                            "user nothing has been dispatched and ask for "
+                            "what's missing.\n"
+                            "Never claim work that wasn't tool-dispatched.]"
+                        )
+                        messages.append(LLMMessage(
+                            role="assistant", content=_final_content,
+                        ))
+                        messages.append(LLMMessage(
+                            role="user", content=_correction,
+                        ))
+                        logger.warning(
+                            "Action-claim hallucination from %s (matched %r) "
+                            "— injecting correction (retry %d/%d)",
+                            response.model, _matched_phrase,
+                            _halluc_retries, _HALLUC_MAX_RETRIES,
+                        )
+                        # Reset streamed_content so the next iteration's
+                        # fresh stream isn't double-prefixed by old text.
+                        streamed_content = ""
+                        continue
 
                     # Nudge: if iteration 0 returned text-only but channel
                     # tools were available, the LLM likely repeated old data
@@ -2290,6 +2711,14 @@ class Agent:
                     for _btc, _bres, _bdur, _bgroup in _batch_outcomes:
                         _pre_executed[_btc.id] = (_bres, _bdur)
 
+                # MCP UserInputError recovery is COLLECTED inside the loop
+                # and emitted ONCE after all tool_results land. Inserting a
+                # system message between two tool_results breaks the
+                # tool_call ↔ tool_result pairing required by MiniMax /
+                # Anthropic / OpenAI (MiniMax 400 code 2013: "tool call
+                # result does not follow tool call").
+                _pending_recoveries: list[tuple[str, dict]] = []
+
                 # Execute each tool call
                 for tc in _tool_calls_to_run:
                     _display = self.registry.get_display_name(tc.name) if self.registry else tc.name
@@ -2349,7 +2778,23 @@ class Agent:
                     # Skip capping + caching for approval responses (JSON args must stay intact)
                     if isinstance(result, str) and not result.startswith(APPROVAL_PREFIX):
                         result = _cap_tool_result(result)
-                        _tool_call_cache[_cache_key] = result
+                        # Don't memoize failures — caching errors made retries
+                        # return the same stale error in 0 ms, masking the fact
+                        # that the brain wasn't varying its args. With this
+                        # skip, identical broken retries re-execute (still
+                        # caught by stuck_detector) and varied args naturally
+                        # miss the cache and call the underlying tool fresh.
+                        _is_err_result = result.startswith((
+                            "[MCP ERROR]", "[NO DATA]", "Error:", "error:",
+                            "Tool error:",
+                        ))
+                        if not _is_err_result:
+                            _tool_call_cache[_cache_key] = result
+                        else:
+                            logger.debug(
+                                "Skipping cache for error result on %s (len=%d)",
+                                tc.name, len(result),
+                            )
 
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
 
@@ -2455,6 +2900,42 @@ class Agent:
                     all_new_messages.append(tool_msg)
                     _tool_call_history.append(tc.name)
                     _tool_results.append(_result_str)
+
+                    # ── MCP parameter-validation recovery (deferred) ──
+                    # If the tool returned a UserInputError-style error AND
+                    # we have its parameter schema, queue it for ONE
+                    # consolidated system message AFTER the loop. We must
+                    # NOT append a system message here — interleaving any
+                    # non-tool message between tool_results breaks the
+                    # tool_call ↔ tool_result pairing the brain expects
+                    # (MiniMax 400 code 2013, Anthropic invalid_request).
+                    if (
+                        isinstance(result, str)
+                        and result.startswith("[MCP ERROR]")
+                        and any(
+                            phrase in result
+                            for phrase in (
+                                "UserInputError",
+                                "must be provided",
+                                "Invalid",
+                                "invalid",
+                                "required parameter",
+                                "missing parameter",
+                                "missing required",
+                            )
+                        )
+                        and self.registry is not None
+                    ):
+                        _recovery_schema = self.registry.get_tool_schema(tc.name)
+                        if _recovery_schema is not None:
+                            _pending_recoveries.append(
+                                (tc.name, _recovery_schema),
+                            )
+                            logger.info(
+                                "MCP UserInputError on %s — queued "
+                                "parameter schema for post-loop recovery",
+                                tc.name,
+                            )
 
                     # ── Hard stop: OAuth credential not authorized ────
                     # n8n_management surfaces this with a STOP_OAUTH_CREDENTIAL
@@ -2582,6 +3063,49 @@ class Agent:
                                 "Injected %d tool schemas: %s",
                                 len(discovered), ", ".join(discovered),
                             )
+
+                # ── Emit MCP UserInputError recovery (post-loop) ─────
+                # All tool_results are now appended in correct order. Safe
+                # to inject a single system message containing every failing
+                # tool's parameter schema for the next iteration's re-read.
+                if _pending_recoveries:
+                    _recovery_lines = [
+                        "[RECOVERY] One or more tool calls in this turn "
+                        "failed with a parameter validation error. "
+                        "Re-read each tool's parameter schema below — pay "
+                        "attention to required fields and conditional "
+                        "requirements (e.g. \"either A or B must be "
+                        "provided\"). Then call the tool(s) again with "
+                        "corrected args, OR if you can't fix it, tell the "
+                        "user what's missing. Do NOT retry with the same "
+                        "args.\n",
+                    ]
+                    for _r_name, _r_schema in _pending_recoveries:
+                        _r_params = _r_schema.get(
+                            "function", {},
+                        ).get("parameters", {})
+                        try:
+                            _r_json = json.dumps(_r_params, indent=2)[:1500]
+                        except Exception:
+                            _r_json = str(_r_params)[:1500]
+                        _recovery_lines.append(
+                            f"\nSchema for `{_r_name}`:\n"
+                            f"```json\n{_r_json}\n```"
+                        )
+                    _recovery_msg = LLMMessage(
+                        role="system",
+                        content="".join(_recovery_lines),
+                    )
+                    messages.append(_recovery_msg)
+                    # Do NOT persist to DB. Transient per-call guidance, not
+                    # conversation. Persisting would slot a system row between
+                    # tool_use and tool_result on second-precision created_at,
+                    # corrupting the tool_use→tool_result pairing on reload.
+                    logger.info(
+                        "Emitted consolidated recovery for %d failing tool(s): %s",
+                        len(_pending_recoveries),
+                        ", ".join(n for n, _ in _pending_recoveries),
+                    )
 
                 # ── Terminal tools: force text response next iteration ──
                 # After these tools, the job is done. Inject a stop signal so

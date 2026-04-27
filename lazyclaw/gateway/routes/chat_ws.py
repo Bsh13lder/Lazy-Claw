@@ -89,6 +89,14 @@ class WebSocketCallback:
             preview = result[:200] if isinstance(result, str) else str(result)[:200]
             await self._send({"type": "tool_result", "name": name, "preview": preview})
 
+        elif kind == "team_delegate":
+            await self._send({
+                "type": "team_delegate",
+                "name": event.detail,
+                "specialist": event.metadata.get("specialist", ""),
+                "instruction": event.metadata.get("instruction", ""),
+            })
+
         elif kind == "specialist_start":
             await self._send({
                 "type": "specialist_start",
@@ -96,10 +104,28 @@ class WebSocketCallback:
                 "task": event.metadata.get("task", ""),
             })
 
+        elif kind == "specialist_thinking":
+            await self._send({
+                "type": "specialist_thinking",
+                "specialist": event.metadata.get("specialist", event.detail),
+                "iteration": event.metadata.get("iteration"),
+            })
+
+        elif kind == "specialist_tool":
+            await self._send({
+                "type": "specialist_tool",
+                "specialist": event.metadata.get("specialist", ""),
+                "tool": event.metadata.get("tool", event.detail),
+            })
+
         elif kind == "specialist_done":
             await self._send({
                 "type": "specialist_done",
                 "name": event.metadata.get("specialist", event.detail),
+                "success": event.metadata.get("success"),
+                "duration_ms": event.metadata.get("duration_ms"),
+                "tools_used": event.metadata.get("tools_used"),
+                "error": event.metadata.get("error"),
             })
 
         elif kind == "phase":
@@ -282,6 +308,34 @@ async def chat_websocket(ws: WebSocket):
                 except Exception:
                     logger.debug("task_event send failed", exc_info=True)
                     return
+
+                # Subagent terminal events also feed the running agent's
+                # side-note channel so the brain can absorb their results
+                # on the next TAOR iteration without waiting for a user
+                # turn to land.
+                if (
+                    evt.kind in ("background_done", "background_failed")
+                    and (evt.task_id or "").startswith("subagent-")
+                ):
+                    active_cb = state.get("active")
+                    if active_cb is not None:
+                        if evt.kind == "background_done":
+                            note = (
+                                f"[subagent {evt.task_id} done] "
+                                f"{evt.name}: {(evt.result or '')[:600]}"
+                            )
+                        else:
+                            note = (
+                                f"[subagent {evt.task_id} failed] "
+                                f"{evt.name}: {evt.error or 'unknown error'}"
+                            )
+                        try:
+                            active_cb.push_side_note(note)
+                        except Exception:
+                            logger.debug(
+                                "push_side_note for subagent failed",
+                                exc_info=True,
+                            )
         except asyncio.CancelledError:
             pass
 
@@ -452,10 +506,16 @@ async def chat_websocket(ws: WebSocket):
 
                 # If an agent turn is already running, auto-promote this
                 # message to a side-note so the user doesn't have to
-                # remember which button to press.
+                # remember which button to press. Also echo it back as a
+                # visible chat bubble with a "queued" badge so the message
+                # doesn't silently vanish into a ThinkingCard chip.
                 cb = state.get("active")
                 if cb is not None:
                     cb.push_side_note(content)
+                    await ws.send_json({
+                        "type": "queued_user_message",
+                        "content": content,
+                    })
                     await ws.send_json({
                         "type": "side_note_ack",
                         "message": content[:80],

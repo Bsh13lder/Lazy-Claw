@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
-from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.callbacks import AgentEvent, StepTrackingCallback
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.specialist import (
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from lazyclaw.config import Config
     from lazyclaw.llm.eco_router import EcoRouter
     from lazyclaw.runtime.callbacks import AgentCallback
+    from lazyclaw.runtime.team_lead import TeamLead
     from lazyclaw.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
@@ -56,12 +58,14 @@ class DelegateSkill(BaseSkill):
         eco_router: EcoRouter,
         permission_checker=None,
         callback: AgentCallback | None = None,
+        team_lead: TeamLead | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
         self._eco_router = eco_router
         self._permission_checker = permission_checker
         self._callback = callback
+        self._team_lead = team_lead
 
     # Specialists run multi-step browser loops — 60s default is too short
     timeout = 300
@@ -142,7 +146,26 @@ class DelegateSkill(BaseSkill):
             "Delegating to %s: %s", spec.display_name, enriched_instruction[:100],
         )
 
-        # Notify user immediately before blocking on specialist
+        # Register with team_lead so /api/agents/status, the activity feed,
+        # and the TUI status bar can see the specialist as a live task.
+        # Without this the activity page only shows the parent "chat" task.
+        task_id = f"specialist-{uuid.uuid4().hex[:8]}"
+        if self._team_lead is not None:
+            try:
+                self._team_lead.register(
+                    task_id=task_id,
+                    name=spec.name,
+                    description=enriched_instruction[:80],
+                    lane="specialist",
+                    instruction_full=enriched_instruction,
+                    user_id=user_id,
+                )
+            except Exception:
+                logger.debug("team_lead.register failed for %s", task_id, exc_info=True)
+
+        # Notify user immediately before blocking on specialist.
+        # Emit BOTH team_delegate (legacy/CLI/Telegram) and specialist_start
+        # (Web UI WS already wired) so every channel renders progress.
         if self._callback:
             await self._callback.on_event(AgentEvent(
                 "team_delegate",
@@ -152,16 +175,52 @@ class DelegateSkill(BaseSkill):
                     "instruction": enriched_instruction[:120],
                 },
             ))
+            await self._callback.on_event(AgentEvent(
+                "specialist_start",
+                spec.name,
+                {
+                    "specialist": spec.name,
+                    "task": enriched_instruction[:200],
+                },
+            ))
 
-        result = await run_specialist(
-            user_id=user_id,
-            specialist=spec,
-            task=enriched_instruction,
-            registry=self._registry,
-            eco_router=self._eco_router,
-            permission_checker=self._permission_checker,
-            callback=self._callback,
-        )
+        # Wrap callback so per-tool events also drive team_lead.update_step,
+        # surfacing the specialist's current tool in the activity panel.
+        wrapped_callback = self._callback
+        if self._team_lead is not None and self._callback is not None:
+            wrapped_callback = StepTrackingCallback(
+                inner=self._callback,
+                team_lead=self._team_lead,
+                task_id=task_id,
+            )
+
+        try:
+            result = await run_specialist(
+                user_id=user_id,
+                specialist=spec,
+                task=enriched_instruction,
+                registry=self._registry,
+                eco_router=self._eco_router,
+                permission_checker=self._permission_checker,
+                callback=wrapped_callback,
+            )
+        except Exception as exc:
+            if self._team_lead is not None:
+                try:
+                    self._team_lead.fail(task_id, error=str(exc))
+                except Exception:
+                    logger.debug("team_lead.fail crashed", exc_info=True)
+            if self._callback:
+                await self._callback.on_event(AgentEvent(
+                    "specialist_done",
+                    spec.name,
+                    {
+                        "specialist": spec.name,
+                        "success": False,
+                        "error": str(exc),
+                    },
+                ))
+            raise
 
         # Save browser learnings (delegate calls run_specialist directly,
         # not through executor.py, so this is the only save path here)
@@ -176,6 +235,35 @@ class DelegateSkill(BaseSkill):
             ))
             _background_tasks.add(bg_task)
             bg_task.add_done_callback(_background_tasks.discard)
+
+        # Mirror the SpecialistResult into team_lead so the activity feed
+        # carries the final outcome, then emit specialist_done so every UI
+        # closes the running card.
+        if self._team_lead is not None:
+            try:
+                if result.success:
+                    self._team_lead.complete(
+                        task_id,
+                        result_preview=(result.result or "")[:100],
+                        result_full=result.result or "",
+                    )
+                else:
+                    self._team_lead.fail(task_id, error=result.error or "")
+            except Exception:
+                logger.debug("team_lead complete/fail crashed", exc_info=True)
+
+        if self._callback:
+            await self._callback.on_event(AgentEvent(
+                "specialist_done",
+                spec.name,
+                {
+                    "specialist": spec.name,
+                    "success": result.success,
+                    "duration_ms": result.duration_ms,
+                    "tools_used": list(result.tools_used),
+                    "error": result.error,
+                },
+            ))
 
         if result.success:
             tools_note = ""
@@ -249,3 +337,5 @@ class DelegateSkill(BaseSkill):
             return domain_match.group(1)
 
         return ""
+
+

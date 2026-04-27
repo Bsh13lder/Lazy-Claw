@@ -16,6 +16,7 @@ import {
 } from "../hooks/useChatStream";
 import type { ConnectionStatus } from "../hooks/useWebSocket";
 import * as api from "../api";
+import { useAgentStatus } from "./AgentStatusContext";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -118,6 +119,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [activeSessionId, setActiveSessionId] = useState("");
   const [chatOpen, setChatOpen] = useState(true);
   const [chatExpanded, setChatExpanded] = useState(false);
+  // ChatProvider is mounted INSIDE AgentStatusProvider in App.tsx, so we
+  // can hand the WS task-event hook a refresh trigger that flips
+  // Activity/Overview snapshots immediately on lifecycle frames.
+  const { refreshStatus } = useAgentStatus();
   const activeIdRef = useRef(activeSessionId);
   useEffect(() => {
     activeIdRef.current = activeSessionId;
@@ -284,6 +289,25 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [updateSession],
   );
 
+  // Server saw a plain "message" frame while a turn was active and absorbed
+  // it as a side-note (defensive path for clients that don't check
+  // isStreaming themselves). Surface as a visible queued user bubble so the
+  // message doesn't silently vanish.
+  const handleQueuedUserMessage = useCallback(
+    (content: string) => {
+      const sid = activeIdRef.current;
+      const sideMsg: Message = {
+        ...makeMessage("user", content),
+        content: `↳ ${content}`,
+      };
+      updateSession(sid, (s) => ({
+        ...s,
+        messages: [...s.messages, sideMsg],
+      }));
+    },
+    [updateSession],
+  );
+
   // Background task finished AFTER its originating turn — surface result
   // inline so the user (and the agent on the next turn, via server-side
   // chat history) can see what happened.
@@ -322,6 +346,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     onComplete: handleComplete,
     onError: handleError,
     onBackgroundComplete: handleBackgroundComplete,
+    onAgentTaskEvent: refreshStatus,
+    onQueuedUserMessage: handleQueuedUserMessage,
   });
 
   // Keep a live ref to streamingState so sendMessage can decide side-note vs

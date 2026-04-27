@@ -141,3 +141,46 @@ class CancellationToken:
     @property
     def is_cancelled(self) -> bool:
         return self._cancelled
+
+
+class StepTrackingCallback:
+    """Forwards every event to the inner callback and, on each
+    ``specialist_tool`` event, also updates the TeamLead step counter.
+
+    Shared between DelegateSkill and AgentDispatcher so subagents and
+    specialists both surface live tool progress in the activity panel.
+    """
+
+    def __init__(self, inner, team_lead, task_id: str) -> None:
+        self._inner = inner
+        self._team_lead = team_lead
+        self._task_id = task_id
+
+    @property
+    def cancel_token(self):
+        return getattr(self._inner, "cancel_token", None)
+
+    @cancel_token.setter
+    def cancel_token(self, token):
+        if hasattr(self._inner, "cancel_token"):
+            self._inner.cancel_token = token
+
+    async def on_event(self, event: AgentEvent) -> None:
+        if event.kind == "specialist_tool":
+            tool_name = (
+                event.metadata.get("tool", event.detail)
+                if event.metadata else event.detail
+            )
+            try:
+                self._team_lead.update_step(self._task_id, tool_name)
+            except Exception:
+                _null_logger.debug(
+                    "update_step failed for %s", self._task_id, exc_info=True,
+                )
+        await self._inner.on_event(event)
+
+    async def on_approval_request(self, skill_name: str, arguments: dict) -> bool:
+        return await self._inner.on_approval_request(skill_name, arguments)
+
+    async def on_help_request(self, context: str, needs_browser: bool) -> str:
+        return await self._inner.on_help_request(context, needs_browser)

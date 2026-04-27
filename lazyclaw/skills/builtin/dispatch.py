@@ -1,8 +1,9 @@
-"""DispatchSubagentsSkill — lets the main agent spawn parallel subagents.
+"""DispatchSubagentsSkill — fan-out to parallel background subagents.
 
 The LLM calls this with a list of tasks and agent types. Each subagent runs
 in an isolated context (no parent conversation history) with type-appropriate
-tools. Results are merged into a structured summary returned to the main agent.
+tools, and reports results asynchronously via ``background_done`` events on
+the task event bus. The skill returns immediately with task IDs.
 
 Single-depth enforced: subagents cannot call this tool (context var + tool
 exclusion both prevent it).
@@ -17,24 +18,26 @@ from lazyclaw.runtime.dispatcher import (
     AgentDispatcher,
     AgentType,
     SubagentConfig,
-    SubagentResult,
     _IS_SUBAGENT,
 )
 
 if TYPE_CHECKING:
     from lazyclaw.config import Config
     from lazyclaw.llm.eco_router import EcoRouter
+    from lazyclaw.runtime.callbacks import AgentCallback
+    from lazyclaw.runtime.team_lead import TeamLead
     from lazyclaw.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
-# Max chars of a single subagent result included in the merged summary.
-# Prevents context blow-up when subagents return large payloads.
-_MAX_RESULT_CHARS = 800
-
 
 class DispatchSubagentsSkill(BaseSkill):
     """Dispatch 2+ independent subtasks to parallel subagents.
+
+    Always non-blocking: spawns subagents in the background and returns
+    task IDs immediately. Subagent results stream back as
+    ``background_done`` events that the agent absorbs on later turns.
+    The user keeps chatting while subagents run.
 
     Use when:
     - 3+ independent tasks can run concurrently (research, fetch, analyse)
@@ -43,7 +46,6 @@ class DispatchSubagentsSkill(BaseSkill):
     - Scoped tool subtasks → 'specialist' type with explicit tool_names
 
     Each subagent runs with isolated context — no conversation history.
-    Results are returned as a structured summary.
 
     Cannot be called from within a subagent (single-depth limit).
     """
@@ -54,14 +56,20 @@ class DispatchSubagentsSkill(BaseSkill):
         registry: SkillRegistry,
         eco_router: EcoRouter,
         permission_checker=None,
+        callback: AgentCallback | None = None,
+        team_lead: TeamLead | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
         self._eco_router = eco_router
         self._permission_checker = permission_checker
+        self._callback = callback
+        self._team_lead = team_lead
 
-    # Parallel subagents can each take up to 60s → allow 5 min total
-    timeout = 300
+    # The skill returns immediately after spawning background subagents,
+    # so a tight outer timeout is fine — we never block waiting for fan-out
+    # results here.
+    timeout = 30
 
     @property
     def name(self) -> str:
@@ -74,12 +82,21 @@ class DispatchSubagentsSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Dispatch independent subtasks to parallel subagents and collect "
-            "results. Runs all of them concurrently via asyncio.gather — no hard "
-            "cap, so fan out aggressively: 5, 8, even 10 subagents is fine when "
-            "the work is genuinely independent (researching 10 companies, "
-            "scraping 8 sites, drafting 6 proposals). Each subagent has isolated "
-            "context — cheap to spawn, doesn't bloat yours. "
+            "Fire N independent research / scrape / draft tasks IN THE "
+            "BACKGROUND and return immediately with task IDs. The subagents "
+            "appear in the user's Activity panel under lane='subagent' and "
+            "stream their results back as `background_done` events that you "
+            "(the brain) absorb on later turns. "
+            "DO NOT WAIT for the results in this turn — your tool-result is "
+            "just the dispatch confirmation. Reply to the user with a short "
+            "status ('I started 5 subagents, results will appear as they "
+            "land') so they know work is in flight; the conversation stays "
+            "responsive. "
+            "Use for parallel work where the user can wait asynchronously: "
+            "researching 10 companies, scraping 8 sites, drafting 6 "
+            "proposals. For tasks where you need the merged answer in this "
+            "same turn (single quick lookup, dependent reasoning), use "
+            "`delegate` or call tools directly instead. "
             "Types: 'explore' (read-only, fastest, use liberally), "
             "'general_purpose' (full access, heavier), "
             "'specialist' (scoped tools via tool_names)."
@@ -181,7 +198,11 @@ class DispatchSubagentsSkill(BaseSkill):
                 agent_type=agent_type,
                 task=task_str,
                 tool_names=tool_names,
-                timeout=int(raw.get("timeout", 60)),
+                # Default raised from 60s → 120s. Cold-start Playwright
+                # (~5–15s) plus a real entity extraction + LLM round-trip
+                # easily blew through the old 60s ceiling, leaving every
+                # explore subagent timing out before producing output.
+                timeout=int(raw.get("timeout", 120)),
             ))
 
         dispatcher = AgentDispatcher(
@@ -189,39 +210,26 @@ class DispatchSubagentsSkill(BaseSkill):
             eco_router=self._eco_router,
             registry=self._registry,
             permission_checker=self._permission_checker,
+            team_lead=self._team_lead,
+            callback=self._callback,
         )
 
         logger.info(
-            "dispatch_subagents: spawning %d subagents in parallel — %s",
+            "dispatch_subagents: spawning %d background subagents — %s",
             len(configs),
             [(c.agent_type.value, c.task[:40]) for c in configs],
         )
 
-        results = await dispatcher.dispatch(configs, user_id)
-        return _format_results(results)
-
-
-def _format_results(results: list[SubagentResult]) -> str:
-    """Format SubagentResult list into a structured LLM-readable summary."""
-    succeeded = sum(1 for r in results if r.success)
-    lines = [
-        f"[Subagent Dispatch: {len(results)} tasks, "
-        f"{succeeded} succeeded, {len(results) - succeeded} failed]\n"
-    ]
-    for i, r in enumerate(results, 1):
-        status = "OK" if r.success else "FAIL"
-        lines.append(
-            f"--- Task {i} [{r.agent_type.value}] {status} ({r.duration_ms}ms) ---"
+        task_ids = await dispatcher.submit_async(configs, user_id)
+        breakdown = ", ".join(
+            f"{c.agent_type.value}: {c.task[:50]}" for c in configs
         )
-        lines.append(f"Task: {r.task[:100]}")
-        if r.success and r.result:
-            preview = r.result[:_MAX_RESULT_CHARS]
-            if len(r.result) > _MAX_RESULT_CHARS:
-                preview += f"\n[...{len(r.result) - _MAX_RESULT_CHARS} chars truncated]"
-            lines.append(f"Result:\n{preview}")
-        elif not r.success:
-            lines.append(f"Error: {r.error}")
-        else:
-            lines.append("Result: (empty)")
-        lines.append("")
-    return "\n".join(lines)
+        return (
+            f"Dispatched {len(task_ids)} subagents in the background "
+            f"(lane='subagent'). They appear in the Activity panel and "
+            f"stream results back as `background_done` events on later "
+            f"turns. Reply to the user with a short status — DO NOT wait "
+            f"for results in this turn.\n"
+            f"Task IDs: {', '.join(task_ids)}\n"
+            f"Tasks: {breakdown}"
+        )

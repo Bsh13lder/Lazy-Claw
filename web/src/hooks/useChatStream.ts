@@ -124,6 +124,16 @@ interface UseChatStreamOptions {
   onComplete: (payload: OnCompletePayload) => void;
   onError: (message: string) => void;
   onBackgroundComplete?: (payload: BackgroundCompletePayload) => void;
+  // Fired on TeamLead / TaskRunner lifecycle frames (`task_started`,
+  // `task_step`, `task_phase`, `task_completed`, `background_started`,
+  // `background_done`, `background_failed`). Consumers usually trigger an
+  // immediate AgentStatusContext.refreshStatus() so Activity/Overview pages
+  // update without waiting for the 3 s poll.
+  onAgentTaskEvent?: () => void;
+  // Server saw a "message" frame while a turn was active and absorbed it
+  // as a side-note. The host should add a visible "queued" user bubble so
+  // the message doesn't silently vanish.
+  onQueuedUserMessage?: (content: string) => void;
   enabled?: boolean;
 }
 
@@ -142,6 +152,8 @@ export function useChatStream({
   onComplete,
   onError,
   onBackgroundComplete,
+  onAgentTaskEvent,
+  onQueuedUserMessage,
   enabled = true,
 }: UseChatStreamOptions): UseChatStreamReturn {
   const [streamingState, setStreamingState] = useState<StreamingState>({
@@ -171,11 +183,15 @@ export function useChatStream({
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
   const onBackgroundCompleteRef = useRef(onBackgroundComplete);
+  const onAgentTaskEventRef = useRef(onAgentTaskEvent);
+  const onQueuedUserMessageRef = useRef(onQueuedUserMessage);
   useEffect(() => {
     onCompleteRef.current = onComplete;
     onErrorRef.current = onError;
     onBackgroundCompleteRef.current = onBackgroundComplete;
-  }, [onComplete, onError, onBackgroundComplete]);
+    onAgentTaskEventRef.current = onAgentTaskEvent;
+    onQueuedUserMessageRef.current = onQueuedUserMessage;
+  }, [onComplete, onError, onBackgroundComplete, onAgentTaskEvent, onQueuedUserMessage]);
 
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;
@@ -309,14 +325,47 @@ export function useChatStream({
           break;
         }
 
+        case "specialist_thinking": {
+          const teamName = `team:${msg.specialist as string}`;
+          const iter = msg.iteration as number | undefined;
+          toolsRef.current = toolsRef.current.map((t) =>
+            t.name === teamName && t.status === "running"
+              ? { ...t, preview: iter ? `step ${iter}` : t.preview }
+              : t,
+          );
+          scheduleFlush();
+          break;
+        }
+
+        case "specialist_tool": {
+          const teamName = `team:${msg.specialist as string}`;
+          const tool = msg.tool as string;
+          toolsRef.current = toolsRef.current.map((t) =>
+            t.name === teamName && t.status === "running"
+              ? { ...t, preview: tool ? `→ ${tool}` : t.preview }
+              : t,
+          );
+          scheduleFlush();
+          break;
+        }
+
+        case "team_delegate":
+          // Legacy event from delegate.py — specialist_start carries the
+          // same info and creates the team:* card. No-op here so the
+          // event isn't logged as unhandled.
+          break;
+
         case "specialist_done": {
           const teamName = `team:${msg.name as string}`;
           const now = Date.now();
+          const success = msg.success as boolean | undefined;
+          const errMsg = msg.error as string | undefined;
           toolsRef.current = toolsRef.current.map((t) =>
             t.name === teamName && t.status === "running"
               ? {
                   ...t,
-                  status: "done" as const,
+                  status: success === false ? ("error" as const) : ("done" as const),
+                  error: success === false ? errMsg : undefined,
                   completed_at: now,
                   duration_ms: t.started_at ? now - t.started_at : undefined,
                 }
@@ -345,6 +394,17 @@ export function useChatStream({
           const note = msg.message as string;
           sideNotesRef.current = [...sideNotesRef.current, note];
           scheduleFlush();
+          break;
+        }
+
+        case "queued_user_message": {
+          // Server absorbed a "message" frame as a side-note while a turn
+          // was active. Surface it as a visible user bubble so the message
+          // doesn't silently vanish into the ThinkingCard chip.
+          const content = (msg.content as string) ?? "";
+          if (content && onQueuedUserMessageRef.current) {
+            onQueuedUserMessageRef.current(content);
+          }
           break;
         }
 
@@ -453,6 +513,19 @@ export function useChatStream({
           break;
         }
 
+        case "background_started":
+        case "task_started":
+        case "task_step":
+        case "task_phase":
+        case "task_completed": {
+          // Live TeamLead / TaskRunner lifecycle events bridged through
+          // task_event_bus → chat WS. They never enter the chat transcript;
+          // they only nudge AgentStatusContext to repoll so Activity and
+          // Overview light up without the 3 s lag.
+          onAgentTaskEventRef.current?.();
+          break;
+        }
+
         case "background_done":
         case "background_failed": {
           const cb = onBackgroundCompleteRef.current;
@@ -470,6 +543,8 @@ export function useChatStream({
               toolsUsed: msg.tools_used as string[] | undefined,
             });
           }
+          // Also nudge dashboard to refresh history.
+          onAgentTaskEventRef.current?.();
           break;
         }
 

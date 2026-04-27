@@ -177,7 +177,12 @@ def make_plan_prompt(
     )
 
 
-def make_user_facing_plan_prompt(message: str, tool_names: list[str]) -> str:
+def make_user_facing_plan_prompt(
+    message: str,
+    tool_names: list[str],
+    *,
+    enumeration_hint: bool = False,
+) -> str:
     """Prompt that asks the LLM to produce a short, human-readable plan.
 
     This is shown to the USER (not just the LLM's own scratchpad) before
@@ -188,13 +193,42 @@ def make_user_facing_plan_prompt(message: str, tool_names: list[str]) -> str:
       * ``QUESTION: <one short question>`` — when the request is
         ambiguous and exactly one missing fact would change the plan.
       * The ``**Plan**`` markdown block — otherwise.
+
+    ``enumeration_hint`` (default False) flips on when the caller
+    detected multi-target work ("scrape N items", "find all X"). The
+    routing rules then explicitly push dispatch_subagents /
+    run_background over a foreground browser loop — counters the
+    "scrape ⇒ browser" training bias.
     """
     tools_hint = ", ".join(tool_names[:20]) if tool_names else "(none available)"
+    # Routing block goes BEFORE the tool list — the model reads in order
+    # and the first rule wins over the browser schema staring it in the
+    # face. Multi-target work should never be a foreground browser loop.
+    routing_rules = (
+        "Routing rules (apply in order, stop at first match):\n"
+        "- Multi-target work (scrape N items, check M sites, research K "
+        "companies, \"for each\", \"all the X\") → prefer `dispatch_subagents` "
+        "with kind=\"explore\" (parallel) OR `run_background` for long jobs. "
+        "NEVER loop a foreground `browser` call over many targets.\n"
+        "- Single page interaction (open THIS URL, click THIS button, log in "
+        "to ONE site) → `browser`.\n"
+        "- Research question with reading/synthesis → "
+        "`delegate(specialist=\"research\")`.\n"
+        "- Plain web lookup / factual query → `web_search`.\n"
+        "- Anything else → pick the single most specific tool.\n\n"
+    )
+    if enumeration_hint:
+        routing_rules += (
+            "HINT: the request looks enumerative. Your FIRST step should be "
+            "`dispatch_subagents` or `run_background`. Do not open a browser "
+            "yourself.\n\n"
+        )
     return (
         "You are producing a PLAN for the user to review. Do NOT call any "
         "tools in this response — only write the plan as plain markdown.\n\n"
         f"User request:\n{message}\n\n"
-        f"Available tools (pick the ones you actually need):\n{tools_hint}\n\n"
+        + routing_rules
+        + f"Available tools (pick the ones you actually need):\n{tools_hint}\n\n"
         "If the request is AMBIGUOUS and you need ONE specific piece of "
         "info to plan properly, respond with exactly one line:\n"
         "QUESTION: <your single short question>\n"

@@ -885,7 +885,7 @@ export const denyRequest = (id: string) =>
 export interface AgentTask {
   task_id: string;
   name: string;
-  description: string;
+  description?: string;
   instruction?: string;    // full untruncated user instruction
   lane: string;
   status: string;
@@ -899,11 +899,17 @@ export interface AgentTask {
   result_preview?: string;
   result?: string;         // full untruncated result
   error?: string | null;
+  created_at?: string;
+  completed_at?: string;
+  cost_usd?: number;
+  tokens_used?: number;
+  llm_calls?: number;
 }
 
 export interface AgentStatus {
   active: AgentTask[];
   background: AgentTask[];
+  background_recent?: AgentTask[];
   recent: AgentTask[];
 }
 

@@ -101,9 +101,14 @@ async def action_open(
     """Open browser and navigate to target."""
     from lazyclaw.browser.page_reader import detect_page_context
 
-    force_visible = params.pop("visible", False)
+    # Default: headless. Only force visible when the user explicitly asks
+    # via the `visible=true` parameter. The previous rule "no target ⇒
+    # visible" caused unwanted Chrome windows whenever the agent called
+    # browser(action="open") with no target (e.g. just to warm the
+    # backend), even on tasks where the user never asked to see anything.
+    force_visible = bool(params.pop("visible", False))
     target = (params.get("target") or "").strip()
-    visible = force_visible or (not target and not is_background)
+    visible = force_visible
 
     if not target:
         await get_backend(user_id, tab_context, visible=visible)

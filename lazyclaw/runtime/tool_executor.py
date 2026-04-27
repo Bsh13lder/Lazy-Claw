@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING
 
 from lazyclaw.llm.providers.base import ToolCall
 from lazyclaw.permissions.models import ALLOW, DENY
+from lazyclaw.runtime.skill_lesson_auto import record_skill_outcome
 from lazyclaw.runtime.tool_result import ToolResult
 from lazyclaw.skills.registry import SkillRegistry
 
 if TYPE_CHECKING:
+    from lazyclaw.config import Config
     from lazyclaw.runtime.callbacks import AgentCallback
 
 logger = logging.getLogger(__name__)
@@ -26,11 +28,18 @@ DEFAULT_TOOL_TIMEOUT = 60
 
 class ToolExecutor:
     def __init__(
-        self, registry: SkillRegistry, permission_checker=None, timeout: int = DEFAULT_TOOL_TIMEOUT,
+        self,
+        registry: SkillRegistry,
+        permission_checker=None,
+        timeout: int = DEFAULT_TOOL_TIMEOUT,
+        config: "Config | None" = None,
     ) -> None:
         self._registry = registry
         self._checker = permission_checker
         self._timeout = timeout
+        # Optional. Without it the auto-recorder no-ops (record_skill_outcome
+        # gates on config presence). Wired by agent.py at construction time.
+        self._config = config
 
     async def execute(
         self,
@@ -70,13 +79,23 @@ class ToolExecutor:
                 timeout=effective_timeout,
             )
             logger.debug("Tool %s executed successfully", tool_call.name)
-            return await self._process_result(result, tool_call.name, callback)
-        except asyncio.TimeoutError:
+            processed = await self._process_result(result, tool_call.name, callback)
+            await record_skill_outcome(
+                self._config, user_id, skill, tool_call.arguments, processed,
+            )
+            return processed
+        except asyncio.TimeoutError as exc:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
             logger.error("Tool %s timed out after %ds", tool_call.name, effective_timeout)
+            await record_skill_outcome(
+                self._config, user_id, skill, tool_call.arguments, None, exc,
+            )
             return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
+            await record_skill_outcome(
+                self._config, user_id, skill, tool_call.arguments, None, e,
+            )
             return f"Error executing {tool_call.name}: {e}"
 
     async def execute_allowed(
@@ -100,13 +119,23 @@ class ToolExecutor:
                 timeout=effective_timeout,
             )
             logger.debug("Tool %s executed (approved)", tool_call.name)
-            return await self._process_result(result, tool_call.name, callback)
-        except asyncio.TimeoutError:
+            processed = await self._process_result(result, tool_call.name, callback)
+            await record_skill_outcome(
+                self._config, user_id, skill, tool_call.arguments, processed,
+            )
+            return processed
+        except asyncio.TimeoutError as exc:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
             logger.error("Tool %s timed out after %ds", tool_call.name, effective_timeout)
+            await record_skill_outcome(
+                self._config, user_id, skill, tool_call.arguments, None, exc,
+            )
             return f"Error: Tool '{tool_call.name}' timed out after {effective_timeout} seconds."
         except Exception as e:
             logger.error("Tool %s failed: %s", tool_call.name, e)
+            await record_skill_outcome(
+                self._config, user_id, skill, tool_call.arguments, None, e,
+            )
             return f"Error executing {tool_call.name}: {e}"
 
     async def execute_batch(

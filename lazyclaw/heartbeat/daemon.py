@@ -71,6 +71,9 @@ class HeartbeatDaemon:
         # In-memory record of "we already seeded today's journal for this user".
         # Resets on restart (idempotent re-seed via tag lookup is cheap).
         self._last_journal_seed_iso: dict[str, str] = {}
+        # Last day we ran the LazyBrain topic-rollup sweep per user. Cooldown
+        # check inside the job is the real gate; this just bounds tick cost.
+        self._last_topic_rollup_iso: dict[str, str] = {}
 
     async def start(self) -> None:
         """Launch the heartbeat loop as a background task."""
@@ -140,6 +143,9 @@ class HeartbeatDaemon:
 
         # Seed today's LazyBrain journal for each registered user (once/day).
         await self._seed_today_journals()
+
+        # Run LazyBrain topic-rollup sweep once per day per user.
+        await self._sweep_topic_rollups()
 
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
@@ -847,6 +853,45 @@ class HeartbeatDaemon:
             except Exception:
                 logger.warning(
                     "Could not seed today's journal for user %s",
+                    user_id, exc_info=True,
+                )
+
+    async def _sweep_topic_rollups(self) -> None:
+        """Run the LazyBrain topic-rollup sweep at most once per user per day.
+
+        The sweep itself enforces a longer per-topic cooldown — this is just
+        an outer guard so the brain LLM isn't queried multiple times per
+        heartbeat tick.
+        """
+        from lazyclaw.heartbeat import topic_rollup_job
+        from lazyclaw.lazybrain import timezone_util as _tzu
+
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute("SELECT id FROM users")
+                users = [r[0] for r in await cursor.fetchall()]
+        except Exception:
+            logger.debug("topic rollup sweep: list users failed", exc_info=True)
+            return
+
+        for user_id in users:
+            today = _tzu.today_iso(user_id)
+            if self._last_topic_rollup_iso.get(user_id) == today:
+                continue
+            try:
+                summary = await topic_rollup_job.run_topic_rollup_sweep(
+                    self._config, user_id,
+                )
+                self._last_topic_rollup_iso[user_id] = today
+                if summary.get("processed"):
+                    logger.info(
+                        "topic rollup sweep: user=%s processed=%d skipped=%d",
+                        user_id, len(summary["processed"]),
+                        len(summary.get("skipped", [])),
+                    )
+            except Exception:
+                logger.warning(
+                    "topic rollup sweep failed for user %s",
                     user_id, exc_info=True,
                 )
 

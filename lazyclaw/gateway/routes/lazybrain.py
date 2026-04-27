@@ -401,6 +401,20 @@ async def topic_rollup_route(
     return await topic_rollup.topic_rollup(_config, user.id, body.topic)
 
 
+@router.post("/topic-rollup/sweep")
+async def topic_rollup_sweep_route(
+    user: User = Depends(get_current_user),
+):
+    """Run the weekly topic-rollup sweep on demand.
+
+    Same code path the heartbeat daemon uses — picks the user's most-used
+    topics, generates rollups for any past their cooldown, returns a summary.
+    """
+    from lazyclaw.heartbeat import topic_rollup_job
+
+    return await topic_rollup_job.run_topic_rollup_sweep(_config, user.id)
+
+
 @router.post("/morning-briefing")
 async def morning_briefing_route(
     body: MorningBriefingRequest,

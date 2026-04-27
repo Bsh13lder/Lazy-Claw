@@ -17,6 +17,7 @@ import {
   Clock,
   Hash,
   Settings2,
+  Sparkles,
   X,
   CategoryIcon,
 } from "./icons";
@@ -113,6 +114,32 @@ export function PageListSidebar({
     () => (showSystemTags ? tags : tags.filter((t) => !isSystemTag(t.tag))),
     [tags, showSystemTags],
   );
+
+  // Aggregate `topic/*` tags so we can render a "Topics" section grouped by
+  // topic name with note counts. The agent auto-records lessons here from
+  // every skill execution, plus weekly rollup notes get tagged with
+  // `kind/rollup`.
+  const topicGroups = useMemo(() => {
+    const groups: Array<{ topic: string; count: number; hasRollup: boolean }> = [];
+    const seen = new Map<string, { count: number; hasRollup: boolean }>();
+    for (const t of tags) {
+      if (!t.tag.startsWith("topic/")) continue;
+      const name = t.tag.slice(6);
+      if (!name) continue;
+      const prev = seen.get(name) ?? { count: 0, hasRollup: false };
+      prev.count += t.count;
+      seen.set(name, prev);
+    }
+    // Note: per-topic rollup detection lives at the `kind/rollup` level —
+    // we surface a sparkle when ANY rollup tag is present overall by
+    // checking the tag list separately.
+    const hasAnyRollup = tags.some((t) => t.tag === "kind/rollup");
+    for (const [topic, info] of seen) {
+      groups.push({ topic, count: info.count, hasRollup: hasAnyRollup });
+    }
+    groups.sort((a, b) => b.count - a.count);
+    return groups.slice(0, 12);
+  }, [tags]);
 
   const journalByMonth = useMemo(() => groupJournalByMonth(journal.slice(0, 14)), [journal]);
 
@@ -255,6 +282,42 @@ export function PageListSidebar({
                     onComplete={() => handleCompleteTask(n.id)}
                   />
                 ))}
+              </SidebarSection>
+            )}
+
+            {/* Topics — auto-grouped from `topic/*` tags. Each row drills
+                into the existing tag filter, reusing the same pipeline
+                clicking a tag chip uses. The sparkle marks topics that
+                have a weekly rollup note ready to read. */}
+            {topicGroups.length > 0 && (
+              <SidebarSection
+                label="Topics"
+                count={topicGroups.length}
+                Icon={Sparkles}
+                iconColor="#a78bfa"
+              >
+                {topicGroups.map((g) => {
+                  const tagFull = `topic/${g.topic}`;
+                  const active = activeTag === tagFull;
+                  return (
+                    <button
+                      key={tagFull}
+                      onClick={() => onTagToggle(tagFull)}
+                      title={`${g.count} note${g.count === 1 ? "" : "s"} tagged ${tagFull}`}
+                      className={`w-full flex items-center gap-2 px-4 py-1 text-sm text-left transition-colors ${
+                        active
+                          ? "bg-accent-soft text-accent"
+                          : "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                      }`}
+                    >
+                      <Hash size={11} strokeWidth={1.75} className={active ? "text-accent" : "text-text-muted"} />
+                      <span className="truncate flex-1">{g.topic}</span>
+                      <span className="text-[10px] text-text-muted/70 tabular-nums">
+                        {g.count}
+                      </span>
+                    </button>
+                  );
+                })}
               </SidebarSection>
             )}
 

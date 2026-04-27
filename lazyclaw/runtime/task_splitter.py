@@ -45,6 +45,42 @@ _FALSE_COMPOUND = re.compile(
     re.IGNORECASE,
 )
 
+# Messages that OPEN with a single-intent verb ("scrape …", "find …",
+# "list …", "search …") are almost never multi-task — even if they happen
+# to contain "and". Skips a 2-3 s LLM round-trip on a common class of
+# single tasks.
+_SINGLE_INTENT_OPENER = re.compile(
+    r"^\s*(?:ok\s+|please\s+|can\s+you\s+|could\s+you\s+|pls\s+|plz\s+|"
+    r"first\s+|now\s+|your\s+task\s*[:,-]?\s*|i\s+want\s+(?:you\s+)?(?:to\s+)?)*"
+    r"(scrape|scrap|scraping|crawl|find|list|search|look\s+up|fetch|"
+    r"pull|grab|get|gather|collect|enumerate|summarize|summarise)\b",
+    re.IGNORECASE,
+)
+
+# "Scrape N things" / "find all X" / "for each of Y" — multi-target work that
+# belongs in the background lane (and ideally dispatched via subagents), not
+# pinned to a foreground browser loop. Shared with agent.py to bias the plan
+# prompt toward dispatch_subagents / run_background when these fire.
+_ENUMERATION_RE = re.compile(
+    r"\b("
+    r"scrape|scrap|scraping|crawl|crawling|enumerate|"
+    r"list\s+all|find\s+all|pull\s+all|get\s+all|"
+    r"for\s+each\s+of|every\s+\w+|all\s+the\s+\w+|"
+    r"bulk|mass|batch|harvest|"
+    r"gather\s+(?:all|every|a\s+list)|"
+    r"collect\s+(?:all|every|a\s+list)|"
+    r"pull\s+(?:all|every|a\s+list)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_enumerative(message: str) -> bool:
+    """Multi-target work that should run background / via dispatch_subagents."""
+    if len(message) < 8:
+        return False
+    return _ENUMERATION_RE.search(message) is not None
+
 
 def _looks_compound(message: str) -> bool:
     """Fast regex check — does this message LOOK like multiple tasks?"""
@@ -52,6 +88,16 @@ def _looks_compound(message: str) -> bool:
         return False
     # Exclude "verb X and tell me" — that's a single task with reporting suffix
     if _FALSE_COMPOUND.search(message) is not None:
+        return False
+    # Single-intent openers ("scrape X", "find all Y", "search for Z") —
+    # these are always a single task even when the object contains "and"
+    # ("scrape restaurants and cafes"). Saves a 2-3 s LLM round-trip on
+    # the most common false-compound case. Only applies when NO explicit
+    # compound keyword is present ("and also", "then", "plus" still win).
+    if (
+        _SINGLE_INTENT_OPENER.match(message)
+        and _COMPOUND_KEYWORDS.search(message) is None
+    ):
         return False
     # Explicit compound keywords always trigger
     if _COMPOUND_KEYWORDS.search(message) is not None:
@@ -104,30 +150,50 @@ async def split_tasks(
     """
     # Fast path: clearly single task
     if not _looks_compound(message):
-        return [SubTask(instruction=message, lane="foreground", name="chat")]
+        lane = "background" if _looks_enumerative(message) else "foreground"
+        return [SubTask(instruction=message, lane=lane, name="chat")]
 
     try:
-        response = await eco_router.chat(
-            messages=[
-                LLMMessage(role="system", content=_SPLIT_PROMPT),
-                LLMMessage(role="user", content=message),
-            ],
-            user_id=user_id,
-            role="brain",
-            max_tokens=200,
-        )
-
-        raw = response.content.strip()
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        parsed = json.loads(raw)
+        parsed: dict | None = None
+        # First attempt — normal prompt.
+        for attempt in range(2):
+            sys_prompt = _SPLIT_PROMPT
+            if attempt == 1:
+                sys_prompt = (
+                    "Return ONLY a valid JSON object. No preamble, no markdown, "
+                    "no trailing comma, no commentary. Close every string and "
+                    "brace. Schema: {\"tasks\": [...]}\n\n" + _SPLIT_PROMPT
+                )
+            response = await eco_router.chat(
+                messages=[
+                    LLMMessage(role="system", content=sys_prompt),
+                    LLMMessage(role="user", content=message),
+                ],
+                user_id=user_id,
+                role="brain",
+                max_tokens=200,
+            )
+            raw = response.content.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            try:
+                parsed = json.loads(raw)
+                break
+            except json.JSONDecodeError as exc:
+                if attempt == 0:
+                    logger.debug(
+                        "Task split JSON parse failed (retrying once): %s", exc,
+                    )
+                    continue
+                raise  # propagate to outer try/except → single-task fallback
+        assert parsed is not None  # loop either broke with parsed set or raised
         tasks_data = parsed.get("tasks", [])
 
         if not tasks_data or len(tasks_data) < 2:
             # LLM says it's a single task
-            return [SubTask(instruction=message, lane="foreground", name="chat")]
+            lane = "background" if _looks_enumerative(message) else "foreground"
+            return [SubTask(instruction=message, lane=lane, name="chat")]
 
         result = []
         for t in tasks_data:
@@ -146,4 +212,5 @@ async def split_tasks(
 
     except Exception as exc:
         logger.debug("Task split failed (falling back to single): %s", exc)
-        return [SubTask(instruction=message, lane="foreground", name="chat")]
+        lane = "background" if _looks_enumerative(message) else "foreground"
+        return [SubTask(instruction=message, lane=lane, name="chat")]

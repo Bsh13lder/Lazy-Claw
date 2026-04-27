@@ -186,16 +186,36 @@ function DetailPane({ task }: { task: AgentTask | null }) {
 export default function Activity() {
   const { agentStatus, activityFeed, metrics } = useAgentStatus();
 
+  // Foreground = the active chat turn only. The previous filter
+  // (`lane !== "specialist"`) leaked parallel `subagent` dispatches and
+  // TaskRunner-tracked `background` rows into the foreground column.
   const foreground = useMemo(
-    () => (agentStatus?.active ?? []).filter((t) => t.lane !== "specialist"),
+    () => (agentStatus?.active ?? []).filter((t) => t.lane === "foreground"),
     [agentStatus],
   );
-  const background = useMemo(() => agentStatus?.background ?? [], [agentStatus]);
+  // Background = TaskRunner running + parallel dispatch subagents (each
+  // parallel agent IS a background task). De-dupe by task_id since
+  // TeamLead and TaskRunner both register `run_background` rows.
+  const background = useMemo(() => {
+    const fromRunner = agentStatus?.background ?? [];
+    const fromActive = (agentStatus?.active ?? []).filter(
+      (t) => t.lane === "background" || t.lane === "subagent",
+    );
+    const seen = new Set(fromRunner.map((t) => t.task_id));
+    return [...fromRunner, ...fromActive.filter((t) => !seen.has(t.task_id))];
+  }, [agentStatus]);
   const specialists = useMemo(
     () => (agentStatus?.active ?? []).filter((t) => t.lane === "specialist"),
     [agentStatus],
   );
-  const recent = useMemo(() => agentStatus?.recent ?? [], [agentStatus]);
+  // Merge foreground/specialist completions with background completions so the
+  // master list, history panel, and detail pane render decrypted background
+  // task results uniformly.
+  const recent = useMemo(() => {
+    const fg = agentStatus?.recent ?? [];
+    const bg = agentStatus?.background_recent ?? [];
+    return [...fg, ...bg];
+  }, [agentStatus]);
   const inFlight = foreground.length + background.length + specialists.length;
 
   const allTasks = useMemo<AgentTask[]>(() => {

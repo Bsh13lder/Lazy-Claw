@@ -305,16 +305,30 @@ async def remote_session_stop(user: User = Depends(get_current_user)):
 
 @router.get("/host-session")
 async def host_session_status(user: User = Depends(get_current_user)):
-    """Report current host-bridge mode + whether host Brave is reachable."""
+    """Report current host-bridge mode + whether host Brave is reachable.
+
+    On native (non-Docker) installs the probe is a guaranteed miss —
+    ``host.docker.internal`` doesn't resolve, so probing every 10 s (the
+    frontend polls this endpoint that often) just fills ``lazyclaw.log``
+    with debug spam. Short-circuit with ``is_docker_runtime()`` instead.
+    """
     from lazyclaw.browser import host_bridge
     from lazyclaw.browser.browser_settings import get_browser_settings
 
     settings = await get_browser_settings(_config, user.id)
+    if not host_bridge.is_docker_runtime():
+        return {
+            "mode": settings.get("use_host_browser", "off"),
+            "runtime": "native",
+            "reachable": False,
+            "last_source": settings.get("last_host_cdp_source"),
+            "token_set": bool(settings.get("host_cdp_token")),
+        }
     port = getattr(_config, "cdp_port", 9222)
     reachable_ws = await host_bridge.probe_host_cdp(port)
     return {
         "mode": settings.get("use_host_browser", "off"),
-        "runtime": "docker" if host_bridge.is_docker_runtime() else "native",
+        "runtime": "docker",
         "reachable": reachable_ws is not None,
         "last_source": settings.get("last_host_cdp_source"),
         "token_set": bool(settings.get("host_cdp_token")),

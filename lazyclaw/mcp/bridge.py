@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -12,6 +14,74 @@ from lazyclaw.skills.registry import SkillRegistry
 logger = logging.getLogger(__name__)
 
 _MCP_PREFIX = "mcp_"
+
+# ── Per-server call concurrency cap ──────────────────────────────────────
+# Each MCP server is one stdio subprocess. crawl4ai (mcp-scraper) holds a
+# stateful Playwright session inside that subprocess; firing 4+ concurrent
+# `extract_entities` / `crawl_url` calls from parallel EXPLORE specialists
+# OOM-crashed the Chromium child and dropped the whole stdio connection
+# (5 restarts in 30 min on 2GB; see plans/rosy-meandering-parnas.md).
+# A per-server-id semaphore caps in-flight calls so Playwright has room to
+# breathe. Cap is configurable via env so we can tighten on a stuck batch
+# without rebuilding.
+_server_call_semaphores: dict[str, asyncio.Semaphore] = {}
+
+
+def _mcp_call_concurrency() -> int:
+    raw = os.environ.get("LAZYCLAW_MCP_CALL_CONCURRENCY")
+    if raw:
+        try:
+            n = int(raw)
+            if n >= 1:
+                return n
+        except ValueError:
+            pass
+    return 4
+
+
+def _get_call_semaphore(server_id: str) -> asyncio.Semaphore:
+    """Lazy per-server-id call semaphore. Mirrors the connect-lock pattern
+    in lazyclaw/mcp/manager.py:_get_connect_lock — but for in-flight calls
+    rather than connect handshakes."""
+    sem = _server_call_semaphores.get(server_id)
+    if sem is None:
+        sem = asyncio.Semaphore(_mcp_call_concurrency())
+        _server_call_semaphores[server_id] = sem
+    return sem
+
+# Tools whose JSON Schema lists params as optional but the server-side
+# validator requires conditional combinations. Without these hints
+# inline in the description, the brain has to learn the requirement
+# the hard way — by triggering UserInputError and retrying. The agent
+# loop already has a recovery path that re-injects the schema on
+# UserInputError, but surfacing the hint upfront avoids the round trip
+# entirely. Keep this map narrow — only known schema-vs-validator
+# mismatches; a generic hint dump would bloat every tool description.
+_DESCRIPTION_HINTS: dict[str, str] = {
+    "modify_sheet_values": (
+        "REQUIRED for write ops: pass `values` as a 2D array of rows "
+        "(e.g. `[[\"foo\", \"bar\"]]`). For clear ops, pass "
+        "`clear_values=true` instead. Calls without either fail with "
+        "UserInputError."
+    ),
+    "append_table_rows": (
+        "REQUIRED: `values` as a 2D array of rows. Row width must "
+        "match the table's column count or the call fails."
+    ),
+    "manage_event": (
+        "REQUIRED for create/update: `summary`, `start`, `end`. "
+        "For delete: `event_id` only. Mixing modes (e.g. event_id "
+        "with summary) fails."
+    ),
+}
+
+
+def _decorate_description(base_name: str, description: str) -> str:
+    """Append a usage hint to known problem-tools' descriptions."""
+    hint = _DESCRIPTION_HINTS.get(base_name)
+    if hint:
+        return f"{description}\n\nNOTE: {hint}"
+    return description
 
 
 def _mcp_topic_for(tool_name: str, server_name: str) -> str | None:
@@ -89,20 +159,24 @@ class MCPToolSkill(BaseSkill):
         Records a skill_lesson on success for learning-enabled topics
         (whatsapp / instagram / email) so future calls can replay a
         known-good parameter shape. Lesson save is fire-and-forget.
+
+        Per-server semaphore caps simultaneous in-flight calls to one
+        stdio subprocess (see `_get_call_semaphore`).
         """
-        try:
-            result = await self._client.call_tool(self._tool_name, params)
-        except Exception as exc:
-            if not self._config or not _is_auth_error(exc):
-                raise
-            logger.info(
-                "MCP tool %s got 401 — attempting token refresh",
-                self._tool_name,
-            )
-            new_client = await self._refresh_and_reconnect(user_id)
-            # Update to the new active client (old one is disconnected)
-            self._client = new_client
-            result = await self._client.call_tool(self._tool_name, params)
+        async with _get_call_semaphore(self._client.server_id):
+            try:
+                result = await self._client.call_tool(self._tool_name, params)
+            except Exception as exc:
+                if not self._config or not _is_auth_error(exc):
+                    raise
+                logger.info(
+                    "MCP tool %s got 401 — attempting token refresh",
+                    self._tool_name,
+                )
+                new_client = await self._refresh_and_reconnect(user_id)
+                # Update to the new active client (old one is disconnected)
+                self._client = new_client
+                result = await self._client.call_tool(self._tool_name, params)
 
         # Fire-and-forget: log what worked, once per successful call, so
         # small models can replay the shape on the next similar request.
@@ -261,26 +335,31 @@ class LazyMCPToolSkill(BaseSkill):
                     )
 
         touch_client(self._server_id)
-        try:
-            return await client.call_tool(self._tool_name, params)
-        except RuntimeError as exc:
-            # Session died between the check and the call — reconnect once
-            if "not connected" not in str(exc):
-                raise
-            logger.warning(
-                "MCP %s session died mid-call, reconnecting for %s",
-                self._server_name, self._tool_name,
-            )
-            async with _get_connect_lock(self._server_id):
-                if self._is_oauth:
-                    client = await connect_server_with_oauth(
-                        self._config, self._user_id, self._server_id,
-                    )
-                else:
-                    client = await connect_server(
-                        self._config, self._user_id, self._server_id, force=True,
-                    )
-            return await client.call_tool(self._tool_name, params)
+        # Per-server call semaphore — gate concurrent in-flight calls so
+        # the underlying stdio subprocess (and any stateful library it
+        # holds, e.g. crawl4ai's Playwright session in mcp-scraper) isn't
+        # stomped by parallel EXPLORE specialists.
+        async with _get_call_semaphore(self._server_id):
+            try:
+                return await client.call_tool(self._tool_name, params)
+            except RuntimeError as exc:
+                # Session died between the check and the call — reconnect once
+                if "not connected" not in str(exc):
+                    raise
+                logger.warning(
+                    "MCP %s session died mid-call, reconnecting for %s",
+                    self._server_name, self._tool_name,
+                )
+                async with _get_connect_lock(self._server_id):
+                    if self._is_oauth:
+                        client = await connect_server_with_oauth(
+                            self._config, self._user_id, self._server_id,
+                        )
+                    else:
+                        client = await connect_server(
+                            self._config, self._user_id, self._server_id, force=True,
+                        )
+                return await client.call_tool(self._tool_name, params)
 
 
 async def register_mcp_tools_lazy(
@@ -313,7 +392,9 @@ async def register_mcp_tools_lazy(
             server_id=server_id,
             server_name=server_name,
             tool_name=tool["name"],
-            tool_description=tool.get("description", ""),
+            tool_description=_decorate_description(
+                tool["name"], tool.get("description", ""),
+            ),
             tool_schema=tool.get("inputSchema", {}),
             config=config,
             user_id=user_id,
@@ -388,7 +469,9 @@ async def register_mcp_tools(
         skill = MCPToolSkill(
             client=client,
             tool_name=tool["name"],
-            tool_description=tool.get("description", ""),
+            tool_description=_decorate_description(
+                tool["name"], tool.get("description", ""),
+            ),
             tool_schema=tool.get("inputSchema", {}),
             config=config,
             user_id=user_id,

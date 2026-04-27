@@ -127,11 +127,18 @@ async def request_plan_approval(
     if existing and not existing.event.is_set():
         existing.decision = PlanDecision(False, "superseded by newer plan")
         existing.event.set()
+        logger.info(
+            "Plan gate: user %s previous pending plan superseded", user_id,
+        )
 
     pending = PendingPlan(plan_text=plan_text, steps=list(steps))
     _pending[user_id] = pending
 
     _publish_plan_event(user_id, plan_text, steps, status="pending")
+    logger.info(
+        "Plan gate: user %s awaiting approval (%d steps, timeout=%.0fs)",
+        user_id, len(steps), timeout,
+    )
 
     try:
         await asyncio.wait_for(pending.event.wait(), timeout=timeout)
@@ -139,11 +146,25 @@ async def request_plan_approval(
         pending.decision = PlanDecision(
             False, "timed out waiting for approval",
         )
+        logger.info(
+            "Plan gate: user %s approval TIMED OUT after %.0fs",
+            user_id, timeout,
+        )
     finally:
         if _pending.get(user_id) is pending:
             _pending.pop(user_id, None)
 
     decision = pending.decision or PlanDecision(False, "unknown")
+    if decision.approved:
+        logger.info(
+            "Plan gate: user %s APPROVED plan (auto_approve_session=%s)",
+            user_id, decision.auto_approve_session,
+        )
+    else:
+        logger.info(
+            "Plan gate: user %s REJECTED plan — reason=%r",
+            user_id, decision.reason,
+        )
     if decision.approved and decision.auto_approve_session:
         set_session_auto_approve(user_id)
     return decision

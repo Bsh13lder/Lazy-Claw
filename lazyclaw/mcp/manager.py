@@ -86,6 +86,16 @@ BUNDLED_MCPS = {
         "description": "Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google",
         "optional": True,
     },
+    "mcp-scraper": {
+        "module": "mcp_scraper",
+        "description": (
+            "Self-hosted scraper — JS-rendered crawl, entity extraction "
+            "(emails/phones/socials), site map, file→markdown, batch URLs. "
+            "Use BEFORE browser for contact data on a known URL."
+        ),
+        "optional": True,
+        "persistent": True,
+    },
     "stripe": {
         "npx": "@stripe/mcp@latest",
         "description": "Create invoices, track payments, manage subscriptions",

@@ -81,9 +81,12 @@ async def get_agent_status(user: User = Depends(get_current_user)):
 
     # Merge background tasks from TaskRunner (if available)
     bg_running: list[dict] = []
+    bg_recent: list[dict] = []
     if _task_runner is not None:
         try:
+            running_ids: set[str] = set()
             for task in _task_runner.list_running(user.id):
+                running_ids.add(task["id"])
                 bg_running.append({
                     "task_id": task["id"],
                     "name": task["name"],
@@ -91,12 +94,37 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                     "status": "running",
                     "elapsed_s": round(task["elapsed_seconds"], 1),
                 })
+            # Pull historical (completed/failed) so the UI can render the
+            # decrypted result body. Excluding rows still in ``running``
+            # avoids duplicate cards in the dashboard.
+            for task in await _task_runner.list_all(user.id, limit=20):
+                if task["id"] in running_ids:
+                    continue
+                if task.get("status") not in ("done", "failed", "cancelled"):
+                    continue
+                bg_recent.append({
+                    "task_id": task["id"],
+                    "name": task["name"],
+                    "lane": "background",
+                    "status": task["status"],
+                    "result": task.get("result"),
+                    "result_preview": (
+                        (task.get("result") or "")[:200] or None
+                    ),
+                    "error": task.get("error"),
+                    "created_at": task.get("created_at"),
+                    "completed_at": task.get("completed_at"),
+                    "cost_usd": task.get("cost_usd", 0.0),
+                    "tokens_used": task.get("tokens_used", 0),
+                    "llm_calls": task.get("llm_calls", 0),
+                })
         except Exception:
-            logger.warning("Failed to list running background tasks", exc_info=True)
+            logger.warning("Failed to list background tasks", exc_info=True)
 
     return {
         "active": active,
         "background": bg_running,
+        "background_recent": bg_recent,
         "recent": recent,
     }
 

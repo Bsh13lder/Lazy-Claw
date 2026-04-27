@@ -212,11 +212,41 @@ def _to_llm_messages(messages: list[dict]) -> list[LLMMessage]:
             tool_calls=tool_calls,
         ))
 
-    # Strip orphaned tool messages (no preceding assistant with matching tool_calls)
+    # Validate tool_use ↔ tool_result pairing.
+    #
+    # Two failure modes both cause Anthropic 400 "tool call result does not
+    # follow tool call (2013)":
+    #   1. tool message with no preceding assistant.tool_calls match → drop it
+    #   2. assistant.tool_calls with no following matching tool message →
+    #      inject a stub tool_result so the pairing is closed
+    #
+    # Persisted system messages (e.g. legacy MCP-recovery rows) sitting
+    # between a tool_use and its tool_result must NOT reset the active set —
+    # they're scoped guidance, not conversation, and resetting would orphan
+    # the trailing tool_result.
     validated: list[LLMMessage] = []
     active_tc_ids: set[str] = set()
+
+    def _flush_unsatisfied() -> None:
+        for tcid in list(active_tc_ids):
+            validated.append(LLMMessage(
+                role="tool",
+                content="[tool result missing]",
+                tool_call_id=tcid,
+            ))
+            logger.debug("Injected stub for unsatisfied tool_call: %s", tcid)
+        active_tc_ids.clear()
+
     for msg in result:
+        if msg.role == "system":
+            # Persisted system rows are legacy noise (e.g. older MCP-recovery
+            # rows). They were transient per-call guidance, never conversation,
+            # and slotting one between a tool_use and tool_result corrupts the
+            # pairing for OpenAI. Drop them — system prompt is built fresh
+            # every call by the agent.
+            continue
         if msg.role == "assistant" and msg.tool_calls:
+            _flush_unsatisfied()
             active_tc_ids = {tc.id for tc in msg.tool_calls}
             validated.append(msg)
         elif msg.role == "tool":
@@ -226,8 +256,10 @@ def _to_llm_messages(messages: list[dict]) -> list[LLMMessage]:
             else:
                 logger.debug("Dropping orphaned tool message: %s", msg.tool_call_id)
         else:
-            active_tc_ids = set()
+            _flush_unsatisfied()
             validated.append(msg)
+
+    _flush_unsatisfied()
     return validated
 
 

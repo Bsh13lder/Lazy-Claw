@@ -29,20 +29,36 @@ SUBSCRIBER_QUEUE = 16
 
 @dataclass(frozen=True)
 class TaskEvent:
-    """Immutable background-task lifecycle event."""
+    """Immutable task-lifecycle event.
+
+    Carries both background-task completion (`background_done` /
+    `background_failed`) and the TeamLead live-progress stream
+    (`task_started`, `task_step`, `task_phase`, `task_completed`,
+    `background_started`). Activity/Overview UI subscribes via
+    chat_ws → task_event_bus.subscribe and merges these into the
+    agent status snapshot without waiting for the 3 s poll.
+    """
 
     user_id: str
-    kind: str                     # background_done | background_failed
+    kind: str
     task_id: str
     name: str
     ts: float = field(default_factory=time.time)
-    result: str | None = None     # agent's final answer (truncated by producer)
+    # Terminal-result fields (background_done / background_failed)
+    result: str | None = None
     error: str | None = None
     duration_ms: int | None = None
     total_tokens: int | None = None
     llm_calls: int | None = None
     total_cost: float | None = None
     tools_used: tuple[str, ...] = ()
+    # Live-progress fields (task_started / task_step / task_phase / task_completed)
+    lane: str | None = None
+    description: str | None = None
+    step: str | None = None
+    step_count: int | None = None
+    phase: str | None = None
+    status: str | None = None     # done | failed | cancelled (task_completed)
 
     def to_frame(self) -> dict:
         """JSON-safe WebSocket frame payload."""

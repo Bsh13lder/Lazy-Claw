@@ -27,7 +27,11 @@ function relativeTime(ts: number): string {
 }
 
 export default function BrowserCanvas({ session, onDismiss }: Props) {
-  const [expanded, setExpanded] = useState(true);
+  // Start COLLAPSED — the canvas mounts on every browser_event (even
+  // headless reads), and a full-height popup is intrusive. User wants
+  // a small notification chip + toggle button; clicking the chevron
+  // expands the thumbnail / timeline on demand.
+  const [expanded, setExpanded] = useState(false);
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpText, setHelpText] = useState("");
@@ -285,6 +289,16 @@ export default function BrowserCanvas({ session, onDismiss }: Props) {
             </div>
           )}
         </div>
+        {/* Collapsed mode: surface a tiny "N actions" chip so the user sees
+            activity without the canvas eating the sidebar. */}
+        {!expanded && session.events.length > 0 && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded bg-sky-400/15 text-sky-300 border border-sky-400/30 shrink-0"
+            title={`${session.events.length} browser event(s) — click chevron to expand`}
+          >
+            {session.events.length} action{session.events.length === 1 ? "" : "s"}
+          </span>
+        )}
         {liveMode.active && (
           <span
             className="text-[10px] px-1.5 py-0.5 rounded bg-rose-400/20 text-rose-400 border border-rose-400/40 flex items-center gap-1"

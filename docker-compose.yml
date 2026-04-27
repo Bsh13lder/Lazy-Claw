@@ -3,7 +3,13 @@ services:
     build: .
     container_name: lazyclaw
     restart: unless-stopped
-    mem_limit: 2g
+    # 4 GB ceiling so Playwright/Chromium has room when 4 EXPLORE
+    # specialists hit mcp-scraper concurrently (each Chromium tab
+    # eats ~150–200 MB; the rest of LazyClaw was already at ~1.2 GB
+    # under load). Was 2g; raised 2026-04-27 after 5 OOM-style crashes
+    # in the Hirossa salon-emails batch.
+    mem_limit: 4g
+    memswap_limit: 4g
     shm_size: '1gb'
     ports:
       - "18789:18789"

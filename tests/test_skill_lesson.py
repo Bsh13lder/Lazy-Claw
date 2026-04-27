@@ -169,15 +169,32 @@ def test_save_skill_lesson_redacts_secrets_in_params(monkeypatch):
     assert "[redacted]" in body
 
 
-def test_save_skill_lesson_skips_unknown_topic(monkeypatch):
+def test_save_skill_lesson_accepts_arbitrary_topic(monkeypatch):
+    """LEARNING_TOPICS used to be a hardcoded whitelist that dropped any
+    topic not explicitly listed. The dispatcher's universal post-skill
+    hook needs the gate inverted: every topic is allowed unless it lands
+    in the (empty by default) ``_TOPIC_DENYLIST``.
+    """
     store, _ = _install_fake_lb(monkeypatch)
     out = _run(mod.save_skill_lesson(
         config=None, user_id="u1",
-        topic="tiktok",        # not in LEARNING_TOPICS
+        topic="tiktok",        # arbitrary, never explicitly registered
         action="tiktok_post",
         intent="Post a video",
         params={},
         outcome="success",
+    ))
+    assert out == "n1"
+    assert len(store.notes) == 1
+    assert "topic/tiktok" in store.notes[0]["tags"]
+
+
+def test_save_skill_lesson_skips_empty_topic(monkeypatch):
+    store, _ = _install_fake_lb(monkeypatch)
+    out = _run(mod.save_skill_lesson(
+        config=None, user_id="u1",
+        topic="",
+        action="x", intent="x", params={}, outcome="success",
     ))
     assert out is None
     assert store.notes == []
@@ -218,7 +235,13 @@ def test_save_skill_lesson_writes_fix_outcome(monkeypatch):
 
 
 def _install_fake_embeddings(monkeypatch, results):
-    async def fake_semantic_search(config, user_id, query, *, k=10):
+    # Accept the same keyword args the production semantic_search now takes
+    # (``tag_prefix`` for SQL-layer prefilter, ``min_similarity`` for the
+    # weak-hit threshold). The fake ignores them — tests control what
+    # comes back independently of which knobs the caller turns.
+    async def fake_semantic_search(
+        config, user_id, query, *, k=10, tag_prefix=None, min_similarity=0.0,
+    ):
         return {"query": query, "results": results, "source": "semantic"}
 
     import lazyclaw.lazybrain.embeddings  # noqa: F401

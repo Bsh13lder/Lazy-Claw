@@ -97,13 +97,16 @@ function AppContent() {
   })();
 
   return (
-    <ChatProvider>
-      <AgentStatusProvider>
+    // AgentStatusProvider MUST wrap ChatProvider — ChatProvider's WebSocket
+    // hook reads `useAgentStatus().refreshStatus` to nudge the dashboard
+    // immediately on TeamLead / TaskRunner lifecycle events.
+    <AgentStatusProvider>
+      <ChatProvider>
         <NavShell activePage={page} onNavigate={setPage}>
           {pageContent}
         </NavShell>
-      </AgentStatusProvider>
-    </ChatProvider>
+      </ChatProvider>
+    </AgentStatusProvider>
   );
 }
 

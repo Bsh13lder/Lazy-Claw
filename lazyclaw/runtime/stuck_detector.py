@@ -91,11 +91,17 @@ def _effective_limit(tool_name: str, limits: dict[str, int]) -> int:
 def detect_tool_loop(
     history: list[str],
     limits: dict[str, int] | None = None,
+    results: list[str] | None = None,
 ) -> StuckSignal | None:
     """Detect when the same tool is called N+ times consecutively.
 
     Browser gets a higher limit (multi-step navigation is normal).
     MCP batch tools (email_*, whatsapp_*) get 10 before stuck.
+
+    If ``results`` is supplied, also requires the recent results to be
+    ≥85% similar pairwise — different results means real progress
+    (e.g. ``email_get(id=X)`` 24× with 24 distinct emails) and the
+    detector should NOT fire just because the tool name repeats.
     """
     if not history:
         return None
@@ -110,6 +116,15 @@ def detect_tool_loop(
     last_n = history[-limit:]
     if len(set(last_n)) != 1:
         return None
+
+    # Same tool name N times — but if results are varying substantially,
+    # this is batch progress (read 24 emails, fetch 30 notes, etc.),
+    # not a stuck loop. Bypass the signal in that case.
+    if results is not None and len(results) >= limit:
+        last_n_results = results[-limit:]
+        for i in range(1, len(last_n_results)):
+            if _similarity_ratio(last_n_results[i - 1], last_n_results[i]) < 0.85:
+                return None
 
     return StuckSignal(
         reason="loop",
@@ -343,7 +358,11 @@ def detect_same_result(
 # making progress — trigger stuck before reaching the loop limit.
 _VERIFIER_FAILED_MARKER = "→ FAILED:"
 _VERIFIER_SUCCESS_MARKER = "→ SUCCESS:"
-_NO_PROGRESS_THRESHOLD = 2
+# 2 was too eager — the verifier is heuristic and a single unlucky
+# screen read could flip it to FAILED while the agent was still
+# making real progress. 3 keeps the detector in play for genuinely
+# stuck flows while letting normal multi-step navigation breathe.
+_NO_PROGRESS_THRESHOLD = 3
 
 
 def detect_no_progress(
@@ -485,8 +504,9 @@ def detect_stuck(
             )
         return signal
 
-    # Tool loop
-    signal = detect_tool_loop(tool_history)
+    # Tool loop — pass results so batch reads with varying content
+    # (e.g. email_get(id=X) 24× → 24 different emails) don't false-fire.
+    signal = detect_tool_loop(tool_history, results=tool_results)
     if signal:
         return signal
 

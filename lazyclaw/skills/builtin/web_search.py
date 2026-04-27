@@ -28,6 +28,7 @@ class _ProviderUsage:
 
     serper_count: int = 0
     serpapi_count: int = 0
+    scraper_count: int = 0
     reset_month: str = ""  # "2026-04" format
 
     def _maybe_reset(self) -> None:
@@ -35,6 +36,7 @@ class _ProviderUsage:
         if self.reset_month != current_month:
             self.serper_count = 0
             self.serpapi_count = 0
+            self.scraper_count = 0
             self.reset_month = current_month
 
     def record(self, provider: str) -> None:
@@ -43,11 +45,14 @@ class _ProviderUsage:
             self.serper_count += 1
         elif provider == "serpapi":
             self.serpapi_count += 1
+        elif provider == "scraper":
+            self.scraper_count += 1
 
     def status(self) -> str:
         self._maybe_reset()
         return (
-            f"Serper.dev: {self.serper_count}/{_SERPER_MONTHLY_LIMIT} "
+            f"mcp-scraper: {self.scraper_count} (free) "
+            f"| Serper.dev: {self.serper_count}/{_SERPER_MONTHLY_LIMIT} "
             f"| SerpAPI: {self.serpapi_count}/{_SERPAPI_MONTHLY_LIMIT}"
         )
 
@@ -63,8 +68,59 @@ class _ProviderUsage:
 # Global singleton — survives across skill calls within one process
 _usage = _ProviderUsage()
 
-# Active provider: "serper" or "serpapi" — changeable via Telegram
-_active_provider: str = "serper"
+# Active provider — "scraper" (default, free via mcp-scraper), or
+# "serper" / "serpapi" (paid, opt-in via Telegram /search command), or
+# "duckduckgo" (offline fallback). The default flipped from "serper" to
+# "scraper" once mcp-scraper became the IDEAL search backbone (2026-04-26).
+_active_provider: str = "scraper"
+
+# mcp-scraper integration constants. The wrapper exposes `search_google`
+# (single query), `batch_search_google` (parallel multi-query), and
+# `search_and_crawl` (search + fetch). web_search uses `search_google`
+# for the single-query path. Tool names are auto-prefixed by the MCP
+# bridge as `mcp_<server_uuid>_<tool_name>`.
+_SCRAPER_SERVER_NAME = "mcp-scraper"
+_SCRAPER_SEARCH_SUFFIX = "_search_google"
+
+
+def _paid_search_enabled() -> bool:
+    """Whether SerpAPI / Serper.dev branches may fire.
+
+    Soft-disabled by default (2026-04-27) — mcp-scraper covers ~all general
+    search needs for free, so paid providers stay dormant. Flip
+    ``LAZYCLAW_ENABLE_PAID_SEARCH=1`` to re-enable the paid chain (needed
+    only for Google Flights structured pricing or as a CAPTCHA-resilient
+    fallback if Google starts blocking the direct scraper).
+    """
+    return os.environ.get("LAZYCLAW_ENABLE_PAID_SEARCH", "").strip() in (
+        "1", "true", "True", "yes", "on",
+    )
+
+# In-process rate-limit cooldown — when a provider returns 429, skip it for
+# the next N seconds so we don't slam the API and chain-trigger fallback to
+# browser. Without this the brain calls web_search 30× in 10 s, each one
+# 429s, and the brain interprets the failure as "search broken → use
+# browser instead" — which is exactly what we don't want.
+_RATE_LIMIT_COOLDOWN_S = 60.0
+_provider_cooldowns: dict[str, float] = {}
+
+
+def _is_in_cooldown(provider: str) -> bool:
+    until = _provider_cooldowns.get(provider, 0.0)
+    return time.monotonic() < until
+
+
+def _trip_cooldown(provider: str, exc: BaseException) -> bool:
+    """Return True if exc indicates a rate limit; mark provider in cooldown."""
+    msg = str(exc).lower()
+    is_rate_limit = "429" in msg or "too many requests" in msg or "rate limit" in msg
+    if is_rate_limit:
+        _provider_cooldowns[provider] = time.monotonic() + _RATE_LIMIT_COOLDOWN_S
+        logger.warning(
+            "Search provider %s rate-limited — cooling down for %ds",
+            provider, int(_RATE_LIMIT_COOLDOWN_S),
+        )
+    return is_rate_limit
 
 
 def get_search_usage() -> _ProviderUsage:
@@ -84,8 +140,11 @@ def set_active_provider(provider: str) -> str:
     is only the system default for users who haven't picked one.
     """
     global _active_provider
-    if provider not in ("serper", "serpapi"):
-        return f"Unknown provider: {provider}. Use 'serper' or 'serpapi'."
+    if provider not in ("scraper", "serper", "serpapi", "duckduckgo"):
+        return (
+            f"Unknown provider: {provider}. "
+            "Use 'scraper' (default, free), 'serper', 'serpapi', or 'duckduckgo'."
+        )
     _active_provider = provider
     return f"Search provider set to: {provider}"
 
@@ -448,6 +507,95 @@ def _format_serpapi_results(data: dict, search_type: str, max_results: int) -> s
     return "\n\n".join(lines) if lines else "No results found."
 
 
+async def _scraper_search(
+    registry,
+    user_id: str,
+    query: str,
+    max_results: int,
+    search_type: str,
+) -> str | None:
+    """Run a Google search through mcp-scraper's `search_google` tool.
+
+    Returns formatted result string on success, ``None`` if the scraper
+    server isn't registered or the call yielded no usable result. Raises
+    on transport/HTTP errors so the caller can flip the cooldown.
+
+    The scraper's tool name is dynamic (`mcp_<server_uuid>_search_google`),
+    so we suffix-match on registered MCP tools and tighten with a description
+    check (the bridge embeds the server name in the description).
+    """
+    if registry is None:
+        return None
+
+    # Suffix-match on already-registered MCP tools first.
+    target_skill = None
+    for tool_info in registry.list_mcp_tools():
+        func = tool_info.get("function", {})
+        tname = func.get("name", "")
+        tdesc = func.get("description", "").lower()
+        if tname.endswith(_SCRAPER_SEARCH_SUFFIX) and _SCRAPER_SERVER_NAME in tdesc:
+            target_skill = registry.get(tname)
+            if target_skill is not None:
+                break
+
+    # On-demand connect if mcp-scraper isn't active yet. Mirrors the
+    # pattern in lazyclaw/runtime/agent.py (~line 1480) so behavior is
+    # consistent between brain-side keyword injection and search-side.
+    if target_skill is None:
+        try:
+            from lazyclaw.config import load_config
+            from lazyclaw.mcp.bridge import cache_tool_schemas, register_mcp_tools
+            from lazyclaw.mcp.manager import (
+                connect_server, get_server_id_by_name,
+            )
+
+            cfg = load_config()
+            sid = await get_server_id_by_name(cfg, user_id, _SCRAPER_SERVER_NAME)
+            if not sid:
+                return None
+            client = await asyncio.wait_for(
+                connect_server(cfg, user_id, sid), timeout=20,
+            )
+            tools_list = await client.list_tools()
+            await cache_tool_schemas(cfg, _SCRAPER_SERVER_NAME, tools_list)
+            await register_mcp_tools(
+                client, registry, config=cfg, user_id=user_id,
+            )
+            for tool_info in registry.list_mcp_tools():
+                func = tool_info.get("function", {})
+                tname = func.get("name", "")
+                tdesc = func.get("description", "").lower()
+                if (
+                    tname.endswith(_SCRAPER_SEARCH_SUFFIX)
+                    and _SCRAPER_SERVER_NAME in tdesc
+                ):
+                    target_skill = registry.get(tname)
+                    if target_skill is not None:
+                        break
+        except Exception:
+            logger.debug("mcp-scraper on-demand connect failed", exc_info=True)
+            return None
+
+    if target_skill is None:
+        return None
+
+    # mcp-scraper's search_google takes a nested `request` dict (the
+    # wrapper uses pydantic Annotated, exposed to MCP as a single object).
+    # Map web_search params (query, max_results) into its expected shape.
+    raw = await target_skill.execute(
+        user_id,
+        {"request": {"query": query, "num_results": max_results}},
+    )
+    if not raw or not isinstance(raw, str):
+        return None
+    if "rate limit" in raw.lower() or "429" in raw:
+        # Surface so the caller can trip the cooldown and fall through.
+        raise RuntimeError(f"scraper-google rate-limited: {raw[:200]}")
+
+    _usage.record("scraper")
+    return f"[mcp-scraper | {search_type}]\n\n{raw}"
+
+
 async def _ddg_fallback(query: str, max_results: int) -> str:
     """DuckDuckGo fallback when no API keys are configured."""
     import asyncio
@@ -486,6 +634,12 @@ def _detect_search_type(query: str) -> str:
 
 
 class WebSearchSkill(BaseSkill):
+    def __init__(self, registry=None) -> None:
+        # Registry is needed so we can call mcp-scraper's `search_google`
+        # tool (the new primary provider). Optional — falls back to the
+        # SerpAPI/Serper/DDG chain if registry is not wired in.
+        self._registry = registry
+
     @property
     def read_only(self) -> bool:
         return True
@@ -501,10 +655,15 @@ class WebSearchSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Search the web using Google via Serper.dev or SerpAPI. "
-            "Supports Google Search, Flights, Shopping, News, Maps. "
-            "Auto-detects flight queries and returns structured pricing data. "
-            "Returns real-time results with titles, URLs, snippets, and prices."
+            "Search the web — runs through mcp-scraper (free, no API key, "
+            "JS-rendered Google). DuckDuckGo is the offline fallback if scraper "
+            "is in cooldown. Paid providers (SerpAPI/Serper.dev) are off by "
+            "default; flip LAZYCLAW_ENABLE_PAID_SEARCH=1 to enable them — needed "
+            "only for Google Flights structured pricing. "
+            "Returns titles, URLs, snippets. Supports Google query operators in "
+            "the `query` field: `site:domain.com`, `intitle:word`, `inurl:word`, "
+            "`\"exact phrase\"`. The result URL itself often contains the answer "
+            "(e.g. an instagram.com/<handle>/ URL gives you the handle directly)."
         )
 
     @property
@@ -537,6 +696,27 @@ class WebSearchSkill(BaseSkill):
         serper_key = os.getenv("SERPER_KEY", "")
         serpapi_key = os.getenv("SERPAPI_KEY", "")
 
+        # ── Primary path: mcp-scraper's search_google (free, JS-rendered) ──
+        # Tried first for ALL non-flight searches unless the user explicitly
+        # opted into a paid provider via the Telegram /search command.
+        # Flights still need SerpAPI (only provider with the Google Flights
+        # engine), so we skip scraper for that branch.
+        _scraper_eligible = (
+            search_type != "flights"
+            and provider not in {"serpapi", "serper", "duckduckgo"}
+            and not _is_in_cooldown("scraper")
+        )
+        if _scraper_eligible:
+            try:
+                result = await _scraper_search(
+                    self._registry, user_id, query, max_results, search_type,
+                )
+                if result:
+                    return result
+            except Exception as exc:
+                _trip_cooldown("scraper", exc)
+                logger.warning("mcp-scraper search failed: %s", exc)
+
         # If the user explicitly picked DuckDuckGo, honor it immediately
         # (skip the paid providers entirely — except flights, which DDG can't do).
         if provider == "duckduckgo" and search_type != "flights":
@@ -546,8 +726,27 @@ class WebSearchSkill(BaseSkill):
             except Exception as exc:
                 return f"DuckDuckGo search failed: {exc}"
 
-        # Flights: ALWAYS use SerpAPI (only provider with Google Flights engine)
-        if search_type == "flights" and serpapi_key and _usage.serpapi_available():
+        # ── Paid-provider chain (SerpAPI / Serper.dev) ────────────────────
+        # Soft-disabled by default since 2026-04-27 — mcp-scraper handles
+        # general search for free. Flip LAZYCLAW_ENABLE_PAID_SEARCH=1 to
+        # re-enable (needed only for Google Flights structured pricing,
+        # or as a CAPTCHA-resilient fallback if Google blocks the direct
+        # scraper). When disabled, control falls through to DuckDuckGo.
+        _paid_enabled = _paid_search_enabled()
+
+        # Flights: ONLY SerpAPI has Google Flights structured pricing.
+        # Even when paid is disabled, log so the user knows why their
+        # flight query came back empty.
+        if search_type == "flights" and not _paid_enabled:
+            logger.info(
+                "Flight query received but LAZYCLAW_ENABLE_PAID_SEARCH is off "
+                "— flights need SerpAPI; returning DuckDuckGo text fallback"
+            )
+
+        if (
+            _paid_enabled and search_type == "flights"
+            and serpapi_key and _usage.serpapi_available()
+        ):
             try:
                 result = await _serpapi_search(query, max_results, "flights")
                 if result:
@@ -563,30 +762,86 @@ class WebSearchSkill(BaseSkill):
                 except Exception as exc:
                     logger.warning("Serper fallback for flights failed: %s", exc)
 
-        # Non-flights: respect active provider, fall back to the other
-        if search_type != "flights":
-            try:
-                if provider == "serper" and serper_key and _usage.serper_available():
+        # Non-flights: respect active provider, fall back to the other.
+        # Each provider gets its own try/except so a 429 on the primary
+        # cleanly falls through to the secondary instead of jumping to
+        # DuckDuckGo (the previous shared try/except did the latter).
+        if _paid_enabled and search_type != "flights":
+            primary_rate_limited = False
+
+            # Primary provider attempt
+            if (
+                provider == "serper" and serper_key
+                and _usage.serper_available() and not _is_in_cooldown("serper")
+            ):
+                try:
                     result = await _serper_search(query, max_results, search_type)
                     if result:
                         return f"[Serper.dev | {search_type}]\n\n{result}"
-
-                if serpapi_key and _usage.serpapi_available():
+                except Exception as exc:
+                    primary_rate_limited = _trip_cooldown("serper", exc)
+                    logger.warning("Serper.dev failed: %s", exc)
+            elif (
+                provider == "serpapi" and serpapi_key
+                and _usage.serpapi_available() and not _is_in_cooldown("serpapi")
+            ):
+                try:
                     result = await _serpapi_search(query, max_results, search_type)
                     if result:
                         return f"[SerpAPI | {search_type}]\n\n{result}"
+                except Exception as exc:
+                    primary_rate_limited = _trip_cooldown("serpapi", exc)
+                    logger.warning("SerpAPI failed: %s", exc)
 
-                if provider == "serpapi" and serper_key and _usage.serper_available():
+            # Secondary provider attempt — separate try so a primary 429
+            # doesn't skip this branch.
+            if (
+                provider == "serper" and serpapi_key
+                and _usage.serpapi_available() and not _is_in_cooldown("serpapi")
+            ):
+                try:
+                    result = await _serpapi_search(query, max_results, search_type)
+                    if result:
+                        return f"[SerpAPI fallback | {search_type}]\n\n{result}"
+                except Exception as exc:
+                    _trip_cooldown("serpapi", exc)
+                    logger.warning("SerpAPI fallback failed: %s", exc)
+            elif (
+                provider == "serpapi" and serper_key
+                and _usage.serper_available() and not _is_in_cooldown("serper")
+            ):
+                try:
                     result = await _serper_search(query, max_results, search_type)
                     if result:
                         return f"[Serper.dev fallback | {search_type}]\n\n{result}"
+                except Exception as exc:
+                    _trip_cooldown("serper", exc)
+                    logger.warning("Serper.dev fallback failed: %s", exc)
 
-            except Exception as exc:
-                logger.warning("Search API failed (%s): %s", provider, exc)
+            # If both paid providers were rate-limited, surface that
+            # specifically so the brain knows it's a transient API issue —
+            # NOT a "search is broken, try browser" signal. This matters
+            # because the brain's training bias is to escalate to browser
+            # whenever a tool returns "failed" wording.
+            if primary_rate_limited:
+                logger.info(
+                    "Search providers rate-limited — falling back to DuckDuckGo "
+                    "(provider in %ds cooldown)", int(_RATE_LIMIT_COOLDOWN_S),
+                )
 
         # Final fallback: DuckDuckGo (no flights/shopping support)
         try:
             result = await _ddg_fallback(query, max_results)
             return f"[DuckDuckGo fallback]\n\n{result}"
         except Exception as exc:
+            # Phrase carefully: don't say "all search providers failed" if it
+            # was rate-limit cooldown — that phrasing pushes the brain to
+            # browser. Instead tell it to retry the query in a moment.
+            in_cooldown = _is_in_cooldown("serper") or _is_in_cooldown("serpapi")
+            if in_cooldown:
+                return (
+                    "Search providers are rate-limited right now. "
+                    "Retry the same query in ~60 s — do NOT escalate to "
+                    "browser; the data is fine, the API just throttled."
+                )
             return f"All search providers failed: {exc}"

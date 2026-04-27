@@ -56,11 +56,23 @@ RUN pip install --no-cache-dir \
 COPY mcp-instagram/ ./mcp-instagram/
 COPY mcp-email/ ./mcp-email/
 COPY mcp-jobspy/ ./mcp-jobspy/
+COPY mcp-scraper/ ./mcp-scraper/
 RUN pip install --no-cache-dir \
         ./mcp-instagram \
         ./mcp-email \
         ./mcp-jobspy \
+        ./mcp-scraper \
         n8n-mcp-server
+
+# Playwright browser binaries for mcp-scraper (JS-rendered crawl).
+# Chromium binary is already in /usr/bin/chromium (system pkg) but Playwright
+# needs its own pinned build; --with-deps installs the X11/font shared libs.
+# PLAYWRIGHT_BROWSERS_PATH sets a shared location readable by the non-root
+# `lazyclaw` user that's added at the end of this Dockerfile (default would
+# install into root's HOME and break for the runtime user).
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rx /ms-playwright
 
 # Claude Code CLI (for claude-code MCP — agent uses Claude as coding tool)
 RUN npm install -g @anthropic-ai/claude-code

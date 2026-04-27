@@ -254,8 +254,19 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
   }, []);
 
   // Split the active + background streams into the three lanes.
-  const foreground = (agentStatus?.active ?? []).filter((t) => t.lane !== "specialist");
-  const background = agentStatus?.background ?? [];
+  // Foreground = the live chat turn only. Anything spawned in parallel
+  // (subagent / background) belongs in the BACKGROUND column — the user
+  // thinks of every parallel agent as a background task.
+  const foreground = (agentStatus?.active ?? []).filter((t) => t.lane === "foreground");
+  const _bgFromRunner = agentStatus?.background ?? [];
+  const _bgFromActive = (agentStatus?.active ?? []).filter(
+    (t) => t.lane === "background" || t.lane === "subagent",
+  );
+  const _seenBg = new Set(_bgFromRunner.map((t) => t.task_id));
+  const background = [
+    ..._bgFromRunner,
+    ..._bgFromActive.filter((t) => !_seenBg.has(t.task_id)),
+  ];
   const specialists = (agentStatus?.active ?? []).filter((t) => t.lane === "specialist");
   const inFlight = foreground.length + background.length + specialists.length;
 
@@ -370,7 +381,10 @@ export default function Overview({ onNavigate }: { onNavigate: (page: Page) => v
             </span>
           </div>
           <HistoryPanel
-            recent={agentStatus?.recent ?? []}
+            recent={[
+              ...(agentStatus?.recent ?? []),
+              ...(agentStatus?.background_recent ?? []),
+            ]}
             events={activityFeed}
             defaultView="cards"
             defaultStatus="all"

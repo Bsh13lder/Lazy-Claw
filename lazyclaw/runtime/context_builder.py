@@ -300,6 +300,14 @@ _TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram", "insta", "reel", " ig "),
     "email":     ("email", "gmail", "inbox", "imap"),
     "whatsapp":  ("whatsapp", "wa msg", "whats app"),
+    "browser":   ("browser", "open ", "click ", "navigate ", "screenshot",
+                  "scroll", " url ", "tab "),
+    "web":       ("search ", "google ", "duckduckgo", "lookup ", "find info",
+                  "what is ", "who is ", "latest news"),
+    "telegram":  ("telegram", " tg "),
+    "lazybrain": ("note", "wikilink", "graph", "lazybrain"),
+    "tasks":     ("task", "remind", "todo", "background job"),
+    "vault":     ("api key", "credential", "secret ", "vault"),
 }
 
 
@@ -317,12 +325,19 @@ async def _build_topic_lessons_section(
     if not user_message:
         return ""
     hay = f" {user_message.lower()} "
-    topics_hit: list[str] = [
-        topic for topic, kws in _TOPIC_KEYWORDS.items()
-        if any(kw in hay for kw in kws)
-    ]
-    if not topics_hit:
+    # Score each topic by # keyword hits — a chatty message that mentions
+    # both "browser" and "search google" should prefer the topics with the
+    # strongest signal, not fan out to every loosely-matching one.
+    scored: list[tuple[int, str]] = []
+    for topic, kws in _TOPIC_KEYWORDS.items():
+        hits = sum(1 for kw in kws if kw in hay)
+        if hits:
+            scored.append((hits, topic))
+    if not scored:
         return ""
+    scored.sort(reverse=True)
+    # Cap at top-2 topics to bound total context injection.
+    topics_hit: list[str] = [t for _, t in scored[:2]]
     try:
         from lazyclaw.runtime.skill_lesson import (
             recall_skill_lessons, format_lessons_as_exemplars,

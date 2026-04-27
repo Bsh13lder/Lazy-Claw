@@ -79,6 +79,53 @@ HELP_TEXT = """\
 # Async helpers (setup wizard)
 # ---------------------------------------------------------------------------
 
+# Bridges TeamLead lifecycle dicts → typed task_event_bus.TaskEvent records.
+# Kept module-level (not a closure) so re-entrant calls in run_agent /
+# _chat_loop don't accidentally hold each other's locals.
+_TEAM_LEAD_BRIDGE_KINDS = {
+    "task_started",
+    "task_step",
+    "task_phase",
+    "task_completed",
+}
+
+
+def _wire_team_lead_to_event_bus(team_lead, task_event_bus_mod) -> None:
+    """Forward TeamLead `_publish` dicts to the per-user task event bus.
+
+    Idempotent: re-installing the publisher on an already-wired TeamLead
+    just replaces the previous adapter (a no-op when the bus module is
+    the same singleton).
+    """
+
+    def _publish(user_id: str, event: dict) -> None:
+        kind = event.get("type", "")
+        if kind not in _TEAM_LEAD_BRIDGE_KINDS:
+            return
+        try:
+            task_event_bus_mod.publish(task_event_bus_mod.TaskEvent(
+                user_id=user_id,
+                kind=kind,
+                task_id=str(event.get("task_id", "") or ""),
+                name=str(event.get("name", "") or event.get("step", "") or ""),
+                lane=event.get("lane"),
+                description=event.get("description"),
+                step=event.get("step"),
+                step_count=event.get("step_count"),
+                phase=event.get("phase"),
+                status=event.get("status"),
+                error=event.get("error"),
+            ))
+        except Exception:
+            # Live UI is best-effort; swallow so TeamLead stays unaffected.
+            logging.getLogger(__name__).debug(
+                "team_lead → task_event_bus bridge failed (kind=%s)", kind,
+                exc_info=True,
+            )
+
+    team_lead.set_event_publisher(_publish)
+
+
 async def verify_provider_async(provider: str, key: str) -> bool:
     from lazyclaw.llm.router import LLMRouter
 
@@ -216,6 +263,13 @@ async def run_agent(config: Config) -> None:
     # Wire activity dashboard deps
     from lazyclaw.gateway.routes.activity import set_activity_deps
     set_activity_deps(team_lead, task_runner)
+
+    # Bridge TeamLead lifecycle events → per-user task_event_bus so the
+    # web chat WebSocket pumps live `task_started` / `task_step` /
+    # `task_phase` / `task_completed` frames straight to Activity/Overview
+    # (no 3 s poll lag). Without this the live path is dead.
+    from lazyclaw.runtime import task_event_bus as _task_bus
+    _wire_team_lead_to_event_bus(team_lead, _task_bus)
 
     # Wire ECO usage tracking
     from lazyclaw.gateway.routes.eco import set_eco_deps
@@ -1092,6 +1146,12 @@ async def _chat_loop() -> None:
         team_lead=team_lead,
     )
     agent._task_runner = task_runner
+
+    # Bridge TeamLead lifecycle events for the REPL/TUI path too — the
+    # CLI shares the same gateway, so Activity/Overview opened in a
+    # browser tab during a CLI session also gets live updates.
+    from lazyclaw.runtime import task_event_bus as _task_bus
+    _wire_team_lead_to_event_bus(team_lead, _task_bus)
 
     # Share registry with gateway for API fallback path
     from lazyclaw.gateway.app import set_registry

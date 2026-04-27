@@ -78,8 +78,12 @@ async def run_specialist(
     # Build filtered tools
     filtered_tools = _filter_tools(registry, specialist.allowed_skills)
 
-    # Build executor (reuses same registry + permission checker)
-    executor = ToolExecutor(registry, permission_checker=permission_checker)
+    # Build executor (reuses same registry + permission checker).
+    # Pass config so the auto-recorder in tool_executor can save lessons.
+    _config = load_config()
+    executor = ToolExecutor(
+        registry, permission_checker=permission_checker, config=_config,
+    )
 
     # System prompt = specialist prompt + task
     system_prompt = (
@@ -100,6 +104,10 @@ async def run_specialist(
     # Stuck detection state — tracks tool names and results across iterations
     _tool_history: list[str] = []
     _tool_results: list[str] = []
+    # One-shot rescue: when stuck looping on `browser`, inject a web_search hint
+    # and let the worker try ONE more iteration before bailing. Strictly capped
+    # at one rescue per task to prevent infinite cycles.
+    _rescue_used: bool = False
 
     try:
         for _iteration in range(MAX_ITERATIONS):
@@ -248,6 +256,39 @@ async def run_specialist(
             # ── Stuck detection after processing all tool calls ──
             stuck = detect_stuck(_tool_history, _tool_results, _tool_results[-1] if _tool_results else None)
             if stuck:
+                # One-shot rescue: if the worker is stuck looping on `browser`
+                # and `web_search` is in its toolbox, inject a hint and let it
+                # try ONE more iteration. This catches the common failure where
+                # workers reach for a heavyweight scrape when a `site:` query
+                # would have answered the question.
+                if (
+                    not _rescue_used
+                    and stuck.reason == "loop"
+                    and _tool_history
+                    and _tool_history[-1] == "browser"
+                    and "web_search" in (specialist.allowed_skills or ())
+                ):
+                    logger.info(
+                        "Specialist %s stuck on browser — injecting web_search rescue hint",
+                        specialist.name,
+                    )
+                    messages.append(LLMMessage(
+                        role="system",
+                        content=(
+                            "RESCUE: You looped on `browser`. STOP using browser for this turn. "
+                            "Try `web_search` instead with a Google operator like "
+                            "`site:domain.com <field you need>`. The URL in the search result "
+                            "often contains the answer (e.g. instagram.com/<handle>/). "
+                            "If web_search also fails, summarize what you DO have and exit."
+                        ),
+                    ))
+                    # Reset the recent tool-history window so detect_stuck
+                    # doesn't fire again on the next iteration just because of
+                    # leftover browser entries.
+                    _tool_history = _tool_history[:-3] if len(_tool_history) >= 3 else []
+                    _rescue_used = True
+                    continue  # let the worker loop run one more iteration with the hint
+
                 duration = int((time.monotonic() - start_time) * 1000)
                 logger.warning(
                     "Specialist %s stuck: %s (%s)",

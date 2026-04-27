@@ -49,6 +49,14 @@ class MCPClient:
         self._transport = transport
         self._config = config
         self._session: Any | None = None
+        # Per-instance lock that serializes ALL writes to _write_stream
+        # (i.e. every JSON-RPC request the SDK sends). The MCP Python SDK's
+        # BaseSession.send_request / notify / respond paths call
+        # `_write_stream.send()` without any synchronization — concurrent
+        # callers will interleave their writes, corrupt the JSON on the wire,
+        # and the server will close the stdio session ("Connection closed").
+        # See plans/rosy-meandering-parnas.md (2026-04-27 root-cause dive).
+        self._call_lock = asyncio.Lock()
         self._read_stream: Any | None = None
         self._write_stream: Any | None = None
         self._child_process: Any | None = None  # Track stdio subprocess for cleanup
@@ -231,7 +239,8 @@ class MCPClient:
         Returns a list of dicts with keys: name, description, inputSchema.
         """
         self._require_session()
-        result = await self._session.list_tools()
+        async with self._call_lock:
+            result = await self._session.list_tools()
         return [
             {
                 "name": tool.name,
@@ -245,7 +254,11 @@ class MCPClient:
         """Invoke a tool on the MCP server and return the result as a string."""
         self._require_session()
         logger.debug("MCPClient %s calling tool %s", self._server_id, name)
-        result = await self._session.call_tool(name, arguments)
+        # Serialize the wire I/O — the MCP SDK does NOT lock _write_stream.
+        # Result-processing below stays outside the lock so we don't hold it
+        # for parsing work.
+        async with self._call_lock:
+            result = await self._session.call_tool(name, arguments)
 
         # Check MCP protocol error flag first
         if getattr(result, "isError", False):

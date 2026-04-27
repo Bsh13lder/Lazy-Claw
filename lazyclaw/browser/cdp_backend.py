@@ -324,7 +324,24 @@ class CDPBackend:
                 ws_url = self._current_tab.ws_url
 
             self._conn = CDPConnection()
-            await self._conn.connect(ws_url, origin=origin)
+            # Timeout — a hung WS handshake (bad port, firewall, zombie
+            # Chrome) used to strand the whole agent because ``connect``
+            # had no deadline. 15 s is well above any legitimate local
+            # connect (sub-second in practice).
+            try:
+                await asyncio.wait_for(
+                    self._conn.connect(ws_url, origin=origin),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "CDP connect timed out after 15s (ws=%s source=%s)",
+                    ws_url, source,
+                )
+                self._conn = None
+                raise ConnectionError(
+                    f"CDP connect timeout after 15s (source={source})"
+                )
             self._cdp_source = source
 
             # Enable required CDP domains

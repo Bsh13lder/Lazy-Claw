@@ -37,11 +37,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Topics we record lessons for. Keep narrow — only skills where a
-# per-call schema is load-bearing AND where failure manifests as
-# a cryptic server error that blocks progress.
+# Topics we explicitly REFUSE to record lessons for. Empty by default —
+# the dispatcher's universal post-skill hook now feeds every topic that
+# passes its noise filter. Add a topic here only if its lessons turn out
+# to pollute recall (e.g. tag became too generic).
+_TOPIC_DENYLIST: frozenset[str] = frozenset()
+
+# Backwards-compatibility alias. Old callers (n8n_management.py) imported
+# the original whitelist name; keep the symbol exposed but treat it as a
+# no-op informational set so explicit topics still record.
 LEARNING_TOPICS: frozenset[str] = frozenset({
     "n8n", "instagram", "email", "whatsapp",
+    "browser", "web", "telegram", "lazybrain", "tasks", "vault", "computer",
 })
 
 # Keys that must never land in a lesson body, at any nesting depth.
@@ -119,8 +126,8 @@ async def save_skill_lesson(
     Never raises. Silently no-ops when ``topic`` isn't in the learning set
     (unknown topics would pollute recall with garbage exemplars).
     """
-    if topic not in LEARNING_TOPICS:
-        logger.debug("skill_lesson: topic %r not in LEARNING_TOPICS, skipping", topic)
+    if not topic or topic in _TOPIC_DENYLIST:
+        logger.debug("skill_lesson: topic %r denylisted, skipping", topic)
         return None
     if outcome not in {"success", "fail", "fix"}:
         logger.debug("skill_lesson: unknown outcome %r, skipping", outcome)
@@ -213,14 +220,21 @@ async def recall_skill_lessons(
     Empty list on no matches, on Ollama-down with no substring matches,
     on unknown topic, or on any error (never raises).
     """
-    if topic not in LEARNING_TOPICS:
+    if not topic or topic in _TOPIC_DENYLIST:
         return []
 
     try:
         from lazyclaw.lazybrain import embeddings as lb_emb
 
         query = f"topic:{topic} {intent}"
-        hit = await lb_emb.semantic_search(config, user_id, query, k=max(1, k * 3))
+        # Topic prefilter at the SQL layer — only decrypts embeddings whose
+        # note carries the matching topic tag. Bounds latency as the corpus
+        # grows; also drops post-hoc rejection at line ~245 to ~0%.
+        hit = await lb_emb.semantic_search(
+            config, user_id, query,
+            k=max(1, k * 2),
+            tag_prefix=f"topic/{topic}",
+        )
         results = hit.get("results") or []
     except Exception:
         logger.debug("skill_lesson recall failed", exc_info=True)
@@ -260,6 +274,19 @@ async def recall_skill_lessons(
 _FIELD_RE = re.compile(r"^\*\*([^:*]+):\*\*\s*(.*)$", re.MULTILINE)
 _JSON_BLOCK_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
+# Truncation caps applied at exemplar assembly time. The full lesson stays
+# intact in the LazyBrain note for human inspection — these only shrink the
+# bytes injected into the LLM context.
+_EXEMPLAR_FIELD_LIMIT = 240
+_EXEMPLAR_PARAMS_LIMIT = 600
+
+
+def _truncate(value: str, limit: int) -> str:
+    if value is None:
+        return ""
+    s = str(value)
+    return s if len(s) <= limit else s[:limit] + "…"
+
 
 def _parse_lesson_body(body: str) -> dict:
     fields: dict[str, str] = {}
@@ -273,12 +300,12 @@ def _parse_lesson_body(body: str) -> dict:
         except Exception:
             params = j.group(1)
     return {
-        "topic": fields.get("topic", ""),
-        "action": fields.get("action", ""),
-        "intent": fields.get("intent", ""),
+        "topic": _truncate(fields.get("topic", ""), _EXEMPLAR_FIELD_LIMIT),
+        "action": _truncate(fields.get("action", ""), _EXEMPLAR_FIELD_LIMIT),
+        "intent": _truncate(fields.get("intent", ""), _EXEMPLAR_FIELD_LIMIT),
         "outcome": fields.get("outcome", ""),
-        "error": fields.get("error", ""),
-        "fix": fields.get("fix", ""),
+        "error": _truncate(fields.get("error", ""), _EXEMPLAR_FIELD_LIMIT),
+        "fix": _truncate(fields.get("fix", ""), _EXEMPLAR_FIELD_LIMIT),
         "params": params,
     }
 
@@ -304,6 +331,7 @@ def format_lessons_as_exemplars(lessons: list[dict]) -> str:
                 pretty = json.dumps(params, ensure_ascii=False, indent=2)
             except Exception:
                 pretty = str(params)
+            pretty = _truncate(pretty, _EXEMPLAR_PARAMS_LIMIT)
             blocks.append("Working parameters:")
             blocks.append("```json")
             blocks.append(pretty)

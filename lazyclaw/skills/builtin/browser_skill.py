@@ -43,7 +43,8 @@ class BrowserSkill(BaseSkill):
     """Single CDP-based tool for all browser interactions.
 
     Pure action tool — buy tickets, check in, pay bills, order from Amazon,
-    read Gmail, navigate. Controls user's real visible Brave.
+    read Gmail, navigate. Runs HEADLESS by default; only visible when
+    the user explicitly asks ("show me", "make visible", "let me see").
     """
 
     def __init__(self, config=None) -> None:
@@ -69,10 +70,17 @@ class BrowserSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Control the user's REAL Brave browser. Visible on their screen. "
-            "Use for reading pages, navigating, clicking, typing, "
-            "taking screenshots, listing tabs, scrolling. Shortcuts: "
-            "'twitter', 'facebook', 'linkedin'. "
+            "Control a real Brave browser via CDP. Runs HEADLESS by default — "
+            "the user does NOT see the window unless they explicitly ask "
+            "(\"show me\", \"make visible\", \"let me see\"). For Google "
+            "Sheets / Drive / Gmail / Calendar use `google_run_task` instead "
+            "— never browse to sheets.google.com/etc. when an API call works. "
+            "If `web_search` returned a rate-limit message, retry the search "
+            "in ~60 s — do NOT escalate to browser; the data is fine, the "
+            "API just throttled. "
+            "Use this tool for: reading non-Google pages, navigating, "
+            "clicking, typing, screenshots, listing tabs, scrolling. "
+            "Shortcuts: 'twitter', 'facebook', 'linkedin'. "
             "NOT for messaging or email apps — those have dedicated MCP tools. "
             "\n\nIMPORTANT — identity routing: if the user says 'use my browser', "
             "'use mybrowser', 'my brave', 'use my cookies', 'login as me', or "

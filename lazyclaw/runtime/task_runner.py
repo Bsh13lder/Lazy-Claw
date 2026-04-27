@@ -17,7 +17,7 @@ from uuid import uuid4
 from lazyclaw.runtime.team_lead import TeamLead
 
 from lazyclaw.crypto.key_manager import get_user_dek
-from lazyclaw.crypto.encryption import encrypt, decrypt
+from lazyclaw.crypto.encryption import encrypt, decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.runtime import task_event_bus
@@ -167,6 +167,21 @@ class TaskRunner:
                 user_id=user_id,
             )
 
+        # Announce on the per-user task event bus so a connected web chat
+        # paints the new background card the same instant the task starts —
+        # without waiting for the next 3 s /api/agents/status poll.
+        try:
+            task_event_bus.publish(task_event_bus.TaskEvent(
+                user_id=user_id,
+                kind="background_started",
+                task_id=task_id,
+                name=task_name,
+                lane="background",
+                description=instruction[:80],
+            ))
+        except Exception:
+            logger.debug("task_event_bus publish (started) failed", exc_info=True)
+
         logger.info(
             "Background task %s (%s) started for user %s",
             task_id[:8], task_name, user_id,
@@ -192,12 +207,23 @@ class TaskRunner:
         task_name = self._task_names.get(task_id, task_id[:8])
         _status = "done"
 
-        # Wrapper callback to capture work_summary from agent
+        # Wrapper callback to capture work_summary AND drive TeamLead step
+        # updates so the Activity/Overview UI shows the bg agent's current
+        # tool live, not only on completion.
         _captured_summary: WorkSummary | None = None
         _original_cb = callback
+        _team_lead_ref = self._team_lead
+        _bound_task_id = task_id
 
-        class _SummaryCapture:
-            """Transparent wrapper that captures the work_summary event."""
+        class _BgEventTap:
+            """Transparent wrapper around the user's original callback.
+
+            On `work_summary` it captures the WorkSummary so the runner
+            can persist cost/token stats. On `tool_call` it pings TeamLead
+            so the running background task's `current_tool` / `recent_tools`
+            stay live for the dashboard poll AND for the live event bus
+            (TeamLead._publish → task_event_bus → chat WS).
+            """
 
             def __getattr__(self, name):
                 return getattr(_original_cb, name)
@@ -206,9 +232,22 @@ class TaskRunner:
                 nonlocal _captured_summary
                 if event.kind == "work_summary":
                     _captured_summary = event.metadata.get("summary")
+                elif event.kind == "tool_call" and _team_lead_ref is not None:
+                    tool_name = (
+                        (event.metadata or {}).get("display_name")
+                        or (event.metadata or {}).get("tool")
+                        or event.detail
+                    )
+                    try:
+                        _team_lead_ref.update_step(_bound_task_id, str(tool_name))
+                    except Exception:
+                        logger.debug(
+                            "team_lead.update_step failed for bg task %s",
+                            _bound_task_id, exc_info=True,
+                        )
                 await _original_cb.on_event(event)
 
-        callback = _SummaryCapture()
+        callback = _BgEventTap()
 
         try:
             # Create FRESH Agent instance (isolated state, no race conditions)
@@ -396,13 +435,17 @@ class TaskRunner:
         return result
 
     async def list_all(self, user_id: str, limit: int = 20) -> list[dict]:
-        """List all tasks from DB (running + completed + failed)."""
+        """List all tasks from DB (running + completed + failed).
+
+        Includes the decrypted ``result`` body for completed tasks so the
+        UI can render outcomes without a separate detail fetch.
+        """
         key = await get_user_dek(self._config, user_id)
 
         async with db_session(self._config) as db:
             rows = await db.execute(
-                "SELECT id, name, status, error, created_at, completed_at, "
-                "cost_usd, tokens_used, llm_calls "
+                "SELECT id, name, status, error, result, created_at, "
+                "completed_at, cost_usd, tokens_used, llm_calls "
                 "FROM background_tasks WHERE user_id = ? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (user_id, limit),
@@ -411,16 +454,28 @@ class TaskRunner:
 
         tasks = []
         for row in results:
+            raw_result = row[4]
+            decrypted_result: str | None = None
+            if raw_result:
+                try:
+                    decrypted_result = (
+                        decrypt(raw_result, key)
+                        if is_encrypted(raw_result) else raw_result
+                    )
+                except Exception:
+                    logger.debug("list_all: result decrypt failed", exc_info=True)
+                    decrypted_result = None
             tasks.append({
                 "id": row[0],
                 "name": row[1],
                 "status": row[2],
                 "error": row[3],
-                "created_at": row[4],
-                "completed_at": row[5],
-                "cost_usd": row[6] or 0.0,
-                "tokens_used": row[7] or 0,
-                "llm_calls": row[8] or 0,
+                "result": decrypted_result,
+                "created_at": row[5],
+                "completed_at": row[6],
+                "cost_usd": row[7] or 0.0,
+                "tokens_used": row[8] or 0,
+                "llm_calls": row[9] or 0,
             })
         return tasks
 

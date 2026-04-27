@@ -131,6 +131,7 @@ export {
   Clock,
   Hash,
   Save,
+  Sparkles,
   Archive,
   AlarmClock,
 };

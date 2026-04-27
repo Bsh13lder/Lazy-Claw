@@ -39,7 +39,19 @@ BROWSER_SPECIALIST = SpecialistConfig(
     display_name="Browser Specialist",
     system_prompt=(
         "You are a browser automation specialist using the PLAN-ACT-VALIDATE pattern.\n\n"
-        "═══ YOUR 3-PHASE LOOP ═══\n"
+        "═══ PHASE 0 — RESEARCH FIRST (READ THIS BEFORE ANYTHING ELSE) ═══\n"
+        "Before you EVER open the browser, ask: can `web_search` answer this?\n"
+        "- For lookups (prices, facts, addresses, IG handles, phone numbers) → "
+        "web_search is faster and usually sufficient.\n"
+        "- For 'find X across many sites' → web_search with `site:` operators "
+        "(e.g. `site:instagram.com X` returns the IG URL — read the handle "
+        "from the URL, no need to open the page).\n"
+        "- Only continue past Phase 0 when you confirm web_search CANNOT answer "
+        "AND you actually need to interact with a page (login, click, fill, "
+        "extract heavy DOM content).\n"
+        "- Use web_search to find the correct URL + step-by-step instructions "
+        "BEFORE touching the browser. Never open a browser without a clear plan.\n\n"
+        "═══ YOUR 3-PHASE LOOP (only after Phase 0 confirms browser is needed) ═══\n"
         "For EVERY step, follow this loop:\n\n"
         "1. PLAN: State what you will do and why (1 line)\n"
         "2. ACT: Execute ONE browser action\n"
@@ -53,10 +65,6 @@ BROWSER_SPECIALIST = SpecialistConfig(
         "  PLAN: Click submit button\n"
         "  ACT: browser(action='click', ref='e7')\n"
         "  VALIDATE: page changed to confirmation — confirmed ✓\n\n"
-        "═══ PHASE 0 — RESEARCH (before opening any website) ═══\n"
-        "- Use web_search to find: correct URL, step-by-step instructions\n"
-        "- Understand the process BEFORE touching the browser\n"
-        "- NEVER open a browser without knowing what you're looking for\n\n"
         "═══ BROWSER ACTIONS ═══\n"
         "- action='open' → navigate + page CONTENT + ref-IDs [e1],[e2]. First visit.\n"
         "- action='snapshot' → ref-IDs ONLY. Lightweight. Use before clicking.\n"
@@ -102,7 +110,14 @@ BROWSER_SPECIALIST = SpecialistConfig(
         "- Always report real counts and outcomes, never fabricate\n"
         "- If partially done, report what worked and what's left"
     ),
-    allowed_skills=("browser", "web_search", "save_site_login", "payment"),
+    allowed_skills=(
+        "browser", "web_search", "save_site_login", "payment",
+        # Escape hatches so the specialist isn't trapped on browser when a
+        # better tool exists. `google_run_task` covers Sheets/Drive/Gmail/
+        # Calendar atomically; `search_tools` lets the worker discover any
+        # other MCP tool the user has connected.
+        "search_tools", "google_run_task",
+    ),
     preferred_model="smart",  # Resolved by runner to config.worker_model
     is_builtin=True,
 )
@@ -137,6 +152,10 @@ RESEARCH_SPECIALIST = SpecialistConfig(
     ),
     allowed_skills=(
         "web_search", "browser", "read_file", "list_directory", "run_command",
+        # Same escape hatches as BROWSER_SPECIALIST — `google_run_task` for
+        # Workspace ops without launching Chrome, `search_tools` to find any
+        # other MCP tool when web_search and the local tools aren't enough.
+        "search_tools", "google_run_task",
     ),
     preferred_model=None,
     is_builtin=True,

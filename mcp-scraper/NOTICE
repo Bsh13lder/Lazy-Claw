@@ -1,0 +1,24 @@
+mcp-scraper
+===========
+
+This package vendors third-party source code. License notices below.
+
+------------------------------------------------------------------
+1. crawl4ai (Apache License 2.0)
+   Copyright (c) Unclecode <unclecode@kidocode.com>
+   Source: https://github.com/unclecode/crawl4ai @ tag v0.7.8
+   Vendored at: mcp_scraper/_vendor/crawl4ai/
+   Full license: see LICENSE-CRAWL4AI
+
+------------------------------------------------------------------
+2. crawl-mcp wrapper (MIT License)
+   Copyright (c) 2025 walksoda
+   Source: https://github.com/walksoda/crawl-mcp
+   Vendored at: mcp_scraper/ (FastMCP server + tool registrations)
+   Full license: see LICENSE
+
+------------------------------------------------------------------
+3. mcp-scraper integration code (MIT License)
+   Modifications by the LazyClaw project — entry point, import path
+   rewrites, BUNDLED_MCPS wiring.
+   Same MIT terms as LICENSE.

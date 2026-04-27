@@ -103,7 +103,7 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.send_email import SendEmailSkill
 
         self.register(SearchToolsSkill(registry=self))
-        self.register(WebSearchSkill())
+        self.register(WebSearchSkill(registry=self))
         self.register(KeywordResearchSkill())
         self.register(GetTimeSkill())
         self.register(CalculateSkill())

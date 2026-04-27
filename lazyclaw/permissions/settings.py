@@ -45,12 +45,57 @@ async def get_permission_settings(config: Config, user_id: str) -> dict:
     if not isinstance(perms, dict):
         return dict(DEFAULT_PERMISSIONS)
 
-    # Merge with defaults for any missing keys
+    # Merge with defaults for any missing keys. category_defaults and
+    # skill_overrides are deep-merged so that newly added defaults
+    # (e.g. a new category in DEFAULT_CATEGORY_PERMISSIONS) surface in
+    # the API response for users whose stored dict was saved before the
+    # default was introduced. Existing user overrides always win.
     merged = dict(DEFAULT_PERMISSIONS)
     for key in DEFAULT_PERMISSIONS:
-        if key in perms:
-            merged[key] = perms[key]
+        if key not in perms:
+            continue
+        stored = perms[key]
+        if key == "category_defaults" and isinstance(stored, dict):
+            merged[key] = {**DEFAULT_CATEGORY_PERMISSIONS, **stored}
+        elif key == "skill_overrides" and isinstance(stored, dict):
+            merged[key] = dict(stored)
+        else:
+            merged[key] = stored
     return merged
+
+
+async def apply_permission_change(
+    config: Config, user_id: str, target: str, level: str,
+) -> dict:
+    """Set a category or skill permission level. Pure helper shared by
+    every surface (CLI, Telegram, future web shortcuts). Detects whether
+    ``target`` is a known category or a skill override and persists the
+    minimal change.
+
+    Returns ``{"target": str, "kind": "category" | "skill", "level": str}``.
+    Raises ValueError if ``level`` is not one of allow/ask/deny.
+    """
+    if level not in VALID_LEVELS:
+        raise ValueError(
+            f"Invalid permission level: {level}. Must be one of: {sorted(VALID_LEVELS)}"
+        )
+
+    settings = await get_permission_settings(config, user_id)
+
+    if target in DEFAULT_CATEGORY_PERMISSIONS:
+        cat_defaults = dict(settings.get("category_defaults", {}))
+        cat_defaults[target] = level
+        await update_permission_settings(
+            config, user_id, {"category_defaults": cat_defaults},
+        )
+        return {"target": target, "kind": "category", "level": level}
+
+    overrides = dict(settings.get("skill_overrides", {}))
+    overrides[target] = level
+    await update_permission_settings(
+        config, user_id, {"skill_overrides": overrides},
+    )
+    return {"target": target, "kind": "skill", "level": level}
 
 
 async def update_permission_settings(

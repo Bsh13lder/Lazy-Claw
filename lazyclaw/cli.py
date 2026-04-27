@@ -1045,25 +1045,17 @@ async def show_permissions(config: Config, user_id: str) -> None:
 
 async def set_permission(config: Config, user_id: str, target: str, level: str) -> None:
     """Set a category or skill permission level."""
-    from lazyclaw.permissions.settings import get_permission_settings, update_permission_settings
-    from lazyclaw.permissions.models import DEFAULT_CATEGORY_PERMISSIONS
+    from lazyclaw.permissions.settings import apply_permission_change
 
-    settings = await get_permission_settings(config, user_id)
+    try:
+        result = await apply_permission_change(config, user_id, target, level)
+    except ValueError as exc:
+        console.print(f"  [red]{exc}[/red]")
+        return
 
-    # Check if target is a category
-    if target in DEFAULT_CATEGORY_PERMISSIONS:
-        cat_defaults = dict(settings.get("category_defaults", {}))
-        cat_defaults[target] = level
-        await update_permission_settings(config, user_id, {"category_defaults": cat_defaults})
-        color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
-        console.print(f"  [{color}]Category '{target}' set to {level}[/{color}]")
-    else:
-        # Treat as skill override
-        overrides = dict(settings.get("skill_overrides", {}))
-        overrides[target] = level
-        await update_permission_settings(config, user_id, {"skill_overrides": overrides})
-        color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
-        console.print(f"  [{color}]Skill '{target}' set to {level}[/{color}]")
+    color = "green" if level == "allow" else "yellow" if level == "ask" else "red"
+    label = "Category" if result["kind"] == "category" else "Skill"
+    console.print(f"  [{color}]{label} '{result['target']}' set to {level}[/{color}]")
 
 
 async def _chat_loop() -> None:

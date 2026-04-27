@@ -53,6 +53,9 @@ BOT_COMMANDS = [
     BotCommand("note", "\U0001f4dd Save a quick note"),
     BotCommand("idea", "\U0001f4a1 Save an idea"),
     BotCommand("remember", "\U0001f9e0 Save to memory"),
+    BotCommand("permissions", "\U0001f510 Show permissions"),
+    BotCommand("allow", "✅ /allow <category|skill>"),
+    BotCommand("deny", "\U0001f6ab /deny <category|skill>"),
 ]
 
 
@@ -102,6 +105,9 @@ class TelegramCommands:
             "note": self._handle_note,
             "idea": self._handle_idea,
             "remember": self._handle_remember,
+            "permissions": self._handle_permissions,
+            "allow": self._handle_allow,
+            "deny": self._handle_deny,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -2117,6 +2123,87 @@ class TelegramCommands:
         text = (update.message.text or "")
         body = text.partition(" ")[2]
         await self._save_quick_note(update, "kind/memory", body)
+
+    # -- Permissions -------------------------------------------------------
+
+    async def _handle_permissions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show current category defaults + per-skill overrides."""
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        from lazyclaw.permissions.settings import get_permission_settings
+
+        settings = await get_permission_settings(self._config, user_id)
+        cat = settings.get("category_defaults", {})
+        overrides = settings.get("skill_overrides", {})
+        icon = {"allow": "✅", "ask": "❓", "deny": "\U0001f6ab"}
+
+        lines = ["\U0001f510 <b>Permissions</b>", "", "<b>Categories:</b>"]
+        for name in sorted(cat):
+            level = cat[name]
+            lines.append(f"  {icon.get(level, '?')} <code>{name}</code> — {level}")
+
+        if overrides:
+            lines.append("")
+            lines.append("<b>Skill overrides:</b>")
+            for name in sorted(overrides):
+                level = overrides[name]
+                lines.append(f"  {icon.get(level, '?')} <code>{name}</code> — {level}")
+
+        lines.append("")
+        lines.append(
+            "<i>Change with</i> <code>/allow &lt;name&gt;</code> "
+            "<i>or</i> <code>/deny &lt;name&gt;</code>"
+        )
+        await self._reply(update, "\n".join(lines))
+
+    async def _handle_allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/allow <category|skill> — set permission to allow."""
+        await self._apply_perm(update, context, "allow")
+
+    async def _handle_deny(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/deny <category|skill> — set permission to deny."""
+        await self._apply_perm(update, context, "deny")
+
+    async def _apply_perm(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        level: str,
+    ) -> None:
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        if not context.args:
+            await self._reply(
+                update,
+                f"❓ <b>Usage:</b> <code>/{level} &lt;category|skill&gt;</code>\n\n"
+                "<b>Examples:</b>\n"
+                f"  <code>/{level} tasks</code>\n"
+                f"  <code>/{level} list_tasks</code>\n\n"
+                "<i>Use</i> <code>/permissions</code> <i>to see current settings.</i>",
+            )
+            return
+
+        target = context.args[0].strip()
+        from lazyclaw.permissions.settings import apply_permission_change
+
+        try:
+            result = await apply_permission_change(
+                self._config, user_id, target, level,
+            )
+        except ValueError as exc:
+            await self._reply(update, f"❌ {exc}")
+            return
+
+        icon = {"allow": "✅", "ask": "❓", "deny": "\U0001f6ab"}[level]
+        label = "Category" if result["kind"] == "category" else "Skill"
+        await self._reply(
+            update,
+            f"{icon} <b>{label} '<code>{result['target']}</code>' set to {level}</b>",
+        )
 
     # -- Callback query handler (inline keyboards) -------------------------
 

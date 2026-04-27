@@ -31,6 +31,7 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "mcp": ALLOW,
     "mcp_management": ALLOW,
     "survival": ALLOW,
+    "tasks": ALLOW,
 }
 
 

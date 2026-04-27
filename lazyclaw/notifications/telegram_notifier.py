@@ -227,3 +227,33 @@ class TelegramNotifier:
             return f"[help] <b>Agent stuck</b>\n\n{detail}\n\n<i>Reply in CLI/TUI to help.</i>", "HTML"
 
         return None, None
+
+
+class PrefixedTelegramNotifier(TelegramNotifier):
+    """TelegramNotifier that prepends an icon + name header to ``done`` events.
+
+    Used by background-fired paths (cron jobs, reminders, watcher
+    expiries, MCP auto-replies) so the chat distinguishes scheduled
+    pushes from foreground task completions.
+    """
+
+    def __init__(
+        self,
+        bot: Any | None,
+        admin_chat_id_fn: Callable[[], str | None],
+        *,
+        prefix: str,
+        icon: str = "⏰",
+        source_is_telegram: bool = False,
+    ) -> None:
+        super().__init__(bot, admin_chat_id_fn, source_is_telegram=source_is_telegram)
+        self._prefix = prefix
+        self._icon = icon
+
+    def _format(self, event: Any) -> tuple[str | None, str | None]:
+        text, parse_mode = super()._format(event)
+        if text and event.kind == "done" and self._prefix:
+            lines = text.split("\n")
+            lines[0] = f"{self._icon} <b>{html.escape(self._prefix)}</b>"
+            text = "\n".join(lines)
+        return text, parse_mode

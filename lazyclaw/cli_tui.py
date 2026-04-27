@@ -1703,7 +1703,29 @@ class LazyClawApp(App):
 
                 telegram_push = _telegram_push_fn
 
-            heartbeat = HeartbeatDaemon(self._config, self._lane_queue, telegram_push=telegram_push)
+            notifier_factory = None
+            if self._telegram_connected and telegram:
+                from lazyclaw.notifications.telegram_notifier import (
+                    PrefixedTelegramNotifier,
+                )
+
+                _tg_ref = telegram
+
+                def _make_prefixed_notifier(prefix: str, icon: str = "⏰"):
+                    return PrefixedTelegramNotifier(
+                        bot=_tg_ref._app.bot,
+                        admin_chat_id_fn=lambda: _tg_ref._admin_chat_id,
+                        prefix=prefix,
+                        icon=icon,
+                    )
+
+                notifier_factory = _make_prefixed_notifier
+
+            heartbeat = HeartbeatDaemon(
+                self._config, self._lane_queue,
+                telegram_push=telegram_push,
+                notifier_factory=notifier_factory,
+            )
             await heartbeat.start()
             logger.info("TUI: Heartbeat daemon started")
             self._post_log("info", "Heartbeat daemon started")

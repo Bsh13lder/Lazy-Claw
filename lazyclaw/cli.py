@@ -353,9 +353,29 @@ async def _run_headless(
             logger.warning("Telegram startup failed in headless: %s", exc)
             console.print(f"[yellow]Telegram adapter failed: {exc}[/yellow]")
 
+    notifier_factory = None
+    if telegram is not None:
+        from lazyclaw.notifications.telegram_notifier import PrefixedTelegramNotifier
+
+        _tg_ref = telegram
+
+        def _make_prefixed_notifier(prefix: str, icon: str = "⏰"):
+            return PrefixedTelegramNotifier(
+                bot=_tg_ref._app.bot,
+                admin_chat_id_fn=lambda: _tg_ref._admin_chat_id,
+                prefix=prefix,
+                icon=icon,
+            )
+
+        notifier_factory = _make_prefixed_notifier
+
     try:
         from lazyclaw.heartbeat.daemon import HeartbeatDaemon
-        heartbeat = HeartbeatDaemon(config, lane_queue, telegram_push=telegram_push)
+        heartbeat = HeartbeatDaemon(
+            config, lane_queue,
+            telegram_push=telegram_push,
+            notifier_factory=notifier_factory,
+        )
         await heartbeat.start()
         console.print("[green]✓[/green] Heartbeat daemon started")
     except Exception as exc:

@@ -52,10 +52,21 @@ def _store_watcher_context(
 class HeartbeatDaemon:
     """Periodically checks for due cron jobs and enqueues them."""
 
-    def __init__(self, config: Config, lane_queue, telegram_push=None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        lane_queue,
+        telegram_push=None,
+        notifier_factory=None,
+    ) -> None:
         self._config = config
         self._lane_queue = lane_queue
         self._telegram_push = telegram_push  # async fn(text) → send to Telegram admin
+        # Called per background-fired enqueue to build a callback that pushes
+        # the agent's reply to Telegram with a "[icon] [name]" header so
+        # cron/reminder/watcher pushes are distinguishable from foreground task
+        # completions. Signature: (prefix: str, icon: str = "⏰") -> AgentCallback
+        self._notifier_factory = notifier_factory
         self._task: asyncio.Task | None = None
         # In-memory record of "we already seeded today's journal for this user".
         # Resets on restart (idempotent re-seed via tag lookup is cheap).
@@ -170,8 +181,13 @@ class HeartbeatDaemon:
                 if not self._lane_queue._running:
                     logger.debug("LaneQueue not ready yet — skipping job '%s' this tick", job_name)
                     continue
+                cb = (
+                    self._notifier_factory(job_name, "⏰")
+                    if self._notifier_factory else None
+                )
+                cb_kwargs = {"callback": cb} if cb is not None else {}
                 await self._lane_queue.enqueue(
-                    user_id, f"[JOB:{job_name}] {instruction}"
+                    user_id, f"[JOB:{job_name}] {instruction}", **cb_kwargs,
                 )
 
                 next_run = calculate_next_run(cron_expression)
@@ -222,10 +238,16 @@ class HeartbeatDaemon:
 
                 logger.info("Reminder '%s' (%s) is due, firing", job_name, job_id)
 
-                # Enqueue as agent message (will reach Telegram via callback)
+                # Enqueue as agent message (reaches Telegram via callback)
+                cb = (
+                    self._notifier_factory(job_name or "Reminder", "🔔")
+                    if self._notifier_factory else None
+                )
+                cb_kwargs = {"callback": cb} if cb is not None else {}
                 await self._lane_queue.enqueue(
                     user_id,
                     f"[REMINDER] {message}",
+                    **cb_kwargs,
                 )
 
                 # Auto-delete — one-shot reminder, done
@@ -393,9 +415,17 @@ class HeartbeatDaemon:
                             _hist.forget_watcher(user_id, job_id)
                         except Exception:
                             logger.debug("history forget failed", exc_info=True)
+                        cb = (
+                            self._notifier_factory(
+                                f"Watcher expired: {job_name}", "👁️",
+                            )
+                            if self._notifier_factory else None
+                        )
+                        cb_kwargs = {"callback": cb} if cb is not None else {}
                         await self._lane_queue.enqueue(
                             user_id,
                             f"[WATCHER] '{job_name}' has expired and stopped.",
+                            **cb_kwargs,
                         )
                         continue
 
@@ -621,9 +651,17 @@ class HeartbeatDaemon:
                     auto_reply = ctx.get("auto_reply")
                     if auto_reply and self._lane_queue:
                         _svc = ctx.get("service", "")
+                        cb = (
+                            self._notifier_factory(
+                                f"{_svc or 'MCP'} auto-reply", "📨",
+                            )
+                            if self._notifier_factory else None
+                        )
+                        cb_kwargs = {"callback": cb} if cb is not None else {}
                         await self._lane_queue.enqueue(
                             user_id,
                             f"[MCP_WATCHER] New {_svc} messages. {auto_reply}\n\n{notification}",
+                            **cb_kwargs,
                         )
 
                     if new_ctx.get("one_shot"):

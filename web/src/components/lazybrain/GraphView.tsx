@@ -187,6 +187,16 @@ const CATEGORY_ORBIT: Record<string, number> = {
   _default: 3,
 };
 
+/** Labels drawn along each orbit ring (upper case). Only used in
+ *  category layout mode — neural-link mode hides the orbit chrome
+ *  entirely since its layout is force-directed, not ring-based. */
+const ORBIT_LABELS: { title: string; subtitle: string; color: string }[] = [
+  { title: "CORE",      subtitle: "URGENT",    color: "#f0a060" },
+  { title: "DOING",     subtitle: "TASKS",     color: "#d4a26a" },
+  { title: "LIVED",     subtitle: "MEMORY",    color: "#a8906a" },
+  { title: "LEARNED",   subtitle: "KNOWLEDGE", color: "#8a7a6a" },
+];
+
 const BADGE_MAP: Record<string, string> = {
   task: "T",
   deadline: "!",
@@ -284,56 +294,22 @@ export function GraphView({
   //     (force-directed clustering with a decorative sun at center).
   //     Flipped via the on-canvas toggle below. Persisted in localStorage
   //     so the user's last choice is the default on next reload.
-  // Layout mode is now hard-fixed to "neural-link" — the codex
-  // redesign collapses the previous two-mode (Categories + Neural-link)
-  // toggle into a single graph view. The state remains as a const so
-  // existing branches reading `layoutMode === "neural-link"` short-
-  // circuit cleanly without a refactor of every reference.
-  const layoutMode = "neural-link" as const;
-
-  // ── Physics freeze ────────────────────────────────────────────────────
-  // Neural-link mode runs an O(N²) repulsion pass that crawls the browser
-  // until cooled (~1.5s). Every hover/zoom warms it again, so the user
-  // never reaches the cheap state. Solution: let the user freeze physics
-  // entirely. Layout still renders (positions came from saved state), it
-  // just stops mutating. Categories mode is cheap (O(N) orbital rotation)
-  // so the toggle is hidden there but the state still applies if set.
-  //
-  // Default behaviour:
-  //   - explicit user preference in localStorage wins
-  //   - else: false (let it settle) — the auto-freeze effect below flips
-  //     to true once the sim cools, AND the "settled-on-entry" effect
-  //     flips to true immediately if savedPositions filled in the layout.
-  const [physicsFrozen, setPhysicsFrozen] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
+  const [layoutMode, setLayoutMode] = useState<"category" | "neural-link">(() => {
+    if (typeof window === "undefined") return "category";
     try {
-      const saved = window.localStorage.getItem("lazybrain-physics-frozen");
-      if (saved === "true") return true;
-      if (saved === "false") return false;
+      const saved = window.localStorage.getItem("lazybrain-layout-mode");
+      return saved === "neural-link" || saved === "category" ? saved : "category";
     } catch {
-      // ignored — fall through to default
+      return "category";
     }
-    return false;
   });
-  // Track whether the freeze state came from an explicit user click vs an
-  // auto-derivation. Only persist user clicks — auto-freezes are derived
-  // from the sim state on every load.
-  const physicsFrozenIsUserSetRef = useRef<boolean>(false);
-  // Mirror physicsFrozen in a ref so the RAF loop reads it without
-  // tearing down on every toggle.
-  const physicsFrozenRef = useRef<boolean>(physicsFrozen);
   useEffect(() => {
-    physicsFrozenRef.current = physicsFrozen;
-    if (typeof window === "undefined") return;
-    if (!physicsFrozenIsUserSetRef.current) return;
     try {
-      window.localStorage.setItem(
-        "lazybrain-physics-frozen", String(physicsFrozen),
-      );
+      window.localStorage.setItem("lazybrain-layout-mode", layoutMode);
     } catch {
-      // Private-mode Safari — session-only is fine.
+      // Private-mode Safari throws on setItem — session-only is fine.
     }
-  }, [physicsFrozen]);
+  }, [layoutMode]);
 
   // Top hub — highest-degree node. Used as the "sun" in neural-link mode.
   // Computed from graph.edges directly so it's available before the sim.
@@ -392,41 +368,6 @@ export function GraphView({
   useEffect(() => {
     simRef.current?.resize(size.width, size.height);
   }, [size.width, size.height]);
-
-  // ── Derived freeze defaults ──────────────────────────────────────────
-  // 1. On entry, if the sim restored saved positions (already-settled
-  //    layout from prior session) AND the user hasn't expressed a
-  //    preference, freeze immediately — no warm-up settle storm.
-  // 2. While in neural-link mode and not yet frozen, poll cooled() and
-  //    auto-freeze on convergence. This handles fresh users (no saved
-  //    positions): one settle pass, then sticks. Skipped in categories
-  //    mode (orbital sim never cools by design).
-  useEffect(() => {
-    if (!sim) return;
-    if (layoutMode !== "neural-link") return;
-    if (physicsFrozenIsUserSetRef.current) return;
-    if (sim.usedSavedPositions() && !physicsFrozen) {
-      setPhysicsFrozen(true);
-    }
-  }, [sim, layoutMode, physicsFrozen]);
-  useEffect(() => {
-    if (layoutMode !== "neural-link") return;
-    if (physicsFrozen) return;
-    let cancelled = false;
-    const tick = () => {
-      if (cancelled) return;
-      if (simRef.current?.cooled()) {
-        setPhysicsFrozen(true);
-        return;
-      }
-      window.setTimeout(tick, 500);
-    };
-    const t = window.setTimeout(tick, 500);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(t);
-    };
-  }, [layoutMode, physicsFrozen, sim]);
 
   // Async server overlay — fetch saved positions on mount + mode change
   // and apply them on top of the localStorage cache. Server wins on
@@ -515,23 +456,15 @@ export function GraphView({
   const hubIds = useMemo(() => new Set(sim.hubIds(5)), [sim]);
 
   // ── Pulse loop — advances a per-frame counter used to animate synapse
-  //    signals. ~30fps (skips every other RAF) so the graph feels alive in
-  //    the background even when the user isn't hovering.
-  //
-  //    BIG perf gate: when physics is frozen, this loop is the dominant
-  //    cost — every setPulseTick causes a full React reconcile of the
-  //    entire SVG tree, which in neural-link mode is ~17,500 nodes
-  //    (gradient + path + 2 mote circles per edge × 2,500 edges). The
-  //    original "162 edges × 1 pulse ≈ 162 circles/frame" budget assumed
-  //    Categories mode; Neural-links is 15× over. So when frozen we stop
-  //    ticking entirely — the motes freeze with the layout, which is the
-  //    whole point of the freeze toggle.
+  //    signals. Always-on at ~30fps (skips every other RAF) so the graph
+  //    feels alive in the background even when the user isn't hovering.
+  //    162 edges × 1 pulse ≈ 162 circles/frame — well within budget.
   useEffect(() => {
     let raf = 0;
     let skip = false;
     const loop = () => {
       skip = !skip;
-      if (!skip && !physicsFrozenRef.current) {
+      if (!skip) {
         setPulseTick((t) => (t + 1) % 1_000_000);
       }
       raf = requestAnimationFrame(loop);
@@ -542,38 +475,97 @@ export function GraphView({
 
   // ── Starfield — deterministic seeded warm specks behind the graph.
   //    Sparse atmospheric dust, not a Webb deep-field. Pure cosmetic.
-  // Starfield removed in the Codex redesign — the page is the substrate,
-  // no atmospheric specks. Backdrop is now the dot lattice only.
+  const starfield = useMemo(() => {
+    const seed = 0x9e3779b9 ^ graph.nodes.length;
+    let a = seed;
+    const rand = () => {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const stars: { x: number; y: number; r: number; o: number }[] = [];
+    for (let i = 0; i < 55; i++) {
+      stars.push({
+        x: (rand() - 0.5) * 2400,
+        y: (rand() - 0.5) * 2400,
+        r: 0.5 + rand() * 0.8,
+        o: 0.04 + rand() * 0.07,
+      });
+    }
+    return stars;
+  }, [graph]);
+
+  // Memoized starfield JSX — computed once per graph. 55 tiny dots never
+  // need to reconcile on every animation tick; keeping this memo stops
+  // React from walking them at 30fps for zero benefit.
+  const starfieldJsx = useMemo(
+    () => (
+      <g pointerEvents="none" aria-hidden>
+        {starfield.map((s, i) => (
+          <circle
+            key={`star-${i}`}
+            cx={s.x}
+            cy={s.y}
+            r={s.r}
+            fill="#e8d5b0"
+            opacity={s.o}
+          />
+        ))}
+      </g>
+    ),
+    [starfield],
+  );
 
   // ── Territorial backdrop ────────────────────────────────────────────────
   // Faint white dot grid + 4 thin radial sector divider lines. Together they
   // give the canvas a sense of mapped territory (Obsidian-style cartography)
   // without ever competing with the nodes. Memoized by canvas size so the
   // 200+ background circles don't reconcile per animation tick.
-  // Codex backdrop — a faint dot lattice. No center, no orrery: the
-  // layout is the subject, the page is a quiet substrate. Reads more
-  // like a manuscript page than a planetarium.
   const territorialBackdrop = useMemo(() => {
     const span = Math.max(size.width, size.height) * 1.6;
-    const step = 64;
+    const step = 70;
     const dots: { x: number; y: number }[] = [];
     for (let x = -span; x <= span; x += step) {
       for (let y = -span; y <= span; y += step) {
         dots.push({ x, y });
       }
     }
+    const cx = size.width / 2;
+    const cy = size.height / 2;
+    const sectorLen = Math.max(size.width, size.height) * 0.7;
     return (
       <g pointerEvents="none" aria-hidden>
+        {/* White dot grid — sparse, almost-invisible territory markers. */}
         {dots.map((d, i) => (
           <circle
             key={`td-${i}`}
             cx={d.x}
             cy={d.y}
-            r={0.55}
-            fill="#e8d5b0"
-            opacity={0.05}
+            r={0.6}
+            fill="#f5ecd0"
+            opacity={0.06}
           />
         ))}
+        {/* Sector divider lines — at 45/135/225/315° so they sit BETWEEN
+            the orbit labels (which live at 12 o'clock). Dashed, near-zero
+            opacity, just enough to suggest "this side vs. that side". */}
+        {[45, 135, 225, 315].map((deg) => {
+          const rad = (deg * Math.PI) / 180;
+          return (
+            <line
+              key={`sec-${deg}`}
+              x1={cx}
+              y1={cy}
+              x2={cx + Math.cos(rad) * sectorLen}
+              y2={cy + Math.sin(rad) * sectorLen}
+              stroke="#f5ecd0"
+              strokeOpacity={0.04}
+              strokeWidth={0.6}
+              strokeDasharray="1 14"
+            />
+          );
+        })}
       </g>
     );
   }, [size.width, size.height]);
@@ -596,23 +588,6 @@ export function GraphView({
       if (!alive) return;
       const s = simRef.current;
       if (!s) return;
-      // Frozen path: physics is off. The only thing that should still
-      // re-render is an active node-drag — pin() has already mutated the
-      // node's position, but React needs a setTick to flush that to the
-      // DOM. Hover/zoom/pan don't touch positions, so they don't need
-      // re-renders here (their handlers already fire setHover/setView).
-      if (physicsFrozenRef.current) {
-        const dragging =
-          !!dragRef.current &&
-          dragRef.current.kind === "node" &&
-          !!dragRef.current.id;
-        if (dragging) {
-          setTick((t) => (t + 1) % 1_000_000);
-        }
-        idleTicks = 0;
-        frameRef.current = requestAnimationFrame(loop);
-        return;
-      }
       const cooled = s.cooled();
       if (cooled) {
         // Skip the expensive force pass — already gated inside s.step().
@@ -856,9 +831,7 @@ export function GraphView({
     cancelHoverClear();
     setHoverId(null);
     simRef.current?.setHover(null);
-    // Skip warm() when frozen — hover is purely visual, doesn't need
-    // physics re-stirring.
-    if (!physicsFrozenRef.current) simRef.current?.warm();
+    simRef.current?.warm();
   }, []);
 
   const handleNodeEnter = useCallback((id: string) => {
@@ -866,7 +839,7 @@ export function GraphView({
     setHoverId(id);
     simRef.current?.setHover(id);
     // Wake the sim so the renderer paints the hover halo on the next frame.
-    if (!physicsFrozenRef.current) simRef.current?.warm();
+    simRef.current?.warm();
   }, []);
 
   const handleNodeLeave = useCallback((id: string) => {
@@ -878,7 +851,7 @@ export function GraphView({
       setHoverId((cur) => {
         if (cur === id) {
           simRef.current?.setHover(null);
-          if (!physicsFrozenRef.current) simRef.current?.warm();
+          simRef.current?.warm();
           return null;
         }
         return cur;
@@ -1087,24 +1060,205 @@ export function GraphView({
         />
 
         <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
-          {/* Codex backdrop — faint dot lattice. The graph is the subject;
-              the canvas is just substrate. No starfield, no orrery. */}
+          {/* Sparse warm motes — atmospheric dust, not stars. Memoized
+              upstream so 55 dots don't walk React each animation tick. */}
+          {starfieldJsx}
+
+          {/* Territorial dot grid + sector divider lines — Obsidian-style
+              faint cartography behind everything. Both layers are memoized
+              upstream + drawn at very low opacity so they read as "this
+              canvas has territory" without ever competing with the nodes. */}
           {territorialBackdrop}
 
-          {/* No central decoration — the codex aesthetic deliberately
-              omits the sun/orbits/ember halo. Whatever sits at the
-              centroid is just whichever node settled there. */}
+          {/* Decorative sun — ember core at canvas center. Shown in BOTH
+              modes because both modes orbit around the center: orbital
+              mode has concentric rings around it, force mode has a
+              force-directed cluster slowly rotating around it. The sun
+              is never a real note (that was the "big task at center"
+              mistake) — just a gravitational anchor visual.           */}
+          {layoutMode === "neural-link" && (() => {
+            const { cx, cy } = sim.center();
+            const coreBreath = 1 + 0.05 * Math.sin(pulseTick * 0.03);
+            const coreR = 24 * coreBreath;
+            return (
+              <g pointerEvents="none" aria-hidden>
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 3.4}
+                  fill="url(#lb-ember)"
+                  opacity={0.82}
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR}
+                  fill="#d4a26a"
+                  opacity={0.3}
+                  filter="url(#lb-core-glow)"
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 0.42}
+                  fill="#f5d19a"
+                  opacity={0.55}
+                />
+              </g>
+            );
+          })()}
 
-          {/* Edges — codex-thin ivory hairs. One single ink color for all
-              connections; the trace through your graph reads like ruled
-              ink on a page, not coloured wire. Per-edge linearGradient
-              defs were the dominant DOM cost (one gradient + 2 stops × N
-              edges); replacing with a single shared stroke colour drops
-              ~3 SVG nodes per edge × N edges from the document tree.
-              Gentle bow (3% of length) keeps overlapping edges visually
-              separable without the synapse-curl exuberance of the old
-              galaxy view. Active (1-hop of focus) gets full ink + a
-              hair more weight; everything else is whisper. */}
+          {/* Observatory furniture — orbit guide rings, ring labels, ember
+              core, "now" tick. Only in category mode (orbital layout).  */}
+          {layoutMode === "category" && (() => {
+            const { cx, cy } = sim.center();
+            const radii = sim.orbitRadii();
+            const coreBreath = 1 + 0.05 * Math.sin(pulseTick * 0.03);
+            const coreR = 24 * coreBreath;
+            return (
+              <g pointerEvents="none" aria-hidden>
+                {/* Orbit guide rings — dashed warm strokes in each ring's
+                    label color. Subtle, never compete with the nodes. */}
+                {radii.map((r, i) => (
+                  <circle
+                    key={`orbit-${i}`}
+                    cx={cx}
+                    cy={cy}
+                    r={r}
+                    fill="none"
+                    stroke={ORBIT_LABELS[i].color}
+                    strokeOpacity={
+                      isolatedOrbit === null
+                        ? 0.10 + i * 0.012
+                        : isolatedOrbit === i
+                          ? 0.32
+                          : 0.04
+                    }
+                    strokeWidth={isolatedOrbit === i ? 1.2 : 0.8}
+                    strokeDasharray={isolatedOrbit === i ? "3 5" : "2 7"}
+                  />
+                ))}
+                {/* Orbit labels — static text parked at the TOP of each ring,
+                    OUTSIDE the orbit path. Empty orbits are skipped. */}
+                {(() => {
+                  const metas = sim.orbitMeta();
+                  return radii.map((r, i) => {
+                    if ((metas[i]?.nodeCount ?? 0) === 0) return null;
+                    if (r < 80) return null;
+                    const op =
+                      isolatedOrbit === null
+                        ? 0.6
+                        : isolatedOrbit === i
+                          ? 0.95
+                          : 0.14;
+                    const label = ORBIT_LABELS[i];
+                    return (
+                      <text
+                        key={`orbit-label-${i}`}
+                        x={cx}
+                        y={cy - r - 8}
+                        textAnchor="middle"
+                        fill={label.color}
+                        opacity={op}
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          letterSpacing: "0.28em",
+                          fontFamily: "var(--font-display, inherit)",
+                        }}
+                      >
+                        {label.title}
+                        <tspan
+                          dx={6}
+                          fill={label.color}
+                          opacity={0.6}
+                          style={{ fontSize: 9, fontWeight: 500 }}
+                        >
+                          · {label.subtitle}
+                        </tspan>
+                      </text>
+                    );
+                  });
+                })()}
+                {/* Outer ember halo + warm core + hot center pupil. Only
+                    visible in category mode; neural-link mode hides the
+                    whole observatory chrome since the hub star is the
+                    actual center anchor there. */}
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 3.4}
+                  fill="url(#lb-ember)"
+                  opacity={0.82}
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR}
+                  fill="#d4a26a"
+                  opacity={0.3}
+                  filter="url(#lb-core-glow)"
+                />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={coreR * 0.42}
+                  fill="#f5d19a"
+                  opacity={0.55}
+                />
+                {/* "Now" marker — a small amber tick at 12 o'clock on the
+                    innermost orbit. Represents the current focus axis. */}
+                <g transform={`translate(${cx} ${cy - radii[0]})`}>
+                  <line
+                    x1={0}
+                    y1={-6}
+                    x2={0}
+                    y2={6}
+                    stroke="#f5d19a"
+                    strokeWidth={1.5}
+                    strokeOpacity={0.9}
+                    strokeLinecap="round"
+                  />
+                  <circle
+                    cx={0}
+                    cy={-10}
+                    r={2.2}
+                    fill="#f5d19a"
+                    opacity={0.95}
+                  />
+                </g>
+              </g>
+            );
+          })()}
+
+          {/* Edges — thin curved synapse arcs. Each path is a quadratic
+              Bezier bowed gently perpendicular to the straight line, so as
+              the orbits rotate, the arcs sweep and flex organically. No
+              blur halo — the cozy palette doesn't need it, and removing it
+              drops visual noise massively. */}
+          {graph.edges.map((edge, idx) => {
+            const a = nodeById.get(edge.source);
+            const b = nodeById.get(edge.target);
+            if (!a || !b) return null;
+            const srcNote = notesById?.[edge.source];
+            const tgtNote = notesById?.[edge.target];
+            const srcColor = srcNote ? colorForTags(srcNote.tags, srcNote.pinned).ring : "#6b5e4a";
+            const tgtColor = tgtNote ? colorForTags(tgtNote.tags, tgtNote.pinned).ring : "#6b5e4a";
+            return (
+              <linearGradient
+                key={`g-${idx}`}
+                id={`e-grad-${idx}`}
+                gradientUnits="userSpaceOnUse"
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+              >
+                <stop offset="0%" stopColor={srcColor} stopOpacity={0.78} />
+                <stop offset="100%" stopColor={tgtColor} stopOpacity={0.78} />
+              </linearGradient>
+            );
+          })}
           {graph.edges.map((edge, idx) => {
             const a = nodeById.get(edge.source);
             const b = nodeById.get(edge.target);
@@ -1115,26 +1269,31 @@ export function GraphView({
               depths !== null &&
               ((depths.get(edge.source) ?? 99) <= 1 ||
                 (depths.get(edge.target) ?? 99) <= 1);
+            // Quadratic Bezier — bow the line perpendicular to the straight
+            // path. Control point sits at the midpoint, pushed outward by
+            // ~12% of the edge length. Side (sign) chosen deterministically
+            // from the edge index so curves don't all bend the same way.
             const dx = b.x - a.x;
             const dy = b.y - a.y;
             const len = Math.hypot(dx, dy) || 1;
-            // Bow = 3% of edge length, sign alternates by edge index so
-            // overlapping pairs don't superimpose into a thick block.
-            const bow = len * 0.03 * (idx % 2 === 0 ? 1 : -1);
+            const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1);
             const mx = (a.x + b.x) / 2 + (-dy / len) * bow;
             const my = (a.y + b.y) / 2 + (dx / len) * bow;
             const d = `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
+            // Very gentle breathing opacity — barely perceptible, just
+            // enough to feel alive. No bright strobe.
+            const phase = Math.sin((pulseTick + idx * 13) * 0.04);
             const dimmed = st.opacity < 0.1;
             const baseOp = dimmed
-              ? st.opacity * 0.45
-              : isActive ? 0.78 : 0.13;
+              ? st.opacity * 0.5
+              : (isActive ? 0.72 : 0.34) + 0.06 * phase;
             return (
               <path
                 key={`e-${idx}`}
                 d={d}
                 fill="none"
-                stroke="#e8d5b0"
-                strokeWidth={isActive ? 1.1 : 0.55}
+                stroke={`url(#e-grad-${idx})`}
+                strokeWidth={isActive ? 1.4 : 0.95}
                 strokeOpacity={baseOp}
                 strokeLinecap="round"
                 pointerEvents="none"
@@ -1144,12 +1303,8 @@ export function GraphView({
 
           {/* Traveling synapse motes — one soft dot per edge, follows the
               curve. Active (1-hop of focus) gets a warmer, slightly brighter
-              mote. No paired flashes, no neon.
-              Skipped entirely when frozen: motes are pure ornament, and at
-              high edge counts (neural-link with 2k+ edges) the 2 circles
-              per edge × N edges balloons the SVG DOM and makes zoom/pan
-              stutter even with no React reconcile. */}
-          {!physicsFrozen && graph.edges.map((edge, idx) => {
+              mote. No paired flashes, no neon. */}
+          {graph.edges.map((edge, idx) => {
             const a = nodeById.get(edge.source);
             const b = nodeById.get(edge.target);
             if (!a || !b) return null;
@@ -1290,33 +1445,57 @@ export function GraphView({
                   pointerEvents="none"
                   filter="url(#lb-neural-glow)"
                 />
-                {/* Hub mark — top-5 most-connected notes carry a thin
-                    static amber ring. The previous pulsing <animate>
-                    elements forced the browser into perpetual SVG
-                    repaints even with the rest of the graph frozen
-                    (each top-5 hub = 2 animated attributes × forever),
-                    which was a meaningful chunk of the residual lag.
-                    Static ring reads the same role at zero cost. */}
+                {/* Hub ring — top-5 most connected notes get a warm
+                    concentric pulse marking them as anchors of the graph. */}
                 {hubIds.has(node.id) && !note?.pinned && (
-                  <circle
-                    r={r + 2.2}
-                    fill="none"
-                    stroke="#d4a26a"
-                    strokeWidth={0.9}
-                    strokeOpacity={0.55}
-                    pointerEvents="none"
-                  />
+                  <>
+                    <circle
+                      r={r + 1.6}
+                      fill="none"
+                      stroke="#d4a26a"
+                      strokeWidth={1.2}
+                      strokeOpacity={0.5}
+                      pointerEvents="none"
+                    />
+                    <circle
+                      r={r + 2}
+                      fill="none"
+                      stroke="#d4a26a"
+                      strokeWidth={1.4}
+                      strokeOpacity={0.8}
+                      pointerEvents="none"
+                    >
+                      <animate
+                        attributeName="r"
+                        values={`${r + 2};${r + 10};${r + 2}`}
+                        dur="3.2s"
+                        repeatCount="indefinite"
+                      />
+                      <animate
+                        attributeName="stroke-opacity"
+                        values="0.8;0;0.8"
+                        dur="3.2s"
+                        repeatCount="indefinite"
+                      />
+                    </circle>
+                  </>
                 )}
-                {/* Pinned mark — single static amber ring, no pulse. */}
+                {/* Pinned halo — now with a slow pulse (±1px) */}
                 {note?.pinned && (
                   <circle
-                    r={r + 3.5}
+                    r={r + 4}
                     fill="none"
                     stroke="#fbbf24"
-                    strokeWidth={1.3}
-                    strokeOpacity={0.85}
-                    pointerEvents="none"
-                  />
+                    strokeWidth={2}
+                    strokeOpacity={0.9}
+                  >
+                    <animate
+                      attributeName="r"
+                      values={`${r + 3};${r + 5};${r + 3}`}
+                      dur="2.4s"
+                      repeatCount="indefinite"
+                    />
+                  </circle>
                 )}
                 {/* Selected ring */}
                 {isSelected && !isFocus && (
@@ -1807,82 +1986,124 @@ export function GraphView({
         );
       })()}
 
-      {/* Codex mast — top-left editorial chrome. Replaces the old
-          two-mode toggle pill, freeze pill and orbit-chip rail. The
-          graph is one mode now; the mast just identifies what you're
-          looking at and gives a quiet count. Tracked-out monospace
-          for the wordmark, lining-numerals serif for the count. */}
-      <div
-        className="absolute top-3 left-4 z-10 flex items-baseline gap-2 select-none pointer-events-none"
-        style={{ color: "#e8d5b0" }}
-      >
-        <span
-          style={{
-            fontFamily:
-              "var(--font-mono, ui-monospace, 'JetBrains Mono', Menlo, monospace)",
-            fontSize: 9,
-            letterSpacing: "0.42em",
-            textTransform: "uppercase",
-            opacity: 0.55,
-          }}
-        >
-          Codex
-        </span>
-        <span
-          style={{
-            fontFamily:
-              "'Source Serif 4', 'Source Serif Pro', Georgia, serif",
-            fontStyle: "italic",
-            fontSize: 13,
-            opacity: 0.78,
-            fontFeatureSettings: "'lnum' 1",
-          }}
-        >
-          {graph.nodes.length}
-          <span
-            style={{
-              fontStyle: "normal",
-              fontSize: 9,
-              opacity: 0.5,
-              marginLeft: 4,
-              letterSpacing: "0.18em",
-              textTransform: "uppercase",
-            }}
-          >
-            notes
-          </span>
-        </span>
-      </div>
+      {/* Orbit chip stack — left-middle edge. Click to isolate a ring,
+          click again to release. Hover highlights. Shows per-orbit count.
+          Hidden in neural-link mode where there are no orbits. */}
+      {layoutMode === "category" && (() => {
+        const meta = sim.orbitMeta();
+        return (
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1.5">
+            {meta.map((m, i) => {
+              // Skip empty orbits — no need to show a chip for "CORE 0".
+              if (m.nodeCount === 0) return null;
+              const label = ORBIT_LABELS[i];
+              const isIso = isolatedOrbit === i;
+              const dim = isolatedOrbit !== null && !isIso;
+              return (
+                <button
+                  key={`ochip-${i}`}
+                  onClick={() => setIsolatedOrbit(isIso ? null : i)}
+                  className="group relative flex items-center gap-2 pl-2 pr-2.5 py-1.5 rounded-r-md text-left transition-all"
+                  style={{
+                    background: isIso
+                      ? "rgba(212,162,106,0.16)"
+                      : "rgba(27,22,32,0.72)",
+                    border: "1px solid",
+                    borderColor: isIso
+                      ? "rgba(212,162,106,0.55)"
+                      : "rgba(168,144,106,0.18)",
+                    borderLeft: `3px solid ${label.color}`,
+                    opacity: dim ? 0.5 : 1,
+                    backdropFilter: "blur(8px)",
+                  }}
+                  title={
+                    isIso
+                      ? `Release ${label.title} orbit (${i + 1})`
+                      : `Isolate ${label.title} orbit (press ${i + 1})`
+                  }
+                >
+                  <div className="flex flex-col leading-none">
+                    <span
+                      className="text-[10px] font-semibold tracking-[0.18em]"
+                      style={{
+                        color: label.color,
+                        fontFamily: "var(--font-display, inherit)",
+                      }}
+                    >
+                      {label.title}
+                    </span>
+                    <span
+                      className="text-[8px] opacity-60 mt-0.5"
+                      style={{ color: label.color }}
+                    >
+                      {label.subtitle}
+                    </span>
+                  </div>
+                  <span
+                    className="ml-1 text-[10px] tabular-nums px-1 rounded"
+                    style={{
+                      background: "rgba(240,228,200,0.08)",
+                      color: "rgba(232,213,176,0.78)",
+                      minWidth: 20,
+                      textAlign: "center",
+                    }}
+                  >
+                    {m.nodeCount}
+                  </span>
+                </button>
+              );
+            })}
+            {isolatedOrbit !== null && (
+              <button
+                onClick={() => setIsolatedOrbit(null)}
+                className="text-[9px] uppercase tracking-[0.15em] text-text-muted hover:text-text-primary transition-colors mt-1 px-2 py-1"
+                style={{ fontFamily: "var(--font-display, inherit)" }}
+                title="Show all orbits (Esc)"
+              >
+                ✕ clear focus
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
-      {/* Codex colophon — bottom-left corner stats. Plate count, link
-          count, orphan count. Quiet monospace, no chrome, no
-          background. Reads like a margin note in a printed atlas. */}
-      <div
-        className="absolute bottom-3 left-4 z-10 select-none pointer-events-none flex items-baseline gap-3"
-        style={{
-          color: "#a89072",
-          fontFamily:
-            "var(--font-mono, ui-monospace, 'JetBrains Mono', Menlo, monospace)",
-          fontSize: 9,
-          letterSpacing: "0.22em",
-          textTransform: "uppercase",
-          opacity: 0.62,
-        }}
-      >
-        <span>{graph.edges.length} links</span>
-        <span style={{ opacity: 0.4 }}>·</span>
-        <span>
-          {(() => {
-            // Orphans = nodes with zero edges in either direction.
-            const seen = new Set<string>();
-            for (const e of graph.edges) {
-              seen.add(e.source);
-              seen.add(e.target);
-            }
-            return graph.nodes.length - seen.size;
-          })()}{" "}
-          orphans
-        </span>
+      {/* Zoom controls */}
+      {/* Layout-mode toggle — flip between category orbits (each kind on
+          its own ring) and neural-link orbits (top-hub at center, others
+          on BFS-distance rings). Top-left corner so it doesn't crash into
+          the search bar (center) or zoom controls (right). */}
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-0 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-0.5 py-0.5 text-[10px]">
+        {(["category", "neural-link"] as const).map((mode) => {
+          const active = layoutMode === mode;
+          const label = mode === "category" ? "Categories" : "Neural-links";
+          const title =
+            mode === "category"
+              ? "Group notes by kind (task / lesson / memory)"
+              : topHubId
+                ? "Pin the most-linked note at center; others orbit by distance"
+                : "Neural-link mode — needs at least one link";
+          return (
+            <button
+              key={mode}
+              type="button"
+              disabled={mode === "neural-link" && !topHubId}
+              onClick={() => setLayoutMode(mode)}
+              title={title}
+              className={`px-2.5 py-1 rounded-full transition-colors tracking-wide ${
+                active
+                  ? "bg-bg-hover text-text-primary"
+                  : "text-text-muted hover:text-text-primary"
+              } ${mode === "neural-link" && !topHubId ? "opacity-40 cursor-not-allowed" : ""}`}
+              style={
+                active
+                  ? { boxShadow: `inset 0 -2px 0 ${mode === "neural-link" ? "#f0a060" : "#d4a26a"}` }
+                  : undefined
+              }
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       <div className="absolute top-3 right-3 flex flex-col gap-1 z-10">

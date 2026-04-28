@@ -110,12 +110,6 @@ export class ForceSimulation {
    *  that should re-stir the layout). Orbital mode never cools (always
    *  rotating by design). */
   private _quietTicks = 0;
-  /** True if the constructor restored any node position from
-   *  ``options.savedPositions``. The renderer reads this to decide
-   *  whether to start the graph in "frozen physics" mode (we already
-   *  have a settled layout) or run a one-time settle pass (no prior
-   *  positions yet). */
-  private _usedSavedPositions = false;
 
   constructor(
     nodes: Array<{ id: string; pinned?: boolean }>,
@@ -228,7 +222,6 @@ export class ForceSimulation {
         n.y = sy;
         n.vx = 0;
         n.vy = 0;
-        this._usedSavedPositions = true;
         if (this._mode === "orbital") {
           // Keep the orbit metadata coherent with the restored position
           // so orbital rotation math doesn't snap the node back to its
@@ -503,15 +496,6 @@ export class ForceSimulation {
    *  layout. Always false in orbital mode (perpetual rotation). */
   cooled(): boolean {
     return this._mode === "force" && this._quietTicks >= COOL_TICKS;
-  }
-
-  /** True if the constructor restored at least one node position from
-   *  ``options.savedPositions``. Used by the renderer to skip the
-   *  warm-up settle pass when a prior session already arranged the
-   *  layout — the graph opens visually identical to its last cooled
-   *  state, no O(N²) physics burst needed. */
-  usedSavedPositions(): boolean {
-    return this._usedSavedPositions;
   }
 
   pin(id: string, x: number, y: number): void {

@@ -149,7 +149,9 @@ async def _mirror_site_memory_note(
             source="site-memory",
         )
     except Exception:
-        logger.debug("lazybrain site_memory mirror failed", exc_info=True)
+        logger.warning(
+            "lazybrain site_memory mirror failed for user %s", user_id, exc_info=True,
+        )
 
 
 async def recall(config: Config, user_id: str, url: str) -> dict[str, list[dict]]:

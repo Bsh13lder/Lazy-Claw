@@ -16,8 +16,10 @@ use tag-only pages.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import unicodedata
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -84,6 +86,23 @@ def _title_key(title: str | None) -> str | None:
     if not title:
         return None
     return normalize_page(title)
+
+
+def _fold(s: str) -> str:
+    """Lowercase + strip combining diacritics for substring search.
+
+    Folds Latin accents ("Asistència" → "asistencia", "café" → "cafe")
+    so multilingual search isn't case- or accent-sensitive. Non-Latin
+    scripts (Georgian, Cyrillic, Arabic, CJK) carry no combining marks
+    and pass through unchanged, so this is safe for the user's
+    Latin-Georgian transliteration as well.
+    """
+    if not s:
+        return ""
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    ).lower()
 
 
 def _merge_tags(explicit: list[str] | None, markdown: str) -> list[str]:
@@ -153,6 +172,47 @@ async def _resolve_pending_links(db, user_id: str, new_note: dict) -> None:
         "WHERE user_id = ? AND to_page_name = ? AND to_note_id IS NULL",
         (new_note["id"], user_id, key),
     )
+
+
+def _schedule_post_save_hooks(
+    config: Config, user_id: str, note_id: str, content: str
+) -> None:
+    """Fire-and-forget secondary indexes after save_note/update_note commits.
+
+    Two hooks the brain needs to keep recall working — both were defined
+    elsewhere but never wired:
+
+    1. ``ensure_embedding`` — upserts the note's vector into
+       ``note_embeddings`` so ``semantic_search`` actually finds new
+       notes. Without this, embeddings.py:semantic_search silently
+       degrades to substring matching for everything saved post-startup.
+    2. ``wikilink_injector.invalidate_cache`` — drops the 30s LRU of
+       known titles so a freshly-titled note can become a ``[[wikilink]]``
+       in the agent's next reply, not 30 seconds later.
+
+    Both are best-effort: PKM bookkeeping must never block a save.
+    """
+    try:
+        from lazyclaw.lazybrain import embeddings as _lb_emb
+        # Schedule the embedding upsert on the running loop. If we're
+        # not inside one (e.g. called from sync test code), silently skip.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            asyncio.create_task(
+                _lb_emb.ensure_embedding(config, user_id, note_id, content),
+            )
+    except Exception:
+        logger.debug("schedule embedding upsert failed", exc_info=True)
+    try:
+        # Local import — wikilink_injector imports store, so this avoids
+        # an import-time cycle. invalidate_cache is sync.
+        from lazyclaw.runtime.wikilink_injector import invalidate_cache
+        invalidate_cache(user_id)
+    except Exception:
+        logger.debug("wikilink cache invalidation failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +309,8 @@ async def save_note(
             {"id": note_id, "title_key": title_key},
         )
         await db.commit()
+
+    _schedule_post_save_hooks(config, user_id, note_id, content)
 
     return {
         "id": note_id,
@@ -355,6 +417,10 @@ async def update_note(
             )
         await db.commit()
 
+    # Re-embed if content changed; invalidate wikilink cache if title changed.
+    if content is not None or title is not None:
+        _schedule_post_save_hooks(config, user_id, note_id, new_content)
+
     return await get_note(config, user_id, note_id)
 
 
@@ -440,12 +506,12 @@ async def search_notes(
     """
     if not query or not query.strip():
         return []
-    q = query.strip().lower()
+    q = _fold(query.strip())
     candidates = await list_notes(config, user_id, tag=tag, limit=500)
     hits = [
         n
         for n in candidates
-        if q in (n["content"] or "").lower() or q in (n["title"] or "").lower()
+        if q in _fold(n["content"] or "") or q in _fold(n["title"] or "")
     ]
     return hits[:limit]
 

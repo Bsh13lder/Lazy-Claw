@@ -486,7 +486,10 @@ async def auto_extract(
                     user_id, note["id"], note["title"], note["tags"], source="session-end",
                 )
         except Exception:
-            logger.debug("lazybrain session-end mirror failed", exc_info=True)
+            logger.warning(
+                "lazybrain session-end mirror failed for user %s",
+                user_id, exc_info=True,
+            )
 
         return results
 

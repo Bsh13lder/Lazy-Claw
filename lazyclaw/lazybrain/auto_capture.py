@@ -21,6 +21,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterable
 
 from lazyclaw.config import Config
@@ -53,27 +54,46 @@ class Capture:
 # ---------------------------------------------------------------------------
 
 _DECISION_RE = re.compile(
-    r"\b(?:decided|going with|we'?ll use|i'?ll go with|chose)\s+([^\.\n]{4,140})",
+    r"\b(?:"
+    # English
+    r"decided|going with|we'?ll use|i'?ll go with|chose"
+    # Spanish — decidí / decidido / vamos con / voy a usar / elegí / escogí / opté por
+    r"|decid[íiío](?:do|da)?|vamos con|voy a usar|eleg[íi]|escog[íi]|opt[éeó] por"
+    r")\s+([^\.\n]{4,140})",
     re.IGNORECASE,
 )
 
 _TIL_RE = re.compile(
-    r"\b(?:TIL|today i learned|turns out|apparently|good to know)[:\- ]+"
-    r"(.{4,240}?)(?:\.\s|$)",
+    r"\b(?:"
+    # English
+    r"TIL|today i learned|turns out|apparently|good to know"
+    # Spanish — aprendí hoy / hoy aprendí / resulta que / al parecer / bueno saber
+    r"|aprend[íi] hoy|hoy aprend[íi]|resulta que|al parecer|bueno saber"
+    r")[:\- ]+(.{4,240}?)(?:\.\s|$)",
     re.IGNORECASE | re.DOTALL,
 )
 
 _PRICE_RE = re.compile(
-    r"(?P<what>[A-Z][\w\s]{2,60}?)\s+costs?\s+"
+    r"(?P<what>[A-Za-zÁÉÍÓÚÑáéíóúñ][\wÁÉÍÓÚÑáéíóúñ\s]{2,60}?)\s+"
+    # English: costs   |   Spanish: cuesta / vale / sale por
+    r"(?:costs?|cuesta|vale|sale por)\s+"
     r"(?P<cur>[$€£])(?P<amount>\d[\d,\.]*)"
-    r"(?:\s*(?:per|/|a)\s+(?P<unit>\w+))?",
+    # per / / / a   (English)   |   por / al / la / el   (Spanish)
+    r"(?:\s*(?:per|/|a|por|al|la|el)\s+(?P<unit>\w+))?",
     re.IGNORECASE,
 )
 
 _DEADLINE_RE = re.compile(
-    r"\b(?:deadline|due|by)\s+(?P<when>"
-    r"(?:tomorrow|today|tonight|next (?:week|month|\w+day)|\w+ \d{1,2}(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2})"
-    r")(?:\s+(?:for|:)\s+(?P<what>[^\.\n]{3,120}))?",
+    r"\b(?:"
+    # English
+    r"deadline|due|by"
+    # Spanish — fecha límite / antes del / para el / vence / hasta el
+    r"|fecha l[íi]mite|antes del|para el|vence(?: el)?|hasta el"
+    r")\s+(?P<when>"
+    r"(?:tomorrow|today|tonight|next (?:week|month|\w+day)"
+    r"|ma[ñn]ana|hoy|esta noche|la pr[óo]xima semana|el pr[óo]ximo mes"
+    r"|\w+ \d{1,2}(?:st|nd|rd|th)?|\d{1,2} de \w+|\d{4}-\d{2}-\d{2})"
+    r")(?:\s+(?:for|:|para)\s+(?P<what>[^\.\n]{3,120}))?",
     re.IGNORECASE,
 )
 
@@ -101,7 +121,12 @@ _CONTACT_RE = re.compile(
 )
 
 _IDEA_RE = re.compile(
-    r"\b(?:idea|should explore|worth trying|todo later)[:\- ]+([^\.\n]{5,200})",
+    r"\b(?:"
+    # English
+    r"idea|should explore|worth trying|todo later"
+    # Spanish — idea / habría que probar / deberíamos / sería bueno / pendiente
+    r"|habr[íi]a que probar|deber[íi]amos|ser[íi]a bueno|pendiente"
+    r")[:\- ]+([^\.\n]{5,200})",
     re.IGNORECASE,
 )
 
@@ -285,23 +310,33 @@ async def capture_text(
         captures = [c for c in extract(text) if c.confidence >= min_confidence]
         return await _persist(config, user_id, captures, trace_session_id, source)
     except Exception:
-        logger.debug("auto_capture failed silently", exc_info=True)
+        logger.warning(
+            "auto_capture regex tier failed for user %s", user_id, exc_info=True,
+        )
         return []
 
 
 _LLM_PROMPT = """Extract the single most important thing worth remembering from this message.
-Polish the phrasing into clear English — the author may not be a native speaker.
-Be conservative: if the message is vague or ambiguous, set skip=true instead of guessing.
+
+LANGUAGE RULE — write `content` and `title` in the SAME language as the message.
+If the message is in Spanish, reply in Spanish. If transliterated Georgian
+(Latin-script Georgian, e.g. "gadavts'q'vit'e"), keep that script. Never
+translate the user's own words into English. Only fix typos and obvious
+grammar slips — preserve voice and idiom.
+
+Be conservative — set skip=true only if the message has NO concrete fact,
+decision, deadline, price, idea, contact, command, or learning. A message
+in non-English with a clear point is NOT vague — capture it in its language.
 
 Categories: decision | til | price | deadline | command | recipe | contact | idea | fact | task
 Return strict JSON only. No prose, no code fences.
 {{
   "kind": "<category>",
-  "content": "<1-3 line polished markdown>",
-  "title": "<short polished title, max 60 chars>",
+  "content": "<1-3 line markdown in the SAME LANGUAGE as the message>",
+  "title": "<short title, max 60 chars, SAME LANGUAGE as the message>",
   "importance": <1-10>,
   "tags": ["auto", "<kind>"],
-  "skip": <true if unclear or not worth remembering>
+  "skip": <true ONLY if message has zero memorable content>
 }}
 
 Message:
@@ -368,8 +403,49 @@ async def capture_text_with_llm(
         )
         return await _persist(config, user_id, [cap], trace_session_id, source)
     except Exception:
-        logger.debug("auto_capture LLM fallback failed silently", exc_info=True)
+        logger.warning(
+            "auto_capture LLM fallback failed for user %s", user_id, exc_info=True,
+        )
         return []
+
+
+# Re-saving the same auto-capture inside this window is treated as a
+# duplicate and skipped. 7 days is long enough to catch "I told you that
+# yesterday" but short enough that a real follow-up week later still gets
+# its own note.
+_DEDUP_WINDOW_DAYS = 7
+
+
+async def _is_recent_duplicate(
+    config: Config, user_id: str, cap: Capture
+) -> bool:
+    """True if a note with the same title already exists in the last week.
+
+    Uses the indexed plaintext ``title_key`` column — no decrypt needed.
+    Cheap enough to run before every auto-capture insert. Skips the check
+    if the capture has no title (rare; falls through to the regular save).
+    """
+    if not cap.title:
+        return False
+    try:
+        existing = await store.find_by_title(config, user_id, cap.title)
+    except Exception:
+        logger.debug("dedup lookup failed", exc_info=True)
+        return False
+    if not existing:
+        return False
+    created = existing.get("created_at")
+    if not created:
+        return True  # found a same-title note, no timestamp → conservative skip
+    try:
+        # created_at is "YYYY-MM-DD HH:MM:SS" UTC (see store._now)
+        ts = datetime.strptime(created, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return True  # malformed timestamp → conservative skip
+    age = datetime.now(timezone.utc) - ts
+    return age.days < _DEDUP_WINDOW_DAYS
 
 
 async def _persist(
@@ -385,6 +461,11 @@ async def _persist(
     extra_tags = [f"source/{source}", "owner/user"]
     note_ids: list[str] = []
     for cap in captures:
+        if await _is_recent_duplicate(config, user_id, cap):
+            logger.debug(
+                "auto_capture skipping recent duplicate: %s", cap.title,
+            )
+            continue
         note = await store.save_note(
             config,
             user_id,

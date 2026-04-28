@@ -49,7 +49,9 @@ async def save_memory(
             user_id, note["id"], note["title"], note["tags"], source="memory",
         )
     except Exception:
-        logger.debug("lazybrain memory mirror failed", exc_info=True)
+        logger.warning(
+            "lazybrain memory mirror failed for user %s", user_id, exc_info=True,
+        )
 
     return memory_id
 

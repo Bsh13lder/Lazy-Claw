@@ -217,9 +217,48 @@ async def build_context(
     # 3. Personal memories — hybrid pick: always-on facts (importance) +
     #    context-relevant facts (keyword overlap with the current message).
     #    Fetch a wider pool once, then pick 5+5 with dedup.
+    #    Pool merges:
+    #      - legacy personal_memory table (importance-ranked facts)
+    #      - LazyBrain user-saved + auto-captured notes (TILs, decisions,
+    #        prices, deadlines, ideas), excluding mirrors of stores already
+    #        represented in the pool (#memory / #daily-log / #session-end)
+    #        so the same content doesn't appear twice.
+    #    Without this merge, anything saved into LazyBrain (manual or
+    #    auto-captured) is invisible to the agent unless explicitly
+    #    pinned — write-only brain bug.
     from lazyclaw.memory.personal import get_memories
 
     pool = await get_memories(config, user_id, limit=40)
+    try:
+        from lazyclaw.lazybrain import store as _lb_store
+
+        lb_notes = await _lb_store.list_notes(config, user_id, limit=40)
+        _SKIP_TAGS = {"memory", "daily-log", "session-end"}
+        for n in lb_notes:
+            tags = n.get("tags") or []
+            if any(t in _SKIP_TAGS for t in tags):
+                continue
+            title = (n.get("title") or "")
+            if title.startswith(("Journal —", "Daily summary", "Weekly summary")):
+                continue
+            content = (n.get("content") or "").strip()
+            if not content:
+                continue
+            # Cap LazyBrain importance at 6 so auto-capture deadlines/decisions
+            # (importance 7-8) don't drown out user-saved memories (default 5).
+            imp = min(int(n.get("importance") or 5), 6)
+            pool.append({
+                "id": f"lb:{n['id']}",
+                "memory_type": "lazybrain",
+                "content": content[:500],
+                "importance": imp,
+            })
+        # Re-sort merged pool by importance DESC so _pick_hybrid_memories
+        # still sees a properly-ordered list.
+        pool.sort(key=lambda m: int(m.get("importance") or 0), reverse=True)
+    except Exception:
+        logger.debug("Failed to merge lazybrain notes into memory pool", exc_info=True)
+
     memories = _pick_hybrid_memories(pool, user_message, n_importance=5, n_relevant=5)
 
     # 4. Recent activity (daily/weekly logs — agent's "diary")

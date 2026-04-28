@@ -83,7 +83,10 @@ async def store_lesson(
                     user_id, note["id"], note["title"], note["tags"], source="lesson",
                 )
             except Exception:
-                logger.debug("lazybrain lesson mirror failed", exc_info=True)
+                logger.warning(
+                    "lazybrain lesson mirror failed for user %s",
+                    user_id, exc_info=True,
+                )
             return memory_id
 
     except Exception as e:

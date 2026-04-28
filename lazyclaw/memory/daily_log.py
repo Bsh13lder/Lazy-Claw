@@ -77,7 +77,9 @@ async def save_daily_log(
             user_id, note["id"], note["title"], note["tags"], source="daily-log",
         )
     except Exception:
-        logger.debug("lazybrain daily_log mirror failed", exc_info=True)
+        logger.warning(
+            "lazybrain daily_log mirror failed for user %s", user_id, exc_info=True,
+        )
 
     return log_id
 

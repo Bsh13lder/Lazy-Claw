@@ -326,6 +326,16 @@ async def chat_websocket(ws: WebSocket):
                     evt.kind in ("background_done", "background_failed")
                     and (evt.task_id or "").startswith("subagent-")
                 )
+                # Brain-spawned run_background tasks share the same
+                # "consolidate, don't paint per-task" rule. TaskRunner
+                # already fired the synthetic consolidation turn (or
+                # will, when the last sibling settles), and that turn's
+                # reply lands in chat normally. Per-task cards would
+                # duplicate.
+                _is_brain_bg_terminal = (
+                    evt.kind in ("background_done", "background_failed")
+                    and getattr(evt, "source", None) == "brain"
+                )
 
                 # Build the side-note payload the brain will see on its
                 # next TAOR iteration. Subagent results never render as
@@ -358,6 +368,13 @@ async def chat_websocket(ws: WebSocket):
                     # completed" assistant cards, breaking the "ONE
                     # consolidated summary" contract. Activity panel
                     # already saw the task_completed frame separately.
+                    continue
+
+                if _is_brain_bg_terminal:
+                    # Per-task assistant cards for brain fan-out
+                    # tasks would duplicate the consolidator's reply.
+                    # Drop them; Activity panel still updates via the
+                    # separate task_completed frame.
                     continue
 
                 try:

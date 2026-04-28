@@ -188,6 +188,12 @@ class TelegramNotifier:
 
         if kind == "background_done":
             meta = event.metadata or {}
+            # Brain fan-out: per-task push is suppressed at the source
+            # in TaskRunner; the consolidator turn writes ONE merged
+            # summary instead. Defensive guard here for any path that
+            # bypasses TaskRunner's gate.
+            if meta.get("source") == "brain":
+                return None, None
             name = html.escape(meta.get("name", ""))
             result = _strip_markdown(meta.get("result", ""))
             preview = html.escape(result[:500])
@@ -215,6 +221,9 @@ class TelegramNotifier:
 
         if kind == "background_failed":
             meta = event.metadata or {}
+            # Brain fan-out — let the consolidator surface failures.
+            if meta.get("source") == "brain":
+                return None, None
             name = html.escape(meta.get("name", ""))
             error = html.escape(_strip_markdown(meta.get("error", ""))[:300])
             return (

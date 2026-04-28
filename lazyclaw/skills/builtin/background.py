@@ -21,12 +21,29 @@ logger = logging.getLogger(__name__)
 
 
 class RunBackgroundSkill(BaseSkill):
-    """Start a task that runs in the background."""
+    """Start a task that runs in the background.
 
-    def __init__(self, config: Config | None = None) -> None:
+    Per-turn re-registration (see :mod:`lazyclaw.runtime.agent`) injects
+    ``callback`` and ``fanout_group_id`` so a fresh group identity is
+    minted every TAOR turn. When the brain calls this tool 2+ times in
+    one turn — typically because the dispatch_subagents same-shape
+    rejector bounced its fan-out — every sibling shares the group ID,
+    individual per-task pushes get suppressed, and ONE consolidated
+    brain reply fires once the last sibling settles.
+    """
+
+    def __init__(
+        self,
+        config: Config | None = None,
+        callback: AgentCallback | None = None,
+        fanout_group_id: str | None = None,
+        chat_session_id: str | None = None,
+    ) -> None:
         self._config = config
         self._task_runner: TaskRunner | None = None
-        self._callback: AgentCallback | None = None
+        self._callback = callback
+        self._fanout_group_id = fanout_group_id
+        self._chat_session_id = chat_session_id
 
     @property
     def name(self) -> str:
@@ -93,11 +110,19 @@ class RunBackgroundSkill(BaseSkill):
         name = params.get("name", "").strip() or None
 
         try:
+            # source="brain" + fanout_group_id route this submit through
+            # TaskRunner's fan-out group bucketing. If the brain calls
+            # run_background only once in the turn, the group will have
+            # 1 entry and TaskRunner._consolidate degrades to the legacy
+            # per-task push automatically.
             task_id = await self._task_runner.submit(
                 user_id=user_id,
                 instruction=instruction,
                 name=name,
                 callback=self._callback,
+                source="brain",
+                fanout_group_id=self._fanout_group_id,
+                chat_session_id=self._chat_session_id,
             )
         except RuntimeError as exc:
             return f"Cannot start background task: {exc}"

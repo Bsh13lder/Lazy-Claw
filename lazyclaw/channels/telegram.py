@@ -535,6 +535,12 @@ class _TelegramCallback:
             )
 
             meta = event.metadata or {}
+            # Brain fan-out tasks: TaskRunner._consolidate fires ONE
+            # merged reply through the consolidator factory; suppress
+            # the per-task push here too so the user doesn't see
+            # both N partial pushes AND the consolidated one.
+            if meta.get("source") == "brain":
+                return
             task_name = _html.escape(meta.get("name", ""))
             result = _strip_markdown(meta.get("result", ""))
             preview = _html.escape(result[:2000])
@@ -577,6 +583,10 @@ class _TelegramCallback:
             import html as _html
 
             meta = event.metadata or {}
+            # Brain fan-out — consolidator surfaces failures alongside
+            # successes; suppress per-task push.
+            if meta.get("source") == "brain":
+                return
             task_name = _html.escape(meta.get("name", ""))
             error = _html.escape(meta.get("error", "unknown error")[:300])
             text = (

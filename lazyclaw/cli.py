@@ -247,6 +247,7 @@ async def run_agent(config: Config) -> None:
         eco_router=agent.eco_router,
         permission_checker=permission_checker,
         team_lead=team_lead,
+        lane_queue=lane_queue,
     )
     agent._task_runner = task_runner  # Enable fast dispatch
 
@@ -422,6 +423,17 @@ async def _run_headless(
             )
 
         notifier_factory = _make_prefixed_notifier
+
+        # Wire a consolidator-callback factory into TaskRunner so brain
+        # fan-out groups can post their merged reply to Telegram with a
+        # "🧠 Consolidated" prefix. The factory accepts (user_id, original_cb)
+        # and returns a fresh PrefixedTelegramNotifier — original_cb is
+        # ignored for Telegram (we always go through the bot adapter), but
+        # the signature stays open so a Web UI variant could be added.
+        def _consolidator_factory(user_id: str, original_cb):
+            return _make_prefixed_notifier("Consolidated", "🧠")
+
+        task_runner._consolidator_factory = _consolidator_factory
 
     try:
         from lazyclaw.heartbeat.daemon import HeartbeatDaemon

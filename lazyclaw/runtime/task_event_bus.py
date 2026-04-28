@@ -59,6 +59,12 @@ class TaskEvent:
     step_count: int | None = None
     phase: str | None = None
     status: str | None = None     # done | failed | cancelled (task_completed)
+    # Provenance — distinguishes brain-initiated fan-outs (where we
+    # consolidate one summary back to the user via a synthetic turn)
+    # from cron-fired and standalone tasks (which keep their immediate
+    # per-task push). See lazyclaw/runtime/task_runner.py:_BrainFanoutGroup.
+    source: str | None = None         # "brain" | "cron" | "user"
+    fanout_group_id: str | None = None  # uuid grouping sibling brain tasks
 
     def to_frame(self) -> dict:
         """JSON-safe WebSocket frame payload."""

@@ -232,26 +232,23 @@ _SCRAPER_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Suffixes for mcp-scraper tools (server_id is a UUID, so we match on
-# the plain tool name suffix). Subset of the 19 tools the wrapper exposes —
-# the high-leverage ones for LazyClaw's "find contact / read page" needs.
-_SCRAPER_MCP_TOOL_SUFFIXES: tuple[str, ...] = (
-    "_extract_entities",
-    "_crawl_url",
-    "_deep_crawl_site",
-    "_crawl_url_with_fallback",
-    "_intelligent_extract",
-    "_batch_crawl",
-    "_search_and_crawl",
-    # Search tools — scraper now also handles plain Google search,
-    # not just page reads. The `web_search` skill calls `search_google`
-    # under the hood as the primary provider, but the brain also gets
-    # direct access to `search_google` / `batch_search_google` so it can
-    # call them explicitly when it needs structured search results.
-    "_search_google",
-    "_batch_search_google",
+# Canonical scraper-pool tool names. The MCP bridge registers the pool
+# under stable names (no UUID prefix) so the keyword-injection path is
+# a direct registry lookup — no suffix matching required. Subset of the
+# 19 tools the scraper exposes — the high-leverage ones for LazyClaw's
+# "find contact / read page" needs. Search tools (search_google,
+# batch_search_google) included so the brain can call them explicitly.
+_SCRAPER_MCP_TOOL_NAMES: tuple[str, ...] = (
+    "mcp_scraper_extract_entities",
+    "mcp_scraper_crawl_url",
+    "mcp_scraper_deep_crawl_site",
+    "mcp_scraper_crawl_url_with_fallback",
+    "mcp_scraper_intelligent_extract",
+    "mcp_scraper_batch_crawl",
+    "mcp_scraper_search_and_crawl",
+    "mcp_scraper_search_google",
+    "mcp_scraper_batch_search_google",
 )
-_SCRAPER_MCP_SERVER_NAME = "mcp-scraper"
 
 # Suffixes of the czlonkowski/n8n-mcp tools we care about when n8n
 # keywords fire. The MCP bridge prefixes every tool with
@@ -1118,6 +1115,24 @@ class Agent:
             self.registry.register(dispatch_skill)
             _dispatch_registered = True
 
+            # Re-register run_background per turn so each turn gets a
+            # fresh fanout_group_id + the live channel callback. When
+            # the brain calls run_background 2+ times in this turn,
+            # every sibling shares the group, per-task pushes are
+            # suppressed, and TaskRunner consolidates one reply once
+            # the last sibling settles. See task_runner._consolidate.
+            from lazyclaw.skills.builtin.background import RunBackgroundSkill
+
+            _bg_fanout_group_id = uuid4().hex[:12]
+            bg_skill = RunBackgroundSkill(
+                config=self.config,
+                callback=cb,
+                fanout_group_id=_bg_fanout_group_id,
+                chat_session_id=chat_session_id,
+            )
+            bg_skill._task_runner = self._task_runner
+            self.registry.register(bg_skill)
+
         # Initialize channel state (used by tool nudge later, must exist for all paths)
         _matched_channels: list[str] = []
 
@@ -1464,70 +1479,34 @@ class Agent:
             _wants_scraper = bool(_SCRAPER_KEYWORDS_RE.search(message))
             if not _wants_scraper:
                 # Re-trigger if recent history called any scraper tool
-                for tname in _history_tool_names:
-                    if any(tname.endswith(s) for s in _SCRAPER_MCP_TOOL_SUFFIXES):
-                        _wants_scraper = True
-                        logger.info("Scraper tools re-injected from recent history context")
-                        break
+                if any(
+                    tname in _SCRAPER_MCP_TOOL_NAMES
+                    for tname in _history_tool_names
+                ):
+                    _wants_scraper = True
+                    logger.info("Scraper tools re-injected from recent history context")
             if _wants_scraper and self.registry is not None:
-                # First, scan already-registered MCP tools for scraper suffixes
-                for tool_info in self.registry.list_mcp_tools():
-                    func = tool_info.get("function", {})
-                    tname = func.get("name", "")
-                    tdesc = func.get("description", "").lower()
-                    if not any(tname.endswith(s) for s in _SCRAPER_MCP_TOOL_SUFFIXES):
-                        continue
-                    if _SCRAPER_MCP_SERVER_NAME not in tdesc:
-                        continue
+                # Canonical-name lookup — pool registers under stable names
+                for tname in _SCRAPER_MCP_TOOL_NAMES:
                     schema = self.registry.get_tool_schema(tname)
                     if schema is not None:
                         _scraper_tools.append(schema)
-                # On-demand connect mcp-scraper if nothing matched
+                # If pool isn't registered yet (e.g. shard-1 boot failed),
+                # try a one-shot spawn of shard-0 and re-fetch schemas.
                 if not _scraper_tools:
                     try:
-                        from lazyclaw.mcp.manager import (
-                            connect_server, get_server_id_by_name,
+                        from lazyclaw.mcp.manager import _ensure_scraper_shard
+                        spawned = await _ensure_scraper_shard(
+                            self.config, user_id, 0,
                         )
-                        from lazyclaw.mcp.bridge import (
-                            cache_tool_schemas, register_mcp_tools,
-                        )
-                        sid = await get_server_id_by_name(
-                            self.config, user_id, _SCRAPER_MCP_SERVER_NAME,
-                        )
-                        if sid:
-                            logger.info(
-                                "On-demand connecting %s (id=%s)…",
-                                _SCRAPER_MCP_SERVER_NAME, sid[:8],
-                            )
-                            client = await asyncio.wait_for(
-                                connect_server(self.config, user_id, sid),
-                                timeout=20,
-                            )
-                            tools_list = await client.list_tools()
-                            await cache_tool_schemas(
-                                self.config, _SCRAPER_MCP_SERVER_NAME, tools_list,
-                            )
-                            await register_mcp_tools(
-                                client, self.registry,
-                                config=self.config, user_id=user_id,
-                            )
-                            for tool_info in self.registry.list_mcp_tools():
-                                func = tool_info.get("function", {})
-                                tname = func.get("name", "")
-                                tdesc = func.get("description", "").lower()
-                                if not any(
-                                    tname.endswith(s)
-                                    for s in _SCRAPER_MCP_TOOL_SUFFIXES
-                                ):
-                                    continue
-                                if _SCRAPER_MCP_SERVER_NAME not in tdesc:
-                                    continue
+                        if spawned:
+                            for tname in _SCRAPER_MCP_TOOL_NAMES:
                                 schema = self.registry.get_tool_schema(tname)
                                 if schema is not None:
                                     _scraper_tools.append(schema)
                     except Exception:
                         logger.debug(
-                            "mcp-scraper on-demand connect failed",
+                            "scraper pool on-demand spawn failed",
                             exc_info=True,
                         )
                 if _scraper_tools:
@@ -3662,21 +3641,33 @@ class Agent:
             except Exception:
                 logger.debug("wikilink_injector failed", exc_info=True)
 
-            try:
-                from lazyclaw.lazybrain.auto_capture import (
-                    capture_text_with_llm as _lb_capture_llm,
-                )
-                from lazyclaw.llm.eco_router import EcoRouter as _EcoRouter
+            # Truly fire-and-forget: the worker-LLM call inside
+            # capture_text_with_llm can take 1-3s on Gemma/Ollama, and the
+            # lane queue is FIFO per user — if we await here, the next
+            # message blocks behind PKM bookkeeping. Detach via create_task.
+            async def _bg_auto_capture() -> None:
+                try:
+                    from lazyclaw.lazybrain.auto_capture import (
+                        capture_text_with_llm as _lb_capture_llm,
+                    )
+                    from lazyclaw.llm.eco_router import EcoRouter as _EcoRouter
 
-                _eco = _EcoRouter(self.config, self.router)
-                await _lb_capture_llm(
-                    self.config,
-                    user_id,
-                    message,
-                    _eco,
-                    source="chat",
-                )
+                    _eco = _EcoRouter(self.config, self.router)
+                    await _lb_capture_llm(
+                        self.config,
+                        user_id,
+                        message,
+                        _eco,
+                        source="chat",
+                    )
+                except Exception:
+                    logger.warning(
+                        "lazybrain auto_capture failed for user %s",
+                        user_id, exc_info=True,
+                    )
+            try:
+                asyncio.create_task(_bg_auto_capture())
             except Exception:
-                logger.debug("lazybrain auto_capture failed", exc_info=True)
+                logger.warning("could not schedule auto_capture", exc_info=True)
 
         return content

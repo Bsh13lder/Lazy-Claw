@@ -174,32 +174,52 @@ async def test_dispatch_skill_caps_at_five():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_skill_rejects_same_shape_fanout():
-    """3+ tasks with the same opening prefix = ONE batch job, NOT N
-    subagents. Pins the production-log bug where the brain dispatched 4
-    subagents all starting with 'Find contact email addresses for these
-    V…' and each one re-did overlapping work. Reject with redirect to
-    run_background + batch scraper.
+async def test_dispatch_skill_accepts_same_shape_chunks_under_cap():
+    """3 same-shape tasks — chunked fan-out — must SUCCEED.
+
+    The architecture is: brain splits 21 items across 2-5 workers, each
+    worker batches its chunk internally. That gives every worker the
+    same opening verb phrase. Earlier we rejected this by mistake; now
+    the 5-cap is the safeguard, the foreground worker-loop drift is
+    handled by ``detect_inline_pivot`` separately, and chunked
+    dispatches pass through.
     """
     from lazyclaw.skills.builtin.dispatch import DispatchSubagentsSkill
+    from lazyclaw.teams.runner import SpecialistResult
+    from lazyclaw.teams import runner as teams_runner
 
-    skill = DispatchSubagentsSkill(
-        config=MagicMock(),
-        registry=MagicMock(),
-        eco_router=MagicMock(),
-        permission_checker=None,
-        team_lead=MagicMock(),
-    )
-    out = await skill.execute("u1", {
-        "tasks": [
-            {"type": "explore", "task": "Find contact email for Salon A in Valencia"},
-            {"type": "explore", "task": "Find contact email for Salon B in Valencia"},
-            {"type": "explore", "task": "Find contact email for Salon C in Valencia"},
-        ],
-    })
-    assert "Error" in out
-    assert "run_background" in out
-    assert "batch" in out.lower()
+    async def fast_run_specialist(**kwargs):
+        return SpecialistResult(
+            agent_name="explore_agent",
+            task=kwargs.get("task", ""),
+            result="ok",
+            tools_used=(),
+            model_used="test",
+            duration_ms=1,
+            success=True,
+            error=None,
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(teams_runner, "run_specialist", fast_run_specialist)
+    try:
+        skill = DispatchSubagentsSkill(
+            config=MagicMock(),
+            registry=MagicMock(),
+            eco_router=MagicMock(),
+            permission_checker=None,
+            team_lead=MagicMock(),
+        )
+        out = await skill.execute("u1", {
+            "tasks": [
+                {"type": "explore", "task": "Find contact emails for chunk 1: Salons A-G"},
+                {"type": "explore", "task": "Find contact emails for chunk 2: Salons H-N"},
+                {"type": "explore", "task": "Find contact emails for chunk 3: Salons O-U"},
+            ],
+        })
+        assert out.startswith("Dispatched 3 subagents")
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.asyncio

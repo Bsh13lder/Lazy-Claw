@@ -23,7 +23,7 @@ from lazyclaw.runtime.events import (
     BROWSER_PLAN, BROWSER_ACTION, BROWSER_VERIFY, BROWSER_PROGRESS,
 )
 from lazyclaw.runtime.team_lead import TeamLead
-from lazyclaw.runtime.stuck_detector import detect_stuck
+from lazyclaw.runtime.stuck_detector import detect_stuck, detect_inline_pivot
 from lazyclaw.browser.action_planner import (
     ActionPlannerState,
     PlanStatus,
@@ -1786,6 +1786,14 @@ class Agent:
         all_new_messages: list[LLMMessage] = [LLMMessage(role="user", content=message)]
         _tool_call_history: list[str] = []  # Track tool names for loop detection
         _tool_results: list[str] = []  # Track results for error detection
+        # Per-turn (tool_name, sorted_arg_keys) trail. Feeds the mid-turn
+        # pivot detector — when the brain runs ≥5 same-shape calls in a
+        # row it's acting as a worker, and the runtime nudges it to
+        # dispatch instead. Cleared at iteration end alongside the other
+        # per-turn state. Memory/discovery tools (recall_memories,
+        # save_memory, search_tools) are filtered out by detect_inline_pivot.
+        _tool_call_signatures: list[tuple[str, tuple[str, ...]]] = []
+        _pivot_nudged: bool = False
         _escalated = False  # True after auto-escalation to brain_model
         _escalation_iter = 0  # Iteration when escalation happened
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
@@ -2879,6 +2887,13 @@ class Agent:
                     all_new_messages.append(tool_msg)
                     _tool_call_history.append(tc.name)
                     _tool_results.append(_result_str)
+                    # Mid-turn pivot tracking: fingerprint = (tool_name,
+                    # sorted_arg_keys). 5 of the same in a row trips the
+                    # detector below and injects a "dispatch don't
+                    # iterate" system message.
+                    _tool_call_signatures.append(
+                        (tc.name, tuple(sorted((tc.arguments or {}).keys())))
+                    )
 
                     # ── MCP parameter-validation recovery (deferred) ──
                     # If the tool returned a UserInputError-style error AND
@@ -3149,6 +3164,45 @@ class Agent:
                         pass
 
                     _last_result = _tool_results[-1] if _tool_results else None
+
+                    # ── Mid-turn pivot ─────────────────────────────
+                    # Brain dispatches, workers execute. If the brain has
+                    # run ≥5 same-shape tool calls in this turn, it has
+                    # slipped into worker role for what should be a
+                    # fan-out. Fire ONE system nudge per turn redirecting
+                    # it to dispatch_subagents / run_background.
+                    if not _pivot_nudged:
+                        _pivot_signal = detect_inline_pivot(
+                            _tool_call_signatures, threshold=5,
+                        )
+                        if _pivot_signal is not None:
+                            logger.info(
+                                "Mid-turn pivot fired: %d× %s — "
+                                "nudging brain to dispatch",
+                                _pivot_signal.count, _pivot_signal.tool_name,
+                            )
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=(
+                                    f"⚠ BRAIN DISPATCHES, WORKERS EXECUTE.\n\n"
+                                    f"You've executed {_pivot_signal.count} "
+                                    f"same-shape `{_pivot_signal.tool_name}` "
+                                    f"calls in this turn. Stop iterating "
+                                    f"inline.\n\n"
+                                    f"Pivot now:\n"
+                                    f"- Split the remaining items across "
+                                    f"2–3 `dispatch_subagents` workers "
+                                    f"(each handling a chunk via batch "
+                                    f"scraper tools), OR\n"
+                                    f"- Fire ONE `run_background` if it's "
+                                    f"a single batch job.\n\n"
+                                    f"Reply with a short status — the "
+                                    f"brain consolidates when workers "
+                                    f"return."
+                                ),
+                            ))
+                            _pivot_nudged = True
+
                     _stuck_signal = detect_stuck(
                         _tool_call_history, _tool_results, _last_result,
                     )
@@ -3178,6 +3232,7 @@ class Agent:
                             ))
                             _tool_call_history.clear()
                             _tool_results.clear()
+                            _tool_call_signatures.clear()
                             continue
 
                         elif _escalation_level == 1:
@@ -3208,6 +3263,7 @@ class Agent:
                             ))
                             _tool_call_history.clear()
                             _tool_results.clear()
+                            _tool_call_signatures.clear()
                             iter_model = None  # Let eco_router decide
                             _iter_role = ROLE_BRAIN
                             continue
@@ -3363,6 +3419,7 @@ class Agent:
                         all_new_messages.append(_help_msg)
                         _tool_call_history.clear()
                         _tool_results.clear()
+                        _tool_call_signatures.clear()
                         continue
 
             else:

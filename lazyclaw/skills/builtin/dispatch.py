@@ -198,48 +198,16 @@ class DispatchSubagentsSkill(BaseSkill):
                 f"logs where 21-subagent fan-outs returned zero results."
             )
 
-        # Same-shape detection: when ≥3 tasks share the same opening
-        # verb-phrase ("find email for X", "scrape Y", "research Z"),
-        # the brain is fan-outing what is really one batch job. The right
-        # path is ONE run_background calling a batch scraper tool, not N
-        # subagents whose only difference is the tail of the instruction.
-        # Production logs (2026-04-28 00:31) showed 4 subagents starting
-        # with identical 'Find contact email addresses for these V…' —
-        # overlapping salons across subagents, wasted budget.
-        #
-        # Heuristic: compare the first 3 lowercase words of each task.
-        # "Find email for Salon A" / "Find email for Salon B" both reduce
-        # to ("find", "email", "for") and trip the rule.
-        def _shape_key(task: str) -> tuple[str, ...]:
-            t = task.strip().lower()
-            for ch in ('"', "'", "*", "-", "•'"):
-                t = t.lstrip(ch).strip()
-            words = [w.strip(".,:;()[]{}\"'") for w in t.split() if w]
-            return tuple(words[:3])
-
-        _shape_keys = [_shape_key(raw.get("task") or "") for raw in raw_tasks]
-        _shape_keys = [k for k in _shape_keys if k]
-        if _shape_keys:
-            from collections import Counter
-            top_key, top_count = Counter(_shape_keys).most_common(1)[0]
-            if top_count >= 3 and top_count >= len(_shape_keys) - 1:
-                opener = " ".join(top_key)
-                return (
-                    f"Error: dispatch_subagents rejected — {top_count} of "
-                    f"{len(_shape_keys)} tasks open with the same verb "
-                    f"phrase ({opener!r}…). That's ONE batch job split N "
-                    f"ways, not N independent goals, and produces "
-                    f"overlapping work + wasted cold-starts. Fire ONE "
-                    f"`run_background(instruction=...)` whose instruction "
-                    f"calls `mcp_scraper_batch_search_google(queries=[...])` "
-                    f"with the full list, then `mcp_scraper_extract_entities` "
-                    f"per hit. One worker, brain stays free, you receive "
-                    f"ONE consolidated `background_done` and write ONE "
-                    f"accurate summary. dispatch_subagents is for ≤5 "
-                    f"DIFFERENT goals (research X, scrape Y, draft Z), "
-                    f"not N copies of the same goal with different inputs."
-                )
-
+        # NOTE: prior versions of this skill rejected ≥3 same-shape
+        # tasks ("find email for X / Y / Z") on the theory they were
+        # really ONE batch job split N ways. That blocked the
+        # legitimate chunked-fan-out pattern (3 workers each batching
+        # 7 of 21 items). The 5-cap above is the real safeguard
+        # against the original 21-way explosion. Worker-loop drift in
+        # the foreground brain (the user-facing failure mode) is
+        # caught separately by the mid-turn pivot detector in
+        # ``lazyclaw/runtime/agent.py`` (see ``detect_inline_pivot``)
+        # — that nudges the brain to dispatch when it iterates inline.
         configs: list[SubagentConfig] = []
         for raw in raw_tasks:
             type_str = raw.get("type", "")

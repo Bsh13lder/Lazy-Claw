@@ -22,6 +22,70 @@ class StuckSignal:
     url: str | None = None
 
 
+@dataclass(frozen=True)
+class PivotSignal:
+    """The brain has been iterating same-shape tool calls inline instead
+    of dispatching workers.
+
+    Architectural rule: brain dispatches, workers execute. When N
+    consecutive tool calls share the same fingerprint
+    ``(tool_name, sorted(arg_keys))``, the brain has slipped into worker
+    role for what should be a fan-out (``dispatch_subagents``) or a
+    batch background (``run_background``). Caller injects a system
+    message redirecting it.
+    """
+
+    reason: str
+    tool_name: str
+    arg_keys: tuple[str, ...]
+    count: int
+
+
+# Tools that legitimately repeat without indicating worker-loop drift —
+# the brain pulling memory and saving facts is part of its dispatcher
+# role, not a per-item loop. Excluded from the pivot fingerprint count.
+_PIVOT_EXEMPT_TOOLS: frozenset[str] = frozenset({
+    "recall_memories", "save_memory", "search_tools",
+})
+
+
+def detect_inline_pivot(
+    tool_call_signatures: list[tuple[str, tuple[str, ...]]],
+    *,
+    threshold: int = 5,
+) -> PivotSignal | None:
+    """N same-shape tool calls in a row → brain is acting as a worker.
+
+    ``tool_call_signatures`` is the per-turn ordered list of
+    ``(tool_name, sorted_arg_keys)`` tuples. The function looks at the
+    trailing run: if the last K entries share a single fingerprint and
+    K >= threshold, it returns a PivotSignal. Memory / discovery tools
+    are filtered out by the caller (see ``_PIVOT_EXEMPT_TOOLS``).
+
+    Pure function — no side effects, easy to unit-test.
+    """
+    if threshold < 2 or not tool_call_signatures:
+        return None
+
+    # Walk backwards counting how many trailing entries match the latest.
+    last = tool_call_signatures[-1]
+    if last[0] in _PIVOT_EXEMPT_TOOLS:
+        return None
+    count = 0
+    for sig in reversed(tool_call_signatures):
+        if sig != last:
+            break
+        count += 1
+    if count < threshold:
+        return None
+    return PivotSignal(
+        reason="same_shape_inline_loop",
+        tool_name=last[0],
+        arg_keys=last[1],
+        count=count,
+    )
+
+
 # ── CAPTCHA detection ────────────────────────────────────────────────
 
 _CAPTCHA_RE = re.compile(

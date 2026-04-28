@@ -24,6 +24,7 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "memory": ALLOW,
     "vault": ASK,
     "browser": ALLOW,
+    "browser_management": ALLOW,
     "computer": ASK,
     "skills": ALLOW,
     "custom": ALLOW,
@@ -32,6 +33,15 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "mcp_management": ALLOW,
     "survival": ALLOW,
     "tasks": ALLOW,
+    # Meta-tools the brain MUST be able to call without an approval loop:
+    # search_tools is how the brain discovers anything beyond the 16 base
+    # tools; orchestration covers dispatch_subagents / delegate /
+    # run_background — gating these on ASK locks the brain in an
+    # approval-deny-retry loop and the user sees no progress. Production
+    # log on 2026-04-28 10:29 showed the brain stuck calling search_tools
+    # → 'requires approval' → next iteration → repeat.
+    "core": ALLOW,
+    "orchestration": ALLOW,
 }
 
 

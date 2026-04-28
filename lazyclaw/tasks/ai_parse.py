@@ -32,10 +32,20 @@ Return ONLY a JSON object with these keys (use null when not mentioned):
   category      — short lowercase word like "shopping", "health", "work" or null.
   tags          — array of short lowercase strings (no # prefix) or [].
   steps         — array of short action strings (sub-tasks) or [].
+  pre_reminders — array of full ISO-8601 datetime strings for advance
+                  reminders (e.g. lawyer/doctor/court appointments — emit
+                  the resolved timestamps for "2 hours before" and
+                  "1 hour before" reminder_at), or [] when not relevant.
 
 Rules:
   - If the user says "tomorrow", "in 2 hours", "next Monday" etc., you MUST
     resolve it against ``now`` (provided below) and output concrete dates.
+  - For appointment-class items (lawyer, doctor, dentist, court, flight,
+    interview, meeting, hearing, surgery — English or Spanish), emit
+    pre_reminders with at least the 2h-before and 1h-before timestamps,
+    UNLESS the user already specified a different lead time.
+  - Each pre_reminder must be strictly between now and reminder_at — never
+    in the past, never at/after reminder_at.
   - Keep the title terse — strip time phrases, priority words, tags.
   - Output strictly valid JSON with no markdown fences, no commentary.
 """
@@ -106,5 +116,6 @@ async def ai_parse_task(config: Config, user_id: str, text: str) -> dict:
         "category": parsed.get("category") or None,
         "tags": _as_list(parsed.get("tags")),
         "steps": _as_list(parsed.get("steps")),
+        "pre_reminders": _as_list(parsed.get("pre_reminders")),
         "matched_time": None,
     }

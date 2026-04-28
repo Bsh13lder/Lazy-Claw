@@ -43,6 +43,112 @@ def _parse_relative_time(value: str) -> datetime | None:
         days=days, hours=hours, minutes=minutes
     )
 
+
+# Relative-offset pattern for advance reminders, e.g. "-2h", "-30m", "-1d2h".
+_OFFSET_RE = re.compile(
+    r"^-\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$",
+    re.IGNORECASE,
+)
+
+
+def _parse_offset_against(value: str, base: datetime) -> datetime | None:
+    """Parse a negative relative offset like '-2h' as `base - offset`."""
+    if not value:
+        return None
+    match = _OFFSET_RE.match(value.strip())
+    if not match:
+        return None
+    days = int(match.group(1) or 0)
+    hours = int(match.group(2) or 0)
+    minutes = int(match.group(3) or 0)
+    if days == 0 and hours == 0 and minutes == 0:
+        return None
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return base - timedelta(days=days, hours=hours, minutes=minutes)
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    """Parse an ISO-8601 datetime string. Returns UTC-aware datetime or None."""
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# Appointment-class words that auto-trigger advance reminders even when the
+# LLM forgot to set priority=high. Bilingual (EN + ES) because the user runs
+# the system in Madrid.
+APPOINTMENT_KEYWORDS = frozenset({
+    "lawyer", "abogado", "abogada",
+    "doctor", "doctora", "médico", "medico", "médica", "medica",
+    "dentist", "dentista",
+    "court", "juzgado", "tribunal",
+    "appointment", "cita",
+    "meeting", "reunión", "reunion",
+    "interview", "entrevista",
+    "flight", "vuelo",
+    "hearing", "audiencia",
+    "consult", "consulta",
+    "surgery", "cirugía", "cirugia", "operación", "operacion",
+})
+
+async def _resolve_pre_reminders(
+    config,
+    user_id: str,
+    title: str,
+    explicit: list[str] | None,
+    reminder_at: str | None,
+    priority: str | None,
+) -> list[str]:
+    """Compute the list of advance-reminder ISO timestamps for a new task.
+
+    Returns the explicit input verbatim when supplied (so the agent can override
+    auto-derivation by passing []). Otherwise auto-derives from the user's
+    ``reminder_offsets`` setting when the task looks important. Filters out any
+    timestamps already in the past.
+    """
+    if not reminder_at:
+        return []
+
+    base = _parse_iso_datetime(reminder_at)
+    if not base:
+        return []
+
+    raw = explicit
+    if raw is None:
+        pri = (priority or "medium").lower()
+        title_lower = (title or "").lower()
+        is_important = pri in {"high", "urgent"} or any(
+            kw in title_lower for kw in APPOINTMENT_KEYWORDS
+        )
+        if not is_important:
+            return []
+        try:
+            from lazyclaw.settings.general import get_general_settings
+            gen = await get_general_settings(config, user_id)
+            raw = gen.get("reminder_offsets") or ["-2h", "-1h"]
+        except Exception:
+            logger.debug("Failed to read reminder_offsets, falling back", exc_info=True)
+            raw = ["-2h", "-1h"]
+
+    if not raw:
+        return []
+
+    now = datetime.now(timezone.utc)
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        dt = _parse_offset_against(entry, base) or _parse_iso_datetime(entry)
+        if dt and now < dt < base:
+            out.append(dt.isoformat())
+    return sorted(set(out))
+
+
 # Priority display
 _PRIORITY_ICON = {"urgent": "!!", "high": "!", "medium": "-", "low": "."}
 _STATUS_ICON = {"todo": "[ ]", "in_progress": "[~]", "done": "[x]", "cancelled": "[-]"}
@@ -229,6 +335,19 @@ class AddTaskSkill(BaseSkill):
                     "items": {"type": "string"},
                     "description": "Optional tags (e.g. ['work', 'urgent'])",
                 },
+                "pre_reminders": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional advance reminders. Each item is a "
+                        "negative relative offset ('-2h', '-1h', '-30m') OR "
+                        "an absolute ISO datetime. Offsets are computed "
+                        "from reminder_at. For high/urgent priority OR "
+                        "appointment-class titles (lawyer/doctor/court/etc), "
+                        "defaults to the user's reminder_offsets setting "
+                        "(typically ['-2h', '-1h']) when this field is omitted."
+                    ),
+                },
             },
             "required": ["title"],
         }
@@ -264,6 +383,16 @@ class AddTaskSkill(BaseSkill):
             if not is_valid(recurring):
                 return f"Invalid cron expression: '{recurring}'"
 
+        # Resolve advance reminders. Explicit input wins; otherwise auto-derive
+        # for important tasks (priority high/urgent OR appointment-class title)
+        # using the user's configured reminder_offsets default.
+        pre_reminders = await _resolve_pre_reminders(
+            self._config, user_id, title,
+            params.get("pre_reminders"),
+            reminder_at,
+            params.get("priority", "medium"),
+        )
+
         try:
             task = await create_task(
                 self._config, user_id,
@@ -276,6 +405,7 @@ class AddTaskSkill(BaseSkill):
                 reminder_at=reminder_at,
                 recurring=recurring,
                 tags=params.get("tags"),
+                pre_reminders=pre_reminders,
             )
         except Exception as exc:
             logger.error("Failed to create task: %s", exc, exc_info=True)
@@ -286,15 +416,16 @@ class AddTaskSkill(BaseSkill):
             result_parts.append(f"Due: {task['due_date']}")
         if task.get("reminder_at"):
             result_parts.append(f"Reminder: {task['reminder_at']}")
+        if pre_reminders:
+            result_parts.append("Advance reminders: " + ", ".join(pre_reminders))
         if task.get("recurring"):
             result_parts.append(f"Recurring: {task['recurring']}")
 
-        # Fire-and-forget: AI categorize + duplicate check
-        ai_notes = await _smart_enrich(
-            self._config, user_id, task["id"], title
-        )
-        if ai_notes:
-            result_parts.append(ai_notes)
+        # Truly fire-and-forget: AI categorize runs in the background and
+        # persists the result via update_task; we don't block the user's
+        # reply waiting on Ollama / mcp-taskai.
+        import asyncio as _aio
+        _aio.create_task(_smart_enrich(self._config, user_id, task["id"], title))
 
         return "\n".join(result_parts)
 

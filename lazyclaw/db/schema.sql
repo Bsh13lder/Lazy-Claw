@@ -252,7 +252,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     attempt_count INTEGER NOT NULL DEFAULT 0,     -- bumps on every fail_task call
     last_attempted_at TEXT,                       -- timestamp of last execution attempt
     trace_session_id TEXT,                        -- conversation trace that created this task
-    lazybrain_note_id TEXT                        -- mirror note id for status sync
+    lazybrain_note_id TEXT,                       -- mirror note id for status sync
+    pre_reminders TEXT                            -- JSON array of pending advance-reminder ISO timestamps
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status

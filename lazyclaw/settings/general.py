@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from lazyclaw.config import Config
 from lazyclaw.db.connection import db_session
@@ -23,7 +24,15 @@ VALID_SEARCH_PROVIDERS: frozenset[str] = frozenset({"serper", "serpapi", "duckdu
 DEFAULT_GENERAL = {
     "search_provider": "auto",
     "show_cost_badges": True,
+    # Default lead-time offsets for advance reminders on important tasks
+    # (priority high/urgent OR appointment-class title). Each entry is a
+    # negative relative offset like "-2h", "-30m", "-1d" — applied to the
+    # task's reminder_at to derive pre_reminders entries. Override per-user.
+    "reminder_offsets": ["-2h", "-1h"],
 }
+
+# Validates "-Xh", "-Xm", "-Xd" with an optional combined form like "-2h30m".
+_OFFSET_RE = re.compile(r"^-(?:\d+d)?(?:\d+h)?(?:\d+m)?$")
 
 
 async def get_general_settings(config: Config, user_id: str) -> dict:
@@ -68,6 +77,20 @@ async def update_general_settings(
 
     if "show_cost_badges" in updates and updates["show_cost_badges"] is not None:
         clean["show_cost_badges"] = bool(updates["show_cost_badges"])
+
+    if "reminder_offsets" in updates and updates["reminder_offsets"] is not None:
+        vals = updates["reminder_offsets"]
+        if not isinstance(vals, list):
+            raise ValueError("reminder_offsets must be a list of strings")
+        cleaned: list[str] = []
+        for v in vals:
+            s = str(v).strip()
+            if not _OFFSET_RE.match(s):
+                raise ValueError(
+                    f"Invalid offset {v!r}. Use '-2h', '-30m', '-1d', '-2h30m', etc."
+                )
+            cleaned.append(s)
+        clean["reminder_offsets"] = cleaned
 
     if not clean:
         return await get_general_settings(config, user_id)

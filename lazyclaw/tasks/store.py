@@ -29,6 +29,10 @@ TASK_COLUMNS = [
     "trace_session_id", "lazybrain_note_id",
     # Sub-task checklist (encrypted JSON: [{id, title, done}])
     "steps",
+    # Advance reminders — plaintext JSON list of ISO timestamps that
+    # fire before reminder_at (e.g. T-2h, T-1h). Each timestamp pops
+    # off the list once delivered.
+    "pre_reminders",
 ]
 
 TASK_SELECT = ", ".join(TASK_COLUMNS)
@@ -101,6 +105,7 @@ async def create_task(
     tags: list[str] | None = None,
     trace_session_id: str | None = None,
     steps: list[dict] | None = None,
+    pre_reminders: list[str] | None = None,
 ) -> dict:
     """Create a new task. Returns the full task dict (decrypted).
 
@@ -183,6 +188,10 @@ async def create_task(
             task_id, user_id, exc_info=True,
         )
 
+    pre_reminders_json = (
+        json.dumps(sorted(set(pre_reminders))) if pre_reminders else None
+    )
+
     placeholders = ", ".join(["?"] * len(TASK_COLUMNS))
     async with db_session(config) as db:
         await db.execute(
@@ -194,6 +203,7 @@ async def create_task(
                 created_at, None,
                 None, 0, None, trace_session_id, lazybrain_note_id,
                 enc_steps,
+                pre_reminders_json,
             ),
         )
         await db.commit()
@@ -213,6 +223,7 @@ async def create_task(
         "trace_session_id": trace_session_id,
         "lazybrain_note_id": lazybrain_note_id,
         "steps": json.dumps(normalized_steps) if normalized_steps else None,
+        "pre_reminders": pre_reminders_json,
     }
 
 
@@ -393,6 +404,12 @@ async def update_task(
     for field_name, value in fields.items():
         if field_name in ENCRYPTED_FIELDS and value is not None:
             value = encrypt(value, key)
+        elif field_name == "pre_reminders" and value is not None:
+            # Accept either a list of ISO strings (preferred) or a pre-encoded
+            # JSON string. Empty list collapses to NULL so the heartbeat scan
+            # filter (`pre_reminders != '[]' AND IS NOT NULL`) skips the row.
+            if isinstance(value, list):
+                value = json.dumps(sorted(set(value))) if value else None
         set_clauses.append(f"{field_name} = ?")
         params.append(value)
 

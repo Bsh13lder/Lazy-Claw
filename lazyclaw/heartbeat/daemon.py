@@ -688,10 +688,13 @@ class HeartbeatDaemon:
                 )
 
     async def _check_task_nagging(self) -> None:
-        """Due App-style nagging: re-fire reminders for tasks not yet done.
+        """Due App-style nagging + advance pre-reminders for important tasks.
 
-        Escalates: first nag at reminder_at, then +15min, +30min, +1hr (capped at 5).
-        Sends Telegram push with inline [Done] [Snooze 1h] [Tomorrow] buttons.
+        Pass 1: fire any pre_reminders entries whose timestamp is now <= now.
+                Heads-up notifications, no escalation, no inline keyboard.
+        Pass 2: existing reminder_at + nag escalation (15m / 30m / 60m / 60m,
+                capped at 5). Sends Telegram push with inline [Done] [Snooze]
+                [Tomorrow] buttons.
         """
         from datetime import timedelta
 
@@ -700,6 +703,12 @@ class HeartbeatDaemon:
 
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
+
+        # ── Pass 1: advance pre-reminders ──────────────────────────────────
+        try:
+            await self._fire_due_pre_reminders(now, now_iso)
+        except Exception:
+            logger.exception("pre-reminder pass failed")
 
         # Find all users who have tasks with due reminders
         async with db_session(self._config) as db:
@@ -828,6 +837,110 @@ class HeartbeatDaemon:
                 logger.debug(
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
                 )
+
+    async def _fire_due_pre_reminders(self, now, now_iso) -> None:
+        """Fire any pending advance reminders whose timestamp has arrived.
+
+        Each fired timestamp is removed from the task's ``pre_reminders``
+        JSON array so it never fires twice. No inline keyboard — these are
+        heads-up notifications; the at-time reminder (with Done/Snooze/
+        Tomorrow buttons) fires separately when ``reminder_at`` lands.
+        """
+        import html as _html
+        import json
+        from datetime import timedelta
+
+        from lazyclaw.crypto.encryption import is_encrypted
+        from lazyclaw.tasks.store import update_task
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute(
+                "SELECT id, user_id, title, pre_reminders, reminder_at, priority "
+                "FROM tasks "
+                "WHERE status IN ('todo', 'in_progress') "
+                "AND pre_reminders IS NOT NULL AND pre_reminders != '[]'",
+            )
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            task_id, user_id, enc_title, raw_pre, reminder_at, priority = row
+            try:
+                pending = json.loads(raw_pre or "[]")
+            except (json.JSONDecodeError, TypeError):
+                logger.debug("bad pre_reminders JSON on task %s, skipping", task_id)
+                continue
+            due = [t for t in pending if t and t <= now_iso]
+            if not due:
+                continue
+
+            try:
+                key = await get_user_dek(self._config, user_id)
+                title = (
+                    decrypt(enc_title, key)
+                    if enc_title and is_encrypted(enc_title)
+                    else enc_title or "Task reminder"
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt title for pre-reminder, using placeholder",
+                    exc_info=True,
+                )
+                title = "Task reminder"
+
+            for fired_iso in due:
+                lead = self._format_lead_time(fired_iso, reminder_at)
+                pri_icon = {"urgent": "\U0001f534", "high": "\U0001f7e0"}.get(
+                    priority or "", "",
+                )
+                msg = (
+                    f"⏰ {pri_icon} <b>{_html.escape(title)}</b>\n"
+                    f"<i>{_html.escape(lead)}</i>"
+                )
+                try:
+                    await self._telegram_push(msg)
+                except Exception as exc:
+                    logger.warning("Pre-reminder push failed: %s", exc)
+
+            remaining = [t for t in pending if t and t > now_iso]
+            try:
+                await update_task(
+                    self._config, user_id, task_id,
+                    pre_reminders=remaining,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist pruned pre_reminders for task %s",
+                    task_id, exc_info=True,
+                )
+
+    @staticmethod
+    def _format_lead_time(fired_iso: str, reminder_at: str | None) -> str:
+        """Return a short label like 'in 2h', 'in 30m' for the lead-time."""
+        from datetime import timedelta as _td
+
+        if not reminder_at:
+            return "soon"
+        try:
+            base = datetime.fromisoformat(reminder_at)
+            fired = datetime.fromisoformat(fired_iso)
+        except (ValueError, TypeError):
+            return "soon"
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        if fired.tzinfo is None:
+            fired = fired.replace(tzinfo=timezone.utc)
+        delta = base - fired
+        if delta <= _td(0):
+            return "now"
+        total_min = int(delta.total_seconds() // 60)
+        if total_min >= 60 * 24:
+            days = total_min // (60 * 24)
+            return f"in {days}d"
+        if total_min >= 60:
+            hours = total_min // 60
+            mins = total_min % 60
+            return f"in {hours}h" if mins == 0 else f"in {hours}h{mins}m"
+        return f"in {total_min}m"
 
     async def _seed_today_journals(self) -> None:
         """Ensure each registered user has a journal note for today.

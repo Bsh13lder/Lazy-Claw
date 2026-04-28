@@ -172,7 +172,10 @@ class TelegramNotifier:
                 tools_line = _format_tools_html(meta)
                 preview = getattr(summary, "result_preview", None)
                 if preview:
-                    result_preview = html.escape(_strip_markdown(preview)[:500])
+                    stripped = _strip_markdown(preview)
+                    result_preview = html.escape(stripped[:3500])
+                    if len(stripped) > 3500:
+                        result_preview += "\n[truncated]"
 
                 lines = ["[done] <b>Task complete</b>"]
                 if stats_line:

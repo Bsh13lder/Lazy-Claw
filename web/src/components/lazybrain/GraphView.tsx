@@ -1236,29 +1236,15 @@ export function GraphView({
               the orbits rotate, the arcs sweep and flex organically. No
               blur halo — the cozy palette doesn't need it, and removing it
               drops visual noise massively. */}
-          {graph.edges.map((edge, idx) => {
-            const a = nodeById.get(edge.source);
-            const b = nodeById.get(edge.target);
-            if (!a || !b) return null;
-            const srcNote = notesById?.[edge.source];
-            const tgtNote = notesById?.[edge.target];
-            const srcColor = srcNote ? colorForTags(srcNote.tags, srcNote.pinned).ring : "#6b5e4a";
-            const tgtColor = tgtNote ? colorForTags(tgtNote.tags, tgtNote.pinned).ring : "#6b5e4a";
-            return (
-              <linearGradient
-                key={`g-${idx}`}
-                id={`e-grad-${idx}`}
-                gradientUnits="userSpaceOnUse"
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-              >
-                <stop offset="0%" stopColor={srcColor} stopOpacity={0.78} />
-                <stop offset="100%" stopColor={tgtColor} stopOpacity={0.78} />
-              </linearGradient>
-            );
-          })}
+          {/* Edges — single-pass render. The previous version emitted a
+              <linearGradient> def + 2 <stop>s for every edge (3 SVG
+              nodes per edge × N edges → ~7,500 wasted nodes on a 2k+
+              edge graph), which was a major DOM-bloat lag source.
+              We now stroke each path with the source node's solid
+              ring colour. The visible difference vs. the old gradient
+              is barely perceptible (most edges connect same-kind
+              nodes anyway, so the gradient ends were already the same
+              colour). */}
           {graph.edges.map((edge, idx) => {
             const a = nodeById.get(edge.source);
             const b = nodeById.get(edge.target);
@@ -1269,6 +1255,10 @@ export function GraphView({
               depths !== null &&
               ((depths.get(edge.source) ?? 99) <= 1 ||
                 (depths.get(edge.target) ?? 99) <= 1);
+            const srcNote = notesById?.[edge.source];
+            const stroke = srcNote
+              ? colorForTags(srcNote.tags, srcNote.pinned).ring
+              : "#6b5e4a";
             // Quadratic Bezier — bow the line perpendicular to the straight
             // path. Control point sits at the midpoint, pushed outward by
             // ~12% of the edge length. Side (sign) chosen deterministically
@@ -1292,7 +1282,7 @@ export function GraphView({
                 key={`e-${idx}`}
                 d={d}
                 fill="none"
-                stroke={`url(#e-grad-${idx})`}
+                stroke={stroke}
                 strokeWidth={isActive ? 1.4 : 0.95}
                 strokeOpacity={baseOp}
                 strokeLinecap="round"
@@ -1457,30 +1447,26 @@ export function GraphView({
                       strokeOpacity={0.5}
                       pointerEvents="none"
                     />
+                    {/* Static outer ring — replaced the perpetual
+                        <animate> pulse. The animation forced the
+                        browser to repaint these nodes forever (every
+                        top-5 hub × 2 animated attrs × indefinite),
+                        which was a meaningful chunk of the residual
+                        graph lag at scale. The static ring keeps the
+                        same "this is a hub" visual cue at zero cost. */}
                     <circle
-                      r={r + 2}
+                      r={r + 6}
                       fill="none"
                       stroke="#d4a26a"
-                      strokeWidth={1.4}
-                      strokeOpacity={0.8}
+                      strokeWidth={1}
+                      strokeOpacity={0.32}
                       pointerEvents="none"
-                    >
-                      <animate
-                        attributeName="r"
-                        values={`${r + 2};${r + 10};${r + 2}`}
-                        dur="3.2s"
-                        repeatCount="indefinite"
-                      />
-                      <animate
-                        attributeName="stroke-opacity"
-                        values="0.8;0;0.8"
-                        dur="3.2s"
-                        repeatCount="indefinite"
-                      />
-                    </circle>
+                    />
                   </>
                 )}
-                {/* Pinned halo — now with a slow pulse (±1px) */}
+                {/* Pinned halo — static ring (was a perpetual ±1px
+                    pulse on radius). Same DOM-bloat lag pattern as
+                    the hub ring above, replaced for the same reason. */}
                 {note?.pinned && (
                   <circle
                     r={r + 4}
@@ -1488,14 +1474,8 @@ export function GraphView({
                     stroke="#fbbf24"
                     strokeWidth={2}
                     strokeOpacity={0.9}
-                  >
-                    <animate
-                      attributeName="r"
-                      values={`${r + 3};${r + 5};${r + 3}`}
-                      dur="2.4s"
-                      repeatCount="indefinite"
-                    />
-                  </circle>
+                    pointerEvents="none"
+                  />
                 )}
                 {/* Selected ring */}
                 {isSelected && !isFocus && (

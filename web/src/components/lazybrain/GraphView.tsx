@@ -311,6 +311,55 @@ export function GraphView({
     }
   }, [layoutMode]);
 
+  // ── Physics freeze ────────────────────────────────────────────────────
+  // Big graphs (500+ notes) crawl when the simulation steps every frame
+  // and synapse motes re-render at 15fps. The freeze toggle short-circuits:
+  //   - the RAF loop's s.step() + setTick (no physics, no React reconcile)
+  //   - the pulseTick RAF loop (no mote/breath animation)
+  //   - the synapse mote <g> rendering (drops 7,500 SVG nodes from DOM)
+  // Persisted under "lazybrain-physics-frozen". On graphs with saved
+  // positions and no explicit user preference, defaults to frozen so
+  // re-opening the graph is instantaneous instead of triggering settle.
+  const [physicsFrozen, setPhysicsFrozen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const saved = window.localStorage.getItem("lazybrain-physics-frozen");
+      if (saved === "true") return true;
+      if (saved === "false") return false;
+    } catch {
+      // ignored — fall through to default
+    }
+    return false;
+  });
+  // Mirror in a ref so RAF loops can read the latest value without
+  // tearing down the effect on every toggle.
+  const physicsFrozenRef = useRef<boolean>(physicsFrozen);
+  // Track whether the freeze state came from an explicit user click vs an
+  // auto-derivation. Only persist user clicks.
+  const physicsFrozenIsUserSetRef = useRef<boolean>(false);
+  useEffect(() => {
+    physicsFrozenRef.current = physicsFrozen;
+    if (typeof window === "undefined") return;
+    if (!physicsFrozenIsUserSetRef.current) return;
+    try {
+      window.localStorage.setItem(
+        "lazybrain-physics-frozen", String(physicsFrozen),
+      );
+    } catch {
+      // Private-mode Safari — session-only is fine.
+    }
+  }, [physicsFrozen]);
+  const togglePhysicsFrozen = useCallback(() => {
+    physicsFrozenIsUserSetRef.current = true;
+    setPhysicsFrozen((cur) => {
+      const next = !cur;
+      // Unfreezing: warm() so the user immediately sees motion;
+      // otherwise the sim might still be at quietTicks≥45 → cooled.
+      if (!next) simRef.current?.warm();
+      return next;
+    });
+  }, []);
+
   // Top hub — highest-degree node. Used as the "sun" in neural-link mode.
   // Computed from graph.edges directly so it's available before the sim.
   const topHubId = useMemo(() => {
@@ -368,6 +417,39 @@ export function GraphView({
   useEffect(() => {
     simRef.current?.resize(size.width, size.height);
   }, [size.width, size.height]);
+
+  // ── Derived freeze defaults ──────────────────────────────────────────
+  // 1. On entry, if the sim restored saved positions (already-settled
+  //    layout from prior session) AND the user hasn't expressed a
+  //    preference, freeze immediately — no warm-up settle storm.
+  // 2. While in neural-link mode and not yet frozen, poll cooled() and
+  //    auto-freeze on convergence. Skipped in categories mode (orbital
+  //    sim never cools by design — it rotates forever).
+  useEffect(() => {
+    if (!sim) return;
+    if (physicsFrozenIsUserSetRef.current) return;
+    if (sim.usedSavedPositions() && !physicsFrozen) {
+      setPhysicsFrozen(true);
+    }
+  }, [sim, physicsFrozen]);
+  useEffect(() => {
+    if (layoutMode !== "neural-link") return;
+    if (physicsFrozen) return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      if (simRef.current?.cooled()) {
+        setPhysicsFrozen(true);
+        return;
+      }
+      window.setTimeout(tick, 500);
+    };
+    const t = window.setTimeout(tick, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [layoutMode, physicsFrozen, sim]);
 
   // Async server overlay — fetch saved positions on mount + mode change
   // and apply them on top of the localStorage cache. Server wins on
@@ -456,15 +538,16 @@ export function GraphView({
   const hubIds = useMemo(() => new Set(sim.hubIds(5)), [sim]);
 
   // ── Pulse loop — advances a per-frame counter used to animate synapse
-  //    signals. Always-on at ~30fps (skips every other RAF) so the graph
-  //    feels alive in the background even when the user isn't hovering.
-  //    162 edges × 1 pulse ≈ 162 circles/frame — well within budget.
+  //    signals. ~30fps (skips every other RAF) so the graph feels alive.
+  //    Short-circuits when frozen: the synapse motes are skipped from the
+  //    DOM in that mode, so ticking pulseTick would cause useless full
+  //    React reconciles every frame for zero visual benefit.
   useEffect(() => {
     let raf = 0;
     let skip = false;
     const loop = () => {
       skip = !skip;
-      if (!skip) {
+      if (!skip && !physicsFrozenRef.current) {
         setPulseTick((t) => (t + 1) % 1_000_000);
       }
       raf = requestAnimationFrame(loop);
@@ -588,6 +671,22 @@ export function GraphView({
       if (!alive) return;
       const s = simRef.current;
       if (!s) return;
+      // Frozen path: physics off, no React reconcile. Drag is the only
+      // interaction that should still cause a re-render — pin() has
+      // already mutated the node's position, but React needs a setTick
+      // to flush that to the DOM.
+      if (physicsFrozenRef.current) {
+        const dragging =
+          !!dragRef.current &&
+          dragRef.current.kind === "node" &&
+          !!dragRef.current.id;
+        if (dragging) {
+          setTick((t) => (t + 1) % 1_000_000);
+        }
+        idleTicks = 0;
+        frameRef.current = requestAnimationFrame(loop);
+        return;
+      }
       const cooled = s.cooled();
       if (cooled) {
         // Skip the expensive force pass — already gated inside s.step().
@@ -831,27 +930,27 @@ export function GraphView({
     cancelHoverClear();
     setHoverId(null);
     simRef.current?.setHover(null);
-    simRef.current?.warm();
+    // Skip warm() when frozen — hover is purely visual, doesn't need
+    // physics re-stirring (and waking the sim while frozen would just
+    // burn cycles for no on-screen change).
+    if (!physicsFrozenRef.current) simRef.current?.warm();
   }, []);
 
   const handleNodeEnter = useCallback((id: string) => {
     cancelHoverClear();
     setHoverId(id);
     simRef.current?.setHover(id);
-    // Wake the sim so the renderer paints the hover halo on the next frame.
-    simRef.current?.warm();
+    if (!physicsFrozenRef.current) simRef.current?.warm();
   }, []);
 
   const handleNodeLeave = useCallback((id: string) => {
-    // Tiny grace so a fast cursor crossing a 1-2px gap between sibling
-    // nodes doesn't flicker the tooltip off and back on.
     cancelHoverClear();
     hoverClearRef.current = window.setTimeout(() => {
       hoverClearRef.current = null;
       setHoverId((cur) => {
         if (cur === id) {
           simRef.current?.setHover(null);
-          simRef.current?.warm();
+          if (!physicsFrozenRef.current) simRef.current?.warm();
           return null;
         }
         return cur;
@@ -1059,7 +1158,22 @@ export function GraphView({
           }}
         />
 
-        <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
+        <g
+          style={{
+            // CSS transform (vs SVG `transform=` attribute) lets the
+            // browser promote pan/zoom to a compositor layer and
+            // GPU-shift the rendered subtree without re-laying out
+            // ~13,600 child SVG nodes. With the SVG attribute, every
+            // pan delta forces bbox invalidation across the whole
+            // subtree → full repaint, which was the dominant pan/zoom
+            // lag source at scale.
+            transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.k})`,
+            transformOrigin: "0 0",
+            // Hint to the compositor that this element will be
+            // transformed often — promotes to its own layer.
+            willChange: "transform",
+          }}
+        >
           {/* Sparse warm motes — atmospheric dust, not stars. Memoized
               upstream so 55 dots don't walk React each animation tick. */}
           {starfieldJsx}
@@ -1291,10 +1405,13 @@ export function GraphView({
             );
           })}
 
-          {/* Traveling synapse motes — one soft dot per edge, follows the
-              curve. Active (1-hop of focus) gets a warmer, slightly brighter
-              mote. No paired flashes, no neon. */}
-          {graph.edges.map((edge, idx) => {
+          {/* Traveling synapse motes — one soft dot per edge. Skipped
+              when frozen: each edge mote is `<g><circle><circle></g>`
+              (~3 SVG nodes) and at 2,500 edges that's 7,500 nodes the
+              browser keeps in the document tree even when nothing
+              animates them. With pulseTick paused (frozen), they'd be
+              static decorations anyway. */}
+          {!physicsFrozen && graph.edges.map((edge, idx) => {
             const a = nodeById.get(edge.source);
             const b = nodeById.get(edge.target);
             if (!a || !b) return null;
@@ -1386,12 +1503,26 @@ export function GraphView({
               const content = note?.content || "";
               return /^\s*-\s*\[x\]/im.test(content);
             })();
-            // Always-on labels — every node carries a short title beneath
-            // it so the user can read the constellation without hovering.
-            // Selected / focus / neighbor / pinned get the bright pill;
-            // everyone else gets a dim ghost label.
-            const showSideLabel = !!label;
+            // Conditional labels — at scale (~500 nodes) emitting a
+            // <text> + <rect> per node was ~1,000 extra SVG elements
+            // and a constant repaint cost. Show labels only when:
+            //  - hub (top-5 by degree)
+            //  - pinned
+            //  - focus / hovered
+            //  - 1-hop neighbour of focus
+            //  - selected (peeked)
+            //  - matched by current search query
+            // This mirrors Obsidian's own behaviour: idle graph shows
+            // a few hub labels, hover lights up the relevant cluster.
+            const isHub = hubIds.has(node.id);
+            const isMatch = matcher ? matcher(node.id) : false;
             const labelEmphasized = isSelected || isFocus || isNeighbor || !!note?.pinned;
+            const showSideLabel =
+              !!label && (
+                labelEmphasized ||
+                isHub ||
+                (highlightQuery ? isMatch : false)
+              );
 
             // Gentle hover scale — noticeable but not jumpy. The hover
             // also freezes the node's orbit via sim.setHover, so the user
@@ -1433,7 +1564,17 @@ export function GraphView({
                   fill={color.ring}
                   opacity={isFocus ? 0.18 : isNeighbor ? 0.11 : 0.055}
                   pointerEvents="none"
-                  filter="url(#lb-neural-glow)"
+                  // feGaussianBlur was applied to all 500 node halos
+                  // every frame — 500 GPU rasterizations per reconcile.
+                  // Limit to focus + 1-hop + selected (≤10 at any time).
+                  // The unfiltered halo at 0.055 opacity reads identical
+                  // to the filtered one because the blur radius
+                  // (stdDev=1.2) is smaller than the alpha falloff.
+                  filter={
+                    isFocus || isNeighbor || isSelected
+                      ? "url(#lb-neural-glow)"
+                      : undefined
+                  }
                 />
                 {/* Hub ring — top-5 most connected notes get a warm
                     concentric pulse marking them as anchors of the graph. */}
@@ -2052,38 +2193,67 @@ export function GraphView({
           its own ring) and neural-link orbits (top-hub at center, others
           on BFS-distance rings). Top-left corner so it doesn't crash into
           the search bar (center) or zoom controls (right). */}
-      <div className="absolute top-3 left-3 z-10 flex items-center gap-0 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-0.5 py-0.5 text-[10px]">
-        {(["category", "neural-link"] as const).map((mode) => {
-          const active = layoutMode === mode;
-          const label = mode === "category" ? "Categories" : "Neural-links";
-          const title =
-            mode === "category"
-              ? "Group notes by kind (task / lesson / memory)"
-              : topHubId
-                ? "Pin the most-linked note at center; others orbit by distance"
-                : "Neural-link mode — needs at least one link";
-          return (
-            <button
-              key={mode}
-              type="button"
-              disabled={mode === "neural-link" && !topHubId}
-              onClick={() => setLayoutMode(mode)}
-              title={title}
-              className={`px-2.5 py-1 rounded-full transition-colors tracking-wide ${
-                active
-                  ? "bg-bg-hover text-text-primary"
-                  : "text-text-muted hover:text-text-primary"
-              } ${mode === "neural-link" && !topHubId ? "opacity-40 cursor-not-allowed" : ""}`}
-              style={
-                active
-                  ? { boxShadow: `inset 0 -2px 0 ${mode === "neural-link" ? "#f0a060" : "#d4a26a"}` }
-                  : undefined
-              }
-            >
-              {label}
-            </button>
-          );
-        })}
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 text-[10px]">
+        <div className="flex items-center gap-0 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-0.5 py-0.5">
+          {(["category", "neural-link"] as const).map((mode) => {
+            const active = layoutMode === mode;
+            const label = mode === "category" ? "Categories" : "Neural-links";
+            const title =
+              mode === "category"
+                ? "Group notes by kind (task / lesson / memory)"
+                : topHubId
+                  ? "Pin the most-linked note at center; others orbit by distance"
+                  : "Neural-link mode — needs at least one link";
+            return (
+              <button
+                key={mode}
+                type="button"
+                disabled={mode === "neural-link" && !topHubId}
+                onClick={() => setLayoutMode(mode)}
+                title={title}
+                className={`px-2.5 py-1 rounded-full transition-colors tracking-wide ${
+                  active
+                    ? "bg-bg-hover text-text-primary"
+                    : "text-text-muted hover:text-text-primary"
+                } ${mode === "neural-link" && !topHubId ? "opacity-40 cursor-not-allowed" : ""}`}
+                style={
+                  active
+                    ? { boxShadow: `inset 0 -2px 0 ${mode === "neural-link" ? "#f0a060" : "#d4a26a"}` }
+                    : undefined
+                }
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {/* Physics freeze toggle — pure perf control. Independent of
+            layout mode: works in both Categories (stops orbital
+            rotation) and Neural-link (stops force settling + motes).
+            When frozen, the synapse mote layer skips rendering entirely
+            so 7,500 SVG nodes drop from the DOM. */}
+        <button
+          type="button"
+          onClick={togglePhysicsFrozen}
+          title={
+            physicsFrozen
+              ? "Movement frozen — click to resume animation (slower on big graphs)"
+              : "Movement on — click to freeze for instant pan/zoom and idle 0% CPU"
+          }
+          className={`flex items-center gap-1 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-2.5 py-1 transition-colors tracking-wide ${
+            physicsFrozen
+              ? "text-text-primary"
+              : "text-text-muted hover:text-text-primary"
+          }`}
+          style={
+            physicsFrozen
+              ? { boxShadow: "inset 0 -2px 0 #6ec1d4" }
+              : undefined
+          }
+        >
+          <span aria-hidden>{physicsFrozen ? "❄" : "✺"}</span>
+          <span>{physicsFrozen ? "Frozen" : "Moving"}</span>
+        </button>
       </div>
 
       <div className="absolute top-3 right-3 flex flex-col gap-1 z-10">

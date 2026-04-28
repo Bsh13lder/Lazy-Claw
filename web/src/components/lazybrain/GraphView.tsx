@@ -1088,6 +1088,404 @@ export function GraphView({
     return { opacity: 0.16, stroke: "var(--color-text-muted)", width: 1 };
   };
 
+  // ── Memoized JSX for the three big render blocks ────────────────────
+  // Pan/zoom only changes `view` — none of the deps below depend on it.
+  // Without these memos, every setView re-evaluated 3,000+ inline JSX
+  // blocks (500 nodes + 2,500 edges + 2,500 motes). With memo, pan/zoom
+  // re-uses the cached subtree and only the wrapper <g>'s style updates,
+  // so the React reconcile cost on pan drops to O(1) regardless of
+  // graph size.
+  //
+  // Each memo intentionally captures the closures (edgeState, opacityFor)
+  // by reference. They re-create per render but that's fine — the memo
+  // only invalidates when the listed primitives change, and the closures
+  // resolve at call time using the latest values from this render's
+  // captured scope.
+  const edgesJsx = useMemo(
+    () => graph.edges.map((edge, idx) => {
+      const a = nodeById.get(edge.source);
+      const b = nodeById.get(edge.target);
+      if (!a || !b) return null;
+      const st = edgeState(edge.source, edge.target);
+      const isActive =
+        !!focusId &&
+        depths !== null &&
+        ((depths.get(edge.source) ?? 99) <= 1 ||
+          (depths.get(edge.target) ?? 99) <= 1);
+      const srcNote = notesById?.[edge.source];
+      const stroke = srcNote
+        ? colorForTags(srcNote.tags, srcNote.pinned).ring
+        : "#6b5e4a";
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1);
+      const mx = (a.x + b.x) / 2 + (-dy / len) * bow;
+      const my = (a.y + b.y) / 2 + (dx / len) * bow;
+      const d = `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
+      const phase = Math.sin((pulseTick + idx * 13) * 0.04);
+      const dimmed = st.opacity < 0.1;
+      const baseOp = dimmed
+        ? st.opacity * 0.5
+        : (isActive ? 0.72 : 0.34) + 0.06 * phase;
+      return (
+        <path
+          key={`e-${idx}`}
+          d={d}
+          fill="none"
+          stroke={stroke}
+          strokeWidth={isActive ? 1.4 : 0.95}
+          strokeOpacity={baseOp}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+      );
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [graph.edges, nodeById, notesById, focusId, depths, pulseTick, dimPredicate, matcher, isHoverFocus],
+  );
+
+  const motesJsx = useMemo(
+    () => physicsFrozen ? null : graph.edges.map((edge, idx) => {
+      const a = nodeById.get(edge.source);
+      const b = nodeById.get(edge.target);
+      if (!a || !b) return null;
+      const st = edgeState(edge.source, edge.target);
+      if (st.opacity < 0.1) return null;
+      const isActive =
+        !!focusId &&
+        depths !== null &&
+        ((depths.get(edge.source) ?? 99) <= 1 ||
+          (depths.get(edge.target) ?? 99) <= 1);
+      let flipped = (idx % 2) === 0;
+      if (isActive && depths) {
+        const dSrc = depths.get(edge.source) ?? 99;
+        const dTgt = depths.get(edge.target) ?? 99;
+        flipped = dSrc < dTgt;
+      }
+      const fromX = flipped ? b.x : a.x;
+      const fromY = flipped ? b.y : a.y;
+      const toX   = flipped ? a.x : b.x;
+      const toY   = flipped ? a.y : b.y;
+      const dx = toX - fromX;
+      const dy = toY - fromY;
+      const len = Math.hypot(dx, dy) || 1;
+      const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1) * (flipped ? -1 : 1);
+      const mx = (fromX + toX) / 2 + (-dy / len) * bow;
+      const my = (fromY + toY) / 2 + (dx / len) * bow;
+      const dur = isActive ? 200 : 400;
+      const t = ((pulseTick + idx * 17) % dur) / dur;
+      const omt = 1 - t;
+      const px = omt * omt * fromX + 2 * omt * t * mx + t * t * toX;
+      const py = omt * omt * fromY + 2 * omt * t * my + t * t * toY;
+      const fill = isActive ? "#f5d19a" : "#d4b388";
+      const op = isActive ? 0.75 : 0.28;
+      const rOuter = isActive ? 2.4 : 1.6;
+      const rInner = isActive ? 1.1 : 0.7;
+      return (
+        <g key={`pulse-${idx}`} pointerEvents="none">
+          <circle cx={px} cy={py} r={rOuter} fill={fill} opacity={op * 0.5} />
+          <circle cx={px} cy={py} r={rInner} fill="#fdf2d9" opacity={op} />
+        </g>
+      );
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [physicsFrozen, graph.edges, nodeById, notesById, focusId, depths, pulseTick, dimPredicate, matcher, isHoverFocus],
+  );
+
+  // Node JSX memo — same rationale as edges/motes: pan/zoom mutates
+  // `view` but none of these deps reference it, so the cached subtree
+  // is reused. `pulseTick` is the position-tracker — it advances on
+  // the same RAF cadence the simulation steps, so when sim is moving,
+  // position changes propagate. When frozen, pulseTick stops, the
+  // memo is fully cached, and pan/zoom is essentially free.
+  // Trade-off: the wouldOverflow label placement check (which reads
+  // view + size.width) is slightly stale during pan; it self-corrects
+  // on the next interaction (hover, search, mode switch).
+  const nodesJsx = useMemo(
+    () => graph.nodes.map((node) => {
+      const sn = nodeById.get(node.id);
+      if (!sn) return null;
+      const note = notesById?.[node.id];
+      const color = note
+        ? colorForTags(note.tags, note.pinned)
+        : { ring: "#475569", emoji: "", label: "Note" };
+      const deg = degree[node.id] ?? 0;
+      const importance = note?.importance ?? 5;
+      const r =
+        16 +
+        Math.min(11, Math.sqrt(deg) * 2) +
+        Math.min(5, importance / 2) +
+        (note?.pinned ? 1 : 0);
+      const categoryKeys = categoryKeysFor(note?.tags, !!note?.pinned);
+      const categoryKey = categoryKeys[0] ?? pickCategoryKey(note?.tags, !!note?.pinned);
+      const badge = dotBadge(note?.title, categoryKey);
+      const brightness = 0.85 + Math.min(0.4, importance / 25);
+      const op = opacityFor(node.id);
+      const depth = depths?.get(node.id);
+      const isFocus = node.id === hoverId;
+      const isNeighbor = depth === 1;
+      const isSelected = node.id === selectedId;
+      const label = (note?.title || node.label || "").trim();
+      const taskDone = (() => {
+        if (categoryKey !== "task") return false;
+        const tagsLower = (note?.tags || []).map((t) => t.toLowerCase());
+        if (tagsLower.includes("done") || tagsLower.includes("completed")) return true;
+        const content = note?.content || "";
+        return /^\s*-\s*\[x\]/im.test(content);
+      })();
+      const isHub = hubIds.has(node.id);
+      const isMatch = matcher ? matcher(node.id) : false;
+      const labelEmphasized = isSelected || isFocus || isNeighbor || !!note?.pinned;
+      const showSideLabel =
+        !!label && (
+          labelEmphasized ||
+          isHub ||
+          (highlightQuery ? isMatch : false)
+        );
+      const scale = isFocus ? 1.18 : isSelected ? 1.08 : 1;
+      return (
+        <g
+          key={node.id}
+          transform={`translate(${sn.x} ${sn.y}) scale(${scale})`}
+          onPointerDown={(e) => handlePointerDownNode(e, node.id)}
+          onPointerEnter={() => handleNodeEnter(node.id)}
+          onPointerLeave={() => handleNodeLeave(node.id)}
+          onClick={(e) => {
+            if (justDraggedRef.current || dragRef.current) {
+              justDraggedRef.current = false;
+              return;
+            }
+            e.stopPropagation();
+            if (node.id === selectedId && onClearPeek) {
+              onClearPeek();
+              return;
+            }
+            if (onPeek) onPeek(node.id);
+            else onSelect?.(node.id);
+          }}
+          opacity={op}
+          className="cursor-pointer"
+        >
+          <circle
+            r={r + 1 + deg * 0.15}
+            fill={color.ring}
+            opacity={isFocus ? 0.18 : isNeighbor ? 0.11 : 0.055}
+            pointerEvents="none"
+            filter={
+              isFocus || isNeighbor || isSelected
+                ? "url(#lb-neural-glow)"
+                : undefined
+            }
+          />
+          {hubIds.has(node.id) && !note?.pinned && (
+            <>
+              <circle
+                r={r + 1.6}
+                fill="none"
+                stroke="#d4a26a"
+                strokeWidth={1.2}
+                strokeOpacity={0.5}
+                pointerEvents="none"
+              />
+              <circle
+                r={r + 6}
+                fill="none"
+                stroke="#d4a26a"
+                strokeWidth={1}
+                strokeOpacity={0.32}
+                pointerEvents="none"
+              />
+            </>
+          )}
+          {note?.pinned && (
+            <circle
+              r={r + 4}
+              fill="none"
+              stroke="#fbbf24"
+              strokeWidth={2}
+              strokeOpacity={0.9}
+              pointerEvents="none"
+            />
+          )}
+          {isSelected && !isFocus && (
+            <circle
+              r={r + 2.5}
+              fill="none"
+              stroke="var(--color-accent)"
+              strokeWidth={2}
+            />
+          )}
+          {(() => {
+            const bodyOpacity = isFocus ? 0.88 : isNeighbor ? 0.78 : 0.66;
+            const bodyStroke = isFocus
+              ? "rgba(240,228,200,0.3)"
+              : "rgba(240,228,200,0.08)";
+            const bodyStrokeW = isFocus ? 0.9 : 0.5;
+            const bodyFilter = { filter: `brightness(${brightness * 0.9})` };
+            const isDateBadge =
+              (categoryKey === "journal" || categoryKey === "daily-log") &&
+              /\d/.test(badge);
+            return (
+              <>
+                <circle
+                  r={r}
+                  fill={color.ring}
+                  opacity={bodyOpacity}
+                  stroke={bodyStroke}
+                  strokeWidth={bodyStrokeW}
+                  style={bodyFilter}
+                />
+                {isDateBadge ? (
+                  <text
+                    x={0}
+                    y={0}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    className="pointer-events-none select-none"
+                    style={{
+                      fontSize: `${Math.max(9, r * 0.48)}px`,
+                      fontWeight: 700,
+                      fill: "#0a0a0a",
+                      letterSpacing: "-0.03em",
+                    }}
+                  >
+                    {badge}
+                  </text>
+                ) : (() => {
+                  const IconComp = CATEGORY_ICONS[categoryKey] ?? DEFAULT_CATEGORY_ICON;
+                  const iconSize = Math.max(12, r * 0.9);
+                  return (
+                    <g
+                      transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
+                      pointerEvents="none"
+                    >
+                      <IconComp
+                        size={iconSize}
+                        color="#0a0a0a"
+                        strokeWidth={2}
+                        aria-hidden
+                      />
+                    </g>
+                  );
+                })()}
+              </>
+            );
+          })()}
+          {(() => {
+            const hasDeadline =
+              categoryKeys.includes("deadline") && categoryKey !== "deadline";
+            const hasDueTag = (note?.tags || []).some((t) =>
+              t.toLowerCase().startsWith("due/"),
+            );
+            if (!hasDeadline && !hasDueTag) return null;
+            const dx = Math.cos(-Math.PI / 4) * r;
+            const dy = Math.sin(-Math.PI / 4) * r;
+            const chipR = Math.max(5.5, r * 0.32);
+            const iconSize = chipR * 1.25;
+            const AlarmIcon = CATEGORY_ICONS.deadline ?? DEFAULT_CATEGORY_ICON;
+            return (
+              <g transform={`translate(${dx} ${dy})`} pointerEvents="none">
+                <circle
+                  r={chipR + 2}
+                  fill={ringForKey("deadline")}
+                  opacity={0.22}
+                  filter="url(#lb-neural-glow)"
+                />
+                <circle
+                  r={chipR}
+                  fill={ringForKey("deadline")}
+                  stroke="rgba(240,228,200,0.35)"
+                  strokeWidth={0.7}
+                  opacity={isFocus ? 0.98 : 0.9}
+                />
+                <g
+                  transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
+                >
+                  <AlarmIcon
+                    size={iconSize}
+                    color="#0a0a0a"
+                    strokeWidth={2.2}
+                    aria-hidden
+                  />
+                </g>
+              </g>
+            );
+          })()}
+          {showSideLabel && label && (() => {
+            const emphasized = labelEmphasized;
+            const maxChars =
+              isSelected || isFocus ? 32 : labelEmphasized ? 18 : 14;
+            const truncated =
+              label.length > maxChars
+                ? label.slice(0, maxChars - 2) + "…"
+                : label;
+            const fontPx = isSelected || isFocus ? 11 : labelEmphasized ? 10 : 9;
+            const labelW = truncated.length * (fontPx * 0.62) + (emphasized ? 14 : 6);
+            const placeBelow = !emphasized;
+            const offsetX = placeBelow ? -labelW / 2 : r + 8;
+            const offsetY = placeBelow ? r + 6 : -8;
+            const baseTextOp = isSelected || isFocus
+              ? 0.96
+              : labelEmphasized ? 0.78 : 0.42;
+            const textColor = taskDone
+              ? `rgba(232,213,176,${baseTextOp * 0.55})`
+              : emphasized
+                ? `rgba(245,209,154,${baseTextOp})`
+                : `rgba(232,213,176,${baseTextOp})`;
+            return (
+              <g
+                transform={`translate(${offsetX} ${offsetY})`}
+                pointerEvents="none"
+                opacity={op}
+              >
+                {emphasized && (isSelected || isFocus) && !placeBelow && (
+                  <rect
+                    x={-4}
+                    y={-2}
+                    rx={4}
+                    ry={4}
+                    width={labelW}
+                    height={18}
+                    fill="rgba(27,22,32,0.9)"
+                    stroke="rgba(212,162,106,0.45)"
+                    strokeWidth={1}
+                  />
+                )}
+                <text
+                  x={placeBelow ? labelW / 2 : (emphasized ? 3 : 0)}
+                  y={placeBelow ? 0 : 11}
+                  textAnchor={placeBelow ? "middle" : "start"}
+                  dominantBaseline={placeBelow ? "hanging" : "auto"}
+                  style={{
+                    fontSize: `${fontPx}px`,
+                    fontWeight: emphasized ? 600 : 500,
+                    fill: textColor,
+                    fontFamily: "var(--font-display, inherit)",
+                    letterSpacing: "-0.01em",
+                    textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.7)",
+                    textDecoration: taskDone ? "line-through" : "none",
+                    textDecorationColor: "rgba(110,181,131,0.9)",
+                    textDecorationThickness: "1.5px",
+                  }}
+                >
+                  {truncated}
+                </text>
+              </g>
+            );
+          })()}
+        </g>
+      );
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      graph.nodes, nodeById, notesById, focusId, hoverId, selectedId,
+      depths, hubIds, degree, dimPredicate, matcher, highlightQuery,
+      pulseTick, handlePointerDownNode, handleNodeEnter, handleNodeLeave,
+      onPeek, onClearPeek, onSelect,
+    ],
+  );
+
   return (
     <div
       ref={containerRef}
@@ -1345,480 +1743,14 @@ export function GraphView({
             );
           })()}
 
-          {/* Edges — thin curved synapse arcs. Each path is a quadratic
-              Bezier bowed gently perpendicular to the straight line, so as
-              the orbits rotate, the arcs sweep and flex organically. No
-              blur halo — the cozy palette doesn't need it, and removing it
-              drops visual noise massively. */}
-          {/* Edges — single-pass render. The previous version emitted a
-              <linearGradient> def + 2 <stop>s for every edge (3 SVG
-              nodes per edge × N edges → ~7,500 wasted nodes on a 2k+
-              edge graph), which was a major DOM-bloat lag source.
-              We now stroke each path with the source node's solid
-              ring colour. The visible difference vs. the old gradient
-              is barely perceptible (most edges connect same-kind
-              nodes anyway, so the gradient ends were already the same
-              colour). */}
-          {graph.edges.map((edge, idx) => {
-            const a = nodeById.get(edge.source);
-            const b = nodeById.get(edge.target);
-            if (!a || !b) return null;
-            const st = edgeState(edge.source, edge.target);
-            const isActive =
-              !!focusId &&
-              depths !== null &&
-              ((depths.get(edge.source) ?? 99) <= 1 ||
-                (depths.get(edge.target) ?? 99) <= 1);
-            const srcNote = notesById?.[edge.source];
-            const stroke = srcNote
-              ? colorForTags(srcNote.tags, srcNote.pinned).ring
-              : "#6b5e4a";
-            // Quadratic Bezier — bow the line perpendicular to the straight
-            // path. Control point sits at the midpoint, pushed outward by
-            // ~12% of the edge length. Side (sign) chosen deterministically
-            // from the edge index so curves don't all bend the same way.
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const len = Math.hypot(dx, dy) || 1;
-            const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1);
-            const mx = (a.x + b.x) / 2 + (-dy / len) * bow;
-            const my = (a.y + b.y) / 2 + (dx / len) * bow;
-            const d = `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
-            // Very gentle breathing opacity — barely perceptible, just
-            // enough to feel alive. No bright strobe.
-            const phase = Math.sin((pulseTick + idx * 13) * 0.04);
-            const dimmed = st.opacity < 0.1;
-            const baseOp = dimmed
-              ? st.opacity * 0.5
-              : (isActive ? 0.72 : 0.34) + 0.06 * phase;
-            return (
-              <path
-                key={`e-${idx}`}
-                d={d}
-                fill="none"
-                stroke={stroke}
-                strokeWidth={isActive ? 1.4 : 0.95}
-                strokeOpacity={baseOp}
-                strokeLinecap="round"
-                pointerEvents="none"
-              />
-            );
-          })}
+          {/* Memoized edge + mote subtrees. See the useMemo definitions
+              above (around the top of the JSX return). Pan/zoom does not
+              re-evaluate these — that's the whole point. */}
+          {edgesJsx}
+          {motesJsx}
 
-          {/* Traveling synapse motes — one soft dot per edge. Skipped
-              when frozen: each edge mote is `<g><circle><circle></g>`
-              (~3 SVG nodes) and at 2,500 edges that's 7,500 nodes the
-              browser keeps in the document tree even when nothing
-              animates them. With pulseTick paused (frozen), they'd be
-              static decorations anyway. */}
-          {!physicsFrozen && graph.edges.map((edge, idx) => {
-            const a = nodeById.get(edge.source);
-            const b = nodeById.get(edge.target);
-            if (!a || !b) return null;
-            const st = edgeState(edge.source, edge.target);
-            if (st.opacity < 0.1) return null;
-            const isActive =
-              !!focusId &&
-              depths !== null &&
-              ((depths.get(edge.source) ?? 99) <= 1 ||
-                (depths.get(edge.target) ?? 99) <= 1);
-            // Active edges flow TOWARD the focus node. Ambient flow
-            // alternates direction by edge index to avoid a uniform drift.
-            let flipped = (idx % 2) === 0;
-            if (isActive && depths) {
-              const dSrc = depths.get(edge.source) ?? 99;
-              const dTgt = depths.get(edge.target) ?? 99;
-              flipped = dSrc < dTgt;
-            }
-            const fromX = flipped ? b.x : a.x;
-            const fromY = flipped ? b.y : a.y;
-            const toX   = flipped ? a.x : b.x;
-            const toY   = flipped ? a.y : b.y;
-            // Same bow as the curve so the mote rides the arc, not the chord
-            const dx = toX - fromX;
-            const dy = toY - fromY;
-            const len = Math.hypot(dx, dy) || 1;
-            const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1) * (flipped ? -1 : 1);
-            const mx = (fromX + toX) / 2 + (-dy / len) * bow;
-            const my = (fromY + toY) / 2 + (dx / len) * bow;
-            // Cozy slow pace — every edge finishes a trip in ~3.5s (active)
-            // or ~7s (ambient), offset per edge so motes don't pulse in sync.
-            const dur = isActive ? 200 : 400;
-            const t = ((pulseTick + idx * 17) % dur) / dur;
-            // Quadratic Bezier point at parameter t.
-            const omt = 1 - t;
-            const px = omt * omt * fromX + 2 * omt * t * mx + t * t * toX;
-            const py = omt * omt * fromY + 2 * omt * t * my + t * t * toY;
-            const fill = isActive ? "#f5d19a" : "#d4b388";
-            const op = isActive ? 0.75 : 0.28;
-            const rOuter = isActive ? 2.4 : 1.6;
-            const rInner = isActive ? 1.1 : 0.7;
-            return (
-              <g key={`pulse-${idx}`} pointerEvents="none">
-                <circle cx={px} cy={py} r={rOuter} fill={fill} opacity={op * 0.5} />
-                <circle cx={px} cy={py} r={rInner} fill="#fdf2d9" opacity={op} />
-              </g>
-            );
-          })}
-
-          {/* Nodes */}
-          {graph.nodes.map((node) => {
-            const sn = nodeById.get(node.id);
-            if (!sn) return null;
-            const note = notesById?.[node.id];
-            const color = note
-              ? colorForTags(note.tags, note.pinned)
-              : { ring: "#475569", emoji: "", label: "Note" };
-            const deg = degree[node.id] ?? 0;
-            // Base radius 16 is big enough for a 1–3 char badge. Scales up
-            // with backlink degree and importance — "deep" nodes pop.
-            const importance = note?.importance ?? 5;
-            const r =
-              16 +
-              Math.min(11, Math.sqrt(deg) * 2) +
-              Math.min(5, importance / 2) +
-              (note?.pinned ? 1 : 0);
-            const categoryKeys = categoryKeysFor(note?.tags, !!note?.pinned);
-            const categoryKey = categoryKeys[0] ?? pickCategoryKey(note?.tags, !!note?.pinned);
-            const badge = dotBadge(note?.title, categoryKey);
-            // Brightness filter — higher importance nodes "glow" more.
-            // Also boosts the hovered 1-hop neighbors so deep things pop.
-            const brightness = 0.85 + Math.min(0.4, importance / 25);
-            const op = opacityFor(node.id);
-            const depth = depths?.get(node.id);
-            // Focus = the node the user is actively hovering (always),
-            // regardless of whether it has neighbors (depths may be null
-            // for isolated nodes — we still want the hover animation).
-            const isFocus = node.id === hoverId;
-            const isNeighbor = depth === 1;
-            const isSelected = node.id === selectedId;
-            const label = (note?.title || node.label || "").trim();
-            // Completed-task detection — mirrors the tooltip logic so the
-            // two views agree. A task is done if any of: done/completed
-            // tag, leading markdown checkbox `- [x]`, or starts with ~~.
-            const taskDone = (() => {
-              if (categoryKey !== "task") return false;
-              const tagsLower = (note?.tags || []).map((t) => t.toLowerCase());
-              if (tagsLower.includes("done") || tagsLower.includes("completed")) return true;
-              const content = note?.content || "";
-              return /^\s*-\s*\[x\]/im.test(content);
-            })();
-            // Conditional labels — at scale (~500 nodes) emitting a
-            // <text> + <rect> per node was ~1,000 extra SVG elements
-            // and a constant repaint cost. Show labels only when:
-            //  - hub (top-5 by degree)
-            //  - pinned
-            //  - focus / hovered
-            //  - 1-hop neighbour of focus
-            //  - selected (peeked)
-            //  - matched by current search query
-            // This mirrors Obsidian's own behaviour: idle graph shows
-            // a few hub labels, hover lights up the relevant cluster.
-            const isHub = hubIds.has(node.id);
-            const isMatch = matcher ? matcher(node.id) : false;
-            const labelEmphasized = isSelected || isFocus || isNeighbor || !!note?.pinned;
-            const showSideLabel =
-              !!label && (
-                labelEmphasized ||
-                isHub ||
-                (highlightQuery ? isMatch : false)
-              );
-
-            // Gentle hover scale — noticeable but not jumpy. The hover
-            // also freezes the node's orbit via sim.setHover, so the user
-            // doesn't need aggressive scaling to identify the target.
-            const scale = isFocus ? 1.18 : isSelected ? 1.08 : 1;
-
-            return (
-              <g
-                key={node.id}
-                transform={`translate(${sn.x} ${sn.y}) scale(${scale})`}
-                onPointerDown={(e) => handlePointerDownNode(e, node.id)}
-                onPointerEnter={() => handleNodeEnter(node.id)}
-                onPointerLeave={() => handleNodeLeave(node.id)}
-                onClick={(e) => {
-                  // Suppress the click that browsers fire after a drag-release
-                  // — `justDraggedRef` is set the moment DRAG_THRESHOLD is
-                  // crossed in handlePointerMove AND again in handlePointerUp.
-                  if (justDraggedRef.current || dragRef.current) {
-                    justDraggedRef.current = false;
-                    return;
-                  }
-                  e.stopPropagation();
-                  // Clicking the currently-peeked node closes the peek
-                  // (toggle UX). Otherwise open it.
-                  if (node.id === selectedId && onClearPeek) {
-                    onClearPeek();
-                    return;
-                  }
-                  if (onPeek) onPeek(node.id);
-                  else onSelect?.(node.id);
-                }}
-                opacity={op}
-                className="cursor-pointer"
-              >
-                {/* Whisper-soft halo — a breath of color around the dot,
-                    never a bloom. Cozy, not clinical. */}
-                <circle
-                  r={r + 1 + deg * 0.15}
-                  fill={color.ring}
-                  opacity={isFocus ? 0.18 : isNeighbor ? 0.11 : 0.055}
-                  pointerEvents="none"
-                  // feGaussianBlur was applied to all 500 node halos
-                  // every frame — 500 GPU rasterizations per reconcile.
-                  // Limit to focus + 1-hop + selected (≤10 at any time).
-                  // The unfiltered halo at 0.055 opacity reads identical
-                  // to the filtered one because the blur radius
-                  // (stdDev=1.2) is smaller than the alpha falloff.
-                  filter={
-                    isFocus || isNeighbor || isSelected
-                      ? "url(#lb-neural-glow)"
-                      : undefined
-                  }
-                />
-                {/* Hub ring — top-5 most connected notes get a warm
-                    concentric pulse marking them as anchors of the graph. */}
-                {hubIds.has(node.id) && !note?.pinned && (
-                  <>
-                    <circle
-                      r={r + 1.6}
-                      fill="none"
-                      stroke="#d4a26a"
-                      strokeWidth={1.2}
-                      strokeOpacity={0.5}
-                      pointerEvents="none"
-                    />
-                    {/* Static outer ring — replaced the perpetual
-                        <animate> pulse. The animation forced the
-                        browser to repaint these nodes forever (every
-                        top-5 hub × 2 animated attrs × indefinite),
-                        which was a meaningful chunk of the residual
-                        graph lag at scale. The static ring keeps the
-                        same "this is a hub" visual cue at zero cost. */}
-                    <circle
-                      r={r + 6}
-                      fill="none"
-                      stroke="#d4a26a"
-                      strokeWidth={1}
-                      strokeOpacity={0.32}
-                      pointerEvents="none"
-                    />
-                  </>
-                )}
-                {/* Pinned halo — static ring (was a perpetual ±1px
-                    pulse on radius). Same DOM-bloat lag pattern as
-                    the hub ring above, replaced for the same reason. */}
-                {note?.pinned && (
-                  <circle
-                    r={r + 4}
-                    fill="none"
-                    stroke="#fbbf24"
-                    strokeWidth={2}
-                    strokeOpacity={0.9}
-                    pointerEvents="none"
-                  />
-                )}
-                {/* Selected ring */}
-                {isSelected && !isFocus && (
-                  <circle
-                    r={r + 2.5}
-                    fill="none"
-                    stroke="var(--color-accent)"
-                    strokeWidth={2}
-                  />
-                )}
-                {/* Single-planet node body. One colored circle, one centered
-                    icon (or date text for journal/daily-log). Secondary
-                    category signals live as corner markers below — NEVER as
-                    inner slices — so the graph reads like a constellation
-                    of distinct stars, not a pie-chart garden.                */}
-                {(() => {
-                  const bodyOpacity = isFocus ? 0.88 : isNeighbor ? 0.78 : 0.66;
-                  const bodyStroke = isFocus
-                    ? "rgba(240,228,200,0.3)"
-                    : "rgba(240,228,200,0.08)";
-                  const bodyStrokeW = isFocus ? 0.9 : 0.5;
-                  const bodyFilter = { filter: `brightness(${brightness * 0.9})` };
-                  const isDateBadge =
-                    (categoryKey === "journal" || categoryKey === "daily-log") &&
-                    /\d/.test(badge);
-                  return (
-                    <>
-                      <circle
-                        r={r}
-                        fill={color.ring}
-                        opacity={bodyOpacity}
-                        stroke={bodyStroke}
-                        strokeWidth={bodyStrokeW}
-                        style={bodyFilter}
-                      />
-                      {isDateBadge ? (
-                        <text
-                          x={0}
-                          y={0}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          className="pointer-events-none select-none"
-                          style={{
-                            fontSize: `${Math.max(9, r * 0.48)}px`,
-                            fontWeight: 700,
-                            fill: "#0a0a0a",
-                            letterSpacing: "-0.03em",
-                          }}
-                        >
-                          {badge}
-                        </text>
-                      ) : (() => {
-                        const IconComp = CATEGORY_ICONS[categoryKey] ?? DEFAULT_CATEGORY_ICON;
-                        const iconSize = Math.max(12, r * 0.9);
-                        return (
-                          <g
-                            transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
-                            pointerEvents="none"
-                          >
-                            <IconComp
-                              size={iconSize}
-                              color="#0a0a0a"
-                              strokeWidth={2}
-                              aria-hidden
-                            />
-                          </g>
-                        );
-                      })()}
-                    </>
-                  );
-                })()}
-                {/* Deadline attendant — a tiny rose moon stamped in the
-                    top-right when the note carries a deadline that isn't
-                    already its primary category (e.g. a task with a due
-                    date). Keeps the primary-icon solar aesthetic intact
-                    while still whispering "this has a time pressure".     */}
-                {(() => {
-                  const hasDeadline =
-                    categoryKeys.includes("deadline") && categoryKey !== "deadline";
-                  const hasDueTag = (note?.tags || []).some((t) =>
-                    t.toLowerCase().startsWith("due/"),
-                  );
-                  if (!hasDeadline && !hasDueTag) return null;
-                  // Chase the 45° diagonal out from center so the chip sits
-                  // on the node's skin, flush against the top-right arc.
-                  const cx = Math.cos(-Math.PI / 4) * r;
-                  const cy = Math.sin(-Math.PI / 4) * r;
-                  const chipR = Math.max(5.5, r * 0.32);
-                  const iconSize = chipR * 1.25;
-                  const AlarmIcon = CATEGORY_ICONS.deadline ?? DEFAULT_CATEGORY_ICON;
-                  return (
-                    <g transform={`translate(${cx} ${cy})`} pointerEvents="none">
-                      {/* Soft outer glow — rose luminance sold as a tiny
-                          nebula without competing with the node proper. */}
-                      <circle
-                        r={chipR + 2}
-                        fill={ringForKey("deadline")}
-                        opacity={0.22}
-                        filter="url(#lb-neural-glow)"
-                      />
-                      <circle
-                        r={chipR}
-                        fill={ringForKey("deadline")}
-                        stroke="rgba(240,228,200,0.35)"
-                        strokeWidth={0.7}
-                        opacity={isFocus ? 0.98 : 0.9}
-                      />
-                      <g
-                        transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
-                      >
-                        <AlarmIcon
-                          size={iconSize}
-                          color="#0a0a0a"
-                          strokeWidth={2.2}
-                          aria-hidden
-                        />
-                      </g>
-                    </g>
-                  );
-                })()}
-                {/* Always-on label — every node carries a short title under
-                    it so the constellation reads at a glance. Three weights:
-                    • selected / focused / pinned → solid pill, full opacity
-                    • neighbor of focus           → bright text, no pill
-                    • everything else             → dim ghost text          */}
-                {showSideLabel && label && (() => {
-                  const emphasized = labelEmphasized;
-                  const maxChars =
-                    isSelected || isFocus ? 32 : labelEmphasized ? 18 : 14;
-                  const truncated =
-                    label.length > maxChars
-                      ? label.slice(0, maxChars - 2) + "…"
-                      : label;
-                  const fontPx = isSelected || isFocus ? 11 : labelEmphasized ? 10 : 9;
-                  const labelW = truncated.length * (fontPx * 0.62) + (emphasized ? 14 : 6);
-                  // Anchor the label BELOW the node by default so even
-                  // tightly clustered notes can read their titles without
-                  // colliding into other nodes' bodies. Selected/focused
-                  // nodes get the side-pill so the eye can rest on them.
-                  const placeBelow = !emphasized;
-                  const snScreenX = sn.x * view.k + view.tx;
-                  const wouldOverflow =
-                    !placeBelow &&
-                    snScreenX + (r + 12 + labelW) * view.k > size.width - 8;
-                  const offsetX = placeBelow
-                    ? -labelW / 2
-                    : wouldOverflow
-                      ? -(r + 8 + labelW - 4)
-                      : r + 8;
-                  const offsetY = placeBelow ? r + 6 : -8;
-                  const baseTextOp = isSelected || isFocus
-                    ? 0.96
-                    : labelEmphasized ? 0.78 : 0.42;
-                  const textColor = taskDone
-                    ? `rgba(232,213,176,${baseTextOp * 0.55})`
-                    : emphasized
-                      ? `rgba(245,209,154,${baseTextOp})`
-                      : `rgba(232,213,176,${baseTextOp})`;
-                  return (
-                    <g
-                      transform={`translate(${offsetX} ${offsetY})`}
-                      pointerEvents="none"
-                      opacity={op}
-                    >
-                      {emphasized && (isSelected || isFocus) && !placeBelow && (
-                        <rect
-                          x={-4}
-                          y={-2}
-                          rx={4}
-                          ry={4}
-                          width={labelW}
-                          height={18}
-                          fill="rgba(27,22,32,0.9)"
-                          stroke="rgba(212,162,106,0.45)"
-                          strokeWidth={1}
-                        />
-                      )}
-                      <text
-                        x={placeBelow ? labelW / 2 : (emphasized ? 3 : 0)}
-                        y={placeBelow ? 0 : 11}
-                        textAnchor={placeBelow ? "middle" : "start"}
-                        dominantBaseline={placeBelow ? "hanging" : "auto"}
-                        style={{
-                          fontSize: `${fontPx}px`,
-                          fontWeight: emphasized ? 600 : 500,
-                          fill: textColor,
-                          fontFamily: "var(--font-display, inherit)",
-                          letterSpacing: "-0.01em",
-                          textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.7)",
-                          textDecoration: taskDone ? "line-through" : "none",
-                          textDecorationColor: "rgba(110,181,131,0.9)",
-                          textDecorationThickness: "1.5px",
-                        }}
-                      >
-                        {truncated}
-                      </text>
-                    </g>
-                  );
-                })()}
-              </g>
-            );
-          })}
+          {/* Nodes — memoized JSX, see nodesJsx useMemo above. */}
+          {nodesJsx}
         </g>
       </svg>
 

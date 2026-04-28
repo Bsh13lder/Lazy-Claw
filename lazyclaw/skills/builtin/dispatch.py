@@ -82,23 +82,30 @@ class DispatchSubagentsSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Fire N independent research / scrape / draft tasks IN THE "
-            "BACKGROUND and return immediately with task IDs. The subagents "
-            "appear in the user's Activity panel under lane='subagent' and "
-            "stream their results back as `background_done` events that you "
-            "(the brain) absorb on later turns. "
-            "DO NOT WAIT for the results in this turn — your tool-result is "
-            "just the dispatch confirmation. Reply to the user with a short "
-            "status ('I started 5 subagents, results will appear as they "
-            "land') so they know work is in flight; the conversation stays "
-            "responsive. "
-            "Use for parallel work where the user can wait asynchronously: "
-            "researching 10 companies, scraping 8 sites, drafting 6 "
-            "proposals. For tasks where you need the merged answer in this "
-            "same turn (single quick lookup, dependent reasoning), use "
-            "`delegate` or call tools directly instead. "
-            "Types: 'explore' (read-only, fastest, use liberally), "
-            "'general_purpose' (full access, heavier), "
+            "Fire 2–5 TRULY DIFFERENT background tasks and return immediately "
+            "with task IDs. Subagents appear in the Activity panel under "
+            "lane='subagent' and stream results back as `background_done` "
+            "events you (the brain) absorb on later turns. "
+            "DO NOT WAIT for results in this turn — reply with a short "
+            "status ('Started 3 subagents, I'll fold results into my next "
+            "reply'). The conversation stays responsive. "
+            "\n\n"
+            "WHEN TO USE — STRICT:\n"
+            "- 2–5 tasks, each a DIFFERENT goal (research X, scrape Y, "
+            "summarize Z) → dispatch_subagents.\n"
+            "- 1 long-running task (1 site, 1 thing) → use `run_background` "
+            "instead. One worker, brain stays free, Telegram push when done.\n"
+            "- ≥6 SIMILAR lookups (find email for 20 salons, scrape 50 "
+            "URLs) → ONE `run_background` that calls a batch scraper tool "
+            "(`mcp_scraper_batch_search_google`, `mcp_scraper_batch_crawl`). "
+            "Spawning 20 subagents is wasteful: each cold-starts its own "
+            "context, the concurrency cap is 4 so 16 wait in line, and most "
+            "time out. Hard cap is 5 — calls with more will be rejected.\n"
+            "- Need the merged answer in THIS turn → `delegate(...)` for one "
+            "specialist, or call tools directly.\n"
+            "\n"
+            "Types: 'explore' (read-only, cheap, default), "
+            "'general_purpose' (full tool access, heavier), "
             "'specialist' (scoped tools via tool_names)."
         )
 
@@ -114,7 +121,13 @@ class DispatchSubagentsSkill(BaseSkill):
                 "tasks": {
                     "type": "array",
                     "minItems": 2,
-                    "description": "Independent tasks to run in parallel (min 2, no hard max — aggressive fan-out encouraged for independent work)",
+                    "maxItems": 5,
+                    "description": (
+                        "Independent tasks to run in parallel (min 2, max 5). "
+                        "For >5 similar lookups use one run_background with a "
+                        "batch scraper tool, NOT N subagents — see skill "
+                        "description."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -166,9 +179,66 @@ class DispatchSubagentsSkill(BaseSkill):
             return "Error: tasks list is empty"
         if len(raw_tasks) < 2:
             return (
-                "Error: dispatch_subagents requires at least 2 tasks. "
-                "Use the delegate tool for single-specialist tasks."
+                "Error: dispatch_subagents needs ≥2 distinct tasks. For a "
+                "single task, call `run_background(instruction=...)` — it "
+                "runs ONE worker in the background, keeps the brain free, "
+                "and Telegram-pushes when done. Use `delegate(...)` only "
+                "when you need the merged answer back in THIS same turn."
             )
+        if len(raw_tasks) > 5:
+            return (
+                f"Error: dispatch_subagents capped at 5 (you asked for "
+                f"{len(raw_tasks)}). For ≥6 similar lookups, fire ONE "
+                f"`run_background` task that calls a batch scraper tool "
+                f"(`mcp_scraper_batch_search_google` for queries, "
+                f"`mcp_scraper_batch_crawl` for URLs, "
+                f"`mcp_scraper_search_and_crawl` for query→page→extract). "
+                f"That uses one worker instead of N cold-starting context "
+                f"copies most of which will time out — see prior session "
+                f"logs where 21-subagent fan-outs returned zero results."
+            )
+
+        # Same-shape detection: when ≥3 tasks share the same opening
+        # verb-phrase ("find email for X", "scrape Y", "research Z"),
+        # the brain is fan-outing what is really one batch job. The right
+        # path is ONE run_background calling a batch scraper tool, not N
+        # subagents whose only difference is the tail of the instruction.
+        # Production logs (2026-04-28 00:31) showed 4 subagents starting
+        # with identical 'Find contact email addresses for these V…' —
+        # overlapping salons across subagents, wasted budget.
+        #
+        # Heuristic: compare the first 3 lowercase words of each task.
+        # "Find email for Salon A" / "Find email for Salon B" both reduce
+        # to ("find", "email", "for") and trip the rule.
+        def _shape_key(task: str) -> tuple[str, ...]:
+            t = task.strip().lower()
+            for ch in ('"', "'", "*", "-", "•'"):
+                t = t.lstrip(ch).strip()
+            words = [w.strip(".,:;()[]{}\"'") for w in t.split() if w]
+            return tuple(words[:3])
+
+        _shape_keys = [_shape_key(raw.get("task") or "") for raw in raw_tasks]
+        _shape_keys = [k for k in _shape_keys if k]
+        if _shape_keys:
+            from collections import Counter
+            top_key, top_count = Counter(_shape_keys).most_common(1)[0]
+            if top_count >= 3 and top_count >= len(_shape_keys) - 1:
+                opener = " ".join(top_key)
+                return (
+                    f"Error: dispatch_subagents rejected — {top_count} of "
+                    f"{len(_shape_keys)} tasks open with the same verb "
+                    f"phrase ({opener!r}…). That's ONE batch job split N "
+                    f"ways, not N independent goals, and produces "
+                    f"overlapping work + wasted cold-starts. Fire ONE "
+                    f"`run_background(instruction=...)` whose instruction "
+                    f"calls `mcp_scraper_batch_search_google(queries=[...])` "
+                    f"with the full list, then `mcp_scraper_extract_entities` "
+                    f"per hit. One worker, brain stays free, you receive "
+                    f"ONE consolidated `background_done` and write ONE "
+                    f"accurate summary. dispatch_subagents is for ≤5 "
+                    f"DIFFERENT goals (research X, scrape Y, draft Z), "
+                    f"not N copies of the same goal with different inputs."
+                )
 
         configs: list[SubagentConfig] = []
         for raw in raw_tasks:

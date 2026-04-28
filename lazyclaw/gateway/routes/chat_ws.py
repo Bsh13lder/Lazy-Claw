@@ -253,6 +253,13 @@ async def chat_websocket(ws: WebSocket):
     # Mutable holder — shared between reader task and writer tasks.
     state: dict = {"active": None}  # type: dict[str, WebSocketCallback | None]
     writer_tasks: set = set()
+    # Subagent terminal events that fired while the brain was idle. The
+    # task_event_bus pump can't push them into a callback that doesn't
+    # exist, so we stash them here and drain into the next turn's
+    # callback as system-level side-notes. Without this the brain never
+    # learns the outcome of background subagents and can't write the
+    # consolidated summary the user expects.
+    pending_subagent_notes: list[str] = []
 
     # Forward live browser events from the per-user pub/sub bus.
     # Runs alongside the chat-message reader; cancelled on disconnect.
@@ -284,16 +291,27 @@ async def chat_websocket(ws: WebSocket):
 
     bus_task = asyncio.create_task(_browser_event_pump())
 
-    # Forward background-task completion events so the web chat can show
-    # results from tasks that started in an earlier turn (the original
-    # WebSocketCallback is long gone by the time a background task finishes).
+    # Forward background-task lifecycle events so Activity / Overview can
+    # update without 3s poll lag, and so background_done from earlier
+    # turns still surface in chat. Subagent terminal events get special
+    # routing: they NEVER render in chat (the brain writes ONE
+    # consolidated summary instead), they ONLY feed the brain's
+    # side-note channel — either immediately if a turn is active, or
+    # queued in `pending_subagent_notes` until the next turn starts.
     async def _task_event_pump() -> None:
         from lazyclaw.runtime import task_event_bus
 
-        # Initial paint: replay recent completions (last 10 min) so a user
-        # who reconnects right after a task finished still sees the result.
+        # Initial paint: replay recent live-progress events ONLY (so the
+        # Activity panel knows what's still running). Terminal completion
+        # events are NOT replayed — the brain has already incorporated
+        # them (or will, via pending_subagent_notes), so re-painting them
+        # would duplicate "✅ Background task completed" cards in chat.
         try:
-            for evt in task_event_bus.recent_events(user.id, limit=3, max_age_s=600):
+            for evt in task_event_bus.recent_events(
+                user.id, limit=10, max_age_s=300,
+            ):
+                if evt.kind in ("background_done", "background_failed"):
+                    continue
                 payload = {"type": evt.kind, **evt.to_frame()}
                 if ws.client_state == WebSocketState.CONNECTED:
                     await ws.send_json(payload)
@@ -303,32 +321,28 @@ async def chat_websocket(ws: WebSocket):
             async for evt in task_event_bus.subscribe(user.id):
                 if ws.client_state != WebSocketState.CONNECTED:
                     return
-                try:
-                    await ws.send_json({"type": evt.kind, **evt.to_frame()})
-                except Exception:
-                    logger.debug("task_event send failed", exc_info=True)
-                    return
 
-                # Subagent terminal events also feed the running agent's
-                # side-note channel so the brain can absorb their results
-                # on the next TAOR iteration without waiting for a user
-                # turn to land.
-                if (
+                _is_subagent_terminal = (
                     evt.kind in ("background_done", "background_failed")
                     and (evt.task_id or "").startswith("subagent-")
-                ):
+                )
+
+                # Build the side-note payload the brain will see on its
+                # next TAOR iteration. Subagent results never render as
+                # chat messages — the brain consolidates them.
+                if _is_subagent_terminal:
+                    if evt.kind == "background_done":
+                        note = (
+                            f"[subagent {evt.task_id} done] "
+                            f"{evt.name}: {(evt.result or '')[:600]}"
+                        )
+                    else:
+                        note = (
+                            f"[subagent {evt.task_id} failed] "
+                            f"{evt.name}: {evt.error or 'unknown error'}"
+                        )
                     active_cb = state.get("active")
                     if active_cb is not None:
-                        if evt.kind == "background_done":
-                            note = (
-                                f"[subagent {evt.task_id} done] "
-                                f"{evt.name}: {(evt.result or '')[:600]}"
-                            )
-                        else:
-                            note = (
-                                f"[subagent {evt.task_id} failed] "
-                                f"{evt.name}: {evt.error or 'unknown error'}"
-                            )
                         try:
                             active_cb.push_side_note(note)
                         except Exception:
@@ -336,6 +350,21 @@ async def chat_websocket(ws: WebSocket):
                                 "push_side_note for subagent failed",
                                 exc_info=True,
                             )
+                    else:
+                        # Brain idle — queue until next turn starts.
+                        pending_subagent_notes.append(note)
+                    # DO NOT forward subagent terminal frames to chat —
+                    # they'd render as standalone "✅ Background task
+                    # completed" assistant cards, breaking the "ONE
+                    # consolidated summary" contract. Activity panel
+                    # already saw the task_completed frame separately.
+                    continue
+
+                try:
+                    await ws.send_json({"type": evt.kind, **evt.to_frame()})
+                except Exception:
+                    logger.debug("task_event send failed", exc_info=True)
+                    return
         except asyncio.CancelledError:
             pass
 
@@ -433,6 +462,23 @@ async def chat_websocket(ws: WebSocket):
         import time as _time
 
         cb = WebSocketCallback(ws=ws)
+        # Drain background-arrived subagent notes into this turn's
+        # callback BEFORE marking it active. The agent's TAOR loop
+        # pop_side_notes() on each iteration → these land as system
+        # messages and the brain writes ONE consolidated summary
+        # incorporating the prior fan-out's results.
+        if pending_subagent_notes:
+            for _note in pending_subagent_notes:
+                try:
+                    cb.push_side_note(_note)
+                except Exception:
+                    logger.debug("draining pending subagent note failed",
+                                 exc_info=True)
+            logger.info(
+                "Drained %d pending subagent note(s) into new turn for user %s",
+                len(pending_subagent_notes), user.id,
+            )
+            pending_subagent_notes.clear()
         state["active"] = cb
         turn_start_ts = _time.time()
         try:

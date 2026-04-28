@@ -45,11 +45,38 @@ class SpecialistResult:
     error: str | None = None
 
 
-def _filter_tools(registry: SkillRegistry, allowed: tuple[str, ...]) -> list[dict]:
-    """Return OpenAI-format tool list filtered to allowed skill names."""
+def _filter_tools(
+    registry: SkillRegistry,
+    allowed: tuple[str, ...],
+    *,
+    include_scraper: bool = False,
+) -> list[dict]:
+    """Return OpenAI-format tool list filtered to allowed skill names.
+
+    When ``include_scraper`` is True, every connected mcp-scraper tool is
+    unioned in. Scraper tool names are dynamic (`mcp_<server_uuid>_<name>`)
+    so we identify them by their description containing ``mcp-scraper``.
+    Without this, browser/research specialists would fall back to opening
+    Chrome for read-only contact-data work that ``extract_entities`` solves
+    in one JS-rendered call.
+    """
     all_tools = registry.list_tools()
     allowed_set = set(allowed)
-    return [t for t in all_tools if t["function"]["name"] in allowed_set]
+    out = [t for t in all_tools if t["function"]["name"] in allowed_set]
+    if include_scraper:
+        try:
+            mcp_tools = registry.list_mcp_tools()
+        except Exception:
+            mcp_tools = []
+        seen = {t["function"]["name"] for t in out}
+        for t in mcp_tools:
+            func = t.get("function", {})
+            name = func.get("name", "")
+            desc = (func.get("description") or "").lower()
+            if "mcp-scraper" in desc and name not in seen:
+                out.append(t)
+                seen.add(name)
+    return out
 
 
 async def run_specialist(
@@ -75,8 +102,15 @@ async def run_specialist(
     tools_used: list[str] = []
     step_history: list[StepEntry] = []
 
-    # Build filtered tools
-    filtered_tools = _filter_tools(registry, specialist.allowed_skills)
+    # Build filtered tools — when the specialist opts into scraper, every
+    # connected mcp-scraper tool is unioned in so the worker can reach
+    # extract_entities / crawl_url / batch_crawl without us having to
+    # hard-code dynamic tool IDs.
+    filtered_tools = _filter_tools(
+        registry,
+        specialist.allowed_skills,
+        include_scraper=specialist.include_scraper,
+    )
 
     # Build executor (reuses same registry + permission checker).
     # Pass config so the auto-recorder in tool_executor can save lessons.
@@ -196,8 +230,20 @@ async def run_specialist(
                     specialist.name, _iteration + 1, tc.name, _args_summary,
                 )
 
-                # Only execute if skill is in allowed list
-                if tc.name not in specialist.allowed_skills:
+                # Only execute if skill is in allowed list. Scraper-opted
+                # specialists also accept any mcp-scraper tool — these are
+                # dynamic tool IDs unioned in by ``_filter_tools`` above
+                # (see SpecialistConfig.include_scraper).
+                _is_scraper_tool = (
+                    specialist.include_scraper
+                    and tc.name.startswith("mcp_")
+                    and any(
+                        t["function"]["name"] == tc.name
+                        and "mcp-scraper" in (t["function"].get("description") or "").lower()
+                        for t in filtered_tools
+                    )
+                )
+                if tc.name not in specialist.allowed_skills and not _is_scraper_tool:
                     tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
                 else:
                     # Inject TabContext for browser isolation (immutable — new ToolCall)

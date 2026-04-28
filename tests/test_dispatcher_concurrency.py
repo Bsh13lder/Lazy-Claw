@@ -363,3 +363,121 @@ async def test_dispatch_skill_returns_handles_not_results(monkeypatch):
     assert out.startswith("Dispatched 2 subagents")
     assert "Task IDs:" in out
     assert "subagent-" in out
+
+
+# ── Subagent silence (no chat-WS leakage) ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_subagent_callback_does_not_leak_to_brain(monkeypatch):
+    """Background subagents must be silent on the brain's callback.
+
+    Pins the architectural rule: a parallel subagent's per-step events
+    (specialist_thinking / specialist_tool / phase / token / tool_call /
+    tool_result) must NOT reach the foreground brain callback. They are
+    Activity-panel-only via TeamLead → task_event_bus.
+
+    Regression guard: dispatcher used to wrap the brain's chat-WS
+    callback in StepTrackingCallback, which forwarded every event to it
+    and dumped raw subagent traffic into the user's chat window.
+    """
+    from lazyclaw.runtime.callbacks import AgentEvent
+    from lazyclaw.teams.runner import SpecialistResult
+    from lazyclaw.teams import runner as teams_runner
+
+    brain_events: list[str] = []
+
+    class RecordingBrainCallback:
+        async def on_event(self, event: AgentEvent) -> None:
+            brain_events.append(event.kind)
+
+        async def on_approval_request(self, skill_name, arguments):
+            return False
+
+        async def on_help_request(self, context, needs_browser):
+            return "skip"
+
+    # Simulate a subagent that emits the full event spectrum a real
+    # specialist would: specialist_thinking, specialist_tool, phase,
+    # token, tool_call, tool_result.
+    async def chatty_run_specialist(**kwargs):
+        cb = kwargs.get("callback")
+        if cb:
+            for kind in (
+                "specialist_thinking", "specialist_tool", "phase",
+                "token", "tool_call", "tool_result", "thinking_delta",
+            ):
+                await cb.on_event(AgentEvent(kind=kind, detail="x", metadata={}))
+        return SpecialistResult(
+            agent_name="explore_agent",
+            task=kwargs.get("task", ""),
+            result="done",
+            tools_used=("web_search",),
+            model_used="test",
+            duration_ms=1,
+            success=True,
+            error=None,
+        )
+
+    monkeypatch.setattr(teams_runner, "run_specialist", chatty_run_specialist)
+
+    team_lead = MagicMock()
+    brain_cb = RecordingBrainCallback()
+
+    dispatcher = AgentDispatcher(
+        config=MagicMock(),
+        eco_router=MagicMock(),
+        registry=MagicMock(),
+        permission_checker=None,
+        team_lead=team_lead,
+        callback=brain_cb,  # the brain's foreground chat-WS callback
+    )
+
+    configs = [SubagentConfig(agent_type=AgentType.EXPLORE, task="t")]
+    results = await dispatcher.dispatch(configs, user_id="u_silent")
+
+    assert results[0].success
+    assert brain_events == [], (
+        f"subagent leaked {brain_events!r} into brain/chat callback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_specialist_tool_still_drives_team_lead(monkeypatch):
+    """Silent callback must still surface live tool progress in the
+    Activity panel by calling team_lead.update_step on `specialist_tool`
+    events. Otherwise the panel would freeze on 'queued'.
+    """
+    from lazyclaw.runtime.callbacks import AgentEvent
+    from lazyclaw.teams.runner import SpecialistResult
+    from lazyclaw.teams import runner as teams_runner
+
+    async def chatty_run_specialist(**kwargs):
+        cb = kwargs.get("callback")
+        if cb:
+            await cb.on_event(AgentEvent(
+                kind="specialist_tool", detail="web_search",
+                metadata={"specialist": "explore_agent", "tool": "web_search"},
+            ))
+            await cb.on_event(AgentEvent(
+                kind="specialist_tool", detail="read_file",
+                metadata={"specialist": "explore_agent", "tool": "read_file"},
+            ))
+        return SpecialistResult(
+            agent_name="explore_agent",
+            task="t", result="ok", tools_used=("web_search", "read_file"),
+            model_used="test", duration_ms=1, success=True, error=None,
+        )
+
+    monkeypatch.setattr(teams_runner, "run_specialist", chatty_run_specialist)
+
+    team_lead = MagicMock()
+    dispatcher = _build_dispatcher_with_team_lead(team_lead)
+
+    configs = [SubagentConfig(agent_type=AgentType.EXPLORE, task="t")]
+    await dispatcher.dispatch(configs, user_id="u_step")
+
+    steps = [c.args for c in team_lead.update_step.call_args_list]
+    assert len(steps) == 2
+    assert steps[0][1] == "web_search"
+    assert steps[1][1] == "read_file"

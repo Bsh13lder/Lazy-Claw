@@ -294,13 +294,18 @@ class AgentDispatcher:
         share the same ID.
         """
         from lazyclaw.teams.runner import run_specialist
-        from lazyclaw.runtime.callbacks import StepTrackingCallback
+        from lazyclaw.runtime.callbacks import (
+            CancellationToken, SilentSubagentCallback,
+        )
 
         # Mark context as subagent — blocks nested dispatch_subagents calls
         token = _IS_SUBAGENT.set(True)
         start = time.monotonic()
 
         task_id = task_id_override or f"subagent-{uuid.uuid4().hex[:8]}"
+        # Per-subagent cancel token so the Activity panel "cancel" button
+        # can stop a single subagent without taking down the rest.
+        sub_cancel = CancellationToken()
 
         # Register with TeamLead so the Activity panel shows the subagent
         # alongside specialists and background tasks.
@@ -312,6 +317,7 @@ class AgentDispatcher:
                     description=cfg.task[:80],
                     lane="subagent",
                     instruction_full=cfg.task,
+                    cancel_token=sub_cancel,
                     user_id=user_id,
                 )
             except Exception:
@@ -319,15 +325,16 @@ class AgentDispatcher:
                     "team_lead.register failed for %s", task_id, exc_info=True,
                 )
 
-        # Wrap callback so per-tool events drive update_step, surfacing the
-        # subagent's current tool in the panel just like specialists do.
-        wrapped_callback = self._callback
-        if self._team_lead is not None and self._callback is not None:
-            wrapped_callback = StepTrackingCallback(
-                inner=self._callback,
-                team_lead=self._team_lead,
-                task_id=task_id,
-            )
+        # Background subagents are silent on the chat WS by design — events
+        # only drive TeamLead, which fans out to the Activity panel via
+        # task_event_bus. The brain learns the outcome via the consolidated
+        # background_done side-note on its next TAOR iteration, NOT through
+        # passthrough of subagent steps.
+        wrapped_callback = SilentSubagentCallback(
+            team_lead=self._team_lead,
+            task_id=task_id,
+            cancel_token=sub_cancel,
+        ) if self._team_lead is not None else None
 
         try:
             spec = self._make_specialist(cfg)
@@ -340,6 +347,7 @@ class AgentDispatcher:
                     eco_router=self._eco_router,
                     permission_checker=self._permission_checker,
                     callback=wrapped_callback,
+                    cancel_token=sub_cancel,
                 ),
                 timeout=cfg.timeout,
             )
@@ -429,18 +437,16 @@ class AgentDispatcher:
             base_allowed = (
                 set(cfg.tool_names) if cfg.tool_names else set(_EXPLORE_TOOLS)
             )
-            # Union in mcp-scraper tool names. Tool ids are dynamic
-            # (`mcp_<server_uuid>_<toolname>`) so we can't hard-code them
-            # in `_EXPLORE_TOOLS`. Match by description containing the
-            # server name (`mcp-scraper`). Without this, EXPLORE workers
-            # cannot reach `extract_entities` / `crawl_url` and fall back
-            # to `browser` even when the brain told them to use scraper.
+            # Union in mcp-scraper pool tool names. Pool registers tools
+            # under canonical `mcp_scraper_<tool>` (one entry per tool,
+            # not per shard) — so name-prefix match is exact and gives
+            # the EXPLORE worker direct access to extract_entities /
+            # crawl_url without falling back to browser.
             try:
                 for t in self._registry.list_mcp_tools():
                     func = t.get("function", {})
                     name = func.get("name", "")
-                    desc = func.get("description", "").lower()
-                    if "mcp-scraper" in desc:
+                    if name.startswith("mcp_scraper_"):
                         base_allowed.add(name)
             except Exception:
                 logger.debug(

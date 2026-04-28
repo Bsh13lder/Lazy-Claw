@@ -429,6 +429,7 @@ async def _run_headless(
             config, lane_queue,
             telegram_push=telegram_push,
             notifier_factory=notifier_factory,
+            team_lead=team_lead,
         )
         await heartbeat.start()
         console.print("[green]✓[/green] Heartbeat daemon started")

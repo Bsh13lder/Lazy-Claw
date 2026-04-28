@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import signal
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +60,7 @@ class HeartbeatDaemon:
         lane_queue,
         telegram_push=None,
         notifier_factory=None,
+        team_lead=None,
     ) -> None:
         self._config = config
         self._lane_queue = lane_queue
@@ -67,6 +70,11 @@ class HeartbeatDaemon:
         # cron/reminder/watcher pushes are distinguishable from foreground task
         # completions. Signature: (prefix: str, icon: str = "⏰") -> AgentCallback
         self._notifier_factory = notifier_factory
+        # TeamLead reference so the idle-browser reaper can see live
+        # subagent / specialist work. Without it the reaper only checks
+        # the ``background_tasks`` table and kills Chrome out from under
+        # an explore subagent that's mid-scrape.
+        self._team_lead = team_lead
         self._task: asyncio.Task | None = None
         # In-memory record of "we already seeded today's journal for this user".
         # Resets on restart (idempotent re-seed via tag lookup is cheap).
@@ -958,7 +966,36 @@ class HeartbeatDaemon:
                         row = await cursor.fetchone()
                         has_bg_tasks = row and row[0] > 0
 
-                    if browser_alive and idle != float("inf") and idle > timeout and not has_watchers and not has_bg_tasks:
+                    # Subagents (lane='subagent') and specialists
+                    # (lane='specialist') don't write to background_tasks
+                    # — they're tracked in TeamLead's in-memory active set.
+                    # Without this check the reaper kills Chrome mid-scrape.
+                    has_team_work = False
+                    if self._team_lead is not None:
+                        try:
+                            for t in self._team_lead.active_tasks:
+                                if (
+                                    t.lane in ("subagent", "specialist")
+                                    and self._team_lead._task_users.get(
+                                        t.task_id, ""
+                                    ) == user_id
+                                ):
+                                    has_team_work = True
+                                    break
+                        except Exception:
+                            logger.debug(
+                                "team_lead probe failed in browser reaper",
+                                exc_info=True,
+                            )
+
+                    if (
+                        browser_alive
+                        and idle != float("inf")
+                        and idle > timeout
+                        and not has_watchers
+                        and not has_bg_tasks
+                        and not has_team_work
+                    ):
                         # Idle too long and no watchers — kill it
                         logger.info(
                             "Auto-closing idle browser (%.0fs idle, %ds timeout)",
@@ -971,7 +1008,6 @@ class HeartbeatDaemon:
                                 stderr=asyncio.subprocess.DEVNULL,
                             )
                             stdout, _ = await proc.communicate()
-                            import signal
                             for line in stdout.decode("utf-8", errors="replace").splitlines():
                                 if f"remote-debugging-port={port}" in line:
                                     parts = line.split()
@@ -981,9 +1017,28 @@ class HeartbeatDaemon:
                                         except (ProcessLookupError, ValueError):
                                             # Intentional: process may have exited before SIGTERM
                                             pass
-                        except Exception:
-                            logger.warning("Failed to send SIGTERM to idle browser process on port %d", port, exc_info=True)
-                    elif not browser_alive and (idle < timeout or has_watchers or has_bg_tasks):
+                                        except PermissionError:
+                                            # Host Brave bridge is running as
+                                            # a different uid (typical when
+                                            # the daemon is in a Docker
+                                            # container and the browser is
+                                            # on the host). Stop trying to
+                                            # kill it — log once at info and
+                                            # let the user manage it.
+                                            logger.info(
+                                                "Idle-browser PID %s on port %d is "
+                                                "owned by another uid (likely host "
+                                                "Brave bridge) — leaving it alone",
+                                                parts[1], port,
+                                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Idle-browser reap on port %d failed: %s: %s",
+                                port, type(exc).__name__, exc,
+                            )
+                    elif not browser_alive and (
+                        idle < timeout or has_watchers or has_bg_tasks or has_team_work
+                    ):
                         # Browser died but still needed — restart
                         await self._launch_browser(user_id, port)
                     return

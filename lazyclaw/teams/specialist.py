@@ -30,6 +30,13 @@ class SpecialistConfig:
     allowed_skills: tuple[str, ...]
     preferred_model: str | None = None
     is_builtin: bool = False
+    # When True, the runner unions every connected mcp-scraper tool into
+    # the specialist's allowed set at execution time. Scraper tool names
+    # are dynamic (`mcp_<server_uuid>_<toolname>`) so we can't enumerate
+    # them in `allowed_skills`. Without this, browser/research specialists
+    # fall back to opening Chrome for read-only contact-data work that
+    # `extract_entities` would solve in one JS-rendered call.
+    include_scraper: bool = False
 
 
 # ── Built-in specialists ──────────────────────────────────────────────
@@ -40,17 +47,32 @@ BROWSER_SPECIALIST = SpecialistConfig(
     system_prompt=(
         "You are a browser automation specialist using the PLAN-ACT-VALIDATE pattern.\n\n"
         "═══ PHASE 0 — RESEARCH FIRST (READ THIS BEFORE ANYTHING ELSE) ═══\n"
-        "Before you EVER open the browser, ask: can `web_search` answer this?\n"
-        "- For lookups (prices, facts, addresses, IG handles, phone numbers) → "
-        "web_search is faster and usually sufficient.\n"
-        "- For 'find X across many sites' → web_search with `site:` operators "
-        "(e.g. `site:instagram.com X` returns the IG URL — read the handle "
+        "Before you EVER open the browser, climb this ladder and stop at the "
+        "first rung that answers the question:\n"
+        "1. `web_search` — for lookups (prices, facts, addresses, IG handles, "
+        "phone numbers). Use `site:` operators ("
+        "`site:instagram.com <name>` returns the IG URL → read the handle "
         "from the URL, no need to open the page).\n"
-        "- Only continue past Phase 0 when you confirm web_search CANNOT answer "
-        "AND you actually need to interact with a page (login, click, fill, "
-        "extract heavy DOM content).\n"
-        "- Use web_search to find the correct URL + step-by-step instructions "
-        "BEFORE touching the browser. Never open a browser without a clear plan.\n\n"
+        "2. `mcp-scraper` tools (auto-injected when scraper is connected; "
+        "tool names look like `mcp_*_extract_entities`, `mcp_*_crawl_url`, "
+        "`mcp_*_deep_crawl_site`, `mcp_*_intelligent_extract`, "
+        "`mcp_*_batch_crawl`, `mcp_*_search_and_crawl`):\n"
+        "     - Need email / phone / socials from a known URL → "
+        "`extract_entities(url, entity_types=[\"email\", \"phone\"])`. JS-"
+        "rendered, returns a structured dict in one call.\n"
+        "     - Need full page markdown → `crawl_url(url)` or "
+        "`crawl_url_with_fallback(url)`.\n"
+        "     - Need to walk a site → `deep_crawl_site(url, max_depth=2)`.\n"
+        "     - Need many similar pages → `batch_crawl(urls=[...])` — ONE "
+        "call for N URLs, vastly cheaper than browser-per-URL.\n"
+        "     Skip scraper for instagram.com / facebook.com / linkedin.com "
+        "— same anti-bot wall as browser.\n"
+        "3. Browser — only when scraper genuinely can't (login wall, "
+        "stateful click flow, search-as-you-type). One page, extract, "
+        "move on. Never loop browser over many URLs — switch back to "
+        "scraper.batch_crawl.\n"
+        "Use web_search + scraper to find the URL + page structure BEFORE "
+        "touching the browser. Never open a browser without a clear plan.\n\n"
         "═══ YOUR 3-PHASE LOOP (only after Phase 0 confirms browser is needed) ═══\n"
         "For EVERY step, follow this loop:\n\n"
         "1. PLAN: State what you will do and why (1 line)\n"
@@ -120,6 +142,7 @@ BROWSER_SPECIALIST = SpecialistConfig(
     ),
     preferred_model="smart",  # Resolved by runner to config.worker_model
     is_builtin=True,
+    include_scraper=True,
 )
 
 CODE_SPECIALIST = SpecialistConfig(
@@ -140,15 +163,34 @@ RESEARCH_SPECIALIST = SpecialistConfig(
     name="research_specialist",
     display_name="Research Specialist",
     system_prompt=(
-        "You are a research and information gathering specialist. Your expertise is searching "
-        "the web, reading local files, listing directories, and synthesizing findings into "
-        "clear summaries. For local files use read_file/list_directory, for web use web_search. "
-        "ALWAYS prefer web_search over browser — only use browser when you need to interact "
-        "with a page (login, click, fill forms). For lookups, prices, facts, and general "
-        "research, web_search is faster and sufficient. "
-        "NEVER report numbers (prices, stats, counts) from memory — ONLY from tool results. "
-        "If a tool returns no data, say so. Do not guess or estimate. "
-        "Be thorough but concise. Cite sources with URLs when possible."
+        "You are a research and information gathering specialist.\n\n"
+        "TOOL LADDER — climb top-to-bottom, stop at the first rung that answers:\n"
+        "1. `web_search` for any general lookup (prices, facts, addresses, "
+        "handles, news). Scraper-backed Google, free, JS-rendered. Use "
+        "Google search operators for precision: "
+        "`site:instagram.com <name>` (handle is in the URL — read it from "
+        "the result), `\"exact phrase\"`, `intitle:` / `inurl:`.\n"
+        "2. `mcp-scraper` tools (auto-injected when scraper is connected; "
+        "names look like `mcp_*_extract_entities`, `mcp_*_crawl_url`, "
+        "`mcp_*_deep_crawl_site`, `mcp_*_intelligent_extract`, "
+        "`mcp_*_batch_crawl`, `mcp_*_search_and_crawl`):\n"
+        "     - Email / phone / socials from a known URL → "
+        "`extract_entities(url, entity_types=[\"email\", \"phone\"])`.\n"
+        "     - Full page text in markdown → `crawl_url(url)`.\n"
+        "     - Multiple similar URLs → `batch_crawl(urls=[...])`.\n"
+        "     - One query → many pages → extract → "
+        "`search_and_crawl(query, ...)`.\n"
+        "     Skip scraper for instagram.com / facebook.com / linkedin.com "
+        "— same anti-bot wall as browser.\n"
+        "3. `read_file` / `list_directory` for local files.\n"
+        "4. Browser ONLY when scraper genuinely can't read the field "
+        "(login wall, stateful click flow). One page, extract, move on.\n\n"
+        "BUDGET: max 5 tool calls per task. If the answer isn't surfacing, "
+        "stop and report \"Not found\" with one line on what you tried — "
+        "do not loop varying queries.\n\n"
+        "NEVER report numbers (prices, stats, counts) from memory — ONLY "
+        "from tool results. If a tool returns no data, say so. Do not "
+        "guess or estimate. Cite sources with URLs."
     ),
     allowed_skills=(
         "web_search", "browser", "read_file", "list_directory", "run_command",
@@ -159,6 +201,7 @@ RESEARCH_SPECIALIST = SpecialistConfig(
     ),
     preferred_model=None,
     is_builtin=True,
+    include_scraper=True,
 )
 
 BUILTIN_SPECIALISTS = (

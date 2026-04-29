@@ -54,13 +54,20 @@ def test_no_residual_absolute_crawl4ai_imports():
 
 
 def test_bundled_mcp_registry_includes_scraper():
-    """LazyClaw's MCP manager must register mcp-scraper so the bridge spawns it."""
+    """LazyClaw's MCP manager must register a single `mcp-scraper` so the
+    bridge spawns one subprocess and routes it through the canonical-name
+    pool registrar (`register_scraper_pool([client], …)`).
+    """
     from lazyclaw.mcp.manager import BUNDLED_MCPS
 
     assert "mcp-scraper" in BUNDLED_MCPS
     cfg = BUNDLED_MCPS["mcp-scraper"]
     assert cfg["module"] == "mcp_scraper"
     assert cfg.get("optional") is True
+    assert cfg.get("persistent") is True
+    # No shard rows — the pool experiment is collapsed.
+    shards = [k for k in BUNDLED_MCPS if k.startswith("mcp-scraper-")]
+    assert shards == []
 
 
 def test_explore_prompt_mentions_scraper():

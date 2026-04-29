@@ -828,7 +828,67 @@ async def auto_register_bundled_mcps(
     key = await get_user_dek(config, user_id)
     registered: list[str] = []
 
-    # Get existing server names for this user
+    # One-shot cleanup of an old in-flight scraper-pool experiment.
+    # Some users booted a build that injected `mcp-scraper-1`…`mcp-scraper-N`
+    # rows. Collapse them back to a single `mcp-scraper`: rename shard-1 if
+    # canonical doesn't exist, drop shards 2..N, drop their tool-cache rows.
+    # Idempotent — once collapsed, this block is a no-op.
+    async with db_session(config) as db:
+        shard_rows = await db.execute(
+            "SELECT id, name FROM mcp_connections "
+            "WHERE user_id = ? AND name LIKE 'mcp-scraper-%'",
+            (user_id,),
+        )
+        shards = await shard_rows.fetchall()
+        if shards:
+            canonical_row = await db.execute(
+                "SELECT 1 FROM mcp_connections "
+                "WHERE user_id = ? AND name = 'mcp-scraper'",
+                (user_id,),
+            )
+            canonical_exists = await canonical_row.fetchone() is not None
+            shard_one = next((s for s in shards if s[1] == "mcp-scraper-1"), None)
+            other_shards = [s for s in shards if s[1] != "mcp-scraper-1"]
+
+            if shard_one and not canonical_exists:
+                await db.execute(
+                    "UPDATE mcp_connections SET name = 'mcp-scraper' "
+                    "WHERE id = ?",
+                    (shard_one[0],),
+                )
+                await db.execute(
+                    "UPDATE mcp_tool_cache SET server_name = 'mcp-scraper' "
+                    "WHERE server_name = 'mcp-scraper-1'",
+                )
+                logger.info(
+                    "Renamed legacy mcp-scraper-1 → mcp-scraper for user %s",
+                    user_id,
+                )
+            elif shard_one and canonical_exists:
+                # Drop shard-1 — the canonical row already covers it
+                await db.execute(
+                    "DELETE FROM mcp_connections WHERE id = ?",
+                    (shard_one[0],),
+                )
+                await db.execute(
+                    "DELETE FROM mcp_tool_cache WHERE server_name = 'mcp-scraper-1'",
+                )
+            for sid, sname in other_shards:
+                await db.execute(
+                    "DELETE FROM mcp_connections WHERE id = ?", (sid,),
+                )
+                await db.execute(
+                    "DELETE FROM mcp_tool_cache WHERE server_name = ?",
+                    (sname,),
+                )
+            await db.commit()
+            if other_shards:
+                logger.info(
+                    "Removed %d legacy scraper-pool shards for user %s",
+                    len(other_shards), user_id,
+                )
+
+    # Get existing server names for this user (post-cleanup)
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT name FROM mcp_connections WHERE user_id = ?",
@@ -961,6 +1021,7 @@ async def connect_and_register_bundled_mcps(
         load_cached_schemas,
         register_mcp_tools,
         register_mcp_tools_lazy,
+        register_scraper_pool,
     )
 
     # Step 1: ensure DB entries exist for all users
@@ -1063,9 +1124,19 @@ async def connect_and_register_bundled_mcps(
                 client = await connect_server(config, user_id, server_id)
             tools = await client.list_tools()
             await cache_tool_schemas(config, name, tools)
-            count = await register_mcp_tools(
-                client, registry, config=config, user_id=user_id,
-            )
+            # mcp-scraper goes through the canonical-name pool registrar
+            # (with a single-client pool) so consumers in web_search,
+            # agent, and dispatcher can look up `mcp_scraper_<tool>`
+            # without a UUID. Other servers stay on the UUID-prefixed
+            # path (each server gets its own server-scoped namespace).
+            if name == "mcp-scraper":
+                count = await register_scraper_pool(
+                    [client], registry, config=config, user_id=user_id,
+                )
+            else:
+                count = await register_mcp_tools(
+                    client, registry, config=config, user_id=user_id,
+                )
             logger.info("Connected favorite MCP %s: %d tools", name, count)
             return count
         except Exception:
@@ -1155,3 +1226,14 @@ async def connect_and_register_bundled_mcps(
         len(favorites), len(lazy), total_tools,
     )
     return total_tools
+
+
+# No-op stub kept because `bridge.PooledMCPToolSkill.execute` opportunistically
+# imports it on per-call-semaphore saturation. The scraper pool is single-shard
+# by design (see plan: keep one mcp-scraper, fix `_call_lock` to unblock
+# in-process parallelism); growing the pool is a no-op.
+async def maybe_grow_scraper_pool(
+    config: Any | None = None,
+    user_id: str | None = None,
+) -> None:
+    return None

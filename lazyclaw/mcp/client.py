@@ -49,13 +49,15 @@ class MCPClient:
         self._transport = transport
         self._config = config
         self._session: Any | None = None
-        # Per-instance lock that serializes ALL writes to _write_stream
-        # (i.e. every JSON-RPC request the SDK sends). The MCP Python SDK's
-        # BaseSession.send_request / notify / respond paths call
-        # `_write_stream.send()` without any synchronization — concurrent
-        # callers will interleave their writes, corrupt the JSON on the wire,
-        # and the server will close the stdio session ("Connection closed").
-        # See plans/rosy-meandering-parnas.md (2026-04-27 root-cause dive).
+        # Per-instance lock around schema-cache-touching paths only
+        # (list_tools). NOT used around call_tool: the MCP SDK's
+        # send_request keys responses by request_id (mcp/shared/session.py
+        # line 256-308), and the stdio transport serializes wire writes
+        # via a single stdin_writer task that pumps an anyio
+        # MemoryObjectStream (mcp/client/stdio/__init__.py line 166).
+        # Concurrent call_tool invocations are therefore safe at the
+        # protocol layer; throttling lives in
+        # bridge._get_call_semaphore (per-server semaphore).
         self._call_lock = asyncio.Lock()
         self._read_stream: Any | None = None
         self._write_stream: Any | None = None
@@ -254,11 +256,13 @@ class MCPClient:
         """Invoke a tool on the MCP server and return the result as a string."""
         self._require_session()
         logger.debug("MCPClient %s calling tool %s", self._server_id, name)
-        # Serialize the wire I/O — the MCP SDK does NOT lock _write_stream.
-        # Result-processing below stays outside the lock so we don't hold it
-        # for parsing work.
-        async with self._call_lock:
-            result = await self._session.call_tool(name, arguments)
+        # No lock: the MCP SDK already demultiplexes concurrent requests
+        # by id (mcp/shared/session.py:_response_streams) and the stdio
+        # transport's single writer task drains anyio.MemoryObjectStream
+        # messages serially. Holding a lock here would queue every parallel
+        # caller behind the slowest scrape — that was the 9-subagent
+        # salon-batch timeout. Throttle via bridge._get_call_semaphore.
+        result = await self._session.call_tool(name, arguments)
 
         # Check MCP protocol error flag first
         if getattr(result, "isError", False):

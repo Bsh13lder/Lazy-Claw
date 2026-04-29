@@ -15,11 +15,14 @@ import pytest
 
 from lazyclaw.skills.builtin.web_search import (
     WebSearchSkill,
-    _SCRAPER_SEARCH_SUFFIX,
-    _SCRAPER_SERVER_NAME,
     _provider_cooldowns,
     set_active_provider,
 )
+
+# Canonical pooled-skill name that web_search now looks up (see
+# lazyclaw/mcp/bridge.py: PooledMCPToolSkill — registers tools under
+# `mcp_scraper_<tool>` regardless of pool size).
+_POOL_SEARCH_NAME = "mcp_scraper_search_google"
 
 
 class _FakeScraperSkill:
@@ -35,12 +38,11 @@ class _FakeScraperSkill:
 
 
 class _FakeRegistry:
-    """Tiny registry stub. Surfaces a single fake mcp-scraper search tool."""
+    """Tiny registry stub. Surfaces the canonical pooled scraper tool."""
 
     def __init__(self, scraper_skill: _FakeScraperSkill | None):
         self._scraper = scraper_skill
-        self._uuid = "ce2f19a7-bd2a-4259-a669-89b316165a46"
-        self._tool_name = f"mcp_{self._uuid}{_SCRAPER_SEARCH_SUFFIX}"
+        self._tool_name = _POOL_SEARCH_NAME
 
     def list_mcp_tools(self) -> list[dict]:
         if self._scraper is None:
@@ -49,7 +51,7 @@ class _FakeRegistry:
             "function": {
                 "name": self._tool_name,
                 "description": (
-                    f"Search Google via {_SCRAPER_SERVER_NAME}. "
+                    "[MCP: mcp-scraper] Search Google via mcp-scraper. "
                     "Direct scrape, no API key."
                 ),
                 "parameters": {"type": "object", "properties": {}},

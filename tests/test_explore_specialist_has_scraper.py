@@ -17,37 +17,34 @@ from lazyclaw.runtime.dispatcher import (
 
 
 class _FakeRegistry:
-    """Stub that returns a handful of mcp-scraper tools + one unrelated MCP tool."""
-
-    def __init__(self):
-        self._uuid = "f33e5b73-743b-4e6a-8a55-2a53c750965d"
+    """Stub that returns canonical pooled scraper tools + one unrelated MCP tool."""
 
     def list_mcp_tools(self) -> list[dict]:
         return [
             {
                 "function": {
-                    "name": f"mcp_{self._uuid}_extract_entities",
+                    "name": "mcp_scraper_extract_entities",
                     "description": (
-                        "Self-hosted scraper — JS-rendered crawl, entity extraction. "
-                        "Part of mcp-scraper."
+                        "[MCP: mcp-scraper] Self-hosted scraper — JS-rendered "
+                        "crawl, entity extraction."
                     ),
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
             {
                 "function": {
-                    "name": f"mcp_{self._uuid}_crawl_url",
+                    "name": "mcp_scraper_crawl_url",
                     "description": (
-                        "Fetch a URL and return markdown. Part of mcp-scraper."
+                        "[MCP: mcp-scraper] Fetch a URL and return markdown."
                     ),
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
             {
                 "function": {
-                    "name": f"mcp_{self._uuid}_search_google",
+                    "name": "mcp_scraper_search_google",
                     "description": (
-                        "Google search via mcp-scraper (no API key needed)."
+                        "[MCP: mcp-scraper] Google search (no API key needed)."
                     ),
                     "parameters": {"type": "object", "properties": {}},
                 },

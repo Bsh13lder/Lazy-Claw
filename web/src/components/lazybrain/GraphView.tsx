@@ -418,38 +418,11 @@ export function GraphView({
     simRef.current?.resize(size.width, size.height);
   }, [size.width, size.height]);
 
-  // ── Derived freeze defaults ──────────────────────────────────────────
-  // 1. On entry, if the sim restored saved positions (already-settled
-  //    layout from prior session) AND the user hasn't expressed a
-  //    preference, freeze immediately — no warm-up settle storm.
-  // 2. While in neural-link mode and not yet frozen, poll cooled() and
-  //    auto-freeze on convergence. Skipped in categories mode (orbital
-  //    sim never cools by design — it rotates forever).
-  useEffect(() => {
-    if (!sim) return;
-    if (physicsFrozenIsUserSetRef.current) return;
-    if (sim.usedSavedPositions() && !physicsFrozen) {
-      setPhysicsFrozen(true);
-    }
-  }, [sim, physicsFrozen]);
-  useEffect(() => {
-    if (layoutMode !== "neural-link") return;
-    if (physicsFrozen) return;
-    let cancelled = false;
-    const tick = () => {
-      if (cancelled) return;
-      if (simRef.current?.cooled()) {
-        setPhysicsFrozen(true);
-        return;
-      }
-      window.setTimeout(tick, 500);
-    };
-    const t = window.setTimeout(tick, 500);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(t);
-    };
-  }, [layoutMode, physicsFrozen, sim]);
+  // No auto-derived freeze defaults — the user's last toggle (or the
+  // first-visit default of "Moving") is the source of truth and stays
+  // until the user clicks ❄/✺ again. Earlier versions auto-froze on
+  // sim cooldown or on entry-with-saved-positions, which kept undoing
+  // an explicit "Moving" choice the moment the simulation settled.
 
   // Async server overlay — fetch saved positions on mount + mode change
   // and apply them on top of the localStorage cache. Server wins on

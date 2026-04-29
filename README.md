@@ -27,7 +27,7 @@
 
 **LazyClaw** is an open-source AI agent platform where every piece of user data is encrypted with AES-256-GCM before it touches disk. Conversations, memories, skills, credentials, scheduled jobs — all encrypted. The server never sees plaintext.
 
-Built in Python. Native MCP. Multi-agent delegation. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, and saved templates for recurring flows like government appointments**. Telegram + WhatsApp + Instagram + Email. 128 builtin skills + ~67 MCP tools discoverable at runtime. React Web UI with 12 pages + persistent chat sidebar.
+Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, and saved templates for recurring flows like government appointments**. Telegram + WhatsApp + Instagram + Email. 128 builtin skills + ~85 MCP tools discoverable at runtime. React Web UI with 13 pages (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
 
 ## Why LazyClaw?
 
@@ -45,7 +45,7 @@ LazyClaw takes a different approach:
 | **Tool selection** | Smart discovery via search_tools (4 base tools, ~195 discoverable) | All tools every turn (5K+ tokens) |
 | **Cost routing** | 3-mode Brain/Worker split across 5 providers (Anthropic · MiniMax subscription · OpenAI · local Ollama · Claude CLI) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
-| **MCP** | Native client + server + 6 bundled servers | Community plugins |
+| **MCP** | Native client + server + 8 bundled servers | Community plugins |
 | **Integrations** | Google Workspace direct API (Gmail/Drive/Calendar/Sheets/Docs) + n8n for visual workflows | Manual API wiring |
 | **Channels** | Telegram + WhatsApp + Instagram + Email MCPs | Browser-only for most |
 | **Browser control** | Live canvas + checkpoints + saved templates + noVNC takeover (zero extra tokens) | Screenshots or nothing |
@@ -291,7 +291,7 @@ First-class MCP support — both client and server.
 
 **Remote MCP with OAuth:** The agent can connect to OAuth-protected remote MCP servers (Canva, GitHub, Slack, Google Drive, Gmail) via a single natural-language command. Say *"connect to Canva"* → LazyClaw opens Brave for the OAuth login → catches the callback on localhost → stores tokens encrypted in the vault → the remote server's tools become first-class agent skills. Auto-refreshes on expiry without re-prompting.
 
-**Bundled MCP servers (6 active):**
+**Bundled MCP servers (8 active):**
 
 | Server | Purpose |
 |--------|---------|
@@ -300,7 +300,9 @@ First-class MCP support — both client and server.
 | `mcp-instagram` | Instagram DMs, feed, posting via private mobile API. No browser needed. |
 | `mcp-whatsapp` | WhatsApp messaging via web protocol. QR auth, no API needed. |
 | `mcp-email` | Send/read/search email via SMTP+IMAP. Gmail, Outlook, any provider. |
-| `mcp-jobspy` | Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google. |
+| `mcp-jobspy` | Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google. NaN/float-safe normalizer (`normalize.py`) shared with the in-tree direct path. |
+| `mcp-scraper` | crawl4ai-backed crawl + extract + search bundle. Auto-dismisses Cookiebot/OneTrust/Iubenda banners. Single persistent subprocess (no per-call lock). |
+| `mcp-upwork` | Apache-2.0 fork of `vanooo/upwork-mcp` — 18 tools (search, proposals, messages, contracts, profile, work diary). CDP-driven; **shares your existing Brave profile + cookies** via `LAZYCLAW_BROWSER_PROFILE_DIR`, so one login is all the agent needs. |
 
 **Coming soon (disabled, rebuild in progress):** `mcp-freeride` (free AI router), `mcp-healthcheck` (provider monitor), `mcp-apihunter` (API discovery), `mcp-vaultwhisper` (PII proxy).
 
@@ -356,8 +358,9 @@ While the agent works, type `/status` or "what's happening" to see live progress
 
 ## Web UI
 
-React 19 + TypeScript + Vite + Tailwind control panel with 12 pages, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
+React 19 + TypeScript + Vite + Tailwind control panel with 13 pages, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
 
+- **Chat** — Dedicated `/chat` route with full-width conversation + collapsible **AgentConsole** dashboard (agent status, queued items, active background tasks, BrowserCanvas)
 - **Overview** — System dashboard with health stats and pending approvals
 - **Activity** — Live agent and task monitor (active, background, recent)
 - **Replay** — Session trace playback and debugging
@@ -370,7 +373,7 @@ React 19 + TypeScript + Vite + Tailwind control panel with 12 pages, a persisten
 - **Memory** — Personal memories + daily logs
 - **Vault** — Encrypted credential management
 - **Settings** — ECO mode, model config, team settings, permissions
-- **Chat Sidebar** — Persistent agent conversation with WebSocket streaming, markdown rendering, tool call visualization, and live BrowserCanvas showing URL + action timeline + thumbnail + Refresh / Live / Help / Take control buttons (available on every page)
+- **Chat Sidebar** — Persistent agent conversation with WebSocket streaming, markdown rendering, tool call visualization, and live BrowserCanvas showing URL + action timeline + thumbnail + Refresh / Live / Help / Take control buttons (available on every other page)
 
 ```bash
 cd web && npm install && npm run dev   # Development (port 5173)
@@ -410,7 +413,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 ## Roadmap
 
 - [x] Phases 1-10: Foundation through Session Replay
-- [x] 6 bundled MCP servers (taskai, lazydoctor, instagram, whatsapp, email, jobspy)
+- [x] 8 bundled MCP servers (taskai, lazydoctor, instagram, whatsapp, email, jobspy, scraper, upwork)
 - [ ] 4 MCP servers in progress (freeride, healthcheck, apihunter, vaultwhisper — source rebuild needed)
 - [x] ECO mode — HYBRID (Sonnet brain + local Ollama worker), FULL (all-Claude), CLAUDE (Haiku API)
 - [x] Multi-agent teams with inline delegation
@@ -484,7 +487,9 @@ mcp-lazydoctor/     # Self-healing agent
 mcp-instagram/      # Instagram DMs, feed, posting (20 tools)
 mcp-whatsapp/       # WhatsApp messaging + mute (12 tools)
 mcp-email/          # Email via SMTP+IMAP (11 tools)
-mcp-jobspy/         # Job search aggregation
+mcp-jobspy/         # Job search aggregation + NaN/float-safe normalizer
+mcp-scraper/        # crawl4ai crawl/extract/search bundle (single subprocess)
+mcp-upwork/         # Apache-2.0 fork of vanooo/upwork-mcp (CDP, shared Brave profile)
 mcp-freeride/       # Free AI router (disabled — rebuild in progress)
 mcp-healthcheck/    # Provider health monitor (disabled — rebuild in progress)
 mcp-apihunter/      # API discovery engine (disabled — rebuild in progress)

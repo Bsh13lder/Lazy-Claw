@@ -1,25 +1,27 @@
 """Cross-topic skill-outcome lessons — the system's own trainable memory.
 
-Existing `lesson_extractor.py` captures lessons from *user corrections*
-(types: `site` / `preference`). This module extends that machinery with a
-third lesson source: **skill outcomes**. Every time a high-value skill
-(n8n / instagram / email / whatsapp for now) succeeds, fails, or fixes
-a prior failure, we write down the working (or failing) shape as a
-LazyBrain note. Before the next similar call, `recall_skill_lessons`
-pulls the best 3 and hands them to the LLM as few-shot exemplars.
+Borrowed PKM patterns: Anki spaced reinforcement (replay_count + last_used_at),
+Logseq state machine (pending → verified, with auto-promotion via the
+verification pump), Tana supertags (kind/shape, kind/fact, kind/known-bad),
+Obsidian Tasks states ([ ] [/] [x] [-] [?]), Heptabase typed cards.
 
-Why this matters: MiniMax-M2.7 stalled for two days on "create Google
-Sheet" because our tool interface hid n8n's node schema. Large models
-like Haiku succeed because they memorized n8n's schema in training.
-Smaller models (0.6B local workers, MiniMax, etc.) need the product
-to remember instead. After one successful run by ANY model, the
-shape is captured and replayable by every future model on every
-future run — no validator upgrade required per node-type.
+A "shape" is one Anki-style card per (topic, action, intent_slug) triple.
+Re-execution updates the existing card's frontmatter (replay_count++,
+last_used_at, run-log line) instead of writing a fresh note. The 60-second
+in-memory dedup of the prior design is replaced by content-addressable
+upsert keyed on `title_key`.
 
-Storage is LazyBrain notes with a canonical tag set so the existing
-PKM UI can browse / filter / graph these lessons alongside everything
-else. Retrieval uses the existing embedding pipeline with graceful
-substring fallback when Ollama is down.
+Outcome lifecycle:
+  pending     — just executed, awaiting verification
+  verified    — promoted by quiet-turn pump or /confirm
+  failed      — tool returned error or exception
+  superseded  — collapsed by migration (G) or replaced by newer card
+  known-bad   — user said "don't do that" / /reject
+
+Storage is LazyBrain notes with kind/shape + outcome/<state> tags so the
+PKM UI can filter, hide ("Skills vault" toggle), and graph alongside
+everything else. Retrieval uses the existing embedding pipeline with
+graceful substring fallback when Ollama is down.
 
 Never raises — fire-and-forget semantics match `lesson_store.py`.
 """
@@ -29,12 +31,59 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from lazyclaw.config import Config
 
 logger = logging.getLogger(__name__)
+
+
+# ── Outcome state machine (Logseq + Obsidian Tasks) ──────────────────
+
+OUTCOME_PENDING = "pending"
+OUTCOME_VERIFIED = "verified"
+OUTCOME_FAILED = "failed"
+OUTCOME_SUPERSEDED = "superseded"
+OUTCOME_KNOWN_BAD = "known-bad"
+
+_OUTCOMES: frozenset[str] = frozenset({
+    OUTCOME_PENDING,
+    OUTCOME_VERIFIED,
+    OUTCOME_FAILED,
+    OUTCOME_SUPERSEDED,
+    OUTCOME_KNOWN_BAD,
+})
+
+# Importance map: known-bad and verified rise highest because they
+# carry the strongest replayable (or anti-replayable) signal. Pending
+# defaults middle-low so unverified shapes don't crowd recall_memories.
+_OUTCOME_IMPORTANCE: dict[str, int] = {
+    OUTCOME_PENDING: 4,
+    OUTCOME_VERIFIED: 7,
+    OUTCOME_FAILED: 3,
+    OUTCOME_SUPERSEDED: 1,
+    OUTCOME_KNOWN_BAD: 8,
+}
+
+# Outcomes a positive few-shot recall wants. ``verified`` is the
+# strongest signal, but ``pending`` shapes are also useful exemplars —
+# they ran without error, just haven't survived the quiet-window yet.
+# Excluding pending here would create a 3-turn dead zone right after a
+# successful first run, exactly when recall is most valuable.
+# Failed / superseded / known-bad stay out.
+_POSITIVE_OUTCOMES: frozenset[str] = frozenset({
+    OUTCOME_VERIFIED,
+    OUTCOME_PENDING,
+})
+
+# Backwards-compat alias for legacy callers (e.g. older tests).
+_LEGACY_OUTCOME_MAP: dict[str, str] = {
+    "success": OUTCOME_PENDING,   # legacy "success" → fresh write goes to pending
+    "fail": OUTCOME_FAILED,
+    "fix": OUTCOME_VERIFIED,       # explicit fix is a verified replay
+}
 
 
 # Topics we explicitly REFUSE to record lessons for. Empty by default —
@@ -109,6 +158,71 @@ def _intent_slug(intent: str) -> str:
 # ── Write side ───────────────────────────────────────────────────────
 
 
+_RUN_LOG_HEADER = "## Run log"
+_RUN_LOG_CAP = 50
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _canonical_title(topic: str, action: str, intent_slug: str) -> str:
+    """One title per (topic, action, intent) triple — the upsert handle.
+
+    Centred dot avoids collision with any user-typed `Lesson:` title.
+    Empty intent_slug falls back to "(no-intent)" so the title stays
+    deterministic; the same call replays into the same card.
+    """
+    slug = intent_slug or "no-intent"
+    base_action = (action or "unknown").split(":")[0]
+    return f"Skill shape · {topic}/{base_action} · {slug}"
+
+
+def _build_body(
+    topic: str,
+    action: str,
+    intent: str,
+    params_block: str,
+    error: str | None,
+    fix_summary: str | None,
+) -> str:
+    """Render the human-readable card body. Frontmatter holds the
+    machine-readable fields; this is what a user sees in the React
+    panel without expanding the properties pane.
+    """
+    lines: list[str] = [
+        f"**Topic:** {topic}",
+        f"**Action:** {action}",
+        f"**Intent:** {intent}",
+    ]
+    if error:
+        lines.append(f"**Error:** {_redact(error)}")
+    if fix_summary:
+        lines.append(f"**Fix:** {_redact(fix_summary)}")
+    if params_block:
+        lines.append("")
+        lines.append("```json")
+        lines.append(params_block)
+        lines.append("```")
+    lines.append("")
+    lines.append(_RUN_LOG_HEADER)
+    return "\n".join(lines)
+
+
+def _append_run_log(body: str, line: str) -> str:
+    """Append a single dated line under the Run log header, capped at
+    ``_RUN_LOG_CAP``. Idempotent if the same iso line already trailing.
+    """
+    if _RUN_LOG_HEADER not in body:
+        body = body.rstrip() + "\n\n" + _RUN_LOG_HEADER + "\n"
+    pre, _, log = body.rpartition(_RUN_LOG_HEADER)
+    rows = [r for r in log.splitlines() if r.strip().startswith("- ")]
+    rows.append(f"- {line}")
+    if len(rows) > _RUN_LOG_CAP:
+        rows = rows[-_RUN_LOG_CAP:]
+    return pre + _RUN_LOG_HEADER + "\n" + "\n".join(rows) + "\n"
+
+
 async def save_skill_lesson(
     config: "Config",
     user_id: str,
@@ -117,25 +231,37 @@ async def save_skill_lesson(
     action: str,
     intent: str,
     params: dict | None = None,
-    outcome: str = "success",
+    outcome: str = OUTCOME_PENDING,
     error: str | None = None,
     fix_summary: str | None = None,
+    pending_since_turn: int | None = None,
 ) -> str | None:
-    """Persist a skill-outcome lesson to LazyBrain. Returns note id or None.
+    """Upsert a skill-outcome card to LazyBrain. Returns note id or None.
 
-    Never raises. Silently no-ops when ``topic`` isn't in the learning set
-    (unknown topics would pollute recall with garbage exemplars).
+    One card per ``(topic, action, intent_slug)``. Re-execution merges
+    into the existing card's frontmatter (Anki-style review reinforcement)
+    instead of producing a duplicate note. Never raises.
+
+    Legacy callers passing ``outcome="success"`` are normalised to
+    ``OUTCOME_PENDING`` (a fresh write awaits verification); ``"fail"``
+    maps to ``OUTCOME_FAILED``; ``"fix"`` maps to ``OUTCOME_VERIFIED``.
     """
     if not topic or topic in _TOPIC_DENYLIST:
         logger.debug("skill_lesson: topic %r denylisted, skipping", topic)
         return None
-    if outcome not in {"success", "fail", "fix"}:
-        logger.debug("skill_lesson: unknown outcome %r, skipping", outcome)
-        return None
+
+    # Normalise legacy outcome strings into the new state machine.
+    if outcome not in _OUTCOMES:
+        if outcome in _LEGACY_OUTCOME_MAP:
+            outcome = _LEGACY_OUTCOME_MAP[outcome]
+        else:
+            logger.debug("skill_lesson: unknown outcome %r, skipping", outcome)
+            return None
 
     try:
         from lazyclaw.lazybrain import events as lb_events
         from lazyclaw.lazybrain import store as lb_store
+        from lazyclaw.lazybrain.store import _title_key  # internal helper
 
         clean_params = _redact(params) if params is not None else None
         try:
@@ -146,43 +272,125 @@ async def save_skill_lesson(
         except Exception:
             params_block = str(clean_params)[:_STRING_REDACTION_LIMIT * 4]
 
-        lines: list[str] = [
-            f"**Topic:** {topic}",
-            f"**Action:** {action}",
-            f"**Intent:** {intent}",
-            f"**Outcome:** {outcome}",
-        ]
-        if error:
-            lines.append(f"**Error:** {_redact(error)}")
-        if fix_summary:
-            lines.append(f"**Fix:** {_redact(fix_summary)}")
-        if params_block:
-            lines.append("")
-            lines.append("```json")
-            lines.append(params_block)
-            lines.append("```")
-        body = "\n".join(lines)
+        slug = _intent_slug(intent)
+        canonical_title = _canonical_title(topic, action, slug)
+        title_key = _title_key(canonical_title)
+
+        # Look for an existing card with the same canonical title key.
+        existing = await _find_by_title_key(config, user_id, title_key)
 
         tags = [
             "lesson", "auto", "owner/agent",
+            "kind/shape",
             f"topic/{topic}",
             f"outcome/{outcome}",
-            f"action/{action.split(':')[0]}",
+            f"action/{(action or 'unknown').split(':')[0]}",
         ]
-        slug = _intent_slug(intent)
         if slug:
             tags.append(f"intent/{slug}")
 
-        # Importance: success > fix > fail. Higher importance rises in
-        # the personal_memory picker AND seeds stronger recall weight.
-        importance = {"success": 6, "fix": 7, "fail": 3}.get(outcome, 5)
+        importance = _OUTCOME_IMPORTANCE.get(outcome, 5)
+        now_iso = _now_iso()
+
+        if existing:
+            # Reinforcement (Anki review): bump replay_count, append to
+            # run log, merge frontmatter. Special case: a verified card
+            # hit by a fresh failure does NOT flip to failed — it demotes
+            # to pending and re-arms the verification window. Failed
+            # cards stay failed; pending cards stay pending.
+            from lazyclaw.lazybrain.frontmatter import parse_frontmatter
+
+            content = existing.get("content") or ""
+            old_props, _body, _has = parse_frontmatter(content)
+            old_replay = int(old_props.get("replay_count") or 0)
+            old_outcome = str(old_props.get("outcome") or "")
+
+            effective_outcome = outcome
+            effective_pending_turn = pending_since_turn
+            if outcome == OUTCOME_FAILED and old_outcome == OUTCOME_VERIFIED:
+                # Verified shape hit a new error — re-test it, don't bury it.
+                effective_outcome = OUTCOME_PENDING
+                if effective_pending_turn is None:
+                    # Fall back to the live turn counter when the caller
+                    # didn't carry one (e.g. manual retry path).
+                    try:
+                        from lazyclaw.runtime.turn_counter import current_turn
+                        effective_pending_turn = current_turn(user_id)
+                    except Exception:
+                        effective_pending_turn = None
+                # Refresh tags + importance to match the demoted state.
+                tags = [
+                    "outcome/pending" if t.startswith("outcome/") else t
+                    for t in tags
+                ]
+                importance = _OUTCOME_IMPORTANCE[OUTCOME_PENDING]
+
+            new_body = _append_run_log(
+                content, f"{now_iso} {effective_outcome}"
+            )
+            fm_updates: dict[str, Any] = {
+                "replay_count": old_replay + 1,
+                "last_used_at": now_iso,
+                "outcome": effective_outcome,
+                "kind": "shape",
+                "topic": topic,
+                "action": (action or "unknown").split(":")[0],
+                "intent": intent[:120],
+            }
+            # Pending → expose pending_since_turn so the verifier pump
+            # knows when the quiet window started. Other outcomes clear it.
+            if effective_outcome == OUTCOME_PENDING:
+                if effective_pending_turn is not None:
+                    fm_updates["pending_since_turn"] = effective_pending_turn
+                # else: leave any existing marker alone
+            else:
+                fm_updates["pending_since_turn"] = None
+
+            updated = await lb_store.update_note(
+                config, user_id, existing["id"],
+                content=new_body,
+                tags=tags,
+                importance=importance,
+                frontmatter_updates=fm_updates,
+            )
+            note_id = (updated or existing).get("id") or existing.get("id")
+            try:
+                lb_events.publish_note_saved(
+                    user_id, note_id, canonical_title, tags,
+                    source="skill_lesson_upsert",
+                )
+            except Exception:
+                logger.debug("publish_note_saved failed", exc_info=True)
+            logger.info(
+                "skill_lesson upserted: topic=%s action=%s outcome=%s "
+                "replay_count=%d id=%s",
+                topic, action, outcome, old_replay + 1, note_id,
+            )
+            return note_id
+
+        # First write — create a fresh card.
+        body = _build_body(topic, action, intent, params_block, error, fix_summary)
+        body = _append_run_log(body, f"{now_iso} {outcome}")
+        frontmatter: dict[str, Any] = {
+            "kind": "shape",
+            "topic": topic,
+            "action": (action or "unknown").split(":")[0],
+            "intent": intent[:120],
+            "outcome": outcome,
+            "replay_count": 1,
+            "first_used_at": now_iso,
+            "last_used_at": now_iso,
+        }
+        if outcome == OUTCOME_PENDING and pending_since_turn is not None:
+            frontmatter["pending_since_turn"] = pending_since_turn
 
         note = await lb_store.save_note(
             config, user_id,
             content=body,
-            title=f"Lesson ({topic}/{outcome}): {intent[:60]}",
+            title=canonical_title,
             tags=tags,
             importance=importance,
+            frontmatter=frontmatter,
         )
         try:
             lb_events.publish_note_saved(
@@ -190,15 +398,44 @@ async def save_skill_lesson(
                 note.get("tags"), source="skill_lesson",
             )
         except Exception:
-            logger.debug("skill_lesson: publish_note_saved failed", exc_info=True)
+            logger.debug("publish_note_saved failed", exc_info=True)
 
         logger.info(
-            "skill_lesson saved: topic=%s action=%s outcome=%s intent=%s id=%s",
-            topic, action, outcome, intent[:60], note["id"],
+            "skill_lesson created: topic=%s action=%s outcome=%s id=%s",
+            topic, action, outcome, note["id"],
         )
         return note["id"]
     except Exception:
         logger.warning("skill_lesson save failed", exc_info=True)
+        return None
+
+
+async def _find_by_title_key(
+    config: "Config", user_id: str, title_key: str | None
+) -> dict | None:
+    """Return the (topic, action, intent_slug) card if one exists.
+
+    Goes through the public ``store.get_note`` after a direct title_key
+    SELECT — keeps the decryption + tag-loading path consistent with how
+    the rest of the system reads notes.
+    """
+    if not title_key:
+        return None
+    try:
+        from lazyclaw.db.connection import db_session
+        from lazyclaw.lazybrain import store as lb_store
+
+        async with db_session(config) as db:
+            rows = await db.execute(
+                "SELECT id FROM notes WHERE user_id = ? AND title_key = ? LIMIT 1",
+                (user_id, title_key),
+            )
+            row = await rows.fetchone()
+        if not row:
+            return None
+        return await lb_store.get_note(config, user_id, row[0])
+    except Exception:
+        logger.debug("skill_lesson: find_by_title_key failed", exc_info=True)
         return None
 
 
@@ -212,27 +449,36 @@ async def recall_skill_lessons(
     topic: str,
     intent: str,
     k: int = 3,
-    outcomes: tuple[str, ...] = ("success", "fix"),
+    outcomes: tuple[str, ...] | None = None,
+    kinds: tuple[str, ...] = ("shape",),
 ) -> list[dict]:
-    """Return up to ``k`` past lessons for ``topic`` matching ``intent``.
+    """Return up to ``k`` past shapes for ``topic`` matching ``intent``.
+
+    By default filters to ``kind/shape`` cards with ``outcome/verified`` —
+    only confirmed-good shapes feed the few-shot pool. Pass ``outcomes``
+    explicitly to widen (e.g. ``("verified", "pending")`` to include
+    unverified replays during a rebuild).
 
     Each element carries ``{title, intent, action, outcome, params, body}``.
-    Empty list on no matches, on Ollama-down with no substring matches,
-    on unknown topic, or on any error (never raises).
+    Empty list on no matches, on unknown topic, or on any error.
+    Excludes ``kind/known-bad`` cards from positive recall — those go
+    through ``recall_known_bad_shapes`` as negative examples.
     """
     if not topic or topic in _TOPIC_DENYLIST:
         return []
+
+    if outcomes is None:
+        outcomes = tuple(_POSITIVE_OUTCOMES)
+    wanted_outcomes = set(outcomes)
+    wanted_kinds = {f"kind/{k}" for k in kinds}
 
     try:
         from lazyclaw.lazybrain import embeddings as lb_emb
 
         query = f"topic:{topic} {intent}"
-        # Topic prefilter at the SQL layer — only decrypts embeddings whose
-        # note carries the matching topic tag. Bounds latency as the corpus
-        # grows; also drops post-hoc rejection at line ~245 to ~0%.
         hit = await lb_emb.semantic_search(
             config, user_id, query,
-            k=max(1, k * 2),
+            k=max(1, k * 3),  # widen the pool — more rows get filtered out now
             tag_prefix=f"topic/{topic}",
         )
         results = hit.get("results") or []
@@ -241,17 +487,22 @@ async def recall_skill_lessons(
         return []
 
     out: list[dict] = []
-    wanted = set(outcomes)
     for note in results:
         tags = [str(t) for t in (note.get("tags") or [])]
         if f"topic/{topic}" not in tags:
             continue
-        # Outcome filter — only success/fix exemplars by default.
+        # Kind filter — only kind/shape cards by default; never inject
+        # known-bad as a positive example.
+        if not any(t in wanted_kinds for t in tags):
+            continue
+        if "kind/known-bad" in tags:
+            continue
+        # Outcome filter — only verified shapes by default.
         this_outcome = next(
             (t.split("/", 1)[1] for t in tags if t.startswith("outcome/")),
             None,
         )
-        if this_outcome not in wanted:
+        if this_outcome not in wanted_outcomes:
             continue
         parsed = _parse_lesson_body(note.get("content") or "")
         out.append({
@@ -263,6 +514,56 @@ async def recall_skill_lessons(
             "body": note.get("content") or "",
             "note_id": note.get("id"),
             "score": note.get("_score"),
+        })
+        if len(out) >= k:
+            break
+    return out
+
+
+async def recall_known_bad_shapes(
+    config: "Config",
+    user_id: str,
+    *,
+    topic: str,
+    intent: str,
+    k: int = 2,
+) -> list[dict]:
+    """Return up to ``k`` known-bad shapes for ``topic`` to inject as
+    negative examples ("Avoid this shape:") in the LLM prompt. Mirrors
+    ``recall_skill_lessons`` but inverted on the known-bad filter.
+    """
+    if not topic or topic in _TOPIC_DENYLIST:
+        return []
+
+    try:
+        from lazyclaw.lazybrain import embeddings as lb_emb
+
+        query = f"topic:{topic} {intent}"
+        hit = await lb_emb.semantic_search(
+            config, user_id, query,
+            k=max(1, k * 2),
+            tag_prefix=f"topic/{topic}",
+        )
+        results = hit.get("results") or []
+    except Exception:
+        logger.debug("recall_known_bad failed", exc_info=True)
+        return []
+
+    out: list[dict] = []
+    for note in results:
+        tags = [str(t) for t in (note.get("tags") or [])]
+        if f"topic/{topic}" not in tags:
+            continue
+        if "outcome/known-bad" not in tags:
+            continue
+        parsed = _parse_lesson_body(note.get("content") or "")
+        out.append({
+            "title": note.get("title") or "",
+            "intent": parsed.get("intent", ""),
+            "action": parsed.get("action", ""),
+            "params": parsed.get("params"),
+            "body": note.get("content") or "",
+            "note_id": note.get("id"),
         })
         if len(out) >= k:
             break
@@ -338,3 +639,45 @@ def format_lessons_as_exemplars(lessons: list[dict]) -> str:
             blocks.append("```")
     blocks.append("\nReuse these shapes when the current request is analogous.")
     return "\n".join(blocks)
+
+
+def format_known_bad_as_warnings(known_bad: list[dict]) -> str:
+    """Markdown block for negative examples. Kept distinct from the
+    positive-exemplar block so the LLM doesn't confuse them."""
+    if not known_bad:
+        return ""
+    blocks: list[str] = ["## Avoid these known-bad shapes"]
+    for i, lesson in enumerate(known_bad, 1):
+        blocks.append(
+            f"\n### Anti-example {i} — {lesson.get('intent', '(no intent)')}"
+        )
+        if lesson.get("action"):
+            blocks.append(f"Action that failed: `{lesson['action']}`")
+        params = lesson.get("params")
+        if params is not None:
+            try:
+                pretty = json.dumps(params, ensure_ascii=False, indent=2)
+            except Exception:
+                pretty = str(params)
+            pretty = _truncate(pretty, _EXEMPLAR_PARAMS_LIMIT)
+            blocks.append("Parameters that did NOT work:")
+            blocks.append("```json")
+            blocks.append(pretty)
+            blocks.append("```")
+    blocks.append("\nDo not replay the above. Find a different shape.")
+    return "\n".join(blocks)
+
+
+__all__ = [
+    "OUTCOME_PENDING",
+    "OUTCOME_VERIFIED",
+    "OUTCOME_FAILED",
+    "OUTCOME_SUPERSEDED",
+    "OUTCOME_KNOWN_BAD",
+    "LEARNING_TOPICS",
+    "save_skill_lesson",
+    "recall_skill_lessons",
+    "recall_known_bad_shapes",
+    "format_lessons_as_exemplars",
+    "format_known_bad_as_warnings",
+]

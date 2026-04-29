@@ -153,6 +153,29 @@ _CHANNEL_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Phrases that indicate the user wants to RESEARCH / FIND contact info
+# rather than OPERATE an inbox or messaging account. Email/Instagram MCP
+# tools handle send/read/inbox-search — they CAN'T find email addresses
+# from the open web. When this regex matches, channel injection for
+# email/instagram is suppressed so the agent reaches for web_search +
+# mcp_scraper_extract_entities + browser instead. Fixed 2026-04-29 after
+# the Valencia-salons bg task got 36 channel-MCP tools (no Google Sheets,
+# no scraper search) and could only do 5 stranded web_searches before
+# giving up. See plans note in MEMORY.md.
+_FIND_CONTACT_RE = re.compile(
+    r"\b(find|finding|missing|research|scrape|scraping|extract|extracting|"
+    r"search\s+for|lookup|look\s+up|gather|collect|locate|harvest|"
+    r"discover|enrich|fill\s+in|complete|add)\s+"
+    r"(?:the\s+|all\s+|their\s+|its\s+|some\s+|any\s+|missing\s+|"
+    r"contact\s+|business\s+|public\s+|company\s+|website\s+|owner\s+|"
+    r"correct\s+)*"
+    r"(?:e-?mails?|addresses?|contacts?|phone\s+numbers?|info|details?|"
+    r"information)\b"
+    r"|\b(?:e-?mails?|addresses?|contacts?|phone\s+numbers?)\s+"
+    r"(?:of|for|from)\s+",
+    re.IGNORECASE,
+)
+
 # Task manager keywords → inject task skills directly
 _TASK_KEYWORDS = frozenset({
     # Core task words
@@ -616,6 +639,44 @@ def _handle_instant_command(
     return None
 
 
+_VERIFY_RE = re.compile(r"^/(confirm|reject)\b", re.IGNORECASE)
+
+
+async def _handle_verification_command(
+    message: str, config, user_id: str | None,
+) -> str | None:
+    """Parse `/confirm` / `/reject` and flip the latest skill shape.
+
+    Returns a short user-facing reply on hit, or None when the message
+    isn't a verification command. Never raises — verification flips are
+    fire-and-forget and the user sees the same canned reply either way.
+    """
+    if not user_id or not message:
+        return None
+    m = _VERIFY_RE.match(message.strip())
+    if not m:
+        return None
+    action = m.group(1).lower()
+    try:
+        from lazyclaw.runtime.lesson_verifier import (
+            confirm_latest_shape,
+            reject_latest_shape,
+        )
+        if action == "confirm":
+            note_id = await confirm_latest_shape(config, user_id)
+            if note_id:
+                return "Confirmed — last skill shape marked verified."
+            return "Nothing pending to confirm."
+        # reject
+        note_id = await reject_latest_shape(config, user_id)
+        if note_id:
+            return "Rejected — last skill shape flagged as known-bad."
+        return "Nothing recent to reject."
+    except Exception:
+        logger.debug("verification command failed", exc_info=True)
+        return None
+
+
 async def _extract_and_store_lesson(
     eco_router, config, user_id: str, message: str, recent: list,
 ) -> None:
@@ -927,6 +988,35 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Response ready", {}))
             return instant
 
+        # /confirm and /reject — manual verification overrides for the
+        # most-recently-touched skill shape. Borrowed from Anki's review
+        # gesture: one user-side click flips a card's outcome.
+        verify_reply = await _handle_verification_command(
+            message, self.config, user_id,
+        )
+        if verify_reply is not None:
+            await cb.on_event(AgentEvent(INSTANT_COMMAND, verify_reply, {}))
+            await cb.on_event(AgentEvent("done", "Response ready", {}))
+            return verify_reply
+
+        # Advance the agent's monotonic turn counter once per user message.
+        # The lesson verification pump uses this as its quiet-window clock.
+        try:
+            from lazyclaw.runtime.turn_counter import advance_turn
+            advance_turn(user_id)
+        except Exception:
+            logger.debug("turn_counter advance failed", exc_info=True)
+        # Fire-and-forget: promote eligible pending shapes to verified.
+        try:
+            from lazyclaw.runtime.aio_helpers import fire_and_forget
+            from lazyclaw.runtime.lesson_verifier import run_verification_pump
+            fire_and_forget(
+                run_verification_pump(self.config, user_id),
+                name=f"verify-pump-{user_id[:8]}",
+            )
+        except Exception:
+            logger.debug("verification pump dispatch failed", exc_info=True)
+
         key = await get_user_dek(self.config, user_id)
         _start_time = time.monotonic()
         _all_tools_used: list[str] = []
@@ -1179,17 +1269,36 @@ class Agent:
             _planning_words = {"how to", "strategy", "plan", "market", "reach",
                                "steps", "approach", "idea", "advice", "suggest"}
             _is_planning = any(pw in _msg_lower for pw in _planning_words)
+            # Find-contact intent: "find emails for X", "missing emails",
+            # "research email addresses". The user wants to DISCOVER contact
+            # info from the open web — email/instagram MCP tools are useless
+            # for this (they only send/read inbox). Suppress passive channels
+            # so research path (web_search + scraper) gets the budget.
+            _is_find_contact = bool(_FIND_CONTACT_RE.search(_msg_lower))
             _matched_channels: list[str] = []
             if not _is_planning:
                 for channel, pattern in _CHANNEL_KEYWORDS.items():
                     if pattern.search(_msg_lower):
+                        # Suppress passive-discovery channels for research queries.
+                        # WhatsApp stays — "find whatsapp number" is rare and the
+                        # MCP tool can read user's own WA contacts. Email/Instagram
+                        # MCP tools cannot discover external contact info.
+                        if _is_find_contact and channel in ("email", "instagram"):
+                            continue
                         _matched_channels.append(channel)
+                if _is_find_contact:
+                    logger.info(
+                        "Find-contact intent detected — email/instagram channel "
+                        "injection suppressed (research path uses web_search + scraper)"
+                    )
 
             # Re-inject channel tools if the LAST assistant response used them
             # AND the user's message looks like a continuation (reply words, short msg).
             # Without the continuation check, one-shot tool calls (e.g. mute from
             # a notification reply) make channel tools "sticky" for all future messages.
-            if not _matched_channels:
+            # Skip the re-inject entirely on find-contact intent — research queries
+            # should NEVER inherit messaging-channel tools from a previous turn.
+            if not _matched_channels and not _is_find_contact:
                 # "ok" removed — too generic, was re-injecting channel tools
                 # on unrelated short replies (e.g. "ok tell me about bitcoin"
                 # would re-grab whatever the last assistant call touched).

@@ -234,9 +234,17 @@ async def build_context(
 
         lb_notes = await _lb_store.list_notes(config, user_id, limit=40)
         _SKIP_TAGS = {"memory", "daily-log", "session-end"}
+        # Skill shapes (kind/shape) are agent-owned replayable
+        # artifacts, not user-facing facts. They feed the dedicated
+        # few-shot exemplar pool via `recall_skill_lessons`, not the
+        # general personal-memory pool — so exclude them here. Without
+        # this every shape note crowds out real memories.
+        _SKIP_KIND_TAGS = {"kind/shape", "kind/legacy"}
         for n in lb_notes:
             tags = n.get("tags") or []
             if any(t in _SKIP_TAGS for t in tags):
+                continue
+            if any(t in _SKIP_KIND_TAGS for t in tags):
                 continue
             title = (n.get("title") or "")
             if title.startswith(("Journal —", "Daily summary", "Weekly summary")):

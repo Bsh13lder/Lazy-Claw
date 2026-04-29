@@ -31,6 +31,10 @@ from lazyclaw.crypto.encryption import (
 )
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
+from lazyclaw.lazybrain.frontmatter import (
+    FmValue,
+    serialize_frontmatter,
+)
 from lazyclaw.lazybrain.wikilinks import extract_tags, extract_wikilinks, normalize_page
 
 logger = logging.getLogger(__name__)
@@ -247,10 +251,20 @@ async def save_note(
     importance: int = 5,
     pinned: bool = False,
     trace_session_id: str | None = None,
+    frontmatter: dict[str, FmValue] | None = None,
 ) -> dict:
-    """Create a new note and index its wikilinks. Returns the note dict."""
+    """Create a new note and index its wikilinks. Returns the note dict.
+
+    When ``frontmatter`` is provided, its keys are serialized as a leading
+    ``---`` YAML block on top of ``content`` before encryption. The React
+    panel parses the same block on read; the body stays editable from
+    either side.
+    """
     if not content:
         raise ValueError("content required")
+
+    if frontmatter:
+        content = serialize_frontmatter(frontmatter, content)
 
     dek = await get_user_dek(config, user_id)
     note_id = str(uuid4())
@@ -363,13 +377,25 @@ async def update_note(
     tags: list[str] | None = None,
     importance: int | None = None,
     pinned: bool | None = None,
+    frontmatter_updates: dict[str, FmValue] | None = None,
 ) -> dict | None:
-    """Partial update. Re-indexes wikilinks if content changed. Returns updated dict."""
+    """Partial update. Re-indexes wikilinks if content changed. Returns updated dict.
+
+    ``frontmatter_updates`` merges keys into the note's existing frontmatter
+    block (creating one if absent). A value of ``None`` deletes the key —
+    useful for clearing transient fields like ``pending_since_turn`` on
+    promotion. Pass ``content`` together with ``frontmatter_updates`` only
+    when you want to fully replace the body and frontmatter at once;
+    typical reinforcement upserts pass only ``frontmatter_updates``.
+    """
     existing = await get_note(config, user_id, note_id)
     if not existing:
         return None
 
     new_content = content if content is not None else existing["content"]
+    if frontmatter_updates is not None:
+        from lazyclaw.lazybrain.frontmatter import merge_frontmatter
+        new_content = merge_frontmatter(new_content, frontmatter_updates)
     new_title = title if title is not None else existing["title"]
     new_tags = tags if tags is not None else existing["tags"]
     new_importance = (
@@ -418,7 +444,9 @@ async def update_note(
         await db.commit()
 
     # Re-embed if content changed; invalidate wikilink cache if title changed.
-    if content is not None or title is not None:
+    # Frontmatter-only updates also count as a body change because the
+    # serialized YAML block is part of the encrypted content blob.
+    if content is not None or title is not None or frontmatter_updates is not None:
         _schedule_post_save_hooks(config, user_id, note_id, new_content)
 
     return await get_note(config, user_id, note_id)

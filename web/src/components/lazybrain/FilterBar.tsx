@@ -1,7 +1,7 @@
 import type { Owner } from "./noteColors";
-import { FILTER_CATEGORIES, OWNER_META } from "./noteColors";
+import { FILTER_CATEGORIES, OWNER_META, SKILLS_VAULT_KEYS } from "./noteColors";
 import { CategoryIcon, OWNER_ICONS } from "./icons";
-import { Infinity as InfinityIcon } from "lucide-react";
+import { Infinity as InfinityIcon, Wrench } from "lucide-react";
 
 interface Props {
   hiddenCategories: Set<string>;
@@ -10,6 +10,12 @@ interface Props {
   onSetOwner: (o: Owner | "all") => void;
   counts: Record<string, number>;
   ownerCounts: Record<Owner, number>;
+  /** True when the user has the Skills vault toggle on. Persisted by the
+   *  parent (see `useSkillsVault`). When off (default), all
+   *  `kind/shape*` chips are added to `hiddenCategories` and the toggle
+   *  button is dimmed. */
+  skillsVaultOpen: boolean;
+  onToggleSkillsVault: () => void;
 }
 
 export function FilterBar({
@@ -19,11 +25,18 @@ export function FilterBar({
   onSetOwner,
   counts,
   ownerCounts,
+  skillsVaultOpen,
+  onToggleSkillsVault,
 }: Props) {
   const allCount = ownerCounts.user + ownerCounts.agent + ownerCounts.unknown;
+  // Total shape count across all kind/shape* chips → drives the toggle's
+  // count badge so the user knows whether opening the vault reveals
+  // anything at all.
+  let shapeCount = 0;
+  for (const k of SKILLS_VAULT_KEYS) shapeCount += counts[k] ?? 0;
   return (
     <div className="px-3 py-2 border-b border-border space-y-2">
-      {/* Owner tabs */}
+      {/* Owner tabs + Skills vault toggle */}
       <div className="flex items-center gap-1">
         <OwnerTab
           label="All"
@@ -49,11 +62,34 @@ export function FilterBar({
           ring={OWNER_META.agent.ring}
           onClick={() => onSetOwner("agent")}
         />
+        {shapeCount > 0 && (
+          <button
+            onClick={onToggleSkillsVault}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] transition-colors ${
+              skillsVaultOpen
+                ? "bg-bg-primary text-text-primary"
+                : "text-text-muted hover:text-text-primary hover:bg-bg-hover opacity-70"
+            }`}
+            title={
+              skillsVaultOpen
+                ? "Skills vault open — agent's known shapes are visible. Click to hide."
+                : "Skills vault hidden — click to reveal verified / pending / failed agent shapes."
+            }
+          >
+            <Wrench size={12} strokeWidth={1.75} color={skillsVaultOpen ? "#22c55e" : undefined} />
+            <span>Skills</span>
+            <span className="opacity-60 tabular-nums">{shapeCount}</span>
+          </button>
+        )}
       </div>
 
       {/* Category chips */}
       <div className="flex flex-wrap gap-1">
         {FILTER_CATEGORIES.map((c) => {
+          const isShapeChip = SKILLS_VAULT_KEYS.has(c.key);
+          // Hide shape chips entirely when the vault is closed — they
+          // re-appear the moment the user opens it.
+          if (isShapeChip && !skillsVaultOpen) return null;
           const hidden = hiddenCategories.has(c.key);
           const count = counts[c.key] ?? 0;
           if (count === 0) return null;

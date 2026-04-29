@@ -24,7 +24,11 @@ export type NoteColor = {
 const PALETTE: Record<string, NoteColor> = {
   task:               { ring: "#e0742a", emoji: "📋", label: "Task" },          // deeper coral
   journal:            { ring: "#2dd4bf", emoji: "📓", label: "Journal" },       // teal-400
-  lesson:             { ring: "#d4a015", emoji: "💡", label: "Lesson" },        // muted gold
+  lesson:             { ring: "#d4a015", emoji: "💡", label: "Lesson" },        // muted gold (legacy)
+  shape:              { ring: "#22c55e", emoji: "🧩", label: "Skill shape" },   // green-500 — verified replayable
+  "shape-pending":    { ring: "#6b7280", emoji: "⌛", label: "Pending shape" }, // gray-500 — awaiting verification
+  "shape-failed":     { ring: "#dc2626", emoji: "⚠️", label: "Failed shape" }, // red-600
+  "shape-known-bad":  { ring: "#7f1d1d", emoji: "🚫", label: "Known-bad shape" }, // crimson — never replay
   til:                { ring: "#22c55e", emoji: "🧠", label: "TIL" },           // green-500
   decision:           { ring: "#9333ea", emoji: "✔️", label: "Decision" },     // violet-600 (distinct from emerald accent)
   price:              { ring: "#0891b2", emoji: "💰", label: "Price" },         // cyan-700
@@ -56,9 +60,17 @@ const DEFAULT: NoteColor = {
 
 /** Single source of truth for which category a note belongs to.
  *  Both `colorForTags()` and `GraphView.pickCategoryKey()` walk this list,
- *  so a note's color, badge, icon, and filter row always agree. */
+ *  so a note's color, badge, icon, and filter row always agree.
+ *
+ *  Order matters — outcome-flavored shapes win over the generic `shape`
+ *  bucket so a `kind/shape outcome/known-bad` note paints crimson, not
+ *  green. Generic `shape` only matches when no outcome tag is present
+ *  (legacy / mid-write).
+ */
 export const CATEGORY_PRIORITY: string[] = [
-  "task", "deadline", "journal", "lesson", "til",
+  "task", "deadline", "journal",
+  "shape-known-bad", "shape-failed", "shape-pending", "shape",
+  "lesson", "til",
   "decision", "price", "command", "recipe", "contact",
   "idea", "rollup", "reference", "layer",
   "survival", "fact", "learned_preference", "context",
@@ -145,13 +157,24 @@ export const OWNER_META: Record<Owner, { emoji: string; label: string; ring: str
  *    4. ambient: context → auto
  *  `pinned` is excluded because it renders as a halo, not a filter chip. */
 const FILTER_ORDER: string[] = [
-  "task", "deadline", "journal", "lesson", "til",
+  "task", "deadline", "journal",
+  // Skill-shape cards live behind the "Skills vault" toggle in FilterBar
+  // — they're hidden by default to keep the user's vault uncluttered.
+  "shape", "shape-pending", "shape-failed", "shape-known-bad",
+  "lesson", "til",
   "decision", "idea", "price", "command", "recipe", "contact",
   "reference", "rollup", "layer",
   "survival", "fact", "memory", "learned_preference",
   "site-memory", "daily-log",
   "context", "imported", "auto",
 ];
+
+/** Filter chips that the "Skills vault" toggle hides by default. The
+ *  vault toggle in FilterBar reads this set to set up the initial
+ *  hidden-categories state on first load. */
+export const SKILLS_VAULT_KEYS: ReadonlySet<string> = new Set([
+  "shape", "shape-pending", "shape-failed", "shape-known-bad",
+]);
 
 /** User-facing display label per filter key. Falls back to `PALETTE[key].label`
  *  when a key isn't listed — so new kinds inherit the PALETTE label by default
@@ -160,7 +183,11 @@ const FILTER_ORDER: string[] = [
 const FILTER_LABEL_OVERRIDE: Record<string, string> = {
   task:               "Tasks",
   deadline:           "Deadlines",
-  lesson:             "Lessons",
+  lesson:             "Legacy lessons",
+  shape:              "Skill shapes",
+  "shape-pending":    "Pending shapes",
+  "shape-failed":     "Failed shapes",
+  "shape-known-bad":  "Known-bad shapes",
   decision:           "Decisions",
   idea:               "Ideas",
   price:              "Prices",
@@ -210,11 +237,34 @@ export function isSystemTag(tag: string): boolean {
   return SYSTEM_TAG_PREFIXES.some((p) => t.startsWith(p));
 }
 
-/** Does a note match the category filter key? (tag prefix match) */
+/** Does a note match the category filter key? (tag prefix match)
+ *
+ *  Also matches the `kind/<key>` namespace introduced by the Obsidian-borrowed
+ *  redesign (`kind/shape`, `kind/fact`, `kind/known-bad`) so chips for new
+ *  taxonomy values resolve to the right notes without forcing every emitter
+ *  to also stamp a bare top-level tag.
+ *
+ *  Special handling for `outcome/<state>`: a `shape-<state>` chip key
+ *  (e.g. `shape-pending`, `shape-failed`, `shape-known-bad`) requires
+ *  both `kind/shape` AND the matching `outcome/<state>` tag. Lets the
+ *  filter UI surface "verified shapes vs pending shapes" without two
+ *  completely separate code paths.
+ */
 export function matchesCategory(tags: string[] | null | undefined, key: string): boolean {
   if (!tags) return false;
   const lower = tags.map((t) => t.toLowerCase());
-  return lower.includes(key) || lower.some((t) => t.startsWith(`${key}/`));
+
+  // Compound shape-<state> keys.
+  if (key.startsWith("shape-")) {
+    const state = key.slice("shape-".length);
+    return lower.includes("kind/shape") && lower.includes(`outcome/${state}`);
+  }
+
+  return (
+    lower.includes(key)
+    || lower.some((t) => t.startsWith(`${key}/`))
+    || lower.includes(`kind/${key}`)
+  );
 }
 
 /** Pick the best color for a note based on its tags. Walks CATEGORY_PRIORITY

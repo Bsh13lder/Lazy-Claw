@@ -1,9 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as api from "../../api";
 import type { LazyBrainNote, LazyBrainTag } from "../../api";
 import { FilterBar } from "./FilterBar";
 import type { Owner } from "./noteColors";
-import { categoryKeysFor, colorForTags, isSystemTag } from "./noteColors";
+import {
+  categoryKeysFor,
+  colorForTags,
+  isSystemTag,
+  SKILLS_VAULT_KEYS,
+} from "./noteColors";
 import {
   Brain,
   Lock,
@@ -91,6 +96,44 @@ export function PageListSidebar({
   const [showSystemTags, setShowSystemTags] = useState(false);
   const [completingIds, setCompletingIds] = useState<Set<string>>(new Set());
   const [completedIds, setCompletedIds] = useState<Set<string>>(new Set());
+
+  // Skills vault toggle (Obsidian "workspaces" metaphor) — `kind/shape*`
+  // chips hide by default. Persisted to localStorage so the user's
+  // choice survives reloads. The default-closed state keeps the agent's
+  // own learning corpus out of the user's daily view.
+  const [skillsVaultOpen, setSkillsVaultOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("lazybrain-skills-vault-open") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  // Synchronise the vault state with the parent's `hiddenCategories`
+  // set so shape notes don't just lose their chips — they actually
+  // filter out of the graph too. Runs once on mount + on toggle.
+  useEffect(() => {
+    for (const key of SKILLS_VAULT_KEYS) {
+      const isCurrentlyHidden = hiddenCategories.has(key);
+      const shouldBeHidden = !skillsVaultOpen;
+      if (isCurrentlyHidden !== shouldBeHidden) {
+        onToggleCategory(key);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skillsVaultOpen]);
+
+  const toggleSkillsVault = () => {
+    setSkillsVaultOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("lazybrain-skills-vault-open", next ? "true" : "false");
+      } catch {
+        // Private mode / disabled storage — value just doesn't persist.
+      }
+      return next;
+    });
+  };
 
   const handleCompleteTask = async (noteId: string) => {
     if (completingIds.has(noteId) || completedIds.has(noteId)) return;
@@ -203,6 +246,8 @@ export function PageListSidebar({
         ownerCounts={ownerCounts}
         onToggleCategory={onToggleCategory}
         onSetOwner={onSetOwner}
+        skillsVaultOpen={skillsVaultOpen}
+        onToggleSkillsVault={toggleSkillsVault}
       />
 
       {/* Quick sections */}

@@ -154,15 +154,16 @@ def outcome_from_result(
 ) -> tuple[str, str | None]:
     """Return ``(outcome, error_message)``.
 
-    ``outcome`` is one of ``"success"`` or ``"fail"``. ``"fix"`` is reserved
-    for explicit retry-after-failure recordings — auto-recording can't
-    detect that without state, so we keep it binary here.
+    Successful executions return the new ``"pending"`` state — the
+    verification pump (Logseq DOING→DONE) promotes them to ``"verified"``
+    after a quiet window or explicit ``/confirm``. Errors return
+    ``"failed"``. ``"skip"`` skips recording entirely.
     """
     if exception is not None:
-        return "fail", f"{type(exception).__name__}: {exception}"[:240]
+        return "failed", f"{type(exception).__name__}: {exception}"[:240]
 
     if result is None:
-        return "success", None
+        return "pending", None
 
     text = result if isinstance(result, str) else getattr(result, "text", "")
     if not isinstance(text, str):
@@ -172,31 +173,31 @@ def outcome_from_result(
         # Pending approval is neither success nor failure — skip recording.
         return "skip", None
     if any(text.startswith(p) for p in _ERROR_PREFIXES):
-        return "fail", text[:240]
-    return "success", None
+        return "failed", text[:240]
+    return "pending", None
 
 
-# ── Dedup cache ──────────────────────────────────────────────────────
+# ── Tight-retry guard ────────────────────────────────────────────────
+# Single-card upsert by title_key (skill_lesson._find_by_title_key)
+# handles the bulk of dedup. We keep a 2-second guard ONLY to swallow
+# tight retries within a single agent step (e.g. parallel tool fan-out
+# that runs the same skill twice within milliseconds). Anything beyond
+# 2 seconds is a real replay and deserves a replay_count++.
 
-
-_DEDUP_WINDOW_SECONDS = 60
-_DEDUP_MAX_ENTRIES = 1000
+_TIGHT_RETRY_WINDOW = 2.0
 _recent_dedup: dict[tuple[str, str, str], float] = {}
 
 
 def _should_record(user_id: str, skill_name: str, outcome: str) -> bool:
-    """Return True if the same (user, skill, outcome) wasn't recorded in
-    the last ``_DEDUP_WINDOW_SECONDS``. Prunes opportunistically when the
-    cache crosses ``_DEDUP_MAX_ENTRIES``.
-    """
     key = (user_id, skill_name, outcome)
     now = time.monotonic()
     last = _recent_dedup.get(key)
-    if last is not None and (now - last) < _DEDUP_WINDOW_SECONDS:
+    if last is not None and (now - last) < _TIGHT_RETRY_WINDOW:
         return False
     _recent_dedup[key] = now
-    if len(_recent_dedup) > _DEDUP_MAX_ENTRIES:
-        cutoff = now - _DEDUP_WINDOW_SECONDS
+    # Cheap prune — never grows past the window's worth of entries.
+    if len(_recent_dedup) > 256:
+        cutoff = now - _TIGHT_RETRY_WINDOW
         for k, ts in list(_recent_dedup.items()):
             if ts < cutoff:
                 _recent_dedup.pop(k, None)
@@ -247,6 +248,9 @@ async def record_skill_outcome(
         )
 
         from lazyclaw.runtime.skill_lesson import save_skill_lesson
+        from lazyclaw.runtime.turn_counter import current_turn
+
+        turn = current_turn(user_id) if outcome == "pending" else None
 
         await save_skill_lesson(
             config, user_id,
@@ -256,6 +260,7 @@ async def record_skill_outcome(
             params=clean_args or None,
             outcome=outcome,
             error=error_msg,
+            pending_since_turn=turn,
         )
     except Exception:
         logger.debug("record_skill_outcome failed", exc_info=True)

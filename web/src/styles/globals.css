@@ -1042,3 +1042,24 @@ html, body {
   background: var(--color-bg-secondary);
   font-weight: 600;
 }
+
+/* ── LazyBrain neural-link graph: photon flow along edges ──
+   CSS-only data-flow streak. Compositor-thread; scales to thousands
+   of edges without React reconciliation. Honors physicsFrozen via
+   data-frozen attr and prefers-reduced-motion. */
+@keyframes lb-edge-flow {
+  to { stroke-dashoffset: -50; }
+}
+.lazybrain-root .lb-edge-flow {
+  animation: lb-edge-flow linear infinite;
+  will-change: stroke-dashoffset;
+}
+.lazybrain-root .lb-edge-flow[data-frozen="1"] {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lazybrain-root .lb-edge-flow {
+    animation: none;
+    opacity: 0;
+  }
+}

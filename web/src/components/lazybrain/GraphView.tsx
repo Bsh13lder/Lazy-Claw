@@ -1101,21 +1101,41 @@ export function GraphView({
       const baseOp = dimmed
         ? st.opacity * 0.5
         : (isActive ? 0.72 : 0.34) + 0.06 * phase;
+      const showFlow = !dimmed;
+      const flowDur = isActive ? 1.2 : 3.5;
+      const flowDelay = (idx * 137) % 1000;
       return (
-        <path
-          key={`e-${idx}`}
-          d={d}
-          fill="none"
-          stroke={stroke}
-          strokeWidth={isActive ? 1.4 : 0.95}
-          strokeOpacity={baseOp}
-          strokeLinecap="round"
-          pointerEvents="none"
-        />
+        <g key={`e-${idx}`} pointerEvents="none">
+          <path
+            d={d}
+            fill="none"
+            stroke={stroke}
+            strokeWidth={isActive ? 1.9 : 1.2}
+            strokeOpacity={baseOp}
+            strokeLinecap="round"
+          />
+          {showFlow && (
+            <path
+              d={d}
+              fill="none"
+              stroke="#fdf2d9"
+              strokeWidth={isActive ? 1.4 : 0.7}
+              strokeOpacity={isActive ? 0.9 : 0.18}
+              strokeLinecap="round"
+              strokeDasharray="3 22"
+              className="lb-edge-flow"
+              data-frozen={physicsFrozen ? "1" : "0"}
+              style={{
+                animationDuration: `${flowDur}s`,
+                animationDelay: `${flowDelay}ms`,
+              }}
+            />
+          )}
+        </g>
       );
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.edges, nodeById, notesById, focusId, depths, pulseTick, dimPredicate, matcher, isHoverFocus],
+    [graph.edges, nodeById, notesById, focusId, depths, pulseTick, dimPredicate, matcher, isHoverFocus, physicsFrozen],
   );
 
   const motesJsx = useMemo(
@@ -1153,10 +1173,14 @@ export function GraphView({
       const py = omt * omt * fromY + 2 * omt * t * my + t * t * toY;
       const fill = isActive ? "#f5d19a" : "#d4b388";
       const op = isActive ? 0.75 : 0.28;
-      const rOuter = isActive ? 2.4 : 1.6;
-      const rInner = isActive ? 1.1 : 0.7;
+      const rOuter = isActive ? 3.2 : 1.6;
+      const rInner = isActive ? 1.5 : 0.7;
+      const haloOp = isActive ? 0.18 : 0;
       return (
         <g key={`pulse-${idx}`} pointerEvents="none">
+          {haloOp > 0 && (
+            <circle cx={px} cy={py} r={rOuter * 1.9} fill="#f5d19a" opacity={haloOp} />
+          )}
           <circle cx={px} cy={py} r={rOuter} fill={fill} opacity={op * 0.5} />
           <circle cx={px} cy={py} r={rInner} fill="#fdf2d9" opacity={op} />
         </g>

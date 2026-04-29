@@ -756,6 +756,11 @@ export default function LazyBrain() {
             // sidebar list (the backend marks it done + updates the mirror).
             void refresh();
           }}
+          onNoteMutated={() => {
+            // Sidebar performed an optimistic pin/delete — refetch so the
+            // authoritative server state replaces the local override.
+            void refresh();
+          }}
         />
       )}
 

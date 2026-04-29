@@ -103,6 +103,12 @@ async def lifespan(application: FastAPI):
     await init_db(_config)
     await seed_default_models(_config)
     logger.info("Database initialized, models seeded")
+
+    from lazyclaw.llm.providers.claude_cli_provider import check_claude_cli_auth
+    ready, msg = check_claude_cli_auth()
+    if not ready:
+        logger.warning("[claude-cli] %s", msg)
+
     yield
 
 
@@ -157,6 +163,7 @@ app.include_router(tasks_router)
 
 class ChatRequest(BaseModel):
     message: str = Field(max_length=50_000)
+    chat_session_id: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -171,7 +178,9 @@ async def health():
 @app.post("/api/agent/chat", response_model=ChatResponse)
 async def agent_chat(body: ChatRequest, user: User = Depends(get_current_user)):
     if _lane_queue:
-        result = await _lane_queue.enqueue(user.id, body.message)
+        result = await _lane_queue.enqueue(
+            user.id, body.message, chat_session_id=body.chat_session_id,
+        )
     else:
         # Fallback for standalone gateway (no queue)
         from lazyclaw.llm.router import LLMRouter
@@ -186,5 +195,7 @@ async def agent_chat(body: ChatRequest, user: User = Depends(get_current_user)):
         router = LLMRouter(_config)
         permission_checker = PermissionChecker(_config, registry)
         agent = Agent(_config, router, registry, permission_checker=permission_checker)
-        result = await agent.process_message(user.id, body.message)
+        result = await agent.process_message(
+            user.id, body.message, chat_session_id=body.chat_session_id,
+        )
     return ChatResponse(response=result)

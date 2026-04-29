@@ -871,18 +871,34 @@ class Agent:
             except Exception:
                 tool_names = []
 
+        # Pre-plan research pass — parallel zero-brain-LLM lookups over
+        # LazyBrain, past skill shapes, and (when the message references a
+        # file) the codebase. Findings are injected into the plan prompt
+        # so the model has context BEFORE drafting.
+        research_findings: str = ""
+        try:
+            from lazyclaw.runtime.plan_research import gather_plan_research
+            research_findings = await gather_plan_research(
+                self.config, user_id, message,
+            )
+        except Exception:
+            logger.debug("plan_research pre-pass failed (non-fatal)", exc_info=True)
+
         plan_instruction = make_user_facing_plan_prompt(
-            message, tool_names, enumeration_hint=enumeration_hint,
+            message, tool_names,
+            enumeration_hint=enumeration_hint,
+            research_findings=research_findings,
         )
         # LLMMessage is imported at the top of this module.
         plan_messages = list(messages_so_far) + [
             LLMMessage(role="system", content=plan_instruction),
         ]
 
-        # Clarification-question loop. Capped at 3 rounds to prevent
-        # ping-pong if the model keeps asking.
+        # Clarification-question loop. Capped at 4 rounds to allow
+        # research_needed → question → question → plan transitions
+        # without ping-pong.
         _THINK_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
-        max_rounds = 3
+        max_rounds = 4
         plan_text: str = ""
         steps: list[str] = []
         for round_idx in range(max_rounds):
@@ -902,6 +918,29 @@ class Agent:
 
             if cancel_token.is_cancelled:
                 raise _PlanRejected("cancelled before approval")
+
+            # Self-research branch — brain asked for something we can look
+            # up ourselves. Run another research pass on the request and
+            # re-prompt; never ask the user.
+            if plan_text.startswith("RESEARCH_NEEDED:"):
+                rq = plan_text[len("RESEARCH_NEEDED:"):].strip()
+                logger.info(
+                    "Plan gate: brain requested self-research: %s",
+                    rq[:120],
+                )
+                try:
+                    from lazyclaw.runtime.plan_research import gather_plan_research
+                    extra = await gather_plan_research(self.config, user_id, rq)
+                except Exception:
+                    extra = ""
+                plan_messages.append(LLMMessage(
+                    role="system",
+                    content=(
+                        f"## Additional research for: {rq}\n"
+                        f"{extra or '(no results — proceed with the best plan you can.)'}"
+                    ),
+                ))
+                continue
 
             # Clarifying-question branch.
             if plan_text.startswith("QUESTION:"):
@@ -1959,6 +1998,9 @@ class Agent:
         # Graduated escalation level: 0=normal, 1=soft nudge, 2=brain escalation
         # Level 3 (give up) triggers when stuck is detected at level 2.
         _escalation_level: int = 0
+        # Self-recall guard: knowledge-gap detector re-prompts the brain with
+        # LazyBrain + personal_memory injection at most ONCE per turn.
+        _self_recalled: bool = False
         # Counts stuck signals that fired AFTER the L2 brain escalation. The
         # 1st gets the existing HELP_NEEDED dialog (user can rescue);
         # the 2nd hard-stops the loop with a terminal message instead of
@@ -2726,6 +2768,50 @@ class Agent:
                         _iter_role = "escalation" if _fallback_name else ROLE_BRAIN
                         streamed_content = ""
                         continue  # Retry with a different provider
+
+                    # Knowledge-gap self-recall — re-prompt brain with LazyBrain
+                    # + personal_memory injection BEFORE this answer ships, when
+                    # the brain just emitted a confusion phrase or the user is
+                    # repeating themselves. One shot per turn (_self_recalled).
+                    if (
+                        not _self_recalled
+                        and _final_content
+                    ):
+                        try:
+                            from lazyclaw.runtime.self_recall import (
+                                detect_knowledge_gap, build_recall_block,
+                            )
+                            _prior_user = [
+                                (m.content or "")
+                                for m in messages[-12:]
+                                if m.role == "user"
+                            ]
+                            _is_gap, _gap_query = detect_knowledge_gap(
+                                _final_content, message, _prior_user,
+                            )
+                            if _is_gap:
+                                _block = await build_recall_block(
+                                    self.config, user_id, _gap_query,
+                                )
+                                if _block:
+                                    logger.info(
+                                        "Knowledge gap detected — injecting "
+                                        "self-recall and re-prompting brain",
+                                    )
+                                    messages.append(LLMMessage(
+                                        role="assistant", content=_final_content,
+                                    ))
+                                    messages.append(LLMMessage(
+                                        role="system", content=_block,
+                                    ))
+                                    _self_recalled = True
+                                    streamed_content = ""
+                                    continue
+                        except Exception:
+                            logger.debug(
+                                "self_recall hook failed (non-fatal)",
+                                exc_info=True,
+                            )
 
                     # Final text response (already streamed to user)
                     await cb.on_event(AgentEvent("stream_done", "", {}))

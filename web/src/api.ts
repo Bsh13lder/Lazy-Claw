@@ -219,8 +219,11 @@ export const getMe = () =>
 
 // ── Chat ───────────────────────────────────────────────────────────────────
 
-export const sendMessage = (message: string) =>
-  request<{ response: string }>("/api/agent/chat", { method: "POST", body: JSON.stringify({ message }) });
+export const sendMessage = (message: string, chatSessionId?: string) =>
+  request<{ response: string }>("/api/agent/chat", {
+    method: "POST",
+    body: JSON.stringify({ message, chat_session_id: chatSessionId }),
+  });
 
 // ── Chat Sessions ─────────────────────────────────────────────────────────
 

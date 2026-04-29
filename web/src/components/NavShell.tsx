@@ -4,7 +4,7 @@ import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
+export type Page = "overview" | "activity" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -15,6 +15,7 @@ interface NavShellProps {
 const PAGE_META: Record<Page, { label: string; description: string }> = {
   overview: { label: "Overview", description: "System health & activity" },
   activity: { label: "Activity", description: "Live agent & task monitor" },
+  chat: { label: "Chat", description: "Full-screen agent conversation + live console" },
   tasks: { label: "Tasks", description: "Encrypted todos with NL time + steps" },
   notes: { label: "Notes", description: "Quick notes, ideas, memory — capture from anywhere" },
   replay: { label: "Replay", description: "Session traces & debugging" },
@@ -45,6 +46,11 @@ const ICONS: Record<Page, NavIcon> = {
   activity: (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </svg>
+  ),
+  chat: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
     </svg>
   ),
   tasks: (
@@ -137,7 +143,7 @@ const ICONS: Record<Page, NavIcon> = {
 // Disciplined grouping — read top-to-bottom as the typical user journey:
 // start on Home, work in your brain, run automations, configure tools, debug.
 const NAV_GROUPS: { label: string; items: Page[] }[] = [
-  { label: "Home",       items: ["overview", "activity", "tasks"] },
+  { label: "Home",       items: ["overview", "activity", "chat", "tasks"] },
   { label: "Knowledge",  items: ["lazybrain", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
   { label: "Tools",      items: ["hub", "skills", "mcp"] },
@@ -311,8 +317,9 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
 
         {/* Main workspace area */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          {/* Page header bar — hidden on LazyBrain so the PKM gets full canvas */}
-          {activePage !== "lazybrain" && (
+          {/* Page header bar — hidden on LazyBrain so the PKM gets full
+              canvas, and on Chat where AgentConsole owns the top strip. */}
+          {activePage !== "lazybrain" && activePage !== "chat" && (
             <header className="shrink-0 px-6 py-3 border-b border-border bg-bg-secondary/50 backdrop-blur-sm">
               <div className="flex items-center gap-2">
                 <span className="text-text-muted text-xs">LazyClaw</span>
@@ -331,10 +338,12 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
           </main>
         </div>
 
-        {/* Right chat sidebar — always visible so user can chat with LazyClaw
-            from any page, including LazyBrain. Toggle behavior lives inside
-            <ChatSidebar> itself (its own collapse button). */}
-        <ChatSidebar />
+        {/* Right chat sidebar — visible from every page so the user can
+            chat without leaving their current view. Suppressed on the
+            dedicated /?page=chat route, which already hosts its own
+            full-screen ChatSidebar in page mode (mounting two would
+            duplicate the UI on top of the same shared ChatContext). */}
+        {activePage !== "chat" && <ChatSidebar />}
       </div>
 
       {/* Bottom status bar */}

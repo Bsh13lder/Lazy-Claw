@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 
 # Number of recent messages to keep in full detail.
 # Tool-heavy sessions generate ~3 messages per exchange (assistant + tool + result),
-# so 10 messages ≈ 3-4 recent exchanges. Daily logs cover older context.
-WINDOW_SIZE = 10
+# so 30 messages ≈ ~10 recent exchanges. Daily logs cover older context.
+# Bumped from 10 → 30 to fix mid-session amnesia: at 10 only ~3 exchanges
+# survived compression, so the brain forgot decisions made one turn earlier.
+WINDOW_SIZE = 30
 
 # Skip expensive LLM summarization if older chunk is smaller than this
 # (just truncate instead — saves 15-20s per message)

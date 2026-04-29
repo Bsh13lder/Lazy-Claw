@@ -5,6 +5,7 @@ import { AgentStatusProvider } from "./context/AgentStatusContext";
 import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
+import ChatPage from "./pages/ChatPage";
 import Tasks from "./pages/Tasks";
 import Replay from "./pages/Replay";
 import Audit from "./pages/Audit";
@@ -22,7 +23,7 @@ import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
 
 const VALID_PAGES: readonly Page[] = [
-  "overview", "activity", "tasks", "notes", "replay", "audit", "hub", "skills",
+  "overview", "activity", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
   "templates", "jobs", "watchers", "mcp", "memory", "lazybrain",
   "vault", "settings",
 ];
@@ -75,6 +76,7 @@ function AppContent() {
     switch (page) {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
+      case "chat": return <ChatPage />;
       case "tasks": return <Tasks />;
       // /notes is now the Notes tab inside the Tasks workspace. Redirect
       // so Telegram deep-links and any old bookmarks keep working without

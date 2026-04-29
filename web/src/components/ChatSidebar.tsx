@@ -10,7 +10,16 @@ import PlanApprovalCard from "./PlanApprovalCard";
 import PlanModeToggle from "./PlanModeToggle";
 import BrainBadge from "./BrainBadge";
 
-export default function ChatSidebar() {
+interface ChatSidebarProps {
+  /** "sidebar" — default 380px right-side panel with collapse pill.
+   *  "page" — fills its parent, no collapse pill, no expand/close
+   *  buttons. Used by the dedicated Chat page so the same chat I/O
+   *  renders full-screen without rebuilding the plumbing. */
+  presentationMode?: "sidebar" | "page";
+}
+
+export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSidebarProps = {}) {
+  const isPageMode = presentationMode === "page";
   const {
     activeSession,
     streamingState,
@@ -48,7 +57,10 @@ export default function ChatSidebar() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [activeSession.messages.length, streamingState.streamContent]);
 
-  if (!chatOpen) {
+  // Page mode forces the chat open and renders full-width; the
+  // collapsed pill only makes sense when this component is mounted as a
+  // sibling to other content in the layout.
+  if (!chatOpen && !isPageMode) {
     return (
       <button
         onClick={toggleChat}
@@ -67,12 +79,17 @@ export default function ChatSidebar() {
 
   const isEmpty = activeSession.messages.length === 0 && !isStreaming;
 
-  const widthClass = chatExpanded
+  const widthClass = isPageMode
+    ? "flex-1 w-full min-w-0"
+    : chatExpanded
     ? "flex-1"
     : "w-[380px] min-w-[320px] max-w-[50vw]";
+  const containerClass = isPageMode
+    ? `${widthClass} bg-bg-primary flex flex-col min-h-0`
+    : `${widthClass} bg-bg-primary border-l border-border flex flex-col shrink-0 transition-all duration-200`;
 
   return (
-    <div className={`${widthClass} bg-bg-primary border-l border-border flex flex-col shrink-0 transition-all duration-200`}>
+    <div className={containerClass}>
       {/* Header */}
       <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-bg-secondary shrink-0">
         {/* Title */}
@@ -99,38 +116,42 @@ export default function ChatSidebar() {
 
         <ConnectionStatus status={connectionStatus} />
 
-        {/* Expand/collapse toggle */}
-        <button
-          onClick={toggleExpanded}
-          className="p-1.5 rounded-lg hover:bg-bg-hover text-text-muted hover:text-text-secondary transition-colors"
-          title={chatExpanded ? "Shrink chat" : "Expand chat"}
-        >
-          {chatExpanded ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <polyline points="4 14 10 14 10 20" />
-              <polyline points="20 10 14 10 14 4" />
-              <line x1="14" y1="10" x2="21" y2="3" />
-              <line x1="3" y1="21" x2="10" y2="14" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <polyline points="15 3 21 3 21 9" />
-              <polyline points="9 21 3 21 3 15" />
-              <line x1="21" y1="3" x2="14" y2="10" />
-              <line x1="3" y1="21" x2="10" y2="14" />
-            </svg>
-          )}
-        </button>
-        {/* Close */}
-        <button
-          onClick={toggleChat}
-          className="p-1.5 rounded-lg hover:bg-bg-hover text-text-muted hover:text-text-secondary transition-colors"
-          title="Close chat panel"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </button>
+        {/* Expand / close affordances are sidebar-only. In page mode the
+            chat already owns the full viewport, so they'd be no-ops. */}
+        {!isPageMode && (
+          <>
+            <button
+              onClick={toggleExpanded}
+              className="p-1.5 rounded-lg hover:bg-bg-hover text-text-muted hover:text-text-secondary transition-colors"
+              title={chatExpanded ? "Shrink chat" : "Expand chat"}
+            >
+              {chatExpanded ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <polyline points="4 14 10 14 10 20" />
+                  <polyline points="20 10 14 10 14 4" />
+                  <line x1="14" y1="10" x2="21" y2="3" />
+                  <line x1="3" y1="21" x2="10" y2="14" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <polyline points="15 3 21 3 21 9" />
+                  <polyline points="9 21 3 21 3 15" />
+                  <line x1="21" y1="3" x2="14" y2="10" />
+                  <line x1="3" y1="21" x2="10" y2="14" />
+                </svg>
+              )}
+            </button>
+            <button
+              onClick={toggleChat}
+              className="p-1.5 rounded-lg hover:bg-bg-hover text-text-muted hover:text-text-secondary transition-colors"
+              title="Close chat panel"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+          </>
+        )}
       </div>
 
       {/* Live browser canvas — only when an event has arrived */}
@@ -165,7 +186,7 @@ export default function ChatSidebar() {
             </p>
           </div>
         ) : (
-          <div className="py-1">
+          <div className={isPageMode ? "py-3 mx-auto w-full max-w-3xl px-4" : "py-1"}>
             {activeSession.messages.map((m) => (
               <MessageBubble
                 key={m.id}
@@ -214,13 +235,27 @@ export default function ChatSidebar() {
         )}
       </div>
 
-      {/* Input */}
-      <ChatInput
-        onSend={sendMessage}
-        disabled={connectionStatus !== "connected"}
-        isStreaming={isStreaming}
-        onCancel={cancelGeneration}
-      />
+      {/* Input — centered in page mode for a comfortable reading
+          measure; full-width in sidebar mode where the panel is narrow. */}
+      {isPageMode ? (
+        <div className="border-t border-border bg-bg-secondary/40">
+          <div className="mx-auto w-full max-w-3xl">
+            <ChatInput
+              onSend={sendMessage}
+              disabled={connectionStatus !== "connected"}
+              isStreaming={isStreaming}
+              onCancel={cancelGeneration}
+            />
+          </div>
+        </div>
+      ) : (
+        <ChatInput
+          onSend={sendMessage}
+          disabled={connectionStatus !== "connected"}
+          isStreaming={isStreaming}
+          onCancel={cancelGeneration}
+        />
+      )}
     </div>
   );
 }

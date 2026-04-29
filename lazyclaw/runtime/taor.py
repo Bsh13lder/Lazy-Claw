@@ -182,6 +182,7 @@ def make_user_facing_plan_prompt(
     tool_names: list[str],
     *,
     enumeration_hint: bool = False,
+    research_findings: str = "",
 ) -> str:
     """Prompt that asks the LLM to produce a short, human-readable plan.
 
@@ -189,10 +190,20 @@ def make_user_facing_plan_prompt(
     any tool call. The LLM must NOT invoke tools in this response — it
     only drafts the plan. The user then approves or rejects.
 
-    Two valid response shapes:
-      * ``QUESTION: <one short question>`` — when the request is
-        ambiguous and exactly one missing fact would change the plan.
+    Three valid response shapes:
+      * ``QUESTION: <short question>`` — when the request is ambiguous
+        and a missing fact only the human knows would change the plan.
+        Cap: 2 questions per turn.
+      * ``RESEARCH_NEEDED: <what to look up>`` — when the gap is
+        something we could look up ourselves (existing notes, past
+        shapes, codebase). Caller runs another research pass and
+        re-prompts; never asks the user.
       * The ``**Plan**`` markdown block — otherwise.
+
+    ``research_findings`` (default empty) is a pre-built ``## Research
+    findings`` block from ``runtime.plan_research``. Injected ahead of
+    the routing rules so the model sees what we already know before
+    deciding to ask the user.
 
     ``enumeration_hint`` (default False) flips on when the caller
     detected multi-target work ("scrape N items", "find all X"). The
@@ -223,18 +234,27 @@ def make_user_facing_plan_prompt(
             "`dispatch_subagents` or `run_background`. Do not open a browser "
             "yourself.\n\n"
         )
+
+    # Optional research block — already a complete "## Research findings"
+    # markdown section. Empty string when nothing was found.
+    findings_block = (research_findings + "\n\n") if research_findings else ""
+
     return (
         "You are producing a PLAN for the user to review. Do NOT call any "
         "tools in this response — only write the plan as plain markdown.\n\n"
         f"User request:\n{message}\n\n"
+        + findings_block
         + routing_rules
         + f"Available tools (pick the ones you actually need):\n{tools_hint}\n\n"
-        "If the request is AMBIGUOUS and you need ONE specific piece of "
-        "info to plan properly, respond with exactly one line:\n"
-        "QUESTION: <your single short question>\n"
-        "Nothing else, no plan, no preface. Cap: one question per turn — "
-        "do NOT ping-pong with the user.\n\n"
-        "Otherwise produce the plan in this exact format, nothing else:\n\n"
+        "Response shapes (pick exactly one):\n"
+        "  1. ``QUESTION: <short question>`` — only when the gap is "
+        "something ONLY the user knows (preferences, secrets, intent). "
+        "Cap: 2 questions per turn — don't ping-pong.\n"
+        "  2. ``RESEARCH_NEEDED: <what to look up>`` — when the gap is "
+        "something WE could look up ourselves (existing notes, past "
+        "shapes, codebase paths). Prefer this over a question whenever "
+        "possible.\n"
+        "  3. The plan, in this exact format:\n\n"
         "**Plan**\n"
         "1. <short step, name the tool you'll use>\n"
         "2. <short step>\n"

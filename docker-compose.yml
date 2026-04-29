@@ -49,7 +49,15 @@ services:
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
-      - ~/.claude:/home/lazyclaw/.claude:ro  # Mount Claude auth (Max subscription)
+      # Host ~/.claude provides settings/plugins/history but on macOS the
+      # OAuth credential lives in Keychain (invisible to Docker), so we
+      # mount the host dir read-only at a side path and let the entrypoint
+      # build a writable ~/.claude in the container that symlinks back.
+      - ~/.claude:/home/lazyclaw/.claude-host:ro
+      # Persistent volume for the credential only. `claude /login` inside
+      # the container writes here and survives `docker compose down` and
+      # image rebuilds. See scripts/docker-entrypoint.sh.
+      - claude_creds:/home/lazyclaw/.claude-creds
       - ${HOME}/Desktop:/host/Desktop
       # Google Workspace OAuth credentials (shared with workspace-mcp MCP server).
       # Cached token lives at ~/.google_workspace_mcp/credentials/{email}.json
@@ -102,3 +110,4 @@ services:
 
 volumes:
   n8n_data:
+  claude_creds:

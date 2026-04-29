@@ -244,6 +244,44 @@ def _parse_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
     return remaining, tool_calls
 
 
+def check_claude_cli_auth() -> tuple[bool, str]:
+    """Detect Claude CLI install + login state at boot.
+
+    Returns (is_ready, message). Designed for a one-line server log:
+    silent when fine, loud when broken. Never raises — broken claude
+    just means MODE_CLAUDE is unavailable, other modes still work.
+
+    Detection:
+      1. Binary present? If not, MODE_CLAUDE is irrelevant — return ready=True
+         and skip the warning entirely (user is not on a claude path).
+      2. Credential file present and non-empty?
+         Linux/Docker: ~/.claude/.credentials.json (claude writes it here)
+         macOS host:   credential lives in Keychain, file may not exist —
+                       skip the file check there.
+    """
+    binary = shutil.which("claude")
+    if not binary:
+        # No CLI installed — user clearly isn't trying to use MODE_CLAUDE.
+        return True, ""
+
+    # macOS host stores cred in Keychain, no file to check. We can't
+    # probe Keychain from Python without Foundation bindings, so we
+    # just trust it and skip the warning.
+    import sys
+    if sys.platform == "darwin" and not os.path.exists("/.dockerenv"):
+        return True, ""
+
+    cred_path = os.path.expanduser("~/.claude/.credentials.json")
+    if not os.path.isfile(cred_path) or os.path.getsize(cred_path) == 0:
+        return False, (
+            "Claude CLI is installed but not logged in. "
+            "Run `docker exec -it lazyclaw claude /login` "
+            "(or `claude /login` on the host) to enable MODE_CLAUDE."
+        )
+
+    return True, ""
+
+
 def _find_claude_binary() -> str:
     """Find the claude CLI binary, searching common install paths.
 

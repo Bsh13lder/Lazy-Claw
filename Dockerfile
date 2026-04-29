@@ -3,7 +3,6 @@ FROM python:3.11-slim
 # Install tini as PID 1 init — reaps zombie child processes (Chromium spawns many)
 RUN apt-get update && apt-get install -y --no-install-recommends tini \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-ENTRYPOINT ["tini", "--"]
 
 # Install Node.js (for npx/node MCP servers like claude-code, stripe, mcp-whatsapp)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -89,7 +88,19 @@ COPY .env.example .env.example
 # (refuses --dangerously-skip-permissions when running as root)
 RUN groupadd -r lazyclaw && useradd -r -g lazyclaw -m -d /home/lazyclaw lazyclaw \
     && chown -R lazyclaw:lazyclaw /app
+
+# Pre-create the credential-volume mount point owned by lazyclaw so the
+# Docker named volume inherits non-root ownership on first init.
+# The entrypoint script symlinks ~/.claude/.credentials.json into here,
+# letting `claude /login` inside the container persist across rebuilds.
+RUN mkdir -p /home/lazyclaw/.claude-creds /home/lazyclaw/.claude \
+    && chown -R lazyclaw:lazyclaw /home/lazyclaw/.claude-creds /home/lazyclaw/.claude
+
+COPY --chown=lazyclaw:lazyclaw scripts/docker-entrypoint.sh /usr/local/bin/lazyclaw-entrypoint.sh
+RUN chmod +x /usr/local/bin/lazyclaw-entrypoint.sh
+
 USER lazyclaw
 
 EXPOSE 18789
+ENTRYPOINT ["tini", "--", "/usr/local/bin/lazyclaw-entrypoint.sh"]
 CMD ["lazyclaw", "start"]

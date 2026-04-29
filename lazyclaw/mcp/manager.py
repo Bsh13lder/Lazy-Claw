@@ -86,6 +86,21 @@ BUNDLED_MCPS = {
         "description": "Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google",
         "optional": True,
     },
+    # Forked from vanooo/upwork-mcp (Apache-2.0). All 12 upstream tools
+    # preserved. Patched to share LazyClaw's per-user Brave profile via
+    # LAZYCLAW_BROWSER_PROFILE_DIR (injected by inject_user_context below)
+    # so user logs in to Upwork once and the MCP reuses the cookies.
+    "mcp-upwork": {
+        "module": "upwork_mcp",
+        "description": (
+            "Upwork freelance marketplace — search jobs, manage proposals, "
+            "messages, contracts via the user's real Brave/Chrome session. "
+            "Bypasses Cloudflare bot detection (Patchright + CDP)."
+        ),
+        "optional": True,
+        "persistent": True,
+        "inject_user_context": True,  # provides LAZYCLAW_BROWSER_PROFILE_DIR
+    },
     "mcp-scraper": {
         "module": "mcp_scraper",
         "description": (
@@ -915,6 +930,19 @@ async def auto_register_bundled_mcps(
             )
             continue
 
+        # Build per-user env when the MCP opts in. Used by mcp-upwork so the
+        # MCP subprocess can locate the user's shared Brave profile +
+        # CDP port without hardcoding ~/.upwork-mcp.
+        per_user_env: dict[str, str] = {}
+        if info.get("inject_user_context"):
+            per_user_env["LAZYCLAW_USER_ID"] = user_id
+            per_user_env["LAZYCLAW_BROWSER_PROFILE_DIR"] = str(
+                config.database_dir / "browser_profiles" / user_id,
+            )
+            cdp_port_env = _os.environ.get("LAZYCLAW_CDP_PORT")
+            if cdp_port_env:
+                per_user_env["LAZYCLAW_CDP_PORT"] = cdp_port_env
+
         # Determine transport type: Python module, CLI binary, npx, or remote URL
         if "module" in info:
             # Python module — check if importable
@@ -927,6 +955,8 @@ async def auto_register_bundled_mcps(
                 "command": sys.executable,
                 "args": ["-m", info["module"], *info.get("extra_args", [])],
             }
+            if per_user_env:
+                server_config["env"] = per_user_env
         elif "bin" in info:
             # CLI binary on PATH (installed via pip console_script / apt / etc.)
             import shutil

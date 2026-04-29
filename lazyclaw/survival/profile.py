@@ -29,19 +29,46 @@ class SkillsProfile:
     excluded_keywords: tuple[str, ...] = ()
     work_hours: str = "flexible"
     branding_mode: str = "lazyclaw"  # "lazyclaw" = AI agent identity, "personal" = human freelancer
+    # Tiny-gig matcher bonus — `score_job` adds +0.10 when 0 < budget <= cap.
+    # NL-editable via set_skills_profile: "set tiny gig cap to 75".
+    max_tiny_gig_budget: float = 100.0
+    # Defaults applied when SearchJobsSkill / JobSpy is invoked without
+    # explicit args. All NL-editable.
+    default_search_sites: tuple[str, ...] = ("indeed",)
+    default_results_per_search: int = 25
+    default_hours_old: int = 72
 
 
-DEFAULT_PROFILE = SkillsProfile()
+# Python-leaning starter profile so a fresh user can run "find me jobs"
+# immediately. User overrides via set_skills_profile from chat:
+#   "my skills are figma, logo, branding"
+#   "set platforms to upwork only"
+#   "set tiny gig cap to 50"
+DEFAULT_PROFILE = SkillsProfile(
+    skills=("python", "fastapi", "scraping", "automation", "scripting"),
+    title="Python Developer",
+    bio="AI-assisted developer for fast scripting, scraping, and automation gigs.",
+    min_hourly_rate=20.0,
+    min_fixed_rate=20.0,
+    platforms=("upwork", "indeed"),
+    max_tiny_gig_budget=100.0,
+    branding_mode="lazyclaw",
+)
 
 _PROFILE_FIELDS = frozenset(SkillsProfile.__dataclass_fields__.keys())
 
 # Explicit list — safer than annotation introspection
 _TUPLE_FIELDS: frozenset[str] = frozenset({
     "skills", "platforms", "preferred_categories", "excluded_keywords",
+    "default_search_sites",
 })
 
 _NUMERIC_FIELDS: frozenset[str] = frozenset({
-    "min_hourly_rate", "min_fixed_rate",
+    "min_hourly_rate", "min_fixed_rate", "max_tiny_gig_budget",
+})
+
+_INTEGER_FIELDS: frozenset[str] = frozenset({
+    "max_concurrent_jobs", "default_results_per_search", "default_hours_old",
 })
 
 
@@ -56,6 +83,11 @@ def _coerce_updates(updates: dict[str, object]) -> dict[str, object] | str:
                 result[k] = float(str(v).lstrip("$").strip())
             except (ValueError, TypeError):
                 return f"Invalid value for {k}: must be a number."
+        elif k in _INTEGER_FIELDS:
+            try:
+                result[k] = int(float(str(v).strip()))
+            except (ValueError, TypeError):
+                return f"Invalid value for {k}: must be an integer."
         elif k in _TUPLE_FIELDS:
             if isinstance(v, (list, tuple)):
                 result[k] = list(v)

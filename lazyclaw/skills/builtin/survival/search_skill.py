@@ -1,4 +1,4 @@
-"""Search for freelance jobs via JobSpy MCP, browser, or web search."""
+"""Search for freelance jobs via JobSpy MCP, Upwork MCP, browser, or web search."""
 
 from __future__ import annotations
 
@@ -11,6 +11,55 @@ from lazyclaw.skills.base import BaseSkill
 logger = logging.getLogger(__name__)
 
 _SEARCH_PREFIX = "SURVIVAL_SEARCH:"
+
+
+def _normalize_upwork_job(job: dict) -> dict:
+    """Map an Upwork MCP search result → canonical job dict consumed by `score_job`.
+
+    Upstream upwork-mcp returns shapes like:
+      {"id": "~01...", "title": "...", "description": "...",
+       "budget": "$50", "hourly_rate": "$20-$40/hr",
+       "skills": [...], "url": "https://www.upwork.com/jobs/~01..."}
+    We fall back through a few key aliases and coerce strings safely.
+    """
+    title = job.get("title") or job.get("name") or ""
+    description = job.get("description") or job.get("snippet") or ""
+
+    # Budget — Upwork sends either fixed-price `budget` or `hourly_rate` range
+    budget = (
+        job.get("budget")
+        or job.get("hourly_rate")
+        or job.get("amount")
+        or job.get("price")
+        or "N/A"
+    )
+
+    skills = job.get("skills") or job.get("tags") or []
+    if not isinstance(skills, list):
+        skills = []
+
+    url = job.get("url") or job.get("link") or job.get("ciphertext_url") or ""
+    if url and not url.startswith("http"):
+        url = f"https://www.upwork.com/jobs/{url}"
+
+    job_id = str(job.get("id") or job.get("ciphertext") or job.get("job_id") or "")
+
+    return {
+        "id": job_id,
+        "title": str(title),
+        "description": str(description)[:500],
+        "company": str(job.get("client_name") or job.get("client") or ""),
+        "location": str(job.get("location") or "Remote"),
+        "site": "upwork",
+        "platform": "upwork",
+        "url": str(url),
+        "budget": str(budget),
+        "salary": str(budget),
+        "skills": [str(s) for s in skills if isinstance(s, str)],
+        "is_remote": True,
+        "date_posted": str(job.get("date_posted") or job.get("created_on") or ""),
+        "job_type": str(job.get("job_type") or job.get("type") or ""),
+    }
 
 
 class SearchJobsSkill(BaseSkill):
@@ -58,30 +107,36 @@ class SearchJobsSkill(BaseSkill):
         from lazyclaw.memory.personal import save_memory
         from lazyclaw.survival.gig import create_gig
         from lazyclaw.survival.matcher import score_job
-        from lazyclaw.survival.platforms import BROWSER_PLATFORMS, PLATFORMS
+        from lazyclaw.survival.platforms import BROWSER_PLATFORMS, MCP_PLATFORMS, PLATFORMS
         from lazyclaw.survival.profile import get_profile
 
         profile = await get_profile(self._config, user_id)
         keywords = params.get("keywords", "") or " ".join(profile.skills[:5])
+
+        # NL-controlled defaults from profile, callable arg overrides them.
         try:
-            max_results = min(int(params.get("max_results", 10)), 50)
+            max_results = min(
+                int(params.get("max_results", profile.default_results_per_search)), 50,
+            )
         except (ValueError, TypeError):
-            logger.debug("Invalid max_results param, defaulting to 10")
-            max_results = 10
+            max_results = profile.default_results_per_search
 
         if not keywords:
+            # Should be unreachable now that DEFAULT_PROFILE seeds python skills,
+            # but kept defensively in case a user explicitly clears their skills.
             return (
-                "No search keywords and no skills profile set. "
-                "Set your profile first: 'my skills are python, fastapi, react'"
+                "No search keywords. Tell me what to search for, "
+                "or set your skills: 'my skills are python, fastapi, react'."
             )
 
         all_jobs: list[dict] = []
 
+        upwork_in_profile = "upwork" in profile.platforms
         browser_platforms = [p for p in profile.platforms if p in BROWSER_PLATFORMS]
 
         # ALWAYS try JobSpy first — fast, free, no browser
         await self._ensure_jobspy_connected(user_id)
-        mcp_result = await self._try_jobspy(user_id, keywords, max_results)
+        mcp_result = await self._try_jobspy(user_id, keywords, max_results, profile)
         if mcp_result is not None:
             if isinstance(mcp_result, str):
                 try:
@@ -98,8 +153,15 @@ class SearchJobsSkill(BaseSkill):
                 mcp_jobs = mcp_result if isinstance(mcp_result, list) else []
             all_jobs.extend(mcp_jobs)
 
-        # Browser path — Upwork, etc. (slower, needs login)
-        # Skip if JobSpy already found enough results (browser is slow + Cloudflare)
+        # Upwork via mcp-upwork — runs in user's real Brave (cookies persist).
+        # Independent of JobSpy results; small fixed-price gigs live on Upwork.
+        if upwork_in_profile and "upwork" in MCP_PLATFORMS:
+            await self._ensure_upwork_connected(user_id)
+            upwork_jobs = await self._try_upwork(user_id, keywords, max_results)
+            if upwork_jobs:
+                all_jobs.extend(upwork_jobs)
+
+        # Browser path — true browser-only platforms (none today, kept for future)
         if not all_jobs:
             for platform_name in browser_platforms:
                 platform = PLATFORMS.get(platform_name)
@@ -239,12 +301,12 @@ class SearchJobsSkill(BaseSkill):
             logger.warning("Failed to on-demand connect mcp-jobspy: %s", exc)
 
     async def _try_jobspy(
-        self, user_id: str, keywords: str, max_results: int,
+        self, user_id: str, keywords: str, max_results: int, profile=None,
     ) -> list | dict | str | None:
         """Try JobSpy MCP, then direct python-jobspy import."""
         registry = self._registry
         if registry is None:
-            return await self._try_jobspy_direct(keywords, max_results)
+            return await self._try_jobspy_direct(keywords, max_results, profile)
 
         tool = None
         for tool_info in registry.list_mcp_tools():
@@ -258,20 +320,23 @@ class SearchJobsSkill(BaseSkill):
 
         if tool is not None:
             try:
-                logger.warning("Calling JobSpy MCP tool: %s", tool.name)
+                hours = profile.default_hours_old if profile else 72
+                sites = list(profile.default_search_sites) if profile and profile.default_search_sites else ["indeed"]
+                logger.warning("Calling JobSpy MCP tool: %s (sites=%s, hours_old=%d)", tool.name, sites, hours)
                 return await tool.execute(user_id, {
                     "search_term": keywords,
                     "results_wanted": max_results,
-                    "hours_old": 72,
+                    "hours_old": hours,
+                    "site_name": sites,
                 })
             except Exception as exc:
                 logger.warning("JobSpy MCP call failed: %s", exc)
 
         logger.warning("JobSpy MCP not available — trying direct import")
-        return await self._try_jobspy_direct(keywords, max_results)
+        return await self._try_jobspy_direct(keywords, max_results, profile)
 
     async def _try_jobspy_direct(
-        self, keywords: str, max_results: int,
+        self, keywords: str, max_results: int, profile=None,
     ) -> str | None:
         """Call python-jobspy directly without MCP server."""
         try:
@@ -279,38 +344,27 @@ class SearchJobsSkill(BaseSkill):
 
             from jobspy import scrape_jobs
 
+            from mcp_jobspy.normalize import normalize_row
+
+            sites = list(profile.default_search_sites) if profile and profile.default_search_sites else ["indeed"]
+            hours = profile.default_hours_old if profile else 72
+
             loop = asyncio.get_running_loop()
             df = await loop.run_in_executor(
                 None,
                 lambda: scrape_jobs(
-                    site_name=["indeed", "glassdoor"],
+                    site_name=sites,
                     search_term=keywords,
                     location="Remote",
                     results_wanted=min(max_results, 50),
-                    hours_old=72,
+                    hours_old=hours,
                 ),
             )
             if df is None or df.empty:
                 return None
 
-            jobs = []
-            for _, row in df.iterrows():
-                job = {
-                    "id": str(row.get("id", "")),
-                    "title": str(row.get("title", "")),
-                    "company": str(row.get("company_name", row.get("company", ""))),
-                    "location": str(row.get("location", "")),
-                    "site": str(row.get("site", "")),
-                    "url": str(row.get("job_url", row.get("link", ""))),
-                    "description": str(row.get("description", ""))[:500],
-                }
-                min_sal = row.get("min_amount", row.get("salary_min", None))
-                max_sal = row.get("max_amount", row.get("salary_max", None))
-                if min_sal and max_sal:
-                    job["budget"] = f"${min_sal}-${max_sal}"
-                jobs.append(job)
-
-            logger.warning("JobSpy direct: found %d jobs", len(jobs))
+            jobs = [normalize_row(row) for _, row in df.iterrows()]
+            logger.warning("JobSpy direct: found %d jobs (sites=%s)", len(jobs), sites)
             return json.dumps({"jobs": jobs})
         except ImportError:
             logger.debug("jobspy package not available for direct search")
@@ -318,6 +372,100 @@ class SearchJobsSkill(BaseSkill):
         except Exception as exc:
             logger.warning("JobSpy direct search failed: %s", exc)
             return None
+
+    # -- Upwork helpers --------------------------------------------------------
+
+    async def _ensure_upwork_connected(self, user_id: str) -> None:
+        """On-demand connect mcp-upwork if not already active."""
+        try:
+            import asyncio
+
+            from lazyclaw.mcp.bridge import register_mcp_tools
+            from lazyclaw.mcp.manager import (
+                _active_clients,
+                connect_server,
+                get_server_id_by_name,
+            )
+
+            for tool_info in (self._registry.list_mcp_tools() if self._registry else []):
+                func = tool_info.get("function", {})
+                if "upwork" in func.get("name", "").lower():
+                    return
+
+            sid = await get_server_id_by_name(self._config, user_id, "mcp-upwork")
+            if not sid:
+                return
+            if sid in _active_clients:
+                return
+
+            logger.warning("On-demand connecting mcp-upwork (id=%s)...", sid[:8])
+            client = await asyncio.wait_for(
+                connect_server(self._config, user_id, sid), timeout=30,
+            )
+            count = await register_mcp_tools(
+                client, self._registry, config=self._config, user_id=user_id,
+            )
+            logger.warning("On-demand connected mcp-upwork: %d tools registered", count)
+        except Exception as exc:
+            logger.warning("Failed to on-demand connect mcp-upwork: %s", exc)
+
+    async def _try_upwork(
+        self, user_id: str, keywords: str, max_results: int,
+    ) -> list[dict]:
+        """Call upwork_search_jobs from mcp-upwork. Returns normalized job dicts."""
+        registry = self._registry
+        if registry is None:
+            return []
+
+        tool = None
+        for tool_info in registry.list_mcp_tools():
+            func = tool_info.get("function", {})
+            tname = func.get("name", "")
+            if tname.endswith("upwork_search_jobs") or "upwork_search_jobs" in tname:
+                tool = registry.get(tname)
+                if tool is not None:
+                    break
+
+        if tool is None:
+            logger.debug("upwork_search_jobs tool not available")
+            return []
+
+        try:
+            logger.warning("Calling Upwork MCP search: %s (q=%r)", tool.name, keywords)
+            raw = await tool.execute(user_id, {
+                "query": keywords,
+                "limit": min(max_results, 50),
+            })
+        except Exception as exc:
+            logger.warning("Upwork MCP search failed: %s", exc)
+            return []
+
+        # Upstream returns a JSON string — parse, then normalize to canonical shape.
+        jobs: list[dict] = []
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.debug("Upwork MCP returned non-JSON: %s", raw[:200])
+                return []
+        elif isinstance(raw, list):
+            data = raw
+        elif isinstance(raw, dict):
+            data = raw
+        else:
+            return []
+
+        # Try common shapes
+        if isinstance(data, dict):
+            raw_jobs = data.get("jobs") or data.get("results") or data.get("items") or []
+        else:
+            raw_jobs = data if isinstance(data, list) else []
+
+        for j in raw_jobs:
+            if not isinstance(j, dict):
+                continue
+            jobs.append(_normalize_upwork_job(j))
+        return jobs
 
     # -- Fallback helpers ------------------------------------------------------
 

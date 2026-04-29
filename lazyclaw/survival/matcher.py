@@ -83,6 +83,18 @@ def score_job(job: dict, profile: SkillsProfile) -> ScoredJob:
     elif budget_value > 0:
         score += 0.1  # has budget, can't compare
 
+    # Tiny-gig bonus (0.10) — fast Claude-doable work usually under $100.
+    # Skipped for hourly jobs (the cap doesn't apply to hourly rates).
+    tiny_cap = getattr(profile, "max_tiny_gig_budget", 0.0) or 0.0
+    if not is_hourly and tiny_cap > 0 and 0 < budget_value <= tiny_cap:
+        score += 0.10
+        reasons.append(f"Tiny gig (≤${int(tiny_cap)})")
+
+    # Remote bonus (0.05) — most LazyClaw users want remote work
+    if job.get("is_remote") is True:
+        score += 0.05
+        reasons.append("Remote")
+
     # Category match (0.1)
     for cat in profile.preferred_categories:
         if cat.lower() in combined_text:
@@ -90,8 +102,12 @@ def score_job(job: dict, profile: SkillsProfile) -> ScoredJob:
             reasons.append(f"Category: {cat}")
             break
 
-    # Recency bonus (0.05)
+    # Recency bonus (0.05) — boosted slightly when date_posted < 24h
     score += 0.05
+    date_posted = str(job.get("date_posted") or "")
+    if date_posted and _looks_recent(date_posted):
+        score += 0.03
+        reasons.append("Posted today")
 
     # Exclusion filter — zeros the score (word-boundary matching)
     for keyword in profile.excluded_keywords:
@@ -117,6 +133,25 @@ def score_job(job: dict, profile: SkillsProfile) -> ScoredJob:
 
 
 _BUDGET_RE = re.compile(r"\d+(?:\.\d+)?")
+
+# Matches "today", explicit dates within the current/last day, or ISO dates
+# from the last 24h. Conservative — only fires on clear signals.
+_TODAY_RE = re.compile(r"\b(today|just posted|<\s*24\s*h|\d+\s*hours?\s*ago|\d+\s*minutes?\s*ago)\b", re.IGNORECASE)
+
+
+def _looks_recent(date_posted: str) -> bool:
+    """Best-effort 'posted in last 24h' detector. Pure string check, no parsing."""
+    if not date_posted:
+        return False
+    if _TODAY_RE.search(date_posted):
+        return True
+    # ISO date — compare YYYY-MM-DD against today (cheap, no datetime import needed)
+    try:
+        from datetime import date
+        today_iso = date.today().isoformat()
+        return date_posted.startswith(today_iso)
+    except Exception:
+        return False
 
 
 def _parse_budget(budget: str, salary: str) -> float:

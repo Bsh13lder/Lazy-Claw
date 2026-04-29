@@ -18,6 +18,7 @@ class PlatformConfig:
     search_path: str  # URL path with {keywords} placeholder
     jobspy_supported: bool
     login_required: bool
+    mcp_supported: bool = False  # served by a dedicated MCP server (e.g. mcp-upwork)
 
 
 PLATFORMS: dict[str, PlatformConfig] = {
@@ -27,6 +28,7 @@ PLATFORMS: dict[str, PlatformConfig] = {
         search_path="/nx/search/jobs/?q={keywords}&sort=recency&per_page=20",
         jobspy_supported=False,
         login_required=True,
+        mcp_supported=True,  # mcp-upwork (forked from vanooo/upwork-mcp)
     ),
     "indeed": PlatformConfig(
         name="Indeed",
@@ -47,6 +49,12 @@ PLATFORMS: dict[str, PlatformConfig] = {
 JOBSPY_PLATFORMS: frozenset[str] = frozenset(
     name for name, p in PLATFORMS.items() if p.jobspy_supported
 )
+MCP_PLATFORMS: frozenset[str] = frozenset(
+    name for name, p in PLATFORMS.items() if p.mcp_supported
+)
+# Browser-only = login-required AND NOT covered by an MCP. Upwork is now
+# served by mcp-upwork, so it leaves BROWSER_PLATFORMS.
 BROWSER_PLATFORMS: frozenset[str] = frozenset(
-    name for name, p in PLATFORMS.items() if not p.jobspy_supported
+    name for name, p in PLATFORMS.items()
+    if not p.jobspy_supported and not p.mcp_supported
 )

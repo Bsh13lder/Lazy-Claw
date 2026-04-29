@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "upwork": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/upwork-mcp", "run", "upwork-mcp"],
+      "env": {}
+    }
+  }
+}

@@ -23,9 +23,13 @@ class SetSkillsProfileSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Set your freelance skills profile for job matching. "
-            "Platforms available: upwork, indeed, glassdoor, freelancer, fiverr. "
-            "Usage: 'my skills are python, fastapi, react' or "
-            "'set minimum rate $40/hour' or 'set title Senior Python Developer'"
+            "Platforms: upwork, indeed, glassdoor, freelancer, fiverr. "
+            "Examples: 'my skills are python, fastapi, react' / "
+            "'set min rate $40/hour' / 'set title Senior Python Developer' / "
+            "'set tiny gig cap to 75' / 'only search indeed and linkedin' / "
+            "'show only jobs from last 24 hours' / "
+            "'switch branding to personal' / "
+            "'show my skills profile' (no args = view)."
         )
 
     @property
@@ -40,11 +44,11 @@ class SetSkillsProfileSkill(BaseSkill):
                 "skills": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Your professional skills",
+                    "description": "Your professional skills (e.g. python, react, figma)",
                 },
                 "title": {
                     "type": "string",
-                    "description": "Professional title",
+                    "description": "Professional title (e.g. 'Senior Python Developer')",
                 },
                 "bio": {
                     "type": "string",
@@ -56,7 +60,7 @@ class SetSkillsProfileSkill(BaseSkill):
                 },
                 "min_fixed_rate": {
                     "type": "number",
-                    "description": "Minimum fixed price in USD",
+                    "description": "Minimum fixed-price job amount in USD",
                 },
                 "platforms": {
                     "type": "array",
@@ -64,12 +68,50 @@ class SetSkillsProfileSkill(BaseSkill):
                         "type": "string",
                         "enum": ["upwork", "indeed", "glassdoor", "freelancer", "fiverr"],
                     },
-                    "description": "Platforms to hunt on: upwork, indeed, glassdoor, freelancer, fiverr",
+                    "description": "Platforms to hunt on",
                 },
                 "excluded_keywords": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Keywords to exclude from job results",
+                    "description": "Keywords to filter OUT of results",
+                },
+                "max_tiny_gig_budget": {
+                    "type": "number",
+                    "description": "Tiny-gig matcher bonus cap in USD (default 100). Jobs at or below this budget get a +0.10 score boost. NL: 'set tiny gig cap to 75'.",
+                },
+                "default_search_sites": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["indeed", "linkedin", "glassdoor", "zip_recruiter", "google"],
+                    },
+                    "description": "JobSpy sites to search by default. NL: 'only search indeed and linkedin'.",
+                },
+                "default_results_per_search": {
+                    "type": "integer",
+                    "description": "Max results per platform per search (default 25, max 50).",
+                },
+                "default_hours_old": {
+                    "type": "integer",
+                    "description": "Only show jobs posted within this many hours (default 72). NL: 'only show jobs from last 24 hours'.",
+                },
+                "branding_mode": {
+                    "type": "string",
+                    "enum": ["lazyclaw", "personal"],
+                    "description": "lazyclaw = transparent AI agent identity; personal = human freelancer. NL: 'switch branding to personal'.",
+                },
+                "preferred_categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Categories that get a small matcher bonus (e.g. 'web scraping', 'data extraction').",
+                },
+                "work_hours": {
+                    "type": "string",
+                    "description": "Free-text work hours, e.g. 'flexible', 'EU business hours'.",
+                },
+                "max_concurrent_jobs": {
+                    "type": "integer",
+                    "description": "Max active gigs at once (default 2).",
                 },
             },
         }
@@ -85,8 +127,6 @@ class SetSkillsProfileSkill(BaseSkill):
 
         if not raw_updates:
             profile = await get_profile(self._config, user_id)
-            if not profile.skills:
-                return "No skills profile set. Tell me your skills, title, and rates."
             branding = "LazyClaw AI Agent" if profile.branding_mode == "lazyclaw" else "Personal"
             return (
                 f"Your Skills Profile:\n\n"
@@ -96,8 +136,14 @@ class SetSkillsProfileSkill(BaseSkill):
                 f"Bio: {profile.bio or 'Not set'}\n"
                 f"Min hourly: ${profile.min_hourly_rate}/hr\n"
                 f"Min fixed: ${profile.min_fixed_rate}\n"
-                f"Platforms: {', '.join(profile.platforms)}\n"
+                f"Tiny-gig cap: ${profile.max_tiny_gig_budget}\n"
+                f"Platforms: {', '.join(profile.platforms) or 'None'}\n"
+                f"Default sites: {', '.join(profile.default_search_sites) or 'indeed'}\n"
+                f"Default hours: last {profile.default_hours_old}h, "
+                f"{profile.default_results_per_search} results/site\n"
+                f"Categories: {', '.join(profile.preferred_categories) or 'None'}\n"
                 f"Excluded: {', '.join(profile.excluded_keywords) or 'None'}\n"
+                f"Work hours: {profile.work_hours}\n"
                 f"Max concurrent: {profile.max_concurrent_jobs}"
             )
 

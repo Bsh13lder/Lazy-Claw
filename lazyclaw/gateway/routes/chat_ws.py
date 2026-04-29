@@ -73,6 +73,13 @@ class WebSocketCallback:
 
     async def on_event(self, event: AgentEvent) -> None:
         kind = event.kind
+        # Demux: events tagged with bg_task_id come from a background task
+        # (see TaskRunner._BgEventTap). Re-emit as bg_* frames so the chat
+        # UI renders them under a "Background: <name>" card instead of
+        # appending to the foreground turn's tool list (which has likely
+        # already been finalized by the brain's "done" event).
+        _bg_id = (event.metadata or {}).get("bg_task_id") if isinstance(event.metadata, dict) else None
+        _bg_name = (event.metadata or {}).get("bg_task_name") if isinstance(event.metadata, dict) else None
 
         if kind == "token":
             self._buffer += event.detail
@@ -81,13 +88,31 @@ class WebSocketCallback:
         elif kind == "tool_call":
             name = event.metadata.get("tool_name", event.detail)
             args = event.metadata.get("arguments", {})
-            await self._send({"type": "tool_call", "name": name, "args": args})
+            if _bg_id:
+                await self._send({
+                    "type": "bg_tool_call",
+                    "task_id": _bg_id,
+                    "task_name": _bg_name,
+                    "name": name,
+                    "args": args,
+                })
+            else:
+                await self._send({"type": "tool_call", "name": name, "args": args})
 
         elif kind == "tool_result":
             name = event.metadata.get("tool_name", event.detail)
             result = event.metadata.get("result", "")
             preview = result[:200] if isinstance(result, str) else str(result)[:200]
-            await self._send({"type": "tool_result", "name": name, "preview": preview})
+            if _bg_id:
+                await self._send({
+                    "type": "bg_tool_result",
+                    "task_id": _bg_id,
+                    "task_name": _bg_name,
+                    "name": name,
+                    "preview": preview,
+                })
+            else:
+                await self._send({"type": "tool_result", "name": name, "preview": preview})
 
         elif kind == "team_delegate":
             await self._send({
@@ -190,6 +215,26 @@ class WebSocketCallback:
             # on the "done" payload the client listens for.
             self._final_model = event.metadata.get("model_used") or self._final_model
             self._fallback_reason = event.metadata.get("fallback_reason")
+
+        elif kind in ("background_done", "background_failed"):
+            # Direct surface for 1-task brain fan-outs: TaskRunner._consolidate
+            # fires this on the original chat callback (not via the event bus,
+            # which is filtered for brain-source frames to avoid duplicates
+            # with multi-task consolidation turns). Without this branch, the
+            # event silently fell through and the chat UI sat in "running…"
+            # forever even after the task completed. Fixed 2026-04-29 after
+            # the Valencia salons bg task wrote to the sheet but the user was
+            # never notified. See plans/silent-completion-fix.
+            await self._send({
+                "type": kind,
+                "name": event.metadata.get("name", event.detail),
+                "task_id": event.metadata.get("task_id"),
+                "result": event.metadata.get("result"),
+                "error": event.metadata.get("error"),
+                "duration_ms": event.metadata.get("duration_ms"),
+                "tools_used": event.metadata.get("tools_used"),
+                "total_cost": event.metadata.get("total_cost"),
+            })
 
     async def on_approval_request(self, skill_name: str, arguments: dict) -> bool:
         # Auto-approve from web UI for now

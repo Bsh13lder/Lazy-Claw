@@ -120,9 +120,14 @@ class GoogleSearchAnalysisMixin:
         max_concurrent: int = 3,
         language: str = 'en',
         region: str = 'us',
-        search_genre: Optional[str] = None
+        search_genre: Optional[str] = None,
+        backend: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Perform multiple Google searches in batch"""
+        """Perform multiple Google searches in batch.
+
+        ``backend`` (optional): per-call override of the search backend.
+        See ``GoogleSearchProcessor.search_google``.
+        """
 
         async def search_single_query(query):
             return await self.search_google(
@@ -130,7 +135,8 @@ class GoogleSearchAnalysisMixin:
                 num_results=num_results_per_query,
                 language=language,
                 region=region,
-                search_genre=search_genre
+                search_genre=search_genre,
+                backend=backend,
             )
 
         semaphore = asyncio.Semaphore(max_concurrent)

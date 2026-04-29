@@ -40,6 +40,7 @@ async def search_google(
         region = request.get('region', 'us')
         safe_search = request.get('safe_search', True)
         recent_days = request.get('recent_days')
+        backend = request.get('backend')  # Optional per-call override (auto/serper/serpapi/...)
 
         # Process query for date filtering
         enhanced_query = query
@@ -59,7 +60,8 @@ async def search_google(
             language=language,
             region=region,
             safe_search=safe_search,
-            search_genre=search_genre
+            search_genre=search_genre,
+            backend=backend,
         )
 
         if result['success']:
@@ -128,6 +130,7 @@ async def batch_search_google(
         summary_length = request.get('summary_length', 'medium')
         llm_provider = request.get('llm_provider')
         llm_model = request.get('llm_model')
+        backend = request.get('backend')  # Optional per-call override (auto/serper/serpapi/...)
 
         # Process queries for date enhancement
         enhanced_queries = []
@@ -151,7 +154,8 @@ async def batch_search_google(
             max_concurrent=max_concurrent,
             language=language,
             region=region,
-            search_genre=search_genre
+            search_genre=search_genre,
+            backend=backend,
         )
 
         # Process results and count successes/failures

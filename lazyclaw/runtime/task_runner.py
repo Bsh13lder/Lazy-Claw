@@ -332,6 +332,11 @@ class TaskRunner:
         _team_lead_ref = self._team_lead
         _bound_task_id = task_id
 
+        # Capture a stable display name for the bg task so chat-side
+        # consumers can attach a label ("Background: salon_email_research")
+        # to the live progress card.
+        _bg_task_display_name = task_name
+
         class _BgEventTap:
             """Transparent wrapper around the user's original callback.
 
@@ -340,6 +345,14 @@ class TaskRunner:
             so the running background task's `current_tool` / `recent_tools`
             stay live for the dashboard poll AND for the live event bus
             (TeamLead._publish → task_event_bus → chat WS).
+
+            Also tags every forwarded event's metadata with ``bg_task_id``
+            and ``bg_task_name`` so chat WS can demux foreground vs
+            background streaming and render the bg task's progress as a
+            separate "Background: <name>" card instead of appending to the
+            (already-completed) foreground turn's tool list.
+            Fixed 2026-04-29 after a 39-iter foreground grind made the bg
+            tool stream invisible to the user.
             """
 
             def __getattr__(self, name):
@@ -362,6 +375,20 @@ class TaskRunner:
                             "team_lead.update_step failed for bg task %s",
                             _bound_task_id, exc_info=True,
                         )
+
+                # Tag the event with bg-task identity so chat WS demuxes
+                # bg streams from the active foreground turn. Mutating
+                # metadata in-place is fine — events are not retained
+                # after dispatch. We still forward the (now-tagged) event
+                # to the original callback below.
+                try:
+                    if not isinstance(event.metadata, dict):
+                        event.metadata = {}
+                    event.metadata.setdefault("bg_task_id", _bound_task_id)
+                    event.metadata.setdefault("bg_task_name", _bg_task_display_name)
+                except Exception:
+                    logger.debug("bg event tagging failed", exc_info=True)
+
                 await _original_cb.on_event(event)
 
         callback = _BgEventTap()

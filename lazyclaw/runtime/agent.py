@@ -1996,6 +1996,21 @@ class Agent:
         _HALLUC_MAX_RETRIES = 2
         _halluc_retries = 0
 
+        # Auto-promote-to-background nudge: when a foreground turn drags
+        # past N tool-using iterations and the brain hasn't yet called
+        # run_background, inject a system message that strongly suggests
+        # dispatching the rest async. Long foreground grinds (we've seen
+        # 30+ iter on sheet enrichment) burn UI context and freeze chat.
+        # Only nudges once per turn; only fires when run_background is
+        # actually in the toolset; only for foreground (bg agents
+        # shouldn't recursively dispatch). Fixed 2026-04-29 after a
+        # Valencia-salons enrichment ran 39 iter foreground without ever
+        # promoting. Track tool names called this turn so we know whether
+        # the brain already dispatched.
+        _PROMOTE_BG_AT_ITER = 8
+        _called_tool_names: set[str] = set()
+        _promoted_to_bg = False
+
         response = None
         iteration = 0
         try:
@@ -2489,6 +2504,10 @@ class Agent:
                     len(response.tool_calls or []),
                     [tc.name for tc in (response.tool_calls or [])],
                 )
+
+                # Track tool names this turn for the auto-promote heuristic.
+                for _tc in response.tool_calls or []:
+                    _called_tool_names.add(_tc.name)
 
                 # If no tools were provided but LLM returned tool_calls
                 # (hallucination from history patterns), ignore them
@@ -3286,6 +3305,51 @@ class Agent:
                                 "Do NOT write code or technical details. Just show the result."
                             ),
                         ))
+
+                # ── Auto-promote-to-background nudge ──
+                # Foreground turns that hit _PROMOTE_BG_AT_ITER without
+                # having dispatched run_background should be moved off the
+                # blocking lane. Inject a strong system instruction telling
+                # the brain to package up the rest as a background task.
+                # Only fires for foreground turns that have run_background
+                # available and haven't already used it.
+                _is_foreground = not getattr(self, "is_background", False)
+                _has_run_bg = any(
+                    (t.get("function", {}) or {}).get("name") == "run_background"
+                    for t in (tools or [])
+                )
+                if (
+                    _is_foreground
+                    and _has_run_bg
+                    and not _promoted_to_bg
+                    and "run_background" not in _called_tool_names
+                    and iteration >= _PROMOTE_BG_AT_ITER
+                ):
+                    _promoted_to_bg = True
+                    _promote_msg = LLMMessage(
+                        role="system",
+                        content=(
+                            f"[AUTO-PROMOTE] You've used {iteration} iterations "
+                            "in a foreground chat turn and haven't finished. The "
+                            "user is waiting in chat with their UI frozen. STOP "
+                            "doing more work in this turn. Your NEXT response "
+                            "MUST: (1) call `run_background(instruction=..., "
+                            "name=...)` with a self-contained instruction that "
+                            "captures everything still needed (current state, "
+                            "what's done, what remains, target sheet/file, "
+                            "success criteria), then (2) write a short reply to "
+                            "the user like 'Continuing in background, will "
+                            "report back when done.' DO NOT call any other tool "
+                            "this turn. Background tasks have full tool access "
+                            "and will surface results back to chat when complete."
+                        ),
+                    )
+                    messages.append(_promote_msg)
+                    logger.info(
+                        "Iteration %d: AUTO-PROMOTE injected — pushing brain "
+                        "to dispatch run_background and exit foreground turn",
+                        iteration + 1,
+                    )
 
                 # ── Running-long nudge ──
                 # At 80% of safety cap, tell the LLM to wrap up or ask user

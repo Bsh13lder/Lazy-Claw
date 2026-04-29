@@ -69,7 +69,23 @@ _ENUMERATION_RE = re.compile(
     r"bulk|mass|batch|harvest|"
     r"gather\s+(?:all|every|a\s+list)|"
     r"collect\s+(?:all|every|a\s+list)|"
-    r"pull\s+(?:all|every|a\s+list)"
+    r"pull\s+(?:all|every|a\s+list)|"
+    # Sheet/list enrichment patterns — multi-row work that takes >5 min
+    # synchronously and should never block the foreground chat lane.
+    # Catches "fill in missing emails", "populate the spreadsheet",
+    # "enrich this list", "find emails for the salons", "complete the
+    # missing data", "for each row", "go through the sheet".
+    # Added 2026-04-29 after a Valencia salons run blocked chat for 15min+.
+    r"fill\s+(?:in|out|the)\s+|"
+    r"populate\s+(?:the\s+)?(?:list|sheet|spreadsheet|table|column|file|csv|rows?)|"
+    r"enrich\s+(?:this|the|a)\s+(?:list|sheet|spreadsheet|table|data|column|file|csv)|"
+    r"missing\s+(?:e-?mails?|addresses?|contacts?|phone\s+numbers?|info|infos?|data|values?|cells?|fields?|rows?|entries|details?)|"
+    r"for\s+each\s+(?:row|item|entry|cell|record|line|salon|company|business|customer|client|contact|product|listing|lead)|"
+    r"per\s+(?:row|item|entry|salon|company|business|customer|client|contact|product|listing|record|line)s?|"
+    r"complete\s+(?:the\s+)?(?:list|sheet|spreadsheet|table|column|missing|rows?|entries)|"
+    r"go\s+through\s+(?:the\s+)?(?:list|sheet|spreadsheet|table|rows?)|"
+    # "find at least N X" / "find N emails" — numeric volume signals
+    r"find\s+(?:at\s+least\s+)?\d+\s+\w+"
     r")\b",
     re.IGNORECASE,
 )

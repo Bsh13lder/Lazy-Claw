@@ -304,6 +304,13 @@ class SkillRegistry:
         self.register(EcoSetModelSkill(config=config))
         self.register(EcoListModelsSkill(config=config))
 
+        from lazyclaw.skills.builtin.search_provider import (
+            SetSearchProviderSkill, ShowSearchProviderSkill,
+        )
+
+        self.register(SetSearchProviderSkill(config=config))
+        self.register(ShowSearchProviderSkill(config=config))
+
         from lazyclaw.skills.builtin.provider_management import (
             ProviderListSkill, ProviderAddSkill, ProviderScanSkill,
         )

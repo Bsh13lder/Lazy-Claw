@@ -2,8 +2,11 @@
 Search tool registrations.
 """
 
+import json
+from typing import Union, List
+
 from ._shared import (
-    Annotated, Dict, Field, Any,
+    Annotated, Dict, Field, Any, Optional,
     apply_token_limit,
     validate_content_slicing_params,
     validate_output_path,
@@ -30,12 +33,61 @@ def _extract_persist_opts(request: Dict[str, Any]):
     )
 
 
+def _normalize_queries(queries: Any) -> Union[List[str], Dict[str, str]]:
+    """Coerce LLM-produced query payloads into the list-of-strings shape the
+    inner search core expects.
+
+    Accepted shapes (all observed in production logs):
+      - ["q1", "q2"]                                 → passthrough
+      - "[{\"query\": \"q1\"}, {\"query\": \"q2\"}]" → JSON-decoded then dict-flattened
+      - "[\"q1\", \"q2\"]"                           → JSON-decoded
+      - [{"query": "q1"}, {"query": "q2"}]           → dict-flattened to ["q1", "q2"]
+      - "single string query"                        → wrapped as ["single string query"]
+
+    Returns either a normalized List[str] OR a dict {"error": "..."} when
+    the input is unrecognizable.
+    """
+    if queries is None:
+        return {"error": "queries is required."}
+
+    # JSON-encoded string → decode first.
+    if isinstance(queries, str):
+        s = queries.strip()
+        if s.startswith('[') or s.startswith('{'):
+            try:
+                queries = json.loads(s)
+            except json.JSONDecodeError:
+                return {"error": f"queries is a malformed JSON string: {s[:80]}"}
+        else:
+            # Bare single query — wrap into a list.
+            return [s] if s else {"error": "queries is empty."}
+
+    if not isinstance(queries, list):
+        return {"error": f"queries must be a list of strings; got {type(queries).__name__}."}
+
+    # Flatten list-of-dicts (each having `query` key) to list-of-strings.
+    out: List[str] = []
+    for item in queries:
+        if isinstance(item, str):
+            if item.strip():
+                out.append(item.strip())
+        elif isinstance(item, dict):
+            q = item.get('query') or item.get('q') or item.get('text')
+            if isinstance(q, str) and q.strip():
+                out.append(q.strip())
+            else:
+                return {"error": f"query item missing 'query' string: {item}"}
+        else:
+            return {"error": f"unsupported query item type: {type(item).__name__}"}
+    return out
+
+
 def register_search_tools(mcp, get_modules):
     """Register search-related MCP tools."""
 
     @mcp.tool(annotations=READONLY_ANNOTATIONS)
     async def search_google(
-        request: Annotated[Dict[str, Any], Field(description="Dict with: query (required), num_results, search_genre, language, region, recent_days, content_limit (int), content_offset (int). Optional persistence keys: output_path (absolute file path, auto .json extension — full unsliced results written to disk BEFORE content_limit/content_offset slicing), include_content_in_response (bool, default False — when True keeps results in the response too, still subject to slicing), overwrite (bool, default False).")]
+        request: Annotated[Dict[str, Any], Field(description="Dict with: query (required), num_results, search_genre, language, region, recent_days, content_limit (int), content_offset (int), backend (optional: 'auto'/'serper'/'serpapi'/'googlesearch_only'/'custom_search_only'). Optional persistence keys: output_path (absolute file path, auto .json extension — full unsliced results written to disk BEFORE content_limit/content_offset slicing), include_content_in_response (bool, default False — when True keeps results in the response too, still subject to slicing), overwrite (bool, default False).")]
     ) -> Dict[str, Any]:
         """Search Google with genre filtering. Genres: academic, news, technical, commercial, social. Supply output_path in the request to persist the full unsliced result set to disk as JSON and receive a slim response."""
         # Output path validation (Guard A)
@@ -128,16 +180,31 @@ def register_search_tools(mcp, get_modules):
 
     @mcp.tool(annotations=READONLY_ANNOTATIONS)
     async def batch_search_google(
-        request: Annotated[Dict[str, Any], Field(description="Dict with: queries (max 3), num_results_per_query, search_genre, recent_days. Optional persistence keys: output_path (absolute file path, auto .json extension — full result set written to disk), include_content_in_response (bool, default False — when True keeps results in the response too), overwrite (bool, default False).")]
+        queries: Annotated[Union[List[Any], str], Field(description="List of search query strings. Max 3 per call. Example: [\"site:example.com email\", \"another query\"]. Also accepts a JSON-encoded string of the same shape, or a list of {query: '...'} dicts.")],
+        num_results_per_query: Annotated[int, Field(description="Results per query. Default 10.")] = 10,
+        search_genre: Annotated[Optional[str], Field(description="Optional genre filter: academic, news, technical, commercial, social.")] = None,
+        recent_days: Annotated[Optional[int], Field(description="Filter to results from last N days. None = all dates.")] = None,
+        language: Annotated[str, Field(description="Search language code, e.g. 'en', 'es'.")] = "en",
+        region: Annotated[str, Field(description="Search region code, e.g. 'us', 'es'.")] = "us",
+        max_concurrent: Annotated[int, Field(description="Max concurrent searches. 1-5. Default 3.")] = 3,
+        backend: Annotated[Optional[str], Field(description="Override search backend per call: auto / serper / serpapi / googlesearch_only / custom_search_only. Defaults to env SCRAPER_SEARCH_BACKEND or 'auto'.")] = None,
+        output_path: Annotated[Optional[str], Field(description="Absolute file path (auto .json) to persist full result set; response slimmed when set.")] = None,
+        include_content_in_response: Annotated[bool, Field(description="When True with output_path, also keep results in response.")] = False,
+        overwrite: Annotated[bool, Field(description="Overwrite existing output_path file.")] = False,
     ) -> Dict[str, Any]:
-        """Perform multiple Google searches. Max 3 queries per call. Supply output_path in the request to persist the full result set to disk as JSON and receive a slim response."""
-        # Query limit check (MCP best practice: bounded toolsets)
-        queries = request.get('queries', [])
+        """Perform multiple Google searches. Max 3 queries per call. `queries` is normally a list of strings (e.g. ["q1", "q2"]); JSON-encoded strings and lists of {query: '...'} dicts are also accepted and normalized. Supply output_path to persist the full result set to disk as JSON."""
+        # Coerce LLM-produced shapes into the list-of-strings the core expects.
+        normalized = _normalize_queries(queries)
+        if isinstance(normalized, dict) and 'error' in normalized:
+            return {"success": False, "error": normalized['error']}
+        queries = normalized  # type: List[str]
+
         if len(queries) > 3:
             return {"success": False, "error": "Maximum 3 queries allowed per batch. Split into multiple calls."}
+        if not queries:
+            return {"success": False, "error": "queries is required and must be non-empty."}
 
         # Output path validation (Guard A)
-        output_path, include_content_in_response, overwrite = _extract_persist_opts(request)
         output_error = validate_output_path(output_path, overwrite)
         if output_error:
             return output_error
@@ -146,6 +213,25 @@ def register_search_tools(mcp, get_modules):
         if not modules:
             return modules_unavailable_error()
         web_crawling, search, youtube, file_processing, utilities = modules
+
+        # Reconstruct the request dict the inner core function expects.
+        request: Dict[str, Any] = {
+            "queries": queries,
+            "num_results_per_query": num_results_per_query,
+            "language": language,
+            "region": region,
+            "max_concurrent": max_concurrent,
+        }
+        if search_genre is not None:
+            request["search_genre"] = search_genre
+        if recent_days is not None:
+            request["recent_days"] = recent_days
+        if backend is not None:
+            request["backend"] = backend
+        if output_path is not None:
+            request["output_path"] = output_path
+            request["include_content_in_response"] = include_content_in_response
+            request["overwrite"] = overwrite
 
         try:
             result = await search.batch_search_google(request)

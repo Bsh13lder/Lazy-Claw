@@ -120,10 +120,28 @@ export interface BackgroundCompletePayload {
   toolsUsed?: string[];
 }
 
+// Live tool-call/tool-result emitted by a running background task.
+// Consumers render these under a per-task "Background: <name>" card
+// that lives below the brain's reply, persists past the foreground
+// "done" event, and finalizes when the matching background_done lands.
+export interface BackgroundToolEvent {
+  kind: "tool_call" | "tool_result";
+  taskId: string;
+  taskName: string;
+  name: string;             // tool name, e.g. mcp_scraper_extract_entities
+  args?: Record<string, unknown>;
+  preview?: string;
+  ts: number;
+}
+
 interface UseChatStreamOptions {
   onComplete: (payload: OnCompletePayload) => void;
   onError: (message: string) => void;
   onBackgroundComplete?: (payload: BackgroundCompletePayload) => void;
+  // Fired on every live tool_call / tool_result emitted by a running
+  // background task. The host typically appends to a per-task list and
+  // renders a "Background: <name>" card under the brain's reply.
+  onBackgroundTool?: (evt: BackgroundToolEvent) => void;
   // Fired on TeamLead / TaskRunner lifecycle frames (`task_started`,
   // `task_step`, `task_phase`, `task_completed`, `background_started`,
   // `background_done`, `background_failed`). Consumers usually trigger an
@@ -152,6 +170,7 @@ export function useChatStream({
   onComplete,
   onError,
   onBackgroundComplete,
+  onBackgroundTool,
   onAgentTaskEvent,
   onQueuedUserMessage,
   enabled = true,
@@ -183,15 +202,17 @@ export function useChatStream({
   const onCompleteRef = useRef(onComplete);
   const onErrorRef = useRef(onError);
   const onBackgroundCompleteRef = useRef(onBackgroundComplete);
+  const onBackgroundToolRef = useRef(onBackgroundTool);
   const onAgentTaskEventRef = useRef(onAgentTaskEvent);
   const onQueuedUserMessageRef = useRef(onQueuedUserMessage);
   useEffect(() => {
     onCompleteRef.current = onComplete;
     onErrorRef.current = onError;
     onBackgroundCompleteRef.current = onBackgroundComplete;
+    onBackgroundToolRef.current = onBackgroundTool;
     onAgentTaskEventRef.current = onAgentTaskEvent;
     onQueuedUserMessageRef.current = onQueuedUserMessage;
-  }, [onComplete, onError, onBackgroundComplete, onAgentTaskEvent, onQueuedUserMessage]);
+  }, [onComplete, onError, onBackgroundComplete, onBackgroundTool, onAgentTaskEvent, onQueuedUserMessage]);
 
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;
@@ -313,67 +334,48 @@ export function useChatStream({
           break;
         }
 
-        case "specialist_start": {
-          const tool: ToolCallInfo = {
-            name: `team:${msg.name as string}`,
-            args: { task: msg.task as string },
-            status: "running",
-            started_at: Date.now(),
-          };
-          toolsRef.current = [...toolsRef.current, tool];
-          scheduleFlush();
+        // Live tool stream from a running background task. Surfaced as a
+        // separate event so consumers render a per-task "Background:
+        // <name>" card under the brain's reply that grows live and
+        // finalizes when the matching background_done arrives. NEVER
+        // mutates toolsRef — that's foreground-only.
+        case "bg_tool_call":
+        case "bg_tool_result": {
+          const cb = onBackgroundToolRef.current;
+          if (cb) {
+            cb({
+              kind: type === "bg_tool_call" ? "tool_call" : "tool_result",
+              taskId: (msg.task_id as string) ?? "",
+              taskName: (msg.task_name as string) ?? "Background task",
+              name: (msg.name as string) ?? "",
+              args: type === "bg_tool_call"
+                ? (msg.args as Record<string, unknown>) ?? {}
+                : undefined,
+              preview: type === "bg_tool_result"
+                ? (msg.preview as string)
+                : undefined,
+              ts: Date.now(),
+            });
+          }
+          // Also nudge dashboard to refresh — the bg task's
+          // current_tool / recent_tools list updates via TeamLead.
+          onAgentTaskEventRef.current?.();
           break;
         }
 
-        case "specialist_thinking": {
-          const teamName = `team:${msg.specialist as string}`;
-          const iter = msg.iteration as number | undefined;
-          toolsRef.current = toolsRef.current.map((t) =>
-            t.name === teamName && t.status === "running"
-              ? { ...t, preview: iter ? `step ${iter}` : t.preview }
-              : t,
-          );
-          scheduleFlush();
-          break;
-        }
-
-        case "specialist_tool": {
-          const teamName = `team:${msg.specialist as string}`;
-          const tool = msg.tool as string;
-          toolsRef.current = toolsRef.current.map((t) =>
-            t.name === teamName && t.status === "running"
-              ? { ...t, preview: tool ? `→ ${tool}` : t.preview }
-              : t,
-          );
-          scheduleFlush();
-          break;
-        }
-
+        case "specialist_start":
+        case "specialist_thinking":
+        case "specialist_tool":
+        case "specialist_done":
         case "team_delegate":
-          // Legacy event from delegate.py — specialist_start carries the
-          // same info and creates the team:* card. No-op here so the
-          // event isn't logged as unhandled.
+          // Parallel / delegated agents are NOT foreground work — they
+          // belong in the Activity / Overview Background lane (dispatched
+          // subagents) or Specialist lane (single delegate). We no longer
+          // mount a `team:*` chip in the streaming chat tool widget; we
+          // just nudge the dashboard so it repolls and shows the live
+          // specialist immediately.
+          onAgentTaskEventRef.current?.();
           break;
-
-        case "specialist_done": {
-          const teamName = `team:${msg.name as string}`;
-          const now = Date.now();
-          const success = msg.success as boolean | undefined;
-          const errMsg = msg.error as string | undefined;
-          toolsRef.current = toolsRef.current.map((t) =>
-            t.name === teamName && t.status === "running"
-              ? {
-                  ...t,
-                  status: success === false ? ("error" as const) : ("done" as const),
-                  error: success === false ? errMsg : undefined,
-                  completed_at: now,
-                  duration_ms: t.started_at ? now - t.started_at : undefined,
-                }
-              : t,
-          );
-          scheduleFlush();
-          break;
-        }
 
         case "thinking":
           // Agent reasoning — captured for future display

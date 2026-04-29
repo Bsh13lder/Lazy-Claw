@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -14,6 +16,83 @@ from lazyclaw.skills.registry import SkillRegistry
 logger = logging.getLogger(__name__)
 
 _MCP_PREFIX = "mcp_"
+
+# ── Scraper pool plumbing ────────────────────────────────────────────────
+# `mcp-scraper-1`, `mcp-scraper-2`, … are N parallel subprocesses that
+# expose identical schemas. They're abstracted as a single pooled skill
+# set in the registry under canonical names `mcp_scraper_<tool>`. The
+# pool lives here (not in manager.py) because it's a registry-skill
+# concern, not a connection concern. See:
+#   ~/.claude/plans/i-prefer-hard-and-stateful-alpaca.md
+_SCRAPER_SHARD_RE = re.compile(r"^mcp-scraper-\d+$")
+_SCRAPER_CANONICAL = "mcp-scraper"  # name used in skill_lesson + display
+_SCRAPER_TOOL_PREFIX = "mcp_scraper_"  # canonical registry name prefix
+_pool_counter = itertools.count()  # process-wide round-robin index
+
+
+def is_scraper_shard(name: str) -> bool:
+    """True if `name` looks like `mcp-scraper-1`, `mcp-scraper-2`, …"""
+    return bool(_SCRAPER_SHARD_RE.match(name or ""))
+
+
+# ── Per-user search backend injection ───────────────────────────────────
+# When the user changes their search backend (Web UI dropdown / Telegram
+# `/search serper` / NL `set_search_provider serper`), it lands in
+# users.settings.general.search_provider. Bridge auto-injects it into
+# scraper search calls so the AI doesn't need to know.
+# Maps user-facing names to the scraper's internal mode names.
+_USER_PROVIDER_TO_SCRAPER_BACKEND = {
+    "auto": "auto",
+    "serper": "serper",
+    "serpapi": "serpapi",
+    # 'duckduckgo' user pref → scraper has no DDG backend; fall back to auto
+    # (Serper-first chain). LazyClaw's own web_search skill respects DDG.
+    "duckduckgo": "auto",
+}
+
+
+async def _inject_user_search_backend(
+    config: Any,
+    user_id: str | None,
+    tool_name: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Inject the user's ``general.search_provider`` into scraper search
+    tool params. Per-call ``backend`` arg from the LLM always wins.
+
+    For ``batch_search_google`` (flat signature) the field is a top-level
+    ``backend``. For ``search_google`` (request-envelope signature) the
+    field lands inside ``request.backend``. Returns the (possibly modified)
+    params dict.
+    """
+    if config is None or not user_id:
+        return params
+    # If the LLM already passed an explicit backend, leave it alone.
+    if tool_name == "batch_search_google" and params.get("backend"):
+        return params
+    if tool_name == "search_google":
+        req = params.get("request")
+        if isinstance(req, dict) and req.get("backend"):
+            return params
+    try:
+        from lazyclaw.settings.general import get_general_settings
+        general = await get_general_settings(config, user_id)
+    except Exception:
+        logger.debug("search backend injection: settings load failed", exc_info=True)
+        return params
+    pref = str(general.get("search_provider") or "auto").lower().strip()
+    backend = _USER_PROVIDER_TO_SCRAPER_BACKEND.get(pref, "auto")
+    if tool_name == "batch_search_google":
+        params["backend"] = backend
+    else:  # search_google — request envelope
+        req = params.get("request")
+        if isinstance(req, dict):
+            req["backend"] = backend
+            params["request"] = req
+        else:
+            # Caller passed flat? Stash it in a request dict for forward-compat.
+            params.setdefault("request", {})["backend"] = backend
+    return params
 
 # ── Per-server call concurrency cap ──────────────────────────────────────
 # Each MCP server is one stdio subprocess. crawl4ai (mcp-scraper) holds a
@@ -241,6 +320,170 @@ class MCPToolSkill(BaseSkill):
             self._config, user_id, self._client.server_id,
             server, new_tokens.access_token,
         )
+
+
+class PooledMCPToolSkill(BaseSkill):
+    """Round-robin wrapper over N MCPClient shards exposing the same tool.
+
+    The mcp-scraper bundle ships as multiple identical subprocesses
+    (`mcp-scraper-1`, `mcp-scraper-2`, …) so parallel callers don't
+    serialize behind one client's `_call_lock`. This skill picks a
+    shard via a process-wide `itertools.count()` counter, falls
+    through to the next shard if a call returns an error, and skips
+    disconnected shards entirely.
+
+    Registered under canonical names `mcp_scraper_<tool>` — one entry
+    per tool, no UUID. The brain therefore sees one set of scraper
+    tools regardless of pool size.
+    """
+
+    def __init__(
+        self,
+        clients: list[MCPClient],
+        tool_name: str,
+        tool_description: str,
+        tool_schema: dict[str, Any],
+        config: Any = None,
+        user_id: str | None = None,
+    ) -> None:
+        # Shared mutable list — manager.py appends lazy-spawned shards here
+        self._clients = clients
+        self._tool_name = tool_name
+        self._tool_description = tool_description
+        self._tool_schema = tool_schema
+        self._config = config
+        self._user_id = user_id
+
+    @property
+    def name(self) -> str:
+        return f"{_SCRAPER_TOOL_PREFIX}{self._tool_name}"
+
+    @property
+    def display_name(self) -> str:
+        return f"{_SCRAPER_CANONICAL}:{self._tool_name}"
+
+    @property
+    def description(self) -> str:
+        return f"[MCP: {_SCRAPER_CANONICAL}] {self._tool_description}"
+
+    @property
+    def category(self) -> str:
+        return "mcp"
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return self._tool_schema
+
+    def _ordered_shards(self) -> list[MCPClient]:
+        """Return shards starting at the current round-robin index.
+
+        Skips disconnected shards. The list never mutates mid-call —
+        callers iterate this list, not the underlying `_clients`.
+        """
+        live = [c for c in self._clients if c.is_connected]
+        if not live:
+            return []
+        start = next(_pool_counter) % len(live)
+        return live[start:] + live[:start]
+
+    async def execute(self, user_id: str, params: dict[str, Any]) -> str:
+        """Pick a shard, call the tool, retry on next shard on error.
+
+        Lazy-spawn hook: if shard-0's call semaphore is saturated
+        (`locked()`), trigger `_ensure_scraper_shard(idx)` for the
+        next un-spawned shard. Falls back to running on shard-0
+        regardless — the lazy spawn is best-effort capacity growth.
+
+        Search-backend injection: for ``search_google`` and
+        ``batch_search_google``, auto-inject the user's chosen
+        backend (``general.search_provider``) so changing the
+        setting in Web UI / Telegram propagates to the next call
+        without any LLM-side change.
+        """
+        # Lazy-spawn check (best effort, never blocks the call)
+        if self._clients and self._clients[0].is_connected:
+            sem0 = _get_call_semaphore(self._clients[0].server_id)
+            if sem0.locked():
+                try:
+                    from lazyclaw.mcp.manager import maybe_grow_scraper_pool
+                    asyncio.create_task(
+                        maybe_grow_scraper_pool(self._config, user_id),
+                    )
+                except Exception:
+                    logger.debug("scraper pool growth skipped", exc_info=True)
+
+        # Inject user's per-user search backend preference for search tools
+        # (only when the LLM didn't already pass one explicitly).
+        if self._tool_name in ("search_google", "batch_search_google"):
+            params = await _inject_user_search_backend(
+                self._config, user_id, self._tool_name, dict(params),
+            )
+
+        ordered = self._ordered_shards()
+        if not ordered:
+            return (
+                "[MCP ERROR] scraper pool fully unavailable — all shards "
+                "disconnected. Try again in a few seconds."
+            )
+
+        last_error: str | None = None
+        for idx, client in enumerate(ordered):
+            try:
+                async with _get_call_semaphore(client.server_id):
+                    result = await client.call_tool(self._tool_name, params)
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "scraper shard %s failed on %s: %s — trying next",
+                    client.name, self._tool_name, exc,
+                )
+                # Only retry once across shards — keep latency bounded
+                if idx >= 1:
+                    break
+                continue
+
+            if _mcp_result_indicates_error(result) and idx == 0:
+                # First shard returned an error string — try the next one
+                last_error = result[:200]
+                logger.info(
+                    "scraper shard %s returned error on %s, retrying on next shard",
+                    client.name, self._tool_name,
+                )
+                continue
+
+            # Fire-and-forget skill_lesson — record under canonical name
+            # so recall lookups don't fragment across N shard variants.
+            try:
+                topic = _mcp_topic_for(self._tool_name, _SCRAPER_CANONICAL)
+                if (
+                    topic is not None
+                    and self._config is not None
+                    and not _mcp_result_indicates_error(result)
+                ):
+                    from lazyclaw.runtime.skill_lesson import save_skill_lesson
+                    await save_skill_lesson(
+                        self._config, user_id,
+                        topic=topic,
+                        action=self._tool_name,
+                        intent=f"call {self._tool_name} via {_SCRAPER_CANONICAL}",
+                        params=params,
+                        outcome="success",
+                    )
+            except Exception:
+                logger.debug("scraper pool lesson save failed", exc_info=True)
+
+            return result
+
+        return (
+            f"[MCP ERROR] scraper pool exhausted on {self._tool_name} — "
+            f"last error: {last_error or 'unknown'}"
+        )
+
+
+# Per-canonical-name pool registry — lets manager.py look up the existing
+# pooled skill when a lazy-spawned shard becomes available, so we can
+# append the new client to the shared list without re-registering.
+_pooled_skills_by_tool: dict[str, PooledMCPToolSkill] = {}
 
 
 def _is_auth_error(exc: BaseException) -> bool:
@@ -483,6 +726,82 @@ async def register_mcp_tools(
         "Registered %d tools from MCP server %s", count, client.server_id
     )
     return count
+
+
+async def register_scraper_pool(
+    clients: list[MCPClient],
+    registry: SkillRegistry,
+    config: Any = None,
+    user_id: str | None = None,
+) -> int:
+    """Register canonical scraper tools backed by a shared client pool.
+
+    Enumerates tools from the first connected client (all shards expose
+    identical schemas) and creates one `PooledMCPToolSkill` per tool
+    under canonical name `mcp_scraper_<tool>`. The shared `clients`
+    list lets `add_scraper_shard_to_pool` append lazy-spawned shards
+    later without re-registering.
+
+    Returns the number of pooled tools registered.
+    """
+    if not clients:
+        logger.warning("register_scraper_pool called with no clients")
+        return 0
+
+    first_live = next((c for c in clients if c.is_connected), None)
+    if first_live is None:
+        logger.warning("register_scraper_pool: no connected clients yet")
+        return 0
+
+    tools = await first_live.list_tools()
+    count = 0
+    for tool in tools:
+        base_name = tool["name"]
+        canonical_name = f"{_SCRAPER_TOOL_PREFIX}{base_name}"
+        # Idempotent — re-registering the same canonical name is a no-op
+        # so both eager startup and lazy late-bind paths can call this.
+        if canonical_name in _pooled_skills_by_tool:
+            continue
+        skill = PooledMCPToolSkill(
+            clients=clients,
+            tool_name=base_name,
+            tool_description=_decorate_description(
+                base_name, tool.get("description", ""),
+            ),
+            tool_schema=tool.get("inputSchema", {}),
+            config=config,
+            user_id=user_id,
+        )
+        registry.register(skill)
+        _pooled_skills_by_tool[canonical_name] = skill
+        count += 1
+    logger.info(
+        "Registered %d pooled scraper tools (pool size=%d)",
+        count, len(clients),
+    )
+    return count
+
+
+def add_scraper_shard_to_pool(client: MCPClient) -> None:
+    """Append a lazy-spawned shard to the existing pool's shared list.
+
+    Pool skills hold a reference to the same `clients` list, so a new
+    shard becomes visible to round-robin on the next `execute()` call.
+    No-op if no pool has been registered yet (skip-add).
+    """
+    if not _pooled_skills_by_tool:
+        logger.debug(
+            "add_scraper_shard_to_pool: no pool registered yet, skip-add",
+        )
+        return
+    # All pooled skills share the same list — pick any to append to
+    sample = next(iter(_pooled_skills_by_tool.values()))
+    if client not in sample._clients:
+        sample._clients.append(client)
+        logger.info(
+            "Added scraper shard %s to pool (size now=%d)",
+            client.name, len(sample._clients),
+        )
 
 
 def unregister_mcp_tools(server_id: str, registry: SkillRegistry) -> int:

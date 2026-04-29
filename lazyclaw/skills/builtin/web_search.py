@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -74,13 +75,11 @@ _usage = _ProviderUsage()
 # "scraper" once mcp-scraper became the IDEAL search backbone (2026-04-26).
 _active_provider: str = "scraper"
 
-# mcp-scraper integration constants. The wrapper exposes `search_google`
-# (single query), `batch_search_google` (parallel multi-query), and
-# `search_and_crawl` (search + fetch). web_search uses `search_google`
-# for the single-query path. Tool names are auto-prefixed by the MCP
-# bridge as `mcp_<server_uuid>_<tool_name>`.
-_SCRAPER_SERVER_NAME = "mcp-scraper"
-_SCRAPER_SEARCH_SUFFIX = "_search_google"
+# mcp-scraper integration: pool of N parallel shards registered under
+# canonical names `mcp_scraper_<tool>` (see lazyclaw/mcp/bridge.py:
+# PooledMCPToolSkill). Single-query Google search lives at
+# `mcp_scraper_search_google`. Round-robin / lazy-spawn handled
+# inside the pool — callers just look up the canonical name.
 
 
 def _paid_search_enabled() -> bool:
@@ -514,66 +513,33 @@ async def _scraper_search(
     max_results: int,
     search_type: str,
 ) -> str | None:
-    """Run a Google search through mcp-scraper's `search_google` tool.
+    """Run a Google search through the mcp-scraper pool's `search_google`.
 
-    Returns formatted result string on success, ``None`` if the scraper
-    server isn't registered or the call yielded no usable result. Raises
-    on transport/HTTP errors so the caller can flip the cooldown.
+    Returns formatted result string on success, ``None`` if the pool
+    isn't registered or the call yielded no usable result. Raises on
+    transport/HTTP errors so the caller can flip the cooldown.
 
-    The scraper's tool name is dynamic (`mcp_<server_uuid>_search_google`),
-    so we suffix-match on registered MCP tools and tighten with a description
-    check (the bridge embeds the server name in the description).
+    The pool registers tools under canonical name `mcp_scraper_<tool>`
+    in the registry — one entry per tool regardless of pool size. Round-
+    robin happens inside `PooledMCPToolSkill.execute`.
     """
     if registry is None:
         return None
 
-    # Suffix-match on already-registered MCP tools first.
-    target_skill = None
-    for tool_info in registry.list_mcp_tools():
-        func = tool_info.get("function", {})
-        tname = func.get("name", "")
-        tdesc = func.get("description", "").lower()
-        if tname.endswith(_SCRAPER_SEARCH_SUFFIX) and _SCRAPER_SERVER_NAME in tdesc:
-            target_skill = registry.get(tname)
-            if target_skill is not None:
-                break
-
-    # On-demand connect if mcp-scraper isn't active yet. Mirrors the
-    # pattern in lazyclaw/runtime/agent.py (~line 1480) so behavior is
-    # consistent between brain-side keyword injection and search-side.
+    # Canonical lookup — pool registers `mcp_scraper_search_google` once
+    target_skill = registry.get("mcp_scraper_search_google")
     if target_skill is None:
+        # Pool wasn't registered (e.g. shard-1 failed to boot). Try an
+        # on-demand spawn of shard-0 so single-call paths still work.
         try:
             from lazyclaw.config import load_config
-            from lazyclaw.mcp.bridge import cache_tool_schemas, register_mcp_tools
-            from lazyclaw.mcp.manager import (
-                connect_server, get_server_id_by_name,
-            )
-
+            from lazyclaw.mcp.manager import _ensure_scraper_shard
             cfg = load_config()
-            sid = await get_server_id_by_name(cfg, user_id, _SCRAPER_SERVER_NAME)
-            if not sid:
-                return None
-            client = await asyncio.wait_for(
-                connect_server(cfg, user_id, sid), timeout=20,
-            )
-            tools_list = await client.list_tools()
-            await cache_tool_schemas(cfg, _SCRAPER_SERVER_NAME, tools_list)
-            await register_mcp_tools(
-                client, registry, config=cfg, user_id=user_id,
-            )
-            for tool_info in registry.list_mcp_tools():
-                func = tool_info.get("function", {})
-                tname = func.get("name", "")
-                tdesc = func.get("description", "").lower()
-                if (
-                    tname.endswith(_SCRAPER_SEARCH_SUFFIX)
-                    and _SCRAPER_SERVER_NAME in tdesc
-                ):
-                    target_skill = registry.get(tname)
-                    if target_skill is not None:
-                        break
+            spawned = await _ensure_scraper_shard(cfg, user_id, 0)
+            if spawned:
+                target_skill = registry.get("mcp_scraper_search_google")
         except Exception:
-            logger.debug("mcp-scraper on-demand connect failed", exc_info=True)
+            logger.debug("scraper pool on-demand spawn failed", exc_info=True)
             return None
 
     if target_skill is None:
@@ -588,8 +554,24 @@ async def _scraper_search(
     )
     if not raw or not isinstance(raw, str):
         return None
-    if "rate limit" in raw.lower() or "429" in raw:
+    # Trip cooldown ONLY on real rate-limit signals, not on the catch-all
+    # "All search methods failed or rate limited" string mcp-scraper returns
+    # when ALL backends return 0 results for hyper-specific quoted queries.
+    # That string contains "rate limit" but means "no hits anywhere", not
+    # "Serper threw a 429". Substring-matching it tripped a 60s pool-wide
+    # cooldown on every 0-result query, blocking real Serper hits behind it.
+    # See: scraper rate-limit false-positive bug, 2026-04-29.
+    raw_lower = raw.lower()
+    is_real_rate_limit = (
+        "429" in raw
+        or "quota exhausted" in raw_lower
+        or "too many requests" in raw_lower
+        or '"status_code": 429' in raw
+        or '"rate_limited": true' in raw_lower
+    )
+    if is_real_rate_limit:
         # Surface so the caller can trip the cooldown and fall through.
+        # Cooldown is pool-wide intentionally — shards share egress IP.
         raise RuntimeError(f"scraper-google rate-limited: {raw[:200]}")
 
     _usage.record("scraper")
@@ -631,6 +613,51 @@ def _detect_search_type(query: str) -> str:
     if any(w in q for w in shop_words) and "flight" not in q:
         return "shopping"
     return "search"
+
+
+# Match a quoted phrase, including curly quotes some LLMs emit.
+_QUOTE_RE = re.compile(r"""[“”"][^“”"]+[“”"]""")
+
+
+def _query_overspecified(query: str) -> bool:
+    """True when a query has 2+ quoted phrases — usually means the agent
+    pinned name + address + phone all at once and Serper drops to 0 hits.
+    Single-quoted brand names ("Apple") are NOT over-specification."""
+    return len(_QUOTE_RE.findall(query)) >= 2
+
+
+def _strip_quotes(query: str) -> str:
+    """Strip all quoted phrases from a query, keep the bare tokens.
+    Collapses extra whitespace. ``'"Foo Bar" Madrid "Calle 1" email'`` →
+    ``'Foo Bar Madrid Calle 1 email'``."""
+    # Replace the QUOTE wrappers with their content (drop the quote chars
+    # but keep the words inside — the tokens are still useful, just not
+    # forced as exact phrases).
+    out = _QUOTE_RE.sub(lambda m: m.group(0)[1:-1], query)
+    # Collapse whitespace
+    return " ".join(out.split())
+
+
+# Patterns that indicate a search returned no useful results. Lowercased
+# for case-insensitive matching.
+_EMPTY_RESULT_PATTERNS = (
+    "no results found",
+    "no search results found",
+    "all search backends returned 0 results",
+    "all search methods failed",
+    "search backends failed",
+)
+
+
+def _result_is_empty(result: str | None) -> bool:
+    """True when a search result text indicates 0 hits or pure failure.
+    Used by the auto-fallback to decide whether to retry with bare query."""
+    if not result or not isinstance(result, str):
+        return True
+    if len(result.strip()) < 30:
+        return True
+    low = result.lower()
+    return any(pat in low for pat in _EMPTY_RESULT_PATTERNS)
 
 
 class WebSearchSkill(BaseSkill):
@@ -688,10 +715,57 @@ class WebSearchSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        query = params["query"]
+        original_query = params["query"]
         max_results = params.get("max_results", 5)
-        search_type = params.get("search_type") or _detect_search_type(query)
+        search_type = params.get("search_type") or _detect_search_type(original_query)
 
+        # First attempt with the query as-passed.
+        result = await self._search_once(
+            user_id, original_query, max_results, search_type,
+        )
+
+        # Auto-fallback: when an over-specific quoted query returns 0 hits,
+        # retry once with all quoted phrases stripped. Empirically the LLM
+        # constructs queries like:
+        #   "Peluqueria Elite" Valencia "Calle Ruzafa 12" email contacto
+        # which Serper returns 0 hits for (BOE legal docs / random TikTok),
+        # while the bare equivalent
+        #   Peluqueria Elite Valencia
+        # returns the salon's actual booksy/treatwell/instagram listings.
+        # See: scraper-bug-report 2026-04-29 "over-specific quoted queries".
+        # Only fires when (a) query has 2+ quoted phrases (multi-quote =
+        # over-specification, single-quoted brand name is fine) AND (b)
+        # the result text indicates 0 hits.
+        if _query_overspecified(original_query) and _result_is_empty(result):
+            bare = _strip_quotes(original_query)
+            if bare and bare != original_query:
+                logger.info(
+                    "Auto-fallback: 0 hits on quoted query, retrying bare → %r",
+                    bare[:80],
+                )
+                fallback = await self._search_once(
+                    user_id, bare, max_results, search_type,
+                )
+                if not _result_is_empty(fallback):
+                    return (
+                        f"[Auto-fallback: original quoted query returned 0 hits, "
+                        f"retried with bare query {bare!r}]\n\n{fallback}"
+                    )
+        return result
+
+    async def _search_once(
+        self,
+        user_id: str,
+        query: str,
+        max_results: int,
+        search_type: str,
+    ) -> str:
+        """Run one full search-backend cycle (scraper → paid → DDG).
+
+        Extracted so ``execute`` can call this twice on auto-fallback —
+        first with the original (possibly over-specific quoted) query,
+        and again with quoted phrases stripped if the first returns 0.
+        """
         provider = await resolve_active_provider(user_id)
         serper_key = os.getenv("SERPER_KEY", "")
         serpapi_key = os.getenv("SERPAPI_KEY", "")

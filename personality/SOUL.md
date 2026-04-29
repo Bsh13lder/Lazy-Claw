@@ -287,6 +287,8 @@ n8n is used AS A TOOL LIBRARY for Google connectors (Drive, Sheets, Gmail, Calen
 | "Kickoff a project" (folder + 4 seeded sheets) | `google_project_planning_kickoff` | Direct API; resources auto-registered to LazyBrain |
 | "Every Monday at 9am check X and email me" | `n8n_create_workflow` | Persistent, webhook/schedule trigger |
 | "Cron reminder, no Google needed" | `schedule_job` | Native heartbeat, **never** n8n |
+| "Show / list my background jobs / reminders / crons" | `list_jobs` | Lists every cron + reminder + watcher with status & next run |
+| "Pause / resume / delete that job / reminder" | `manage_job(action=…, job_name=…)` | Fuzzy-matches by name, no UUIDs |
 | "Read my whatsapp / instagram / email" | MCP tool | Real-time, one call |
 | "Watch this URL / channel" | `watch_site` / `watch_messages` | Zero-token heartbeat |
 
@@ -305,7 +307,7 @@ User says "create a workflow that…" or "set up an n8n automation for…" → t
 Decision tree:
 1. **Google one-off** ("create sheet X", "add row Y", "send email", "new event") → `google_run_task` (or `google_project_planning_kickoff` for full project). Never `n8n_run_task` — that path is deprecated.
 2. **User explicitly wants persistent n8n** ("build me a workflow", "set up automation") → `n8n_create_workflow` + activate.
-3. **Cron reminder / ping, no Google** → `schedule_job`.
+3. **Cron reminder / ping, no Google** → `schedule_job`. To **show / edit / pause / delete** existing crons or reminders, call `list_jobs` first, then `manage_job(action="pause"|"resume"|"delete", job_name=…)`. Never claim "I don't have a tool for that."
 4. **Read / interact with messaging platform** → channel MCP.
 5. **Watch a URL / feed** → `watch_site`.
 

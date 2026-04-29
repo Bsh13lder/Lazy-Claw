@@ -179,12 +179,35 @@ _TASK_KEYWORDS = frozenset({
 _TASK_TOOL_NAMES = frozenset({
     "add_task", "list_tasks", "complete_task", "update_task",
     "delete_task", "daily_briefing", "work_todos", "stop_background",
-    "set_reminder", "schedule_job", "list_jobs",
+    "set_reminder", "schedule_job", "list_jobs", "manage_job",
 })
 
-# Survival/job keywords → inject search_jobs + survival tools directly
+# Cron / heartbeat job keywords → inject schedule_job/list_jobs/manage_job/
+# set_reminder. The brain owns "show / edit / pause / delete background jobs"
+# intents that the bare survival keyword "jobs" used to swallow into the
+# gig-economy bucket.
+_CRON_KEYWORDS = frozenset({
+    "cron", "cron job", "cron jobs",
+    "background job", "background jobs",
+    "scheduled job", "scheduled jobs",
+    "show jobs", "list jobs", "my jobs",
+    "show my jobs", "show my reminders", "list reminders",
+    "my reminders", "what's scheduled", "what is scheduled",
+    "running jobs", "active jobs", "pause job", "delete job",
+    "pause reminder", "delete reminder", "cancel reminder",
+    "edit reminder", "edit job", "manage job",
+})
+
+_CRON_TOOL_NAMES = frozenset({
+    "schedule_job", "list_jobs", "manage_job", "set_reminder",
+})
+
+# Survival/job keywords → inject search_jobs + survival tools directly.
+# NOTE: bare "jobs" intentionally removed — it overloaded with cron-job
+# intent. Specific phrases ("find job", "find work", "apply job",
+# "freelance", "gig", "gigs") still cover the gig-economy case.
 _SURVIVAL_KEYWORDS = frozenset({
-    "jobs", "jobspy", "freelance", "gig", "gigs",
+    "jobspy", "freelance", "gig", "gigs",
     "find work", "find job", "search job", "apply job", "apply for",
     "survival mode", "survival status", "skills profile",
     "start gig", "submit deliverable", "invoice client",
@@ -1350,6 +1373,26 @@ class Agent:
                         len(_task_tools_extra),
                     )
 
+            # Cron / heartbeat job keyword detection → inject cron-job tools.
+            # Independent of _TASK_KEYWORDS so phrases like "show my jobs" or
+            # "delete that cron" reach manage_job/list_jobs even when no
+            # "task" / "reminder" word is present in the message.
+            _cron_tools_extra: list = []
+            _wants_cron = any(kw in _msg_lower for kw in _CRON_KEYWORDS)
+            if not _wants_cron and _history_tool_names & _CRON_TOOL_NAMES:
+                _wants_cron = True
+                logger.info("Cron-job tools re-injected from recent history context")
+            if _wants_cron:
+                for cname in _CRON_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(cname)
+                    if schema is not None:
+                        _cron_tools_extra.append(schema)
+                if _cron_tools_extra:
+                    logger.info(
+                        "Cron-job keywords detected — %d cron tools injected",
+                        len(_cron_tools_extra),
+                    )
+
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
             _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
@@ -1592,6 +1635,12 @@ class Agent:
             for tt in _task_tools_extra:
                 if tt.get("function", {}).get("name") not in _existing_names:
                     tools.append(tt)
+
+            # Add cron / heartbeat job tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for ct in _cron_tools_extra:
+                if ct.get("function", {}).get("name") not in _existing_names:
+                    tools.append(ct)
 
             # Add survival tools (deduplicated)
             _existing_names = {t.get("function", {}).get("name") for t in tools}

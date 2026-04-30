@@ -516,6 +516,7 @@ class SkillRegistry:
         # Survival skills (job hunting + gig execution pipeline)
         from lazyclaw.skills.builtin.survival import (
             ApplyJobSkill,
+            ApplyRedditDmSkill,
             DraftFreelanceProposalSkill,
             InvoiceClientSkill,
             ReviewDeliverableSkill,
@@ -530,6 +531,7 @@ class SkillRegistry:
 
         self.register(SearchJobsSkill(config=config, registry=self))
         self.register(ApplyJobSkill(config=config, registry=self))
+        self.register(ApplyRedditDmSkill(config=config, registry=self))
         self.register(SurvivalModeSkill(config=config))
         self.register(SetSkillsProfileSkill(config=config))
         self.register(SurvivalStatusSkill(config=config))

@@ -49,15 +49,20 @@ services:
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
-      # Host ~/.claude provides settings/plugins/history but on macOS the
-      # OAuth credential lives in Keychain (invisible to Docker), so we
-      # mount the host dir read-only at a side path and let the entrypoint
-      # build a writable ~/.claude in the container that symlinks back.
+      # Host ~/.claude is mounted read-only at a side path so the
+      # container can read settings/plugins/history WITHOUT being able
+      # to write back to the host (also: macOS Keychain holds the host
+      # credential, invisible to Docker, so the host dir alone can't
+      # auth the in-container CLI).
       - ~/.claude:/home/lazyclaw/.claude-host:ro
-      # Persistent volume for the credential only. `claude /login` inside
-      # the container writes here and survives `docker compose down` and
-      # image rebuilds. See scripts/docker-entrypoint.sh.
-      - claude_creds:/home/lazyclaw/.claude-creds
+      # ~/.claude itself is a writable persistent volume. claude /login
+      # uses atomic rename (write tmp + rename(2)) which would replace a
+      # symlink with a real file — so the credential file MUST live in
+      # the same writable mount as the directory, not behind a symlink.
+      # Volume seeded by entrypoint with symlinks to .claude-host for
+      # plugins/settings; .credentials.json stays a real file owned by
+      # claude inside the volume. Survives down + image rebuilds.
+      - claude_data:/home/lazyclaw/.claude
       - ${HOME}/Desktop:/host/Desktop
       # Google Workspace OAuth credentials (shared with workspace-mcp MCP server).
       # Cached token lives at ~/.google_workspace_mcp/credentials/{email}.json
@@ -110,4 +115,4 @@ services:
 
 volumes:
   n8n_data:
-  claude_creds:
+  claude_data:

@@ -78,8 +78,8 @@ RUN SITE="$(python3 -c 'import auth, os; print(os.path.abspath(os.path.dirname(a
 # metadata into a fresh layer).
 # ---------------------------------------------------------------------------
 RUN groupadd -r lazyclaw && useradd -r -g lazyclaw -m -d /home/lazyclaw lazyclaw \
-    && mkdir -p /home/lazyclaw/.claude-creds /home/lazyclaw/.claude \
-    && chown -R lazyclaw:lazyclaw /home/lazyclaw/.claude-creds /home/lazyclaw/.claude /app
+    && mkdir -p /home/lazyclaw/.claude \
+    && chown -R lazyclaw:lazyclaw /home/lazyclaw/.claude /app
 
 # ---------------------------------------------------------------------------
 # Volatile COPYs (in increasing volatility order so cache stays warm longer).

@@ -663,6 +663,31 @@ class EcoRouter:
         except Exception as exc:
             logger.warning("Claude CLI failed: %s", exc)
             self._last_claude_fallback = str(exc)
+
+            # If the CLI explicitly says it's not logged in, don't waste a
+            # paid-API call — most MODE_CLAUDE users have $0 API balance
+            # anyway. Surface the actionable fix directly.
+            cli_err = str(exc)
+            cli_err_l = cli_err.lower()
+            cli_not_logged_in = (
+                "not logged in" in cli_err_l or "/login" in cli_err_l
+            )
+            if cli_not_logged_in:
+                logger.warning(
+                    "Claude CLI not logged in — skipping paid fallback, "
+                    "surfacing actionable message",
+                )
+                return LLMResponse(
+                    content=(
+                        "Claude CLI is not logged in — MODE_CLAUDE can't "
+                        "reach your subscription. Run `make claude-login` "
+                        "inside the lazyclaw container (or `claude /login` "
+                        "on the host) to authenticate, then retry."
+                    ),
+                    model="error",
+                    tool_calls=[],
+                )
+
             # ── 3. Last resort: paid API fallback ──
             try:
                 response = await self._route_paid(
@@ -676,12 +701,33 @@ class EcoRouter:
                 response.fallback_reason = "cli_failed"
                 return response
             except Exception as paid_exc:
-                if "401" in str(paid_exc) or "authentication" in str(paid_exc).lower():
-                    logger.warning("Paid fallback also failed (401) — returning CLI error")
+                paid_err = str(paid_exc)
+                paid_err_l = paid_err.lower()
+                is_auth_fail = (
+                    "401" in paid_err or "authentication" in paid_err_l
+                )
+                is_billing_fail = (
+                    "credit balance is too low" in paid_err_l
+                    or ("400" in paid_err and "balance" in paid_err_l)
+                    or ("400" in paid_err and "billing" in paid_err_l)
+                )
+
+                if is_auth_fail or is_billing_fail:
+                    label = (
+                        "no API credit" if is_billing_fail
+                        else "invalid API key"
+                    )
+                    logger.warning(
+                        "Paid fallback failed (%s) — surfacing actionable msg",
+                        label,
+                    )
                     return LLMResponse(
                         content=(
-                            f"Claude CLI timed out and the API key is invalid. "
-                            f"Try again or check your connection. (CLI error: {exc})"
+                            f"Claude CLI failed AND the paid-API fallback "
+                            f"also failed ({label}). Fix the CLI with "
+                            f"`make claude-login`, or top up Anthropic "
+                            f"billing / fix ANTHROPIC_API_KEY. "
+                            f"(CLI error: {exc})"
                         ),
                         model="error",
                         tool_calls=[],

@@ -620,6 +620,15 @@ _HEAVY_MCP_BASES: frozenset[str] = frozenset({
     "search_and_crawl", "intelligent_extract", "enhanced_process_large_content",
 })
 
+# When a user-approved plan has at least this many concrete steps, the
+# plan gate auto-promotes it to a `run_background` dispatch instead of
+# executing inline. Frees the lane queue so the user can keep chatting
+# while the work runs; final result pings via Telegram + chat.
+# 6 steps ≈ 5–10 minutes typical wall-clock work — matches user's
+# "task is little big and needs more than 5-10 steps" intuition.
+_AUTO_BACKGROUND_STEP_THRESHOLD: int = 6
+_AUTO_BG_PLAN_PREFIX: str = "AUTO_BG:"
+
 
 def _handle_instant_command(
     message: str, team_lead: TeamLead | None, task_runner=None,
@@ -1011,6 +1020,37 @@ class Agent:
             "Plan gate: approved (auto_approve_session=%s)",
             decision.auto_approve_session,
         )
+
+        # Auto-promote multi-step plans to background. The brain's first
+        # and ONLY tool call becomes run_background — lane queue freed
+        # immediately, push notification on completion. Sentinel prefix
+        # lets the plan-injection block (in process_message) emit a
+        # different system wrapper that does NOT contradict the
+        # "first tool call MUST be run_background" override below.
+        if len(steps) >= _AUTO_BACKGROUND_STEP_THRESHOLD:
+            _escaped_msg = message.replace('"', "'").replace("\n", " ")[:1500]
+            plan_text = (
+                f"{_AUTO_BG_PLAN_PREFIX}\n"
+                f"This task has {len(steps)} steps and will run >30s. "
+                f"To keep the chat responsive, it dispatches to a background "
+                f"agent instead of running inline.\n\n"
+                f"Original plan (for the background agent's reference):\n"
+                f"{plan_text}\n\n"
+                f"YOUR INSTRUCTION (NON-NEGOTIABLE):\n"
+                f"  1. Your FIRST and ONLY tool call MUST be:\n"
+                f'       run_background(instruction="{_escaped_msg}")\n'
+                f"  2. After it returns, reply with EXACTLY ONE line:\n"
+                f"       'Dispatched as background task <id> — I'll ping you "
+                f"when it's done. ETA: ~Xm.'\n"
+                f"  3. Do NOT execute the steps inline. Do NOT call any other "
+                f"tool. The background agent has all your tools and will run "
+                f"the plan."
+            )
+            logger.info(
+                "Plan gate: %d steps ≥ threshold %d → auto-promoting to "
+                "run_background",
+                len(steps), _AUTO_BACKGROUND_STEP_THRESHOLD,
+            )
         return plan_text
 
     async def process_message(
@@ -2203,18 +2243,39 @@ class Agent:
                     # instead of asking the model to re-plan. Keeps the
                     # approved intent intact and saves an LLM call.
                     if _plan_mode_used and _plan_text_approved:
-                        messages.append(LLMMessage(
-                            role="system",
-                            content=(
-                                "The user has REVIEWED AND APPROVED this plan. "
-                                "Execute it step by step — do NOT re-plan, do "
-                                "NOT ask for confirmation again.\n\n"
-                                f"{_plan_text_approved}"
-                            ),
-                        ))
-                        logger.info(
-                            "TAOR Plan: using user-approved plan (no re-plan)",
-                        )
+                        # Auto-background plans (≥ N steps) carry their
+                        # own non-negotiable instruction. Wrapping them
+                        # with "execute step by step" contradicts the
+                        # "first tool call MUST be run_background"
+                        # directive — strip the wrapper for that branch.
+                        if _plan_text_approved.startswith(_AUTO_BG_PLAN_PREFIX):
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=(
+                                    "The user has REVIEWED AND APPROVED this "
+                                    "plan. Follow the embedded instruction "
+                                    "EXACTLY — it overrides any prior routing "
+                                    "rules.\n\n"
+                                    f"{_plan_text_approved}"
+                                ),
+                            ))
+                            logger.info(
+                                "TAOR Plan: AUTO_BG plan injected (lane will "
+                                "free after run_background dispatch)",
+                            )
+                        else:
+                            messages.append(LLMMessage(
+                                role="system",
+                                content=(
+                                    "The user has REVIEWED AND APPROVED this plan. "
+                                    "Execute it step by step — do NOT re-plan, do "
+                                    "NOT ask for confirmation again.\n\n"
+                                    f"{_plan_text_approved}"
+                                ),
+                            ))
+                            logger.info(
+                                "TAOR Plan: using user-approved plan (no re-plan)",
+                            )
                     else:
                         _taor_plan = make_plan_prompt(
                             message, _effort, _taor_retry_context,

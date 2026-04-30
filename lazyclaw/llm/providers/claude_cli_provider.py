@@ -40,7 +40,12 @@ _TOOL_CALL_PATTERN = re.compile(
     re.DOTALL,
 )
 
-# System prompt fragment that teaches Claude how to call tools
+# System prompt fragment that teaches Claude how to call tools.
+# Order rationale: format spec + concrete examples FIRST so the model
+# locks onto the [TOOL_CALL] convention, then tool defs. A separate
+# "REMINDER" block is appended AFTER the (large) tool list at call site
+# — instructions placed closest to generation have higher recall in
+# long contexts, which matters for Opus-with-1M-context users.
 _TOOL_CALLING_INSTRUCTIONS = """
 ## Available Tools
 
@@ -56,8 +61,35 @@ CRITICAL RULES:
 - ONLY use tools listed below. Do NOT invent tool names.
 - NEVER report numbers, stats, or data from memory or previous messages. If the user asks for live data (follower counts, message counts, status), you MUST call a tool. If no tool exists for it, say "I don't have a tool to check that" — NEVER guess or repeat old numbers.
 
+### Examples
+
+User: "what's my name?"
+[TOOL_CALL]{"name": "recall_memories", "arguments": {"query": "name"}}[/TOOL_CALL]
+
+User: "check google sheet 1abc2def what's inside"
+[TOOL_CALL]{"name": "read_sheet_values", "arguments": {"spreadsheet_id": "1abc2def", "user_google_email": "user@example.com"}}[/TOOL_CALL]
+
+User: "find a tool for whatsapp"
+[TOOL_CALL]{"name": "search_tools", "arguments": {"query": "whatsapp"}}[/TOOL_CALL]
+
+User: "hi"
+Hey! 👋 What's up?
+(plain text only — no tags, because no tool is needed)
+
 ### Tool Definitions
 
+"""
+
+# Reminder block appended AFTER the tool list in the assembled prompt.
+# Recall is highest on the last tokens before generation; this stays
+# small to fit cheaply at the tail.
+_TOOL_CALLING_REMINDER = """
+
+---
+REMINDER before responding:
+1. You are NOT Claude Code. Tools named Read, Edit, Bash, Grep, Write, Glob, WebSearch, WebFetch, Agent do NOT exist. ONLY call tools from the Tool Definitions above.
+2. If the user is asking you to DO something (check, find, search, send, look up, scrape, read, write, list), you MUST emit at least one [TOOL_CALL] tag. Never just say "I'll check" or "Let me look" without an actual tool call — that's a hallucination.
+3. Tag format: [TOOL_CALL]{"name":"<tool_name>","arguments":{<args>}}[/TOOL_CALL]
 """
 
 
@@ -381,16 +413,18 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
         if tools:
             _tools_text, self._tool_name_map = _serialize_tools(tools)
+            # Order: intro → format spec + examples → tool defs →
+            # REMINDER. The reminder lands closest to generation, which
+            # is where prompt adherence is highest in long contexts.
+            # See commit msg / plan for why this matters with Opus +
+            # large tool lists.
             tool_system = (
                 "You are LazyClaw, an AI agent. The user's instructions "
                 "and your capabilities are in the [System Context] blocks "
                 "in the conversation. Follow those rules.\n\n"
-                "CRITICAL: You are NOT Claude Code. Do NOT call tools named "
-                "Read, Edit, Bash, Grep, Write, Glob, WebSearch, WebFetch, "
-                "Agent, or any Claude Code tool. They do NOT exist. "
-                "ONLY call tools from the list below.\n\n"
                 + _TOOL_CALLING_INSTRUCTIONS
                 + _tools_text
+                + _TOOL_CALLING_REMINDER
             )
             args.extend(["--system-prompt", tool_system])
         else:

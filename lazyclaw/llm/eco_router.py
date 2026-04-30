@@ -88,6 +88,48 @@ def _is_valid_cli_model(name: str) -> bool:
         return True
     return False
 
+
+def _resolve_claude_cli_model(settings: object | None, role: str) -> str:
+    """Pick the right CLI model for a given role + settings, with strict
+    fallback to claude-sonnet-4-6 when the stored value is junk.
+
+    Role mapping:
+      - ROLE_BRAIN (default) → claude_brain_model
+      - ROLE_WORKER          → claude_worker_model, then claude_brain_model
+      - any other (escalation, fallback) → claude_brain_model
+
+    Junk values (e.g. the legacy registry alias "claude-cli" written by
+    the old ModelAssignment dropdown) trigger a one-line warning and
+    fall back to the safe default. Same pattern as the brain validator
+    in commit 0ee38f3.
+    """
+    DEFAULT = "claude-sonnet-4-6"
+    if settings is None:
+        return DEFAULT
+
+    if role == ROLE_WORKER:
+        candidates = [
+            ("claude_worker_model", getattr(settings, "claude_worker_model", None)),
+            ("claude_brain_model", getattr(settings, "claude_brain_model", None)),
+        ]
+    else:
+        candidates = [
+            ("claude_brain_model", getattr(settings, "claude_brain_model", None)),
+        ]
+
+    for field_name, value in candidates:
+        if not value:
+            continue
+        if _is_valid_cli_model(value):
+            return value
+        logger.warning(
+            "%s=%r is not a valid Claude CLI model name — falling back. "
+            "Re-pick a model in Settings → CLAUDE mode to clear this state.",
+            field_name, value,
+        )
+
+    return DEFAULT
+
 # Backward-compat aliases for imports that used the old names
 MODE_ECO_ON = MODE_HYBRID      # deprecated
 MODE_ECO_HYBRID = MODE_HYBRID  # deprecated
@@ -549,6 +591,18 @@ class EcoRouter:
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
 
+        # MODE_CLAUDE is strictly sticky: every brain/worker/escalation/
+        # explicit-model-override path goes through the CLI subprocess.
+        # The user runs CLAUDE mode precisely because they have $0 paid-
+        # API balance, so silently falling back to _route_paid would
+        # always 400. One chokepoint here captures every entry path —
+        # including agent.py's `role="escalation"` recovery path that
+        # previously bypassed routing at line 559.
+        if settings.mode == MODE_CLAUDE:
+            return await self._route_claude(
+                messages, user_id, settings=settings, role=role, **kwargs,
+            )
+
         # Explicit model override — bypass routing
         if model and role not in (ROLE_BRAIN, ROLE_WORKER):
             # Claude CLI is not a paid API model — route through CLI provider
@@ -659,28 +713,16 @@ class EcoRouter:
     ) -> LLMResponse:
         """Route through Claude CLI ($0 via subscription).
 
-        Cascade: CLI → paid API fallback.
-        CLI works on native Mac. In Docker, falls back to paid API.
+        Strictly the only LLM provider for MODE_CLAUDE — no paid-API
+        fallback, since the user runs this mode precisely because they
+        have no API credit. CLI failures surface clear actionable error
+        messages instead of cascading to a paid call that always 400s.
         """
-        # CLAUDE mode reads its OWN per-mode field — never the generic
-        # `brain_model`, which belongs to HYBRID/FULL paid-API routing.
-        # Strict isolation so flipping `claude_brain_model` never touches
-        # the API model picker, and vice versa.
-        candidate = settings.claude_brain_model if settings else None
-        if candidate and _is_valid_cli_model(candidate):
-            cli_model = candidate
-        else:
-            if candidate:
-                # Legacy state: the old ModelAssignment dropdown could
-                # write the internal registry alias "claude-cli" here,
-                # which is NOT a real --model value the CLI accepts.
-                logger.warning(
-                    "claude_brain_model=%r is not a valid Claude CLI model name "
-                    "— falling back to claude-sonnet-4-6. Re-pick a model in "
-                    "Settings → CLAUDE mode to clear this state.",
-                    candidate,
-                )
-            cli_model = "claude-sonnet-4-6"
+        # Per-mode fields are role-scoped: brain → claude_brain_model,
+        # worker → claude_worker_model (falls back to brain), and any
+        # other role uses the brain field. Validator catches legacy
+        # junk like the registry alias "claude-cli".
+        cli_model = _resolve_claude_cli_model(settings, role)
 
         if self._claude_cli is None:
             from lazyclaw.llm.providers.claude_cli_provider import (
@@ -702,75 +744,39 @@ class EcoRouter:
             logger.warning("Claude CLI failed: %s", exc)
             self._last_claude_fallback = str(exc)
 
-            # If the CLI explicitly says it's not logged in, don't waste a
-            # paid-API call — most MODE_CLAUDE users have $0 API balance
-            # anyway. Surface the actionable fix directly.
+            # MODE_CLAUDE is strict: NO paid-API fallback. The user is
+            # here precisely because they have $0 API credit, so a
+            # cascade to _route_paid would always 400. Instead, surface
+            # a clear actionable message keyed off the failure reason.
             cli_err = str(exc)
             cli_err_l = cli_err.lower()
-            cli_not_logged_in = (
-                "not logged in" in cli_err_l or "/login" in cli_err_l
-            )
-            if cli_not_logged_in:
-                logger.warning(
-                    "Claude CLI not logged in — skipping paid fallback, "
-                    "surfacing actionable message",
+
+            if "not logged in" in cli_err_l or "/login" in cli_err_l:
+                msg = (
+                    "Claude CLI is not logged in — MODE_CLAUDE can't reach "
+                    "your subscription. Run `make claude-login` inside the "
+                    "lazyclaw container (or `claude /login` on the host) "
+                    "to authenticate, then retry."
                 )
-                return LLMResponse(
-                    content=(
-                        "Claude CLI is not logged in — MODE_CLAUDE can't "
-                        "reach your subscription. Run `make claude-login` "
-                        "inside the lazyclaw container (or `claude /login` "
-                        "on the host) to authenticate, then retry."
-                    ),
-                    model="error",
-                    tool_calls=[],
+            elif "timed out" in cli_err_l or "timeout" in cli_err_l:
+                msg = (
+                    f"Claude CLI timed out (model={cli_model}). Try a "
+                    f"faster model in Settings → CLAUDE mode (Sonnet 4.6 "
+                    f"is fastest), or send a shorter message."
+                )
+            elif "not found" in cli_err_l or "no such file" in cli_err_l:
+                msg = (
+                    "Claude CLI binary not found in the container. "
+                    "Run `make rebuild` to reinstall."
+                )
+            else:
+                msg = (
+                    f"Claude CLI failed: {exc}. Re-pick a model in "
+                    f"Settings → CLAUDE mode and retry. Or switch to "
+                    f"HYBRID/FULL mode if you have paid-API credit."
                 )
 
-            # ── 3. Last resort: paid API fallback ──
-            try:
-                response = await self._route_paid(
-                    messages, user_id, "claude-sonnet-4-6",
-                    reason=f"claude_cli_failed: {exc}",
-                    **kwargs,
-                )
-                response.content = (
-                    f"[⚡ CLI error → Sonnet fallback] {response.content}"
-                )
-                response.fallback_reason = "cli_failed"
-                return response
-            except Exception as paid_exc:
-                paid_err = str(paid_exc)
-                paid_err_l = paid_err.lower()
-                is_auth_fail = (
-                    "401" in paid_err or "authentication" in paid_err_l
-                )
-                is_billing_fail = (
-                    "credit balance is too low" in paid_err_l
-                    or ("400" in paid_err and "balance" in paid_err_l)
-                    or ("400" in paid_err and "billing" in paid_err_l)
-                )
-
-                if is_auth_fail or is_billing_fail:
-                    label = (
-                        "no API credit" if is_billing_fail
-                        else "invalid API key"
-                    )
-                    logger.warning(
-                        "Paid fallback failed (%s) — surfacing actionable msg",
-                        label,
-                    )
-                    return LLMResponse(
-                        content=(
-                            f"Claude CLI failed AND the paid-API fallback "
-                            f"also failed ({label}). Fix the CLI with "
-                            f"`make claude-login`, or top up Anthropic "
-                            f"billing / fix ANTHROPIC_API_KEY. "
-                            f"(CLI error: {exc})"
-                        ),
-                        model="error",
-                        tool_calls=[],
-                    )
-                raise
+            return LLMResponse(content=msg, model="error", tool_calls=[])
 
         self._last_claude_fallback = None
         self._record_routing_stats("claude-cli", response.usage)

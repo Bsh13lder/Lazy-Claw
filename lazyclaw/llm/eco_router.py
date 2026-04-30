@@ -65,6 +65,29 @@ DISABLED_MODE_MESSAGE = (
 
 VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL, MODE_CLAUDE})
 
+
+# ── Claude CLI model validator ────────────────────────────────────────
+# The CLI accepts:
+#   - aliases: sonnet, opus, haiku
+#   - full IDs: claude-sonnet-*, claude-opus-*, claude-haiku-* (with
+#     optional [1m] suffix for the 1M-context tier)
+# `claude-cli` is the INTERNAL registry alias (model_registry.py) and is
+# not a valid --model value — it slipped into stored settings via the
+# old ModelAssignment dropdown that listed every registry profile.
+_CLI_MODEL_ALIASES = frozenset({"sonnet", "opus", "haiku"})
+_CLI_MODEL_FAMILIES = ("sonnet", "opus", "haiku")
+
+
+def _is_valid_cli_model(name: str) -> bool:
+    """True if `name` is something `claude --model X` will accept."""
+    if name in _CLI_MODEL_ALIASES:
+        return True
+    if name.startswith("claude-") and any(
+        fam in name for fam in _CLI_MODEL_FAMILIES
+    ):
+        return True
+    return False
+
 # Backward-compat aliases for imports that used the old names
 MODE_ECO_ON = MODE_HYBRID      # deprecated
 MODE_ECO_HYBRID = MODE_HYBRID  # deprecated
@@ -639,10 +662,25 @@ class EcoRouter:
         Cascade: CLI → paid API fallback.
         CLI works on native Mac. In Docker, falls back to paid API.
         """
-        cli_model = "sonnet"
-        if settings and settings.brain_model:
-            if "opus" in settings.brain_model.lower():
-                cli_model = "opus"
+        # CLAUDE mode reads its OWN per-mode field — never the generic
+        # `brain_model`, which belongs to HYBRID/FULL paid-API routing.
+        # Strict isolation so flipping `claude_brain_model` never touches
+        # the API model picker, and vice versa.
+        candidate = settings.claude_brain_model if settings else None
+        if candidate and _is_valid_cli_model(candidate):
+            cli_model = candidate
+        else:
+            if candidate:
+                # Legacy state: the old ModelAssignment dropdown could
+                # write the internal registry alias "claude-cli" here,
+                # which is NOT a real --model value the CLI accepts.
+                logger.warning(
+                    "claude_brain_model=%r is not a valid Claude CLI model name "
+                    "— falling back to claude-sonnet-4-6. Re-pick a model in "
+                    "Settings → CLAUDE mode to clear this state.",
+                    candidate,
+                )
+            cli_model = "claude-sonnet-4-6"
 
         if self._claude_cli is None:
             from lazyclaw.llm.providers.claude_cli_provider import (

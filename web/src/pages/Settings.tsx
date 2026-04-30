@@ -221,6 +221,65 @@ const ROLE_INFO: Record<string, { label: string; description: string }> = {
   fallback: { label: "Fallback", description: "When primary model fails" },
 };
 
+// CLAUDE-mode-only model picker. Three CLI model choices, all $0 via the
+// user's Claude Code subscription. Writes ONLY to claude_brain_model so
+// HYBRID/FULL API model settings stay untouched. The CLI runs every role
+// (brain/worker/fallback) through the same binary, so one knob is enough.
+const CLAUDE_CLI_MODELS: readonly { value: string; label: string }[] = [
+  { value: "claude-sonnet-4-6", label: "Sonnet 4.6 — 200K context" },
+  { value: "claude-opus-4-6[1m]", label: "Opus 4.6 — 1M context" },
+  { value: "claude-opus-4-7[1m]", label: "Opus 4.7 — 1M context" },
+];
+
+function ClaudeCliModelPicker({
+  eco,
+  onSettingsUpdate,
+}: {
+  readonly eco: EcoSettings;
+  readonly onSettingsUpdate: (updates: Partial<EcoSettings>) => Promise<void>;
+}) {
+  const toast = useToast();
+  const current = eco.claude_brain_model ?? "claude-sonnet-4-6";
+
+  const handleChange = async (value: string) => {
+    try {
+      await onSettingsUpdate({ claude_brain_model: value });
+      toast.success("Claude CLI model updated");
+    } catch {
+      toast.error("Failed to update Claude CLI model");
+    }
+  };
+
+  return (
+    <section className="bg-bg-secondary border border-border rounded-xl p-5">
+      <SectionHeading
+        title="Claude CLI Model"
+        subtitle="Which model `claude -p` uses for every call. $0 via your Max subscription."
+      />
+      <div className="flex items-center gap-4">
+        <div className="w-24 shrink-0">
+          <p className="text-sm font-medium text-text-primary">Model</p>
+          <p className="text-[10px] text-text-muted">CLI brain</p>
+        </div>
+        <select
+          value={current}
+          onChange={(e) => handleChange(e.target.value)}
+          className="flex-1 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light appearance-none cursor-pointer"
+        >
+          {CLAUDE_CLI_MODELS.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="text-[10px] text-text-muted mt-3">
+        Only affects CLAUDE mode. HYBRID and FULL API model settings are independent.
+      </p>
+    </section>
+  );
+}
+
 function ModelAssignment({
   eco,
   modelsData,
@@ -485,8 +544,13 @@ function EcoTab({
         </div>
       </section>
 
-      {/* Model Assignment */}
-      {eco && modelsData && (
+      {/* Model Assignment — CLAUDE mode gets its own CLI-only picker that
+          writes ONLY to claude_brain_model. HYBRID/FULL keep the existing
+          generic 3-row API matrix. No state crosses between modes. */}
+      {eco && eco.mode === "claude" && (
+        <ClaudeCliModelPicker eco={eco} onSettingsUpdate={onSettingsUpdate} />
+      )}
+      {eco && modelsData && eco.mode !== "claude" && (
         <ModelAssignment
           eco={eco}
           modelsData={modelsData}

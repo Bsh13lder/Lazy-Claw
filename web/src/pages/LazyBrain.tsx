@@ -90,8 +90,28 @@ export default function LazyBrain() {
   // Loading / errors
   const [error, setError] = useState<string | null>(null);
 
-  // Filter state
-  const [hiddenCategories, setHiddenCategories] = useState<Set<string>>(new Set());
+  // Filter state — hiddenCategories persisted to localStorage so the
+  // user's graph-legend selection sticks across reloads. Stored as a
+  // JSON array; rehydrated to a Set on mount.
+  const [hiddenCategories, setHiddenCategories] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("lazybrain-hidden-categories");
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch {
+      // Bad JSON / private mode — start with no hidden categories.
+    }
+    return new Set();
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "lazybrain-hidden-categories",
+        JSON.stringify([...hiddenCategories]),
+      );
+    } catch {
+      // Best-effort persistence.
+    }
+  }, [hiddenCategories]);
   const [ownerFilter, setOwnerFilter] = useState<Owner | "all">("all");
   // Phase 3.4 — graph importance slider (1..10). Notes below the threshold
   // dim in the graph; 1 = show all, 10 = pinned-level only.

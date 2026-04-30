@@ -268,7 +268,26 @@ export function GraphView({
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [view, setView] = useState({ tx: 0, ty: 0, k: 1 });
   const [hoverId, setHoverId] = useState<string | null>(null);
-  const [legendOpen, setLegendOpen] = useState(true);
+  // Legend open/closed — persisted so the user's choice (and the
+  // "Filters" header with chevron + all/none controls) doesn't reset on
+  // page reload. Default open so first-timers see the full category map.
+  const [legendOpen, setLegendOpen] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem("lazybrain-graph-legend-open");
+      if (raw === "false") return false;
+      if (raw === "true") return true;
+    } catch {
+      // Private mode / disabled — fall through to default.
+    }
+    return true;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("lazybrain-graph-legend-open", legendOpen ? "true" : "false");
+    } catch {
+      // Best-effort.
+    }
+  }, [legendOpen]);
   const [, setTick] = useState(0);
   // Pulse ticker — dedicated 60fps loop that advances the traveling
   // synapse signals. Only runs while there's a focus so idle CPU is zero.
@@ -2212,47 +2231,16 @@ export function GraphView({
         </IconButton>
       </div>
 
-      {/* Interactive legend — doubles as a category filter */}
+      {/* Interactive legend — doubles as a category filter. The header
+          ("Filters" + chevron + all/none) is anchored at the BOTTOM of
+          the panel where bottom-3 sits, so it stays visible no matter
+          how many categories are listed. The category list grows
+          UPWARD from the header and scrolls internally if it would
+          otherwise overflow the viewport. */}
       {showLegend && (
-        <div className="absolute bottom-3 left-3 z-10 text-xs w-[200px]">
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-t-lg bg-bg-secondary border border-border">
-            <button
-              onClick={() => setLegendOpen((v) => !v)}
-              className="flex items-center gap-2 text-text-secondary hover:text-text-primary transition-colors flex-1"
-            >
-              <span className="w-2 h-2 rounded-full inline-block bg-accent" />
-              <span className="font-medium">Filters</span>
-            </button>
-            {legendOpen && onToggleCategory && onSetHiddenCategories && (
-              <div className="flex items-center gap-1 text-[10px]">
-                <button
-                  onClick={() => onSetHiddenCategories(new Set())}
-                  className="px-1.5 py-0.5 rounded hover:bg-bg-hover text-text-muted hover:text-accent transition-colors"
-                  title="Show all categories"
-                >
-                  all
-                </button>
-                <span className="text-text-muted/40">·</span>
-                <button
-                  onClick={() =>
-                    onSetHiddenCategories(new Set(FILTER_CATEGORIES.map((c) => c.key)))
-                  }
-                  className="px-1.5 py-0.5 rounded hover:bg-bg-hover text-text-muted hover:text-accent transition-colors"
-                  title="Hide all categories"
-                >
-                  none
-                </button>
-              </div>
-            )}
-            <button
-              onClick={() => setLegendOpen((v) => !v)}
-              className="text-text-muted hover:text-text-primary transition-colors"
-            >
-              {legendOpen ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
-            </button>
-          </div>
+        <div className="absolute bottom-3 left-3 z-10 text-xs w-[200px] flex flex-col max-h-[calc(100vh-7rem)]">
           {legendOpen && (
-            <div className="border border-t-0 border-border bg-bg-secondary rounded-b-lg p-1.5 space-y-0.5">
+            <div className="border border-b-0 border-border bg-bg-secondary rounded-t-lg p-1.5 space-y-0.5 flex-1 min-h-0 overflow-y-auto">
               {FILTER_CATEGORIES.map((c) => {
                 const hidden = hiddenCategories?.has(c.key) ?? false;
                 const count = categoryCounts?.[c.key] ?? 0;
@@ -2289,6 +2277,51 @@ export function GraphView({
               </div>
             </div>
           )}
+
+          {/* Header — always visible at the BOTTOM of the panel so the
+              user can always reach the toggle, all / none controls, and
+              chevron, even when the list above is scrolling. */}
+          <div
+            className={`flex items-center justify-between gap-2 px-3 py-1.5 ${
+              legendOpen ? "rounded-b-lg" : "rounded-lg"
+            } bg-bg-secondary border border-border shrink-0`}
+          >
+            <button
+              onClick={() => setLegendOpen((v) => !v)}
+              className="flex items-center gap-2 text-text-secondary hover:text-text-primary transition-colors flex-1"
+            >
+              <span className="w-2 h-2 rounded-full inline-block bg-accent" />
+              <span className="font-medium">Filters</span>
+            </button>
+            {legendOpen && onToggleCategory && onSetHiddenCategories && (
+              <div className="flex items-center gap-1 text-[10px]">
+                <button
+                  onClick={() => onSetHiddenCategories(new Set())}
+                  className="px-1.5 py-0.5 rounded hover:bg-bg-hover text-text-muted hover:text-accent transition-colors"
+                  title="Show all categories"
+                >
+                  all
+                </button>
+                <span className="text-text-muted/40">·</span>
+                <button
+                  onClick={() =>
+                    onSetHiddenCategories(new Set(FILTER_CATEGORIES.map((c) => c.key)))
+                  }
+                  className="px-1.5 py-0.5 rounded hover:bg-bg-hover text-text-muted hover:text-accent transition-colors"
+                  title="Hide all categories"
+                >
+                  none
+                </button>
+              </div>
+            )}
+            <button
+              onClick={() => setLegendOpen((v) => !v)}
+              className="text-text-muted hover:text-text-primary transition-colors"
+              title={legendOpen ? "Collapse filter list" : "Expand filter list"}
+            >
+              {legendOpen ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+            </button>
+          </div>
         </div>
       )}
 

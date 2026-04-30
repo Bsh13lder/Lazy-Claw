@@ -185,10 +185,16 @@ def _build_body(
     params_block: str,
     error: str | None,
     fix_summary: str | None,
+    result_snippet: str | None = None,
 ) -> str:
     """Render the human-readable card body. Frontmatter holds the
     machine-readable fields; this is what a user sees in the React
     panel without expanding the properties pane.
+
+    ``result_snippet`` is the first chars of the actual tool output —
+    saved on every outcome so the card carries "what came back" not just
+    "what was attempted." Critical for failure replay (the brain can see
+    why) and shape recall (the brain can see the response structure).
     """
     lines: list[str] = [
         f"**Topic:** {topic}",
@@ -199,6 +205,12 @@ def _build_body(
         lines.append(f"**Error:** {_redact(error)}")
     if fix_summary:
         lines.append(f"**Fix:** {_redact(fix_summary)}")
+    if result_snippet:
+        lines.append("")
+        lines.append("**Output:**")
+        lines.append("```")
+        lines.append(_redact(result_snippet))
+        lines.append("```")
     if params_block:
         lines.append("")
         lines.append("```json")
@@ -234,6 +246,7 @@ async def save_skill_lesson(
     outcome: str = OUTCOME_PENDING,
     error: str | None = None,
     fix_summary: str | None = None,
+    result_snippet: str | None = None,
     pending_since_turn: int | None = None,
 ) -> str | None:
     """Upsert a skill-outcome card to LazyBrain. Returns note id or None.
@@ -369,7 +382,10 @@ async def save_skill_lesson(
             return note_id
 
         # First write — create a fresh card.
-        body = _build_body(topic, action, intent, params_block, error, fix_summary)
+        body = _build_body(
+            topic, action, intent, params_block, error, fix_summary,
+            result_snippet=result_snippet,
+        )
         body = _append_run_log(body, f"{now_iso} {outcome}")
         frontmatter: dict[str, Any] = {
             "kind": "shape",

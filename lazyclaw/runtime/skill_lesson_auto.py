@@ -145,36 +145,102 @@ def synthesize_intent(skill: "BaseSkill", args: dict[str, Any]) -> str:
 
 
 _APPROVAL_PREFIX = "APPROVAL_REQUIRED:"
+
+# Strict prefixes — only fire when the FIRST chars match exactly.
 _ERROR_PREFIXES = ("Error:", "Error ", "error:", "ERROR:")
+
+# Broader substring patterns — many real failures don't start with "Error:".
+# MCP tool errors come back wrapped in `[mcp-<name> | <op>]` headers, scraper
+# pool exhaustion lands as `[MCP ERROR]`, browser timeouts come as plain
+# `Timeout ...` lines without the colon. Without these, the auto-recorder
+# misclassified failures as `pending`, the verifier promoted them to
+# `verified`, and the brain replayed broken shapes. Checked in the first
+# 400 chars only so a giant successful response with one stray "failed"
+# token deep inside doesn't false-positive.
+_ERROR_SUBSTRINGS: tuple[str, ...] = (
+    "[MCP ERROR]",
+    "[ERROR]",
+    "[mcp-",  # mcp-scraper / mcp-jobspy / etc. headers always wrap real errors
+    "Traceback (most recent call last)",
+    "Exception:",
+    "Failed to ",
+    "Unable to ",
+    "Could not ",
+    "Timeout",
+    "timed out",
+    "Connection refused",
+    "Connection reset",
+    "pool exhausted",
+    "No such file",
+    "PermissionError",
+    "ValidationError",
+    "ConnectionError",
+)
+_ERROR_SCAN_WINDOW = 400
+
+# How much of the result we keep on the lesson card. Long enough to
+# capture a useful shape signal (response structure, key field names);
+# short enough not to bloat the encrypted note store. _redact further
+# truncates to _STRING_REDACTION_LIMIT (200) on the way in.
+_RESULT_SNIPPET_LIMIT = 600
 
 
 def outcome_from_result(
     result: Any,
     exception: BaseException | None,
-) -> tuple[str, str | None]:
-    """Return ``(outcome, error_message)``.
+) -> tuple[str, str | None, str | None]:
+    """Return ``(outcome, error_message, result_snippet)``.
 
     Successful executions return the new ``"pending"`` state — the
     verification pump (Logseq DOING→DONE) promotes them to ``"verified"``
     after a quiet window or explicit ``/confirm``. Errors return
     ``"failed"``. ``"skip"`` skips recording entirely.
+
+    ``result_snippet`` carries the first chars of the actual tool output
+    regardless of outcome so the lesson card has a real "what came back"
+    record — invaluable for both replay debugging and shape comparison
+    on next recall.
     """
     if exception is not None:
-        return "failed", f"{type(exception).__name__}: {exception}"[:240]
+        msg = f"{type(exception).__name__}: {exception}"[:240]
+        return "failed", msg, msg
 
     if result is None:
-        return "pending", None
+        return "pending", None, None
 
     text = result if isinstance(result, str) else getattr(result, "text", "")
     if not isinstance(text, str):
         text = str(text)
 
+    snippet = text[:_RESULT_SNIPPET_LIMIT] if text else None
+
     if text.startswith(_APPROVAL_PREFIX):
         # Pending approval is neither success nor failure — skip recording.
-        return "skip", None
+        return "skip", None, None
+
+    # Strict prefix check — same as before, fast path.
     if any(text.startswith(p) for p in _ERROR_PREFIXES):
-        return "failed", text[:240]
-    return "pending", None
+        return "failed", text[:240], snippet
+
+    # Broader substring scan in the first window. Many MCP and browser
+    # errors don't lead with "Error:" — they wrap with `[MCP ERROR]`,
+    # `[mcp-scraper | search]`, `Timeout`, etc. Catch those too. We
+    # anchor on the EARLIEST matching position (not the first pattern in
+    # the tuple) so a `[mcp-...]` channel header before `[MCP ERROR]`
+    # is preserved — that prefix is the most useful context for replay.
+    head = text[:_ERROR_SCAN_WINDOW]
+    earliest_idx: int = -1
+    for pat in _ERROR_SUBSTRINGS:
+        idx = head.find(pat)
+        if idx == -1:
+            continue
+        if earliest_idx == -1 or idx < earliest_idx:
+            earliest_idx = idx
+    if earliest_idx != -1:
+        err = head[earliest_idx:earliest_idx + 240]
+        return "failed", err, snippet
+
+    return "pending", None, snippet
 
 
 # ── Tight-retry guard ────────────────────────────────────────────────
@@ -231,7 +297,7 @@ async def record_skill_outcome(
         if not topic:
             return
 
-        outcome, error_msg = outcome_from_result(result, exception)
+        outcome, error_msg, result_snippet = outcome_from_result(result, exception)
         if outcome == "skip":
             return
 
@@ -260,6 +326,7 @@ async def record_skill_outcome(
             params=clean_args or None,
             outcome=outcome,
             error=error_msg,
+            result_snippet=result_snippet,
             pending_since_turn=turn,
         )
     except Exception:

@@ -607,8 +607,17 @@ HEAVY_TOOLS: frozenset[str] = frozenset({
 
 # MCP tool base names that should trigger fast dispatch when they appear
 # in multi-step chains (delete, move, organize = slow IMAP operations).
+# Scraper tools land here too: crawl_url_with_fallback can iterate 7
+# bypass stages and lock the lane queue for 30+ seconds otherwise. Keep
+# this list tight — only tools that are GUARANTEED slow on a typical
+# call. Cheap reads (crawl_url single page on a fast site) stay
+# foreground so the user gets the answer inline.
 _HEAVY_MCP_BASES: frozenset[str] = frozenset({
     "email_delete", "email_move", "email_mark", "email_create_label",
+    # Scraper — multi-stage / multi-target work
+    "crawl_url_with_fallback", "deep_crawl_site", "multi_url_crawl",
+    "batch_crawl", "batch_search_google", "batch_extract_youtube_transcripts",
+    "search_and_crawl", "intelligent_extract", "enhanced_process_large_content",
 })
 
 

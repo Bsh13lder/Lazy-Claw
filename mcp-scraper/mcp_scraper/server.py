@@ -9,6 +9,19 @@ import os
 import sys
 import warnings
 
+# CRITICAL: redirect builtins.print() → stderr BEFORE any other import.
+# Every scraper module (and vendored crawl4ai) calls bare print(...) for
+# progress lines like "Stage 4/7: Attempting user_behavior". On stdio
+# transport those bytes hit fd 1 — the JSONRPC channel — and crash the
+# MCP client's parser with `Invalid JSON`. Patching builtins.print catches
+# all of them at once without touching every print site.
+import builtins as _builtins
+_real_print = _builtins.print
+def _stderr_print(*args, **kwargs):
+    kwargs.setdefault("file", sys.stderr)
+    return _real_print(*args, **kwargs)
+_builtins.print = _stderr_print
+
 # Set environment variables before any imports
 os.environ["FASTMCP_QUIET"] = "true"
 os.environ["FASTMCP_NO_BANNER"] = "true"

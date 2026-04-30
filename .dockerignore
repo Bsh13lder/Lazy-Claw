@@ -1,0 +1,93 @@
+# Local runtime data — never ship in the image
+data/
+**/data/lazyclaw.db*
+**/data/lazyclaw.log
+**/data/browser_profiles/
+**/data/lazybrain_migration_*.json
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.python-version
+
+# Node
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Web build output (image only needs source for backend; web is its own container)
+web/dist/
+web/.next/
+web/.turbo/
+
+# Editor / VCS
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Tests + CI artefacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Disabled / scratch MCPs that aren't installed in the Dockerfile
+mcp-apihunter/
+mcp-freeride/
+mcp-healthcheck/
+mcp-vaultwhisper/
+mcp-upwork/
+
+# Top-level scratch
+*.log
+*.db
+*.db-shm
+*.db-wal
+apihunter.db
+tests/
+docs/
+plugins/
+n8n-custom/
+production/
+
+# Docker meta — keep Dockerfile + docker-compose accessible to BuildKit, but skip these
+.dockerignore
+
+# Repo docs we don't need in the image
+TODO.md
+CHANGELOG.md
+LAUNCH-PLAN.md
+ARCHITECTURE_PLAN.md
+DOCS.md
+README.md
+CONTRIBUTING.md
+SECURITY.md
+CLAUDE.md
+tui-mockup.jsx
+transfer-claude.sh
+
+# Mac metadata
+.AppleDouble
+.LSOverride
+Icon
+._*

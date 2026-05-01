@@ -148,6 +148,13 @@ async def _internal_crawl_url(request: CrawlRequest) -> CrawlResponse:
             "generate_markdown": request.generate_markdown,
         }
 
+        # When the caller asks for the undetected/stealth path, also enable
+        # `magic` so cookie banners, age-gates and overlays get auto-dismissed
+        # before extraction. Unsupported on older crawl4ai runtimes — the
+        # supported_params filter below drops it silently.
+        if request.use_undetected_browser:
+            config_params["magic"] = True
+
         js_wait_params = {}
         if request.wait_for_js:
             js_wait_params["wait_until"] = "networkidle"
@@ -216,9 +223,15 @@ async def _internal_crawl_url(request: CrawlRequest) -> CrawlResponse:
         if request.use_undetected_browser:
             browser_config["enable_stealth"] = True
             browser_config["browser_type"] = "chromium"
+            # Randomized UA fights basic UA-fingerprint blocks. crawl4ai
+            # 0.7.8 supports it; the BrowserConfig.from_kwargs path drops
+            # unknown fields silently on older runtimes.
+            browser_config.setdefault("user_agent_mode", "random")
 
         if request.user_agent:
             browser_config["user_agent"] = request.user_agent
+            # Explicit UA overrides random mode.
+            browser_config.pop("user_agent_mode", None)
 
         headers = dict(request.headers) if request.headers else {}
         if request.auth_token:

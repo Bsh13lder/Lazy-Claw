@@ -7,9 +7,113 @@ extracted from tools/web_crawling.py.
 """
 
 import json
+import re as _re
 from typing import Any, Dict, List, Optional
 
 from ..models import CrawlRequest
+
+
+# Canonical plural keys for the regex `patterns` dict below. The MCP tool
+# field used to advertise singular forms ("email", "phone", …) which silently
+# matched nothing — this alias map fixes that without breaking existing
+# callers that already pass plurals.
+_ENTITY_KEY_ALIASES: Dict[str, str] = {
+    "email": "emails",
+    "phone": "phones",
+    "url": "urls",
+    "date": "dates",
+    "ip": "ips",
+    "price": "prices",
+    "credit_card": "credit_cards",
+    "coordinate": "coordinates",
+}
+
+
+def _canonicalize_entity_types(types: List[str]) -> List[str]:
+    """Map singular aliases to the plural keys the regex dict uses."""
+    return [_ENTITY_KEY_ALIASES.get(t, t) for t in types]
+
+
+_PHONE_DIGITS_RE = _re.compile(r"\D+")
+
+
+# JS snippet that auto-dismisses the most common cookie/consent banners on
+# European sites (Cookiebot, OneTrust, Iubenda, Quantcast/IAB-TCF, Complianz,
+# generic ARIA labels). Without this, sites like toniandguy.it/saloni return
+# only the cookie-wall HTML and the salon directory never renders, so
+# extract_entities sees zero contact data even after a successful crawl.
+# The snippet is idempotent, runs once per page-load, and is safe to inject
+# everywhere — it does nothing on pages without a banner.
+#
+# IMPORTANT: crawl4ai's `robust_execute_user_script` already wraps our code
+# in `(async () => { <body> })()` and awaits it. So we ship BARE STATEMENTS
+# here — wrapping in our own IIFE would leave the inner Promise un-awaited
+# and Playwright would capture HTML before the consent click took effect.
+#
+_ACCEPT_COOKIE_BANNERS_JS = r"""
+try {
+  const SELECTORS = [
+    // Cookiebot
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "#CybotCookiebotDialogBodyButtonAccept",
+    "#CybotCookiebotDialogBodyLevelButtonAccept",
+    // OneTrust
+    "#onetrust-accept-btn-handler",
+    "button#accept-recommended-btn-handler",
+    // Iubenda
+    "button.iubenda-cs-accept-btn",
+    ".iubenda-cs-accept-btn",
+    // Quantcast / IAB TCF
+    "button.qc-cmp2-summary-buttons > button[mode=primary]",
+    "button[aria-label='AGREE']",
+    // Complianz / RGPD
+    "button.cmplz-accept",
+    "button.cc-accept-all",
+    // Italian-language fallbacks
+    "button[aria-label*='Accetta' i]",
+    "button[title*='Accetta' i]",
+    // English-language fallbacks
+    "button[aria-label*='Accept' i]",
+    "button[title*='Accept' i]",
+    // Generic class hints (last resort)
+    "button[class*='accept-all' i]",
+    "button[class*='accept_all' i]",
+  ];
+  let clicked = false;
+  for (const s of SELECTORS) {
+    const el = document.querySelector(s);
+    if (el && el.offsetParent !== null) { el.click(); clicked = true; break; }
+  }
+  // Give the page a beat to fetch real content after consent.
+  await new Promise(r => setTimeout(r, 2200));
+  // Lazy-load scroll: many SPA contact widgets fetch only after scroll.
+  window.scrollTo(0, document.body.scrollHeight);
+  await new Promise(r => setTimeout(r, 800));
+  window.scrollTo(0, 0);
+  return { consent_clicked: clicked };
+} catch (e) {
+  // Never let consent JS break extraction.
+  return { error: String(e) };
+}
+"""
+
+
+def _looks_like_real_phone(candidate: str) -> bool:
+    """Reject obvious non-phone matches (cookie IDs, VAT numbers, hashes).
+
+    A candidate must:
+      - have between 8 and 15 digits (E.164 range)
+      - not be all-same-digit (0000000000)
+      - not start with three zeros (typical product/order code)
+    """
+    digits = _PHONE_DIGITS_RE.sub("", candidate)
+    if not (8 <= len(digits) <= 15):
+        return False
+    if len(set(digits)) <= 1:
+        return False
+    if digits.startswith("000"):
+        return False
+    return True
 
 
 def _regex_worker(pattern: str, text: str, flags: int, result_queue) -> None:
@@ -77,7 +181,9 @@ async def _internal_extract_entities(
     entity_types: List[str],
     custom_patterns: Optional[Dict[str, str]] = None,
     include_context: bool = True,
-    deduplicate: bool = True
+    deduplicate: bool = True,
+    use_undetected_browser: bool = False,
+    simulate_user: bool = False,
 ) -> Dict[str, Any]:
     """
     Internal extract entities implementation using regex patterns.
@@ -85,7 +191,21 @@ async def _internal_extract_entities(
     from .crawler_core import _internal_crawl_url
 
     try:
-        request = CrawlRequest(url=url, generate_markdown=True, include_cleaned_html=True)
+        # Entity extraction always needs the page fully rendered, otherwise
+        # SPA-rendered contact widgets (store locators, dental clinics,
+        # salon directories) finish their fetch *after* the crawl returns
+        # and the page text never contains the email/phone. wait_for_js
+        # turns on networkidle + scan_full_page in `_internal_crawl_url`,
+        # which forces a full-page scroll so lazy content loads.
+        request = CrawlRequest(
+            url=url,
+            generate_markdown=True,
+            include_cleaned_html=True,
+            wait_for_js=True,
+            execute_js=_ACCEPT_COOKIE_BANNERS_JS,
+            use_undetected_browser=use_undetected_browser,
+            simulate_user=simulate_user,
+        )
         crawl_result = await _internal_crawl_url(request)
 
         if not crawl_result.success:
@@ -99,9 +219,19 @@ async def _internal_extract_entities(
         entities = {}
         pattern_errors = {}
 
+        # Phone pattern accepts:
+        #   - international form (+CC + 8-16 digit-or-separator chars)
+        #   - structured local form (digit groups separated by space/-/.)
+        # plus a post-filter (`_looks_like_real_phone`) drops noise such as
+        # cookie IDs, VAT numbers and asset hashes that the old US-shaped
+        # regex produced as false positives.
         patterns = {
-            "emails": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            "phones": r'(?:\+?1[-.\s]?)?(?:\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4})',
+            "emails": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b',
+            "phones": (
+                r'(?:\+\d[\d\s\-./()]{7,18}\d)'
+                r'|'
+                r'(?<![\d./])(?:\(?\d{2,5}\)?[\s\-.]\d{2,5}[\s\-.]\d{2,5}(?:[\s\-.]\d{2,5})?)(?![\d./])'
+            ),
             "urls": r'https?://(?:[-\w.])+(?:[:\d]+)?(?:/(?:[\w/_.])*(?:\?(?:[\w&=%.])*)?(?:#(?:[\w.])*)?)?',
             "dates": r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{2,4}[/-]\d{1,2}[/-]\d{1,2})\b',
             "ips": r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b',
@@ -113,10 +243,14 @@ async def _internal_extract_entities(
         if custom_patterns:
             patterns.update(custom_patterns)
 
-        for entity_type in entity_types:
+        canonical_types = _canonicalize_entity_types(entity_types)
+
+        for entity_type in canonical_types:
             if entity_type in patterns:
                 try:
                     matches = _safe_regex_findall(patterns[entity_type], content, timeout=5.0)
+                    if entity_type == "phones" and matches:
+                        matches = [m.strip() for m in matches if _looks_like_real_phone(m)]
                     if matches:
                         if deduplicate:
                             matches = list(set(matches))
@@ -158,7 +292,9 @@ async def _internal_llm_extract_entities(
     model: Optional[str] = None,
     custom_instructions: Optional[str] = None,
     include_context: bool = True,
-    deduplicate: bool = True
+    deduplicate: bool = True,
+    use_undetected_browser: bool = False,
+    simulate_user: bool = False,
 ) -> Dict[str, Any]:
     """
     Internal LLM extract entities implementation using AI-powered named entity recognition.
@@ -166,7 +302,15 @@ async def _internal_llm_extract_entities(
     from .crawler_core import _internal_crawl_url
 
     try:
-        request = CrawlRequest(url=url, generate_markdown=True, include_cleaned_html=True)
+        request = CrawlRequest(
+            url=url,
+            generate_markdown=True,
+            include_cleaned_html=True,
+            wait_for_js=True,
+            execute_js=_ACCEPT_COOKIE_BANNERS_JS,
+            use_undetected_browser=use_undetected_browser,
+            simulate_user=simulate_user,
+        )
         crawl_result = await _internal_crawl_url(request)
 
         if not crawl_result.success:
@@ -345,7 +489,9 @@ async def extract_entities(
     deduplicate: bool = True,
     use_llm: bool = False,
     llm_provider: Optional[str] = None,
-    llm_model: Optional[str] = None
+    llm_model: Optional[str] = None,
+    use_undetected_browser: bool = False,
+    simulate_user: bool = False,
 ) -> Dict[str, Any]:
     """Extract entities (emails, phones, etc.) from web pages."""
     if use_llm:
@@ -356,7 +502,9 @@ async def extract_entities(
             model=llm_model,
             custom_instructions=None,
             include_context=include_context,
-            deduplicate=deduplicate
+            deduplicate=deduplicate,
+            use_undetected_browser=use_undetected_browser,
+            simulate_user=simulate_user,
         )
     else:
         return await _internal_extract_entities(
@@ -364,5 +512,7 @@ async def extract_entities(
             entity_types=entity_types,
             custom_patterns=custom_patterns,
             include_context=include_context,
-            deduplicate=deduplicate
+            deduplicate=deduplicate,
+            use_undetected_browser=use_undetected_browser,
+            simulate_user=simulate_user,
         )

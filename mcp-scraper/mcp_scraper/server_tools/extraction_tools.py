@@ -150,13 +150,15 @@ def register_extraction_tools(mcp, get_modules):
     @mcp.tool(annotations=READONLY_ANNOTATIONS)
     async def extract_entities(
         url: Annotated[str, Field(description="Target URL")],
-        entity_types: Annotated[List[str], Field(description="Types: email, phone, url, date, ip, price")],
+        entity_types: Annotated[List[str], Field(description="Canonical: emails, phones, urls, dates, ips, prices, credit_cards, coordinates. Singular aliases (email, phone, url, date, ip, price, credit_card, coordinate) are accepted and mapped automatically.")],
         custom_patterns: Annotated[Optional[Dict[str, str]], Field(description="Custom regex patterns")] = None,
         include_context: Annotated[bool, Field(description="Include context")] = True,
         deduplicate: Annotated[bool, Field(description="Remove duplicates")] = True,
         use_llm: Annotated[bool, Field(description="Use LLM for NER")] = False,
         llm_provider: Annotated[Optional[str], Field(description="LLM provider")] = None,
         llm_model: Annotated[Optional[str], Field(description="LLM model")] = None,
+        use_undetected_browser: Annotated[bool, Field(description="Use undetected-chromedriver to bypass anti-bot walls (Cloudflare, Instagram). Set True for IG/FB/protected small-business sites.")] = False,
+        simulate_user: Annotated[bool, Field(description="Simulate human-like mouse moves and scrolls before extracting. Pair with use_undetected_browser for stricter sites.")] = False,
         output_path: Annotated[Optional[str], Field(description="Absolute file path (auto .json extension) to persist the full entity extraction as JSON. When set, the response is slimmed (content, markdown, extracted_data.raw_content removed).")] = None,
         include_content_in_response: Annotated[bool, Field(description="When True (with output_path set), also keep the entity data in the response. Defaults to False.")] = False,
         overwrite: Annotated[bool, Field(description="Overwrite an existing output file at output_path. Defaults to False.")] = False,
@@ -166,6 +168,12 @@ def register_extraction_tools(mcp, get_modules):
         output_error = validate_output_path(output_path, overwrite)
         if output_error:
             return output_error
+
+        # Normalize singular aliases up-front so the regex fallback paths
+        # below (which check `"emails" in entity_types` etc.) also work
+        # when the caller follows the older docstring.
+        from ..core.extraction_entity import _canonicalize_entity_types
+        entity_types = _canonicalize_entity_types(entity_types)
 
         modules = get_modules()
         if not modules:
@@ -185,8 +193,48 @@ def register_extraction_tools(mcp, get_modules):
             result = await web_crawling.extract_entities(
                 url=url, entity_types=entity_types, custom_patterns=custom_patterns,
                 include_context=include_context, deduplicate=deduplicate, use_llm=use_llm,
-                llm_provider=llm_provider, llm_model=llm_model
+                llm_provider=llm_provider, llm_model=llm_model,
+                use_undetected_browser=use_undetected_browser,
+                simulate_user=simulate_user,
             )
+
+            # Auto-escalate: if the cheap default crawl succeeded but produced
+            # NO contact entities for a contact-extraction request, transparently
+            # retry once with the stealth ladder (chromium + stealth + magic +
+            # simulate_user). This is what the LLM expects from a "just works"
+            # tool — without it the brain sees `success=True, entities={}` and
+            # silently gives up. Only escalates when the caller wanted emails
+            # or phones (the noisy cases for JS-rendered contact widgets).
+            _wants_contact = any(
+                t in entity_types for t in ("emails", "phones")
+            )
+            _no_contact_hits = not any(
+                (result.get("entities") or {}).get(t) for t in ("emails", "phones")
+            )
+            _had_content = (result.get("content_length") or 0) > 200
+            if (
+                result.get("success", True)
+                and _wants_contact
+                and _no_contact_hits
+                and _had_content
+                and not use_undetected_browser
+            ):
+                escalated = await web_crawling.extract_entities(
+                    url=url, entity_types=entity_types, custom_patterns=custom_patterns,
+                    include_context=include_context, deduplicate=deduplicate, use_llm=use_llm,
+                    llm_provider=llm_provider, llm_model=llm_model,
+                    use_undetected_browser=True,
+                    simulate_user=True,
+                )
+                if escalated.get("success", True):
+                    escalated_hits = any(
+                        (escalated.get("entities") or {}).get(t) for t in ("emails", "phones")
+                    )
+                    if escalated_hits:
+                        escalated["_auto_escalated"] = "stealth+simulate_user"
+                        return apply_token_limit(_persist(escalated), max_tokens=25000)
+                    # No improvement — return the original result with a hint.
+                    result["_auto_escalation_tried"] = "stealth+simulate_user (still empty)"
 
             # Check if entity extraction was successful
             if result.get("success", True):
@@ -209,7 +257,13 @@ def register_extraction_tools(mcp, get_modules):
                             entities["emails"] = list(set(emails)) if deduplicate else emails
 
                     if "phones" in entity_types:
-                        phones = re.findall(r'[\+]?[1-9]?[0-9]{7,15}', content)
+                        from ..core.extraction_entity import _looks_like_real_phone
+                        _phone_re = (
+                            r'(?:\+\d[\d\s\-./()]{7,18}\d)'
+                            r'|'
+                            r'(?<![\d./])(?:\(?\d{2,5}\)?[\s\-.]\d{2,5}[\s\-.]\d{2,5}(?:[\s\-.]\d{2,5})?)(?![\d./])'
+                        )
+                        phones = [p.strip() for p in re.findall(_phone_re, content) if _looks_like_real_phone(p)]
                         if phones:
                             entities["phones"] = list(set(phones)) if deduplicate else phones
 
@@ -253,7 +307,13 @@ def register_extraction_tools(mcp, get_modules):
                             entities["emails"] = list(set(emails)) if deduplicate else emails
 
                     if "phones" in entity_types:
-                        phones = re.findall(r'[\+]?[1-9]?[0-9]{7,15}', content)
+                        from ..core.extraction_entity import _looks_like_real_phone
+                        _phone_re = (
+                            r'(?:\+\d[\d\s\-./()]{7,18}\d)'
+                            r'|'
+                            r'(?<![\d./])(?:\(?\d{2,5}\)?[\s\-.]\d{2,5}[\s\-.]\d{2,5}(?:[\s\-.]\d{2,5})?)(?![\d./])'
+                        )
+                        phones = [p.strip() for p in re.findall(_phone_re, content) if _looks_like_real_phone(p)]
                         if phones:
                             entities["phones"] = list(set(phones)) if deduplicate else phones
 

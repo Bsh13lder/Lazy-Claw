@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -30,6 +32,40 @@ def set_chat_ws_deps(lane_queue, registry) -> None:
     _shared_registry = registry
 
 
+# Keys excluded from forwarded metadata: bg_task_id / bg_task_name are
+# already lifted to the top-level frame; raw bytes / unserializable values
+# would crash send_json.
+_BG_META_DROP = frozenset({"bg_task_id", "bg_task_name", "summary"})
+
+
+def _safe_metadata(metadata) -> dict:
+    """Return a JSON-safe copy of an event's metadata for client forwarding.
+
+    Drops bg-task tags (already on the frame) and any non-primitive
+    values that ``ws.send_json`` would refuse.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    out: dict = {}
+    for k, v in metadata.items():
+        if k in _BG_META_DROP:
+            continue
+        if isinstance(v, (str, int, float, bool, type(None))):
+            out[k] = v
+        elif isinstance(v, (list, tuple)):
+            out[k] = [
+                x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
+                for x in v
+            ]
+        elif isinstance(v, dict):
+            out[k] = {
+                kk: vv if isinstance(vv, (str, int, float, bool, type(None))) else str(vv)
+                for kk, vv in v.items()
+            }
+        # Skip everything else (bytes, dataclasses, etc.)
+    return out
+
+
 @dataclass
 class WebSocketCallback:
     """Streams AgentEvents over a WebSocket connection."""
@@ -47,6 +83,10 @@ class WebSocketCallback:
     # Drained by the agent loop between TAOR iterations and injected as
     # system messages so the agent can acknowledge or pivot mid-run.
     _side_notes: list = field(default_factory=list, init=False)
+    # request_id → asyncio.Future[bool] for pending approval prompts.
+    # The reader loop resolves these when the client posts an
+    # `approval_response` frame.
+    _pending_approvals: dict = field(default_factory=dict, init=False)
 
     def push_side_note(self, text: str) -> None:
         """Queue a side-channel note from the user for the running agent."""
@@ -81,6 +121,30 @@ class WebSocketCallback:
         _bg_id = (event.metadata or {}).get("bg_task_id") if isinstance(event.metadata, dict) else None
         _bg_name = (event.metadata or {}).get("bg_task_name") if isinstance(event.metadata, dict) else None
 
+        # ── Bg leak guard ────────────────────────────────────────────
+        # If this event is tagged as background, ALL non-tool-call kinds
+        # must be re-emitted as a single `bg_event` frame so they don't
+        # leak into the foreground chat as if the brain were still
+        # talking. tool_call / tool_result keep their existing dedicated
+        # bg_* frames; background_done / background_failed are direct
+        # surface (the user must see those even when bg-tagged).
+        if _bg_id and kind not in (
+            "tool_call",
+            "tool_result",
+            "background_done",
+            "background_failed",
+            "work_summary",  # captured-only, never forwarded
+        ):
+            await self._send({
+                "type": "bg_event",
+                "task_id": _bg_id,
+                "task_name": _bg_name,
+                "kind": kind,
+                "detail": event.detail,
+                "metadata": _safe_metadata(event.metadata),
+            })
+            return
+
         if kind == "token":
             self._buffer += event.detail
             await self._send({"type": "token", "content": event.detail})
@@ -88,6 +152,7 @@ class WebSocketCallback:
         elif kind == "tool_call":
             name = event.metadata.get("tool_name", event.detail)
             args = event.metadata.get("arguments", {})
+            tool_call_id = event.metadata.get("tool_call_id")
             if _bg_id:
                 await self._send({
                     "type": "bg_tool_call",
@@ -95,14 +160,21 @@ class WebSocketCallback:
                     "task_name": _bg_name,
                     "name": name,
                     "args": args,
+                    "tool_call_id": tool_call_id,
                 })
             else:
-                await self._send({"type": "tool_call", "name": name, "args": args})
+                await self._send({
+                    "type": "tool_call",
+                    "name": name,
+                    "args": args,
+                    "tool_call_id": tool_call_id,
+                })
 
         elif kind == "tool_result":
             name = event.metadata.get("tool_name", event.detail)
             result = event.metadata.get("result", "")
             preview = result[:200] if isinstance(result, str) else str(result)[:200]
+            tool_call_id = event.metadata.get("tool_call_id")
             if _bg_id:
                 await self._send({
                     "type": "bg_tool_result",
@@ -110,9 +182,15 @@ class WebSocketCallback:
                     "task_name": _bg_name,
                     "name": name,
                     "preview": preview,
+                    "tool_call_id": tool_call_id,
                 })
             else:
-                await self._send({"type": "tool_result", "name": name, "preview": preview})
+                await self._send({
+                    "type": "tool_result",
+                    "name": name,
+                    "preview": preview,
+                    "tool_call_id": tool_call_id,
+                })
 
         elif kind == "team_delegate":
             await self._send({
@@ -237,7 +315,66 @@ class WebSocketCallback:
             })
 
     async def on_approval_request(self, skill_name: str, arguments: dict) -> bool:
-        # Auto-approve from web UI for now
+        """Round-trip an approval prompt to the connected web user.
+
+        Sends ``{type: "approval_request", request_id, skill, args}``
+        over the WS and awaits a matching ``approval_response`` frame
+        (resolved by the reader loop). Defaults to **deny** on
+        timeout, disconnect, or any error — never auto-approves
+        silently.
+
+        Set ``LAZYCLAW_AUTO_APPROVE=1`` to restore the legacy
+        "auto-approve everything" behaviour for trusted self-host
+        setups (CI, single-user dev). Default is OFF — every gated
+        skill triggers a real prompt.
+        """
+        if os.environ.get("LAZYCLAW_AUTO_APPROVE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            return True
+        if self._closed or self.ws.client_state != WebSocketState.CONNECTED:
+            return False
+        request_id = uuid4().hex[:12]
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._pending_approvals[request_id] = future
+        try:
+            await self._send({
+                "type": "approval_request",
+                "request_id": request_id,
+                "skill": skill_name,
+                "args": _safe_metadata(arguments),
+            })
+            try:
+                # 2-minute hard cap so a forgotten dialog can't pin a
+                # tool execution forever. Long enough for the user to
+                # decide, short enough to fail loudly when ignored.
+                approved = await asyncio.wait_for(future, timeout=120)
+                return bool(approved)
+            except asyncio.TimeoutError:
+                logger.info(
+                    "approval %s for %s timed out — denying",
+                    request_id, skill_name,
+                )
+                return False
+        except Exception:
+            logger.debug(
+                "approval %s for %s failed — denying",
+                request_id, skill_name, exc_info=True,
+            )
+            return False
+        finally:
+            self._pending_approvals.pop(request_id, None)
+
+    def resolve_approval(self, request_id: str, approved: bool) -> bool:
+        """Settle a pending approval future (called by the reader loop).
+
+        Returns True when the request_id matched a live future.
+        """
+        future = self._pending_approvals.get(request_id)
+        if future is None or future.done():
+            return False
+        future.set_result(approved)
         return True
 
     async def on_help_request(self, context: str, needs_browser: bool) -> str:
@@ -587,6 +724,20 @@ async def chat_websocket(ws: WebSocket):
                     cb.cancel_token.cancel()
                 continue
 
+            if msg_type == "approval_response":
+                request_id = (data.get("request_id") or "").strip()
+                approved = bool(data.get("approved"))
+                cb = state.get("active")
+                if cb is not None and request_id:
+                    settled = cb.resolve_approval(request_id, approved)
+                    if not settled:
+                        logger.debug(
+                            "approval_response %s did not match a "
+                            "pending request (timeout / dup?)",
+                            request_id,
+                        )
+                continue
+
             if msg_type == "side_note":
                 # Explicit side-channel message — append to running agent.
                 note = (data.get("content") or "").strip()
@@ -638,18 +789,21 @@ async def chat_websocket(ws: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("WebSocket chat disconnected: user=%s", user.username)
-        cb = state.get("active")
-        if cb is not None:
-            cb.cancel_token.cancel()
-        for t in writer_tasks:
-            t.cancel()
-        bus_task.cancel()
-        task_bus_task.cancel()
     except Exception as exc:
         logger.error("WebSocket unexpected error: %s", exc, exc_info=True)
+    finally:
+        # All exit paths converge here so the per-connection pumps and
+        # spawned writer tasks always get cancelled — including the
+        # FastAPI normal-shutdown path that doesn't surface as
+        # WebSocketDisconnect. Without this, the browser_event /
+        # task_event subscriptions accumulated as zombies per
+        # disconnect and leaked memory in long-running servers.
         cb = state.get("active")
         if cb is not None:
-            cb.cancel_token.cancel()
+            try:
+                cb.cancel_token.cancel()
+            except Exception:
+                logger.debug("cancel_token.cancel() raised", exc_info=True)
         for t in writer_tasks:
             t.cancel()
         bus_task.cancel()

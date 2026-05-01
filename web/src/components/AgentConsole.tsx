@@ -42,16 +42,25 @@ export default function AgentConsole() {
     });
   };
 
-  const fg = agentStatus?.active ?? [];
+  // active_tasks from TeamLead is mixed-lane (foreground + background +
+  // specialist). Filter to FG-only here so bg tasks don't double-render
+  // in the FG lane (they already get their own BG lane below from
+  // /api/agents/status `background`).
+  const fg = (agentStatus?.active ?? []).filter(
+    (t) => t.lane !== "background",
+  );
   const bg = agentStatus?.background ?? [];
   const recent = agentStatus?.recent ?? [];
 
   const hasRunning =
     fg.length > 0 || bg.length > 0 || streamingState.isStreaming;
-  const liveLabel = fg[0]?.name ?? bg[0]?.name ?? null;
+  // Live ticker priority: FG first (the chat turn), then BG so the user
+  // still sees movement when the brain dispatched and went idle.
+  const liveSource = fg[0] ?? bg[0] ?? null;
+  const liveLabel = liveSource?.name ?? null;
   const liveTool =
-    fg[0]?.current_tool ??
-    fg[0]?.recent_tools?.[fg[0].recent_tools.length - 1] ??
+    liveSource?.current_tool ??
+    liveSource?.recent_tools?.[liveSource.recent_tools.length - 1] ??
     null;
 
   return (

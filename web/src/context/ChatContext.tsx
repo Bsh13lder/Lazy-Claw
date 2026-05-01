@@ -9,7 +9,10 @@ import {
 } from "react";
 import {
   useChatStream,
+  type ApprovalRequest,
   type BackgroundCompletePayload,
+  type BackgroundEvent,
+  type BackgroundToolEvent,
   type StreamingState,
   type ToolCallInfo,
   type UsageInfo,
@@ -43,6 +46,25 @@ export interface ChatSessionLocal {
   loaded: boolean;
 }
 
+// Live progress for a single running background task. Populated by
+// `bg_tool_call` / `bg_tool_result` / `bg_event` frames demuxed at
+// chat_ws.py. Consumers (e.g. a `BackgroundTasksPanel` component, the
+// AgentConsole BG sub-row) read this state to render per-task feeds.
+// **Critical**: bg events MUST land here, NOT in `Message.toolCalls`,
+// because the foreground transcript is for the brain's reply only.
+export interface BackgroundTaskProgress {
+  taskId: string;
+  taskName: string;
+  status: "running" | "done" | "failed";
+  startedAt: number;
+  // Tool calls in flight or completed for this bg task.
+  tools: ToolCallInfo[];
+  // Compact activity log: phase chips, thinking notes, specialist
+  // dispatch, plan questions. Capped at 30 entries to keep the UI
+  // responsive even on long-running bg tasks.
+  events: { kind: string; detail: string; ts: number }[];
+}
+
 interface ChatContextValue {
   sessions: ChatSessionLocal[];
   activeSessionId: string;
@@ -51,6 +73,13 @@ interface ChatContextValue {
   connectionStatus: ConnectionStatus;
   chatOpen: boolean;
   chatExpanded: boolean;
+  // Live per-task progress map for currently running bg tasks. Cleared
+  // entries roll off when `background_done` / `background_failed` lands.
+  backgroundTasks: Record<string, BackgroundTaskProgress>;
+  // Current pending approval prompt (server is awaiting our decision).
+  // Null when no skill is gated.
+  pendingApproval: ApprovalRequest | null;
+  decideApproval: (requestId: string, approved: boolean) => void;
   sendMessage: (text: string) => void;
   cancelGeneration: () => void;
   dismissBrowserSession: () => void;
@@ -308,6 +337,91 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [updateSession],
   );
 
+  // ── Background task live progress ─────────────────────────────────
+  // Keyed by task_id. Updated from `bg_tool_call` / `bg_tool_result` /
+  // `bg_event` frames demuxed server-side. NEVER mutates `messages` —
+  // the chat transcript stays clean (the foreground turn's transcript
+  // is for the brain's reply only). Final completion lands here AND in
+  // the chat as a single summary message via handleBackgroundComplete.
+  const [backgroundTasks, setBackgroundTasks] = useState<
+    Record<string, BackgroundTaskProgress>
+  >({});
+
+  const handleBackgroundTool = useCallback((evt: BackgroundToolEvent) => {
+    setBackgroundTasks((prev) => {
+      const cur = prev[evt.taskId] ?? {
+        taskId: evt.taskId,
+        taskName: evt.taskName,
+        status: "running" as const,
+        startedAt: evt.ts,
+        tools: [],
+        events: [],
+      };
+      let tools: ToolCallInfo[];
+      if (evt.kind === "tool_call") {
+        tools = [
+          ...cur.tools,
+          {
+            name: evt.name,
+            args: evt.args ?? {},
+            status: "running" as const,
+            started_at: evt.ts,
+          },
+        ];
+      } else {
+        // Match by tool_call_id when present (handles same-name
+        // back-to-back calls), else fall back to name+running.
+        const matchById = !!evt.toolCallId;
+        let matched = false;
+        tools = cur.tools.map((t) => {
+          const isMatch = matchById
+            ? !!evt.toolCallId &&
+              (t as ToolCallInfo & { tool_call_id?: string }).tool_call_id ===
+                evt.toolCallId
+            : t.name === evt.name && t.status === "running" && !matched;
+          if (!isMatch) return t;
+          matched = true;
+          return {
+            ...t,
+            status: "done" as const,
+            preview: evt.preview,
+            completed_at: evt.ts,
+            duration_ms: t.started_at ? evt.ts - t.started_at : undefined,
+          };
+        });
+      }
+      return { ...prev, [evt.taskId]: { ...cur, tools } };
+    });
+  }, []);
+
+  // ── Approval round-trip ───────────────────────────────────────────
+  // Server pings us when a gated skill needs the user's go-ahead. We
+  // surface a single dialog (most-recent wins; the old request times
+  // out server-side at 2 minutes if shadowed).
+  const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
+
+  const handleApprovalRequest = useCallback((req: ApprovalRequest) => {
+    setPendingApproval(req);
+  }, []);
+
+  const handleBackgroundEvent = useCallback((evt: BackgroundEvent) => {
+    setBackgroundTasks((prev) => {
+      const cur = prev[evt.taskId] ?? {
+        taskId: evt.taskId,
+        taskName: evt.taskName,
+        status: "running" as const,
+        startedAt: evt.ts,
+        tools: [],
+        events: [],
+      };
+      const events = [
+        ...cur.events,
+        { kind: evt.eventKind, detail: evt.detail, ts: evt.ts },
+      ].slice(-30); // cap to last 30 entries
+      return { ...prev, [evt.taskId]: { ...cur, events } };
+    });
+  }, []);
+
   // Background task finished AFTER its originating turn — surface result
   // inline so the user (and the agent on the next turn, via server-side
   // chat history) can see what happened.
@@ -329,6 +443,25 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           : null;
       const msg = makeMessage("assistant", content, undefined, usage);
       updateSession(sid, (s) => ({ ...s, messages: [...s.messages, msg] }));
+      // Roll the task off the live-progress map after a short delay so
+      // any final tool_result/event frames in flight still land before
+      // the panel removes the row.
+      setBackgroundTasks((prev) => {
+        if (!prev[payload.taskId]) return prev;
+        const next = { ...prev };
+        next[payload.taskId] = {
+          ...next[payload.taskId],
+          status: payload.kind === "background_done" ? "done" : "failed",
+        };
+        return next;
+      });
+      window.setTimeout(() => {
+        setBackgroundTasks((prev) => {
+          if (!prev[payload.taskId]) return prev;
+          const { [payload.taskId]: _drop, ...rest } = prev;
+          return rest;
+        });
+      }, 4000);
     },
     [updateSession],
   );
@@ -337,6 +470,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     sendMessage: wsSendMessage,
     sendSideNote: wsSendSideNote,
     cancelGeneration,
+    sendApprovalResponse,
     dismissBrowserSession,
     dismissTemplateSuggest,
     clearPendingPlan,
@@ -346,9 +480,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     onComplete: handleComplete,
     onError: handleError,
     onBackgroundComplete: handleBackgroundComplete,
+    onBackgroundTool: handleBackgroundTool,
+    onBackgroundEvent: handleBackgroundEvent,
     onAgentTaskEvent: refreshStatus,
     onQueuedUserMessage: handleQueuedUserMessage,
+    onApprovalRequest: handleApprovalRequest,
   });
+
+  const decideApproval = useCallback(
+    (requestId: string, approved: boolean) => {
+      sendApprovalResponse(requestId, approved);
+      setPendingApproval((prev) =>
+        prev && prev.requestId === requestId ? null : prev,
+      );
+    },
+    [sendApprovalResponse],
+  );
 
   // Keep a live ref to streamingState so sendMessage can decide side-note vs
   // new-turn without re-memoizing on every state change.
@@ -451,6 +598,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         connectionStatus,
         chatOpen,
         chatExpanded,
+        backgroundTasks,
+        pendingApproval,
+        decideApproval,
         sendMessage,
         cancelGeneration,
         dismissBrowserSession,

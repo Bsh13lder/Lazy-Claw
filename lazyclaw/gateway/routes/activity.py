@@ -79,21 +79,39 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                 "error": t.error or None,
             })
 
-    # Merge background tasks from TaskRunner (if available)
+    # Merge background tasks from TaskRunner (if available). Enrich with
+    # live TeamLead state (current_tool / recent_tools / phase) so the
+    # AgentConsole BG sub-row can show what the bg agent is doing right
+    # now — TaskRunner only knows name + elapsed.
     bg_running: list[dict] = []
     bg_recent: list[dict] = []
+    _tl_active_by_id: dict[str, object] = {}
+    if _team_lead is not None:
+        try:
+            _tl_active_by_id = {t.task_id: t for t in _team_lead.active_tasks}
+        except Exception:
+            logger.debug("active_tasks snapshot failed", exc_info=True)
     if _task_runner is not None:
         try:
             running_ids: set[str] = set()
             for task in _task_runner.list_running(user.id):
                 running_ids.add(task["id"])
-                bg_running.append({
+                row: dict = {
                     "task_id": task["id"],
                     "name": task["name"],
                     "lane": "background",
                     "status": "running",
                     "elapsed_s": round(task["elapsed_seconds"], 1),
-                })
+                }
+                tl = _tl_active_by_id.get(task["id"])
+                if tl is not None:
+                    row["current_tool"] = (
+                        getattr(tl, "current_tool", "") or getattr(tl, "current_step", "")
+                    )
+                    row["recent_tools"] = list(getattr(tl, "recent_tools", ()) or ())
+                    row["phase"] = getattr(tl, "phase", "") or ""
+                    row["step_count"] = getattr(tl, "step_count", 0) or 0
+                bg_running.append(row)
             # Pull historical (completed/failed) so the UI can render the
             # decrypted result body. Excluding rows still in ``running``
             # avoids duplicate cards in the dashboard.

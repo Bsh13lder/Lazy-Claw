@@ -10,6 +10,10 @@ export interface ToolCallInfo {
   completed_at?: number;
   duration_ms?: number;
   error?: string;
+  // Stable id minted server-side; lets tool_result frames attach back
+  // to the right call when the brain fires the same tool twice in one
+  // turn. Falls back to name+running matching when missing.
+  tool_call_id?: string;
 }
 
 export interface UsageInfo {
@@ -129,8 +133,34 @@ export interface BackgroundToolEvent {
   taskId: string;
   taskName: string;
   name: string;             // tool name, e.g. mcp_scraper_extract_entities
+  toolCallId?: string;      // unique per-call id (matches bg_tool_result)
   args?: Record<string, unknown>;
   preview?: string;
+  ts: number;
+}
+
+// Generic non-tool event from a running background task (bg agent's
+// `token` / `phase` / `thinking_*` / `specialist_*` / `plan_*`
+// frames). The chat UI must NOT render these as foreground bubbles —
+// they belong in the per-task Background card. Server-side demux at
+// `chat_ws.py` re-emits the leak set as `bg_event` instead of letting
+// each frame hit a `token` / `phase` / etc. handler.
+export interface BackgroundEvent {
+  taskId: string;
+  taskName: string;
+  eventKind: string;        // original AgentEvent.kind (e.g. "token", "phase")
+  detail: string;
+  metadata: Record<string, unknown>;
+  ts: number;
+}
+
+// Server-initiated approval prompt. The server is awaiting an
+// `approval_response` frame for this `requestId` and will deny by
+// default after 2 minutes if no response lands.
+export interface ApprovalRequest {
+  requestId: string;
+  skill: string;
+  args: Record<string, unknown>;
   ts: number;
 }
 
@@ -142,6 +172,11 @@ interface UseChatStreamOptions {
   // background task. The host typically appends to a per-task list and
   // renders a "Background: <name>" card under the brain's reply.
   onBackgroundTool?: (evt: BackgroundToolEvent) => void;
+  // Fired on every non-tool bg event (token, phase, thinking_*,
+  // specialist_*, plan_*). Demuxed server-side as `bg_event`. Host
+  // typically appends a one-line activity entry to the same per-task
+  // Background card.
+  onBackgroundEvent?: (evt: BackgroundEvent) => void;
   // Fired on TeamLead / TaskRunner lifecycle frames (`task_started`,
   // `task_step`, `task_phase`, `task_completed`, `background_started`,
   // `background_done`, `background_failed`). Consumers usually trigger an
@@ -152,6 +187,9 @@ interface UseChatStreamOptions {
   // as a side-note. The host should add a visible "queued" user bubble so
   // the message doesn't silently vanish.
   onQueuedUserMessage?: (content: string) => void;
+  // Server is awaiting an approval decision. The host renders a
+  // dialog and calls `sendApprovalResponse(requestId, approved)`.
+  onApprovalRequest?: (req: ApprovalRequest) => void;
   enabled?: boolean;
 }
 
@@ -159,6 +197,7 @@ interface UseChatStreamReturn {
   sendMessage: (content: string, sessionId: string) => void;
   sendSideNote: (content: string) => void;
   cancelGeneration: () => void;
+  sendApprovalResponse: (requestId: string, approved: boolean) => void;
   dismissBrowserSession: () => void;
   dismissTemplateSuggest: () => void;
   clearPendingPlan: () => void;
@@ -171,8 +210,10 @@ export function useChatStream({
   onError,
   onBackgroundComplete,
   onBackgroundTool,
+  onBackgroundEvent,
   onAgentTaskEvent,
   onQueuedUserMessage,
+  onApprovalRequest,
   enabled = true,
 }: UseChatStreamOptions): UseChatStreamReturn {
   const [streamingState, setStreamingState] = useState<StreamingState>({
@@ -203,16 +244,20 @@ export function useChatStream({
   const onErrorRef = useRef(onError);
   const onBackgroundCompleteRef = useRef(onBackgroundComplete);
   const onBackgroundToolRef = useRef(onBackgroundTool);
+  const onBackgroundEventRef = useRef(onBackgroundEvent);
   const onAgentTaskEventRef = useRef(onAgentTaskEvent);
   const onQueuedUserMessageRef = useRef(onQueuedUserMessage);
+  const onApprovalRequestRef = useRef(onApprovalRequest);
   useEffect(() => {
     onCompleteRef.current = onComplete;
     onErrorRef.current = onError;
     onBackgroundCompleteRef.current = onBackgroundComplete;
     onBackgroundToolRef.current = onBackgroundTool;
+    onBackgroundEventRef.current = onBackgroundEvent;
     onAgentTaskEventRef.current = onAgentTaskEvent;
     onQueuedUserMessageRef.current = onQueuedUserMessage;
-  }, [onComplete, onError, onBackgroundComplete, onBackgroundTool, onAgentTaskEvent, onQueuedUserMessage]);
+    onApprovalRequestRef.current = onApprovalRequest;
+  }, [onComplete, onError, onBackgroundComplete, onBackgroundTool, onBackgroundEvent, onAgentTaskEvent, onQueuedUserMessage, onApprovalRequest]);
 
   const flushBuffer = useCallback(() => {
     const content = bufferRef.current;
@@ -307,6 +352,7 @@ export function useChatStream({
             args: (msg.args as Record<string, unknown>) ?? {},
             status: "running",
             started_at: Date.now(),
+            tool_call_id: msg.tool_call_id as string | undefined,
           };
           toolsRef.current = [...toolsRef.current, tool];
           scheduleFlush();
@@ -317,19 +363,54 @@ export function useChatStream({
           const name = msg.name as string;
           const preview = msg.preview as string;
           const error = msg.error as string | undefined;
+          const tool_call_id = msg.tool_call_id as string | undefined;
           const now = Date.now();
-          toolsRef.current = toolsRef.current.map((t) =>
-            t.name === name && t.status === "running"
-              ? {
+          // Prefer matching by id (stable, mints server-side). Fall
+          // back to name+running for legacy / synthetic frames that
+          // don't carry an id (e.g. hallucination-cap bail).
+          let matchedById = false;
+          let nextTools = toolsRef.current.map((t) => {
+            if (
+              tool_call_id &&
+              t.tool_call_id === tool_call_id &&
+              t.status === "running"
+            ) {
+              matchedById = true;
+              return {
+                ...t,
+                status: error ? ("error" as const) : ("done" as const),
+                preview,
+                error,
+                completed_at: now,
+                duration_ms: t.started_at ? now - t.started_at : undefined,
+              };
+            }
+            return t;
+          });
+          if (!matchedById) {
+            // Legacy fallback — first running call with the same name
+            // gets the result.
+            let consumed = false;
+            nextTools = nextTools.map((t) => {
+              if (
+                !consumed &&
+                t.name === name &&
+                t.status === "running"
+              ) {
+                consumed = true;
+                return {
                   ...t,
                   status: error ? ("error" as const) : ("done" as const),
                   preview,
                   error,
                   completed_at: now,
                   duration_ms: t.started_at ? now - t.started_at : undefined,
-                }
-              : t,
-          );
+                };
+              }
+              return t;
+            });
+          }
+          toolsRef.current = nextTools;
           scheduleFlush();
           break;
         }
@@ -348,6 +429,7 @@ export function useChatStream({
               taskId: (msg.task_id as string) ?? "",
               taskName: (msg.task_name as string) ?? "Background task",
               name: (msg.name as string) ?? "",
+              toolCallId: msg.tool_call_id as string | undefined,
               args: type === "bg_tool_call"
                 ? (msg.args as Record<string, unknown>) ?? {}
                 : undefined,
@@ -359,6 +441,28 @@ export function useChatStream({
           }
           // Also nudge dashboard to refresh — the bg task's
           // current_tool / recent_tools list updates via TeamLead.
+          onAgentTaskEventRef.current?.();
+          break;
+        }
+
+        // Catch-all for non-tool bg events demuxed at chat_ws.py
+        // (token / phase / thinking_* / specialist_* / plan_*). The
+        // chat UI MUST NOT render these as foreground bubbles — the
+        // server already filters them so the foreground transcript
+        // stays clean. Consumers append to the same per-task
+        // Background card as bg_tool_*.
+        case "bg_event": {
+          const cb = onBackgroundEventRef.current;
+          if (cb) {
+            cb({
+              taskId: (msg.task_id as string) ?? "",
+              taskName: (msg.task_name as string) ?? "Background task",
+              eventKind: (msg.kind as string) ?? "",
+              detail: (msg.detail as string) ?? "",
+              metadata: (msg.metadata as Record<string, unknown>) ?? {},
+              ts: Date.now(),
+            });
+          }
           onAgentTaskEventRef.current?.();
           break;
         }
@@ -659,6 +763,75 @@ export function useChatStream({
           scheduleFlush();
           break;
         }
+
+        // Server is awaiting an approval decision for a gated skill.
+        // The host renders a dialog and calls sendApprovalResponse.
+        // Default deny is enforced server-side after a 2-min timeout
+        // — see WebSocketCallback.on_approval_request.
+        case "approval_request": {
+          const cb = onApprovalRequestRef.current;
+          if (cb) {
+            cb({
+              requestId: (msg.request_id as string) ?? "",
+              skill: (msg.skill as string) ?? "",
+              args: (msg.args as Record<string, unknown>) ?? {},
+              ts: Date.now(),
+            });
+          } else if (import.meta.env?.DEV) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[useChatStream] approval_request received but no host " +
+              "handler is registered — server will time out and deny.",
+              msg,
+            );
+          }
+          break;
+        }
+
+        // ── Frames the server emits but the chat UI doesn't surface
+        //    yet. Explicit no-op cases (with debug log) so they don't
+        //    silently fall through `default` — easier to spot in dev
+        //    tools when adding UI for one of them.
+        case "llm_call":
+        case "approval":  // post-decision audit frame; UI dialog is approval_request
+        case "stream_done":
+        case "BROWSER_PLAN":
+        case "BROWSER_ACTION":
+          if (import.meta.env?.DEV) {
+            // eslint-disable-next-line no-console
+            console.debug(
+              "[useChatStream] no-op frame:",
+              type,
+              msg,
+            );
+          }
+          break;
+
+        // Tool result attachments (binary data — currently lost in the
+        // chat UI but the server does emit them). When a renderer is
+        // ready we'll grow this case; for now we log so it's visible.
+        case "attachment":
+          if (import.meta.env?.DEV) {
+            // eslint-disable-next-line no-console
+            console.debug(
+              "[useChatStream] attachment received (no UI yet):",
+              {
+                media_type: msg.media_type,
+                filename: msg.filename,
+                bytes: typeof msg.data === "string"
+                  ? (msg.data as string).length
+                  : undefined,
+              },
+            );
+          }
+          break;
+
+        default:
+          if (import.meta.env?.DEV) {
+            // eslint-disable-next-line no-console
+            console.debug("[useChatStream] unhandled frame:", type, msg);
+          }
+          break;
       }
     },
     [scheduleFlush, resetStream],
@@ -668,6 +841,29 @@ export function useChatStream({
     onMessage: handleMessage,
     enabled,
   });
+
+  // Hard reset on WS reconnect — browser/template/plan refs are
+  // CONNECTION-scoped, not turn-scoped. Without this, a stale
+  // BrowserCanvas or TemplateSuggest from the previous WS lifetime
+  // surfaces on the new connection. resetStream() (per-turn)
+  // intentionally preserves these refs; only resetStreamHard clears
+  // them.
+  const lastStatusRef = useRef<ConnectionStatus>(connectionStatus);
+  useEffect(() => {
+    const prev = lastStatusRef.current;
+    lastStatusRef.current = connectionStatus;
+    if (connectionStatus !== "connected" || prev === "connected") return;
+    // Fresh connection (initial OR reconnect) — wipe connection-scoped state.
+    if (browserClearTimerRef.current) {
+      window.clearTimeout(browserClearTimerRef.current);
+      browserClearTimerRef.current = 0;
+    }
+    browserSessionRef.current = undefined;
+    templateSuggestRef.current = undefined;
+    pendingPlanRef.current = undefined;
+    planAutoApproveSessionRef.current = false;
+    scheduleFlush();
+  }, [connectionStatus, scheduleFlush]);
 
   const sendMessage = useCallback(
     (content: string, sessionId: string) => {
@@ -708,10 +904,22 @@ export function useChatStream({
     send({ type: "cancel" });
   }, [send]);
 
+  const sendApprovalResponse = useCallback(
+    (requestId: string, approved: boolean) => {
+      send({
+        type: "approval_response",
+        request_id: requestId,
+        approved,
+      });
+    },
+    [send],
+  );
+
   return {
     sendMessage,
     sendSideNote,
     cancelGeneration,
+    sendApprovalResponse,
     dismissBrowserSession,
     dismissTemplateSuggest,
     clearPendingPlan,

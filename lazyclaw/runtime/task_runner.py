@@ -542,6 +542,35 @@ class TaskRunner:
                     task_id=task_id, name=task_name, success=False,
                     error="Cancelled by user",
                 ))
+            elif _original_cb:
+                # Mirror the timeout / failure paths so the user actually
+                # sees that their cancel landed. Without this, cancelling
+                # a single bg task left the chat UI in "running…" forever.
+                try:
+                    await _original_cb.on_event(AgentEvent(
+                        "background_failed",
+                        f"Background task '{task_name}' cancelled",
+                        {"task_id": task_id, "name": task_name,
+                         "error": "Cancelled by user",
+                         "source": _source, "fanout_group_id": _group_id},
+                    ))
+                except Exception:
+                    logger.debug(
+                        "callback push (cancel) failed for %s",
+                        task_id[:8], exc_info=True,
+                    )
+            try:
+                task_event_bus.publish(task_event_bus.TaskEvent(
+                    user_id=user_id,
+                    kind="background_failed",
+                    task_id=task_id,
+                    name=task_name,
+                    error="Cancelled by user",
+                    source=_source,
+                    fanout_group_id=_group_id,
+                ))
+            except Exception:
+                logger.debug("task_event_bus publish (cancel) failed", exc_info=True)
 
         except Exception as exc:
             _status = "failed"

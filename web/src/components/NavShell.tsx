@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useAgentStatus } from "../context/AgentStatusContext";
 import ChatSidebar from "./ChatSidebar";
+import ApprovalDialog from "./ApprovalDialog";
+import { useChat } from "../context/ChatContext";
 import StatusBar from "./StatusBar";
 
 export type Page = "overview" | "activity" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
@@ -348,6 +350,16 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
 
       {/* Bottom status bar */}
       <StatusBar />
+
+      {/* Global approval prompt — mounted at the shell level so a gated
+          skill can prompt the user from any page (the agent runs
+          independently of the active route). */}
+      <GlobalApprovalDialog />
     </div>
   );
+}
+
+function GlobalApprovalDialog() {
+  const { pendingApproval, decideApproval } = useChat();
+  return <ApprovalDialog request={pendingApproval} onDecide={decideApproval} />;
 }

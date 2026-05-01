@@ -2797,18 +2797,27 @@ class Agent:
                         logger.warning("Nudging tool use: LLM skipped tools for channel query")
                         continue
 
-                    # Strip internal tags that should never reach the user
+                    # `_history_content` keeps <think>...</think> intact for
+                    # multi-turn quality on interleaved-thinking models (MiniMax
+                    # M2/M2.7 — see HF model card: "important to retain the
+                    # thinking content from the assistant's turns within the
+                    # historical messages"). `_final_content` is the user-facing
+                    # version with internal tags stripped.
+                    _history_content = _final_content
+                    if "<taor_plan>" in _history_content:
+                        _history_content = re.sub(
+                            r"<taor_plan>.*?</taor_plan>\s*",
+                            "", _history_content, flags=re.DOTALL,
+                        ).strip()
+                    if "<plan>" in _history_content:
+                        _history_content = re.sub(
+                            r"<plan>.*?</plan>\s*",
+                            "", _history_content, flags=re.DOTALL,
+                        ).strip()
+                    _final_content = _history_content
                     if "<think>" in _final_content:
                         _final_content = re.sub(
                             r"<think>.*?</think>\s*", "", _final_content, flags=re.DOTALL
-                        ).strip()
-                    if "<taor_plan>" in _final_content:
-                        _final_content = re.sub(
-                            r"<taor_plan>.*?</taor_plan>\s*", "", _final_content, flags=re.DOTALL
-                        ).strip()
-                    if "<plan>" in _final_content:
-                        _final_content = re.sub(
-                            r"<plan>.*?</plan>\s*", "", _final_content, flags=re.DOTALL
                         ).strip()
 
                     # Empty response from worker/brain model — escalate to fallback.
@@ -2869,7 +2878,7 @@ class Agent:
                                         "self-recall and re-prompting brain",
                                     )
                                     messages.append(LLMMessage(
-                                        role="assistant", content=_final_content,
+                                        role="assistant", content=_history_content,
                                     ))
                                     messages.append(LLMMessage(
                                         role="system", content=_block,
@@ -2883,10 +2892,12 @@ class Agent:
                                 exc_info=True,
                             )
 
-                    # Final text response (already streamed to user)
+                    # Final text response (already streamed to user). History
+                    # carries the unstripped version so M2 sees its prior <think>
+                    # trace next turn.
                     await cb.on_event(AgentEvent("stream_done", "", {}))
                     all_new_messages.append(
-                        LLMMessage(role="assistant", content=_final_content)
+                        LLMMessage(role="assistant", content=_history_content)
                     )
                     break
 
@@ -3045,7 +3056,16 @@ class Agent:
                     _all_tools_used.append(_display)
                     await cb.on_event(AgentEvent(
                         "tool_call", _display,
-                        {"tool": tc.name, "display_name": _display, "args": tc.arguments},
+                        {
+                            "tool": tc.name,
+                            "display_name": _display,
+                            "args": tc.arguments,
+                            # Stable id so the chat UI can match the
+                            # later tool_result back to THIS specific
+                            # call (otherwise back-to-back same-name
+                            # calls collide on `name+running`).
+                            "tool_call_id": tc.id,
+                        },
                     ))
                     # Emit browser-specific action event for transparency
                     if tc.name == "browser":
@@ -3171,7 +3191,11 @@ class Agent:
                             await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
                             await cb.on_event(AgentEvent(
                                 "tool_result", _display,
-                                {"tool": tc.name, "display_name": _display},
+                                {
+                                    "tool": tc.name,
+                                    "display_name": _display,
+                                    "tool_call_id": tc.id,
+                                },
                             ))
                         else:
                             _denied_approvals.add(_denial_key)
@@ -3188,7 +3212,11 @@ class Agent:
                         # Normal tool (no approval needed) — emit result event
                         await cb.on_event(AgentEvent(
                             "tool_result", _display,
-                            {"tool": tc.name, "display_name": _display},
+                            {
+                                "tool": tc.name,
+                                "display_name": _display,
+                                "tool_call_id": tc.id,
+                            },
                         ))
 
                     # Track step with TeamLead

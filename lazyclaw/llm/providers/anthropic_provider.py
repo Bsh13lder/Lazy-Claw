@@ -1,8 +1,193 @@
 from __future__ import annotations
 
+import json
+import logging
+import re
+import uuid
+
 import anthropic
 
 from lazyclaw.llm.providers.base import BaseLLMProvider, LLMMessage, LLMResponse, ToolCall
+
+_log = logging.getLogger(__name__)
+
+# ─── MiniMax M2 / M2.7 tool-call recovery ────────────────────────────────────
+#
+# M2 is hardcoded to emit tool calls in its proprietary XML format:
+#
+#   <minimax:tool_call>
+#   <invoke name="tool_name">
+#   <parameter name="key">value</parameter>
+#   </invoke>
+#   </minimax:tool_call>
+#
+# MiniMax's `/anthropic` endpoint usually translates this to native Anthropic
+# `tool_use` content blocks server-side, but raw markup leaks through under
+# interleaved-thinking + multi-tool prompts. The parser below recovers it.
+#
+# Vendored verbatim (with adapter glue) from MiniMax's own tool calling guide:
+#   https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/main/docs/tool_calling_guide.md
+# License: MIT via the MiniMax-M2 model card. Battle-tested by the vLLM and
+# SGLang plugins. Schema-driven type coercion (int/float/bool/array/object)
+# beats heuristic guessing.
+#
+# IMPORTANT: This pass strips `<minimax:tool_call>` blocks but MUST NOT touch
+# `<think>...</think>` content. M2 is an interleaved-thinking model — per the
+# HF model card, retaining thinking content in assistant history is required
+# for multi-turn quality. The strip regex below is wrapper-scoped on purpose.
+
+_MINIMAX_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<minimax:tool_call>(.*?)</minimax:tool_call>", re.DOTALL
+)
+_MINIMAX_INVOKE_RE = re.compile(r"<invoke name=(.*?)</invoke>", re.DOTALL)
+_MINIMAX_PARAMETER_RE = re.compile(r"<parameter name=(.*?)</parameter>", re.DOTALL)
+
+
+def _minimax_extract_name(name_str: str) -> str:
+    """Strip surrounding quotes from a name token. (Vendored from MiniMax guide.)"""
+    name_str = name_str.strip()
+    if name_str.startswith('"') and name_str.endswith('"'):
+        return name_str[1:-1]
+    if name_str.startswith("'") and name_str.endswith("'"):
+        return name_str[1:-1]
+    return name_str
+
+
+def _minimax_convert_param_value(value: str, param_type: str) -> object:
+    """Coerce a parameter string to its declared type. (Vendored from MiniMax guide.)"""
+    if value.lower() == "null":
+        return None
+
+    param_type = param_type.lower()
+    if param_type in ("string", "str", "text"):
+        return value
+    if param_type in ("integer", "int"):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return value
+    if param_type in ("number", "float"):
+        try:
+            val = float(value)
+            return val if val != int(val) else int(val)
+        except (ValueError, TypeError):
+            return value
+    if param_type in ("boolean", "bool"):
+        return value.lower() in ("true", "1")
+    if param_type in ("object", "array"):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    # Unknown declared type — try JSON, fall back to raw string.
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _minimax_parse_tool_calls(
+    model_output: str, tools: list[dict] | None = None,
+) -> list[dict]:
+    """Parse MiniMax XML markup into [{name, arguments}, ...].
+
+    Vendored verbatim from MiniMax-M2's tool calling guide. Schema-aware: when
+    `tools` is provided in OpenAI or MiniMax shape, parameter values are coerced
+    to their declared type.
+    """
+    if "<minimax:tool_call>" not in model_output:
+        return []
+
+    parsed: list[dict] = []
+    try:
+        for tool_call_match in _MINIMAX_TOOL_CALL_BLOCK_RE.findall(model_output):
+            for invoke_match in _MINIMAX_INVOKE_RE.findall(tool_call_match):
+                name_match = re.search(r"^([^>]+)", invoke_match)
+                if not name_match:
+                    continue
+                function_name = _minimax_extract_name(name_match.group(1))
+
+                # Resolve parameter type config from tool definitions, if any.
+                param_config: dict = {}
+                if tools:
+                    for tool in tools:
+                        tool_name = (
+                            tool.get("name")
+                            or tool.get("function", {}).get("name")
+                        )
+                        if tool_name == function_name:
+                            params = (
+                                tool.get("parameters")
+                                or tool.get("function", {}).get("parameters")
+                                or tool.get("input_schema")
+                            )
+                            if isinstance(params, dict) and "properties" in params:
+                                param_config = params["properties"]
+                            break
+
+                # Walk <parameter name="K">V</parameter> children.
+                args: dict = {}
+                for param_match in _MINIMAX_PARAMETER_RE.findall(invoke_match):
+                    body_match = re.search(r"^([^>]+)>(.*)", param_match, re.DOTALL)
+                    if not body_match:
+                        continue
+                    param_name = _minimax_extract_name(body_match.group(1))
+                    param_value = body_match.group(2).strip()
+                    if param_value.startswith("\n"):
+                        param_value = param_value[1:]
+                    if param_value.endswith("\n"):
+                        param_value = param_value[:-1]
+
+                    declared_type = "string"
+                    cfg = param_config.get(param_name)
+                    if isinstance(cfg, dict) and "type" in cfg:
+                        declared_type = cfg["type"]
+                    args[param_name] = _minimax_convert_param_value(
+                        param_value, declared_type,
+                    )
+
+                parsed.append({"name": function_name, "arguments": args})
+    except Exception:  # noqa: BLE001 — match upstream behavior
+        _log.exception("Failed to parse MiniMax tool calls")
+        return []
+
+    return parsed
+
+
+def _extract_minimax_tool_calls(
+    text: str, tools: list[dict] | None = None,
+) -> tuple[str, list[ToolCall]]:
+    """Recover MiniMax-style tool-call markup from text content.
+
+    Returns (cleaned_text, tool_calls). Substring-gated — no-op for real
+    Anthropic responses. `<think>...</think>` content is preserved intact;
+    only the `<minimax:tool_call>` wrapper is stripped.
+    """
+    if not text or "<minimax:tool_call>" not in text:
+        return text, []
+
+    parsed = _minimax_parse_tool_calls(text, tools)
+    cleaned = _MINIMAX_TOOL_CALL_BLOCK_RE.sub("", text).strip()
+
+    if not parsed:
+        # Markup was present but unparseable — leave text alone so a human can
+        # see what M2 emitted, return no calls.
+        return text, []
+
+    calls = [
+        ToolCall(
+            id=f"minimax_{uuid.uuid4().hex[:12]}",
+            name=item["name"],
+            arguments=item["arguments"],
+        )
+        for item in parsed
+    ]
+    _log.warning(
+        "Recovered %d MiniMax-style tool call(s) from text content. "
+        "Server-side adapter did not translate to native tool_use blocks.",
+        len(calls),
+    )
+    return cleaned, calls
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -159,6 +344,31 @@ class AnthropicProvider(BaseLLMProvider):
                     ToolCall(id=block.id, name=block.name, arguments=block.input)
                 )
 
+        # Recover MiniMax-style tool markup if the server returned it as text
+        # instead of native tool_use blocks.
+        joined_text = "\n".join(text_parts)
+        cleaned_text, recovered_calls = _extract_minimax_tool_calls(
+            joined_text, converted_tools,
+        )
+        if recovered_calls:
+            parsed_tool_calls.extend(recovered_calls)
+            joined_text = cleaned_text
+
+        # Diagnostic: if MiniMax returned text-only with no tool calls (native
+        # OR recovered), log the first 400 chars so we can see what the model
+        # actually said. Lets us distinguish "M2 thought-only" from "adapter
+        # leaked markup we didn't recognize" without bumping log level globally.
+        if (
+            response.model
+            and "MiniMax" in response.model
+            and not parsed_tool_calls
+            and joined_text
+        ):
+            _log.warning(
+                "MiniMax %s returned text-only (no tool calls): %r",
+                response.model, joined_text[:400],
+            )
+
         usage = None
         if response.usage:
             input_t = response.usage.input_tokens
@@ -176,7 +386,7 @@ class AnthropicProvider(BaseLLMProvider):
             }
 
         return LLMResponse(
-            content="\n".join(text_parts),
+            content=joined_text,
             model=response.model,
             usage=usage,
             tool_calls=parsed_tool_calls or None,
@@ -284,6 +494,14 @@ class AnthropicProvider(BaseLLMProvider):
                             "cache_creation_input_tokens": _input_usage.get("cache_creation_input_tokens", 0),
                             "cache_read_input_tokens": _input_usage.get("cache_read_input_tokens", 0),
                         }
+                    # Recover MiniMax-style tool markup from streamed text when
+                    # the server returned it as content instead of tool_use.
+                    if not collected_tool_calls:
+                        _, recovered = _extract_minimax_tool_calls(
+                            collected_text, converted_tools,
+                        )
+                        if recovered:
+                            collected_tool_calls.extend(recovered)
                     yield StreamChunk(
                         delta="",
                         tool_calls=collected_tool_calls or None,

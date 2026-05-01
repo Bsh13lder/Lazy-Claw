@@ -12,23 +12,34 @@ DENY = "deny"
 
 VALID_LEVELS = frozenset({ALLOW, ASK, DENY})
 
-# Default category -> permission level mapping
-# Safe read-only categories default to ALLOW so the agent can act without
-# asking "would you like me to proceed?" on every tool call.
-# Only truly sensitive categories (vault, computer) require approval.
+# Default category -> permission level mapping.
+# Safe read-only categories and "user's own data" categories default to ALLOW
+# so the agent can act without asking "would you like me to proceed?" on
+# every tool call. Sensitive categories that touch credentials, shell, or
+# money still require approval.
+#
+# Categories listed below were promoted to ALLOW after a 2026-05-01 incident:
+# the brain hit a Google-Sheets append on a beauty-salons scrape task, the
+# `google` category fell through to the ASK fallback, and the user got an
+# unexpected popup for an action they had already authed. The categories
+# below are safe-by-default because either:
+#   (a) they only touch the user's own services they explicitly authed
+#       (google, communication, n8n);
+#   (b) they only touch local encrypted state (lazybrain, pipeline, replay,
+#       session, tasks);
+#   (c) they're configuration toggles or read-only diagnostics
+#       (system, ai_management, teams).
 DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
+    # ── Safe defaults (ALLOW) ────────────────────────────────────────────
     "general": ALLOW,
     "utility": ALLOW,
     "search": ALLOW,
     "research": ALLOW,
     "memory": ALLOW,
-    "vault": ASK,
     "browser": ALLOW,
     "browser_management": ALLOW,
-    "computer": ASK,
     "skills": ALLOW,
     "custom": ALLOW,
-    "security": ASK,
     "mcp": ALLOW,
     "mcp_management": ALLOW,
     "survival": ALLOW,
@@ -42,6 +53,31 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     # → 'requires approval' → next iteration → repeat.
     "core": ALLOW,
     "orchestration": ALLOW,
+    # User's own services (already authed end-to-end at OAuth/login time):
+    "google": ALLOW,         # Gmail / Sheets / Drive on the user's account
+    "communication": ALLOW,  # email / whatsapp / instagram via configured MCPs
+    "n8n": ALLOW,            # workflow CRUD on the user's own n8n instance
+    # Local encrypted state — no external blast radius:
+    "lazybrain": ALLOW,      # PKM notes / wikilinks / journal
+    "pipeline": ALLOW,       # CRM-style local pipeline
+    "replay": ALLOW,         # session trace recordings
+    "session": ALLOW,        # session lifecycle ops
+    "teams": ALLOW,          # specialist dispatch — twin of orchestration
+    # Read-only diagnostics + user-facing config toggles:
+    "system": ALLOW,         # status / about / health
+    "ai_management": ALLOW,  # ECO mode toggles — user-facing settings
+    # ── Sensitive (ASK) — KEEP gated ─────────────────────────────────────
+    "vault": ASK,            # credentials / API keys
+    "computer": ASK,         # shell / subprocess execution
+    "security": ASK,         # security operations
+    "payment": ASK,          # money — always confirm
+    "permissions": ASK,      # meta-op on permissions itself; gating prevents
+                             # agent from silently widening its own access
+    "audit": ASK,            # lazydoctor finding-review surface; the
+                             # underlying user approval is in-band on
+                             # Telegram, but gating the skill itself
+                             # keeps the brain from spamming approvals
+                             # during an unsupervised audit run.
 }
 
 

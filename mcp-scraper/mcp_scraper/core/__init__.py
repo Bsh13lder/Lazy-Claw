@@ -9,7 +9,6 @@ from .crawler_core import _internal_crawl_url
 from .crawl_url import crawl_url, deep_crawl_site
 from .extraction_intelligent import _internal_intelligent_extract, intelligent_extract
 from .extraction_entity import (
-    _regex_worker,
     _safe_regex_findall,
     _internal_extract_entities,
     _internal_llm_extract_entities,

@@ -10,7 +10,6 @@ from ..core.crawl_url import crawl_url, deep_crawl_site
 from ..core.crawler_fallback import crawl_url_with_fallback
 from ..core.extraction_intelligent import _internal_intelligent_extract, intelligent_extract
 from ..core.extraction_entity import (
-    _regex_worker,
     _safe_regex_findall,
     _internal_extract_entities,
     _internal_llm_extract_entities,
@@ -33,7 +32,7 @@ __all__ = [
     '_internal_crawl_url', 'crawl_url', 'deep_crawl_site',
     'crawl_url_with_fallback',
     '_internal_intelligent_extract', 'intelligent_extract',
-    '_regex_worker', '_safe_regex_findall',
+    '_safe_regex_findall',
     '_internal_extract_entities', '_internal_llm_extract_entities', 'extract_entities',
     '_internal_extract_structured_data', 'extract_structured_data',
     '_check_and_summarize_if_needed', '_finalize_fallback_response',

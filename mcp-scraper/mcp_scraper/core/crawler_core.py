@@ -157,8 +157,17 @@ async def _internal_crawl_url(request: CrawlRequest) -> CrawlResponse:
 
         js_wait_params = {}
         if request.wait_for_js:
-            js_wait_params["wait_until"] = "networkidle"
-            js_wait_params["delay_before_return_html"] = 2.0
+            # SPAs (Instagram, modern social/ecommerce, anything with a
+            # background poller) keep the network bus alive forever, so
+            # `networkidle` never fires and the crawl stalls until
+            # page_timeout. domcontentloaded gives a hard ceiling, and the
+            # post-load delay still lets late-rendering contact widgets
+            # populate. Override via CRAWL4AI_WAIT_UNTIL if a specific job
+            # genuinely needs networkidle.
+            js_wait_params["wait_until"] = (
+                os.getenv("CRAWL4AI_WAIT_UNTIL") or "domcontentloaded"
+            )
+            js_wait_params["delay_before_return_html"] = 3.5
             if not request.wait_for_selector:
                 js_wait_params["scan_full_page"] = True
 

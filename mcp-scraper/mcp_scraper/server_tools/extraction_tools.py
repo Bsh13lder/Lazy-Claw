@@ -212,12 +212,31 @@ def register_extraction_tools(mcp, get_modules):
                 (result.get("entities") or {}).get(t) for t in ("emails", "phones")
             )
             _had_content = (result.get("content_length") or 0) > 200
+            # Stealth retry never reveals contact info on these hosts —
+            # they require auth and serve client-rendered shells with no
+            # public emails/phones. Doubling the browser cost is wasted
+            # work and was a major contributor to subprocess OOM under
+            # batch loads (12+ Instagram bios in flight). Use the dedicated
+            # mcp-instagram / mcp-* tools for those platforms instead.
+            from urllib.parse import urlparse as _urlparse
+            _host = (_urlparse(url).netloc or "").lower()
+            if _host.startswith("www."):
+                _host = _host[4:]
+            _anti_bot_social_hosts = (
+                "instagram.com", "facebook.com", "x.com", "twitter.com",
+                "linkedin.com", "tiktok.com", "threads.net",
+            )
+            _is_anti_bot_social = any(
+                _host == d or _host.endswith("." + d)
+                for d in _anti_bot_social_hosts
+            )
             if (
                 result.get("success", True)
                 and _wants_contact
                 and _no_contact_hits
                 and _had_content
                 and not use_undetected_browser
+                and not _is_anti_bot_social
             ):
                 escalated = await web_crawling.extract_entities(
                     url=url, entity_types=entity_types, custom_patterns=custom_patterns,

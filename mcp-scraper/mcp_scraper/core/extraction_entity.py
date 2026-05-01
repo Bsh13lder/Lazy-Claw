@@ -1,16 +1,57 @@
 """
 Entity extraction using regex patterns and LLM.
 
-Contains _regex_worker, _safe_regex_findall, _internal_extract_entities,
+Contains _safe_regex_findall, _internal_extract_entities,
 _internal_llm_extract_entities, and extract_entities wrapper
 extracted from tools/web_crawling.py.
 """
 
+import asyncio
+import concurrent.futures
 import json
+import os
 import re as _re
 from typing import Any, Dict, List, Optional
 
 from ..models import CrawlRequest
+
+
+# Module-level singletons reused across calls. Forking a fresh Python
+# process for every regex pattern (the previous _regex_worker design) and
+# launching a fresh AsyncWebCrawler for every entity extraction were the
+# two amplifiers that turned 12 concurrent calls into an OOM kill of the
+# mcp-scraper subprocess. Both shared resources are bounded here.
+_REGEX_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_CRAWL_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _get_regex_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """One persistent thread pool for ReDoS-bounded regex execution."""
+    global _REGEX_EXECUTOR
+    if _REGEX_EXECUTOR is None:
+        _REGEX_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="regex-timeout",
+        )
+    return _REGEX_EXECUTOR
+
+
+def _get_crawl_semaphore() -> asyncio.Semaphore:
+    """Cap concurrent Playwright launches to keep the subprocess alive.
+
+    Vendored crawl4ai 0.7.8 leaks browser threads on AsyncWebCrawler
+    context-manager exit (upstream issue #1666). Concurrency × leak-rate
+    is what kills the process. 4 keeps RAM ceiling under ~2 GB on macOS;
+    override via MCP_SCRAPER_MAX_CONCURRENT.
+    """
+    global _CRAWL_SEMAPHORE
+    if _CRAWL_SEMAPHORE is None:
+        try:
+            limit = int(os.getenv("MCP_SCRAPER_MAX_CONCURRENT", "4"))
+        except ValueError:
+            limit = 4
+        _CRAWL_SEMAPHORE = asyncio.Semaphore(max(1, limit))
+    return _CRAWL_SEMAPHORE
 
 
 # Canonical plural keys for the regex `patterns` dict below. The MCP tool
@@ -116,64 +157,43 @@ def _looks_like_real_phone(candidate: str) -> bool:
     return True
 
 
-def _regex_worker(pattern: str, text: str, flags: int, result_queue) -> None:
-    """
-    Worker function for regex execution in separate process.
-
-    This runs in an isolated process to enable true timeout via process termination.
-    """
-    import re
-    try:
-        compiled = re.compile(pattern, flags)
-        matches = compiled.findall(text)
-        result_queue.put(("success", matches))
-    except Exception as e:
-        result_queue.put(("error", str(e)))
-
-
 def _safe_regex_findall(pattern: str, text: str, timeout: float = 5.0) -> List[str]:
-    """
-    Execute re.findall with true timeout protection using multiprocessing.
+    """Execute re.findall with bounded-time protection.
+
+    Uses a persistent thread pool instead of forking a fresh Python process
+    per call. The previous multiprocessing.Process design was correct for
+    truly malicious ReDoS (kill-the-process semantics) but the per-pattern
+    fork cost was the dominant factor under load — eight built-in patterns
+    × dozens of in-flight URLs forked the parent into starvation.
+
+    Trade-off: a wedged thread cannot be cancelled, so the pattern length
+    cap and content length cap below are now the real ReDoS mitigation.
+    Built-in patterns are hand-crafted and bounded; custom_patterns from
+    callers are validated against the same caps.
     """
     import re
-    import multiprocessing
 
-    # Validate pattern first
     try:
         re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         raise ValueError(f"Invalid regex pattern: {e}")
 
-    # Safety: limit pattern complexity to mitigate DoS risk
     if len(pattern) > 500:
         raise ValueError(f"Pattern too long ({len(pattern)} chars, max 500)")
 
-    # Use multiprocessing for true timeout with process termination
-    result_queue = multiprocessing.Queue()
-    process = multiprocessing.Process(
-        target=_regex_worker,
-        args=(pattern, text, re.IGNORECASE, result_queue)
-    )
+    if len(text) > 5_000_000:
+        text = text[:5_000_000]
 
-    process.start()
-    process.join(timeout=timeout)
-
-    if process.is_alive():
-        process.terminate()
-        process.join(timeout=1.0)
-        if process.is_alive():
-            process.kill()
-            process.join()
-        raise TimeoutError(f"Regex execution timed out after {timeout}s (possible ReDoS pattern)")
-
-    if result_queue.empty():
-        raise RuntimeError("Regex worker returned no result")
-
-    status, result = result_queue.get_nowait()
-    if status == "error":
-        raise ValueError(f"Regex execution error: {result}")
-
-    return result
+    executor = _get_regex_executor()
+    future = executor.submit(re.findall, pattern, text, re.IGNORECASE)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(
+            f"Regex execution timed out after {timeout}s (possible ReDoS pattern)"
+        )
+    except re.error as e:
+        raise ValueError(f"Regex execution error: {e}")
 
 
 async def _internal_extract_entities(
@@ -206,7 +226,8 @@ async def _internal_extract_entities(
             use_undetected_browser=use_undetected_browser,
             simulate_user=simulate_user,
         )
-        crawl_result = await _internal_crawl_url(request)
+        async with _get_crawl_semaphore():
+            crawl_result = await _internal_crawl_url(request)
 
         if not crawl_result.success:
             return {
@@ -311,7 +332,8 @@ async def _internal_llm_extract_entities(
             use_undetected_browser=use_undetected_browser,
             simulate_user=simulate_user,
         )
-        crawl_result = await _internal_crawl_url(request)
+        async with _get_crawl_semaphore():
+            crawl_result = await _internal_crawl_url(request)
 
         if not crawl_result.success:
             return {

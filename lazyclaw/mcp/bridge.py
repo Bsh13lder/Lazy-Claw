@@ -377,14 +377,39 @@ class PooledMCPToolSkill(BaseSkill):
     def _ordered_shards(self) -> list[MCPClient]:
         """Return shards starting at the current round-robin index.
 
-        Skips disconnected shards. The list never mutates mid-call —
-        callers iterate this list, not the underlying `_clients`.
+        Uses ``is_alive`` (stricter than ``is_connected``) so we don't try
+        to call into a client whose subprocess died but whose ``_session``
+        hasn't been cleared yet by ``_run_context.finally``. The list never
+        mutates mid-call — callers iterate this list, not the underlying
+        ``_clients``.
         """
-        live = [c for c in self._clients if c.is_connected]
+        live = [c for c in self._clients if c.is_alive]
         if not live:
             return []
         start = next(_pool_counter) % len(live)
         return live[start:] + live[:start]
+
+    async def _revive_pool(self) -> list[MCPClient]:
+        """Respawn any non-dead client whose subprocess has died, then
+        return the freshly-live shards. Called when ``_ordered_shards``
+        is empty so a single-shard pool (post db7dd27) can recover from
+        a crashed child without a container restart.
+        """
+        revived: list[MCPClient] = []
+        for client in self._clients:
+            if client.is_alive:
+                revived.append(client)
+                continue
+            if client.is_dead:
+                continue
+            try:
+                if await client.respawn():
+                    revived.append(client)
+            except Exception:
+                logger.debug(
+                    "scraper shard %s respawn raised", client.name, exc_info=True,
+                )
+        return revived
 
     async def execute(self, user_id: str, params: dict[str, Any]) -> str:
         """Pick a shard, call the tool, retry on next shard on error.
@@ -401,7 +426,7 @@ class PooledMCPToolSkill(BaseSkill):
         without any LLM-side change.
         """
         # Lazy-spawn check (best effort, never blocks the call)
-        if self._clients and self._clients[0].is_connected:
+        if self._clients and self._clients[0].is_alive:
             sem0 = _get_call_semaphore(self._clients[0].server_id)
             if sem0.locked():
                 try:
@@ -421,10 +446,16 @@ class PooledMCPToolSkill(BaseSkill):
 
         ordered = self._ordered_shards()
         if not ordered:
-            return (
-                "[MCP ERROR] scraper pool fully unavailable — all shards "
-                "disconnected. Try again in a few seconds."
-            )
+            # Single-shard pool with a crashed child — try to bring it back
+            # before giving up. Bounded by MCPClient's own respawn budget.
+            revived = await self._revive_pool()
+            if not revived:
+                return (
+                    "[MCP ERROR] scraper pool fully unavailable — child "
+                    "subprocess crashed and respawn failed. Check "
+                    "data/mcp-*.stderr.log for the cause."
+                )
+            ordered = revived
 
         last_error: str | None = None
         for idx, client in enumerate(ordered):

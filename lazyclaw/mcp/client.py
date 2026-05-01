@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,39 @@ _ALLOWED_MCP_COMMANDS = frozenset({
     # pip console-script entry points for bundled MCPs
     "workspace-mcp",
 })
+
+# Bounded respawn policy — matches Claude Code's own MCP reconnect
+# (5 attempts, 1→2→4→8→16s) and Google ADK's lazy-reconnect pattern.
+# Without bounds an unrecoverable child (binary missing, port permanently
+# taken) would loop forever and burn the lane queue.
+_MAX_RESPAWN_ATTEMPTS = 5
+_RESPAWN_BASE_DELAY = 1.0
+_RESPAWN_MAX_DELAY = 16.0
+# After this much quiet time since the last respawn, reset the attempt
+# counter so a brand-new outage gets a fresh budget.
+_RESPAWN_RESET_AFTER = 300.0
+# Pre-rotate the stderr log when it crosses this size at open time.
+# crawl4ai children are chatty; without this the log fills the disk.
+_STDERR_LOG_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _is_transport_error(exc: BaseException) -> bool:
+    """True for exceptions that mean "stdio pipe is dead, the server is gone".
+
+    We match by class name to avoid importing anyio here (it's a transitive
+    dep of mcp, not a direct dep of lazyclaw). The set covers what Google ADK,
+    Grinta, and EasyMCP all catch in their own respawn paths.
+    """
+    name = type(exc).__name__
+    if name in ("BrokenResourceError", "ClosedResourceError", "EndOfStream"):
+        return True
+    if isinstance(exc, (BrokenPipeError, ConnectionError, OSError)):
+        return True
+    # The mcp SDK's send_request raises a bare RuntimeError when the
+    # response stream is closed mid-flight (mcp/shared/session.py).
+    if isinstance(exc, RuntimeError) and "closed" in str(exc).lower():
+        return True
+    return False
 
 
 def _get_child_pids(parent_pid: int) -> set[int]:
@@ -71,6 +105,13 @@ class MCPClient:
         self._shutdown_event: asyncio.Event | None = None
         self._ctx_error: Exception | None = None
 
+        # Respawn state — guarded by _respawn_lock so 9 parallel callers all
+        # hitting a dead pipe at once trigger exactly one teardown+reconnect.
+        self._respawn_lock = asyncio.Lock()
+        self._respawn_attempts = 0
+        self._last_respawn_at = 0.0
+        self._dead = False
+
     @property
     def server_id(self) -> str:
         return self._server_id
@@ -82,6 +123,30 @@ class MCPClient:
     @property
     def is_connected(self) -> bool:
         return self._session is not None
+
+    @property
+    def is_alive(self) -> bool:
+        """Stricter than is_connected — also rejects the "subprocess died but
+        _run_context.finally hasn't fired yet" window where _session is still
+        set but the underlying streams are closed.
+
+        Mirrors Google ADK's _is_session_disconnected (stream `_closed` probe)
+        plus a check that the context-holder task is still running.
+        """
+        if self._dead or self._session is None:
+            return False
+        task = self._ctx_task
+        if task is None or task.done():
+            return False
+        for stream in (self._read_stream, self._write_stream):
+            if stream is not None and getattr(stream, "_closed", False):
+                return False
+        return True
+
+    @property
+    def is_dead(self) -> bool:
+        """Permanently dead — respawn budget exhausted, don't try again."""
+        return self._dead
 
     async def connect(self) -> None:
         """Establish connection to the MCP server based on transport type.
@@ -253,9 +318,34 @@ class MCPClient:
         ]
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """Invoke a tool on the MCP server and return the result as a string."""
+        """Invoke a tool on the MCP server and return the result as a string.
+
+        On transport-level failure (broken pipe, closed stream, dead
+        subprocess) respawns the child and retries the call exactly once.
+        Bounded by ``_MAX_RESPAWN_ATTEMPTS`` per ``_RESPAWN_RESET_AFTER``
+        window so an unrecoverable server can't lock the lane queue.
+        """
         self._require_session()
         logger.debug("MCPClient %s calling tool %s", self._server_id, name)
+        try:
+            return await self._call_tool_once(name, arguments)
+        except Exception as exc:
+            if not _is_transport_error(exc):
+                raise
+            logger.warning(
+                "MCP %s transport error on %s (%s) — respawning",
+                self._name, name, type(exc).__name__,
+            )
+            if not await self.respawn():
+                raise RuntimeError(
+                    f"MCP {self._name} subprocess died and respawn failed: {exc}"
+                ) from exc
+            # Fresh subprocess + session — retry once. A second transport
+            # error here propagates so the bridge layer can surface it.
+            return await self._call_tool_once(name, arguments)
+
+    async def _call_tool_once(self, name: str, arguments: dict[str, Any]) -> str:
+        """Single call_tool attempt with no respawn. Used by call_tool wrapper."""
         # No lock: the MCP SDK already demultiplexes concurrent requests
         # by id (mcp/shared/session.py:_response_streams) and the stdio
         # transport's single writer task drains anyio.MemoryObjectStream
@@ -292,6 +382,85 @@ class MCPClient:
             )
 
         return text
+
+    async def respawn(self) -> bool:
+        """Tear down the current transport+session and spawn a fresh one.
+
+        Returns True on successful reconnect, False when the attempt budget
+        is exhausted or the underlying connect() fails. The lock collapses
+        the thundering-herd case where N parallel callers all see a dead
+        pipe at the same moment — only one teardown runs; the rest see an
+        already-alive client when the lock releases and skip the work.
+
+        Always allocates a fresh transport context (Continue.dev #11886:
+        reusing a Client instance after close() throws "Already connected to
+        a transport" because _transport is cleared async by _onclose).
+        """
+        if self._dead:
+            return False
+
+        async with self._respawn_lock:
+            # Another caller may have just respawned us — short-circuit.
+            if self.is_alive:
+                return True
+
+            now = time.monotonic()
+            if now - self._last_respawn_at > _RESPAWN_RESET_AFTER:
+                self._respawn_attempts = 0
+
+            if self._respawn_attempts >= _MAX_RESPAWN_ATTEMPTS:
+                self._dead = True
+                logger.error(
+                    "MCP %s exhausted %d respawn attempts — marking dead",
+                    self._name, _MAX_RESPAWN_ATTEMPTS,
+                )
+                return False
+
+            attempt = self._respawn_attempts
+            self._respawn_attempts += 1
+            self._last_respawn_at = now
+
+            delay = min(_RESPAWN_BASE_DELAY * (2 ** attempt), _RESPAWN_MAX_DELAY)
+            logger.warning(
+                "MCP %s respawning (attempt %d/%d, delay %.1fs)",
+                self._name, attempt + 1, _MAX_RESPAWN_ATTEMPTS, delay,
+            )
+
+            # Tear down the old transport+session in the same task that
+            # entered them — disconnect()'s shutdown_event triggers
+            # _run_context's finally where the cancel-scope-safe cleanup
+            # happens. Don't try to swap streams in-place.
+            try:
+                await self.disconnect()
+            except Exception as exc:
+                logger.debug(
+                    "MCP %s disconnect raised during respawn: %s",
+                    self._name, exc,
+                )
+
+            await asyncio.sleep(delay)
+
+            try:
+                await self.connect()
+            except Exception as exc:
+                logger.warning(
+                    "MCP %s respawn connect failed (attempt %d/%d): %s",
+                    self._name, attempt + 1, _MAX_RESPAWN_ATTEMPTS, exc,
+                )
+                # If the failing attempt was the last one in the budget,
+                # mark dead now so future callers short-circuit instead of
+                # also taking the lock and discovering they're past the cap.
+                if self._respawn_attempts >= _MAX_RESPAWN_ATTEMPTS:
+                    self._dead = True
+                    logger.error(
+                        "MCP %s exhausted %d respawn attempts — marking dead",
+                        self._name, _MAX_RESPAWN_ATTEMPTS,
+                    )
+                return False
+
+            self._respawn_attempts = 0
+            logger.info("MCP %s respawned successfully", self._name)
+            return True
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -361,15 +530,34 @@ class MCPClient:
             args=args,
             env=child_env,
         )
-        # Log MCP stderr to file
+        # Log MCP stderr to file. Pre-rotate when the file gets large so a
+        # chatty child (crawl4ai etc.) can't fill the disk between restarts;
+        # write a banner per generation so post-mortems can correlate stderr
+        # output with the respawn attempt that produced it.
         log_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"
         )
         os.makedirs(log_dir, exist_ok=True)
         safe_name = self._name.replace("/", "_").replace(" ", "_")
-        self._stderr_log = open(
-            os.path.join(log_dir, f"mcp-{safe_name}.stderr.log"), "a"
-        )
+        log_path = os.path.join(log_dir, f"mcp-{safe_name}.stderr.log")
+        try:
+            if os.path.getsize(log_path) > _STDERR_LOG_MAX_BYTES:
+                rotated = log_path + ".1"
+                try:
+                    os.replace(log_path, rotated)
+                except OSError as exc:
+                    logger.debug("MCP %s stderr rotate failed: %s", self._name, exc)
+        except FileNotFoundError:
+            pass
+        self._stderr_log = open(log_path, "a")
+        try:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            attempt = self._respawn_attempts
+            banner = f"\n--- MCP {self._name} start ts={ts} attempt={attempt} ---\n"
+            self._stderr_log.write(banner)
+            self._stderr_log.flush()
+        except Exception:
+            logger.debug("MCP %s stderr banner write failed", self._name, exc_info=True)
         return stdio_client(params, errlog=self._stderr_log)
 
     def _create_sse_ctx(self) -> Any:

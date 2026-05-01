@@ -198,6 +198,7 @@ class AnthropicProvider(BaseLLMProvider):
         *,
         disable_prompt_cache: bool = False,
         default_model: str = "claude-sonnet-4-6",
+        default_tool_choice: dict | str | None = None,
     ) -> None:
         client_kwargs: dict = {"api_key": api_key}
         if base_url:
@@ -205,6 +206,17 @@ class AnthropicProvider(BaseLLMProvider):
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
         self._disable_prompt_cache = disable_prompt_cache
         self._default_model = default_model
+        # Provider-wide default applied when the caller doesn't override
+        # tool_choice. Used to nudge MiniMax's Anthropic-compat adapter (which
+        # silently defaults to `none` on some paths) into the documented
+        # `auto` behaviour. No-op for real Anthropic — `auto` is already the
+        # documented default.
+        self._default_tool_choice = default_tool_choice
+        # Per-instance counter for diagnostics: text-only MiniMax turns vs.
+        # total MiniMax turns. Exposed via `text_only_stats()` for the
+        # `/status` Telegram command.
+        self._minimax_total_turns = 0
+        self._minimax_text_only_turns = 0
 
     @staticmethod
     def _convert_tools(openai_tools: list[dict]) -> list[dict]:
@@ -307,6 +319,11 @@ class AnthropicProvider(BaseLLMProvider):
 
         tools = kwargs.pop("tools", None)
         tool_choice = kwargs.pop("tool_choice", None)
+        # Apply provider default when the caller didn't override AND tools
+        # were actually attached. tool_choice without tools is a 400 on the
+        # Anthropic API.
+        if tool_choice is None and tools and self._default_tool_choice is not None:
+            tool_choice = self._default_tool_choice
 
         if not model:
             model = self._default_model
@@ -358,16 +375,16 @@ class AnthropicProvider(BaseLLMProvider):
         # OR recovered), log the first 400 chars so we can see what the model
         # actually said. Lets us distinguish "M2 thought-only" from "adapter
         # leaked markup we didn't recognize" without bumping log level globally.
-        if (
-            response.model
-            and "MiniMax" in response.model
-            and not parsed_tool_calls
-            and joined_text
-        ):
-            _log.warning(
-                "MiniMax %s returned text-only (no tool calls): %r",
-                response.model, joined_text[:400],
-            )
+        # Also bump the per-instance counter so /status can show drift over
+        # the lifetime of the provider.
+        if response.model and "MiniMax" in response.model:
+            self._minimax_total_turns += 1
+            if not parsed_tool_calls and joined_text:
+                self._minimax_text_only_turns += 1
+                _log.warning(
+                    "MiniMax %s returned text-only (no tool calls): %r",
+                    response.model, joined_text[:400],
+                )
 
         usage = None
         if response.usage:
@@ -399,6 +416,10 @@ class AnthropicProvider(BaseLLMProvider):
         system_parts = [m.content for m in messages if m.role == "system"]
         tools = kwargs.pop("tools", None)
         tool_choice = kwargs.pop("tool_choice", None)
+        # Mirror chat(): apply provider default when caller omitted tool_choice
+        # AND tools are attached.
+        if tool_choice is None and tools and self._default_tool_choice is not None:
+            tool_choice = self._default_tool_choice
 
         if not model:
             model = self._default_model
@@ -502,6 +523,15 @@ class AnthropicProvider(BaseLLMProvider):
                         )
                         if recovered:
                             collected_tool_calls.extend(recovered)
+                    # Counter pump (mirrors chat()): used by /status to track
+                    # how often M2.7 narrates instead of dispatching. Only
+                    # MiniMax models contribute. We can't read the response
+                    # `model` field on the stream object the same way as in
+                    # chat(), so default to checking the requested model.
+                    if model and "minimax" in model.lower():
+                        self._minimax_total_turns += 1
+                        if not collected_tool_calls and collected_text:
+                            self._minimax_text_only_turns += 1
                     yield StreamChunk(
                         delta="",
                         tool_calls=collected_tool_calls or None,
@@ -509,6 +539,18 @@ class AnthropicProvider(BaseLLMProvider):
                         model=model,
                         done=True,
                     )
+
+    def text_only_stats(self) -> dict:
+        """Counters for MiniMax text-only turns vs. total MiniMax turns.
+
+        Used by the `/status` Telegram command to surface drift over the
+        lifetime of the provider. Both numbers are 0 when MiniMax has never
+        been called through this provider instance.
+        """
+        return {
+            "minimax_total_turns": self._minimax_total_turns,
+            "minimax_text_only_turns": self._minimax_text_only_turns,
+        }
 
     async def verify_key(self) -> bool:
         try:

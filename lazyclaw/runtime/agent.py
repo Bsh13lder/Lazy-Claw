@@ -91,6 +91,77 @@ _LOCAL_TOOL_NAMES = frozenset({
     "delegate", "web_search", "recall_memories", "save_memory", "search_tools",
 })
 
+# MiniMax M2.7 narrates actions as text instead of emitting tool_use blocks
+# once the tool count exceeds ~24. This is empirical, not documented — the
+# narration rate roughly doubles between 24 and 40 tools. When the resolved
+# brain is MiniMax, the loaded tool list is trimmed to this cap below.
+_MINIMAX_MAX_TOOLS = 24
+
+
+def _trim_tools_for_minimax(
+    tools: list[dict],
+    user_message: str,
+    base_names: set[str],
+) -> list[dict]:
+    """Trim a tool list to ``_MINIMAX_MAX_TOOLS`` for MiniMax brains.
+
+    Keeps every tool whose name is in ``base_names`` (always-needed:
+    search_tools, web_search, recall_memories, save_memory, delegate,
+    dispatch_subagents, run_background, …). The remaining slots are filled
+    by ranking the rest by keyword overlap between the user message and
+    each tool's display name + description.
+
+    Falls back to a stable head-of-list slice when the message is empty or
+    no tools score any overlap, so behaviour is deterministic regardless of
+    input.
+    """
+    if len(tools) <= _MINIMAX_MAX_TOOLS:
+        return tools
+
+    base_keep: list[dict] = []
+    candidates: list[dict] = []
+    for t in tools:
+        name = t.get("function", {}).get("name", "")
+        if name in base_names:
+            base_keep.append(t)
+        else:
+            candidates.append(t)
+
+    # Truncate base set if it alone exceeds the cap (defensive — base is
+    # only ~7 names so this branch is unlikely).
+    if len(base_keep) >= _MINIMAX_MAX_TOOLS:
+        return base_keep[:_MINIMAX_MAX_TOOLS]
+
+    remaining_slots = _MINIMAX_MAX_TOOLS - len(base_keep)
+
+    # Reuse the tokenizer pattern from context_builder._pick_hybrid_memories
+    # (EN+ES stopwords, 2+ char alphanumeric tokens, lowercase).
+    from lazyclaw.runtime.context_builder import _tokenize_for_memory
+
+    query_tokens = _tokenize_for_memory(user_message)
+    if not query_tokens:
+        # No useful query — keep the first N candidates in their existing
+        # order so behaviour is stable across calls.
+        return base_keep + candidates[:remaining_slots]
+
+    scored: list[tuple[int, int, dict]] = []
+    for idx, t in enumerate(candidates):
+        func = t.get("function", {})
+        text = f"{func.get('name', '')} {func.get('description', '')}"
+        tool_tokens = _tokenize_for_memory(text)
+        overlap = len(query_tokens & tool_tokens)
+        # Negative overlap so that higher overlap sorts first; idx as a
+        # stable tiebreaker preserves the registry order.
+        scored.append((-overlap, idx, t))
+    scored.sort()
+
+    # If nothing scored, fall back to insertion order — better than dropping
+    # the channel-aware tools that were just injected upstream.
+    if scored and scored[0][0] == 0:
+        return base_keep + candidates[:remaining_slots]
+
+    return base_keep + [t for _, _, t in scored[:remaining_slots]]
+
 # Browser only when user explicitly asks — prevents unwanted visible browser popups.
 # Word-bounded regex to avoid substring collisions ("scan" → "scanner",
 # "open" → "open-source", "visit" → "visitor").
@@ -108,20 +179,75 @@ _BROWSER_RE = re.compile(
 # regex matches AND tool_calls is empty AND tools were available, we inject
 # a correction system message and re-roll the iteration.
 #
-# Phrases that imply state mutation has already happened (or is in flight)
-# AND should ALWAYS be backed by a real tool_use block:
+# Categories below are grouped by intent so future readers can extend cleanly:
+#   1. State mutation already happened ("I've started…", "Kicked off…")
+#   2. State mutation in flight ("Running in background", emoji status lines)
+#   3. Future commitments standing in for tool calls ("I'll notify you")
+#   4. Filler reassurances ("on it!", "got it, running")
+#   5. Status: prefix progress lines ("Status: Finding emails for: @x, @y")
+#   6. Dispatch verbs ("Dispatched 3 search agents", "Spinning up a worker")
+#   7. Background promises ("Results will arrive on Telegram shortly")
+#   8. Time-stamped fake starts ("Started: ~just now")
 _ACTION_CLAIM_RE = re.compile(
-    r"\b("
-    r"already on it"
-    r"|background\s+(?:task|job|run)\s+(?:is\s+running|started|kicked\s+off|launched|in\s+progress)"
-    r"|i'?ll\s+(?:ping|notify|message|telegram|let\s+you\s+know)\s+you\b"
-    r"|ping\s+you\s+(?:on\s+telegram|when\s+(?:it'?s|done|finished)|once)"
-    r"|no\s+action\s+needed\s+from\s+you"
-    r"|sit\s+tight"
-    r"|kicked\s+off\s+(?:a|the)\s+(?:background|async|search|task|job|run)"
-    r"|started:?\s*(?:~|just\s+now|a\s+(?:moment|minute|few)|\d+\s*(?:minute|second|hour))"
-    r"|i'?ve\s+(?:started|kicked\s+off|dispatched|launched|fired\s+off|sent|created|added|scheduled|appended|saved\s+to\s+(?:your|the)\s+sheet)"
-    r"|i\s+(?:just\s+)?(?:dispatched|launched|fired\s+off|kicked\s+off|started\s+a\s+background)"
+    r"("
+    # ── Emoji-prefixed status ("🚀 Background task running!") ─────────────
+    # Self-contained (the emoji is part of the match) so it can't fire on
+    # ordinary prose. Covers the rocket / hourglass / checkmark family the
+    # user observed in failures.
+    r"[🚀⏳✅🔍📡⚡]\s*(?:background\s+task|task|running|launching|dispatched|started|queued|on\s+it|done|in\s+progress|fetching|searching|finding|loading|processing|working)"
+    # ── 1. State mutation already happened ────────────────────────────────
+    r"|\balready\s+on\s+it"
+    r"|\bi'?ve\s+(?:started|kicked\s+off|dispatched|launched|fired\s+off|sent(?:\s+off)?|created|added|scheduled|appended|queued|enqueued|registered|saved\s+to\s+(?:your|the)\s+sheet)"
+    r"|\bi\s+(?:just\s+)?(?:dispatched|launched|fired\s+off|kicked\s+off|sent\s+off|spun\s+up|queued|enqueued|started\s+a\s+background)"
+    r"|\bi\s+have\s+(?:queued|enqueued|scheduled|registered|added\s+to\s+the\s+queue|started|launched|dispatched)"
+    r"|\bkicked\s+off\s+(?:a|the)\s+(?:background|async|search|task|job|run|agent|sub)"
+    r"|\bspinning\s+up\s+(?:a|the|\d+)\s+(?:task|agent|search|background|worker|sub)"
+    r"|\bfiring\s+off\s+(?:a|the)?\s*(?:search|task|background|run)"
+    r"|\bqueued\s+(?:up\s+)?(?:a|the|\d+)\s+(?:task|search|job|background|run|agent)"
+    r"|\b(?:just\s+)?(?:dispatched|launched|kicked\s+off|fired\s+off|sent\s+off|queued|spun\s+up)\s+(?:it|that|the\s+task|a\s+task|\d+|the\s+job|in\s+the\s+background)"
+    # ── 2. State mutation in flight ───────────────────────────────────────
+    r"|\bbackground\s+(?:task|job|run|agent)\s+(?:is\s+running|started|kicked\s+off|launched|in\s+progress|queued|dispatched)"
+    r"|\b(?:running|searching|looking|fetching|gathering|scraping|querying|processing)\s+(?:in\s+(?:the\s+)?background|now|right\s+now|for\s+you)"
+    r"|\bworking\s+on\s+(?:it|that|this)\s+(?:now|in\s+the\s+background)"
+    r"|\bworking\s+in\s+(?:the\s+)?background"
+    r"|\bexecuting\s+(?:in\s+(?:the\s+)?background|now|right\s+now)"
+    r"|\brunning\s+(?:a|the|\d+)\s+(?:search|task|background)"
+    r"|\bthis\s+(?:is|will\s+be)\s+running\s+in\s+(?:the\s+)?background"
+    r"|\b(?:i'?m|i\s+am)\s+(?:running|searching|fetching|gathering|scraping|dispatching|launching|kicking\s+off|working\s+on|processing|executing)"
+    r"|\b(?:i'?m|i\s+am)\s+now\s+(?:running|searching|fetching|dispatching|working\s+on|processing)"
+    # ── 3. Future commitments standing in for tool calls ──────────────────
+    r"|\bi'?ll\s+(?:ping|notify|message|telegram|let\s+you\s+know|update\s+you|keep\s+you\s+posted)\b"
+    r"|\bi\s+will\s+(?:ping|notify|message|telegram|let\s+you\s+know|update\s+you|keep\s+you\s+posted)\b"
+    r"|\bping\s+you\s+(?:on\s+telegram|when\s+(?:it'?s|done|finished)|once)"
+    r"|\b(?:i'?ll|i\s+will)\s+(?:get\s+back|come\s+back|circle\s+back|follow\s+up|reach\s+out)"
+    r"|\b(?:i'?ll|i\s+will)\s+(?:run|start|launch|begin|execute|kick\s+off|fire\s+off)\s+(?:that|this|the\s+search|in\s+the\s+background|now)"
+    r"|\b(?:will|gonna|going\s+to)\s+(?:notify|ping|message|update|telegram)\s+you"
+    # ── 4. Filler reassurances (always followed by NO tool call) ──────────
+    r"|\bon\s+it!"
+    r"|\broger\s+that"
+    r"|\bgot\s+it,?\s+(?:running|starting|dispatching|searching|fetching|on\s+it)"
+    r"|\bsit\s+tight"
+    r"|\bstand\s+by"
+    r"|\bhold\s+on,?\s+(?:running|searching|fetching|dispatching|i'?m\s+(?:running|searching|fetching))"
+    r"|\bno\s+action\s+needed\s+from\s+you"
+    r"|\bbe\s+right\s+back\s+with"
+    # ── 5. Status: prefix progress lines ──────────────────────────────────
+    r"|(?:^|\n)\s*status:?\s*(?:finding|searching|looking|fetching|gathering|loading|running|processing|working|analyzing|checking|preparing|building|generating|sending|posting|scraping|dispatching|querying)"
+    r"|\bfinding\s+(?:emails?|contacts?|info|details?|the\s+answer|profiles?)\s+for\s*[:@]"
+    r"|\bsearching\s+for\s+(?:emails?|contacts?|info|details?)\s+(?:of|for|from)"
+    r"|\blooking\s+up\s+(?:emails?|contacts?|info|details?|profiles?)\s+(?:of|for|from)"
+    r"|\bprocessing\s+(?:that|this|your\s+request|the\s+request)"
+    # ── 6. Dispatch verbs ─────────────────────────────────────────────────
+    r"|\bdispatched?\s+\d+\s+(?:search|sub)?agents?"
+    r"|\bdispatching\s+(?:agents?|subagents?|search|the\s+task|workers?)"
+    # ── 7. Background promises ────────────────────────────────────────────
+    r"|\b(?:results?|update|output|answer)\s+(?:will\s+)?(?:come|arrive|appear|land|be\s+(?:back|ready))\s+(?:on\s+telegram|shortly|soon|when|in\s+a)"
+    r"|\bonce\s+(?:it'?s\s+done|finished|complete),?\s+i'?ll"
+    r"|\bas\s+soon\s+as\s+(?:it'?s\s+done|done|finished|complete)"
+    r"|\bmeanwhile,?\s"
+    r"|\bin\s+the\s+meantime"
+    # ── 8. Time-stamped fake starts ───────────────────────────────────────
+    r"|\bstarted:?\s*(?:~|just\s+now|a\s+(?:moment|minute|few)|\d+\s*(?:minute|second|hour))"
     r")",
     re.IGNORECASE,
 )
@@ -1068,6 +1194,7 @@ class Agent:
 
         logger.info("process_message START: user=%s msg=%s", user_id[:8], message[:40])
         self._nudged_tool_use = False  # Reset per-message nudge flag
+        self._nudged_research = False  # Reset research-intent nudge flag
 
         # Instant commands — no LLM call needed
         instant = _handle_instant_command(message, self._team_lead, self._task_runner, user_id)
@@ -1198,6 +1325,7 @@ class Agent:
 
         # Check if using local model (needed for tool count optimization)
         _is_local_model = False
+        _brain_id = ""
         try:
             from lazyclaw.llm.eco_settings import get_eco_settings as _get_eco
             from lazyclaw.llm.model_registry import get_model, get_mode_models
@@ -1216,6 +1344,15 @@ class Agent:
             )
         except Exception:
             logger.debug("Failed to load eco settings for local model check", exc_info=True)
+
+        # MiniMax M2/M2.7 narrates actions as text instead of emitting tool_use
+        # blocks under load. Append a tool-discipline suffix to the system
+        # prompt that names the failure mode explicitly. The regex guard later
+        # in this function catches drift after the fact; this prevents it.
+        from lazyclaw.runtime.personality import (
+            is_minimax_brain, minimax_tool_discipline_suffix,
+        )
+        _is_minimax_brain = is_minimax_brain(_brain_id)
 
         # Decide upfront: does this message need tools?
         needs_tools_early = self.registry is not None and _wants_any_tools(message)
@@ -1276,6 +1413,14 @@ class Agent:
             logger.debug("process_message TRACE: loading history...")
             history_rows = await _load_history()
             logger.debug("process_message TRACE: history loaded")
+
+        # Append MiniMax-only tool-discipline suffix. Skipping the greeting
+        # fast-path-on-local branch (that branch never picks MiniMax anyway)
+        # would still be safe; we apply unconditionally when brain is MiniMax.
+        if _is_minimax_brain and system_prompt:
+            system_prompt = (
+                f"{system_prompt}\n\n---\n\n{minimax_tool_discipline_suffix()}"
+            )
 
         logger.info("process_message TRACE: compressing history...")
         history = await compress_history(
@@ -1900,6 +2045,20 @@ class Agent:
             if len(tools) > _MAX_TOTAL_TOOLS:
                 _cap_hit = True
                 tools = tools[:_MAX_TOTAL_TOOLS]
+
+            # MiniMax M2.7 narration rate climbs sharply past ~24 tools.
+            # When the resolved brain is MiniMax, drop to 24 by keeping the
+            # base tools (search_tools, web_search, recall_memories,
+            # save_memory, delegate) and ranking the remainder by keyword
+            # overlap with the user message. Reuses the tokenizer pattern
+            # from context_builder._pick_hybrid_memories.
+            if _is_minimax_brain and len(tools) > _MINIMAX_MAX_TOOLS:
+                tools = _trim_tools_for_minimax(tools, message, _base_names)
+                _cap_hit = True
+                logger.info(
+                    "MINIMAX cap: trimmed to %d tools (limit=%d)",
+                    len(tools), _MINIMAX_MAX_TOOLS,
+                )
             logger.info(
                 "%s mode: %d tools (cap=%d hit=%s) for: %s",
                 "LOCAL" if _is_local_model else "META",
@@ -2795,6 +2954,47 @@ class Agent:
                         messages.append(LLMMessage(role="assistant", content=_final_content))
                         messages.append(LLMMessage(role="user", content=_nudge))
                         logger.warning("Nudging tool use: LLM skipped tools for channel query")
+                        continue
+
+                    # Research-intent hallucination: user asked the brain to
+                    # FIND/RESEARCH/SCRAPE external data (emails, contacts,
+                    # public info) but it returned text-only without calling
+                    # any web/scraper tool. By definition the answer is
+                    # fabricated — the brain has no other source. Catches
+                    # MiniMax-M2.7's "Here's the table:" + fake values pattern
+                    # that the verb-based _ACTION_CLAIM_RE misses.
+                    if (
+                        iteration == 0
+                        and tools
+                        and _final_content
+                        and _is_find_contact
+                        and not getattr(self, "_nudged_research", False)
+                    ):
+                        self._nudged_research = True
+                        _research_nudge = (
+                            "[SYSTEM: The user asked you to FIND external "
+                            "data (emails / contacts / public info), but you "
+                            "answered without calling any tool. Anything you "
+                            "wrote is fabricated. Call one of these now: "
+                            "web_search, mcp_scraper_search_google, "
+                            "mcp_scraper_extract_entities, "
+                            "mcp_scraper_crawl_url, or run_background for a "
+                            "multi-target enrichment. Do NOT invent emails or "
+                            "contact info — only return values returned by a "
+                            "tool. If a tool returns nothing, say so honestly.]"
+                        )
+                        messages.append(LLMMessage(
+                            role="assistant", content=_final_content,
+                        ))
+                        messages.append(LLMMessage(
+                            role="user", content=_research_nudge,
+                        ))
+                        logger.warning(
+                            "Nudging tool use: %s skipped tools for "
+                            "research-intent query",
+                            response.model,
+                        )
+                        streamed_content = ""
                         continue
 
                     # `_history_content` keeps <think>...</think> intact for

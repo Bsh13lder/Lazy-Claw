@@ -12,6 +12,47 @@ _FALLBACK_PERSONALITY = (
     "You are Claw, a helpful AI assistant. Be direct, friendly, and efficient."
 )
 
+# Appended to SOUL.md only when the resolved brain is MiniMax M2/M2.7. The
+# Anthropic-compat endpoint is correct (MiniMax themselves recommend it for
+# full system/tool/thinking support) but M2.7 still narrates actions as text
+# instead of emitting tool_use blocks under load. This suffix names the failure
+# mode explicitly. The regex guard in agent.py catches drift after the fact;
+# this suffix prevents it before the fact.
+_MINIMAX_TOOL_DISCIPLINE_SUFFIX = (
+    "[TOOL DISCIPLINE — REQUIRED]\n"
+    "You are an interleaved-thinking model. Your reasoning happens in <think>\n"
+    "blocks; your ACTIONS must happen in tool_use blocks.\n"
+    "\n"
+    "Forbidden in user-facing text:\n"
+    "- \"I'll notify/ping/message/Telegram you\"\n"
+    "- \"Background task is running / started / kicked off\"\n"
+    "- \"Dispatched N agents\", \"Status: Running\", emoji-prefixed status lines\n"
+    "- \"On it\", \"Got it, running\", \"Stand by\", \"Sit tight\"\n"
+    "- ANY claim that a state change has happened or is in progress\n"
+    "\n"
+    "Rule: if your reply implies work was started, queued, dispatched, sent, or\n"
+    "saved — you MUST emit a tool_use block in this same turn. If you cannot,\n"
+    "say so plainly and ask for what is missing. Never claim work that wasn't\n"
+    "tool-dispatched."
+)
+
+
+def is_minimax_brain(model: str | None) -> bool:
+    """Return True when the resolved brain model is a MiniMax M2/M2.7 variant.
+
+    Both capitalizations appear in the model registry (`MiniMax-M2.7`,
+    `minimax-m2.5`, `MiniMax-Text-01`, `minimax-m2.7-highspeed`, etc.) so we
+    match case-insensitively against the prefix.
+    """
+    if not model:
+        return False
+    return model.lower().startswith("minimax-")
+
+
+def minimax_tool_discipline_suffix() -> str:
+    """The tool-discipline block to append for MiniMax brains."""
+    return _MINIMAX_TOOL_DISCIPLINE_SUFFIX
+
 # In-memory cache: content + mtime
 _cache: str | None = None
 _cache_mtime: float = 0.0

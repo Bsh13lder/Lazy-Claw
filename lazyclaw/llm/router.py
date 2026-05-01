@@ -88,11 +88,19 @@ class LLMRouter:
             # MiniMax runs through their Anthropic-compatible endpoint — they
             # recommend it over OpenAI-compat for full system/tool/thinking
             # support. Same API key works on both compat layers.
+            #
+            # `default_tool_choice={"type": "auto"}`: MiniMax's adapter
+            # silently falls through to `none` on some paths when the field
+            # is absent, which is one cause of the "narrates instead of
+            # calling tool" failure mode. Sending `auto` explicitly is a
+            # no-op for real Anthropic (already the documented default) and
+            # forces M2.7 to consider tools each turn.
             return AnthropicProvider(
                 api_key=api_key,
                 base_url=self._config.minimax_base_url,
                 disable_prompt_cache=True,
                 default_model="MiniMax-M2.7",
+                default_tool_choice={"type": "auto"},
             )
         raise ValueError(f"Unknown provider: {provider_name}")
 

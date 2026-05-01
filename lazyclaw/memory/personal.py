@@ -19,19 +19,29 @@ async def save_memory(
 ) -> str:
     """Save a memory. Returns the memory ID.
 
-    Also mirrors into LazyBrain as ``#memory #owner/{owner}`` so the user
-    sees every fact/preference in the PKM. Fire-and-forget mirror.
+    Always writes to LazyBrain as ``#memory #owner/{owner} #kind/{type}``
+    so the user sees every fact/preference in the PKM. By default ALSO
+    writes to the legacy ``personal_memory`` table for back-compat.
+
+    When ``config.memory_unified`` is True (env: ``MEMORY_UNIFIED=1``),
+    the legacy INSERT is skipped — LazyBrain becomes the sole source
+    of truth. Reads in ``recall_memories`` and ``context_builder`` keep
+    merging both stores, so existing rows stay accessible during the
+    transition. Run ``cli_migrate_lazybrain.py`` once before flipping
+    the flag to copy any orphan rows.
     """
     key = await get_user_dek(config, user_id)
     memory_id = str(uuid4())
-    encrypted = encrypt(content, key)
-    async with db_session(config) as db:
-        await db.execute(
-            "INSERT INTO personal_memory (id, user_id, memory_type, content, importance) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (memory_id, user_id, memory_type, encrypted, importance),
-        )
-        await db.commit()
+
+    if not getattr(config, "memory_unified", False):
+        encrypted = encrypt(content, key)
+        async with db_session(config) as db:
+            await db.execute(
+                "INSERT INTO personal_memory (id, user_id, memory_type, content, importance) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (memory_id, user_id, memory_type, encrypted, importance),
+            )
+            await db.commit()
 
     try:
         from lazyclaw.lazybrain import events as lb_events
@@ -48,6 +58,10 @@ async def save_memory(
         lb_events.publish_note_saved(
             user_id, note["id"], note["title"], note["tags"], source="memory",
         )
+        # In unified mode, return the LazyBrain id so callers (and the
+        # `recall_memories` no-match preview) can dereference it.
+        if getattr(config, "memory_unified", False):
+            memory_id = f"lb:{note['id']}"
     except Exception:
         logger.warning(
             "lazybrain memory mirror failed for user %s", user_id, exc_info=True,

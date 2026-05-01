@@ -108,6 +108,47 @@ def _tokenize_for_memory(text: str) -> set[str]:
     }
 
 
+# Per-item char cap on injected memory content. Without this a single
+# 2KB note dominates the system prompt and crowds out other facts.
+# 240 chars ≈ 60 tokens — enough for one fact / decision / preference,
+# not enough to drag a whole essay into the prompt.
+_MEMORY_PER_ITEM_CAP = 240
+
+# Total char budget for the merged "What I know about you" section.
+# ~1500 chars ≈ 400 tokens. Picks stop adding once exceeded — we'd
+# rather under-inject than blow the prompt budget. Tunable via the
+# LAZYCLAW_MEMORY_BUDGET_CHARS env var.
+_MEMORY_TOTAL_BUDGET = 1500
+
+
+def _budget_chars() -> int:
+    """Resolve the runtime memory-injection budget (env override safe)."""
+    import os
+
+    raw = os.environ.get("LAZYCLAW_MEMORY_BUDGET_CHARS")
+    if raw:
+        try:
+            n = int(raw)
+            if 200 <= n <= 8000:
+                return n
+        except ValueError:
+            pass
+    return _MEMORY_TOTAL_BUDGET
+
+
+def _truncate_memory(content: str) -> str:
+    """Cap a single memory's content; preserve word boundary when possible."""
+    s = (content or "").strip()
+    if len(s) <= _MEMORY_PER_ITEM_CAP:
+        return s
+    cut = s[:_MEMORY_PER_ITEM_CAP]
+    # Walk back to the last whitespace so we don't slice mid-word.
+    sp = cut.rfind(" ")
+    if sp > _MEMORY_PER_ITEM_CAP - 60:
+        cut = cut[:sp]
+    return cut.rstrip(" ,.;:") + "…"
+
+
 def _pick_hybrid_memories(
     pool: list[dict],
     user_message: str | None,
@@ -119,34 +160,71 @@ def _pick_hybrid_memories(
     Pool is already sorted by importance DESC (see get_memories). We slice
     the first `n_importance` entries, then rank the remainder by token
     overlap against the user message and append up to `n_relevant` more.
+
+    Each picked memory's ``content`` is truncated to
+    ``_MEMORY_PER_ITEM_CAP`` and the merged result is capped at
+    ``_budget_chars()`` total — picks stop the moment the budget is
+    exhausted so a single long note can't crowd out everything else.
+    Returned dicts are SHALLOW COPIES with truncated ``content`` so we
+    don't mutate the caller's pool.
+
     Falls back to pure importance when there's no message or no overlap.
     """
     if not pool:
         return []
 
     by_importance = pool[:n_importance]
-    if not user_message or len(pool) <= n_importance:
-        return by_importance
 
-    query_tokens = _tokenize_for_memory(user_message)
-    if not query_tokens:
-        return by_importance
+    relevant: list[dict] = []
+    if user_message and len(pool) > n_importance:
+        query_tokens = _tokenize_for_memory(user_message)
+        if query_tokens:
+            already_chosen_ids = {m["id"] for m in by_importance}
+            remainder = [m for m in pool if m["id"] not in already_chosen_ids]
 
-    already_chosen_ids = {m["id"] for m in by_importance}
-    remainder = [m for m in pool if m["id"] not in already_chosen_ids]
+            scored: list[tuple[int, int, dict]] = []
+            for idx, mem in enumerate(remainder):
+                mem_tokens = _tokenize_for_memory(mem.get("content") or "")
+                overlap = len(query_tokens & mem_tokens)
+                if overlap > 0:
+                    scored.append((-overlap, idx, mem))
+            scored.sort()
+            relevant = [m for _, _, m in scored[:n_relevant]]
 
-    scored: list[tuple[int, int, dict]] = []
-    for idx, mem in enumerate(remainder):
-        mem_tokens = _tokenize_for_memory(mem.get("content") or "")
-        overlap = len(query_tokens & mem_tokens)
-        if overlap > 0:
-            # Secondary sort key: original pool position (lower = more important)
-            scored.append((-overlap, idx, mem))
+    # Token-budget loop — interleave importance and relevance so neither
+    # category gets starved when the budget is tight.
+    budget = _budget_chars()
+    chosen: list[dict] = []
+    seen_ids: set = set()
+    spent = 0
+    imp_iter = iter(by_importance)
+    rel_iter = iter(relevant)
+    while spent < budget:
+        # Importance first on each round so stable facts always win
+        # over query-relevance when the budget is small.
+        picked_this_round = False
+        for source in (imp_iter, rel_iter):
+            try:
+                m = next(source)
+            except StopIteration:
+                continue
+            if m["id"] in seen_ids:
+                continue
+            content = _truncate_memory(m.get("content") or "")
+            if not content:
+                continue
+            cost = len(content) + 4  # bullet + newline overhead
+            if spent + cost > budget and chosen:
+                # Stop adding new picks once budget is gone.
+                return chosen
+            seen_ids.add(m["id"])
+            picked_this_round = True
+            chosen.append({**m, "content": content})
+            spent += cost
+        if not picked_this_round:
+            break
 
-    scored.sort()
-    relevant = [m for _, _, m in scored[:n_relevant]]
-
-    return by_importance + relevant
+    return chosen
 
 
 async def build_context(
@@ -231,23 +309,11 @@ async def build_context(
     pool = await get_memories(config, user_id, limit=40)
     try:
         from lazyclaw.lazybrain import store as _lb_store
+        from lazyclaw.lazybrain.store import is_user_facing_memory_note
 
         lb_notes = await _lb_store.list_notes(config, user_id, limit=40)
-        _SKIP_TAGS = {"memory", "daily-log", "session-end"}
-        # Skill shapes (kind/shape) are agent-owned replayable
-        # artifacts, not user-facing facts. They feed the dedicated
-        # few-shot exemplar pool via `recall_skill_lessons`, not the
-        # general personal-memory pool — so exclude them here. Without
-        # this every shape note crowds out real memories.
-        _SKIP_KIND_TAGS = {"kind/shape", "kind/legacy"}
         for n in lb_notes:
-            tags = n.get("tags") or []
-            if any(t in _SKIP_TAGS for t in tags):
-                continue
-            if any(t in _SKIP_KIND_TAGS for t in tags):
-                continue
-            title = (n.get("title") or "")
-            if title.startswith(("Journal —", "Daily summary", "Weekly summary")):
+            if not is_user_facing_memory_note(n):
                 continue
             content = (n.get("content") or "").strip()
             if not content:
@@ -258,6 +324,9 @@ async def build_context(
             pool.append({
                 "id": f"lb:{n['id']}",
                 "memory_type": "lazybrain",
+                # Per-item truncation happens in _pick_hybrid_memories so
+                # the budget loop sees the cap; storing 500 chars here
+                # keeps the merge cheap and lets the picker decide.
                 "content": content[:500],
                 "importance": imp,
             })

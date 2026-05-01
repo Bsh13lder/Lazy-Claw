@@ -41,6 +41,50 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Memory recall / context injection — shared exclude tags
+# ---------------------------------------------------------------------------
+#
+# These tag families auto-mirror other stores (personal_memory facts,
+# daily/weekly summaries, session caps). Excluding them from
+# user-facing memory recall keeps the noise out so genuine notes,
+# decisions, ideas surface first. Both `recall_memories` (the skill)
+# and `context_builder` (the system-prompt assembler) share this set
+# so they never disagree on what counts as "memory".
+MEMORY_RECALL_EXCLUDE_TAGS: frozenset[str] = frozenset({
+    "memory",        # mirror of personal_memory rows (already in pool)
+    "daily-log",     # daily auto-summary
+    "session-end",   # session cap
+})
+
+# ``kind/*`` shapes are agent-owned replayable artifacts (skill recipes,
+# legacy mirrors). They feed the dedicated few-shot exemplar pool via
+# `recall_skill_lessons` — they are NOT user-facing facts and should
+# not crowd the memory recall.
+MEMORY_RECALL_EXCLUDE_KIND_TAGS: frozenset[str] = frozenset({
+    "kind/shape",
+    "kind/legacy",
+})
+
+
+def is_user_facing_memory_note(note: dict) -> bool:
+    """True when a LazyBrain note belongs in user-facing memory recall.
+
+    Drops tag mirrors of other stores AND auto-generated journal /
+    summary titles. Used by both the recall skill and context_builder
+    so the two never disagree on what's "memory".
+    """
+    tags = note.get("tags") or []
+    if any(t in MEMORY_RECALL_EXCLUDE_TAGS for t in tags):
+        return False
+    if any(t in MEMORY_RECALL_EXCLUDE_KIND_TAGS for t in tags):
+        return False
+    title = (note.get("title") or "").strip()
+    if title.startswith(("Journal —", "Daily summary", "Weekly summary")):
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # AAD builders — bind every ciphertext to (user, field)
 # ---------------------------------------------------------------------------
 

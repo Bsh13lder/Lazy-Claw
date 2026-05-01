@@ -37,6 +37,11 @@ class Config:
     tool_timeout: int = 60
     cdp_port: int = 9222
     browser_executable: str = ""  # Path to browser binary (Brave, Chrome, Chromium)
+    # When True, save_memory writes ONLY to LazyBrain (legacy
+    # personal_memory table is no longer written to). Reads continue
+    # to merge both stores so existing rows stay accessible. Flip via
+    # ``MEMORY_UNIFIED=1`` after running ``cli_migrate_lazybrain.py``.
+    memory_unified: bool = False
 
 
 def load_config() -> Config:
@@ -92,7 +97,16 @@ def load_config() -> Config:
         tool_timeout=int(os.getenv("TOOL_TIMEOUT", "60")),
         cdp_port=int(os.getenv("CDP_PORT", "9222")),
         browser_executable=os.getenv("BROWSER_EXECUTABLE", "") or _detect_browser(),
+        memory_unified=_env_bool("MEMORY_UNIFIED", default=False),
     )
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    """Parse a boolean env var (1/true/yes/on are truthy)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _detect_browser() -> str:

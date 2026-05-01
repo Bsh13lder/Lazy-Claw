@@ -546,6 +546,22 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.todo_write import TodoWriteSkill
         self.register(TodoWriteSkill(config=config))
 
+        # Lazydoctor — weekly maintenance audit (deps + Phase 2 broken-tool /
+        # stale-config). Setup wizard configures cadence; bridge surfaces
+        # findings as Telegram approval cards; run-now triggers an
+        # on-demand audit. The actual audit + apply lives in the
+        # mcp-lazydoctor MCP (separate process).
+        from lazyclaw.skills.builtin.lazydoctor_setup import LazydoctorSetupSkill
+        from lazyclaw.skills.builtin.lazydoctor_run_now import LazydoctorRunNowSkill
+        from lazyclaw.skills.builtin.lazydoctor_audit_bridge import (
+            LazydoctorReviewFindingSkill,
+            LazydoctorSummarizePendingSkill,
+        )
+        self.register(LazydoctorSetupSkill(config=config))
+        self.register(LazydoctorRunNowSkill(config=config))
+        self.register(LazydoctorReviewFindingSkill(config=config))
+        self.register(LazydoctorSummarizePendingSkill(config=config))
+
     def get_skill(self, name: str) -> "BaseSkill | None":
         """Get a registered skill instance by name."""
         return self._skills.get(name)

@@ -5,6 +5,7 @@ import { CategoryIcon, OWNER_ICONS } from "./icons";
 import {
   Infinity as InfinityIcon,
   Wrench,
+  Archive,
   ChevronRight,
   Filter as FilterIcon,
 } from "lucide-react";
@@ -22,6 +23,11 @@ interface Props {
    *  button is dimmed. */
   skillsVaultOpen: boolean;
   onToggleSkillsVault: () => void;
+  /** Archive toggle — when on, the page re-fetches with rolled-up notes
+   *  included. Off by default to keep the sidebar lean. Optional so
+   *  embedders that don't care about rollups still work. */
+  showRolledUp?: boolean;
+  onToggleShowRolledUp?: () => void;
 }
 
 const LS_FILTERBAR_OPEN = "lazybrain-filterbar-open";
@@ -35,6 +41,8 @@ export function FilterBar({
   ownerCounts,
   skillsVaultOpen,
   onToggleSkillsVault,
+  showRolledUp = false,
+  onToggleShowRolledUp,
 }: Props) {
   const allCount = ownerCounts.user + ownerCounts.agent + ownerCounts.unknown;
   // Total shape count across all kind/shape* chips → drives the Skills
@@ -152,31 +160,67 @@ export function FilterBar({
 
         {filterBarOpen && (
           <div className="mt-2 space-y-2">
-            {/* Skills vault toggle — only meaningful when there are
-                shapes to reveal. Lives inside the expanded panel so the
-                collapsed state stays a single line. */}
-            {shapeCount > 0 && (
-              <button
-                onClick={onToggleSkillsVault}
-                className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] transition-colors ${
-                  skillsVaultOpen
-                    ? "bg-bg-primary text-text-primary"
-                    : "text-text-muted hover:text-text-primary hover:bg-bg-hover opacity-70"
-                }`}
-                title={
-                  skillsVaultOpen
-                    ? "Skills vault open — agent's known shapes are visible. Click to hide."
-                    : "Skills vault hidden — click to reveal verified / pending / failed agent shapes."
-                }
-              >
-                <Wrench
-                  size={12}
-                  strokeWidth={1.75}
-                  color={skillsVaultOpen ? "#22c55e" : undefined}
-                />
-                <span>Skills</span>
-                <span className="opacity-60 tabular-nums">{shapeCount}</span>
-              </button>
+            {/* Toggle row — Skills vault + Archive sit on the same line so
+                the user reads them as parallel "show me hidden things"
+                affordances. Each is independent. */}
+            {(shapeCount > 0 || onToggleShowRolledUp) && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {shapeCount > 0 && (
+                  <button
+                    onClick={onToggleSkillsVault}
+                    className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] transition-colors ${
+                      skillsVaultOpen
+                        ? "bg-bg-primary text-text-primary"
+                        : "text-text-muted hover:text-text-primary hover:bg-bg-hover opacity-70"
+                    }`}
+                    title={
+                      skillsVaultOpen
+                        ? "Skills vault open — agent's known shapes are visible. Click to hide."
+                        : "Skills vault hidden — click to reveal verified / pending / failed agent shapes."
+                    }
+                  >
+                    <Wrench
+                      size={12}
+                      strokeWidth={1.75}
+                      color={skillsVaultOpen ? "#22c55e" : undefined}
+                    />
+                    <span>Skills</span>
+                    <span className="opacity-60 tabular-nums">{shapeCount}</span>
+                  </button>
+                )}
+
+                {/* Archive toggle — surfaces notes that have been folded
+                    into a weekly/monthly rollup. Off by default. The
+                    fuchsia accent matches the Rollups section + the
+                    rollup palette entry, signalling "same family". */}
+                {onToggleShowRolledUp && (
+                  <button
+                    onClick={onToggleShowRolledUp}
+                    className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] transition-colors ${
+                      showRolledUp
+                        ? "bg-bg-primary text-text-primary"
+                        : "text-text-muted hover:text-text-primary hover:bg-bg-hover opacity-70"
+                    }`}
+                    title={
+                      showRolledUp
+                        ? "Archive open — notes folded into rollups are visible. Click to collapse."
+                        : "Archive hidden — click to surface notes folded into weekly/monthly rollups."
+                    }
+                    style={
+                      showRolledUp
+                        ? { boxShadow: "inset 0 -2px 0 #c026d3" }
+                        : undefined
+                    }
+                  >
+                    <Archive
+                      size={12}
+                      strokeWidth={1.75}
+                      color={showRolledUp ? "#c026d3" : undefined}
+                    />
+                    <span>Archive</span>
+                  </button>
+                )}
+              </div>
             )}
 
             {/* Category chips */}

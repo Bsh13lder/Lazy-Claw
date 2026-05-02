@@ -7,8 +7,7 @@ import { GraphPeekCard } from "../components/lazybrain/GraphPeekCard";
 import { NoteEditor } from "../components/lazybrain/NoteEditor";
 import { PageListSidebar } from "../components/lazybrain/PageListSidebar";
 import {
-  FILTER_CATEGORIES,
-  matchesCategory,
+  categoryKeysAllFor,
   ownerOf,
   type Owner,
 } from "../components/lazybrain/noteColors";
@@ -24,6 +23,32 @@ import { motion, AnimatePresence } from "framer-motion";
 
 const LS_LEFT = "lazybrain.leftCollapsed";
 const LS_RIGHT = "lazybrain.rightCollapsed";
+const LS_VIEW_MODE = "lazybrain.viewMode";
+const LS_OWNER_FILTER = "lazybrain.ownerFilter";
+const LS_MIN_IMPORTANCE = "lazybrain.minImportance";
+const LS_NOTES_LIMIT = "lazybrain.notesLimit";
+const LS_GRAPH_LIMIT = "lazybrain.graphLimit";
+const LS_GRAPH_QUERY = "lazybrain.graphQuery";
+const LS_SHOW_ROLLED_UP = "lazybrain.showRolledUp";
+
+// Default fetch sizes. Months-of-data users bump these via the "Load more"
+// pill in the sidebar; the localStorage value sticks across reloads so the
+// page never re-defaults the user back to a smaller pool.
+const DEFAULT_NOTES_LIMIT = 1000;
+const DEFAULT_GRAPH_LIMIT = 500;
+const NOTES_PAGE_SIZE = 1000;
+
+function readNumber(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  } catch {
+    return fallback;
+  }
+}
 
 type ViewMode = "notes" | "graph" | "canvas";
 
@@ -50,9 +75,26 @@ export default function LazyBrain() {
   const [searchQ, setSearchQ] = useState("");
   const [searchResults, setSearchResults] = useState<LazyBrainNote[] | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  // Graph-mode search query persistence — separate localStorage entry
+  // so a search active in graph mode is restored on next visit, even if
+  // the user navigated through notes mode in between (where searchQ is
+  // typically empty / used differently).
+  const graphQueryRestoredRef = useRef(false);
 
-  // View mode (notes editor vs full-page graph)
-  const [viewMode, setViewMode] = useState<ViewMode>("notes");
+  // View mode (notes editor vs full-page graph vs canvas) — persisted so
+  // the user lands back on whichever layout they were last using.
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    try {
+      const v = localStorage.getItem(LS_VIEW_MODE);
+      if (v === "notes" || v === "graph" || v === "canvas") return v;
+    } catch {
+      // Private mode / disabled storage — fall through to default.
+    }
+    return "notes";
+  });
+  useEffect(() => {
+    try { localStorage.setItem(LS_VIEW_MODE, viewMode); } catch { /* noop */ }
+  }, [viewMode]);
 
   // Peek preview (graph click — show card without leaving graph)
   const [peekId, setPeekId] = useState<string | null>(null);
@@ -112,21 +154,87 @@ export default function LazyBrain() {
       // Best-effort persistence.
     }
   }, [hiddenCategories]);
-  const [ownerFilter, setOwnerFilter] = useState<Owner | "all">("all");
+  // Owner tab (All/User/Agent) — persisted so the user's last selection
+  // sticks across reloads instead of snapping back to "all".
+  const [ownerFilter, setOwnerFilter] = useState<Owner | "all">(() => {
+    try {
+      const v = localStorage.getItem(LS_OWNER_FILTER);
+      if (v === "all" || v === "user" || v === "agent" || v === "unknown") {
+        return v as Owner | "all";
+      }
+    } catch {
+      // Private mode / disabled storage — fall through to default.
+    }
+    return "all";
+  });
+  useEffect(() => {
+    try { localStorage.setItem(LS_OWNER_FILTER, ownerFilter); } catch { /* noop */ }
+  }, [ownerFilter]);
   // Phase 3.4 — graph importance slider (1..10). Notes below the threshold
-  // dim in the graph; 1 = show all, 10 = pinned-level only.
-  const [minImportance, setMinImportance] = useState(1);
+  // dim in the graph; 1 = show all, 10 = pinned-level only. Persisted so
+  // the slider reflects the user's last threshold across reloads.
+  const [minImportance, setMinImportance] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(LS_MIN_IMPORTANCE);
+      if (raw !== null) {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n >= 1 && n <= 10) return Math.round(n);
+      }
+    } catch {
+      // Private mode / disabled storage — fall through to default.
+    }
+    return 1;
+  });
+  useEffect(() => {
+    try { localStorage.setItem(LS_MIN_IMPORTANCE, String(minImportance)); } catch { /* noop */ }
+  }, [minImportance]);
 
-  // Pagination — how many notes loaded so far. "Load more" increments by 500.
-  const PAGE_SIZE = 1000;
-  const [notesLimit, setNotesLimit] = useState(PAGE_SIZE);
+  // Pagination — last fetched ceiling sticks across reloads so a user who
+  // hit "Load more" to 4000 doesn't re-default to 1000 every time they
+  // refresh. Bounded to [DEFAULT_NOTES_LIMIT, 50_000] so a corrupt
+  // localStorage value can never request millions of rows.
+  const [notesLimit, setNotesLimit] = useState<number>(() =>
+    readNumber(LS_NOTES_LIMIT, DEFAULT_NOTES_LIMIT, DEFAULT_NOTES_LIMIT, 50_000),
+  );
+  useEffect(() => {
+    try { localStorage.setItem(LS_NOTES_LIMIT, String(notesLimit)); } catch { /* noop */ }
+  }, [notesLimit]);
   const [hasMore, setHasMore] = useState(false);
+  const [totalKnown, setTotalKnown] = useState<number | null>(null);
+
+  // Graph fetch ceiling — same persistence pattern. Default 500, bumped
+  // alongside notesLimit so the graph view doesn't lag behind the
+  // sidebar's pool size.
+  const [graphLimit, setGraphLimit] = useState<number>(() =>
+    readNumber(LS_GRAPH_LIMIT, DEFAULT_GRAPH_LIMIT, DEFAULT_GRAPH_LIMIT, 50_000),
+  );
+  useEffect(() => {
+    try { localStorage.setItem(LS_GRAPH_LIMIT, String(graphLimit)); } catch { /* noop */ }
+  }, [graphLimit]);
+
+  // Archive toggle — when on, sidebar + graph re-fetch with
+  // include_rolled_up=true and the original notes that have been folded
+  // into a weekly/monthly rollup come back as smaller dimmer dots.
+  // Off by default; persisted so a user who opens the archive once
+  // doesn't have to re-open it on every reload.
+  const [showRolledUp, setShowRolledUp] = useState<boolean>(() => {
+    try { return localStorage.getItem(LS_SHOW_ROLLED_UP) === "true"; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(LS_SHOW_ROLLED_UP, showRolledUp ? "true" : "false"); }
+    catch { /* noop */ }
+  }, [showRolledUp]);
 
   // ─── Fetchers ───────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     try {
       const [recent, pins, journalNotes, tagList] = await Promise.all([
-        api.listLazyBrainNotes({ tag: tagFilter || undefined, limit: notesLimit }),
+        api.listLazyBrainNotes({
+          tag: tagFilter || undefined,
+          include_rolled_up: showRolledUp,
+          limit: notesLimit,
+        }),
         api.listLazyBrainNotes({ pinned: true, limit: 50 }),
         api.listLazyBrainJournal(14),
         api.listLazyBrainTags(),
@@ -135,15 +243,23 @@ export default function LazyBrain() {
       setPinned(pins);
       setJournal(journalNotes);
       setTags(tagList);
-      setHasMore(recent.length >= notesLimit);
+      const more = recent.length >= notesLimit;
+      setHasMore(more);
+      // We can only assert "≥ notesLimit" — the API doesn't return a
+      // precise total. When the page is full assume more exists; when
+      // it's short, the actual count is the floor.
+      setTotalKnown(more ? null : recent.length);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [tagFilter, notesLimit]);
+  }, [tagFilter, notesLimit, showRolledUp]);
 
   const loadMore = useCallback(() => {
-    setNotesLimit((n) => n + PAGE_SIZE);
+    setNotesLimit((n) => Math.min(50_000, n + NOTES_PAGE_SIZE));
+    // Bump the graph ceiling in lockstep so a user who paged the sidebar
+    // doesn't see a smaller graph than what they just loaded.
+    setGraphLimit((g) => Math.min(50_000, g + NOTES_PAGE_SIZE));
   }, []);
 
   useEffect(() => {
@@ -195,12 +311,33 @@ export default function LazyBrain() {
     };
   }, [selectedId]);
 
-  // Fetch graph when graph view is active
+  // Restore last graph search query on first entry to graph mode, then
+  // persist any further changes. Keeps notes-mode searchQ untouched.
+  useEffect(() => {
+    if (viewMode !== "graph") return;
+    if (graphQueryRestoredRef.current) return;
+    graphQueryRestoredRef.current = true;
+    if (searchQ.trim()) return; // user already typed something — don't overwrite
+    try {
+      const saved = localStorage.getItem(LS_GRAPH_QUERY);
+      if (saved && saved.trim()) setSearchQ(saved);
+    } catch {
+      // Private mode — ignore.
+    }
+  }, [viewMode, searchQ]);
+  useEffect(() => {
+    if (viewMode !== "graph") return;
+    try { localStorage.setItem(LS_GRAPH_QUERY, searchQ); } catch { /* noop */ }
+  }, [viewMode, searchQ]);
+
+  // Fetch graph when graph view is active. Re-fetches when graphLimit
+  // grows (after the user clicks "Load more") so the graph stays in sync
+  // with the sidebar's pool.
   useEffect(() => {
     if (viewMode !== "graph") return;
     let cancelled = false;
     api
-      .getLazyBrainGraph({ limit: 500 })
+      .getLazyBrainGraph({ limit: graphLimit, include_rolled_up: showRolledUp })
       .then((g) => {
         if (!cancelled) setGraph(g);
       })
@@ -208,7 +345,7 @@ export default function LazyBrain() {
     return () => {
       cancelled = true;
     };
-  }, [viewMode]);
+  }, [viewMode, graphLimit, showRolledUp]);
 
   // Global keyboard shortcuts — Obsidian-style
   //   ⌘K    → command palette
@@ -372,14 +509,17 @@ export default function LazyBrain() {
     return m;
   }, [notes, pinned, journal]);
 
-  // Category & owner counts across the full set (before filtering)
+  // Category & owner counts across the full set (before filtering).
+  // Single pass over notes; categoryKeysAllFor lowercases tags once and
+  // uses string ops instead of regex per-category. At 5k notes this drops
+  // from ~75k regex evals to one tag-list normalization per note.
   const { categoryCounts, ownerCounts } = useMemo(() => {
     const cats: Record<string, number> = {};
     const owners: Record<Owner, number> = { user: 0, agent: 0, unknown: 0 };
     for (const n of notes) {
       owners[ownerOf(n.tags)] += 1;
-      for (const c of FILTER_CATEGORIES) {
-        if (matchesCategory(n.tags, c.key)) cats[c.key] = (cats[c.key] ?? 0) + 1;
+      for (const key of categoryKeysAllFor(n.tags)) {
+        cats[key] = (cats[key] ?? 0) + 1;
       }
     }
     return { categoryCounts: cats, ownerCounts: owners };
@@ -390,11 +530,13 @@ export default function LazyBrain() {
       return items.filter((n) => {
         if (ownerFilter !== "all" && ownerOf(n.tags) !== ownerFilter) return false;
         if (hiddenCategories.size === 0) return true;
-        // If a note matches NO hidden category, show it.
-        const matchedHidden = FILTER_CATEGORIES.some(
-          (c) => hiddenCategories.has(c.key) && matchesCategory(n.tags, c.key),
-        );
-        return !matchedHidden;
+        // categoryKeysAllFor lowercases tags once and uses string ops;
+        // ~10x faster than the previous FILTER_CATEGORIES regex loop
+        // (was 27 regex evals per note per filter pass × 3 passes).
+        for (const k of categoryKeysAllFor(n.tags)) {
+          if (hiddenCategories.has(k)) return false;
+        }
+        return true;
       });
     },
     [hiddenCategories, ownerFilter],
@@ -433,9 +575,10 @@ export default function LazyBrain() {
       if (ownerFilter !== "all" && ownerOf(note.tags) !== ownerFilter) return true;
       if (minImportance > 1 && (note.importance ?? 5) < minImportance) return true;
       if (hiddenCategories.size === 0) return false;
-      return FILTER_CATEGORIES.some(
-        (c) => hiddenCategories.has(c.key) && matchesCategory(note.tags, c.key),
-      );
+      for (const k of categoryKeysAllFor(note.tags)) {
+        if (hiddenCategories.has(k)) return true;
+      }
+      return false;
     },
     [ownerFilter, hiddenCategories, minImportance],
   );
@@ -762,6 +905,10 @@ export default function LazyBrain() {
           onOpenGraph={() => setViewMode(viewMode === "graph" ? "notes" : "graph")}
           onSearchFocus={() => searchRef.current?.focus()}
           noteCount={totalCount}
+          notesLimit={notesLimit}
+          totalKnown={totalKnown}
+          showRolledUp={showRolledUp}
+          onToggleShowRolledUp={() => setShowRolledUp((v) => !v)}
           viewMode={viewMode}
           hasMore={hasMore}
           onLoadMore={loadMore}

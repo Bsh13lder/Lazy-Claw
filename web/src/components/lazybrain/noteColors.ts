@@ -83,6 +83,19 @@ export const CATEGORY_PRIORITY: string[] = [
  *  overflow chip drawn by the node renderer. */
 export const MAX_SLICES = 3;
 
+/** Coerce a tag list to lowercase strings, dropping non-string entries.
+ *  A single non-string in the input would otherwise crash `.toLowerCase()`
+ *  and abort the surrounding useMemo factory, causing React error #310
+ *  (hook count mismatch on next render). */
+function safeLowerTags(tags: string[] | null | undefined): string[] {
+  if (!Array.isArray(tags)) return [];
+  const out: string[] = [];
+  for (const t of tags) {
+    if (typeof t === "string") out.push(t.toLowerCase());
+  }
+  return out;
+}
+
 /** Walk CATEGORY_PRIORITY and return every matching key (capped at MAX_SLICES).
  *  - pinned short-circuits to ["pinned"] so halos stay a single color.
  *  - callers can compare the returned list length against actual match count
@@ -92,8 +105,8 @@ export function categoryKeysFor(
   pinned = false,
 ): string[] {
   if (pinned) return ["pinned"];
-  if (!tags || tags.length === 0) return [];
-  const lower = tags.map((t) => t.toLowerCase());
+  const lower = safeLowerTags(tags);
+  if (lower.length === 0) return [];
   const hit: string[] = [];
   for (const key of CATEGORY_PRIORITY) {
     if (hit.length >= MAX_SLICES) break;
@@ -111,8 +124,8 @@ export function categoryMatchCount(
   pinned = false,
 ): number {
   if (pinned) return 1;
-  if (!tags || tags.length === 0) return 0;
-  const lower = tags.map((t) => t.toLowerCase());
+  const lower = safeLowerTags(tags);
+  if (lower.length === 0) return 0;
   let n = 0;
   for (const key of CATEGORY_PRIORITY) {
     if (lower.includes(key) || lower.some((t) => t.startsWith(`${key}/`))) n += 1;
@@ -134,8 +147,8 @@ export function categoryKeyFor(
 export type Owner = "user" | "agent" | "unknown";
 
 export function ownerOf(tags: string[] | null | undefined): Owner {
-  if (!tags) return "unknown";
-  const lower = tags.map((t) => t.toLowerCase());
+  const lower = safeLowerTags(tags);
+  if (lower.length === 0) return "unknown";
   if (lower.includes("owner/user")) return "user";
   if (lower.includes("owner/agent")) return "agent";
   return "unknown";
@@ -237,6 +250,41 @@ export function isSystemTag(tag: string): boolean {
   return SYSTEM_TAG_PREFIXES.some((p) => t.startsWith(p));
 }
 
+/** Return every FILTER_CATEGORIES key a tag list matches, in declared order.
+ *  Lowercases the tag list once and reuses simple string ops to avoid the
+ *  O(n × FILTER_CATEGORIES) regex re-evaluation that the per-note count
+ *  loop in LazyBrain.tsx used to do.
+ *
+ *  Unlike `categoryKeysFor` (which is capped at MAX_SLICES for graph-node
+ *  rendering), this returns the *complete* set so chip count badges stay
+ *  accurate for notes with many overlapping tags. */
+export function categoryKeysAllFor(
+  tags: string[] | null | undefined,
+): string[] {
+  const lower = safeLowerTags(tags);
+  if (lower.length === 0) return [];
+  // Pre-compute "has kind/shape" because every shape-* compound key needs it.
+  const hasKindShape = lower.includes("kind/shape");
+  const out: string[] = [];
+  for (const c of FILTER_CATEGORIES) {
+    const key = c.key;
+    if (key.startsWith("shape-")) {
+      if (hasKindShape && lower.includes(`outcome/${key.slice("shape-".length)}`)) {
+        out.push(key);
+      }
+      continue;
+    }
+    if (
+      lower.includes(key)
+      || lower.includes(`kind/${key}`)
+      || lower.some((t) => t.startsWith(`${key}/`))
+    ) {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
 /** Does a note match the category filter key? (tag prefix match)
  *
  *  Also matches the `kind/<key>` namespace introduced by the Obsidian-borrowed
@@ -251,8 +299,8 @@ export function isSystemTag(tag: string): boolean {
  *  completely separate code paths.
  */
 export function matchesCategory(tags: string[] | null | undefined, key: string): boolean {
-  if (!tags) return false;
-  const lower = tags.map((t) => t.toLowerCase());
+  const lower = safeLowerTags(tags);
+  if (lower.length === 0) return false;
 
   // Compound shape-<state> keys.
   if (key.startsWith("shape-")) {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import * as api from "../../api";
 import type { LazyBrainNote, LazyBrainTag } from "../../api";
 import { FilterBar } from "./FilterBar";
@@ -36,6 +37,7 @@ import {
   ListTodo,
   ChevronRight,
   Link2,
+  Layers,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { TaskSymbol } from "./TaskSymbol";
@@ -61,6 +63,18 @@ interface Props {
   onOpenGraph: () => void;
   onSearchFocus: () => void;
   noteCount: number;
+  /** Current fetch ceiling — drives the "Showing X of …" pill so the user
+   *  knows whether they're seeing the full corpus or a slice of it. */
+  notesLimit?: number;
+  /** Resolved total when we know the corpus is smaller than the ceiling
+   *  (i.e. last fetch returned < notesLimit rows). null when more pages
+   *  may exist. */
+  totalKnown?: number | null;
+  /** Archive toggle — when on, sidebar/graph re-fetch with rolled-up
+   *  notes included so the user can browse the originals behind a
+   *  rollup. Default off. */
+  showRolledUp?: boolean;
+  onToggleShowRolledUp?: () => void;
   viewMode: "notes" | "graph" | "canvas";
   hasMore?: boolean;
   onLoadMore?: () => void;
@@ -78,21 +92,68 @@ interface Props {
 const MAX_RECENT = 20;
 const MAX_TAGS = 30;
 
-type SectionKey = "tasks" | "topics" | "pinned" | "recent" | "journal" | "tags";
+type SectionKey = "tasks" | "topics" | "pinned" | "rollups" | "recent" | "journal" | "tags";
 type SortKey = "recent" | "importance" | "alpha";
 
 const LS_OPEN = "lazybrain-sidebar-open";
 const LS_SORT = "lazybrain-sidebar-sort";
 const LS_JM = "lazybrain-sidebar-jmonths";
 
+// Reused across every alpha-sort render — Intl.Collator construction is
+// 3-5x more expensive than a single compare, so hoisting it out of the
+// per-render loop is a measurable win at thousands of notes.
+const TITLE_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" });
+
 const DEFAULT_OPEN: Record<SectionKey, boolean> = {
   tasks: true,
   topics: true,
   pinned: true,
+  rollups: true,
   recent: true,
   journal: true,
   tags: true,
 };
+
+/** Lowercase a tag list defensively. Some legacy notes can carry non-string
+ *  tag values (e.g. partially-decoded JSON) — we coerce so the page never
+ *  crashes on a single malformed row. */
+function lowerTags(note: LazyBrainNote): string[] {
+  const raw = note.tags;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const t of raw) {
+    if (typeof t === "string") out.push(t.toLowerCase());
+  }
+  return out;
+}
+
+/** Detects weekly/monthly rollup notes by their tag fingerprint. */
+function isRollupNote(note: LazyBrainNote): boolean {
+  const tags = lowerTags(note);
+  return (
+    tags.includes("kind/rollup")
+    || tags.some((t) => t.startsWith("rollup/weekly") || t.startsWith("rollup/monthly"))
+  );
+}
+
+/** Pulls "12" out of `source-count/12` so the row shows "12 notes folded".
+ *  Returns null when the tag is absent (older rollups predate the count tag). */
+function rollupSourceCount(note: LazyBrainNote): number | null {
+  const tag = lowerTags(note).find((t) => t.startsWith("source-count/"));
+  if (!tag) return null;
+  const n = Number(tag.split("/", 2)[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Returns the human-readable period label, e.g. "W23-2026" or "M2026-05". */
+function rollupPeriodLabel(note: LazyBrainNote): string {
+  const tags = lowerTags(note);
+  for (const t of tags) {
+    if (t.startsWith("rollup/weekly/")) return t.slice("rollup/weekly/".length).toUpperCase();
+    if (t.startsWith("rollup/monthly/")) return t.slice("rollup/monthly/".length).toUpperCase();
+  }
+  return "";
+}
 
 const UNDO_WINDOW_MS = 5000;
 
@@ -117,6 +178,10 @@ export function PageListSidebar({
   onOpenGraph,
   onSearchFocus,
   noteCount,
+  notesLimit,
+  totalKnown,
+  showRolledUp,
+  onToggleShowRolledUp,
   viewMode,
   hasMore,
   onLoadMore,
@@ -456,26 +521,55 @@ export function PageListSidebar({
     return out;
   }, [pinned, recent, deletedIds, pinOverride]);
 
+  // Hoisted filter — both sortedRecent and navigable consume it, so we
+  // avoid reallocating the array on every render even when nothing
+  // upstream changed.
+  const visibleRecent = useMemo(
+    () => recent.filter((n) => !deletedIds.has(n.id)),
+    [recent, deletedIds],
+  );
+
+  // Rollup notes (weekly + monthly), pulled out of `recent` so the
+  // sidebar surfaces them as a first-class section between Pinned and
+  // Recent. Sorted newest-first; capped at 12 because older rollups
+  // are reachable via the rollup-of-rollups (monthly cascade).
+  const visibleRollups = useMemo(
+    () => visibleRecent.filter(isRollupNote).slice(0, 12),
+    [visibleRecent],
+  );
+
+  // The Recent section should NOT also re-list rollup notes — they're
+  // already promoted above. Cheap exclusion via Set lookup on IDs.
+  const rollupIds = useMemo(
+    () => new Set(visibleRollups.map((n) => n.id)),
+    [visibleRollups],
+  );
+  const recentWithoutRollups = useMemo(
+    () => visibleRecent.filter((n) => !rollupIds.has(n.id)),
+    [visibleRecent, rollupIds],
+  );
+
   const sortedRecent = useMemo(() => {
-    const visible = recent.filter((n) => !deletedIds.has(n.id));
-    if (sortKey === "recent") return visible;
-    const arr = [...visible];
+    if (sortKey === "recent") return recentWithoutRollups;
+    // Only the first MAX_RECENT*2 candidates are reachable in the UI;
+    // sorting tens of thousands when we render twenty is a guaranteed
+    // jank source. Slice first, then sort — O(k log k) instead of
+    // O(n log n) where k = 40.
+    const candidates = recentWithoutRollups.slice(0, MAX_RECENT * 4);
     if (sortKey === "importance") {
-      arr.sort((a, b) => {
+      candidates.sort((a, b) => {
         const aP = (pinOverride.get(a.id) ?? a.pinned) ? 1 : 0;
         const bP = (pinOverride.get(b.id) ?? b.pinned) ? 1 : 0;
         if (aP !== bP) return bP - aP;
         return (b.importance ?? 0) - (a.importance ?? 0);
       });
     } else {
-      arr.sort((a, b) =>
-        (a.title || "(untitled)").localeCompare(b.title || "(untitled)", undefined, {
-          sensitivity: "base",
-        }),
+      candidates.sort((a, b) =>
+        TITLE_COLLATOR.compare(a.title || "(untitled)", b.title || "(untitled)"),
       );
     }
-    return arr;
-  }, [recent, sortKey, deletedIds, pinOverride]);
+    return candidates;
+  }, [recentWithoutRollups, sortKey, pinOverride]);
 
   const visibleJournalByMonth = useMemo(
     () => groupJournalByMonth(journal.filter((n) => !deletedIds.has(n.id)).slice(0, 14)),
@@ -502,6 +596,9 @@ export function PageListSidebar({
     if (openSections.pinned) {
       for (const n of visiblePinned.slice(0, 10)) out.push(n);
     }
+    if (openSections.rollups) {
+      for (const n of visibleRollups) out.push(n);
+    }
     if (openSections.recent) {
       for (const n of sortedRecent.slice(0, MAX_RECENT)) out.push(n);
     }
@@ -516,6 +613,7 @@ export function PageListSidebar({
     openSections,
     visibleTasks,
     visiblePinned,
+    visibleRollups,
     sortedRecent,
     visibleJournalByMonth,
     closedMonths,
@@ -739,6 +837,8 @@ export function PageListSidebar({
         onSetOwner={onSetOwner}
         skillsVaultOpen={skillsVaultOpen}
         onToggleSkillsVault={toggleSkillsVault}
+        showRolledUp={!!showRolledUp}
+        onToggleShowRolledUp={onToggleShowRolledUp}
       />
 
       {/* Quick sections */}
@@ -872,6 +972,56 @@ export function PageListSidebar({
               </SidebarSection>
             )}
 
+            {/* Rollups — weekly + monthly compaction notes. Shown above
+                Recent so the user always sees this week's topic at a
+                glance. Each row carries the period label + folded-count
+                badge so the user can read the cadence without opening
+                the rollup. */}
+            {visibleRollups.length > 0 && (
+              <SidebarSection
+                label="Rollups"
+                count={visibleRollups.length}
+                Icon={Layers}
+                iconColor="#c026d3"
+                open={openSections.rollups}
+                onToggle={() => toggleSection("rollups")}
+              >
+                {visibleRollups.map((n) => {
+                  const period = rollupPeriodLabel(n);
+                  const sourceCount = rollupSourceCount(n);
+                  return (
+                    <PageRow
+                      key={n.id}
+                      note={n}
+                      {...rowProps(n)}
+                      meta={
+                        <span className="flex items-center gap-1.5 text-[10px] tabular-nums text-text-muted">
+                          {period && (
+                            <span
+                              className="px-1 py-px rounded"
+                              style={{
+                                background: "rgba(192, 38, 211, 0.12)",
+                                color: "#c026d3",
+                                fontWeight: 600,
+                                letterSpacing: "0.04em",
+                              }}
+                            >
+                              {period}
+                            </span>
+                          )}
+                          {sourceCount !== null && (
+                            <span style={{ color: "#c026d3", opacity: 0.85 }}>
+                              {sourceCount} folded
+                            </span>
+                          )}
+                        </span>
+                      }
+                    />
+                  );
+                })}
+              </SidebarSection>
+            )}
+
             {/* Recent — with sort segmented control */}
             <SidebarSection
               label="Recent"
@@ -893,11 +1043,24 @@ export function PageListSidebar({
                 <button
                   onClick={onLoadMore}
                   className="w-full flex items-center justify-center gap-1.5 px-4 py-1.5 mt-1 text-[11px] text-text-muted hover:text-accent hover:bg-bg-hover transition-colors"
-                  title="Load older notes"
+                  title={
+                    notesLimit
+                      ? `Showing ${noteCount.toLocaleString()} of ${notesLimit.toLocaleString()}+ — load more`
+                      : "Load older notes"
+                  }
                 >
                   <Download size={11} strokeWidth={1.75} />
-                  <span>Load older notes</span>
+                  <span>
+                    {notesLimit
+                      ? `Showing ${noteCount.toLocaleString()} of ${notesLimit.toLocaleString()}+ — load more`
+                      : "Load older notes"}
+                  </span>
                 </button>
+              )}
+              {!hasMore && totalKnown !== null && totalKnown !== undefined && totalKnown > MAX_RECENT && (
+                <div className="px-4 py-1.5 mt-1 text-[10px] text-text-muted/60 text-center tabular-nums">
+                  All {totalKnown.toLocaleString()} notes loaded
+                </div>
               )}
             </SidebarSection>
 
@@ -1204,6 +1367,7 @@ function PageRow({
   onPin,
   onCopy,
   onDelete,
+  meta,
 }: {
   note: LazyBrainNote;
   selected: boolean;
@@ -1216,6 +1380,9 @@ function PageRow({
   onPin: () => void;
   onCopy: () => void;
   onDelete: () => void;
+  /** Optional row of badges rendered below the title — used by the
+   *  Rollups section to surface period + folded-count chips inline. */
+  meta?: ReactNode;
 }) {
   const title = note.title || "(untitled)";
   const color = colorForTags(note.tags || [], isPinned);
@@ -1258,6 +1425,9 @@ function PageRow({
           />
         )}
       </div>
+      {meta && (
+        <div className="pl-[20px] mt-0.5">{meta}</div>
+      )}
       {showSubLine && (
         <div className="flex items-center gap-1.5 pl-[20px] text-[10px] text-text-muted/70 leading-tight">
           {time && <span className="tabular-nums">{time}</span>}

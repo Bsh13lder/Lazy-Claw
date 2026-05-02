@@ -139,13 +139,27 @@ function writePositionsToLocalStorage(
 // Single source of truth for category priority lives in noteColors.ts —
 // imported above so this file's pickCategoryKey, color, icon, and the
 // filter chips can never drift apart again.
+/** Coerce a tag list to lowercase strings, dropping any non-string entries.
+ *  Single non-string in the input would otherwise crash `.toLowerCase()`
+ *  and abort the surrounding useMemo factory, causing React error #310
+ *  (hook count mismatch on next render). Used everywhere this file walks
+ *  a note's tags. */
+function safeTagsLower(tags: unknown): string[] {
+  if (!Array.isArray(tags)) return [];
+  const out: string[] = [];
+  for (const t of tags) {
+    if (typeof t === "string") out.push(t.toLowerCase());
+  }
+  return out;
+}
+
 function pickCategoryKey(
   tags: string[] | null | undefined,
   pinned: boolean,
 ): string {
   if (pinned) return "pinned";
-  if (!tags || tags.length === 0) return "_default";
-  const lower = tags.map((t) => t.toLowerCase());
+  const lower = safeTagsLower(tags);
+  if (lower.length === 0) return "_default";
   for (const key of CATEGORY_PRIORITY) {
     if (lower.includes(key)) return key;
     if (lower.some((t) => t.startsWith(`${key}/`))) return key;
@@ -1007,15 +1021,15 @@ export function GraphView({
     };
   }, [hoverId, nodeById, view]);
 
-  if (graph.nodes.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full text-text-muted text-sm gap-2">
-        <span>No notes to graph yet. Save a note with a</span>
-        <code className="text-accent">[[wikilink]]</code>
-        <span>to start.</span>
-      </div>
-    );
-  }
+  // EMPTY-STATE FLAG — was previously a top-level early return, but
+  // because there are still useMemo hooks below this point (edgesJsx,
+  // motesJsx, nodesJsx), an early return skipped them on the empty
+  // render and called them on the populated render. That is a Rules of
+  // Hooks violation (React error #310 — "rendered more hooks than
+  // during the previous render"). The empty-state JSX is now rendered
+  // conditionally at the end of the component, after every hook has
+  // run unconditionally.
+  const isEmptyGraph = graph.nodes.length === 0;
 
   // Labels — Logseq-style, always visible. Overlap is tolerated; clarity
   // wins over a clean layout. User can zoom/pan to resolve overlaps.
@@ -1228,9 +1242,28 @@ export function GraphView({
         : { ring: "#475569", emoji: "", label: "Note" };
       const deg = degree[node.id] ?? 0;
       const importance = note?.importance ?? 5;
+      // Rollup nodes encode "size of week/month" (how many notes folded
+      // into them) via a #source-count/N tag set by the agent at rollup
+      // time. They render larger than ordinary notes — a constellation
+      // of weeks at a glance.
+      const tagsLower = safeTagsLower(note?.tags);
+      const isRollup =
+        tagsLower.includes("kind/rollup") ||
+        tagsLower.some((t) => t.startsWith("rollup/weekly") || t.startsWith("rollup/monthly"));
+      const isMonthlyRollup = tagsLower.some((t) => t.startsWith("rollup/monthly"));
+      let sourceCount = 0;
+      if (isRollup) {
+        const sc = tagsLower.find((t) => t.startsWith("source-count/"));
+        if (sc) sourceCount = Number(sc.split("/", 2)[1]) || 0;
+      }
+      const baseR = isRollup
+        ? // Weekly with 7 sources ≈ 32px; monthly with 4 weeklies ≈ 38px;
+          // monthly with 30 sources ≈ 50px. Bump monthly's base so even
+          // small-source-count monthlies read as bigger than weeklies.
+          (isMonthlyRollup ? 28 : 22) + Math.min(28, Math.sqrt(sourceCount) * 4)
+        : 16 + Math.min(11, Math.sqrt(deg) * 2);
       const r =
-        16 +
-        Math.min(11, Math.sqrt(deg) * 2) +
+        baseR +
         Math.min(5, importance / 2) +
         (note?.pinned ? 1 : 0);
       const categoryKeys = categoryKeysFor(note?.tags, !!note?.pinned);
@@ -1245,7 +1278,7 @@ export function GraphView({
       const label = (note?.title || node.label || "").trim();
       const taskDone = (() => {
         if (categoryKey !== "task") return false;
-        const tagsLower = (note?.tags || []).map((t) => t.toLowerCase());
+        const tagsLower = safeTagsLower(note?.tags);
         if (tagsLower.includes("done") || tagsLower.includes("completed")) return true;
         const content = note?.content || "";
         return /^\s*-\s*\[x\]/im.test(content);
@@ -1391,8 +1424,8 @@ export function GraphView({
           {(() => {
             const hasDeadline =
               categoryKeys.includes("deadline") && categoryKey !== "deadline";
-            const hasDueTag = (note?.tags || []).some((t) =>
-              t.toLowerCase().startsWith("due/"),
+            const hasDueTag = safeTagsLower(note?.tags).some((t) =>
+              t.startsWith("due/"),
             );
             if (!hasDeadline && !hasDueTag) return null;
             const dx = Math.cos(-Math.PI / 4) * r;
@@ -1501,6 +1534,19 @@ export function GraphView({
       onPeek, onClearPeek, onSelect,
     ],
   );
+
+  if (isEmptyGraph) {
+    // Render the empty-state placeholder at the END (after all hooks
+    // ran) so the early return doesn't skip later useMemo calls and
+    // trigger React error #310 on the next render once data lands.
+    return (
+      <div className="flex items-center justify-center h-full text-text-muted text-sm gap-2">
+        <span>No notes to graph yet. Save a note with a</span>
+        <code className="text-accent">[[wikilink]]</code>
+        <span>to start.</span>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1787,7 +1833,7 @@ export function GraphView({
         const filledDots = Math.max(1, Math.min(5, Math.ceil((hoverNote.importance ?? 5) / 2)));
         // Task completion: tags include done/completed, OR body starts
         // with a markdown-checked checkbox.
-        const tagsLower = (hoverNote.tags || []).map((t) => t.toLowerCase());
+        const tagsLower = safeTagsLower(hoverNote.tags);
         const doneByTag = tagsLower.includes("done") || tagsLower.includes("completed");
         const doneByCheckbox = /^\s*-\s*\[x\]/im.test(hoverNote.content || "");
         const isTask = catKey === "task";

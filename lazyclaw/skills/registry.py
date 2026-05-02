@@ -187,7 +187,8 @@ class SkillRegistry:
             ListTagsSkill, ListTitlesSkill,
             RenamePageSkill, MergeNotesSkill,
             PinNoteSkill, UnpinNoteSkill, ListPinnedSkill,
-            EnableWeeklyRollupSkill, MorningReviewSkill,
+            EnableWeeklyRollupSkill, EnableMonthlyRollupSkill, MarkRolledUpSkill,
+            ListRollupsSkill, MorningReviewSkill,
         )
 
         self.register(SaveNoteSkill(config=config))
@@ -211,6 +212,9 @@ class SkillRegistry:
         self.register(UnpinNoteSkill(config=config))
         self.register(ListPinnedSkill(config=config))
         self.register(EnableWeeklyRollupSkill(config=config))
+        self.register(EnableMonthlyRollupSkill(config=config))
+        self.register(MarkRolledUpSkill(config=config))
+        self.register(ListRollupsSkill(config=config))
 
         # LazyBrain AI-native skills (Phase 2)
         self.register(SuggestLinksSkill(config=config))

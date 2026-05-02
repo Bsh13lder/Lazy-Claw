@@ -96,6 +96,7 @@ class CanvasSaveRequest(BaseModel):
 async def list_notes_route(
     tag: str | None = None,
     pinned: bool = False,
+    include_rolled_up: bool = False,
     limit: int = 500,
     offset: int = 0,
     user: User = Depends(get_current_user),
@@ -105,6 +106,7 @@ async def list_notes_route(
         user.id,
         tag=tag,
         pinned_only=pinned,
+        include_rolled_up=include_rolled_up,
         limit=limit,
         offset=offset,
     )
@@ -222,11 +224,17 @@ async def mark_task_done_route(
 async def search_route(
     q: str,
     tag: str | None = None,
+    include_rolled_up: bool = False,
     limit: int = 20,
     user: User = Depends(get_current_user),
 ):
     results = await store.search_notes(
-        _config, user.id, q, tag=tag, limit=limit
+        _config,
+        user.id,
+        q,
+        tag=tag,
+        include_rolled_up=include_rolled_up,
+        limit=limit,
     )
     return {"query": q, "results": results}
 
@@ -239,6 +247,7 @@ async def search_route(
 async def graph_route(
     root_id: str | None = None,
     depth: int = 1,
+    include_rolled_up: bool = False,
     limit: int = 500,
     user: User = Depends(get_current_user),
 ):
@@ -246,7 +255,9 @@ async def graph_route(
         return await graph.get_neighbors(
             _config, user.id, root_id, depth=depth
         )
-    return await graph.get_graph(_config, user.id, limit=limit)
+    return await graph.get_graph(
+        _config, user.id, include_rolled_up=include_rolled_up, limit=limit
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -519,10 +519,17 @@ async def list_notes(
     *,
     tag: str | None = None,
     pinned_only: bool = False,
+    include_rolled_up: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
-    """List recent notes, most-recent first."""
+    """List recent notes, most-recent first.
+
+    ``include_rolled_up=False`` (default) hides notes that have been folded
+    into a weekly/monthly rollup. The originals stay in the DB and remain
+    findable by passing ``include_rolled_up=True`` — useful when the agent
+    needs historical context that lives behind a rollup wikilink.
+    """
     dek = await get_user_dek(config, user_id)
 
     clauses = ["user_id = ?"]
@@ -533,6 +540,11 @@ async def list_notes(
         # Simple substring over JSON array — good enough for typical sizes
         clauses.append("tags LIKE ?")
         params.append(f'%"{tag.lstrip("#").lower()}"%')
+    if not include_rolled_up:
+        # Hide notes the cascade has folded into a rollup. Substring match on
+        # the JSON-encoded tags column — fast enough at thousands of rows.
+        clauses.append("tags NOT LIKE ?")
+        params.append('%"rolled-up"%')
     where = " AND ".join(clauses)
 
     async with db_session(config) as db:
@@ -570,16 +582,24 @@ async def search_notes(
     query: str,
     *,
     tag: str | None = None,
+    include_rolled_up: bool = False,
     limit: int = 20,
 ) -> list[dict]:
     """Substring search on decrypted content (good enough for thousands of notes).
+
+    ``include_rolled_up`` mirrors :func:`list_notes` — pass ``True`` when the
+    agent is asked about something older than a few weeks and needs to dig
+    behind the rollup. Default ``False`` keeps casual searches focused on
+    recent content.
 
     Phase 18.5 can swap this for FTS5 without changing the API.
     """
     if not query or not query.strip():
         return []
     q = _fold(query.strip())
-    candidates = await list_notes(config, user_id, tag=tag, limit=500)
+    candidates = await list_notes(
+        config, user_id, tag=tag, include_rolled_up=include_rolled_up, limit=500,
+    )
     hits = [
         n
         for n in candidates

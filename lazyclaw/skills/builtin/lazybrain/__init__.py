@@ -32,7 +32,12 @@ from lazyclaw.skills.builtin.lazybrain.pins import (
     PinNoteSkill,
     UnpinNoteSkill,
 )
-from lazyclaw.skills.builtin.lazybrain.rollup import EnableWeeklyRollupSkill
+from lazyclaw.skills.builtin.lazybrain.rollup import (
+    EnableMonthlyRollupSkill,
+    EnableWeeklyRollupSkill,
+    ListRollupsSkill,
+    MarkRolledUpSkill,
+)
 from lazyclaw.skills.builtin.lazybrain.ai_skills import (
     AskNotesSkill,
     MorningBriefingSkill,
@@ -66,6 +71,9 @@ __all__ = [
     "UnpinNoteSkill",
     "ListPinnedSkill",
     "EnableWeeklyRollupSkill",
+    "EnableMonthlyRollupSkill",
+    "ListRollupsSkill",
+    "MarkRolledUpSkill",
     "AskNotesSkill",
     "MorningBriefingSkill",
     "ReindexEmbeddingsSkill",

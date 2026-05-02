@@ -16,15 +16,29 @@ async def get_graph(
     config: Config,
     user_id: str,
     *,
+    include_rolled_up: bool = False,
     limit: int = 500,
 ) -> dict:
-    """Return the full user graph (capped at ``limit`` nodes)."""
+    """Return the full user graph (capped at ``limit`` nodes).
+
+    ``include_rolled_up=False`` (default) hides notes that have been folded
+    into a weekly/monthly rollup. Rollup notes themselves (which carry
+    ``kind/rollup`` but not ``rolled-up``) always render. Pass
+    ``include_rolled_up=True`` to surface every original alongside its
+    rollup — useful for the "Archive" toggle in the UI.
+    """
+    clauses = ["user_id = ?"]
+    params: list = [user_id]
+    if not include_rolled_up:
+        clauses.append("tags NOT LIKE ?")
+        params.append('%"rolled-up"%')
+    where = " AND ".join(clauses)
     async with db_session(config) as db:
         rows = await db.execute(
-            "SELECT id, title_key, pinned, importance, tags, created_at "
-            "FROM notes WHERE user_id = ? "
-            "ORDER BY pinned DESC, importance DESC, created_at DESC LIMIT ?",
-            (user_id, max(1, min(2000, limit))),
+            f"SELECT id, title_key, pinned, importance, tags, created_at "
+            f"FROM notes WHERE {where} "
+            f"ORDER BY pinned DESC, importance DESC, created_at DESC LIMIT ?",
+            (*params, max(1, min(2000, limit))),
         )
         node_rows = await rows.fetchall()
 

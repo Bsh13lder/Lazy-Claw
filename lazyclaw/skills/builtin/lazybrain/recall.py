@@ -88,7 +88,11 @@ class SearchNotesSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Search the user's second brain by substring. Optional tag filter. "
-            "Returns top matches with ID + title + snippet."
+            "Returns top matches with ID + title + snippet. "
+            "Pass include_rolled_up=True when the user asks about something "
+            "older than ~7 days, when answering 'what did I do last month', "
+            "or when the surface query returns nothing — rolled-up notes are "
+            "hidden by default to keep recent searches focused."
         )
 
     @property
@@ -107,6 +111,14 @@ class SearchNotesSkill(BaseSkill):
                     "maximum": 50,
                     "default": 10,
                 },
+                "include_rolled_up": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When True, also search notes that have been folded "
+                        "into a weekly/monthly rollup. Default False."
+                    ),
+                },
             },
             "required": ["query"],
         }
@@ -117,6 +129,7 @@ class SearchNotesSkill(BaseSkill):
             user_id,
             params["query"],
             tag=params.get("tag"),
+            include_rolled_up=bool(params.get("include_rolled_up") or False),
             limit=int(params.get("limit") or 10),
         )
         if not hits:

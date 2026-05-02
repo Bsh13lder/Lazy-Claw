@@ -147,12 +147,14 @@ class SkillRegistry:
 
         # Job & reminder skills
         from lazyclaw.skills.builtin.jobs import (
-            ScheduleJobSkill, SetReminderSkill, ListJobsSkill, ManageJobSkill,
+            ScheduleJobSkill, SetReminderSkill, ListJobsSkill,
+            EditJobSkill, ManageJobSkill,
         )
 
         self.register(ScheduleJobSkill(config=config))
         self.register(SetReminderSkill(config=config))
         self.register(ListJobsSkill(config=config))
+        self.register(EditJobSkill(config=config))
         self.register(ManageJobSkill(config=config))
 
         # Task manager skills (second brain)

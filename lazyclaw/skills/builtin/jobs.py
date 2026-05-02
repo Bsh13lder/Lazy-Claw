@@ -142,7 +142,10 @@ class SetReminderSkill(BaseSkill):
             "relative times (+10m, +1h) and has Telegram buttons (Done/Snooze). "
             "Only use set_reminder for cron-job-style reminders without task tracking. "
             "Accepts relative times: '+10m', '+1h', '+2h30m', '+1d'. "
-            "Also accepts ISO datetime for specific times."
+            "Also accepts ISO datetime for specific times. "
+            "IDEMPOTENT: calling with the same `message` updates the existing "
+            "reminder's time instead of creating a duplicate. To set a second "
+            "reminder for related work, use a distinct message."
         )
 
     @property
@@ -174,7 +177,9 @@ class SetReminderSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         import re
         from datetime import timedelta
-        from lazyclaw.heartbeat.orchestrator import create_job
+        from lazyclaw.heartbeat.orchestrator import (
+            create_job, list_jobs, update_job,
+        )
 
         message = params.get("message", "").strip()
         remind_at = params.get("remind_at", "").strip()
@@ -212,6 +217,50 @@ class SetReminderSkill(BaseSkill):
                     f"Use '+10m', '+1h', or ISO 8601 format."
                 )
 
+        next_run_iso = dt.isoformat()
+        display_time = dt.strftime("%B %d at %I:%M %p")
+
+        # Idempotency: a reminder with the same message + active status is
+        # treated as the same reminder. Calling set_reminder again UPDATES
+        # the time instead of creating a duplicate row. Fixes the bug where
+        # MiniMax called set_reminder twice in a row to "change" a reminder
+        # and ended up with two active jobs both firing.
+        try:
+            existing_jobs = await list_jobs(self._config, user_id)
+        except Exception as exc:
+            logger.debug("list_jobs failed, proceeding to create: %s", exc)
+            existing_jobs = []
+
+        match = None
+        for job in existing_jobs:
+            if job.get("job_type") != "reminder":
+                continue
+            if job.get("status") != "active":
+                continue
+            if (job.get("instruction") or "").strip() == message:
+                match = job
+                break
+
+        if match is not None:
+            try:
+                await update_job(
+                    self._config, user_id, match["id"],
+                    next_run=next_run_iso,
+                    context=remind_at,
+                )
+                return (
+                    f"Updated existing reminder: '{message}' "
+                    f"now fires {display_time}.\n"
+                    f"(One reminder per message — to keep both, send a "
+                    f"distinct message for the second.)"
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to update reminder %s: %s",
+                    match.get("id"), exc, exc_info=True,
+                )
+                return f"Failed to update reminder: {exc}"
+
         try:
             job_id = await create_job(
                 self._config,
@@ -228,12 +277,9 @@ class SetReminderSkill(BaseSkill):
             async with db_session(self._config) as db:
                 await db.execute(
                     "UPDATE agent_jobs SET next_run = ? WHERE id = ?",
-                    (dt.isoformat(), job_id),
+                    (next_run_iso, job_id),
                 )
                 await db.commit()
-
-            # Format display time
-            display_time = dt.strftime("%B %d at %I:%M %p")
 
             return (
                 f"Reminder set for {display_time}.\n"
@@ -338,6 +384,132 @@ class ListJobsSkill(BaseSkill):
             lines.append("")
 
         return "\n".join(lines)
+
+
+class EditJobSkill(BaseSkill):
+    """Edit an existing job's name, instruction, schedule, or context."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "edit_job"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Edit fields of an existing scheduled job or reminder. "
+            "Match the job by name (partial match works) and pass any "
+            "subset of new_name / new_instruction / new_cron_expression / "
+            "new_context. Only provide fields you want to change. "
+            "For cron jobs, supply a 5-field cron expression "
+            "(e.g. '0 8 * * *' = daily 8am)."
+        )
+
+    @property
+    def category(self) -> str:
+        return "utility"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "job_name": {
+                    "type": "string",
+                    "description": (
+                        "Name or partial name of the job to edit. "
+                        "Fuzzy matched against existing jobs."
+                    ),
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "New display name (optional).",
+                },
+                "new_instruction": {
+                    "type": "string",
+                    "description": "New instruction text (optional).",
+                },
+                "new_cron_expression": {
+                    "type": "string",
+                    "description": (
+                        "New 5-field cron expression (optional). Only valid "
+                        "for cron-type jobs. Will be validated."
+                    ),
+                },
+                "new_context": {
+                    "type": "string",
+                    "description": "New context / extra notes (optional).",
+                },
+            },
+            "required": ["job_name"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.heartbeat.cron import is_valid
+        from lazyclaw.heartbeat.orchestrator import list_jobs, update_job
+
+        job_name = (params.get("job_name") or "").strip().lower()
+        if not job_name:
+            return "Missing required field: job_name."
+
+        new_name = (params.get("new_name") or "").strip()
+        new_instruction = (params.get("new_instruction") or "").strip()
+        new_cron = (params.get("new_cron_expression") or "").strip()
+        new_context = (params.get("new_context") or "").strip()
+
+        patch: dict = {}
+        if new_name:
+            patch["name"] = new_name
+        if new_instruction:
+            patch["instruction"] = new_instruction
+        if new_cron:
+            if not is_valid(new_cron):
+                return (
+                    f"Invalid cron expression: '{new_cron}'. "
+                    f"Use 5 fields (minute hour day month weekday)."
+                )
+            patch["cron_expression"] = new_cron
+        if new_context:
+            patch["context"] = new_context
+
+        if not patch:
+            return (
+                "Nothing to update. Provide at least one of: "
+                "new_name, new_instruction, new_cron_expression, new_context."
+            )
+
+        try:
+            jobs = await list_jobs(self._config, user_id)
+        except Exception as e:
+            return f"Failed to list jobs: {e}"
+
+        match = None
+        for job in jobs:
+            name = (job.get("name") or "").lower()
+            if job_name in name or name in job_name:
+                match = job
+                break
+
+        if not match:
+            available = ", ".join(j.get("name", "?") for j in jobs[:5])
+            return f"No job matching '{job_name}'. Available: {available}"
+
+        job_id = match["id"]
+        display_name = match.get("name", "?")
+
+        try:
+            ok = await update_job(self._config, user_id, job_id, **patch)
+        except Exception as e:
+            logger.error("edit_job failed: %s", e, exc_info=True)
+            return f"Error updating '{display_name}': {e}"
+
+        if not ok:
+            return f"Could not update '{display_name}' (no rows changed)."
+
+        changed = ", ".join(sorted(patch.keys()))
+        return f"Updated '{display_name}'. Changed: {changed}."
 
 
 class ManageJobSkill(BaseSkill):

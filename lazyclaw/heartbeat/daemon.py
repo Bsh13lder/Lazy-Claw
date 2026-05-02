@@ -164,10 +164,13 @@ class HeartbeatDaemon:
 
         key = await get_user_dek(self._config, user_id)
 
-        # Check cron jobs (recurring)
+        # Check cron jobs (recurring). next_run is read so is_due can honour
+        # the schedule on the FIRST tick after creation; without it, fresh
+        # jobs (last_run IS NULL) used to fire on the very next heartbeat
+        # regardless of the cron expression.
         async with db_session(self._config) as db:
             cursor = await db.execute(
-                "SELECT id, name, instruction, cron_expression, last_run "
+                "SELECT id, name, instruction, cron_expression, last_run, next_run "
                 "FROM agent_jobs "
                 "WHERE user_id = ? AND status = 'active' AND cron_expression IS NOT NULL",
                 (user_id,),
@@ -175,9 +178,9 @@ class HeartbeatDaemon:
             cron_jobs = await cursor.fetchall()
 
         for row in cron_jobs:
-            job_id, enc_name, enc_instruction, cron_expression, last_run = row
+            job_id, enc_name, enc_instruction, cron_expression, last_run, next_run = row
             try:
-                if not is_due(cron_expression, last_run):
+                if not is_due(cron_expression, last_run, next_run):
                     continue
 
                 job_name = (
@@ -200,12 +203,40 @@ class HeartbeatDaemon:
                     if self._notifier_factory else None
                 )
                 cb_kwargs = {"callback": cb} if cb is not None else {}
-                await self._lane_queue.enqueue(
-                    user_id, f"[JOB:{job_name}] {instruction}", **cb_kwargs,
-                )
+                run_failed = False
+                run_error: str | None = None
+                try:
+                    result_text = await self._lane_queue.enqueue(
+                        user_id, f"[JOB:{job_name}] {instruction}", **cb_kwargs,
+                    )
+                except Exception as exc:
+                    run_failed = True
+                    run_error = f"{type(exc).__name__}: {exc}"
+                    logger.exception("Lane enqueue raised for cron job %s", job_id)
+                else:
+                    if isinstance(result_text, str) and result_text.startswith(
+                        "Error processing message:"
+                    ):
+                        run_failed = True
+                        run_error = result_text[:500]
 
                 next_run = calculate_next_run(cron_expression)
                 await orchestrator.mark_run(self._config, job_id, next_run)
+                try:
+                    if run_failed:
+                        await orchestrator.mark_run_outcome(
+                            self._config, user_id, job_id,
+                            "failed", error=run_error,
+                        )
+                    else:
+                        await orchestrator.mark_run_outcome(
+                            self._config, user_id, job_id, "success",
+                        )
+                except Exception:
+                    logger.debug(
+                        "mark_run_outcome failed for cron job %s",
+                        job_id, exc_info=True,
+                    )
             except Exception:
                 logger.exception("Error processing job %s for user %s", job_id, user_id)
 

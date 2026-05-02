@@ -1245,12 +1245,14 @@ export const listLazyBrainNotes = (opts?: {
   pinned?: boolean;
   limit?: number;
   offset?: number;
+  include_rolled_up?: boolean;
 }) => {
   const params = new URLSearchParams();
   if (opts?.tag) params.set("tag", opts.tag);
   if (opts?.pinned) params.set("pinned", "true");
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
+  if (opts?.include_rolled_up) params.set("include_rolled_up", "true");
   const qs = params.toString();
   return request<{ notes: LazyBrainNote[] }>(
     `/api/lazybrain/notes${qs ? `?${qs}` : ""}`,
@@ -1315,11 +1317,13 @@ export const getLazyBrainGraph = (opts?: {
   root_id?: string;
   depth?: number;
   limit?: number;
+  include_rolled_up?: boolean;
 }) => {
   const params = new URLSearchParams();
   if (opts?.root_id) params.set("root_id", opts.root_id);
   if (opts?.depth) params.set("depth", String(opts.depth));
   if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.include_rolled_up) params.set("include_rolled_up", "true");
   const qs = params.toString();
   return request<LazyBrainGraph>(
     `/api/lazybrain/graph${qs ? `?${qs}` : ""}`,

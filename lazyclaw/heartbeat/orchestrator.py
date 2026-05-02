@@ -14,7 +14,7 @@ from lazyclaw.heartbeat.cron import calculate_next_run
 
 logger = logging.getLogger(__name__)
 
-ENCRYPTED_FIELDS = ("name", "instruction", "context")
+ENCRYPTED_FIELDS = ("name", "instruction", "context", "last_error")
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def _row_to_dict(row, columns: list[str], key: bytes) -> dict:
 JOB_COLUMNS = [
     "id", "user_id", "name", "job_type", "instruction",
     "cron_expression", "context", "status", "last_run",
-    "next_run", "created_at",
+    "next_run", "created_at", "last_status", "last_error",
 ]
 
 JOB_SELECT = ", ".join(JOB_COLUMNS)
@@ -216,5 +216,40 @@ async def mark_run(config: Config, job_id: str, next_run: str | None) -> None:
         await db.execute(
             "UPDATE agent_jobs SET last_run = ?, next_run = ? WHERE id = ?",
             (now, next_run, job_id),
+        )
+        await db.commit()
+
+
+async def mark_run_outcome(
+    config: Config,
+    user_id: str,
+    job_id: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """Record the outcome of the most recent run.
+
+    status: "success" | "failed". error is encrypted (truncated to 500 chars)
+    when present. Safe to call after the job has been deleted — the UPDATE
+    just affects 0 rows.
+    """
+    if status not in ("success", "failed"):
+        logger.debug("mark_run_outcome: ignoring unknown status %r", status)
+        return
+
+    encrypted_error: str | None = None
+    if error is not None:
+        try:
+            key = await get_user_dek(config, user_id)
+            encrypted_error = encrypt(error[:500], key)
+        except Exception as exc:
+            logger.debug("mark_run_outcome: encrypting error failed: %s", exc)
+            encrypted_error = None
+
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE agent_jobs SET last_status = ?, last_error = ? "
+            "WHERE id = ? AND user_id = ?",
+            (status, encrypted_error, job_id, user_id),
         )
         await db.commit()

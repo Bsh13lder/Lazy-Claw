@@ -569,25 +569,87 @@ async def chat_websocket(ws: WebSocket):
 
     task_bus_task = asyncio.create_task(_task_event_pump())
 
-    async def _maybe_suggest_template(
-        user_id: str, turn_start_ts: float, cb: "WebSocketCallback"
+    async def _maybe_append_correction(
+        user_id: str,
+        source: str,
+        text: str,
+        cb: "WebSocketCallback",
     ) -> None:
-        """Post-turn hook — emit a template_suggest frame when the user just
-        ran a multi-step browser flow we could save as a reusable recipe.
+        """If a templated run is active for this user, append a correction
+        to the template's playbook and emit a UI toast frame.
 
-        UI-only: the frame never re-enters the LLM context. Strict trigger
-        (≥3 actions + ≥1 checkpoint + no existing template for the host)
-        keeps noise down.
+        Cheap to call on every side-note / reject — bails fast when no
+        template is active.
         """
-        from urllib.parse import urlparse
-
-        from lazyclaw.browser import event_bus
+        from lazyclaw.browser import active_templates
+        from lazyclaw.browser import template_corrections
         from lazyclaw.browser import templates as tpl_store
 
-        # Only events from this turn — avoid ring-buffer bleed-through.
-        import time as _time
-        max_age = max(1.0, _time.time() - turn_start_ts)
-        events = event_bus.recent_events(user_id, limit=30, max_age_s=max_age)
+        tpl_id = active_templates.get_active(user_id)
+        if not tpl_id:
+            return
+        try:
+            updated = await template_corrections.append_correction(
+                _config, user_id, tpl_id, source, text,
+            )
+        except Exception:
+            logger.warning("append_correction failed", exc_info=True)
+            return
+        if updated is None:
+            return
+        try:
+            tpl = await tpl_store.get_template(_config, user_id, tpl_id)
+        except Exception:
+            tpl = updated
+        try:
+            await cb._send({
+                "type": "template_correction_added",
+                "template_id": tpl_id,
+                "name": (tpl or updated).get("name") if (tpl or updated) else "",
+                "source": source,
+                "corrections_pending": (tpl or updated).get("corrections_pending", 1)
+                if (tpl or updated) else 1,
+            })
+        except Exception:
+            logger.debug("template_correction_added emit failed", exc_info=True)
+
+    async def _maybe_autosave_template(
+        user_id: str, turn_start_ts: float, cb: "WebSocketCallback"
+    ) -> None:
+        """Post-turn hook — auto-save a template when the user just completed
+        a successful multi-step browser flow.
+
+        Strict success gate (all must hold):
+          • turn returned without exception (caller-enforced)
+          • ≥1 navigate event with action=goto
+          • ≥3 action events (click/type/goto/scroll/press_key)
+          • ≥1 checkpoint event resolved=approved
+          • 0 checkpoint events resolved=rejected (correction path, phase 2)
+
+        On match, upserts by primary host — re-running the same site updates
+        ONE row that gets sharper over time, never duplicates. Emits a
+        ``template_saved`` WS frame for a UI toast (UI-only, never re-enters
+        LLM context).
+        """
+        from lazyclaw.browser import event_bus
+        from lazyclaw.browser import templates as tpl_store
+        from lazyclaw.browser.template_synth import (
+            synthesize_template_from_events,
+        )
+        from lazyclaw.llm.router import LLMRouter
+        from lazyclaw.settings.general import get_general_settings
+
+        # Respect user opt-out before any work.
+        try:
+            general = await get_general_settings(_config, user_id)
+        except Exception:
+            general = {}
+        if not general.get("auto_save_browser_templates", True):
+            return
+
+        events = event_bus.recent_events(
+            user_id, limit=50, max_age_s=max(1.0, __import__("time").time() - turn_start_ts),
+        )
         if not events:
             return
 
@@ -596,62 +658,74 @@ async def chat_websocket(ws: WebSocket):
             if e.kind in ("action", "navigate")
             and getattr(e, "action", None) in ("click", "type", "goto", "scroll", "press_key")
         ]
-        checkpoint_events = [e for e in events if e.kind == "checkpoint"]
+        nav_events = [
+            e for e in action_events if getattr(e, "action", None) == "goto"
+        ]
 
-        if len(action_events) < 3 or len(checkpoint_events) < 1:
-            return
-
-        setup_urls: list[str] = []
-        seen_urls: set[str] = set()
+        approved = 0
+        rejected = 0
         for e in events:
-            if getattr(e, "action", None) == "goto" and e.url and e.url not in seen_urls:
-                setup_urls.append(e.url)
-                seen_urls.add(e.url)
-            if len(setup_urls) >= 3:
-                break
-        if not setup_urls:
+            if e.kind != "checkpoint":
+                continue
+            extra = getattr(e, "extra", None) or {}
+            resolved = extra.get("resolved") if isinstance(extra, dict) else None
+            if resolved == "approved":
+                approved += 1
+            elif resolved == "rejected":
+                rejected += 1
+
+        if rejected > 0:
+            # User rejected at least one checkpoint — phase 2 will route this
+            # to correction-capture instead. For now, silently skip.
+            return
+        if not nav_events or len(action_events) < 3 or approved < 1:
             return
 
-        # Skip if the user already has a template covering this host.
+        # Synthesize the draft (worker LLM polishes the playbook). Re-uses
+        # the same path as the BrowserCanvas "Save as template" button.
         try:
-            first_host = urlparse(setup_urls[0]).netloc.lower()
-        except ValueError:
-            first_host = ""
-        try:
-            existing = await tpl_store.list_templates(_config, user_id)
+            draft = await synthesize_template_from_events(
+                _config, LLMRouter(_config), user_id, since_ts=turn_start_ts,
+            )
         except Exception:
-            existing = []
-        for t in existing:
-            for u in (t.get("setup_urls") or []):
-                try:
-                    if urlparse(u).netloc.lower() == first_host and first_host:
-                        return
-                except ValueError:
-                    continue
+            logger.warning("autosave: synthesize failed", exc_info=True)
+            return
+        if draft is None or not draft.setup_urls:
+            return
 
-        checkpoint_names: list[str] = []
-        seen_cp: set[str] = set()
-        for e in checkpoint_events:
-            label = getattr(e, "target", None) or getattr(e, "detail", None)
-            if label and label not in seen_cp:
-                checkpoint_names.append(label)
-                seen_cp.add(label)
+        host = tpl_store._host_of(draft.setup_urls[0])
+        if not host:
+            return
 
-        # Suggested name — prefer a page title, fall back to the host.
-        suggested_name = ""
-        for e in reversed(events):
-            if getattr(e, "title", None):
-                suggested_name = e.title[:60].strip()
-                break
-        if not suggested_name:
-            suggested_name = (first_host or "Saved flow")[:60]
+        try:
+            tpl, was_created = await tpl_store.upsert_by_host(
+                _config, user_id,
+                host=host,
+                name=draft.name,
+                icon=draft.icon,
+                setup_urls=draft.setup_urls,
+                checkpoints=draft.checkpoints,
+                playbook=draft.playbook,
+                auto_saved=True,
+            )
+        except Exception:
+            logger.warning("autosave: upsert_by_host failed", exc_info=True)
+            return
+
+        # Stamp as active so any user follow-up in the next short window
+        # (e.g. "actually, you should have done X") routes through
+        # template_corrections.append_correction.
+        from lazyclaw.browser import active_templates
+        active_templates.set_active(user_id, tpl["id"])
 
         await cb._send({
-            "type": "template_suggest",
-            "suggested_name": suggested_name,
-            "setup_urls": setup_urls,
-            "checkpoints": checkpoint_names,
-            "action_count": len(action_events),
+            "type": "template_saved",
+            "template_id": tpl["id"],
+            "name": tpl["name"],
+            "icon": tpl.get("icon"),
+            "host": host,
+            "was_created": was_created,
+            "run_count": tpl.get("run_count", 1),
         })
 
     async def _run_one_turn(content: str, session_id: str | None) -> None:
@@ -682,12 +756,13 @@ async def chat_websocket(ws: WebSocket):
         turn_start_ts = _time.time()
         try:
             result = await _run_agent_turn(user.id, content, session_id, cb)
-            # Auto-suggest template if the turn included a multi-step
-            # browser flow. UI-only frame — never enters LLM context.
+            # Auto-save successful multi-step browser flows as templates.
+            # UI-only frame — never enters LLM context. Strict success gate
+            # (≥1 nav + ≥3 actions + ≥1 approved checkpoint + 0 rejects).
             try:
-                await _maybe_suggest_template(user.id, turn_start_ts, cb)
+                await _maybe_autosave_template(user.id, turn_start_ts, cb)
             except Exception:
-                logger.debug("template_suggest emit failed", exc_info=True)
+                logger.debug("template autosave emit failed", exc_info=True)
             done_payload: dict = {
                 "type": "done",
                 "content": result or cb._buffer,
@@ -708,6 +783,14 @@ async def chat_websocket(ws: WebSocket):
             # Only clear state.active if it's still this callback
             if state.get("active") is cb:
                 state["active"] = None
+            # Clear the per-user 'active template' marker so corrections
+            # in the next turn don't get mis-routed to this template's
+            # playbook. autosave/run_browser_template re-set it next time.
+            try:
+                from lazyclaw.browser import active_templates
+                active_templates.clear_active(user.id)
+            except Exception:
+                logger.debug("clear_active failed", exc_info=True)
 
     try:
         while True:
@@ -748,6 +831,11 @@ async def chat_websocket(ws: WebSocket):
                         "type": "side_note_ack",
                         "message": note[:80],
                     })
+                    # If a templated run is active, this side-note IS the
+                    # user tutoring the agent — append to the playbook.
+                    asyncio.create_task(
+                        _maybe_append_correction(user.id, "side_note", note, cb),
+                    )
                 elif cb is None and note:
                     # No agent running — just treat it as a normal message.
                     msg_type = "message"

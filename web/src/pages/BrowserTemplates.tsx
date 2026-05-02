@@ -15,6 +15,12 @@ interface BrowserTemplate {
   watch_extractor?: string | null;
   watch_condition?: string | null;
   watch_job_id?: string | null;
+  run_count?: number;
+  success_count?: number;
+  last_run_at?: string | null;
+  auto_saved?: number | boolean;
+  corrections_pending?: number;
+  version?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -434,6 +440,22 @@ export default function BrowserTemplates() {
                       : null}
                     {t.checkpoints?.length
                       ? <span>{t.checkpoints.length} checkpoint{t.checkpoints.length === 1 ? "" : "s"}</span>
+                      : null}
+                    {t.run_count && t.run_count > 0
+                      ? <span title={t.last_run_at ? `last run ${new Date(t.last_run_at).toLocaleString()}` : undefined}>
+                          {t.run_count} run{t.run_count === 1 ? "" : "s"}
+                        </span>
+                      : null}
+                    {t.version && t.version > 1
+                      ? <span className="text-accent">v{t.version}</span>
+                      : null}
+                    {t.auto_saved
+                      ? <span className="text-accent" title="Created by auto-save on a successful flow">⚡ auto-saved</span>
+                      : null}
+                    {t.corrections_pending && t.corrections_pending > 0
+                      ? <span className="text-amber" title="Pending corrections will be merged on next compaction">
+                          📝 {t.corrections_pending} pending
+                        </span>
                       : null}
                     {t.watch_url
                       ? <span className="text-amber">slot-watch ready</span>

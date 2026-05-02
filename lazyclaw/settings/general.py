@@ -19,7 +19,11 @@ from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
 
-VALID_SEARCH_PROVIDERS: frozenset[str] = frozenset({"serper", "serpapi", "duckduckgo", "auto"})
+VALID_SEARCH_PROVIDERS: frozenset[str] = frozenset({"auto", "brave", "scraper", "duckduckgo"})
+
+# Stale provider names that existed before the 2026-05-02 Brave rewrite.
+# Coerce to "auto" on read so old user rows don't break the Settings UI.
+_LEGACY_PROVIDERS: frozenset[str] = frozenset({"serper", "serpapi"})
 
 DEFAULT_GENERAL = {
     "search_provider": "auto",
@@ -29,6 +33,9 @@ DEFAULT_GENERAL = {
     # negative relative offset like "-2h", "-30m", "-1d" — applied to the
     # task's reminder_at to derive pre_reminders entries. Override per-user.
     "reminder_offsets": ["-2h", "-1h"],
+    # Auto-save successful multi-step browser flows as templates (upsert by
+    # primary host). Off → user must manually save via canvas/chat skill.
+    "auto_save_browser_templates": True,
 }
 
 # Validates "-Xh", "-Xm", "-Xd" with an optional combined form like "-2h30m".
@@ -57,6 +64,10 @@ async def get_general_settings(config: Config, user_id: str) -> dict:
 
     merged = dict(DEFAULT_GENERAL)
     merged.update(general)
+    # Coerce stale provider names to "auto" — Serper/SerpAPI were removed
+    # in the Brave rewrite (2026-05-02). Old rows shouldn't crash the UI.
+    if merged.get("search_provider") in _LEGACY_PROVIDERS:
+        merged["search_provider"] = "auto"
     return merged
 
 
@@ -77,6 +88,14 @@ async def update_general_settings(
 
     if "show_cost_badges" in updates and updates["show_cost_badges"] is not None:
         clean["show_cost_badges"] = bool(updates["show_cost_badges"])
+
+    if (
+        "auto_save_browser_templates" in updates
+        and updates["auto_save_browser_templates"] is not None
+    ):
+        clean["auto_save_browser_templates"] = bool(
+            updates["auto_save_browser_templates"]
+        )
 
     if "reminder_offsets" in updates and updates["reminder_offsets"] is not None:
         vals = updates["reminder_offsets"]

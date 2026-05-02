@@ -212,6 +212,65 @@ async def _draft_playbook(
         return f"Auto-captured flow '{name}'. Steps:\n{timeline}"
 
 
+_COMPACT_PROMPT = """You are merging user corrections into a browser playbook.
+The playbook ends with `## Correction (...)` blocks added when the user
+corrected the agent during a templated run.
+
+Rewrite the playbook so the corrections are folded INTO the relevant numbered
+steps. Keep the same overall shape (Goal / Steps / Quirks) but make it sharper:
+- delete superseded instructions
+- add missed conditions to the right step
+- preserve site quirks already documented
+- DO NOT invent steps the user never confirmed
+
+Output ONLY the new playbook (no markdown fences, no preamble).
+
+ORIGINAL PLAYBOOK
+{playbook}
+"""
+
+
+async def compact_playbook(
+    router: LLMRouter,
+    config: Config,
+    user_id: str,
+    playbook: str,
+) -> str | None:
+    """Worker-LLM rewrite of a playbook that has accumulated correction blocks.
+
+    Returns the new playbook text on success. Returns None when the worker
+    is unreachable / produced nothing usable — caller keeps the original
+    playbook + correction blocks unchanged so we never lose user input.
+    """
+    if not playbook or not playbook.strip():
+        return None
+    try:
+        from lazyclaw.llm.providers.base import LLMMessage
+
+        prompt = _COMPACT_PROMPT.format(playbook=playbook[:8000])
+        messages = [
+            LLMMessage(
+                role="system",
+                content=(
+                    "You merge user corrections into a clean browser playbook. "
+                    "Preserve the user's words; never invent steps."
+                ),
+            ),
+            LLMMessage(role="user", content=prompt),
+        ]
+        model = getattr(config, "worker_model", None)
+        response = await router.chat(messages, model=model, user_id=user_id)
+        text = (response.content or "").strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        if len(text) < 20:
+            return None
+        return text[:2500]
+    except Exception:
+        logger.warning("Playbook compaction failed — keeping originals", exc_info=True)
+        return None
+
+
 async def synthesize_template_from_events(
     config: Config,
     router: LLMRouter,

@@ -61,6 +61,16 @@ async def init_db(config: Config) -> None:
             ("users", "auto_plan", "ALTER TABLE users ADD COLUMN auto_plan INTEGER NOT NULL DEFAULT 1"),
             # Cross-channel history — primary session flag on chat sessions.
             ("agent_chat_sessions", "is_primary", "ALTER TABLE agent_chat_sessions ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0"),
+            # Job run outcome tracking — surfaces success/failure on Jobs UI.
+            ("agent_jobs", "last_status", "ALTER TABLE agent_jobs ADD COLUMN last_status TEXT"),
+            ("agent_jobs", "last_error", "ALTER TABLE agent_jobs ADD COLUMN last_error TEXT"),
+            # Browser-template auto-save metrics — drives upsert-by-host + compaction.
+            ("browser_templates", "run_count", "ALTER TABLE browser_templates ADD COLUMN run_count INTEGER NOT NULL DEFAULT 0"),
+            ("browser_templates", "success_count", "ALTER TABLE browser_templates ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0"),
+            ("browser_templates", "last_run_at", "ALTER TABLE browser_templates ADD COLUMN last_run_at TEXT"),
+            ("browser_templates", "auto_saved", "ALTER TABLE browser_templates ADD COLUMN auto_saved INTEGER NOT NULL DEFAULT 0"),
+            ("browser_templates", "corrections_pending", "ALTER TABLE browser_templates ADD COLUMN corrections_pending INTEGER NOT NULL DEFAULT 0"),
+            ("browser_templates", "version", "ALTER TABLE browser_templates ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
         ]
         for table, column, sql in migrations:
             try:

@@ -5,7 +5,7 @@ import ChatInput from "./ChatInput";
 import ConnectionStatus from "./ConnectionStatus";
 import ThinkingCard from "./ThinkingCard";
 import BrowserCanvas from "./BrowserCanvas";
-import TemplateSuggestBanner from "./TemplateSuggestBanner";
+import TemplateSavedToast from "./TemplateSavedToast";
 import PlanApprovalCard from "./PlanApprovalCard";
 import PlanModeToggle from "./PlanModeToggle";
 import BrainBadge from "./BrainBadge";
@@ -27,7 +27,7 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
     sendMessage,
     cancelGeneration,
     dismissBrowserSession,
-    dismissTemplateSuggest,
+    dismissTemplateSavedToast,
     clearPendingPlan,
     chatOpen,
     chatExpanded,
@@ -162,11 +162,11 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
         />
       )}
 
-      {/* Post-turn "save this as a template?" suggestion */}
-      {streamingState.templateSuggest && (
-        <TemplateSuggestBanner
-          suggest={streamingState.templateSuggest}
-          onDismiss={dismissTemplateSuggest}
+      {/* Post-turn "saved as template" toast — auto-dismisses after 4s */}
+      {streamingState.templateSaved && (
+        <TemplateSavedToast
+          info={streamingState.templateSaved}
+          onDismiss={dismissTemplateSavedToast}
         />
       )}
 

@@ -62,12 +62,18 @@ export interface BrowserSession {
   lastFramePair?: BrowserFramePair; // Live-mode-only pre/post flipbook
 }
 
-export interface TemplateSuggest {
-  suggestedName: string;
-  setupUrls: string[];
-  checkpoints: string[];
-  actionCount: number;
+export interface TemplateSavedToast {
+  templateId: string;
+  name: string;
+  icon?: string;
+  host?: string;
+  wasCreated: boolean;
+  runCount: number;
   createdAt: number;
+  // "saved" → upsert toast, "correction" → mid-flight tutoring captured.
+  kind?: "saved" | "correction";
+  correctionsPending?: number;
+  correctionSource?: string;
 }
 
 export interface PendingPlanInfo {
@@ -95,7 +101,7 @@ export interface StreamingState {
   sideNotes: string[];  // side-notes the user queued for the running turn
   startedAt?: number;   // turn start timestamp for elapsed display
   browserSession?: BrowserSession;
-  templateSuggest?: TemplateSuggest;
+  templateSaved?: TemplateSavedToast;
   pendingPlan?: PendingInteractionInfo;
   planAutoApproveSession?: boolean;
   thinkingContent?: string;    // live reasoning stream for the Thinking panel
@@ -199,7 +205,7 @@ interface UseChatStreamReturn {
   cancelGeneration: () => void;
   sendApprovalResponse: (requestId: string, approved: boolean) => void;
   dismissBrowserSession: () => void;
-  dismissTemplateSuggest: () => void;
+  dismissTemplateSavedToast: () => void;
   clearPendingPlan: () => void;
   streamingState: StreamingState;
   connectionStatus: ConnectionStatus;
@@ -235,7 +241,8 @@ export function useChatStream({
   const startedAtRef = useRef<number>(0);
   const browserSessionRef = useRef<BrowserSession | undefined>(undefined);
   const browserClearTimerRef = useRef<number>(0);
-  const templateSuggestRef = useRef<TemplateSuggest | undefined>(undefined);
+  const templateSavedRef = useRef<TemplateSavedToast | undefined>(undefined);
+  const templateSavedClearTimerRef = useRef<number>(0);
   const pendingPlanRef = useRef<PendingInteractionInfo | undefined>(undefined);
   const planAutoApproveSessionRef = useRef<boolean>(false);
   const thinkingContentRef = useRef<string>("");
@@ -274,7 +281,7 @@ export function useChatStream({
       sideNotes: [...sideNotesRef.current],
       startedAt: startedAtRef.current || undefined,
       browserSession: browserSessionRef.current,
-      templateSuggest: templateSuggestRef.current,
+      templateSaved: templateSavedRef.current,
       pendingPlan: pendingPlanRef.current,
       planAutoApproveSession: planAutoApproveSessionRef.current,
       thinkingContent: thinkingContentRef.current || undefined,
@@ -301,7 +308,7 @@ export function useChatStream({
       cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
     }
-    // NOTE: do NOT clear browserSessionRef or templateSuggestRef — their
+    // NOTE: do NOT clear browserSessionRef or templateSavedRef — their
     // lifecycles are independent of a single turn's streaming state.
     setStreamingState({
       isStreaming: false,
@@ -309,7 +316,7 @@ export function useChatStream({
       activeTools: [],
       sideNotes: [],
       browserSession: browserSessionRef.current,
-      templateSuggest: templateSuggestRef.current,
+      templateSaved: templateSavedRef.current,
     });
   }, []);
 
@@ -322,8 +329,12 @@ export function useChatStream({
     scheduleFlush();
   }, [scheduleFlush]);
 
-  const dismissTemplateSuggest = useCallback(() => {
-    templateSuggestRef.current = undefined;
+  const dismissTemplateSavedToast = useCallback(() => {
+    if (templateSavedClearTimerRef.current) {
+      window.clearTimeout(templateSavedClearTimerRef.current);
+      templateSavedClearTimerRef.current = 0;
+    }
+    templateSavedRef.current = undefined;
     scheduleFlush();
   }, [scheduleFlush]);
 
@@ -607,14 +618,48 @@ export function useChatStream({
           resetStream();
           break;
 
-        case "template_suggest": {
-          templateSuggestRef.current = {
-            suggestedName: (msg.suggested_name as string) || "Saved flow",
-            setupUrls: (msg.setup_urls as string[]) ?? [],
-            checkpoints: (msg.checkpoints as string[]) ?? [],
-            actionCount: (msg.action_count as number) ?? 0,
+        case "template_saved": {
+          templateSavedRef.current = {
+            templateId: (msg.template_id as string) || "",
+            name: (msg.name as string) || "Saved flow",
+            icon: msg.icon as string | undefined,
+            host: msg.host as string | undefined,
+            wasCreated: Boolean(msg.was_created),
+            runCount: (msg.run_count as number) ?? 1,
             createdAt: Date.now(),
+            kind: "saved",
           };
+          if (templateSavedClearTimerRef.current) {
+            window.clearTimeout(templateSavedClearTimerRef.current);
+          }
+          templateSavedClearTimerRef.current = window.setTimeout(() => {
+            templateSavedRef.current = undefined;
+            templateSavedClearTimerRef.current = 0;
+            scheduleFlush();
+          }, 4000);
+          scheduleFlush();
+          break;
+        }
+
+        case "template_correction_added": {
+          templateSavedRef.current = {
+            templateId: (msg.template_id as string) || "",
+            name: (msg.name as string) || "template",
+            wasCreated: false,
+            runCount: 0,
+            correctionsPending: (msg.corrections_pending as number) ?? 1,
+            correctionSource: (msg.source as string) || undefined,
+            createdAt: Date.now(),
+            kind: "correction",
+          };
+          if (templateSavedClearTimerRef.current) {
+            window.clearTimeout(templateSavedClearTimerRef.current);
+          }
+          templateSavedClearTimerRef.current = window.setTimeout(() => {
+            templateSavedRef.current = undefined;
+            templateSavedClearTimerRef.current = 0;
+            scheduleFlush();
+          }, 4000);
           scheduleFlush();
           break;
         }
@@ -844,7 +889,7 @@ export function useChatStream({
 
   // Hard reset on WS reconnect — browser/template/plan refs are
   // CONNECTION-scoped, not turn-scoped. Without this, a stale
-  // BrowserCanvas or TemplateSuggest from the previous WS lifetime
+  // BrowserCanvas or template-saved toast from the previous WS lifetime
   // surfaces on the new connection. resetStream() (per-turn)
   // intentionally preserves these refs; only resetStreamHard clears
   // them.
@@ -858,8 +903,12 @@ export function useChatStream({
       window.clearTimeout(browserClearTimerRef.current);
       browserClearTimerRef.current = 0;
     }
+    if (templateSavedClearTimerRef.current) {
+      window.clearTimeout(templateSavedClearTimerRef.current);
+      templateSavedClearTimerRef.current = 0;
+    }
     browserSessionRef.current = undefined;
-    templateSuggestRef.current = undefined;
+    templateSavedRef.current = undefined;
     pendingPlanRef.current = undefined;
     planAutoApproveSessionRef.current = false;
     scheduleFlush();
@@ -921,7 +970,7 @@ export function useChatStream({
     cancelGeneration,
     sendApprovalResponse,
     dismissBrowserSession,
-    dismissTemplateSuggest,
+    dismissTemplateSavedToast,
     clearPendingPlan,
     streamingState,
     connectionStatus,

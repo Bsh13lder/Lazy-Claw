@@ -135,10 +135,10 @@ interface SearchProviderDef {
 }
 
 const SEARCH_PROVIDERS: readonly SearchProviderDef[] = [
-  { id: "auto", label: "Auto", blurb: "Use system default, fall back on limits", needsKey: null },
-  { id: "serper", label: "Serper.dev", blurb: "Google Search (2,500 free/mo) + Shopping/News/Maps", needsKey: "SERPER_KEY" },
-  { id: "serpapi", label: "SerpAPI", blurb: "Google Search + Flights (only option for Flights)", needsKey: "SERPAPI_KEY" },
-  { id: "duckduckgo", label: "DuckDuckGo", blurb: "No API key, no flights/shopping, slower", needsKey: null },
+  { id: "auto", label: "Auto", blurb: "Brave → mcp-scraper → DuckDuckGo. Recommended.", needsKey: null },
+  { id: "brave", label: "Brave Search", blurb: "Curated index, 2,000 free queries/month, clean snippets", needsKey: "BRAVE_KEY" },
+  { id: "scraper", label: "mcp-scraper", blurb: "Live Google scrape via crawl4ai, free, no key", needsKey: null },
+  { id: "duckduckgo", label: "DuckDuckGo", blurb: "No API key, lower quality, rate-limited", needsKey: null },
 ] as const;
 
 // ── Mode card definitions ──────────────────────────────────────────────────
@@ -1481,12 +1481,10 @@ function SearchTab({
   const keyConfigured = (envKey: string | null): boolean => {
     if (!envKey) return true;
     if (keys) {
-      if (envKey === "SERPER_KEY") return !!keys.serper;
-      if (envKey === "SERPAPI_KEY") return !!keys.serpapi;
+      if (envKey === "BRAVE_KEY") return !!keys.brave;
     }
     if (!quota) return false;
-    if (envKey === "SERPER_KEY") return quota.serper_used > 0;
-    if (envKey === "SERPAPI_KEY") return quota.serpapi_used > 0;
+    if (envKey === "BRAVE_KEY") return quota.brave_used > 0;
     return false;
   };
 
@@ -1545,23 +1543,22 @@ function SearchTab({
         })}
       </div>
 
-      {/* Show a "how to configure" note only when at least one key is missing */}
-      {(keys && (!keys.serper || !keys.serpapi)) && (
+      {/* Show a "how to configure" note only when the Brave key is missing */}
+      {(keys && !keys.brave) && (
         <div className="mt-5 p-3 rounded-lg bg-bg-tertiary border border-border text-xs text-text-muted leading-relaxed">
           <div className="text-text-secondary font-medium mb-1">
-            Configure an API key
+            Configure Brave Search API key (optional)
           </div>
-          Add the missing keys to your <code className="text-accent">.env</code> file
+          Add the key to your <code className="text-accent">.env</code> file
           at the repo root, then restart the container:
           <pre className="mt-2 p-2 rounded bg-bg-primary border border-border overflow-x-auto text-[11px]">
 {`# .env
-SERPER_KEY=...       # https://serper.dev (2 500 free/mo)
-SERPAPI_KEY=...      # https://serpapi.com (100 free/mo, needed for Flights)
+BRAVE_KEY=...        # https://api-dashboard.search.brave.com (2,000 free/mo)
 
 docker compose restart lazyclaw`}
           </pre>
-          DuckDuckGo works out of the box — no key needed. Use <em>Auto</em> to
-          prefer whichever provider has quota and fall back on limits.
+          mcp-scraper and DuckDuckGo work out of the box — no key needed.
+          Use <em>Auto</em> to prefer Brave when configured, fall back automatically.
         </div>
       )}
 
@@ -1572,11 +1569,44 @@ docker compose restart lazyclaw`}
             subtitle={quota.reset_month ? `Current month: ${quota.reset_month}` : undefined}
           />
           <div className="space-y-3">
-            <QuotaBar label="Serper.dev" used={quota.serper_used} limit={quota.serper_limit} pct={usedPct(quota.serper_used, quota.serper_limit)} />
-            <QuotaBar label="SerpAPI" used={quota.serpapi_used} limit={quota.serpapi_limit} pct={usedPct(quota.serpapi_used, quota.serpapi_limit)} />
+            <QuotaBar label="Brave Search" used={quota.brave_used} limit={quota.brave_limit} pct={usedPct(quota.brave_used, quota.brave_limit)} />
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-text-secondary">mcp-scraper</span>
+                <span className="text-text-muted tabular-nums">{quota.scraper_used} (free, unlimited)</span>
+              </div>
+            </div>
           </div>
         </div>
       )}
+
+      <div className="mt-6 pt-5 border-t border-border">
+        <SectionHeading
+          title="Browser automation"
+          subtitle="Save successful multi-step flows so the agent can replay them by name."
+        />
+        <div className="flex items-center justify-between py-2">
+          <div className="pr-4">
+            <p className="text-sm text-text-primary">Auto-save successful flows as templates</p>
+            <p className="text-xs text-text-muted">
+              When a turn completes ≥3 actions and an approved checkpoint without rejects,
+              upsert by primary host. Re-runs sharpen the same template — never duplicate.
+            </p>
+          </div>
+          <Toggle
+            on={general?.auto_save_browser_templates !== false}
+            onChange={async () => {
+              try {
+                const next = !(general?.auto_save_browser_templates !== false);
+                await onUpdate({ auto_save_browser_templates: next });
+                toast.success(next ? "Auto-save enabled" : "Auto-save disabled");
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Failed to update");
+              }
+            }}
+          />
+        </div>
+      </div>
     </section>
   );
 }

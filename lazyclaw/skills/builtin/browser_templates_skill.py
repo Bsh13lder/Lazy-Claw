@@ -293,6 +293,7 @@ class RunBrowserTemplateSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         if not self._config:
             return "Error: not configured"
+        from lazyclaw.browser import active_templates
         from lazyclaw.browser import templates as tpl_store
 
         tpl = await tpl_store.get_template_by_name(
@@ -300,6 +301,10 @@ class RunBrowserTemplateSkill(BaseSkill):
         )
         if tpl is None:
             return f"No template named '{params['name']}'. Use list_browser_templates to see what is saved."
+
+        # Mark this template as the active run so side-notes / rejects in
+        # this turn are routed to template_corrections.append_correction.
+        active_templates.set_active(user_id, tpl["id"])
 
         instruction = tpl_store.build_run_instruction(tpl, params.get("input"))
         return (

@@ -213,6 +213,21 @@ async def checkpoint_reject(
         detail=f"Rejected: {reason}",
         extra={"resolved": "rejected", "reason": reason},
     ))
+    # If a templated run is active, the rejection reason IS a correction —
+    # append it to the template's playbook so the next run is sharper.
+    try:
+        from lazyclaw.browser import active_templates, template_corrections
+        tpl_id = active_templates.get_active(user.id)
+        if tpl_id:
+            corr_text = (
+                f"Checkpoint '{name}' rejected: {reason}" if name
+                else f"Checkpoint rejected: {reason}"
+            )
+            await template_corrections.append_correction(
+                _config, user.id, tpl_id, "reject", corr_text,
+            )
+    except Exception:
+        logger.debug("reject → append_correction failed", exc_info=True)
     return {"status": "rejected"}
 
 

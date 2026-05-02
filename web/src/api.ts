@@ -28,6 +28,11 @@ export interface Job {
   next_run: string | null;
   job_type?: string;
   context?: string;
+  // Surfaced by orchestrator.JOB_COLUMNS — used by Jobs.tsx OutcomeChip
+  // and the read-only metadata strip on each job card.
+  created_at?: string | null;
+  last_status?: string | null;
+  last_error?: string | null;
 }
 
 export interface McpServer {
@@ -753,8 +758,17 @@ export const deleteVaultKey = (key: string) =>
 // ── General settings + System about ────────────────────────────────────────
 
 export interface GeneralSettings {
-  search_provider: "serper" | "serpapi" | "duckduckgo" | "auto";
+  // "brave" + "scraper" added when the providers were wired in
+  // gateway/routes/system.py. "auto" still picks the best available.
+  search_provider:
+    | "auto"
+    | "brave"
+    | "scraper"
+    | "serper"
+    | "serpapi"
+    | "duckduckgo";
   show_cost_badges: boolean;
+  auto_save_browser_templates?: boolean;
 }
 
 export interface SearchQuota {
@@ -762,12 +776,19 @@ export interface SearchQuota {
   serper_limit: number;
   serpapi_used: number;
   serpapi_limit: number;
+  // gateway/routes/system.py:115-117 always returns these — required, not optional.
+  brave_used: number;
+  brave_limit: number;
+  // mcp-scraper is unmetered, the count is informational.
+  scraper_used: number;
   reset_month: string;
 }
 
 export interface SearchKeyStatus {
   serper: boolean;
   serpapi: boolean;
+  // Optional because older builds don't return it; UI guards with `keys?.brave`.
+  brave?: boolean;
 }
 
 export interface AboutInfo {
@@ -1222,14 +1243,12 @@ export interface LazyBrainGraph {
 export const listLazyBrainNotes = (opts?: {
   tag?: string;
   pinned?: boolean;
-  include_rolled_up?: boolean;
   limit?: number;
   offset?: number;
 }) => {
   const params = new URLSearchParams();
   if (opts?.tag) params.set("tag", opts.tag);
   if (opts?.pinned) params.set("pinned", "true");
-  if (opts?.include_rolled_up) params.set("include_rolled_up", "true");
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
   const qs = params.toString();
@@ -1295,13 +1314,11 @@ export const searchLazyBrain = (q: string, tag?: string, limit = 20) => {
 export const getLazyBrainGraph = (opts?: {
   root_id?: string;
   depth?: number;
-  include_rolled_up?: boolean;
   limit?: number;
 }) => {
   const params = new URLSearchParams();
   if (opts?.root_id) params.set("root_id", opts.root_id);
   if (opts?.depth) params.set("depth", String(opts.depth));
-  if (opts?.include_rolled_up) params.set("include_rolled_up", "true");
   if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return request<LazyBrainGraph>(

@@ -83,7 +83,7 @@ interface ChatContextValue {
   sendMessage: (text: string) => void;
   cancelGeneration: () => void;
   dismissBrowserSession: () => void;
-  dismissTemplateSuggest: () => void;
+  dismissTemplateSavedToast: () => void;
   clearPendingPlan: () => void;
   createSession: () => void;
   selectSession: (id: string) => void;
@@ -472,7 +472,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     cancelGeneration,
     sendApprovalResponse,
     dismissBrowserSession,
-    dismissTemplateSuggest,
+    dismissTemplateSavedToast,
     clearPendingPlan,
     streamingState,
     connectionStatus,
@@ -604,7 +604,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         sendMessage,
         cancelGeneration,
         dismissBrowserSession,
-        dismissTemplateSuggest,
+        dismissTemplateSavedToast,
         clearPendingPlan,
         createSession,
         selectSession,

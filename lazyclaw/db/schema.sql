@@ -215,7 +215,9 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     status TEXT NOT NULL DEFAULT 'active',
     last_run TEXT,
     next_run TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    last_status TEXT,
+    last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS job_queue (
@@ -479,6 +481,12 @@ CREATE TABLE IF NOT EXISTS browser_templates (
     watch_extractor TEXT,          -- JS string for cheap polling
     watch_condition TEXT,          -- "TRIGGERED if slots > 0" rule
     watch_job_id TEXT,             -- references agent_jobs(id) when active
+    run_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    last_run_at TEXT,
+    auto_saved INTEGER NOT NULL DEFAULT 0,
+    corrections_pending INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );

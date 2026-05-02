@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from lazyclaw.config import Config
@@ -34,6 +35,8 @@ TEMPLATE_COLUMNS = [
     "system_prompt", "setup_urls", "checkpoints", "playbook",
     "page_reader_mode",
     "watch_url", "watch_extractor", "watch_condition", "watch_job_id",
+    "run_count", "success_count", "last_run_at",
+    "auto_saved", "corrections_pending", "version",
     "created_at", "updated_at",
 ]
 SELECT_COLS = ", ".join(TEMPLATE_COLUMNS)
@@ -81,16 +84,17 @@ async def create_template(
     watch_url: str | None = None,
     watch_extractor: str | None = None,
     watch_condition: str | None = None,
+    auto_saved: bool = False,
 ) -> dict:
     if not name or not name.strip():
         raise ValueError("Template name required")
     key = await get_user_dek(config, user_id)
     tpl_id = str(uuid4())
     now = _now()
+    placeholders = ", ".join(["?"] * len(TEMPLATE_COLUMNS))
     async with db_session(config) as db:
         await db.execute(
-            f"INSERT INTO browser_templates ({SELECT_COLS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO browser_templates ({SELECT_COLS}) VALUES ({placeholders})",
             (
                 tpl_id, user_id, name.strip(), icon,
                 _encrypt(system_prompt, key),
@@ -99,6 +103,8 @@ async def create_template(
                 _encrypt(playbook, key),
                 page_reader_mode,
                 watch_url, watch_extractor, watch_condition, None,
+                0, 0, None,
+                1 if auto_saved else 0, 0, 1,
                 now, now,
             ),
         )
@@ -190,6 +196,107 @@ async def delete_template(config: Config, user_id: str, tpl_id: str) -> bool:
         )
         await db.commit()
         return (cursor.rowcount or 0) > 0
+
+
+# ── Auto-save: host lookup + upsert ───────────────────────────────────────
+
+
+def _host_of(url: str | None) -> str:
+    if not url:
+        return ""
+    try:
+        return urlparse(url).netloc.lower()
+    except (ValueError, AttributeError):
+        return ""
+
+
+async def get_template_by_host(
+    config: Config, user_id: str, host: str,
+) -> dict | None:
+    """Find the user's template owning this primary host.
+
+    Primary host = netloc of setup_urls[0]. Case-insensitive.
+    Returns the most recently updated match if multiple exist.
+    """
+    host = (host or "").lower()
+    if not host:
+        return None
+    rows = await list_templates(config, user_id)
+    matches = [
+        r for r in rows
+        if r.get("setup_urls") and _host_of(r["setup_urls"][0]) == host
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+    return matches[0]
+
+
+def _merge_unique(existing: list[str] | None, new: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in (existing or []) + (new or []):
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+async def upsert_by_host(
+    config: Config,
+    user_id: str,
+    *,
+    host: str,
+    name: str,
+    icon: str | None,
+    setup_urls: list[str] | None,
+    checkpoints: list[str] | None,
+    playbook: str | None,
+    auto_saved: bool = True,
+) -> tuple[dict, bool]:
+    """Create-or-update a template by primary host. Idempotent.
+
+    On create: inserts a new row, run_count=1, success_count=1, auto_saved flag.
+    On update: only fills EMPTY fields (don't clobber user-edited playbook),
+               merges setup_urls + checkpoints uniquely, bumps run_count +
+               success_count + last_run_at.
+
+    Returns (template_dict, was_created).
+    """
+    existing = await get_template_by_host(config, user_id, host)
+    now = _now()
+    if existing is None:
+        tpl = await create_template(
+            config, user_id, name,
+            icon=icon, setup_urls=setup_urls, checkpoints=checkpoints,
+            playbook=playbook, auto_saved=auto_saved,
+        )
+        # Bump run/success counters on create — we just ran it successfully.
+        tpl = await update_template(
+            config, user_id, tpl["id"],
+            run_count=1, success_count=1, last_run_at=now,
+        ) or tpl
+        return tpl, True
+
+    fields: dict = {
+        "run_count": (existing.get("run_count") or 0) + 1,
+        "success_count": (existing.get("success_count") or 0) + 1,
+        "last_run_at": now,
+    }
+    if not (existing.get("playbook") or "").strip() and playbook:
+        fields["playbook"] = playbook
+    if not existing.get("icon") and icon:
+        fields["icon"] = icon
+    merged_urls = _merge_unique(existing.get("setup_urls"), setup_urls)
+    if merged_urls != (existing.get("setup_urls") or []):
+        fields["setup_urls"] = merged_urls
+    merged_cps = _merge_unique(existing.get("checkpoints"), checkpoints)
+    if merged_cps != (existing.get("checkpoints") or []):
+        fields["checkpoints"] = merged_cps
+
+    tpl = await update_template(config, user_id, existing["id"], **fields)
+    return tpl or existing, False
 
 
 # ── Hydration helper ──────────────────────────────────────────────────────

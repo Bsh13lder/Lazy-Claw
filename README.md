@@ -27,7 +27,7 @@
 
 **LazyClaw** is an open-source AI agent platform where every piece of user data is encrypted with AES-256-GCM before it touches disk. Conversations, memories, skills, credentials, scheduled jobs — all encrypted. The server never sees plaintext.
 
-Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, and saved templates for recurring flows like government appointments**. Telegram + WhatsApp + Instagram + Email. 128 builtin skills + ~85 MCP tools discoverable at runtime. React Web UI with 13 pages (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
+Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, and saved templates for recurring flows like government appointments**. Telegram + WhatsApp + Instagram + Email. **196 builtin skills + ~85 MCP-bridged tools** discoverable at runtime. React Web UI with **18 pages** (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
 
 ## Why LazyClaw?
 
@@ -45,11 +45,11 @@ LazyClaw takes a different approach:
 | **Tool selection** | Smart discovery via search_tools (4 base tools, ~195 discoverable) | All tools every turn (5K+ tokens) |
 | **Cost routing** | 3-mode Brain/Worker split across 5 providers (Anthropic · MiniMax subscription · OpenAI · local Ollama · Claude CLI) | Manual model config |
 | **Multi-agent** | Inline delegation to specialists | Fire-and-forget sub-agents |
-| **MCP** | Native client + server + 8 bundled servers | Community plugins |
+| **MCP** | Native client + server + 8 active bundled servers | Community plugins |
 | **Integrations** | Google Workspace direct API (Gmail/Drive/Calendar/Sheets/Docs) + n8n for visual workflows | Manual API wiring |
 | **Channels** | Telegram + WhatsApp + Instagram + Email MCPs | Browser-only for most |
 | **Browser control** | Live canvas + checkpoints + saved templates + noVNC takeover (zero extra tokens) | Screenshots or nothing |
-| **Web UI** | React control panel (12 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming | Varies |
+| **Web UI** | React control panel (18 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming | Varies |
 | **Language** | Python (largest AI ecosystem) | TypeScript |
 
 ## Quickstart
@@ -116,7 +116,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `gateway/` | FastAPI HTTP + WebSocket entry point (19 route files) |
 | `runtime/` | TAOR agent loop, context builder, tool dispatch, task runner |
 | `queue/` | FIFO serial execution per user |
-| `skills/` | 128 builtin skills — Instruction, Code (sandboxed), Plugin, Survival, Browser templates |
+| `skills/` | 196 builtin skills — Instruction, Code (sandboxed), Plugin, Survival, Browser templates |
 | `channels/` | Telegram native adapter + WhatsApp/Instagram/Email via MCP |
 | `browser/` | CDP browser control, page reader, site memory, DOM click engine |
 | `computer/` | Native subprocess + remote WebSocket connector |
@@ -135,7 +135,7 @@ Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude CLI, Anthrop
 
 | | |
 |---|---|
-| `web/` | React 19 + TypeScript + Vite + Tailwind control panel (12 pages + chat sidebar with live BrowserCanvas) |
+| `web/` | React 19 + TypeScript + Vite + Tailwind control panel (18 pages + chat sidebar with live BrowserCanvas) |
 
 ## Encryption
 
@@ -160,7 +160,7 @@ Server-side operations (cron jobs, background tasks) derive keys from `PBKDF2(SE
 
 ### Smart Tool Selection
 
-128 builtin skills + ~67 MCP tools registered, but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
+196 builtin skills + ~85 MCP-bridged tools registered, but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
 
 ### Multi-Agent Delegation
 
@@ -174,7 +174,7 @@ Specialists run in parallel via `asyncio.gather`. Results merge back into the co
 
 ### Background Tasks
 
-`run_background` skill spawns independent agent instances for long-running work. Max 5 global, 2 per user. Results pushed to Telegram on completion.
+`run_background` skill spawns independent agent instances for long-running work. Max 5 global, 2 per user. Results pushed to Telegram on completion. **Auto-promote**: when a foreground turn exceeds its budget the runtime promotes the work to a background runner so the chat lane stays responsive — the user gets a Telegram push when the bg agent finishes.
 
 ### Task Manager (Second Brain)
 
@@ -203,8 +203,13 @@ A Python-native, E2E-encrypted knowledge base the user and the agent share. Open
 - **AI-native** (7 skills Obsidian can't ship natively) — autolink suggestions, auto-title/tag on save, **semantic search** via local embeddings (`nomic-embed-text` over Ollama, encrypted 768-d vectors), **"Ask your notes"** RAG with `[[citations]]`, topic rollups, morning briefings. Every feature degrades to substring/offline when Ollama's down.
 - **UX chrome** — ⌘K command palette, ⌘O quick switcher, outline pane, hover preview, importance-slider graph filter, violet Obsidian-Minimal-inspired theme scoped under `.lazybrain-root` (rest of app keeps emerald).
 - **Single source of truth** — tasks, personal memory, daily logs, site memory, lessons all auto-mirror here with `owner/{user,agent}` + `kind/*` tags, so the graph grows while you work.
+- **Lessons v2** — single-card upsert by `(topic, action, intent)` triple (no flooding), 5-state outcome machine (proposed / verified / contested / superseded / archived), verification pump auto-bumps confidence on tool success; Telegram `/confirm` and `/reject` for manual override. `kind/shape` (how-to) split from `kind/fact` (this-is). Skills vault toggle hides the noisy `#skill` namespace from the default graph.
 
 All content encrypted per user (AES-256-GCM with AAD=`notes:{title,content,embedding}`). 28 NL skills + 19 REST endpoints total.
+
+### Watchers
+
+Zero-token site / channel polling. `watch_site(url)` and `watch_messages(channel)` register a watcher that runs in the heartbeat daemon — no LLM calls per check. When a change is detected (new appointment slot, page diff, new message), the canvas fires an `alert` event AND Telegram pushes a notification. Web UI `/watchers` page lists active watchers, last-seen state, and lets you stop them. Used by saved browser templates (e.g. Cita Previa Spain) for slot-watch flows.
 
 ### Context Compression
 
@@ -358,7 +363,7 @@ While the agent works, type `/status` or "what's happening" to see live progress
 
 ## Web UI
 
-React 19 + TypeScript + Vite + Tailwind control panel with 13 pages, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
+React 19 + TypeScript + Vite + Tailwind control panel with 18 pages, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
 
 - **Chat** — Dedicated `/chat` route with full-width conversation + collapsible **AgentConsole** dashboard (agent status, queued items, active background tasks, BrowserCanvas)
 - **Overview** — System dashboard with health stats and pending approvals
@@ -413,13 +418,13 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 ## Roadmap
 
 - [x] Phases 1-10: Foundation through Session Replay
-- [x] 8 bundled MCP servers (taskai, lazydoctor, instagram, whatsapp, email, jobspy, scraper, upwork)
+- [x] 8 active bundled MCP servers (taskai, lazydoctor, instagram, whatsapp, email, jobspy, scraper, upwork) — 4 more (freeride, healthcheck, apihunter, vaultwhisper) parked pending source rebuild
 - [ ] 4 MCP servers in progress (freeride, healthcheck, apihunter, vaultwhisper — source rebuild needed)
 - [x] ECO mode — HYBRID (Sonnet brain + local Ollama worker), FULL (all-Claude), CLAUDE (Haiku API)
 - [x] Multi-agent teams with inline delegation
 - [x] Browser automation (CDP + shared profiles + DOM click engine)
-- [x] ~195 skills discoverable at runtime (128 builtin + ~67 MCP)
-- [x] React Web UI control panel (12 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming
+- [x] ~280 skills discoverable at runtime (196 builtin + ~85 MCP-bridged)
+- [x] React Web UI control panel (18 pages + chat sidebar + live BrowserCanvas) + WebSocket streaming
 - [x] Live browser canvas — URL + action timeline + thumbnail + takeover (zero LLM tokens)
 - [x] Saved browser templates (govt appointments, recurring flows) with zero-token slot polling
 - [x] Checkpoints — agent pauses for user approval before submit/pay/book/delete/sign/send
@@ -462,7 +467,7 @@ lazyclaw/
 ├── gateway/        # FastAPI HTTP + WS (19 route files)
 ├── runtime/        # TAOR agent loop, context, tool dispatch, task runner
 ├── queue/          # Lane-based FIFO queue
-├── skills/         # 128 builtin skills — Instruction, Code, Plugin, Survival, Templates
+├── skills/         # 196 builtin skills — Instruction, Code, Plugin, Survival, Templates
 ├── channels/       # Telegram adapter
 ├── browser/        # CDP control + event bus + checkpoints + saved templates
 ├── computer/       # Native subprocess + connector
@@ -480,7 +485,7 @@ lazyclaw/
 ├── llm/            # Multi-provider router + ECO (Gemma 4 E2B worker)
 └── db/             # aiosqlite + connection pool
 
-web/                # React 19 control panel (12 pages + chat sidebar + live BrowserCanvas)
+web/                # React 19 control panel (18 pages + chat sidebar + live BrowserCanvas)
 n8n-custom/         # n8n Docker sidecar config
 mcp-taskai/         # Task intelligence
 mcp-lazydoctor/     # Self-healing agent

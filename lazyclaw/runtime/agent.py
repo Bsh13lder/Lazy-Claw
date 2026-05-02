@@ -65,6 +65,20 @@ _CHAT_ONLY_PATTERN = re.compile(
 # if the agent exits without calling complete_task / fail_task.
 _TASK_REMINDER_RE = re.compile(r"^\[TASK_REMINDER:([^\]]+)\]")
 
+# Telemetry-only: matches every heartbeat-shaped message so we can log
+# system_prompt size + tool count per call. Used to validate that slim-path
+# changes actually reduce token usage without regressing the full path.
+_HEARTBEAT_TELEMETRY_RE = re.compile(
+    r"^\[(REMINDER|WATCHER|MCP_WATCHER|TASK_REMINDER:[^\]]+|JOB:[^\]]+)\]"
+)
+
+# Slim-context branch — Tier A (announce-style): bypasses build_context() and
+# the full SOUL.md to keep heartbeat reminders cheap. JOB:<name> deliberately
+# excluded; those can be arbitrary work and stay on the full path.
+_SLIM_HEARTBEAT_PREFIX_RE = re.compile(
+    r"^\[(REMINDER|WATCHER|MCP_WATCHER|TASK_REMINDER:[^\]]+)\]"
+)
+
 
 # ── Meta-Tool Pattern ─────────────────────────────────────────────────
 # Instead of regex-guessing which tools the LLM needs (brittle, 5K tokens),
@@ -77,10 +91,15 @@ _TASK_REMINDER_RE = re.compile(r"^\[TASK_REMINDER:([^\]]+)\]")
 # Training bias pushes "scrape" → `browser`; keeping it out of the default
 # set forces the brain to reach for `web_search` / `dispatch_subagents` /
 # `run_background` first.
+#
+# Same rationale for `run_command` / `read_file` / `write_file` /
+# `list_directory`: cheap brains (MiniMax M2.7 in particular) misfire
+# `run_command` on tasks that need external info (e.g. "find this phone
+# number"). They're now keyword-gated via _SHELL_FILE_RE — brain still
+# discovers them via `search_tools` when genuinely needed.
 _BASE_TOOL_NAMES = frozenset({
     "search_tools", "web_search", "recall_memories", "save_memory", "delegate",
     "dispatch_subagents", "run_background",
-    "read_file", "write_file", "run_command", "list_directory",
     "connect_mcp_server", "disconnect_mcp_server",
     "watch_messages", "watch_site", "list_watchers", "stop_watcher",
 })
@@ -171,6 +190,32 @@ _BROWSER_RE = re.compile(
     r"log\s*in|sign\s+in|login)\b",
     re.IGNORECASE,
 )
+
+# Shell / local-file ops only when the user explicitly asks. Keeps
+# `run_command` out of the default tool list so cheap brains (MiniMax M2.7)
+# can't misfire it on a "find this phone number" task. Word-bounded.
+# Triggers strict phrases ("run command", "shell", "edit file", "ls /…")
+# AND filename-extension hits (".py", ".sh", etc.) which strongly imply
+# local-file work. Anything else: brain calls `search_tools`.
+_SHELL_FILE_RE = re.compile(
+    r"\b(?:"
+    r"run\s+(?:a\s+)?command|shell\s+command|terminal|bash|zsh|"
+    r"execute\s+(?:a\s+|the\s+)?(?:command|script|file)|"
+    r"read\s+(?:the\s+|a\s+|my\s+)?file|write\s+(?:to\s+|a\s+)?file|"
+    r"create\s+(?:a\s+|the\s+|new\s+)?file|edit\s+(?:the\s+|a\s+)?file|"
+    r"open\s+(?:the\s+|a\s+|my\s+)?file|save\s+(?:to\s+)?(?:a\s+|the\s+)?file|"
+    r"list\s+(?:the\s+)?(?:directory|folder|files)|"
+    r"ls\s+[/~.]|cd\s+[/~]|pwd"
+    r")\b"
+    r"|\.(?:py|sh|json|txt|md|yaml|yml|toml|ini|conf|log|csv|tsv)\b",
+    re.IGNORECASE,
+)
+
+# Tool names gated behind _SHELL_FILE_RE. Brain can still find them via
+# `search_tools(query="run command")` if the keyword detector misses.
+_SHELL_FILE_TOOL_NAMES = frozenset({
+    "run_command", "read_file", "write_file", "list_directory",
+})
 
 # Detects when the brain produces ASSISTANT TEXT claiming a tool was called
 # while emitting zero tool_calls — i.e. the "Already on it! Background task
@@ -324,17 +369,24 @@ _TASK_KEYWORDS = frozenset({
     "stop all", "cancel background", "stop running",
 })
 
-# Task skill names to inject when task keywords detected
+# Task skill names to inject when task keywords detected.
+# `set_reminder` intentionally NOT in this set — `add_task` is the canonical
+# reminder path (auto-creates the heartbeat job, supports relative times,
+# Telegram Done/Snooze buttons). Keeping `set_reminder` default-injected
+# caused MiniMax to pair `set_reminder` + `add_task` for one user intent
+# → duplicate reminders. `set_reminder` is still discoverable via
+# search_tools for the rare cron-job-style standalone case.
 _TASK_TOOL_NAMES = frozenset({
     "add_task", "list_tasks", "complete_task", "update_task",
     "delete_task", "daily_briefing", "work_todos", "stop_background",
-    "set_reminder", "schedule_job", "list_jobs", "manage_job",
+    "schedule_job", "list_jobs", "manage_job",
 })
 
-# Cron / heartbeat job keywords → inject schedule_job/list_jobs/manage_job/
-# set_reminder. The brain owns "show / edit / pause / delete background jobs"
-# intents that the bare survival keyword "jobs" used to swallow into the
-# gig-economy bucket.
+# Cron / heartbeat job keywords → inject schedule_job/list_jobs/manage_job.
+# The brain owns "show / edit / pause / delete background jobs" intents that
+# the bare survival keyword "jobs" used to swallow into the gig-economy
+# bucket. `set_reminder` removed here too — `add_task` is the canonical
+# reminder path (see _TASK_TOOL_NAMES note above).
 _CRON_KEYWORDS = frozenset({
     "cron", "cron job", "cron jobs",
     "background job", "background jobs",
@@ -348,7 +400,7 @@ _CRON_KEYWORDS = frozenset({
 })
 
 _CRON_TOOL_NAMES = frozenset({
-    "schedule_job", "list_jobs", "manage_job", "set_reminder",
+    "schedule_job", "list_jobs", "manage_job",
 })
 
 # Survival/job keywords → inject search_jobs + survival tools directly.
@@ -750,9 +802,10 @@ _HEAVY_MCP_BASES: frozenset[str] = frozenset({
 # plan gate auto-promotes it to a `run_background` dispatch instead of
 # executing inline. Frees the lane queue so the user can keep chatting
 # while the work runs; final result pings via Telegram + chat.
-# 6 steps ≈ 5–10 minutes typical wall-clock work — matches user's
-# "task is little big and needs more than 5-10 steps" intuition.
-_AUTO_BACKGROUND_STEP_THRESHOLD: int = 6
+# Lowered 6 → 4 (Round 2): brain-as-dispatcher pattern requires that any
+# plan beyond a quick lookup-and-write be handed to a worker. 1–3 step
+# plans stay inline (snappy); 4+ step plans dispatch upfront.
+_AUTO_BACKGROUND_STEP_THRESHOLD: int = 4
 _AUTO_BG_PLAN_PREFIX: str = "AUTO_BG:"
 
 
@@ -1292,6 +1345,13 @@ class Agent:
         if _m:
             _bound_task_id = _m.group(1).strip() or None
 
+        # Detect Tier-A slim heartbeat (REMINDER/WATCHER/MCP_WATCHER/
+        # TASK_REMINDER:<id>). [JOB:...] is intentionally excluded — those
+        # can be arbitrary work and stay on the full path. The slim path
+        # bypasses build_context() and the full SOUL.md, dropping a typical
+        # heartbeat call from ~40k tokens to ~5k.
+        _is_slim_heartbeat = bool(_SLIM_HEARTBEAT_PREFIX_RE.match(message or ""))
+
         # Register foreground task with TeamLead (skip for background agents)
         _fg_task_id: str | None = None
         if self._team_lead and not getattr(self, "is_background", False):
@@ -1379,8 +1439,19 @@ class Agent:
                     )
                 return await rows.fetchall()
 
-        logger.debug("process_message TRACE: needs_tools_early=%s", needs_tools_early)
-        if needs_tools_early:
+        logger.debug("process_message TRACE: needs_tools_early=%s slim_heartbeat=%s",
+                     needs_tools_early, _is_slim_heartbeat)
+        if _is_slim_heartbeat:
+            # Tier-A slim path — skip build_context() and load HEARTBEAT.md
+            # (~800 tokens) instead of full SOUL.md (~9.5k tokens). No
+            # capabilities section, no hybrid memory pick, no LazyBrain
+            # journal/pinned, no lessons recall. History still loaded so
+            # task-bound reminders see prior turns.
+            from lazyclaw.runtime.personality import load_heartbeat_personality
+            logger.info("HEARTBEAT slim path engaged for: %r", (message or "")[:60])
+            system_prompt = load_heartbeat_personality()
+            history_rows = await _load_history()
+        elif needs_tools_early:
             # Full parallel init — load history, skills, and rich context
             # Run sequentially with traces to find which one hangs
             logger.info("process_message TRACE: loading history...")
@@ -1491,8 +1562,54 @@ class Agent:
         # initialize here so the plan-gate call path never trips on NameError
         # in the (defensive) case the branch was skipped.
         _wants_enumeration: bool = False
+        # Defaults for slim-heartbeat path — referenced downstream (line ~2170
+        # `if needs_tools and _wants_visible:`) outside the tool-loading block.
+        _wants_browser: bool = False
+        _wants_visible: bool = False
 
-        if needs_tools:
+        if needs_tools and _is_slim_heartbeat:
+            # Tier-A slim heartbeat. Tool budget is split by envelope kind:
+            #
+            #   `[REMINDER] ...`           — pure notification. Reminder text
+            #     is data, NOT a command. Force ZERO tools so the brain
+            #     can't interpret "delete X" as an instruction. (Seen in
+            #     log 15:17:30 today: a "Time to delete n8n" reminder was
+            #     processed as a command and 26 destructive n8n tool calls
+            #     fired before the stuck-detector tripped.)
+            #
+            #   `[TASK_REMINDER:<id>] ...` — bound to a real task. Allow
+            #     `complete_task` + `update_task` so user replies like
+            #     "done" / "snooze 1h" still mark the task correctly.
+            #
+            #   `[WATCHER] / [MCP_WATCHER]` — may need a small action set
+            #     (e.g. fetch follow-up). Keep the original 4-tool slim.
+            _is_announce_reminder = bool(message and message.startswith("[REMINDER]"))
+            if _is_announce_reminder:
+                _slim_names: frozenset[str] = frozenset()
+            elif _bound_task_id:
+                _slim_names = frozenset({"complete_task", "update_task"})
+            else:
+                _slim_names = frozenset({
+                    "search_tools", "web_search", "recall_memories", "delegate",
+                })
+            _base_names = set(_slim_names)
+            tools = [
+                schema for name in _slim_names
+                if (schema := self.registry.get_tool_schema(name)) is not None
+            ]
+            logger.info(
+                "HEARTBEAT slim tools: %d (slim set: %s, announce_reminder=%s, "
+                "task_bound=%s)",
+                len(tools), sorted(_slim_names),
+                _is_announce_reminder, bool(_bound_task_id),
+            )
+            if not tools and _slim_names:
+                logger.warning(
+                    "HEARTBEAT slim path: ZERO tools resolved despite slim_names=%s "
+                    "— registry may be empty",
+                    sorted(_slim_names),
+                )
+        elif needs_tools:
             from lazyclaw.mcp.manager import _favorite_server_ids, _active_clients
 
             # Detect channel keywords → find matching MCP tools.
@@ -1940,7 +2057,11 @@ class Agent:
             # When channel MCP tools dominate, trim base set to reduce noise.
             _base_names = set(_BASE_TOOL_NAMES)
             if _channel_tools and not _wants_tasks and not _wants_survival:
-                # Drop heavy tools irrelevant for messaging queries
+                # Drop tools irrelevant for messaging queries. (run_command /
+                # read_file / write_file / list_directory are already keyword-
+                # gated via _SHELL_FILE_RE and not in _BASE_TOOL_NAMES — kept
+                # in the set here as a no-op safety net in case the gating
+                # logic ever re-includes them.)
                 _base_names -= {
                     "run_command", "write_file", "read_file", "list_directory",
                     "watch_site", "connect_mcp_server", "disconnect_mcp_server",
@@ -1963,6 +2084,21 @@ class Agent:
                 logger.info("Browser keyword detected — browser tool included")
             elif _wants_browser and _channel_tools:
                 logger.info("Channel detected: %s → %d MCP tools, browser suppressed (MCP-first)", _matched_channels, len(_channel_tools))
+
+            # Shell/file tools only when user explicitly asks. Keeps
+            # `run_command` out of the default tool list so the brain can't
+            # misfire it on a phone-number lookup. Re-inject from history
+            # too — mid-task file work shouldn't lose the tools.
+            _wants_shell_file = bool(_SHELL_FILE_RE.search(_msg_lower))
+            if not _wants_shell_file and _history_tool_names & _SHELL_FILE_TOOL_NAMES:
+                _wants_shell_file = True
+                logger.info("Shell/file tools re-injected from recent history context")
+            if _wants_shell_file:
+                _base_names |= _SHELL_FILE_TOOL_NAMES
+                logger.info(
+                    "Shell/file keywords detected — %d tools included",
+                    len(_SHELL_FILE_TOOL_NAMES),
+                )
             elif _channel_tools:
                 logger.info("Channel detected: %s → %d MCP tools, no browser", _matched_channels, len(_channel_tools))
 
@@ -2111,6 +2247,23 @@ class Agent:
         logger.info("Context: %d messages (%d history + system + user), tools=%d",
                      len(messages), len(chat_history), len(tools))
 
+        # Heartbeat telemetry — log per-call system_prompt + tool counts so we
+        # can validate slim-path savings (Tier A) without regressing the full
+        # path (Tier B / [JOB:...]). See _HEARTBEAT_TELEMETRY_RE comment.
+        _hb_match = _HEARTBEAT_TELEMETRY_RE.match(message or "")
+        if _hb_match:
+            _hb_kind = _hb_match.group(1).split(":", 1)[0]
+            logger.info(
+                "HEARTBEAT_TELEMETRY kind=%s system_prompt_chars=%d tool_count=%d "
+                "history_msgs=%d total_messages=%d msg_preview=%r",
+                _hb_kind,
+                len(system_prompt or ""),
+                len(tools or []),
+                len(chat_history or []),
+                len(messages or []),
+                (message or "")[:60],
+            )
+
         # ── Learn from corrections (fire-and-forget) ─────────────
         # If the user is correcting the previous response, extract a
         # compact lesson and save it to memory for future sessions.
@@ -2257,7 +2410,10 @@ class Agent:
         # Valencia-salons enrichment ran 39 iter foreground without ever
         # promoting. Track tool names called this turn so we know whether
         # the brain already dispatched.
-        _PROMOTE_BG_AT_ITER = 8
+        # Lowered 8 → 5 (Round 2): brain-as-dispatcher pattern. By iter 5
+        # the user has been waiting ~30s with frozen UI; that's the line
+        # where dispatching beats inline grinding.
+        _PROMOTE_BG_AT_ITER = 5
         _called_tool_names: set[str] = set()
         _promoted_to_bg = False
 

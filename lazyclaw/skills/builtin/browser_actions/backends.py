@@ -277,6 +277,16 @@ async def _get_remote_cdp_backend(user_id: str = "default"):
     except Exception as exc:
         logger.debug("pkill before remote session failed: %s", exc)
 
+    if not config.browser_executable:
+        # Fail fast — start_remote_session would otherwise spin up Xvfb +
+        # x11vnc + websockify only to crash inside _start_browser when
+        # browser_bin="" hits asyncio.create_subprocess_exec.
+        raise RuntimeError(
+            "Cannot start remote browser session: no browser binary "
+            "configured. Install Brave/Chrome/Chromium or set "
+            "BROWSER_EXECUTABLE in the environment."
+        )
+
     await start_remote_session(
         user_id=user_id,
         cdp_port=port,

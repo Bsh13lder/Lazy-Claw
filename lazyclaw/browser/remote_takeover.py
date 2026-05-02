@@ -427,6 +427,16 @@ async def _start_browser(
     browser_bin: str,
 ) -> asyncio.subprocess.Process:
     """Start Brave/Chrome visible on the virtual display (NOT headless)."""
+    # Empty browser_bin would land in asyncio.create_subprocess_exec("", ...)
+    # which POSIX rejects with PermissionError: [Errno 13] Permission denied: ''.
+    # Surface a clear cause instead.
+    if not browser_bin:
+        raise RuntimeError(
+            "Cannot start remote browser session: no browser binary "
+            "configured. Install Brave/Chrome/Chromium or set "
+            "BROWSER_EXECUTABLE in the environment."
+        )
+
     os.makedirs(profile_dir, exist_ok=True)
     ext_path = str(Path(__file__).parent / "extension")
 

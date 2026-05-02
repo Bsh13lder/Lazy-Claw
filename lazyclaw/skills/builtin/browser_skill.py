@@ -21,7 +21,13 @@ strategy on that code — e.g. wait on ``[timeout]``, scroll on
 from __future__ import annotations
 
 import logging
+import os
 
+from lazyclaw.browser.action_errors import (
+    RETRY_GIVE_UP,
+    ActionError,
+    ActionErrorCode,
+)
 from lazyclaw.browser.action_verifier import ActionVerifier
 from lazyclaw.browser.browser_settings import touch_browser_activity
 from lazyclaw.runtime.tool_result import ToolResult
@@ -58,6 +64,42 @@ class BrowserSkill(BaseSkill):
             from lazyclaw.browser.snapshot import SnapshotManager
             self._snapshot_mgr = SnapshotManager()
         return self._snapshot_mgr
+
+    async def _browser_runtime_available(self, user_id: str) -> bool:
+        """Return True iff a browser binary is reachable or host bridge is on.
+
+        Two paths count as "available":
+          1. ``config.browser_executable`` resolves to an existing path
+             (set via env or detected by ``_detect_browser``).
+          2. The user opted into the host-browser bridge AND has a token —
+             ``cdp_backend._ensure_connected`` will probe
+             ``host.docker.internal:{port}`` and connect.
+
+        Best-effort. On any settings-lookup failure we fall back to "not
+        available" so the brain gets a clear give-up signal rather than a
+        confusing subprocess error.
+        """
+        from lazyclaw.config import load_config
+
+        config = load_config()
+        binary = config.browser_executable
+        if binary and os.path.exists(binary):
+            return True
+
+        try:
+            from lazyclaw.browser.browser_settings import get_browser_settings
+
+            settings = await get_browser_settings(config, user_id)
+            mode = settings.get("use_host_browser", "off")
+            token = settings.get("host_cdp_token")
+            if mode in ("auto", "ask") and token:
+                return True
+        except Exception:
+            logger.debug(
+                "host-browser settings lookup failed in availability check",
+                exc_info=True,
+            )
+        return False
 
     @property
     def name(self) -> str:
@@ -278,6 +320,27 @@ class BrowserSkill(BaseSkill):
                     f"STOP: Do not use browser for this. Use search_tools('{mcp_name}') "
                     f"to find the {mcp_name}_* MCP tools instead."
                 )
+
+        # Fast-fail when no browser is reachable in this environment. Without
+        # this gate the brain hits ConnectionError on _ensure_connected, the
+        # except-branch recursively re-calls execute(), and the agent burns
+        # 50+ retries per turn (real incident: 80K log lines in 30 min).
+        if not await self._browser_runtime_available(user_id):
+            return str(ActionError(
+                code=ActionErrorCode.DEPENDENCY_MISSING,
+                message=(
+                    "No browser is available in this environment. No "
+                    "Brave/Chrome/Chromium binary was found and the host "
+                    "browser bridge is not configured."
+                ),
+                hint=(
+                    "Use `web_search` or `mcp-scraper` tools to fetch web "
+                    "content. To enable the browser, install Brave/Chrome on "
+                    "the host or call `use_host_browser` to bridge to your "
+                    "real browser via host.docker.internal."
+                ),
+                retry_strategy=RETRY_GIVE_UP,
+            ))
 
         tab_context = params.pop("_tab_context", None)
         is_background = params.pop("_background", False)

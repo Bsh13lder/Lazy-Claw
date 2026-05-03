@@ -92,12 +92,19 @@ interface Props {
 const MAX_RECENT = 20;
 const MAX_TAGS = 30;
 
-type SectionKey = "tasks" | "topics" | "pinned" | "rollups" | "recent" | "journal" | "tags";
+type SectionKey = "days" | "tasks" | "topics" | "pinned" | "rollups" | "recent" | "journal" | "tags";
 type SortKey = "recent" | "importance" | "alpha";
 
 const LS_OPEN = "lazybrain-sidebar-open";
 const LS_SORT = "lazybrain-sidebar-sort";
 const LS_JM = "lazybrain-sidebar-jmonths";
+const LS_DAYS_OPEN = "lazybrain-sidebar-days-open";
+
+/** Number of past days the daily timeline shows. 14 covers two work weeks
+ *  — long enough to navigate "what did I do last week", short enough that
+ *  the section doesn't dominate the sidebar. The Recent + Journal sections
+ *  below already serve as the deep archive. */
+const DAY_TIMELINE_DEPTH = 14;
 
 // Reused across every alpha-sort render — Intl.Collator construction is
 // 3-5x more expensive than a single compare, so hoisting it out of the
@@ -105,6 +112,7 @@ const LS_JM = "lazybrain-sidebar-jmonths";
 const TITLE_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" });
 
 const DEFAULT_OPEN: Record<SectionKey, boolean> = {
+  days: true,
   tasks: true,
   topics: true,
   pinned: true,
@@ -113,6 +121,34 @@ const DEFAULT_OPEN: Record<SectionKey, boolean> = {
   journal: true,
   tags: true,
 };
+
+/** Format a YYYY-MM-DD key into a human-friendly label.
+ *  - Today / Yesterday for the obvious cases
+ *  - "Mon, May 2" for the rest of the current week
+ *  - "Apr 28" for older days
+ *  Madrid locale matches the user's preference (set in MEMORY). */
+function formatDayLabel(dayKey: string, todayKey: string, yesterdayKey: string): string {
+  if (dayKey === todayKey) return "Today";
+  if (dayKey === yesterdayKey) return "Yesterday";
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const now = new Date();
+  const diffDays = Math.floor(
+    (Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - date.getTime()) / 86400000,
+  );
+  if (diffDays >= 0 && diffDays < 7) {
+    return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** YYYY-MM-DD for a Date in local time. */
+function localDayKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
 
 /** Lowercase a tag list defensively. Some legacy notes can carry non-string
  *  tag values (e.g. partially-decoded JSON) — we coerce so the page never
@@ -218,6 +254,47 @@ export function PageListSidebar({
       }
       return next;
     });
+
+  // Daily-timeline open day-keys. We persist *open* days (small set) so
+  // the default ("only today") stays implicit on a fresh install.
+  const [openDays, setOpenDays] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(LS_DAYS_OPEN);
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch {
+      // ignore
+    }
+    return new Set<string>([localDayKey(new Date())]);
+  });
+  const toggleDay = (k: string) =>
+    setOpenDays((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      try {
+        localStorage.setItem(LS_DAYS_OPEN, JSON.stringify([...next]));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+
+  // Watchers — fetched once on mount so the daily timeline can show
+  // "price changed", "appointment opened", etc. fires alongside notes.
+  // `last_trigger_ts` gives only the most-recent trigger per watcher
+  // (no per-day history), but for the typical "what changed today vs
+  // yesterday" view that's exactly what's useful. Errors swallowed —
+  // unauthenticated installs just see empty watcher chips.
+  const [watchers, setWatchers] = useState<api.Watcher[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.listWatchers().then((ws) => {
+      if (!cancelled) setWatchers(ws);
+    }).catch(() => {
+      // No watchers endpoint or auth — silent fall-through.
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   // Closed-month set for the Journal section. We persist the *closed*
   // months (rather than open) so the default — every month visible —
@@ -775,6 +852,118 @@ export function PageListSidebar({
     onDelete: () => requestDelete(n),
   });
 
+  // ── Daily timeline buckets ──────────────────────────────────────────
+  // Group every reachable note (recent + journal + tasks + pinned) by
+  // its created-at day, then attach watcher fires that landed on that
+  // day. Output a desc-sorted slice of the last DAY_TIMELINE_DEPTH
+  // days that have ANY content (notes or watcher fires). Each bucket
+  // also extracts the day's journal + the day's rollup so the sidebar
+  // can show those distinctly above the long task/note list.
+  const dayBuckets = useMemo(() => {
+    type Bucket = {
+      day: string;
+      label: string;
+      journal: LazyBrainNote | null;
+      rollup: LazyBrainNote | null;
+      notes: LazyBrainNote[];
+      watchers: api.Watcher[];
+      taskCount: number;
+    };
+
+    const todayKey = localDayKey(new Date());
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    const yesterdayKey = localDayKey(y);
+
+    // Union of all visible notes, deduped by id.
+    const seen = new Set<string>();
+    const all: LazyBrainNote[] = [];
+    for (const list of [recent, journal, tasks, pinned]) {
+      for (const n of list) {
+        if (seen.has(n.id) || deletedIds.has(n.id)) continue;
+        seen.add(n.id);
+        all.push(n);
+      }
+    }
+
+    const byDay = new Map<string, LazyBrainNote[]>();
+    for (const n of all) {
+      const ts = n.created_at;
+      if (!ts) continue;
+      // Use UTC slice to avoid timezone double-shifts on the iso string.
+      // Notes' created_at is ISO with offset; new Date() handles both.
+      const d = localDayKey(new Date(ts));
+      if (!byDay.has(d)) byDay.set(d, []);
+      byDay.get(d)!.push(n);
+    }
+
+    const watchersByDay = new Map<string, api.Watcher[]>();
+    for (const w of watchers) {
+      if (!w.last_trigger_ts) continue;
+      const k = localDayKey(new Date(w.last_trigger_ts * 1000));
+      if (!watchersByDay.has(k)) watchersByDay.set(k, []);
+      watchersByDay.get(k)!.push(w);
+    }
+
+    // Days with at least one note OR one watcher fire.
+    const candidateDays = new Set<string>([
+      ...byDay.keys(),
+      ...watchersByDay.keys(),
+    ]);
+    const sorted = [...candidateDays]
+      .sort((a, b) => b.localeCompare(a))
+      .slice(0, DAY_TIMELINE_DEPTH);
+
+    return sorted.map<Bucket>((day) => {
+      const items = (byDay.get(day) || []).slice();
+      // Stable per-day order: pinned first, then importance, then title.
+      items.sort((a, b) => {
+        const pa = isPinnedFor(a) ? 1 : 0;
+        const pb = isPinnedFor(b) ? 1 : 0;
+        if (pa !== pb) return pb - pa;
+        if ((b.importance ?? 0) !== (a.importance ?? 0)) return (b.importance ?? 0) - (a.importance ?? 0);
+        return TITLE_COLLATOR.compare(a.title || "", b.title || "");
+      });
+      let dayJournal: LazyBrainNote | null = null;
+      let dayRollup: LazyBrainNote | null = null;
+      let taskCount = 0;
+      const rest: LazyBrainNote[] = [];
+      for (const n of items) {
+        const tags = lowerTags(n);
+        const cats = categoryKeysFor(n.tags, n.pinned);
+        if (!dayJournal && (cats.includes("journal") || cats.includes("daily-log"))) {
+          dayJournal = n;
+          continue;
+        }
+        if (!dayRollup && isRollupNote(n)) {
+          dayRollup = n;
+          continue;
+        }
+        if (cats.includes("task") || tags.includes("task")) taskCount++;
+        rest.push(n);
+      }
+      return {
+        day,
+        label: formatDayLabel(day, todayKey, yesterdayKey),
+        journal: dayJournal,
+        rollup: dayRollup,
+        notes: rest,
+        watchers: watchersByDay.get(day) || [],
+        taskCount,
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recent, journal, tasks, pinned, watchers, deletedIds, pinOverride]);
+
+  // Quick stats for the section header — total active days + total
+  // watcher fires in window. Cheap, runs on every render but only over
+  // ~14 days so it's irrelevant.
+  const dayHeaderCount = dayBuckets.length;
+  const watcherFiresInWindow = useMemo(
+    () => dayBuckets.reduce((acc, b) => acc + b.watchers.length, 0),
+    [dayBuckets],
+  );
+
   return (
     <aside className="w-60 shrink-0 h-full flex flex-col bg-bg-secondary border-r border-border">
       {/* Header */}
@@ -887,6 +1076,163 @@ export function PageListSidebar({
                 previews where the user is about to land. */}
             <TodayJournalButton onClick={onOpenJournalToday} />
 
+            {/* Past days — daily timeline. Each row groups everything
+                that landed on that day (journal, rollup, tasks, lessons,
+                watcher fires). Expanding a day reveals the full list
+                inline. Watcher fires (price drops, slot openings,
+                page-change alerts) get their own indented row so they
+                read distinctly from manually-authored notes. */}
+            {dayBuckets.length > 0 && (
+              <SidebarSection
+                label="Past days"
+                count={dayHeaderCount}
+                Icon={Calendar}
+                iconColor="#a78bfa"
+                open={openSections.days}
+                onToggle={() => toggleSection("days")}
+                headerExtra={
+                  watcherFiresInWindow > 0 ? (
+                    <span
+                      className="px-1.5 py-px rounded text-[9px] tabular-nums font-semibold tracking-wide"
+                      style={{
+                        background: "rgba(251, 191, 36, 0.15)",
+                        color: "#fbbf24",
+                        letterSpacing: "0.05em",
+                      }}
+                      title={`${watcherFiresInWindow} watcher trigger${watcherFiresInWindow === 1 ? "" : "s"} in last ${DAY_TIMELINE_DEPTH} days`}
+                    >
+                      {watcherFiresInWindow} ⚡
+                    </span>
+                  ) : undefined
+                }
+              >
+                {dayBuckets.map((b) => {
+                  const isOpen = openDays.has(b.day);
+                  const total = b.notes.length + (b.journal ? 1 : 0) + (b.rollup ? 1 : 0);
+                  return (
+                    <div key={b.day} className="px-1 mb-0.5 last:mb-0">
+                      <button
+                        onClick={() => toggleDay(b.day)}
+                        className="w-full flex items-center gap-1.5 px-3 py-1 rounded hover:bg-bg-primary/40 transition-colors group/day"
+                      >
+                        <ChevronRight
+                          size={9}
+                          strokeWidth={2.2}
+                          className={`text-text-muted/60 transition-transform ${isOpen ? "rotate-90" : ""}`}
+                        />
+                        <span
+                          className="text-[10px] tabular-nums font-semibold tracking-wide"
+                          style={{
+                            color: b.day === localDayKey(new Date())
+                              ? "#a78bfa"
+                              : "var(--color-text-secondary)",
+                            letterSpacing: "0.04em",
+                          }}
+                        >
+                          {b.label}
+                        </span>
+                        <span className="flex-1" />
+                        {b.taskCount > 0 && (
+                          <span
+                            className="text-[9px] tabular-nums px-1 py-px rounded"
+                            style={{
+                              background: "rgba(110, 181, 131, 0.12)",
+                              color: "var(--color-lb-cat-task)",
+                              fontWeight: 600,
+                            }}
+                            title={`${b.taskCount} task${b.taskCount === 1 ? "" : "s"}`}
+                          >
+                            {b.taskCount}t
+                          </span>
+                        )}
+                        {b.watchers.length > 0 && (
+                          <span
+                            className="text-[9px] tabular-nums px-1 py-px rounded"
+                            style={{
+                              background: "rgba(251, 191, 36, 0.15)",
+                              color: "#fbbf24",
+                              fontWeight: 600,
+                            }}
+                            title={`${b.watchers.length} watcher trigger${b.watchers.length === 1 ? "" : "s"}`}
+                          >
+                            {b.watchers.length}⚡
+                          </span>
+                        )}
+                        <span className="text-[9px] tabular-nums text-text-muted/70 min-w-[1.5rem] text-right">
+                          {total}
+                        </span>
+                      </button>
+                      {isOpen && (
+                        <div className="pl-3">
+                          {b.journal && (
+                            <PageRow note={b.journal} {...rowProps(b.journal)} />
+                          )}
+                          {b.rollup && (
+                            <PageRow
+                              note={b.rollup}
+                              {...rowProps(b.rollup)}
+                              meta={
+                                <span
+                                  className="text-[9px] tabular-nums px-1 py-px rounded"
+                                  style={{
+                                    background: "rgba(192, 38, 211, 0.12)",
+                                    color: "#c026d3",
+                                    fontWeight: 600,
+                                    letterSpacing: "0.04em",
+                                  }}
+                                >
+                                  ROLLUP
+                                </span>
+                              }
+                            />
+                          )}
+                          {b.watchers.map((w) => (
+                            <button
+                              key={w.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                // Surface the watcher trigger message —
+                                // shoves the user toward the Watchers page
+                                // for full history. No router here, so we
+                                // just navigate via location.
+                                window.location.hash = "#/watchers";
+                              }}
+                              className="w-full flex items-center gap-1.5 px-3 py-1 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors rounded"
+                              title={w.last_trigger_message || w.what_to_watch || ""}
+                            >
+                              <span
+                                className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                                style={{ background: "#fbbf24" }}
+                              />
+                              <span className="truncate flex-1">
+                                {w.template_icon ? `${w.template_icon} ` : ""}
+                                {w.name}
+                              </span>
+                              <span className="text-[9px] text-text-muted/70 tabular-nums shrink-0">
+                                {w.last_trigger_ts
+                                  ? new Date(w.last_trigger_ts * 1000).toLocaleTimeString(undefined, {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })
+                                  : ""}
+                              </span>
+                            </button>
+                          ))}
+                          {b.notes.map((n) => (
+                            <PageRow key={n.id} note={n} {...rowProps(n)} />
+                          ))}
+                          {total === 0 && b.watchers.length === 0 && (
+                            <div className="px-3 py-1 text-[10px] text-text-muted/60 italic">
+                              Nothing on this day.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </SidebarSection>
+            )}
 
             {/* Tasks & reminders — auto-pulled from notes tagged `task`.
                 Each row gets an inline checkbox that calls the

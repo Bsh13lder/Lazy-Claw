@@ -199,6 +199,7 @@ Specialists run in parallel via `asyncio.gather`. Results merge back into the co
 Encrypted tasks with nagging reminders and due-date escalation:
 
 - **AI quick-add** — type `"pay electricity bill wednesday 3pm"` in the Tasks page input → LLM extracts title, due date, category, priority in one pass; single click to confirm.
+- **Smart intake suggester** — when you add a task without a deadline, a worker LLM (3s hard timeout, graceful Ollama-down fallback) suggests a deadline + project (category) based on the title and your recent task buckets. Confident suggestions auto-fill the reminder; uncertain time-sensitive ones return a clarification prompt instead of guessing.
 - **Live countdown** — every task card ticks the time-remaining label in real time (`in 2h 14m` → `in 2h 13m`) without re-fetching.
 - **Markdown notes** — rich description field renders `[[wikilinks]]` into LazyBrain, checkboxes, code blocks, and links inline on the card.
 - **Nag pattern** — 15min → 30min → 1hr, capped at 5 (no spam spiral)
@@ -224,6 +225,10 @@ A Python-native, E2E-encrypted knowledge base the user and the agent share. Open
 - **Lessons v2** — single-card upsert by `(topic, action, intent)` triple (no flooding), 5-state outcome machine (proposed / verified / contested / superseded / archived), verification pump auto-bumps confidence on tool success; Telegram `/confirm` and `/reject` for manual override. `kind/shape` (how-to) split from `kind/fact` (this-is). Skills vault toggle hides the noisy `#skill` namespace from the default graph.
 
 All content encrypted per user (AES-256-GCM with AAD=`notes:{title,content,embedding}`). 28 NL skills + 19 REST endpoints total.
+
+### Web Search
+
+`web_search` chains **Brave Search API → mcp-scraper → DuckDuckGo**. Brave's 2k/mo free tier covers most queries with curated, low-spam results. Set `BRAVE_KEY` in `.env` or via the NL skill `set_brave_api_key` (stores it encrypted in the vault). Telegram `/search auto|brave|scraper|duckduckgo` to override the chain. **Price/flight/shopping queries auto-route to the browser** — `web_search` detects price intent and returns a structured `[PRICE_QUERY]` instruction so the agent reads the live booking page (Google Flights / Google Shopping / Google search) instead of trusting cached snippets that are hours stale.
 
 ### Watchers
 
@@ -324,7 +329,7 @@ First-class MCP support — both client and server.
 | `mcp-whatsapp` | WhatsApp messaging via web protocol. QR auth, no API needed. |
 | `mcp-email` | Send/read/search email via SMTP+IMAP. Gmail, Outlook, any provider. |
 | `mcp-jobspy` | Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google. NaN/float-safe normalizer (`normalize.py`) shared with the in-tree direct path. |
-| `mcp-scraper` | crawl4ai-backed crawl + extract + search bundle. Auto-dismisses Cookiebot/OneTrust/Iubenda banners. Single persistent subprocess (no per-call lock). |
+| `mcp-scraper` | crawl4ai-backed crawl + extract + search bundle. Auto-dismisses Cookiebot/OneTrust/Iubenda banners. Single persistent subprocess. **`extract_business_info`** parses schema.org JSON-LD for high-confidence addresses (no more cookie-banner-pollution false positives). Optional Scrapling-style add-ons: TLS-fingerprint impersonation (`stealth_http`), proxy rotation, adaptive selector relocation. |
 | `mcp-upwork` | Apache-2.0 fork of `vanooo/upwork-mcp` — 18 tools (search, proposals, messages, contracts, profile, work diary). CDP-driven; **shares your existing Brave profile + cookies** via `LAZYCLAW_BROWSER_PROFILE_DIR`, so one login is all the agent needs. |
 
 **Coming soon (disabled, rebuild in progress):** `mcp-freeride` (free AI router), `mcp-healthcheck` (provider monitor), `mcp-apihunter` (API discovery), `mcp-vaultwhisper` (PII proxy).
@@ -391,7 +396,7 @@ React 19 + TypeScript + Vite + Tailwind control panel with 18 pages, a persisten
 - **Skill Hub** — Discover and install skills
 - **Skills** — Browse, create, edit, delete skills
 - **Templates** — Saved browser recipes (DGT cita previa, Doctoralia, custom) with one-click Run / Watch / Seed
-- **Jobs** — Cron job management (create, pause, resume)
+- **Jobs** — Cron job management with type tabs (All / Recurring / One-off), inline editor (name/instruction/cron/context with live human-readable cron preview), and Ran-OK / Failed outcome chips after each run
 - **MCP** — Server management (connect, disconnect, install)
 - **Memory** — Personal memories + daily logs
 - **Vault** — Encrypted credential management

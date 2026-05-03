@@ -99,11 +99,13 @@ COPY --chown=lazyclaw:lazyclaw mcp-instagram/ ./mcp-instagram/
 COPY --chown=lazyclaw:lazyclaw mcp-email/ ./mcp-email/
 COPY --chown=lazyclaw:lazyclaw mcp-jobspy/ ./mcp-jobspy/
 COPY --chown=lazyclaw:lazyclaw mcp-scraper/ ./mcp-scraper/
+COPY --chown=lazyclaw:lazyclaw mcp-upwork/ ./mcp-upwork/
 RUN pip install --no-cache-dir \
         ./mcp-instagram \
         ./mcp-email \
         ./mcp-jobspy \
         ./mcp-scraper \
+        ./mcp-upwork \
         n8n-mcp-server
 
 # mcp-whatsapp source (deps already installed above).

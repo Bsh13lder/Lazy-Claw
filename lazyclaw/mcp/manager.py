@@ -942,6 +942,16 @@ async def auto_register_bundled_mcps(
             cdp_port_env = _os.environ.get("LAZYCLAW_CDP_PORT")
             if cdp_port_env:
                 per_user_env["LAZYCLAW_CDP_PORT"] = cdp_port_env
+            # When LazyClaw runs in Docker, the Upwork MCP can't launch its
+            # own Chrome (no binary in the slim image) — point it at the
+            # user's host Brave through host.docker.internal. host_bridge.is_docker_runtime()
+            # checks /.dockerenv + LAZYCLAW_SERVER_MODE.
+            try:
+                from lazyclaw.browser.host_bridge import is_docker_runtime
+                if is_docker_runtime():
+                    per_user_env["LAZYCLAW_CDP_HOST"] = "host.docker.internal"
+            except ImportError:
+                pass
 
         # Determine transport type: Python module, CLI binary, npx, or remote URL
         if "module" in info:

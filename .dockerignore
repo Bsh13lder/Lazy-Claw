@@ -51,12 +51,13 @@ web/.turbo/
 htmlcov/
 .tox/
 
-# Disabled / scratch MCPs that aren't installed in the Dockerfile
+# Disabled / scratch MCPs that aren't installed in the Dockerfile.
+# mcp-upwork/ removed — now baked into the image (Apache-2.0 fork of
+# vanooo/upwork-mcp, shares the user's Brave profile via env injection).
 mcp-apihunter/
 mcp-freeride/
 mcp-healthcheck/
 mcp-vaultwhisper/
-mcp-upwork/
 
 # Top-level scratch
 *.log

@@ -254,7 +254,15 @@ class ConnectMCPServerSkill(BaseSkill):
 
     @property
     def description(self) -> str:
-        return "Connect or reconnect to an MCP server by name."
+        return (
+            "Connect or reconnect to an MCP server by name. Use when user "
+            "says 'connect <name>', 'connect <name> mcp', 'reconnect <name>'. "
+            "If the server isn't installed yet but is a bundled MCP, "
+            "auto-installs it (email, instagram, whatsapp, jobspy, upwork, "
+            "scraper, taskai, lazydoctor, stripe, canva, n8n, workspace, "
+            "claude-code). Don't ask the user for a URL or command for "
+            "these bundled names — just call this skill."
+        )
 
     @property
     def permission_hint(self) -> str:
@@ -694,10 +702,13 @@ class InstallMCPServerSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Install a bundled MCP server package and connect it. "
-            "MUST use this when user says 'install email', 'install instagram', "
-            "'set up email MCP', 'connect email server', 'I need email', "
-            "'add whatsapp', etc. Accepts short names: email, instagram, "
-            "whatsapp, jobspy — or full: mcp-email, mcp-instagram."
+            "MUST use this when user says 'install <name>', 'connect <name> mcp', "
+            "'set up <name>', 'add <name>', 'I need <name>', etc. — for ANY "
+            "bundled MCP. Accepts short names or 'mcp-' prefixed: "
+            "email, instagram, whatsapp, jobspy, upwork, scraper, taskai, "
+            "lazydoctor, stripe, canva, n8n, n8n-nodes, workspace (Google "
+            "Sheets/Drive/Gmail/Calendar), claude-code. Routes through "
+            "_resolve_mcp_name so partial matches work."
         )
 
     @property

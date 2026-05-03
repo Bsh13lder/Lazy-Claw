@@ -3,7 +3,11 @@ name = "upwork-mcp"
 version = "0.1.0"
 description = "MCP server for Upwork via browser automation"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
+# LazyClaw fork patch: upstream pinned >=3.12 conservatively. Source uses
+# only `str | None` (3.10+) and `Annotated` (3.9+); deps want >=3.9.
+# Relaxed so the LazyClaw Docker image (python:3.11-slim) can ship it
+# without dragging in a Python upgrade for the whole stack.
 license = "Apache-2.0"
 
 dependencies = [

@@ -11,16 +11,37 @@ logger = logging.getLogger(__name__)
 
 _SEARCH_PREFIX = "SURVIVAL_SEARCH:"
 
-# LazyClaw branding prompt injected into cover letter generation
+# LazyClaw branding prompt injected into cover letter generation.
+# Style anchor: warm + transparent + structured. Detailed style template
+# in draft_proposal_skill.py:_PROMPT_TEMPLATE — keep these two in sync.
 _LAZYCLAW_BRANDING = (
-    "IMPORTANT CONTEXT: You are writing this proposal on behalf of LazyClaw, "
-    "an AI-powered agent platform. Be transparent about this:\n"
-    "- LazyClaw is an AI agent that executes work autonomously with tools, "
-    "browser control, and code execution capabilities\n"
-    "- A human founder reviews ALL deliverables before submission (quality gate)\n"
-    "- 24/7 availability, fast turnaround, automated testing\n"
-    "- Professional grade, E2E encrypted workspace\n"
-    "- Frame this as a STRENGTH: AI precision + human oversight = best of both worlds\n\n"
+    "IMPORTANT CONTEXT: You are writing this proposal on behalf of Bsh, "
+    "founder of LazyClaw — an open-source AI agent platform "
+    "(MIT, Python, E2E encrypted). Use this exact style:\n\n"
+    "STRUCTURE (in order):\n"
+    "1. Warm opener — name + LazyClaw context + why this job fits (2-3 lines)\n"
+    "2. 'How we'd work' section with these 3 transparency bullets:\n"
+    "     ⚡ Fast responses (agent 24/7, founder approves in Madrid hours)\n"
+    "     ✅ Supervised quality — every deliverable passes human review\n"
+    "     💰 Competitive pricing — agent speed = savings passed on\n"
+    "   AND state: day-to-day responder is the AI agent, founder reviews\n"
+    "   EVERY deliverable, agent escalates to founder when human input needed.\n"
+    "3. 'For your project I propose:' — numbered phase list (1..5) tailored\n"
+    "   to THIS specific job. Each phase = one short concrete deliverable.\n"
+    "4. 'About me' — GitHub: https://github.com/Bsh13lder/Lazy-Claw + stack\n"
+    "   relevance line.\n"
+    "5. Next step — propose a 15-min discovery call. NEVER quote a fixed\n"
+    "   price in the proposal itself.\n"
+    "6. Sign-off: '— Bsh'\n\n"
+    "RULES:\n"
+    "- 250-400 words (substantial, NOT 150)\n"
+    "- Bullet / numbered lists ENCOURAGED for readability\n"
+    "- Bold **key phrases** in markdown — Upwork renders it\n"
+    "- Sparing emojis ONLY in the 3 transparency bullets (⚡ ✅ 💰)\n"
+    "- If brief is Spanish, write ENTIRE proposal in Iberian Spanish\n"
+    "  (tú, 'matrícula', 'presupuesto'). Otherwise English.\n"
+    "- NO 'I hope this message finds you well' / 'Dear Hiring Manager'\n"
+    "- NEVER promise to auto-submit anything to the client\n\n"
 )
 
 
@@ -191,7 +212,9 @@ class ApplyJobSkill(BaseSkill):
         self, user_id: str, job: dict, profile, custom_note: str,
     ) -> str:
         """Generate cover letter with LazyClaw branding."""
-        desc = job.get("description", "N/A")[:300]
+        # 1500 chars of brief — enough room for the LLM to tailor the phase
+        # list to the actual problem rather than guessing.
+        desc = job.get("description", "N/A")[:1500]
 
         # Build prompt with optional LazyClaw branding
         branding = _LAZYCLAW_BRANDING if profile.branding_mode == "lazyclaw" else ""
@@ -207,21 +230,23 @@ class ApplyJobSkill(BaseSkill):
             f"Skills: {', '.join(profile.skills)}\n"
             f"Bio: {profile.bio}\n"
             f"{f'Note: {custom_note}' if custom_note else ''}\n\n"
-            f"Requirements:\n"
-            f"- Max 150 words\n"
-            f"- Professional but not generic\n"
-            f"- Reference specific parts of the job description\n"
-            f"- Highlight relevant experience\n"
-            f"- End with a clear call to action\n"
         )
 
         if profile.branding_mode == "lazyclaw":
+            # Branding template above already specifies length, structure,
+            # tone — don't re-state requirements here, it confuses the model.
             letter_prompt += (
-                "- Mention that LazyClaw is an AI agent with human oversight\n"
-                "- Frame AI as a strength (speed, availability, consistency)\n"
+                "Reference SPECIFIC parts of the job description in the\n"
+                "phase list — show you read the brief.\n"
             )
         else:
             letter_prompt += (
+                "Requirements:\n"
+                "- Max 150 words\n"
+                "- Professional but not generic\n"
+                "- Reference specific parts of the job description\n"
+                "- Highlight relevant experience\n"
+                "- End with a clear call to action\n"
                 "- NO 'Dear Hiring Manager' or 'I am writing to express interest'\n"
                 "- Sound human, not AI-generated\n"
             )
@@ -240,18 +265,29 @@ class ApplyJobSkill(BaseSkill):
                         except Exception as exc:
                             logger.warning("Claude Code letter gen failed: %s", exc)
 
-        # Fallback: template-based letter
+        # Fallback: template-based letter (used when LLM is unavailable).
+        # Keep aligned with the structure in _LAZYCLAW_BRANDING above.
         skills_str = ", ".join(profile.skills[:3]) if profile.skills else "various technologies"
         if profile.branding_mode == "lazyclaw":
             return (
                 f"Hi,\n\n"
-                f"I'm LazyClaw — an AI-powered development agent with human oversight. "
-                f"I specialize in {skills_str} and can deliver your project "
-                f"'{job.get('title', '')}' with 24/7 availability and automated testing.\n\n"
-                f"Every deliverable is reviewed by my human founder before submission, "
-                f"ensuring professional quality with AI speed.\n\n"
-                f"Let's discuss the details — I can start immediately.\n\n"
-                f"LazyClaw"
+                f"My name is Bsh and I run **LazyClaw** — an open-source AI "
+                f"agent platform (MIT, Python, E2E encrypted). Your project "
+                f"'{job.get('title', '')}' fits my stack ({skills_str}) "
+                f"directly.\n\n"
+                f"**How we'd work:** day-to-day responses come from my "
+                f"personal AI agent (LazyClaw); the agent does the technical "
+                f"work, but **I review and approve every deliverable** before "
+                f"it reaches you — nothing ships without human sign-off.\n\n"
+                f"⚡ Fast responses (agent 24/7, I approve in Madrid hours)\n"
+                f"✅ Supervised quality — human review on every delivery\n"
+                f"💰 Competitive pricing — agent speed = savings passed on\n\n"
+                f"**About me:** open-source code at "
+                f"https://github.com/Bsh13lder/Lazy-Claw\n\n"
+                f"**Next step:** a 15-min discovery call to scope the work, "
+                f"then I'll send a phased plan with fixed prices per "
+                f"deliverable — no surprises.\n\n"
+                f"— Bsh"
             )
         return (
             f"Hi,\n\n"

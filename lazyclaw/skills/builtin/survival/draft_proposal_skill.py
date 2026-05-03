@@ -20,7 +20,7 @@ from lazyclaw.skills.base import BaseSkill
 logger = logging.getLogger(__name__)
 
 
-_PROMPT_TEMPLATE = """You are drafting a freelance proposal on behalf of a developer.
+_PROMPT_TEMPLATE = """You are drafting a freelance proposal on behalf of a developer who runs LazyClaw — an open-source AI agent platform (MIT, Python, E2E encrypted). The developer's name is Bsh.
 
 The developer's profile:
   Title: {title}
@@ -31,18 +31,44 @@ The developer's profile:
 Job description (from the platform):
 {description}
 
-Write a proposal in exactly 3 short paragraphs:
-1. Show you understood the ACTUAL problem (paraphrase it, don't just list buzzwords).
-2. State a concrete plan: what you'll deliver, how you'll approach it, roughly how long.
-3. End with ONE specific clarifying question that proves you read the brief.
+Write the proposal with this exact structure:
+
+1. **Opener (2-3 lines):** Warm greeting using the developer's name. Mention LazyClaw as your platform and why this specific job fits.
+
+2. **"How we'd work" section (CRITICAL — be transparent):**
+   - The day-to-day responder is a personal AI agent (LazyClaw)
+   - The agent does the technical work: design, integration, scripts, tests
+   - The HUMAN founder reviews and approves EVERY deliverable before it reaches the client — nothing ships without human sign-off
+   - If the agent has questions or needs decisions, it escalates to the founder, who then contacts the client
+   - Frame this as a STRENGTH using a 3-bullet list:
+     ⚡ Fast responses (agent works 24/7, founder approves in business hours, Madrid timezone)
+     ✅ Supervised quality — every deliverable passes human review
+     💰 Competitive pricing — agent speed = lower cost, savings passed on
+
+3. **"For your project I propose:" section:**
+   - Numbered list (1, 2, 3, 4, 5) of concrete phases tailored to THIS job
+   - Each phase = one short line with what's delivered
+   - Show you understood the actual problem, not buzzwords
+
+4. **"About me" section:**
+   - GitHub link as proof of work: https://github.com/Bsh13lder/Lazy-Claw
+   - 1-2 lines on why LazyClaw stack (or relevant skills) fit this job
+   - Stack relevance line (Python / FastAPI / browser automation / multi-channel / etc.)
+
+5. **Next step:** Propose a 15-min discovery call to understand the project before quoting price. NEVER quote a fixed price in the proposal — always defer pricing until after the call.
+
+6. **Sign-off:** "— Bsh"
 
 Rules:
-- Under 150 words total.
-- No "I hope this message finds you well."
-- No bullet lists.
-- No emojis.
-- If the brief is in Spanish, write in Spanish. Otherwise English.
-- Open with the specific technical detail, not with "I".
+- 250-400 words total (NOT 150 — be substantial, this is a credibility play)
+- Bullet/numbered lists are ENCOURAGED (structure helps readability)
+- Sparing emojis OK in the "How we'd work" bullets only (⚡ ✅ 💰)
+- Bold key phrases with **markdown** (Upwork renders markdown in proposals)
+- If the brief is in Spanish, write the ENTIRE proposal in Spanish (use Iberian Spanish: tú, "matrícula", "presupuesto"). Otherwise English.
+- NO "I hope this message finds you well."
+- NO "Dear Hiring Manager."
+- NEVER quote a fixed price — always end with a discovery call
+- NEVER promise to auto-submit anything
 
 Return ONLY the proposal text, no headers, no footers."""
 
@@ -140,7 +166,7 @@ class DraftFreelanceProposalSkill(BaseSkill):
             response = await router.chat(
                 messages=[LLMMessage(role="user", content=prompt)],
                 user_id=user_id,
-                max_tokens=500,
+                max_tokens=1100,
                 temperature=0.7,
             )
             draft = (response.content or "").strip()

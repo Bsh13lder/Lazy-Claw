@@ -403,6 +403,41 @@ _CRON_TOOL_NAMES = frozenset({
     "schedule_job", "list_jobs", "manage_job",
 })
 
+# MCP management keywords → inject install_mcp_server + connect/list/etc.
+# Without this, "connect upwork mcp" / "install instagram mcp" routed the
+# brain to search_tools, which ranked `list_mcp_servers` highest (matched
+# "mcp" most generically), so the brain showed an empty list and asked the
+# user for a URL — even though install_mcp_server auto-installs every
+# bundled MCP. Pattern: bundled name token (upwork|instagram|email|…) +
+# generic verbs (install|connect|setup|add). Conservative — does NOT fire
+# on bare "upwork" alone (could be a job-search query).
+_MCP_MGMT_KEYWORDS = frozenset({
+    "mcp", "mcp server", "mcp servers", "list mcp", "list mcps",
+    "install mcp", "connect mcp", "set up mcp", "setup mcp", "add mcp",
+    "remove mcp", "disconnect mcp", "favorite mcp", "unfavorite mcp",
+    "reconnect mcp",
+    # Bundle-name + verb pairs — matched as substrings so phrasings like
+    # "connect upwork mcp" and "install upwork" both fire.
+    "install upwork", "connect upwork", "set up upwork", "add upwork",
+    "install instagram", "connect instagram", "set up instagram",
+    "install whatsapp", "connect whatsapp", "set up whatsapp",
+    "install email", "connect email", "set up email",
+    "install jobspy", "connect jobspy",
+    "install scraper", "connect scraper",
+    "install stripe", "connect stripe",
+    "install canva", "connect canva",
+    "install n8n", "connect n8n",
+    "install workspace", "connect workspace", "google workspace mcp",
+    "install claude code", "connect claude code",
+    "install taskai", "install lazydoctor",
+})
+
+_MCP_MGMT_TOOL_NAMES = frozenset({
+    "install_mcp_server", "connect_mcp_server", "list_mcp_servers",
+    "add_mcp_server", "disconnect_mcp_server", "remove_mcp_server",
+    "favorite_mcp_server", "unfavorite_mcp_server",
+})
+
 # Survival/job keywords → inject search_jobs + survival tools directly.
 # NOTE: bare "jobs" intentionally removed — it overloaded with cron-job
 # intent. Specific phrases ("find job", "find work", "apply job",
@@ -1852,6 +1887,26 @@ class Agent:
                         len(_cron_tools_extra),
                     )
 
+            # MCP management keyword detection → inject install/connect/list
+            # so "connect upwork mcp" / "install instagram mcp" route to
+            # install_mcp_server (auto-installs the bundled package) instead
+            # of falling through to list_mcp_servers + asking for a URL.
+            _mcp_mgmt_tools: list = []
+            _wants_mcp_mgmt = any(kw in _msg_lower for kw in _MCP_MGMT_KEYWORDS)
+            if not _wants_mcp_mgmt and _history_tool_names & _MCP_MGMT_TOOL_NAMES:
+                _wants_mcp_mgmt = True
+                logger.info("MCP-mgmt tools re-injected from recent history context")
+            if _wants_mcp_mgmt:
+                for mname in _MCP_MGMT_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(mname)
+                    if schema is not None:
+                        _mcp_mgmt_tools.append(schema)
+                if _mcp_mgmt_tools:
+                    logger.info(
+                        "MCP-mgmt keywords detected — %d tools injected",
+                        len(_mcp_mgmt_tools),
+                    )
+
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
             _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
@@ -2119,6 +2174,12 @@ class Agent:
             for ct in _cron_tools_extra:
                 if ct.get("function", {}).get("name") not in _existing_names:
                     tools.append(ct)
+
+            # Add MCP-management tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for mt in _mcp_mgmt_tools:
+                if mt.get("function", {}).get("name") not in _existing_names:
+                    tools.append(mt)
 
             # Add survival tools (deduplicated)
             _existing_names = {t.get("function", {}).get("name") for t in tools}

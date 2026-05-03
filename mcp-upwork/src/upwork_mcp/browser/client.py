@@ -32,8 +32,45 @@ def _resolve_cdp_port() -> int:
     return 9222
 
 
+def _resolve_cdp_host() -> str:
+    """Resolve CDP host from `LAZYCLAW_CDP_HOST`, fallback 127.0.0.1.
+
+    Set to `host.docker.internal` when running inside the LazyClaw Docker
+    container so the MCP connects to the user's REAL Brave on the Mac/Win
+    host (with their cookies and Cloudflare-passing fingerprint), instead
+    of trying to launch its own Chrome inside the container (which has no
+    Chrome binary).
+
+    KEY DETAIL: we DNS-resolve the hostname to its IP. Chromium's CDP
+    HTTP server only accepts `Host:` headers that are an IP address or
+    `localhost` — it rejects `host.docker.internal` with a 400. By
+    connecting to the resolved IP (e.g. 192.168.65.254) the Host header
+    becomes the IP and Brave accepts it. This means the user can launch
+    Brave with just `--remote-debugging-port=9222` — no
+    `--remote-allow-origins=*` needed.
+    """
+    import socket
+    host = os.environ.get("LAZYCLAW_CDP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
+def _running_in_container() -> bool:
+    """Best-effort check for "running inside a Linux container".
+
+    Used to suppress the in-process `start_chrome_with_debug()` fallback —
+    inside the container there's no Chrome binary and no display, so the
+    fallback always fails with a confusing error. Better to fail fast and
+    tell the user to start Brave on the host with debug port.
+    """
+    return os.path.exists("/.dockerenv")
+
+
 PROFILE_DIR = _resolve_profile_dir()
 CDP_PORT = _resolve_cdp_port()
+CDP_HOST = _resolve_cdp_host()
 
 # Real Chrome paths by platform
 CHROME_PATHS = [
@@ -54,10 +91,17 @@ def find_chrome() -> str | None:
 
 
 def is_chrome_running_with_debug() -> bool:
-    """Check if Chrome is running with debug port."""
+    """Check if Chrome is running with debug port at CDP_HOST:CDP_PORT.
+
+    CDP_HOST defaults to 127.0.0.1 but is set to `host.docker.internal`
+    by LazyClaw's MCP manager when running in Docker, so the probe reaches
+    the user's host Brave instead of the empty container loopback.
+    """
     import urllib.request
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2) as resp:
+        with urllib.request.urlopen(
+            f"http://{CDP_HOST}:{CDP_PORT}/json/version", timeout=2,
+        ) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -110,8 +154,20 @@ class UpworkBrowser:
         if self._started and self._page:
             return self._page
 
-        # Ensure Chrome is running with debug port
+        # Ensure Chrome is running with debug port at CDP_HOST:CDP_PORT.
         if not is_chrome_running_with_debug():
+            if _running_in_container():
+                # No Chrome inside the LazyClaw Docker image — surface a
+                # crisp instruction instead of the cryptic "Could not start
+                # Chrome" the host-launch path produces.
+                raise RuntimeError(
+                    f"Cannot reach a Brave/Chrome with --remote-debugging-port "
+                    f"at {CDP_HOST}:{CDP_PORT}. Start Brave on your host with:\n"
+                    f"  /Applications/Brave\\ Browser.app/Contents/MacOS/Brave\\ Browser "
+                    f"--remote-debugging-port={CDP_PORT} "
+                    f"--user-data-dir=$HOME/Library/Application\\ Support/BraveSoftware/Brave-Browser-Lazy\n"
+                    f"(or use scripts/install-host-brave-bridge.sh for a launchd-managed copy)."
+                )
             print("Starting Chrome with debug port...")
             if not start_chrome_with_debug():
                 raise RuntimeError(
@@ -122,9 +178,10 @@ class UpworkBrowser:
 
         self._playwright = await async_playwright().start()
 
-        # Connect via CDP
+        # Connect via CDP — uses CDP_HOST so containerized installs reach
+        # the host Brave through host.docker.internal.
         self._browser = await self._playwright.chromium.connect_over_cdp(
-            f"http://127.0.0.1:{CDP_PORT}"
+            f"http://{CDP_HOST}:{CDP_PORT}"
         )
 
         contexts = self._browser.contexts

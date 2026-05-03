@@ -38,19 +38,32 @@ class UseHostBrowserSkill(BaseSkill):
             "Switch the agent to drive the user's REAL Brave/Chrome on the "
             "host machine (with all their cookies, saved logins, and "
             "extensions) instead of the containerised headless browser. "
-            "Call this skill BEFORE the `browser` skill whenever the user "
-            "wants to use their own browser identity.\n\n"
+            "**Call this skill BEFORE `browser` whenever the user mentions "
+            "MY/VISIBLE/REAL browser** — that's the signal they want their "
+            "own session, not a fresh headless container.\n\n"
             "Trigger phrases (any of these should match — single word, "
             "typo, or other languages too):\n"
             "  - 'use my browser', 'use mybrowser', 'usemybrowser'\n"
             "  - 'use my brave', 'use brave', 'use mybrave', 'my brave'\n"
             "  - 'use my chrome', 'my chrome'\n"
+            "  - 'work on my visible browser', 'my visible browser', "
+            "'visible browser', 'in my browser', 'on my browser', "
+            "'open in my browser', 'with my browser', 'work in my browser'\n"
             "  - 'login as me', 'connect to brave', 'use my cookies', "
-            "'use my real browser', 'host browser', 'host brave'\n"
-            "  - Spanish: 'usa mi navegador', 'mi navegador', 'usa mi brave'\n"
+            "'use my real browser', 'host browser', 'host brave', "
+            "'real browser', 'logged-in browser'\n"
+            "  - Spanish: 'usa mi navegador', 'mi navegador', 'usa mi brave', "
+            "'en mi navegador'\n"
             "  - Georgian/Latin: 'ჩემი ბრაუზერი', 'chemi brauzeri'\n\n"
             "Keywords for search_tools: browser, brave, chrome, host, "
-            "cookies, login, real, my, mybrowser, mybrave.\n\n"
+            "cookies, login, real, my, mine, mybrowser, mybrave, visible, "
+            "logged-in.\n\n"
+            "**Bridge vs container — when to use which:**\n"
+            "  - 'my'/'visible'/'real' present → THIS skill (host bridge, "
+            "real cookies, no Cloudflare challenges)\n"
+            "  - 'show me' / 'i want to watch' WITHOUT 'my' → "
+            "`browser(visible=true)` (container Brave + noVNC takeover, "
+            "fresh profile, you'll see it but no cookies)\n\n"
             "On first setup, returns a shell one-liner the user has to run "
             "once to relaunch Brave with CDP enabled. 'stop' switches back "
             "to the container browser."
@@ -86,6 +99,13 @@ class UseHostBrowserSkill(BaseSkill):
         settings = await get_browser_settings(self._config, user_id)
         port = getattr(self._config, "cdp_port", 9222)
 
+        # Marker file written by scripts/install-host-brave-bridge.sh — when
+        # present, the user has the launchd auto-start helper installed.
+        # We branch our messaging on this so we stop dumping raw shell
+        # commands to users who already set up the auto-bridge.
+        marker_path = self._config.database_dir / ".host_bridge_installed"
+        bridge_installed = marker_path.exists()
+
         # ─── status ─────────────────────────────────────────────────────
         if action == "status":
             mode = settings.get("use_host_browser", "off")
@@ -93,9 +113,12 @@ class UseHostBrowserSkill(BaseSkill):
             ws = await host_bridge.probe_host_cdp(port)
             reachable = "yes" if ws else "no"
             runtime = "docker" if host_bridge.is_docker_runtime() else "native"
+            installer = "yes" if bridge_installed else "no"
+            shared = "yes" if host_bridge.shared_host_token() else "no"
             return (
                 f"Host browser bridge: mode={mode}, runtime={runtime}, "
-                f"reachable_now={reachable}, last_source={last_source or 'never'}.\n"
+                f"reachable_now={reachable}, launchd_helper_installed={installer}, "
+                f"shared_token_in_env={shared}, last_source={last_source or 'never'}.\n"
                 + ("Use 'use my browser' to enable." if mode == "off"
                    else "Say 'stop host browser' to revert to the container Brave.")
             )
@@ -145,14 +168,41 @@ class UseHostBrowserSkill(BaseSkill):
                 "Say 'stop host browser' when you want to switch back."
             )
 
-        # Not reachable yet — show the setup one-liner.
+        # Not reachable. Two cases — the user has the auto-start helper
+        # installed but Brave is offline (just kick it), or they haven't
+        # set up the helper yet (recommend the installer).
+        if bridge_installed:
+            return (
+                f"Host bridge is armed but Brave isn't responding on port {port}. "
+                "Your launchd auto-start helper IS installed — Brave should be "
+                "running. Two things to try:\n\n"
+                "  1. Check if Brave is open. If you Cmd+Q'd it, just open it "
+                "from Spotlight again — the launchd plist only auto-restarts "
+                "on crash, not after a clean quit.\n\n"
+                "  2. Or kick the agent manually:\n"
+                "     ```\n"
+                "     launchctl kickstart -k gui/$(id -u)/sh.lazyclaw.brave-bridge\n"
+                "     ```\n\n"
+                "Once Brave's window is open, say 'use my browser' again."
+            )
+
+        # No helper installed yet — recommend the one-time installer first,
+        # then fall back to the manual command for users who don't want
+        # auto-start.
         command = host_bridge.build_launch_command(token)
         warning = host_bridge.security_warning()
         return (
             "Host browser bridge is armed but your host Brave isn't reachable "
-            f"on port {port} yet. To connect:\n\n"
+            f"on port {port} yet.\n\n"
+            "**Recommended (one-time setup, never copy a command again):**\n"
+            "```\n"
+            "bash scripts/install-host-brave-bridge.sh\n"
+            "docker compose restart lazyclaw\n"
+            "```\n"
+            "That installs a launchd agent so Brave auto-launches with the "
+            "debug port on every login, and survives crashes. After it runs, "
+            "say 'use my browser' again — connects first try.\n\n"
+            "**Or — one-shot manual launch (have to repeat after every reboot):**\n"
             f"```\n{command}\n```\n\n"
-            f"{warning}\n\n"
-            "Once Brave is running with the command above, say 'use my browser' "
-            "again (or any browser action) and I'll latch onto it."
+            f"{warning}"
         )

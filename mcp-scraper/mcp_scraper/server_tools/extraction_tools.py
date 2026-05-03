@@ -362,6 +362,172 @@ def register_extraction_tools(mcp, get_modules):
             }
 
     @mcp.tool(annotations=READONLY_ANNOTATIONS)
+    async def extract_business_info(
+        url: Annotated[str, Field(description="Target business website URL (a contact/about subpage usually has the richest JSON-LD)")],
+        use_undetected_browser: Annotated[bool, Field(description="Bypass anti-bot via crawl4ai's undetected mode + magic mode + cookie banner dismiss. Default True.")] = True,
+        timeout: Annotated[int, Field(description="Fetch timeout in seconds (default 30)")] = 30,
+    ) -> Dict[str, Any]:
+        """Extract structured business contact data (name, address, phone, email,
+        hours, geo) from a business webpage.
+
+        Pipeline:
+          1. ``<script type="application/ld+json">`` LocalBusiness/Restaurant/Store/etc.
+             with PostalAddress  →  confidence: high  (the ground truth)
+          2. ``<address>`` HTML tag fallback         →  confidence: medium
+          3. tel: / mailto: hints only               →  confidence: low (no address)
+          4. Nothing                                  →  confidence: none
+
+        DOES NOT use regex over body text — that pulls cookie-banner /
+        footer / nav fragments. If the page has no structured data, the
+        tool reports confidence='none' and tells the agent to try a
+        contact/about subpage rather than fabricating an address.
+
+        Use this BEFORE returning a business address to the user — search
+        snippets and document-body regex both lie. JSON-LD doesn't.
+        """
+        modules = get_modules()
+        if not modules:
+            return modules_unavailable_error()
+        web_crawling, *_ = modules
+
+        # Lazy import — keeps the new module independent of crawl4ai's heavy deps.
+        try:
+            from mcp_scraper.extraction_business import extract_business_info as _extract
+        except ImportError as exc:
+            return {
+                "success": False,
+                "error": f"extract_business_info module unavailable: {exc}",
+                "error_code": "module_unavailable",
+            }
+
+        try:
+            crawl_result = _convert_result_to_dict(await web_crawling.crawl_url_with_fallback(
+                url=url,
+                generate_markdown=False,
+                timeout=timeout,
+                use_undetected_browser=use_undetected_browser,
+            ))
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"fetch failed: {exc}",
+                "error_code": "fetch_failed",
+                "url": url,
+            }
+
+        if not crawl_result.get("success"):
+            return {
+                "success": False,
+                "error": crawl_result.get("error_message") or "fetch returned no content",
+                "error_code": "fetch_returned_empty",
+                "url": url,
+            }
+
+        # crawl4ai returns the raw HTML under ``html`` key (sometimes ``cleaned_html``
+        # — fall back to whichever is present).
+        html = crawl_result.get("html") or crawl_result.get("cleaned_html") or ""
+        info = _extract(html, source_url=url)
+        return {
+            "success": True,
+            "url": url,
+            "data": info.to_dict(),
+        }
+
+    @mcp.tool(annotations=READONLY_ANNOTATIONS)
+    async def extract_with_adaptive_selector(
+        url: Annotated[str, Field(description="Target URL")],
+        selector_id: Annotated[str, Field(description="Stable identifier for this extraction (e.g. 'price', 'job_title'). Used as the persistence key — same selector_id across visits = same tracked element. Pick one per (site, field).")],
+        initial_css: Annotated[str, Field(description="Seed CSS selector to use on the FIRST visit (e.g. '.product-price'). Subsequent visits use the stored fingerprint and ignore this unless the saved selector breaks.")],
+        domain: Annotated[Optional[str], Field(description="Domain key for storage (defaults to the URL host). Override when scraping subdomains you want to share state.")] = None,
+        timeout: Annotated[int, Field(description="Fetch timeout in seconds (default 30)")] = 30,
+        use_undetected_browser: Annotated[bool, Field(description="Use crawl4ai's undetected mode + magic mode + cookie banner dismiss")] = True,
+    ) -> Dict[str, Any]:
+        """Extract a single field with an adaptive selector that survives
+        DOM redesigns. SQLite-backed element fingerprinting at
+        ``~/.lazyclaw/scraper_selectors.db`` — first visit pins the
+        fingerprint, subsequent visits silently relocate the element when
+        the site renames a class or restructures the DOM.
+
+        Returns ``{success, url, status, score, text, css_path}`` where
+        ``status`` is one of:
+          * ``hit`` — exact fingerprint match via the saved CSS path
+          * ``relocated`` — DOM changed; we found the element by similarity
+            and updated the saved path. Future visits fast-path again.
+          * ``cold`` — first time for this (domain, selector_id). Stored.
+          * ``broken`` — element appears genuinely gone from this page.
+            Treat as "extractor broken, please report" — DO NOT fabricate
+            data. Investigate manually.
+
+        Use this when you'll be visiting the SAME site repeatedly and
+        need a single field (price, address, status, etc.) — price-watch,
+        appointment slot polling, batch business research, etc. For
+        one-off extractions, use ``intelligent_extract`` or
+        ``extract_business_info`` instead.
+        """
+        modules = get_modules()
+        if not modules:
+            return modules_unavailable_error()
+        web_crawling, *_ = modules
+
+        try:
+            from mcp_scraper.adaptive_selector import AdaptiveSelector
+        except ImportError as exc:
+            return {
+                "success": False,
+                "error": f"adaptive_selector module unavailable: {exc}",
+                "error_code": "module_unavailable",
+            }
+
+        try:
+            crawl_result = _convert_result_to_dict(await web_crawling.crawl_url_with_fallback(
+                url=url,
+                generate_markdown=False,
+                timeout=timeout,
+                use_undetected_browser=use_undetected_browser,
+            ))
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"fetch failed: {exc}",
+                "error_code": "fetch_failed",
+                "url": url,
+            }
+
+        if not crawl_result.get("success"):
+            return {
+                "success": False,
+                "error": crawl_result.get("error_message") or "fetch returned no content",
+                "error_code": "fetch_returned_empty",
+                "url": url,
+            }
+
+        html = crawl_result.get("html") or crawl_result.get("cleaned_html") or ""
+
+        # Default the domain key from the URL host so callers don't have
+        # to recompute it. Strip leading "www." so subdomains share state
+        # by default unless the caller overrode `domain` explicitly.
+        if not domain:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            netloc = parsed.netloc.lower()
+            domain = netloc[4:] if netloc.startswith("www.") else netloc
+
+        sel = AdaptiveSelector()
+        result = sel.find(
+            html, domain=domain, selector_id=selector_id, initial_css=initial_css,
+        )
+        return {
+            "success": result.status != "broken",
+            "url": url,
+            "domain": domain,
+            "selector_id": selector_id,
+            "status": result.status,
+            "score": round(result.score, 3),
+            "text": result.text,
+            "css_path": result.css_path,
+        }
+
+    @mcp.tool(annotations=READONLY_ANNOTATIONS)
     async def extract_structured_data(
         url: Annotated[str, Field(description="Target URL")],
         extraction_type: Annotated[str, Field(description="'css'|'llm'|'table'")] = "css",

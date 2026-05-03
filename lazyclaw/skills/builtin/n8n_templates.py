@@ -409,10 +409,10 @@ def _keyword_research_to_sheet(params: dict[str, Any]) -> dict:
 
     This is the template the brain should reach for when the user asks
     to "research keywords for X and put them in a sheet". Instead of
-    trying to orchestrate a Serper/SerpAPI call live, the template
-    bakes the researched keyword list into a Code node up front — so
-    running the workflow appends the rows the brain already vetted,
-    no external API credential needed.
+    trying to orchestrate a live search-API call, the template bakes
+    the researched keyword list into a Code node up front — so running
+    the workflow appends the rows the brain already vetted, no external
+    API credential needed.
 
     Expected params:
       name: workflow name

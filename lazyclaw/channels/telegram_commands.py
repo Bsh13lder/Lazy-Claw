@@ -2020,9 +2020,11 @@ class TelegramCommands:
         """Switch search provider or show usage.
 
         Usage:
-          /search           — show current provider + usage
-          /search serper    — switch to Serper.dev
-          /search serpapi   — switch to SerpAPI
+          /search             — show current provider + usage
+          /search auto        — Brave → scraper → DDG (default)
+          /search brave       — Brave Search API only
+          /search scraper     — mcp-scraper Google scrape only
+          /search duckduckgo  — DuckDuckGo only
         """
         user_id = await self._auth(update)
         if not user_id:
@@ -2036,7 +2038,7 @@ class TelegramCommands:
 
         if context.args:
             arg = context.args[0].lower()
-            if arg in ("serper", "serpapi", "duckduckgo", "auto"):
+            if arg in ("auto", "brave", "scraper", "duckduckgo"):
                 try:
                     from lazyclaw.settings.general import update_general_settings
 
@@ -2046,15 +2048,15 @@ class TelegramCommands:
                 except Exception as exc:
                     await self._reply(update, f"\u274c Failed to save: {exc}")
                     return
-                # Keep the legacy global in sync for paid providers so other
-                # users who haven't set a preference still get this default.
-                if arg in ("serper", "serpapi"):
+                # Mirror non-auto picks to the global default so other
+                # users without a preference inherit a sensible choice.
+                if arg != "auto":
                     set_active_provider(arg)
                 await self._reply(update, f"\U0001f50d Search provider set to: {arg}")
                 return
             await self._reply(
                 update,
-                "\u2753 Usage: <code>/search serper|serpapi|duckduckgo|auto</code>",
+                "\u2753 Usage: <code>/search auto|brave|scraper|duckduckgo</code>",
             )
             return
 
@@ -2064,7 +2066,7 @@ class TelegramCommands:
             f"\U0001f50d <b>Search Provider</b>\n\n"
             f"Active: <b>{provider}</b>\n"
             f"Usage this month: {usage.status()}\n\n"
-            f"Switch: <code>/search serper</code> or <code>/search serpapi</code>"
+            f"Switch: <code>/search brave</code> or <code>/search auto</code>"
         )
 
     # -- /note, /idea, /remember -------------------------------------------

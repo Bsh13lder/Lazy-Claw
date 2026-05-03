@@ -383,23 +383,44 @@ class CDPBackend:
     async def _resolve_host_preference(self) -> tuple[bool, str | None]:
         """Read the user's host-browser setting + token.
 
+        Token resolution: shared env var (LAZYCLAW_HOST_CDP_TOKEN, set by
+        the launchd installer) wins over per-user DB token. The env-var
+        path is the "single Mac, single user" common case after running
+        ``scripts/install-host-brave-bridge.sh`` — the same token sits in
+        the launchd plist's ``--remote-allow-origins`` flag and in .env,
+        so the handshake matches without any per-user setup. The DB
+        token still works for legacy / multi-user setups.
+
         Best-effort — any error means we default to container behaviour so
         the browser skill never fails for settings-lookup reasons.
         """
+        from lazyclaw.browser.host_bridge import shared_host_token
+
+        env_token = shared_host_token()
+
         if not self._user_id:
-            return False, None
+            # No user_id (CLI / startup probe). Use the shared env token
+            # if present so the bridge still works for non-user contexts.
+            return (bool(env_token), env_token)
         try:
             from lazyclaw.browser.browser_settings import get_browser_settings
             from lazyclaw.config import load_config
 
             settings = await get_browser_settings(load_config(), self._user_id)
             mode = settings.get("use_host_browser", "off")
-            token = settings.get("host_cdp_token")
-            prefer_host = mode in ("auto", "ask") and bool(token)
+            db_token = settings.get("host_cdp_token")
+            # Env wins. Fall back to DB token for legacy installs.
+            token = env_token or db_token
+            # When the env token is set, treat the bridge as armed —
+            # the user installed the launchd helper, the intent is clear.
+            prefer_host = bool(env_token) or (
+                mode in ("auto", "ask") and bool(db_token)
+            )
             return prefer_host, token
         except Exception:
             logger.debug("host-browser settings lookup failed (falling back to local)", exc_info=True)
-            return False, None
+            # Even on settings lookup failure, env token is enough to use the bridge.
+            return (bool(env_token), env_token)
 
     async def _find_cdp_endpoint(
         self, prefer_host: bool, host_token: str | None,

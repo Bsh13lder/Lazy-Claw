@@ -85,6 +85,24 @@ Requires: Python 3.11+, pipx, and at least one LLM path — Anthropic API key (r
 
 > **LazyClaw is optimized for Claude.** Sonnet 4.6 as brain + Haiku 4.5 as workers gives the fastest responses (2–5s) with excellent tool use, and everything is tuned around this pairing. **MiniMax M2.7 is also tested and works really well** as an alternative brain for users who prefer a flat subscription over per-token billing. LazyClaw auto-configures optimal model routing when it detects any supported provider key.
 
+### Docker on macOS — one extra step for browser tasks
+
+If you run LazyClaw via `docker compose`, the agent can drive your **real Mac Brave** (with all your cookies, logins, and Cloudflare clearance) instead of a fresh containerised Chromium. Set it up once:
+
+```bash
+make host-bridge       # installs ~/Library/LaunchAgents/sh.lazyclaw.brave-bridge.plist
+make rebuild           # container picks up the shared CDP token from .env
+```
+
+That installs a launchd agent that auto-launches Brave with `--remote-debugging-port=9222` on every login (and restarts on crash). After that, anytime you say "use my browser" / "work on my visible browser" in chat, the agent connects to your real Brave — you watch the page change in your normal window, no noVNC needed. Sites like Upwork, Reddit, Gmail see your live session, not a bot.
+
+Ops:
+```bash
+make host-bridge-status     # is it installed + reachable?
+make host-bridge-restart    # kick the launchd-managed Brave
+make host-bridge-uninstall  # remove the plist + clean .env
+```
+
 ## Architecture
 
 ```
@@ -268,7 +286,7 @@ Or install Ollama and `ollama pull` one of the bundled models. Or `claude login`
 
 CDP-based control of the user's real Brave/Chrome browser. No separate Chromium instance — the agent uses your actual browser with your logins, cookies, and sessions.
 
-- **Host Brave bridge (Docker-aware)** — when LazyClaw runs inside a container, the agent auto-detects the host's running Brave/Chrome via the `host.docker.internal` CDP bridge. Same browser, same cookies, zero extra login.
+- **Host Brave bridge (Docker-aware)** — when LazyClaw runs inside a container, the agent auto-detects the host's running Brave/Chrome via the `host.docker.internal` CDP bridge. Same browser, same cookies, zero extra login. **One-time setup on macOS:** `make host-bridge` installs a launchd plist that auto-starts Brave with the debug port on every login (and restarts on crash). After running, say "use my browser" / "work on my visible browser" in chat — agent connects first try, you watch the page change in your real Brave window (no noVNC needed). Status: `make host-bridge-status`. Uninstall: `make host-bridge-uninstall`.
 - **Live BrowserCanvas** — embedded in the chat sidebar. See the URL, action timeline (click / type / goto), and a thumbnail of the current page as the agent works. **Zero extra LLM tokens** — events flow UI-only, never enter the agent's context.
 - **Live mode** — one-tap toggle on the canvas. Captures a fresh screenshot after every action for 5 minutes. Use it when the agent is stuck or you just want to watch.
 - **Checkpoints** — the agent calls `request_user_approval` before risky actions (submit, pay, book, delete, sign). The canvas shows an inline Approve / Reject banner; agent blocks until you decide. Same name auto-approves on re-call.

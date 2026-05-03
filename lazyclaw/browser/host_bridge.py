@@ -63,6 +63,21 @@ def generate_host_token() -> str:
     return secrets.token_urlsafe(_TOKEN_BYTES)
 
 
+def shared_host_token() -> str | None:
+    """Read the shared host-bridge token from the env (set by the launchd
+    installer at scripts/install-host-brave-bridge.sh).
+
+    When this is set, EVERY user's host-bridge handshake uses this single
+    token — same one embedded in the launchd plist's
+    ``--remote-allow-origins=http://lazyclaw-<token>``. Per-user DB tokens
+    are still honored for legacy multi-user setups; the env var simply
+    takes precedence so a fresh `install-host-brave-bridge.sh` run gives
+    you a working bridge with zero per-user setup.
+    """
+    val = os.getenv("LAZYCLAW_HOST_CDP_TOKEN", "").strip()
+    return val or None
+
+
 def origin_for_token(token: str) -> str:
     """Build the Origin header value the container sends on the WS handshake."""
     return f"http://lazyclaw-{token}"

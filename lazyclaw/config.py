@@ -110,10 +110,20 @@ def _env_bool(name: str, *, default: bool) -> bool:
 
 
 def _detect_browser() -> str:
-    """Auto-detect best browser: Brave > Chrome > Chromium.
+    """Auto-detect best browser: Brave > Chrome > Chromium > Playwright bundle.
 
     Brave preferred because built-in ad/tracker blocking = cleaner pages for LLM.
+
+    Inside our Docker image (`Dockerfile` line 6-8) Chromium is intentionally
+    NOT installed at `/usr/bin/`; only Playwright's bundled Chromium ships,
+    under ``$PLAYWRIGHT_BROWSERS_PATH/chromium-XXXX/chrome-linux/chrome``.
+    Without probing that path the browser skill fast-fails inside the
+    container even though a usable browser binary IS present (causing
+    "show me visible" to silently no-op + noVNC canvas blank).
     """
+    import glob
+    import shutil
+
     candidates = [
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",  # macOS Brave
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",  # macOS Chrome
@@ -121,7 +131,6 @@ def _detect_browser() -> str:
         "/usr/bin/chromium-browser", # Alpine/older Debian
         "/usr/bin/google-chrome",    # Google Chrome on Linux
     ]
-    import shutil
 
     for path in candidates:
         if os.path.exists(path):
@@ -133,7 +142,33 @@ def _detect_browser() -> str:
         if found:
             return found
 
-    return ""  # No browser found — Playwright will use bundled Chromium
+    # Last resort: Playwright's bundled Chromium. Path is versioned
+    # (`chromium-1234`), so glob and pick the newest by lexical sort —
+    # Playwright versions are monotonic strings. Cross-platform: works
+    # for Linux/Docker (`chrome-linux/chrome`) and macOS dev installs
+    # (`chrome-mac/Chromium.app/...`).
+    pw_root = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "")
+    if not pw_root:
+        # Default Playwright cache locations
+        for default in (
+            os.path.expanduser("~/.cache/ms-playwright"),
+            "/ms-playwright",  # our Dockerfile sets this explicitly
+        ):
+            if os.path.isdir(default):
+                pw_root = default
+                break
+    if pw_root and os.path.isdir(pw_root):
+        for pattern in (
+            os.path.join(pw_root, "chromium-*", "chrome-linux", "chrome"),
+            os.path.join(pw_root, "chromium-*", "chrome-mac", "Chromium.app",
+                         "Contents", "MacOS", "Chromium"),
+        ):
+            matches = sorted(glob.glob(pattern), reverse=True)
+            for path in matches:
+                if os.path.exists(path):
+                    return path
+
+    return ""  # No browser found — host bridge is the only remaining path
 
 
 def save_env(key: str, value: str) -> None:

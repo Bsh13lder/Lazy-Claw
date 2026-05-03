@@ -41,50 +41,54 @@ def normalize_cookies_to_playwright_format(
     return result
 
 
-async def static_fetch_content(url: str, headers: dict = None, timeout: int = 30) -> Tuple[bool, str, str]:
+async def static_fetch_content(
+    url: str,
+    headers: dict = None,
+    timeout: int = 30,
+    impersonate: str = "chrome",
+    proxy: str | None = None,
+) -> Tuple[bool, str, str]:
     """
     Stage 1: Fast static HTTP fetch without browser overhead.
 
-    Uses httpx for direct HTTP requests with readability extraction.
+    Uses ``stealth_get`` (curl_cffi with Chrome TLS fingerprint when
+    available, plain httpx otherwise). The TLS-impersonation upgrade is
+    why this stage now succeeds on Cloudflare-protected EU business sites
+    that previously returned 403 here and forced a Playwright retry.
 
     Args:
         url: URL to fetch
-        headers: Optional HTTP headers
+        headers: Optional HTTP headers (merged on top of impersonate profile)
         timeout: Request timeout in seconds
+        impersonate: TLS fingerprint to mimic — chrome / safari17 / firefox / edge
+        proxy: Optional proxy URL
 
     Returns:
         Tuple of (success: bool, content: str, error: str)
     """
-    import httpx
+    from mcp_scraper.stealth_http import stealth_get
 
     try:
-        default_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        if headers:
-            default_headers.update(headers)
+        resp = await stealth_get(
+            url, headers=headers, timeout=timeout,
+            impersonate=impersonate, proxy=proxy,
+        )
+        if not resp.ok:
+            err = resp.error or f"HTTP error {resp.status_code}"
+            return False, "", f"Static fetch error: {err}"
 
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-            response = await client.get(url, headers=default_headers)
-            response.raise_for_status()
+        content_type = resp.headers.get("content-type", "").lower()
+        if "text/html" not in content_type and "application/xhtml" not in content_type:
+            return False, "", f"Non-HTML content type: {content_type}"
 
-            content_type = response.headers.get("content-type", "").lower()
-            if "text/html" not in content_type and "application/xhtml" not in content_type:
-                return False, "", f"Non-HTML content type: {content_type}"
+        html_content = resp.text
+        if len(html_content.strip()) < 100:
+            return False, "", "Content too short"
 
-            html_content = response.text
-            if len(html_content.strip()) < 100:
-                return False, "", "Content too short"
-
-            return True, html_content, ""
+        return True, html_content, ""
 
     except Exception as e:
-        error_msg = str(e)
-        if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
-            error_msg = f"HTTP error {e.response.status_code}"
-        return False, "", f"Static fetch error: {error_msg}"
+        return False, "", f"Static fetch error: {e}"
 
 
 def extract_spa_json_data(html_content: str) -> Tuple[bool, dict, str]:

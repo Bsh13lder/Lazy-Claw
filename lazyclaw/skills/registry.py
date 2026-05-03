@@ -311,11 +311,16 @@ class SkillRegistry:
         self.register(EcoListModelsSkill(config=config))
 
         from lazyclaw.skills.builtin.search_provider import (
-            SetSearchProviderSkill, ShowSearchProviderSkill,
+            ClearBraveApiKeySkill,
+            SetBraveApiKeySkill,
+            SetSearchProviderSkill,
+            ShowSearchProviderSkill,
         )
 
         self.register(SetSearchProviderSkill(config=config))
         self.register(ShowSearchProviderSkill(config=config))
+        self.register(SetBraveApiKeySkill(config=config))
+        self.register(ClearBraveApiKeySkill(config=config))
 
         from lazyclaw.skills.builtin.provider_management import (
             ProviderListSkill, ProviderAddSkill, ProviderScanSkill,

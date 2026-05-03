@@ -71,6 +71,13 @@ dependencies = [
     "pypdf",
 ]
 
+[project.optional-dependencies]
+# TLS-fingerprint impersonation for `stealth_http.stealth_get` — bypasses
+# JA3/JA4 fingerprint blocks on Cloudflare-protected sites that reject
+# plain httpx at the TLS layer before any HTML is served. ~5 MB compiled
+# extension. When missing, `stealth_http` silently falls back to httpx.
+stealth = ["curl_cffi>=0.7.0"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mcp_scraper*"]

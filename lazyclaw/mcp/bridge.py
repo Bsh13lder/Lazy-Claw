@@ -37,16 +37,18 @@ def is_scraper_shard(name: str) -> bool:
 
 # ── Per-user search backend injection ───────────────────────────────────
 # When the user changes their search backend (Web UI dropdown / Telegram
-# `/search serper` / NL `set_search_provider serper`), it lands in
+# `/search brave` / NL `set_search_provider brave`), it lands in
 # users.settings.general.search_provider. Bridge auto-injects it into
 # scraper search calls so the AI doesn't need to know.
-# Maps user-facing names to the scraper's internal mode names.
+#
+# NOTE: mcp-scraper has no Brave backend — Brave is handled at the LazyClaw
+# `web_search` skill level (its own httpx call, not via scraper). When a
+# user picks "brave" as their primary, scraper-only paths still need a
+# valid backend → fall through to "auto" (scraper's googlesearch chain).
 _USER_PROVIDER_TO_SCRAPER_BACKEND = {
     "auto": "auto",
-    "serper": "serper",
-    "serpapi": "serpapi",
-    # 'duckduckgo' user pref → scraper has no DDG backend; fall back to auto
-    # (Serper-first chain). LazyClaw's own web_search skill respects DDG.
+    "brave": "auto",
+    "scraper": "auto",
     "duckduckgo": "auto",
 }
 

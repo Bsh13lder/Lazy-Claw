@@ -1,14 +1,16 @@
-"""web_search must try mcp-scraper before SerpAPI/Serper.
+"""web_search chain pinned: Brave Search API → mcp-scraper → DuckDuckGo.
 
-User's call (2026-04-26): SerpAPI quota burns out at parallel scale; mcp-scraper's
-free `search_google` should be the primary provider. SerpAPI/Serper become opt-in
-fallbacks. These tests pin the contract — if a future change reintroduces SerpAPI
-as the default, they'll fail.
+Rewrite of 2026-05-02 — Serper / SerpAPI deleted. Brave became the primary
+provider (free 2,000/mo, clean curated index, cleaner snippets than Google
+scrape). Price-class queries (flights, shopping, "cheapest", etc.) skip
+search entirely and return a browser-instruction string.
+
+These tests pin the contract — if a future change reorders the chain or
+reintroduces a paid provider as default, they'll fail loudly.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,12 +18,11 @@ import pytest
 from lazyclaw.skills.builtin.web_search import (
     WebSearchSkill,
     _provider_cooldowns,
+    _is_price_query,
+    _canonical_live_url,
     set_active_provider,
 )
 
-# Canonical pooled-skill name that web_search now looks up (see
-# lazyclaw/mcp/bridge.py: PooledMCPToolSkill — registers tools under
-# `mcp_scraper_<tool>` regardless of pool size).
 _POOL_SEARCH_NAME = "mcp_scraper_search_google"
 
 
@@ -38,25 +39,9 @@ class _FakeScraperSkill:
 
 
 class _FakeRegistry:
-    """Tiny registry stub. Surfaces the canonical pooled scraper tool."""
-
     def __init__(self, scraper_skill: _FakeScraperSkill | None):
         self._scraper = scraper_skill
         self._tool_name = _POOL_SEARCH_NAME
-
-    def list_mcp_tools(self) -> list[dict]:
-        if self._scraper is None:
-            return []
-        return [{
-            "function": {
-                "name": self._tool_name,
-                "description": (
-                    "[MCP: mcp-scraper] Search Google via mcp-scraper. "
-                    "Direct scrape, no API key."
-                ),
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }]
 
     def get(self, name: str):
         if name == self._tool_name:
@@ -68,21 +53,63 @@ class _FakeRegistry:
 def _reset_state():
     """Each test starts with no cooldowns and the default provider."""
     _provider_cooldowns.clear()
-    set_active_provider("scraper")
+    set_active_provider("auto")
     yield
     _provider_cooldowns.clear()
-    set_active_provider("scraper")
+    set_active_provider("auto")
+
+
+# ── Brave Search API: primary path ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_brave_runs_first_when_key_configured(monkeypatch):
+    """When BRAVE_KEY is set, Brave is tried before scraper / DDG."""
+    fake = _FakeScraperSkill()
+    skill = WebSearchSkill(registry=_FakeRegistry(fake))
+    monkeypatch.setenv("BRAVE_KEY", "test-key")
+
+    with (
+        patch(
+            "lazyclaw.skills.builtin.web_search._brave_search",
+            new=AsyncMock(return_value="1. Brave hit\n   https://x.com\n   snippet"),
+        ) as brave,
+        patch(
+            "lazyclaw.skills.builtin.web_search._ddg_fallback", new=AsyncMock(),
+        ) as ddg,
+    ):
+        result = await skill.execute(
+            user_id="u1", params={"query": "find me restaurants"},
+        )
+
+    assert brave.called, "Brave should fire first"
+    assert len(fake.calls) == 0, "Scraper must not run when Brave succeeds"
+    assert not ddg.called, "DDG must not run when Brave succeeds"
+    assert "[Brave Search" in result
 
 
 @pytest.mark.asyncio
-async def test_scraper_runs_first_when_available():
+async def test_falls_back_to_scraper_when_brave_key_missing(monkeypatch):
+    """No Brave key → Brave is skipped, scraper runs.
+
+    Patches ``_resolve_brave_key`` directly because ``load_config()``
+    re-reads .env with override=True — a plain ``monkeypatch.delenv``
+    would be undone the moment the resolver runs.
+    """
     fake = _FakeScraperSkill()
     skill = WebSearchSkill(registry=_FakeRegistry(fake))
 
     with (
-        patch("lazyclaw.skills.builtin.web_search._serper_search", new=AsyncMock()) as serper,
-        patch("lazyclaw.skills.builtin.web_search._serpapi_search", new=AsyncMock()) as serpapi,
-        patch("lazyclaw.skills.builtin.web_search._ddg_fallback", new=AsyncMock()) as ddg,
+        patch(
+            "lazyclaw.skills.builtin.web_search._resolve_brave_key",
+            new=AsyncMock(return_value=""),
+        ),
+        patch(
+            "lazyclaw.skills.builtin.web_search._brave_search",
+            new=AsyncMock(return_value=""),  # treated as not configured
+        ) as brave,
+        patch(
+            "lazyclaw.skills.builtin.web_search._ddg_fallback", new=AsyncMock(),
+        ) as ddg,
     ):
         result = await skill.execute(
             user_id="u1", params={"query": "find me restaurants"},
@@ -90,116 +117,151 @@ async def test_scraper_runs_first_when_available():
 
     assert "[mcp-scraper" in result
     assert len(fake.calls) == 1
-    # search_google's MCP schema wraps everything in a `request` dict
     assert fake.calls[0]["params"]["request"]["query"] == "find me restaurants"
-    assert fake.calls[0]["params"]["request"]["num_results"] == 5
-    serper.assert_not_called()
-    serpapi.assert_not_called()
-    ddg.assert_not_called()
+    assert not ddg.called, "DDG must only run as last resort"
 
 
 @pytest.mark.asyncio
-async def test_scraper_skipped_when_user_picked_serper(monkeypatch):
-    """User-picked serper still works WHEN the paid-search flag is on.
+async def test_user_pinned_scraper_skips_brave(monkeypatch):
+    """User explicitly picked 'scraper' → Brave is bypassed.
 
-    The flag was added 2026-04-27 — paid providers stay dormant by default.
-    Picking "serper" via /search is harmless without the flag (DDG fallback).
-    With the flag on, the user's pick is honored and scraper is bypassed.
+    Patches ``resolve_active_provider`` directly because the real one
+    reads ``users.settings.general.search_provider`` from the DB which
+    defaults to "auto" and would override the global default.
     """
-    monkeypatch.setenv("LAZYCLAW_ENABLE_PAID_SEARCH", "1")
-    set_active_provider("serper")
+    monkeypatch.setenv("BRAVE_KEY", "test-key")
     fake = _FakeScraperSkill()
     skill = WebSearchSkill(registry=_FakeRegistry(fake))
 
-    # Set serper key so the serper branch is reachable
     with (
-        patch.dict("os.environ", {"SERPER_KEY": "test-key"}),
         patch(
-            "lazyclaw.skills.builtin.web_search._serper_search",
-            new=AsyncMock(return_value="serper hit"),
-        ) as serper,
+            "lazyclaw.skills.builtin.web_search.resolve_active_provider",
+            new=AsyncMock(return_value="scraper"),
+        ),
+        patch(
+            "lazyclaw.skills.builtin.web_search._brave_search",
+            new=AsyncMock(return_value="should not be called"),
+        ) as brave,
     ):
-        result = await skill.execute(
-            user_id="u1", params={"query": "find me restaurants"},
-        )
+        result = await skill.execute("u1", {"query": "anything"})
 
-    # Serper was called, scraper was not
-    assert serper.called
-    assert len(fake.calls) == 0
-    assert "Serper.dev" in result
+    assert not brave.called, "Brave must not run when user pinned scraper"
+    assert len(fake.calls) == 1
+    assert "[mcp-scraper" in result
 
 
 @pytest.mark.asyncio
-async def test_paid_providers_dormant_when_flag_off(monkeypatch):
-    """Even if user explicitly picked SerpAPI, the paid chain stays dormant
-    when LAZYCLAW_ENABLE_PAID_SEARCH is unset. Falls through to DDG instead.
-    """
-    monkeypatch.delenv("LAZYCLAW_ENABLE_PAID_SEARCH", raising=False)
-    set_active_provider("serpapi")
-    skill = WebSearchSkill(registry=_FakeRegistry(None))  # no scraper
+async def test_user_pinned_duckduckgo_skips_others(monkeypatch):
+    """User picked DDG → no Brave, no scraper."""
+    monkeypatch.setenv("BRAVE_KEY", "test-key")
+    fake = _FakeScraperSkill()
+    skill = WebSearchSkill(registry=_FakeRegistry(fake))
 
     with (
-        patch.dict("os.environ", {"SERPER_KEY": "k", "SERPAPI_KEY": "k"}),
         patch(
-            "lazyclaw.skills.builtin.web_search._serper_search",
-            new=AsyncMock(return_value="serper hit"),
-        ) as serper,
+            "lazyclaw.skills.builtin.web_search.resolve_active_provider",
+            new=AsyncMock(return_value="duckduckgo"),
+        ),
         patch(
-            "lazyclaw.skills.builtin.web_search._serpapi_search",
-            new=AsyncMock(return_value="serpapi hit"),
-        ) as serpapi,
+            "lazyclaw.skills.builtin.web_search._brave_search", new=AsyncMock(),
+        ) as brave,
         patch(
             "lazyclaw.skills.builtin.web_search._ddg_fallback",
-            new=AsyncMock(return_value="ddg result"),
+            new=AsyncMock(return_value="ddg results"),
         ) as ddg,
     ):
         result = await skill.execute("u1", {"query": "anything"})
 
-    assert not serper.called, "Serper should be gated off"
-    assert not serpapi.called, "SerpAPI should be gated off"
-    assert ddg.called, "DDG should be the fallback when paid is disabled"
+    assert not brave.called
+    assert len(fake.calls) == 0
+    assert ddg.called
     assert "DuckDuckGo" in result
 
 
 @pytest.mark.asyncio
-async def test_paid_providers_active_when_flag_on(monkeypatch):
-    """With LAZYCLAW_ENABLE_PAID_SEARCH=1 the paid chain runs as before."""
-    monkeypatch.setenv("LAZYCLAW_ENABLE_PAID_SEARCH", "1")
-    set_active_provider("serpapi")
-    skill = WebSearchSkill(registry=_FakeRegistry(None))
+async def test_scraper_failure_trips_cooldown_and_falls_to_ddg(monkeypatch):
+    """When scraper returns a 429 marker, cooldown trips and DDG runs.
 
-    with (
-        patch.dict("os.environ", {"SERPER_KEY": "k", "SERPAPI_KEY": "k"}),
-        patch(
-            "lazyclaw.skills.builtin.web_search._serpapi_search",
-            new=AsyncMock(return_value="serpapi hit"),
-        ) as serpapi,
-    ):
-        result = await skill.execute("u1", {"query": "anything"})
-
-    assert serpapi.called, "SerpAPI should fire when flag is on"
-    assert "SerpAPI" in result
-
-
-@pytest.mark.asyncio
-async def test_scraper_failure_trips_cooldown():
-    """A scraper exception (e.g. Google CAPTCHA) flips into cooldown so we don't
-    hammer it for the next minute."""
+    Auto-mode: no Brave key (we patch the resolver directly because
+    ``load_config()`` re-reads .env with override=True, which would
+    undo a plain ``monkeypatch.delenv`` whenever the resolver runs).
+    Scraper hits the rate-limit marker, caller falls through to DDG.
+    """
     fake = _FakeScraperSkill(return_value="rate limit hit, 429")
     skill = WebSearchSkill(registry=_FakeRegistry(fake))
 
     with (
         patch(
+            "lazyclaw.skills.builtin.web_search._resolve_brave_key",
+            new=AsyncMock(return_value=""),
+        ),
+        patch(
             "lazyclaw.skills.builtin.web_search._ddg_fallback",
             new=AsyncMock(return_value="ddg result"),
         ),
-        patch("lazyclaw.skills.builtin.web_search._serper_search", new=AsyncMock()),
-        patch("lazyclaw.skills.builtin.web_search._serpapi_search", new=AsyncMock()),
     ):
-        result = await skill.execute(
-            user_id="u1", params={"query": "anything"},
-        )
+        result = await skill.execute("u1", {"query": "anything"})
 
-    # Rate-limit detected — cooldown should be tripped, fallback ran (DDG)
     assert "scraper" in _provider_cooldowns
     assert "DuckDuckGo" in result
+
+
+# ── Price-query routing: search bypassed, browser instruction returned ──
+
+def test_price_query_classifier_flags_flight_keywords():
+    assert _is_price_query("cheapest flight from BCN to TBS June 15", "search")
+    assert _is_price_query("flight from Madrid to Tokyo", "search")
+    assert _is_price_query("how much does an iPhone 16 cost", "search")
+    assert _is_price_query("any iPhone 16 in stock at Apple Store", "search")
+    assert _is_price_query("hotel near Barcelona", "search")
+
+
+def test_price_query_classifier_skips_factual_queries():
+    assert not _is_price_query("what is the capital of France", "search")
+    assert not _is_price_query("python dataclass example", "search")
+    assert not _is_price_query("how to bake bread", "search")
+
+
+def test_canonical_url_for_flights_uses_google_flights():
+    url = _canonical_live_url("flight from BCN to TBS on 2026-06-15", "flights")
+    assert "google.com/travel/flights" in url
+    assert "BCN" in url and "TBS" in url
+    assert "2026-06-15" in url
+
+
+def test_canonical_url_for_shopping_uses_google_shopping():
+    url = _canonical_live_url("cheapest iPhone 16 Madrid", "shopping")
+    assert "tbm=shop" in url
+
+
+@pytest.mark.asyncio
+async def test_price_query_returns_browser_instruction_not_search(monkeypatch):
+    """A flight/shopping query must NOT hit any search backend.
+
+    Search APIs return cached snippets which lie about prices. The skill
+    must return a structured `[PRICE_QUERY]` instruction with a canonical
+    URL the brain can open in the browser.
+    """
+    monkeypatch.setenv("BRAVE_KEY", "test-key")
+    fake = _FakeScraperSkill()
+    skill = WebSearchSkill(registry=_FakeRegistry(fake))
+
+    with (
+        patch(
+            "lazyclaw.skills.builtin.web_search._brave_search", new=AsyncMock(),
+        ) as brave,
+        patch(
+            "lazyclaw.skills.builtin.web_search._ddg_fallback", new=AsyncMock(),
+        ) as ddg,
+    ):
+        result = await skill.execute(
+            "u1",
+            {"query": "cheapest flight from BCN to TBS on 2026-06-15"},
+        )
+
+    assert "[PRICE_QUERY" in result
+    assert "google.com/travel/flights" in result
+    assert "browser(" in result
+    assert not brave.called, "Brave must not run for price queries"
+    assert len(fake.calls) == 0, "Scraper must not run for price queries"
+    assert not ddg.called, "DDG must not run for price queries"

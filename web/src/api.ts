@@ -789,6 +789,9 @@ export interface SearchKeyStatus {
   serpapi: boolean;
   // Optional because older builds don't return it; UI guards with `keys?.brave`.
   brave?: boolean;
+  // Where the key was found — "vault" (chat-set, encrypted, NL-changeable),
+  // "env" (BRAVE_KEY environment variable), or "none" (not configured).
+  brave_source?: "vault" | "env" | "none";
 }
 
 export interface AboutInfo {

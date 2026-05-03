@@ -73,20 +73,30 @@ async def get_about(
     from lazyclaw.llm.eco_settings import get_eco_settings
     from lazyclaw.llm.free_providers import discover_providers
     from lazyclaw.skills.builtin.web_search import (
-        _SERPAPI_MONTHLY_LIMIT,
-        _SERPER_MONTHLY_LIMIT,
+        _BRAVE_MONTHLY_LIMIT,
         get_search_usage,
     )
 
     eco = await get_eco_settings(config, user.id)
     general = await get_general_settings(config, user.id)
     usage = get_search_usage()
-    # Authoritative API-key presence — reads env directly so the UI doesn't
-    # have to infer "configured" from quota/usage heuristics that fail on a
-    # fresh install before any request has been made.
+    # Authoritative API-key presence — checks vault FIRST (chat-set keys
+    # take precedence and don't require restart), then falls back to env.
+    # The UI shows ✓ when either source has it.
+    has_brave_env = bool(os.environ.get("BRAVE_KEY", "").strip())
+    has_brave_vault = False
+    try:
+        from lazyclaw.crypto.vault import get_credential
+        stored = await get_credential(config, user.id, "brave_key")
+        has_brave_vault = bool(stored)
+    except Exception as exc:
+        logger.debug("vault check for brave_key failed: %s", exc)
     search_keys = {
-        "serper": bool(os.environ.get("SERPER_KEY", "").strip()),
-        "serpapi": bool(os.environ.get("SERPAPI_KEY", "").strip()),
+        "brave": has_brave_env or has_brave_vault,
+        "brave_source": (
+            "vault" if has_brave_vault
+            else ("env" if has_brave_env else "none")
+        ),
     }
 
     try:
@@ -114,10 +124,9 @@ async def get_about(
         "eco_mode": eco.get("mode", "hybrid"),
         "search_provider": general.get("search_provider", "auto"),
         "search_quota": {
-            "serper_used": usage.serper_count,
-            "serper_limit": _SERPER_MONTHLY_LIMIT,
-            "serpapi_used": usage.serpapi_count,
-            "serpapi_limit": _SERPAPI_MONTHLY_LIMIT,
+            "brave_used": usage.brave_count,
+            "brave_limit": _BRAVE_MONTHLY_LIMIT,
+            "scraper_used": usage.scraper_count,
             "reset_month": usage.reset_month,
         },
         "search_keys": search_keys,

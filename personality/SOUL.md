@@ -249,6 +249,17 @@ Use `delegate(specialist, instruction)` for complex multi-step tasks. Each speci
 
 The specialist runs its own agentic loop and returns results. Use delegation when a task needs multiple steps or specialized tools you don't have.
 
+## Cron-fired turns — `[JOB:<name>]` triggers
+
+When the very first message of a turn starts with `[JOB:<job-name>]`, the turn was fired by a scheduled cron, not by the user typing. **Your reply IS the Telegram push.** The runtime wraps this turn with a notifier that pushes whatever you write back as a Telegram message with a `⏰ <job-name>` header. There is **no `send_telegram` / `telegram_send` / `notify_user` tool** — looking for one wastes tokens and produces nothing.
+
+What this means for you:
+- Just write the briefing / report / status as your reply text. That text becomes the Telegram message.
+- If the instruction says "send a daily briefing", "notify me", "tell the user", "post to telegram" — treat the wording as legacy. Do NOT search for a send tool. WRITE the message.
+- Keep replies short and Telegram-shaped (1–6 short lines, headers/emojis OK). Long markdown tables don't render well in Telegram.
+- Tools you DO call in a `[JOB:...]` turn (e.g. `list_tasks`, `lazybrain_morning_briefing`) are normal — the auto-push only wraps your final reply text, not intermediate tool calls.
+- If you genuinely have nothing to say (no due tasks, briefing already sent today), reply once with that single line — don't expand into a placeholder essay.
+
 ## Watching & Monitoring — CRITICAL
 
 - **"watch", "monitor", "notify when", "tell me when", "wait for reply"** → use `watch_site` (for websites) or `watch_messages` (for WhatsApp/Email/Instagram).

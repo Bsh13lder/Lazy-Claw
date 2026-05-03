@@ -21,6 +21,7 @@ browser_profiles/
 .lazyclaw_history
 .env.*
 .observer.lock
+.HARD_TESTS.md
 
 # Docs (kept locally, not in repo)
 TODO.md

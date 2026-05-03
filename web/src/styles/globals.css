@@ -1043,24 +1043,122 @@ html, body {
   font-weight: 600;
 }
 
-/* ── LazyBrain neural-link graph: photon flow along edges ──
-   CSS-only data-flow streak. Compositor-thread; scales to thousands
-   of edges without React reconciliation. Honors physicsFrozen via
-   data-frozen attr and prefers-reduced-motion. */
+/* ── LazyBrain solar-system graph: GPU-only motion ─────────────
+   Every animation here lives on the compositor thread. The graph
+   never re-renders React for motion — `pulseTick` and per-frame
+   setTick were the lag source; CSS keyframes are free at any node
+   count. Honors freeze via data-frozen on the canvas root and
+   respects prefers-reduced-motion. */
+@keyframes lb-sun-core-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50%      { opacity: 0.78; transform: scale(1.07); }
+}
+@keyframes lb-sun-corona-breath {
+  0%, 100% { opacity: 0.74; transform: scale(1); }
+  50%      { opacity: 0.92; transform: scale(1.12); }
+}
+@keyframes lb-sun-pupil-flicker {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0.85; }
+}
+@keyframes lb-orbit-shimmer {
+  to { stroke-dashoffset: -120; }
+}
 @keyframes lb-edge-flow {
   to { stroke-dashoffset: -50; }
 }
-.lazybrain-root .lb-edge-flow {
-  animation: lb-edge-flow linear infinite;
-  will-change: stroke-dashoffset;
+@keyframes lb-edge-active-glow {
+  0%, 100% { stroke-opacity: 0.55; }
+  50%      { stroke-opacity: 0.95; }
 }
-.lazybrain-root .lb-edge-flow[data-frozen="1"] {
-  animation-play-state: paused;
+@keyframes lb-hub-halo {
+  0%, 100% { opacity: 0.32; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(1.18); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .lazybrain-root .lb-edge-flow {
-    animation: none;
-    opacity: 0;
-  }
+@keyframes lb-node-glow {
+  0%, 100% { opacity: 0.7; }
+  50%      { opacity: 1; }
 }
 
+/* Freeze toggle — when the user clicks ❄, the GraphView root div
+   gets data-frozen="1". Every CSS animation under it pauses on the
+   compositor thread (no JS work, no repaint cost). The orbital sim
+   in JS land also halts, so position changes stop too. */
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-sun-core,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-sun-corona,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-sun-pupil,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-orbit-ring,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-edge-flow,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-edge-active,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-hub-halo,
+.lazybrain-root .lb-graph-canvas[data-frozen="1"] .lb-node-focused .lb-node-body {
+  animation-play-state: paused !important;
+}
+
+/* Sun layers — three nested groups with offset cadences so the
+   star never feels mechanical. transform-box: fill-box scopes
+   `transform-origin: center` to each circle's own bbox. */
+.lazybrain-root .lb-sun-core {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: lb-sun-core-pulse 6s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+.lazybrain-root .lb-sun-corona {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: lb-sun-corona-breath 9s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+.lazybrain-root .lb-sun-pupil {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: lb-sun-pupil-flicker 3.5s ease-in-out infinite;
+  will-change: opacity;
+}
+
+/* Orbit guideline rings — slow shimmer along the dash pattern.
+   Each ring picks its own speed via inline animation-duration. */
+.lazybrain-root .lb-orbit-ring {
+  animation: lb-orbit-shimmer linear infinite;
+  will-change: stroke-dashoffset;
+}
+
+/* Edge "photon flow" — dash that slides along the path. ONLY the
+   focused/active edges get this animation now (was per-edge, ate
+   the GPU at scale). Baseline edges stay still and lit. */
+.lazybrain-root .lb-edge-flow {
+  animation: lb-edge-flow 2.4s linear infinite;
+  will-change: stroke-dashoffset;
+}
+.lazybrain-root .lb-edge-active {
+  animation: lb-edge-active-glow 2.8s ease-in-out infinite;
+}
+
+/* Hub planet halos — only the top-5 nodes get this; barely-there
+   warm pulse so they read as gravitationally significant. */
+.lazybrain-root .lb-hub-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: lb-hub-halo 5.2s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+/* Hovered/focused node body — gentle glow modulation. CSS-only,
+   triggered by toggling the className on the node group. */
+.lazybrain-root .lb-node-focused .lb-node-body {
+  animation: lb-node-glow 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lazybrain-root .lb-sun-core,
+  .lazybrain-root .lb-sun-corona,
+  .lazybrain-root .lb-sun-pupil,
+  .lazybrain-root .lb-orbit-ring,
+  .lazybrain-root .lb-edge-flow,
+  .lazybrain-root .lb-edge-active,
+  .lazybrain-root .lb-hub-halo,
+  .lazybrain-root .lb-node-focused .lb-node-body {
+    animation: none !important;
+  }
+}

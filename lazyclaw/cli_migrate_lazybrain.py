@@ -80,12 +80,14 @@ async def migrate_personal_memory(
             if dry_run:
                 mapping[src_id] = "<dry-run>"
                 continue
+            kind = mem_type or "fact"
+            owner_tag = "owner/user" if kind == "fact" else "owner/agent"
             note = await lb_store.save_note(
                 config,
                 user_id,
                 content=content,
-                title=f"{mem_type or 'fact'}: {content[:60]}",
-                tags=["imported/personal", mem_type or "fact"],
+                title=f"{kind}: {content[:60]}",
+                tags=["imported/personal", kind, owner_tag],
                 importance=importance or 5,
             )
             mapping[src_id] = note["id"]
@@ -130,7 +132,7 @@ async def migrate_daily_logs(
                 user_id,
                 content=body,
                 title=f"Journal — {date}",
-                tags=["imported/daily", f"journal/{date}"],
+                tags=["imported/daily", f"journal/{date}", "owner/user"],
                 importance=4,
             )
             mapping[src_id] = note["id"]
@@ -279,7 +281,7 @@ async def migrate_markdown_layers(
                 user_id,
                 content=body,
                 title=f"Layer import — {layer.value}",
-                tags=["imported/layer", f"layer/{layer.value}"],
+                tags=["imported/layer", f"layer/{layer.value}", "owner/agent"],
                 importance=6,
             )
             mapping[source_key] = note["id"]

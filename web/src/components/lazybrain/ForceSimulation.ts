@@ -31,6 +31,18 @@ export interface SimEdge {
   target: string;
 }
 
+/** Per-node visual radius hint passed in at construction. Drives the
+ *  per-node collision pass so hubs (r≈27) push neighbours out further
+ *  than leaves (r≈9). Without this the global REPULSION_MIN clamp left
+ *  small nodes only ~14px of breathing room — labels overlapped on
+ *  any cluster denser than a few notes. */
+export interface SimNodeInput {
+  id: string;
+  pinned?: boolean;
+  /** Visual radius in px. Defaults to 12 if omitted. */
+  r?: number;
+}
+
 export type SimMode = "orbital" | "force";
 
 export interface SimOptions {
@@ -103,6 +115,24 @@ export class ForceSimulation {
   // Edge list as index pairs — precomputed in the constructor so stepForce
   // doesn't rebuild a Map<string, number> from scratch every frame.
   private _edgePairs!: Int32Array;
+  // Per-node visual radius (Float32Array for cache-friendly hot-loop reads).
+  // Used by stepForce for the per-node collision pass. Index-aligned with
+  // this.nodes.
+  private _radii!: Float32Array;
+  // Per-node repulsion mass — scales the Coulomb force a node both
+  // emits and feels. Computed as `1 + sqrt(deg) * 0.4` so a hub with
+  // 130 children (mass ≈ 5.6) pushes much harder than a leaf (mass 1).
+  // This is the trick that makes hubs visibly separate into "islands"
+  // instead of stacking into one center blob — vanilla d3-force with
+  // a uniform charge doesn't do this; Obsidian's graph view does.
+  private _repelMass!: Float32Array;
+  // Per-edge spring strength scale — d3-force convention:
+  //   strength = 1 / min(deg(a), deg(b))
+  // High-degree → low-degree edges (hub→leaf) keep full strength, so
+  // leaves orbit their hub tightly. Hub→hub edges (rare) get weak
+  // strength, so cross-cluster connections don't collapse the hubs
+  // back together. Index-aligned to _edgePairs/2.
+  private _edgeStrengths!: Float32Array;
   /** Force-mode cooldown — counts consecutive ticks where total kinetic
    *  energy is below COOL_THRESHOLD. Once it crosses COOL_TICKS the sim
    *  is "cooled" and the renderer can stop reconciling React on every
@@ -110,6 +140,13 @@ export class ForceSimulation {
    *  that should re-stir the layout). Orbital mode never cools (always
    *  rotating by design). */
   private _quietTicks = 0;
+  /** d3-force-style alpha. All forces are multiplied by this each tick;
+   *  it decays from 1 → 0 over ~120 ticks (`1 - 0.0228` per tick), so
+   *  forces shrink as the layout converges. Without this, sustained
+   *  close-range Coulomb forces keep re-energizing the spring system
+   *  forever and the graph oscillates. With it, kinetic energy is
+   *  bounded and the sim settles like Logseq/Obsidian. */
+  private _alpha = 1.0;
   /** True if the constructor restored at least one node position from
    *  ``options.savedPositions``. The renderer reads this to decide
    *  whether to start the graph in "frozen physics" mode (we already
@@ -117,7 +154,7 @@ export class ForceSimulation {
   private _usedSavedPositions = false;
 
   constructor(
-    nodes: Array<{ id: string; pinned?: boolean }>,
+    nodes: SimNodeInput[],
     edges: SimEdge[],
     options: SimOptions,
   ) {
@@ -131,18 +168,26 @@ export class ForceSimulation {
 
     // Bucket by orbit with stable hash-based order so rebuilds don't
     // reshuffle positions visually.
-    const buckets: Array<Array<{ id: string; pinned?: boolean }>> =
+    const buckets: SimNodeInput[][] =
       Array.from({ length: NUM_ORBITS }, () => []);
     for (const n of nodes) {
       const o = Math.max(0, Math.min(NUM_ORBITS - 1, orbitOf(n.id)));
       buckets[o].push(n);
     }
     for (const b of buckets) b.sort((a, c) => hash(a.id) - hash(c.id));
+    // Index radii by id once — looked up after this.nodes is built so
+    // _radii is index-aligned with the final node order.
+    const radiusOf = new Map<string, number>();
+    for (const n of nodes) {
+      radiusOf.set(n.id, Number.isFinite(n.r) ? (n.r as number) : 12);
+    }
 
     // Galaxy-style ring radii — pushed outward so the inner core breathes
-    // and dense rings have room to fan out into a belt rather than pile up.
-    const base = Math.min(this.w, this.h) * 0.14;
-    const radii = [base * 1.1, base * 2.0, base * 2.95, base * 3.9];
+    // and dense rings have room to fan out into a belt rather than pile
+    // up. Spread is wider on outer rings (more lesson/fact nodes there),
+    // and bigger overall so halos don't collide with neighbours.
+    const base = Math.min(this.w, this.h) * 0.15;
+    const radii = [base * 1.3, base * 2.45, base * 3.7, base * 5.0];
 
     this.nodes = [];
     if (this._mode === "force") {
@@ -152,9 +197,7 @@ export class ForceSimulation {
       for (let o = 0; o < NUM_ORBITS; o++) {
         this._orbitCounts[o] = buckets[o].length;
       }
-      const allBucketed = ([] as Array<{ id: string; pinned?: boolean }>).concat(
-        ...buckets,
-      );
+      const allBucketed = ([] as SimNodeInput[]).concat(...buckets);
       for (const n of allBucketed) {
         const a = hash(n.id + "fa") * Math.PI * 2;
         const r = 80 + hash(n.id + "fr") * 220;
@@ -177,11 +220,13 @@ export class ForceSimulation {
         const bucket = buckets[o];
         const count = bucket.length;
         this._orbitCounts[o] = count;
-        const minArcPerNode = 42;
+        // 56px minimum arc-per-node + a wider radial belt so a hovered
+        // halo never collides with the next planet on the same ring.
+        const minArcPerNode = 56;
         const ringCircumference = 2 * Math.PI * radii[o];
         const usedPerNode = count > 0 ? ringCircumference / count : ringCircumference;
         const crowding = Math.max(1, minArcPerNode / Math.max(1, usedPerNode));
-        const maxJitter = Math.min(72, 18 + crowding * 18);
+        const maxJitter = Math.min(110, 26 + crowding * 26);
         const slotScatter = 0.28;
         bucket.forEach((n, idx) => {
           const slot = (idx / Math.max(1, count)) * Math.PI * 2;
@@ -270,21 +315,61 @@ export class ForceSimulation {
     const N = this.nodes.length;
     this._fx = new Float32Array(N);
     this._fy = new Float32Array(N);
+    // Build per-node radius array index-aligned with this.nodes. Default
+    // to 12 if the caller didn't pass a hint (legacy paths or unknown ids).
+    this._radii = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      this._radii[i] = radiusOf.get(this.nodes[i].id) ?? 12;
+    }
     const nodeIndex: Map<string, number> = new Map(
       this.nodes.map((n, i) => [n.id, i]),
     );
     this._edgePairs = new Int32Array(this.edges.length * 2);
+    this._edgeStrengths = new Float32Array(this.edges.length);
     let ep = 0;
+    let es = 0;
+    // Index-aligned helper: degree by node index, used for both edge
+    // strengths (1/min) and per-node repulsion mass below.
+    const degByIdx = new Int32Array(N);
+    for (let i = 0; i < N; i++) {
+      degByIdx[i] = this._degree.get(this.nodes[i].id) ?? 0;
+    }
     for (const e of this.edges) {
       const i = nodeIndex.get(e.source);
       const j = nodeIndex.get(e.target);
       if (i === undefined || j === undefined) continue;
       this._edgePairs[ep++] = i;
       this._edgePairs[ep++] = j;
+      // d3-force link strength: 1 / min(deg(a), deg(b)). Hub→leaf
+      // (min=1) → strength 1.0. Hub→hub (min=50+) → strength ≤ 0.02
+      // → barely pulls, lets hubs separate under repulsion.
+      const minDeg = Math.max(1, Math.min(degByIdx[i], degByIdx[j]));
+      this._edgeStrengths[es++] = 1 / minDeg;
     }
     // Trim trailing unused slots if any edges were dropped after the filter.
     if (ep < this._edgePairs.length) {
       this._edgePairs = this._edgePairs.slice(0, ep);
+      this._edgeStrengths = this._edgeStrengths.slice(0, es);
+    }
+
+    // Per-node repulsion mass — heavier nodes (hubs) push everything
+    // around them harder. sqrt scaling keeps the spread reasonable:
+    // leaf (deg 1) = 1.4, average (deg 4) = 1.8, hub (deg 130) = 5.6.
+    // The 0.4 coefficient was tuned to make hub clusters visibly
+    // separate without flying apart on first frame.
+    this._repelMass = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      this._repelMass[i] = 1 + Math.sqrt(degByIdx[i]) * 0.4;
+    }
+
+    // Saved positions: start with a moderate alpha so we get the
+    // benefit of remembered layouts but the new force model still has
+    // enough energy to redistribute clusters that were saved under the
+    // OLD forces (e.g., a previous "everything stacked in one blob"
+    // layout will fan out into proper hub-islands on first reload).
+    // Cold start (no saved): full alpha=1.0 from random scatter.
+    if (this._usedSavedPositions && this._mode === "force") {
+      this._alpha = 0.4;
     }
   }
 
@@ -309,33 +394,16 @@ export class ForceSimulation {
   step(): this {
     this.tick += 1;
     if (this._mode === "force") {
-      // Skip the expensive O(N²) physics pass once the layout has cooled —
-      // but keep applying the cheap rigid rotation around the canvas
-      // center every tick so the constellation looks like a real solar
-      // system, slowly revolving whether it's converging or settled.
+      // Force-only motion. After the spring layout settles (cooled),
+      // step() is a complete no-op — no rest rotation, no work at all.
+      // Combined with the GraphView idle-frame skip, this means a
+      // settled graph costs literally zero CPU/GPU until the user
+      // interacts. This matches Obsidian's behaviour.
       if (!this.cooled()) this.stepForce();
-      this.applyRestRotation();
     } else {
       this.stepOrbital();
     }
     return this;
-  }
-
-  /** Slow rigid rotation of every non-pinned node around the canvas
-   *  center. Not a physics force — just a 2D rotation matrix per node,
-   *  O(N) per tick. Period ≈ 150s for a full revolution, below the
-   *  threshold where motion feels unsettling but above "frozen". */
-  private applyRestRotation(): void {
-    const omega = 0.00075; // radians per tick
-    const cosO = Math.cos(omega);
-    const sinO = Math.sin(omega);
-    for (const n of this.nodes) {
-      if (n.pinned) continue;
-      const dx = n.x - this.cx;
-      const dy = n.y - this.cy;
-      n.x = this.cx + dx * cosO - dy * sinO;
-      n.y = this.cy + dx * sinO + dy * cosO;
-    }
   }
 
   private stepOrbital(): void {
@@ -356,31 +424,42 @@ export class ForceSimulation {
   }
 
   private stepForce(): void {
-    // Force-directed pass — three forces per node:
-    //   1. Gentle gravity toward canvas center keeps everyone on-screen.
-    //   2. Pairwise repulsion (Coulomb 1/r²) keeps nodes from overlapping.
-    //   3. Edge springs pull linked nodes toward SPRING_LEN apart, so
-    //      densely-linked sub-graphs collapse into local clusters around
-    //      the pinned hub. This is the "moons orbiting the sun" feel.
-    // Plus damping + velocity cap so the system settles instead of jittering.
-    // Stronger repulsion + longer spring rest length so clusters actually
-    // breathe around the sun instead of piling on top of it. The hub stays
-    // clearly visible at center; direct-linked notes sit ~130px out.
-    // Radial equilibrium mode — every node wants to sit at distance
-    // R_TARGET from the decorative sun at canvas center. Nodes too far
-    // out get pulled in; nodes too close get pushed out. This produces
-    // a ring/disk of notes around the sun instead of a pile ON TOP of
-    // the sun (which is what linear center-gravity gave us). Linked
-    // clusters still bunch together via the edge-spring pass below,
-    // the bunching just happens ON the ring.
-    const REPULSION_K   = 1800;
-    const REPULSION_MIN = 22;
-    const SPRING_K      = 0.028;
-    const SPRING_LEN    = 115;
-    const GRAVITY_K     = 0.006;
-    const DAMPING       = 0.92;
-    const V_MAX         = 5.5;
-    const R_TARGET      = Math.min(this.w, this.h) * 0.28;
+    // d3-force / Logseq-style layout. The critical detail is `alpha` —
+    // all forces are multiplied by this scalar, which decays from 1
+    // toward 0 over ~120 ticks. As alpha drops, forces shrink, the
+    // sim's kinetic energy is bounded, and oscillation dies out. This
+    // is how Logseq + Obsidian settle without shaking.
+    //
+    //   1. Linear gravity toward canvas centre — keeps everyone on-screen.
+    //   2. Pairwise repulsion (Coulomb 1/r²) with per-node-radius clamp.
+    //   3. Edge springs pull linked nodes toward SPRING_LEN apart.
+    const ALPHA_DECAY   = 0.0228; // d3 default — settles in ~120 ticks
+    const ALPHA_MIN     = 0.005;
+    // Base repulsion. Multiplied per-pair by mass[i]*mass[j] so hubs
+    // (mass≈5) push other hubs out an order of magnitude harder than
+    // leaf-leaf. This is what creates Obsidian-style cluster islands
+    // instead of one big stacked blob.
+    const REPULSION_K   = 360;
+    const COLLIDE_K     = 2.0;
+    const COLLIDE_PAD   = 8;
+    // Base spring. Multiplied per-edge by 1/min(deg) so hub→leaf
+    // springs stay strong (leaves orbit) while hub→hub springs weaken
+    // (hubs separate). d3-force convention. 0.08 balances against the
+    // new mass-scaled repulsion — hub→leaf nets ~1.6× the old uniform
+    // 0.05; hub→hub nets ~0.03× (50× weaker than before, lets hubs
+    // drift apart).
+    const SPRING_K      = 0.08;
+    const SPRING_LEN    = 130;   // Obsidian-grade cluster spacing
+    const GRAVITY_K     = 0.008; // softer pull so cluster islands fan out
+    const DAMPING       = 0.88;
+    const V_MAX         = 4.0;
+
+    // Stop integrating entirely once alpha drops below ALPHA_MIN. The
+    // existing _quietTicks counter then accumulates → cooled() fires →
+    // RAF loop stops reading sim positions → zero CPU at rest.
+    if (this._alpha < ALPHA_MIN) return;
+    const alpha = this._alpha;
+    this._alpha *= 1 - ALPHA_DECAY;
 
     const N = this.nodes.length;
     // Reuse preallocated scratch buffers — zero in place instead of
@@ -391,39 +470,43 @@ export class ForceSimulation {
     fx.fill(0);
     fy.fill(0);
 
-    // Radial spring — pull each node toward distance R_TARGET from the
-    // canvas center. Replaces linear "pull to origin" so nodes form a
-    // ring around the sun rather than piling on it.
+    // Linear gravity toward canvas centre — keeps everyone on-screen
+    // and pulls less-connected leaves inward. Replaces the old radial
+    // R_TARGET spring (which forced all nodes onto a single ring and
+    // left the centre empty — not how Obsidian looks).
     for (let i = 0; i < N; i++) {
       const n = this.nodes[i];
-      const dxC = n.x - this.cx;
-      const dyC = n.y - this.cy;
-      // Inline sqrt — Math.hypot is polymorphic + overflow-safe, slow in
-      // tight loops. Our coords never overflow float32, so plain sqrt wins.
-      const r = Math.sqrt(dxC * dxC + dyC * dyC) || 0.001;
-      const rErr = r - R_TARGET;       // +ve: too far out, -ve: too close in
-      const rad = -GRAVITY_K * rErr;   // -ve pulls toward center, +ve pushes out
-      fx[i] += (dxC / r) * rad;
-      fy[i] += (dyC / r) * rad;
+      fx[i] += (this.cx - n.x) * GRAVITY_K;
+      fy[i] += (this.cy - n.y) * GRAVITY_K;
     }
 
-    // Pairwise repulsion — O(N²), fine up to ~500 nodes.
-    const minD2 = REPULSION_MIN * REPULSION_MIN;
+    // Pairwise repulsion — Coulomb 1/r², O(N²), fine up to ~500 nodes.
+    // Two upgrades vs vanilla Coulomb:
+    //   1. Per-node radius-aware minD clamp (replaces old global =14).
+    //   2. Per-pair mass scaling (mass[i]*mass[j]) — hubs push hubs
+    //      ~30× harder than leaves push leaves, which is what makes
+    //      Obsidian-style "cluster islands" instead of one giant blob.
+    const radii = this._radii;
+    const mass = this._repelMass;
     for (let i = 0; i < N; i++) {
       const a = this.nodes[i];
       const ax = a.x;
       const ay = a.y;
+      const ri = radii[i];
+      const mi = mass[i];
       for (let j = i + 1; j < N; j++) {
         const b = this.nodes[j];
         let dx = b.x - ax;
         let dy = b.y - ay;
         let d2 = dx * dx + dy * dy;
+        const minD = (ri + radii[j]) * COLLIDE_K + COLLIDE_PAD;
+        const minD2 = minD * minD;
         if (d2 < minD2) {
           if (d2 < 0.0001) { dx = (i - j) * 0.5; dy = (j - i) * 0.5; d2 = 1; }
           const scale = Math.sqrt(minD2 / d2);
           dx *= scale; dy *= scale; d2 = minD2;
         }
-        const f = REPULSION_K / d2;
+        const f = (REPULSION_K * mi * mass[j]) / d2;
         const d = Math.sqrt(d2);
         const ux = dx / d, uy = dy / d;
         fx[i] -= ux * f; fy[i] -= uy * f;
@@ -431,11 +514,13 @@ export class ForceSimulation {
       }
     }
 
-    // Edge springs — pull linked endpoints to SPRING_LEN apart. This is
-    // what makes related notes cluster together as moons. We iterate a
-    // preflattened Int32Array of [i0,j0,i1,j1,...] pairs built in the
-    // constructor, so no Map lookups in the hot path.
+    // Edge springs — d3-force-style: per-edge strength = SPRING_K *
+    // (1/min(deg(a), deg(b))). Strong hub→leaf pulls keep leaves
+    // tightly orbiting their hub; weak hub→hub pulls let separate
+    // hub clusters drift apart under repulsion. This is THE fix for
+    // "all hubs collapse into one center blob".
     const edgePairs = this._edgePairs;
+    const edgeStrengths = this._edgeStrengths;
     const EP = edgePairs.length;
     for (let k = 0; k < EP; k += 2) {
       const i = edgePairs[k];
@@ -446,26 +531,29 @@ export class ForceSimulation {
       const dy = b.y - a.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
       const delta = d - SPRING_LEN;
-      const f = SPRING_K * delta;
+      const f = SPRING_K * edgeStrengths[k >> 1] * delta;
       const ux = dx / d, uy = dy / d;
       fx[i] += ux * f; fy[i] += uy * f;
       fx[j] -= ux * f; fy[j] -= uy * f;
     }
 
-    // Integrate — apply force, damp, cap, advance. Sum total speed so we
-    // can detect equilibrium and stop driving React re-renders. The
-    // deadband below is THE key trick: force sims in steady state leak
-    // tiny residual velocities forever (gravity vs springs vs repulsion
-    // never cancel to exactly zero in float math). Snapping low speeds
-    // to rest is what lets `cooled()` ever fire.
+    // Integrate — apply alpha-scaled force, damp, cap, advance. Sum
+    // total speed so we can detect equilibrium and stop driving React
+    // re-renders. The deadband below is THE key trick: force sims in
+    // steady state leak tiny residual velocities forever (gravity vs
+    // springs vs repulsion never cancel to exactly zero in float
+    // math). Snapping low speeds to rest is what lets `cooled()` ever
+    // fire.
     let totalSpeed = 0;
     let unpinnedCount = 0;
     for (let i = 0; i < N; i++) {
       const n = this.nodes[i];
       if (n.pinned) continue;
       unpinnedCount += 1;
-      n.vx = (n.vx + fx[i]) * DAMPING;
-      n.vy = (n.vy + fy[i]) * DAMPING;
+      // Forces scaled by alpha — d3-force convention. As alpha decays
+      // from 1 → 0 the energy injected per tick shrinks toward zero.
+      n.vx = (n.vx + fx[i] * alpha) * DAMPING;
+      n.vy = (n.vy + fy[i] * alpha) * DAMPING;
       const speed = Math.sqrt(n.vx * n.vx + n.vy * n.vy);
       if (speed > V_MAX) {
         n.vx = (n.vx / speed) * V_MAX;
@@ -485,6 +573,66 @@ export class ForceSimulation {
         totalSpeed += speed;
       }
     }
+    // Hard collision pass — d3-force-style position correction.
+    // The pairwise repulsion above only CAPS the force at minD; under
+    // strong spring tension a hub and its neighbours can still settle
+    // visually overlapped (force = clamped, but spring keeps pulling).
+    // This pass walks every pair and physically pushes overlapping
+    // nodes apart by half the overlap each, so node circles cannot
+    // visually intersect — matches Obsidian / Logseq.
+    //
+    // Two iterations: the first pass resolves direct overlaps; the
+    // second cleans up cascading overlaps the first pass introduced
+    // (pushing A out of B may push A into C). Two is enough at our
+    // graph sizes; more iterations diminish.
+    const COLLIDE_ITERATIONS = 2;
+    const COLLIDE_PUSH_PAD = COLLIDE_PAD * 0.5;
+    for (let iter = 0; iter < COLLIDE_ITERATIONS; iter++) {
+      for (let i = 0; i < N; i++) {
+        const a = this.nodes[i];
+        const ri = radii[i];
+        for (let j = i + 1; j < N; j++) {
+          const b = this.nodes[j];
+          const rj = radii[j];
+          const minD = ri + rj + COLLIDE_PUSH_PAD;
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let d2 = dx * dx + dy * dy;
+          const minD2 = minD * minD;
+          if (d2 >= minD2) continue;
+          // Two nodes occupy the same point — split them along a
+          // deterministic axis so the simulation doesn't NaN.
+          if (d2 < 0.0001) {
+            dx = (i - j) * 0.5;
+            dy = (j - i) * 0.5;
+            d2 = dx * dx + dy * dy;
+          }
+          const d = Math.sqrt(d2);
+          const overlap = (minD - d) * 0.5;
+          const ux = dx / d;
+          const uy = dy / d;
+          // Push each node out by half the overlap, respecting pins
+          // (pinned nodes don't move; the unpinned partner takes the
+          // full correction).
+          const aPinned = a.pinned;
+          const bPinned = b.pinned;
+          if (aPinned && bPinned) continue;
+          if (aPinned) {
+            b.x += ux * overlap * 2;
+            b.y += uy * overlap * 2;
+          } else if (bPinned) {
+            a.x -= ux * overlap * 2;
+            a.y -= uy * overlap * 2;
+          } else {
+            a.x -= ux * overlap;
+            a.y -= uy * overlap;
+            b.x += ux * overlap;
+            b.y += uy * overlap;
+          }
+        }
+      }
+    }
+
     // Cool-down ratchet — per-node average so the threshold works for any
     // graph size. Any frame with motion above threshold resets the counter.
     // Once we cross COOL_TICKS the renderer stops re-rendering until
@@ -528,11 +676,31 @@ export class ForceSimulation {
     if (n) n.pinned = false;
   }
 
-  /** Re-stir the force sim — resets the cooldown counter so the renderer
-   *  starts ticking again. Called on hover, drag, filter change, etc.
-   *  No-op in orbital mode (which never cools). */
+  /** Re-stir the force sim — resets the cooldown counter and gives
+   *  alpha a small bump so forces have energy to redistribute. Called
+   *  on hover, drag, filter change, etc. We use 0.3 (not 1.0) because
+   *  the layout is already mostly settled — full re-warm would shake
+   *  every node visibly when the user just dragged one. No-op in
+   *  orbital mode (which never cools). */
   warm(): void {
     this._quietTicks = 0;
+    if (this._mode === "force") {
+      this._alpha = Math.max(this._alpha, 0.3);
+    }
+  }
+
+  /** Full re-flow — wakes the sim with fresh energy (alpha=1.0) so the
+   *  current force model can fully redistribute existing positions.
+   *  Use case: saved positions came from an older / different force
+   *  model and look messy with the current one. Keeps every node where
+   *  it is right now, then lets springs + repulsion + collisions push
+   *  them into a clean layout over ~5 seconds. Pinned nodes stay put;
+   *  everything else drifts. */
+  reflow(): void {
+    this._quietTicks = 0;
+    if (this._mode === "force") {
+      this._alpha = 1.0;
+    }
   }
 
   /** Overlay saved positions onto existing nodes without rebuilding the
@@ -557,8 +725,10 @@ export class ForceSimulation {
         n.radius = Math.max(1, Math.sqrt(dx * dx + dy * dy));
       }
     }
-    // Settle any unscaled neighbours.
+    // Settle any unscaled neighbours — small alpha bump rather than full
+    // re-warm, so newly arrived server positions don't visibly bounce.
     this._quietTicks = 0;
+    if (this._mode === "force") this._alpha = Math.max(this._alpha, 0.15);
   }
 
   /** Snapshot {id: [x, y]} for persistence. */
@@ -594,14 +764,16 @@ export class ForceSimulation {
     this.h = h;
     this.cx = newCx;
     this.cy = newCy;
-    // Resize may unsettle tight clusters — re-warm so any residual
-    // forces can redistribute instead of snapping suddenly.
+    // Resize may unsettle tight clusters — small alpha bump so any
+    // residual forces can redistribute instead of snapping suddenly.
     this._quietTicks = 0;
+    if (this._mode === "force") this._alpha = Math.max(this._alpha, 0.2);
   }
 
   orbitRadii(): number[] {
-    const base = Math.min(this.w, this.h) * 0.14;
-    return [base * 1.1, base * 2.0, base * 2.95, base * 3.9];
+    // MUST stay in sync with the seeding values in the constructor.
+    const base = Math.min(this.w, this.h) * 0.15;
+    return [base * 1.3, base * 2.45, base * 3.7, base * 5.0];
   }
 
   orbitMeta(): OrbitMeta[] {

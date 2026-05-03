@@ -74,7 +74,7 @@ async def ensure_today_journal(config: Config, user_id: str) -> dict:
         user_id,
         content=f"# Journal — {today}\n",
         title=f"Journal — {today}",
-        tags=[tag],
+        tags=[tag, "owner/user"],
     )
 
 
@@ -108,7 +108,7 @@ async def append_journal(
             user_id,
             content=f"# Journal — {target}\n\n{snippet}",
             title=f"Journal — {target}",
-            tags=[tag],
+            tags=[tag, "owner/user"],
         )
 
     # Async title refresh — doesn't block the caller. Runs on the

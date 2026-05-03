@@ -35,7 +35,12 @@ const LS_SHOW_ROLLED_UP = "lazybrain.showRolledUp";
 // pill in the sidebar; the localStorage value sticks across reloads so the
 // page never re-defaults the user back to a smaller pool.
 const DEFAULT_NOTES_LIMIT = 1000;
-const DEFAULT_GRAPH_LIMIT = 500;
+// Graph fetch ceiling. The backend (lazyclaw/lazybrain/graph.py) caps at 2000
+// nodes per request and only returns edges where BOTH endpoints survive the
+// node slice, so a low ceiling silently drops most wikilinks: with 670 notes
+// at limit=500 we measured 26 of 852 edges surviving (3%). Setting the floor
+// to the backend cap means every active user sees their full topology.
+const DEFAULT_GRAPH_LIMIT = 2000;
 const NOTES_PAGE_SIZE = 1000;
 
 function readNumber(key: string, fallback: number, min: number, max: number): number {
@@ -96,8 +101,12 @@ export default function LazyBrain() {
     try { localStorage.setItem(LS_VIEW_MODE, viewMode); } catch { /* noop */ }
   }, [viewMode]);
 
-  // Peek preview (graph click — show card without leaving graph)
+  // Peek preview (graph DOUBLE-click — show card without leaving graph)
   const [peekId, setPeekId] = useState<string | null>(null);
+  // Visual-only graph selection (single click). Highlights the node +
+  // dims the rest + surfaces neighbour titles. Distinct from peekId so
+  // a single click doesn't auto-pop the card.
+  const [graphFocusId, setGraphFocusId] = useState<string | null>(null);
 
   // Command modal (⌘K palette / ⌘O quick switcher)
   const [cmdkOpen, setCmdkOpen] = useState<null | "palette" | "switcher">(null);
@@ -1035,13 +1044,15 @@ export default function LazyBrain() {
             <GraphView
               graph={graph}
               notesById={notesById}
-              selectedId={peekId ?? selectedId}
+              selectedId={peekId ?? graphFocusId ?? selectedId}
               highlightQuery={searchQ}
               onSearchChange={setSearchQ}
               dimPredicate={graphDimPredicate}
+              onSelect={(id) => setGraphFocusId(id)}
               onPeek={(id) => setPeekId(id)}
               onClearPeek={() => {
                 setPeekId(null);
+                setGraphFocusId(null);
                 setSelectedId(null);
               }}
               hiddenCategories={hiddenCategories}

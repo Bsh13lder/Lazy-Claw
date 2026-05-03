@@ -1,10 +1,14 @@
 """Pre-plan research pass — gather context BEFORE the plan LLM call.
 
-Three parallel lanes, zero brain LLM calls, hard 2-second wallclock cap each:
+Four parallel lanes, zero brain LLM calls, hard 2-second wallclock cap each:
   1. semantic_search over LazyBrain (top 3 notes)
   2. recall_skill_lessons for matched topic shapes (top 2)
   3. optional codebase grep — only when message references a path-like or
      "in <file>" target. Skipped for general queries.
+  4. project-tasks lane — groups the user's active tasks by inferred
+     project (`category` field) and surfaces the top buckets that overlap
+     with the current message tokens. No `project_id` column needed —
+     `category` already acts as the project handle.
 
 Returns ``''`` if no findings, else a ``"## Research findings\\n..."`` block.
 Failure of any lane is non-fatal — partial results still make the plan
@@ -168,6 +172,80 @@ async def _lane_codebase(message: str) -> list[str]:
     return out
 
 
+async def _lane_project_tasks(config, user_id: str, message: str) -> list[str]:
+    """Group active tasks by inferred project (``category``) and surface
+    the top 2 buckets that share tokens with the current message.
+
+    Reuses the same tokenizer the context_builder uses for hybrid memory
+    so "what's left in lazyclaw?" lands the right bucket without an LLM
+    call. Returns at most 2 projects × 3 tasks each. Empty list when the
+    user has no active tasks or no overlap with the message.
+    """
+    try:
+        from lazyclaw.tasks.store import list_tasks
+        from lazyclaw.runtime.context_builder import _tokenize_for_memory
+    except Exception:
+        logger.debug("plan_research lane_project_tasks imports failed", exc_info=True)
+        return []
+
+    try:
+        active = await list_tasks(
+            config, user_id, status="todo", owner="user",
+        )
+    except Exception:
+        logger.debug("plan_research lane_project_tasks list failed", exc_info=True)
+        return []
+
+    if not active:
+        return []
+
+    # Bucket by category. Tasks without a category fall into a single
+    # "(uncategorised)" group so the user still sees them when the message
+    # has no project anchor — they just won't outrank a real project.
+    buckets: dict[str, list[dict]] = {}
+    for t in active:
+        cat = (t.get("category") or "").strip().lower() or "(uncategorised)"
+        buckets.setdefault(cat, []).append(t)
+
+    msg_tokens = _tokenize_for_memory(message)
+
+    # Score each bucket by message-token overlap with the bucket's own
+    # name + each task's title. Buckets with zero overlap rank by size so
+    # the user always sees their biggest active project.
+    scored: list[tuple[int, int, str, list[dict]]] = []
+    for cat, tasks in buckets.items():
+        cat_tokens = _tokenize_for_memory(cat)
+        overlap = len(msg_tokens & cat_tokens)
+        for task in tasks:
+            overlap += len(
+                msg_tokens & _tokenize_for_memory(task.get("title") or "")
+            )
+        # Sort key: high overlap first; among same-overlap, larger bucket first.
+        scored.append((-overlap, -len(tasks), cat, tasks))
+
+    scored.sort()
+
+    # Drop the catch-all bucket from the displayed top unless it's the
+    # only thing the user has — it isn't a project.
+    top: list[tuple[str, list[dict]]] = []
+    for _, _, cat, tasks in scored:
+        if cat == "(uncategorised)" and len(top) > 0:
+            continue
+        top.append((cat, tasks))
+        if len(top) >= 2:
+            break
+
+    out: list[str] = []
+    for cat, tasks in top:
+        out.append(f"- **{cat}** ({len(tasks)} active):")
+        for t in tasks[:3]:
+            title = (t.get("title") or "(untitled)").strip()[:80]
+            prio = t.get("priority") or "medium"
+            due = t.get("due_date") or "no due date"
+            out.append(f"  - {title}  _(priority: {prio}, due: {due})_")
+    return out
+
+
 async def _run_with_timeout(coro, lane_name: str) -> list[str]:
     """Wrap a lane in a hard 2-second wall-clock cap. Failures yield []."""
     try:
@@ -194,9 +272,12 @@ async def gather_plan_research(config, user_id: str, message: str) -> str:
     lazybrain_co = _run_with_timeout(_lane_lazybrain(config, user_id, msg), "lazybrain")
     lessons_co = _run_with_timeout(_lane_lessons(config, user_id, msg), "lessons")
     codebase_co = _run_with_timeout(_lane_codebase(msg), "codebase")
+    project_co = _run_with_timeout(
+        _lane_project_tasks(config, user_id, msg), "project_tasks",
+    )
 
-    lazybrain, lessons, codebase = await asyncio.gather(
-        lazybrain_co, lessons_co, codebase_co,
+    lazybrain, lessons, codebase, projects = await asyncio.gather(
+        lazybrain_co, lessons_co, codebase_co, project_co,
     )
 
     parts: list[str] = []
@@ -209,6 +290,9 @@ async def gather_plan_research(config, user_id: str, message: str) -> str:
     if codebase:
         parts.append("### Codebase references")
         parts.extend(codebase)
+    if projects:
+        parts.append("### Other tasks in this project")
+        parts.extend(projects)
 
     if not parts:
         return ""

@@ -75,6 +75,12 @@ class TelegramNotifier:
         admin_chat_id_fn:    callable returning current admin chat ID (str | None)
         source_is_telegram:  set True when the originating platform IS Telegram
                              to avoid duplicate notifications
+        verbose:             when True (default), `done` and `background_done`
+                             pushes include a stats line ("2.2m | 144,522 tok |
+                             11 calls") and a tools-used line. Heartbeat-fired
+                             pushes (cron / reminder / watcher) pass False so
+                             the user sees a clean message instead of debug
+                             telemetry.
     """
 
     def __init__(
@@ -83,10 +89,12 @@ class TelegramNotifier:
         admin_chat_id_fn: Callable[[], str | None],
         *,
         source_is_telegram: bool = False,
+        verbose: bool = True,
     ) -> None:
         self._bot = bot
         self._get_chat_id = admin_chat_id_fn
         self._source_is_telegram = source_is_telegram
+        self._verbose = verbose
         self._work_summary: Any | None = None
 
     # ── AgentCallback interface ──────────────────────────────────────
@@ -160,7 +168,6 @@ class TelegramNotifier:
             summary = self._work_summary
             self._work_summary = None
 
-            stats_parts: list[str] = []
             result_preview = ""
             if summary is not None:
                 meta = {}
@@ -168,8 +175,8 @@ class TelegramNotifier:
                     val = getattr(summary, attr, None)
                     if val is not None:
                         meta[attr] = val
-                stats_line = _format_stats_html(meta)
-                tools_line = _format_tools_html(meta)
+                stats_line = _format_stats_html(meta) if self._verbose else ""
+                tools_line = _format_tools_html(meta) if self._verbose else ""
                 preview = getattr(summary, "result_preview", None)
                 if preview:
                     stripped = _strip_markdown(preview)
@@ -184,7 +191,14 @@ class TelegramNotifier:
                     lines.append(tools_line)
                 if result_preview:
                     lines.append("")
-                    lines.append(f"<pre>{result_preview}</pre>")
+                    # Quiet mode (cron / reminder / watcher pushes): drop the
+                    # <pre> wrapper so the body reads as a normal message,
+                    # not a code block. Verbose mode keeps <pre> for the
+                    # foreground "what did the agent do" surface.
+                    if self._verbose:
+                        lines.append(f"<pre>{result_preview}</pre>")
+                    else:
+                        lines.append(result_preview)
                 return "\n".join(lines), "HTML"
 
             return "[done] <b>Task complete</b>", "HTML"
@@ -203,11 +217,11 @@ class TelegramNotifier:
             if len(result) > 500:
                 preview += "\n[truncated]"
 
-            stats_line = _format_stats_html(meta)
-            tools_line = _format_tools_html(meta)
+            stats_line = _format_stats_html(meta) if self._verbose else ""
+            tools_line = _format_tools_html(meta) if self._verbose else ""
             models = meta.get("models_used")
             model_line = ""
-            if models:
+            if models and self._verbose:
                 model_line = "Model: " + ", ".join(html.escape(m) for m in models)
 
             lines = [f"[done] <b>Background '{name}' done</b>"]
@@ -219,7 +233,10 @@ class TelegramNotifier:
                 lines.append(tools_line)
             if preview:
                 lines.append("")
-                lines.append(f"<pre>{preview}</pre>")
+                if self._verbose:
+                    lines.append(f"<pre>{preview}</pre>")
+                else:
+                    lines.append(preview)
             return "\n".join(lines), "HTML"
 
         if kind == "background_failed":
@@ -257,8 +274,18 @@ class PrefixedTelegramNotifier(TelegramNotifier):
         prefix: str,
         icon: str = "⏰",
         source_is_telegram: bool = False,
+        verbose: bool = False,
     ) -> None:
-        super().__init__(bot, admin_chat_id_fn, source_is_telegram=source_is_telegram)
+        # Default verbose=False here: PrefixedTelegramNotifier is only
+        # constructed by heartbeat-fired paths (cron / reminder / watcher
+        # / MCP auto-reply), where the user wants a clean Telegram message,
+        # not engineering telemetry. Foreground task completions still use
+        # the base TelegramNotifier with verbose=True.
+        super().__init__(
+            bot, admin_chat_id_fn,
+            source_is_telegram=source_is_telegram,
+            verbose=verbose,
+        )
         self._prefix = prefix
         self._icon = icon
 

@@ -268,7 +268,11 @@ class AddTaskSkill(BaseSkill):
             "Examples: 'remind me call dentist' → add_task with reminder_at='+10m'. "
             "'after 30 minutes drink water' → add_task with reminder_at='+30m'. "
             "'research flights' → owner=agent. "
-            "ALWAYS use relative reminder_at (+Xm/+Xh) instead of calculating ISO times."
+            "ALWAYS use relative reminder_at (+Xm/+Xh) instead of calculating ISO times. "
+            "SMART INTAKE: when you DON'T pass due_date/reminder_at, the server "
+            "infers a deadline + project (category) from the title using a worker LLM "
+            "and the user's recent task buckets. For time-sensitive tasks (call/meeting/"
+            "submit/deadline), pass an explicit reminder_at — don't rely on inference."
         )
 
     @property
@@ -383,6 +387,51 @@ class AddTaskSkill(BaseSkill):
             if not is_valid(recurring):
                 return f"Invalid cron expression: '{recurring}'"
 
+        priority = params.get("priority", "medium")
+        due_date_param = params.get("due_date")
+        category_param = params.get("category")  # not in schema, but accept
+        user_supplied_tags = params.get("tags")
+
+        # ── Smart intake ────────────────────────────────────────────────
+        # When the brain didn't supply a deadline AND no due_date, ask the
+        # worker LLM to infer a deadline + project (category) from the
+        # title + user's recent task buckets. Synchronous so the user's
+        # confirmation reply shows the inferred values. Replaces the old
+        # post-create fire-and-forget _smart_enrich path.
+        intake_clarification: str | None = None
+        intake_category: str | None = None
+        intake_reason: str = ""
+        if not reminder_at and not due_date_param:
+            try:
+                from lazyclaw.tasks.smart_intake import suggest_intake
+                suggestion = await suggest_intake(
+                    self._config, user_id,
+                    title=title,
+                    description=params.get("description"),
+                    priority=priority,
+                )
+            except Exception:
+                logger.debug("smart_intake call raised", exc_info=True)
+                suggestion = None
+
+            if suggestion is not None:
+                if (
+                    suggestion.deadline_iso
+                    and suggestion.confidence in {"high", "medium"}
+                ):
+                    reminder_at = suggestion.deadline_iso
+                    intake_reason = suggestion.reason
+                if suggestion.category and not category_param:
+                    intake_category = suggestion.category
+                if (
+                    suggestion.needs_user_clarification
+                    and not reminder_at
+                ):
+                    intake_clarification = (
+                        "When's the deadline? Reply with: '+1d' / '+3d' / "
+                        "'tomorrow 9am' / 'next monday 10am' / 'someday'."
+                    )
+
         # Resolve advance reminders. Explicit input wins; otherwise auto-derive
         # for important tasks (priority high/urgent OR appointment-class title)
         # using the user's configured reminder_offsets default.
@@ -390,7 +439,7 @@ class AddTaskSkill(BaseSkill):
             self._config, user_id, title,
             params.get("pre_reminders"),
             reminder_at,
-            params.get("priority", "medium"),
+            priority,
         )
 
         try:
@@ -398,13 +447,13 @@ class AddTaskSkill(BaseSkill):
                 self._config, user_id,
                 title=title,
                 description=params.get("description"),
-                category=None,  # AI will set this
-                priority=params.get("priority", "medium"),
+                category=category_param or intake_category,
+                priority=priority,
                 owner=params.get("owner", "user"),
-                due_date=params.get("due_date"),
+                due_date=due_date_param,
                 reminder_at=reminder_at,
                 recurring=recurring,
-                tags=params.get("tags"),
+                tags=user_supplied_tags,
                 pre_reminders=pre_reminders,
             )
         except Exception as exc:
@@ -412,20 +461,31 @@ class AddTaskSkill(BaseSkill):
             return f"Failed to create task: {exc}"
 
         result_parts = [f"Task added: {title}"]
+        if task.get("category"):
+            result_parts.append(f"Project: {task['category']}")
         if task.get("due_date"):
             result_parts.append(f"Due: {task['due_date']}")
         if task.get("reminder_at"):
-            result_parts.append(f"Reminder: {task['reminder_at']}")
+            stamp = task["reminder_at"]
+            suffix = " (suggested)" if intake_reason else ""
+            result_parts.append(f"Reminder: {stamp}{suffix}")
         if pre_reminders:
             result_parts.append("Advance reminders: " + ", ".join(pre_reminders))
         if task.get("recurring"):
             result_parts.append(f"Recurring: {task['recurring']}")
+        if intake_clarification:
+            result_parts.append("")
+            result_parts.append(intake_clarification)
 
-        # Truly fire-and-forget: AI categorize runs in the background and
-        # persists the result via update_task; we don't block the user's
-        # reply waiting on Ollama / mcp-taskai.
-        import asyncio as _aio
-        _aio.create_task(_smart_enrich(self._config, user_id, task["id"], title))
+        # Fire-and-forget back-stop: only run mcp-taskai categorize when the
+        # smart-intake pre-pass didn't already set a category. Keeps the old
+        # behaviour for users who run with Ollama down (smart_intake returns
+        # category=None) without doubling up the LLM call when it succeeded.
+        if not task.get("category"):
+            import asyncio as _aio
+            _aio.create_task(
+                _smart_enrich(self._config, user_id, task["id"], title)
+            )
 
         return "\n".join(result_parts)
 

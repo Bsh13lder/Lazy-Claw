@@ -248,6 +248,7 @@ async def graph_route(
     root_id: str | None = None,
     depth: int = 1,
     include_rolled_up: bool = False,
+    include_archived: bool = False,
     limit: int = 500,
     user: User = Depends(get_current_user),
 ):
@@ -256,7 +257,10 @@ async def graph_route(
             _config, user.id, root_id, depth=depth
         )
     return await graph.get_graph(
-        _config, user.id, include_rolled_up=include_rolled_up, limit=limit
+        _config, user.id,
+        include_rolled_up=include_rolled_up,
+        include_archived=include_archived,
+        limit=limit,
     )
 
 

@@ -309,6 +309,74 @@ async def test_update_note_content_marks_dirty(tmp_config: Config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_graph_payload_carries_edge_type_and_source(tmp_config: Config) -> None:
+    """get_graph emits edge_type + edge_source on every edge so the
+    frontend can render typed edges distinctly. Wikilinks default to
+    'wikilink' so existing rows remain compatible."""
+    from lazyclaw.lazybrain import graph
+
+    a = await store.save_note(
+        tmp_config, "user-sub", content="A", title="Alpha",
+    )
+    b = await store.save_note(
+        tmp_config, "user-sub",
+        content="Body links to [[Alpha]] explicitly.",
+        title="Beta",
+    )
+    await store.add_relation(
+        tmp_config, "user-sub",
+        from_note_id=b["id"], to_note_id=a["id"],
+        kind="supersedes", source="skill_lesson_auto",
+    )
+
+    payload = await graph.get_graph(tmp_config, "user-sub")
+    edges = payload["edges"]
+
+    # Every edge must declare its type. Implicit wikilinks default to
+    # 'wikilink' so there's exactly one canonical type string per row.
+    types = sorted({e["edge_type"] for e in edges})
+    assert "supersedes" in types, f"typed edge missing from payload: {types}"
+    assert "wikilink" in types, f"wikilink edge missing from payload: {types}"
+
+    sup = [e for e in edges if e["edge_type"] == "supersedes"]
+    assert len(sup) == 1
+    assert sup[0]["edge_source"] == "skill_lesson_auto"
+    assert sup[0]["source"] == b["id"]
+    assert sup[0]["target"] == a["id"]
+
+
+@pytest.mark.asyncio
+async def test_graph_archived_filter_in_payload(tmp_config: Config) -> None:
+    """include_archived=False excludes archived nodes (and their edges)
+    by default; include_archived=True surfaces them."""
+    from lazyclaw.lazybrain import graph
+
+    keep = await store.save_note(
+        tmp_config, "user-sub", content="visible", title="Visible",
+    )
+    archived = await store.save_note(
+        tmp_config, "user-sub", content="hidden", title="Hidden",
+    )
+    async with db_session(tmp_config) as db:
+        await db.execute(
+            "UPDATE notes SET archived = 1 WHERE id = ?",
+            (archived["id"],),
+        )
+        await db.commit()
+
+    default = await graph.get_graph(tmp_config, "user-sub")
+    ids_default = {n["id"] for n in default["nodes"]}
+    assert keep["id"] in ids_default
+    assert archived["id"] not in ids_default
+
+    full = await graph.get_graph(
+        tmp_config, "user-sub", include_archived=True,
+    )
+    ids_full = {n["id"] for n in full["nodes"]}
+    assert archived["id"] in ids_full
+
+
+@pytest.mark.asyncio
 async def test_archived_notes_hidden_by_default(tmp_config: Config) -> None:
     """list_notes hides archived rows; include_archived=True surfaces them.
     Powers the skills-vault toggle."""

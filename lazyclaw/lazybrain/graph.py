@@ -17,6 +17,7 @@ async def get_graph(
     user_id: str,
     *,
     include_rolled_up: bool = False,
+    include_archived: bool = False,
     limit: int = 500,
 ) -> dict:
     """Return the full user graph (capped at ``limit`` nodes).
@@ -26,12 +27,25 @@ async def get_graph(
     ``kind/rollup`` but not ``rolled-up``) always render. Pass
     ``include_rolled_up=True`` to surface every original alongside its
     rollup — useful for the "Archive" toggle in the UI.
+
+    ``include_archived=False`` (default) hides notes flagged ``archived=1``
+    (skills-vault shapes, archived plans). Pass ``True`` to surface them
+    when the user explicitly opens the vault.
+
+    Edges carry ``edge_type`` (``wikilink`` / ``supersedes`` /
+    ``contradicts`` / ``references`` / ``derives_from``) and ``source``
+    (``auto`` / ``user`` / ``skill_lesson_auto`` / etc.) so the frontend
+    can render typed edges distinctly without a second query.
     """
     clauses = ["user_id = ?"]
     params: list = [user_id]
     if not include_rolled_up:
-        clauses.append("tags NOT LIKE ?")
+        # IS NULL guard: SQLite "NULL NOT LIKE 'x'" → NULL → treated as
+        # FALSE in WHERE, silently dropping every tag-less note.
+        clauses.append("(tags IS NULL OR tags NOT LIKE ?)")
         params.append('%"rolled-up"%')
+    if not include_archived:
+        clauses.append("(archived IS NULL OR archived = 0)")
     where = " AND ".join(clauses)
     async with db_session(config) as db:
         rows = await db.execute(
@@ -48,7 +62,7 @@ async def get_graph(
 
         placeholders = ",".join("?" * len(ids))
         edge_rows = await db.execute(
-            f"SELECT from_note_id, to_note_id, to_page_name "
+            f"SELECT from_note_id, to_note_id, to_page_name, edge_type, source "
             f"FROM note_links WHERE user_id = ? AND from_note_id IN ({placeholders})",
             (user_id, *ids),
         )
@@ -66,9 +80,15 @@ async def get_graph(
     ]
 
     edges = []
-    for from_id, to_id, to_page in edges_raw:
+    for from_id, to_id, to_page, edge_type, source in edges_raw:
         if to_id and to_id in ids:
-            edges.append({"source": from_id, "target": to_id, "label": to_page})
+            edges.append({
+                "source": from_id,
+                "target": to_id,
+                "label": to_page,
+                "edge_type": edge_type or "wikilink",
+                "edge_source": source,
+            })
         # Unresolved edges (no target note yet) are dropped from the graph
         # view — they surface instead in the backlinks panel of the orphan.
 
@@ -124,7 +144,7 @@ async def get_neighbors(
         )
         nodes_raw = await node_rows.fetchall()
         edge_rows = await db.execute(
-            f"SELECT from_note_id, to_note_id, to_page_name "
+            f"SELECT from_note_id, to_note_id, to_page_name, edge_type, source "
             f"FROM note_links WHERE user_id = ? AND from_note_id IN ({placeholders})",
             (user_id, *visited),
         )
@@ -141,8 +161,14 @@ async def get_neighbors(
         for row in nodes_raw
     ]
     edges = [
-        {"source": from_id, "target": to_id, "label": page}
-        for from_id, to_id, page in edges_raw
+        {
+            "source": from_id,
+            "target": to_id,
+            "label": page,
+            "edge_type": edge_type or "wikilink",
+            "edge_source": edge_source,
+        }
+        for from_id, to_id, page, edge_type, edge_source in edges_raw
         if to_id and to_id in visited
     ]
     return {"nodes": nodes, "edges": edges}

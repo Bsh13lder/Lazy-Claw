@@ -153,6 +153,61 @@ def _fold(s: str) -> str:
     ).lower()
 
 
+def _dump_aliases(aliases: list[str] | None) -> str | None:
+    """Serialize plaintext aliases to JSON for the ``notes.aliases`` column.
+
+    Aliases are intentionally plaintext (not encrypted) — they're how
+    ``[[wikilinks]]`` resolve, the same as title_key. Threat model: if
+    titles are sensitive, leave aliases empty too. Normalised through
+    ``normalize_page`` so resolution is case + accent insensitive.
+    """
+    if not aliases:
+        return None
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for a in aliases:
+        norm = normalize_page(a or "")
+        if norm and norm not in seen_set:
+            seen.append(norm)
+            seen_set.add(norm)
+    return json.dumps(seen) if seen else None
+
+
+async def _audit_wikilink_collision(
+    config: Config,
+    user_id: str,
+    target_key: str,
+    candidate_ids: list[str],
+) -> None:
+    """Log a wikilink_collision audit_log entry. Best-effort, never raises.
+
+    A collision means two or more notes share the same ``title_key``, so a
+    ``[[Cita Previa]]`` link resolves to "the most recent" by recency
+    instead of a stable target. Both candidates remain queryable, but
+    rename/edit can silently flip the link target — surfacing the case
+    in audit_log lets the user resolve it (rename one, alias the other).
+    """
+    try:
+        from uuid import uuid4
+        async with db_session(config) as db:
+            await db.execute(
+                "INSERT INTO audit_log "
+                "(id, user_id, action, skill_name, result_summary, source) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid4()),
+                    user_id,
+                    "wikilink_collision",
+                    "lazybrain_store",
+                    f"target={target_key} candidates={','.join(candidate_ids[:6])}",
+                    "system",
+                ),
+            )
+            await db.commit()
+    except Exception:
+        logger.debug("audit wikilink_collision failed", exc_info=True)
+
+
 def _merge_tags(explicit: list[str] | None, markdown: str) -> list[str]:
     """Tags from the caller plus #hashtags scraped from markdown body."""
     combined: list[str] = []
@@ -182,31 +237,102 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
     """Replace note_links rows for ``note_id`` with the links extracted from ``markdown``.
 
     Must run inside an open ``db_session``. Returns the list of wikilink targets.
+
+    Resolution order:
+      1. Match against ``notes.title_key`` (existing behaviour).
+      2. If still unresolved, scan ``notes.aliases`` for a JSON-array hit.
+
+    Collision detection: when more than one note shares the same
+    ``title_key``, we surface a ``wikilink_collision`` audit entry — the
+    silent recency-wins behaviour stays (`find_by_title` still picks the
+    newest), but the user gets a trail and can rename/alias to disambiguate.
+    Edge_type defaults to ``'wikilink'`` and source to ``'auto'`` so the
+    semantic-edge column added in Phase 4 carries provenance for free.
     """
     targets = extract_wikilinks(markdown)
+    # Only delete the wikilink-type rows we own — don't blow away typed
+    # edges (supersedes/contradicts/etc.) the agent or user wrote via
+    # add_relation. Without this filter every save_note would wipe the
+    # whole graph of typed edges originating from this note.
     await db.execute(
-        "DELETE FROM note_links WHERE from_note_id = ?",
+        "DELETE FROM note_links WHERE from_note_id = ? AND edge_type = 'wikilink'",
         (note_id,),
     )
     if not targets:
         return []
 
-    # Resolve each target against existing titles (case-insensitive)
+    # Pass 1: title_key match (existing path). Group by key so we can
+    # detect collisions instead of letting the dict comprehension
+    # silently overwrite candidates.
     placeholders = ",".join("?" * len(targets))
     rows = await db.execute(
         f"SELECT id, title_key FROM notes "
-        f"WHERE user_id = ? AND title_key IN ({placeholders})",
+        f"WHERE user_id = ? AND title_key IN ({placeholders}) "
+        f"ORDER BY created_at DESC",
         (user_id, *targets),
     )
-    resolved = {row[1]: row[0] for row in await rows.fetchall() if row[1]}
+    by_title_key: dict[str, list[str]] = {}
+    for nid, key in await rows.fetchall():
+        if not key:
+            continue
+        by_title_key.setdefault(key, []).append(nid)
+
+    resolved: dict[str, str] = {}
+    collisions: list[tuple[str, list[str]]] = []
+    for key, candidates in by_title_key.items():
+        # Recency wins (rows are ORDER BY created_at DESC).
+        resolved[key] = candidates[0]
+        if len(candidates) > 1:
+            collisions.append((key, candidates))
+
+    # Pass 2: alias fallback for still-unresolved targets. Substring
+    # match on the JSON-array column — fast enough at thousands of
+    # rows; FTS isn't worth it for the alias index alone.
+    unresolved = [t for t in targets if t not in resolved]
+    for target in unresolved:
+        like = f'%"{target}"%'
+        rows = await db.execute(
+            "SELECT id FROM notes "
+            "WHERE user_id = ? AND aliases IS NOT NULL "
+            "AND aliases LIKE ? ORDER BY created_at DESC LIMIT 1",
+            (user_id, like),
+        )
+        row = await rows.fetchone()
+        if row:
+            resolved[target] = row[0]
 
     now = _now()
     for target in targets:
         await db.execute(
-            "INSERT INTO note_links (user_id, from_note_id, to_page_name, to_note_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_page_name, to_note_id, "
+            "edge_type, source, created_at) "
+            "VALUES (?, ?, ?, ?, 'wikilink', 'auto', ?)",
             (user_id, note_id, target, resolved.get(target), now),
         )
+
+    # Best-effort audit log entry for any collisions we found. Writes
+    # happen on the same db handle so they ride the same transaction
+    # as the reindex itself — failure here is silent (logger.debug).
+    if collisions:
+        try:
+            from uuid import uuid4 as _uuid4
+            for key, candidates in collisions:
+                await db.execute(
+                    "INSERT INTO audit_log "
+                    "(id, user_id, action, skill_name, result_summary, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(_uuid4()),
+                        user_id,
+                        "wikilink_collision",
+                        "lazybrain_store",
+                        f"target={key} candidates={','.join(candidates[:6])}",
+                        "system",
+                    ),
+                )
+        except Exception:
+            logger.debug("audit wikilink_collision failed", exc_info=True)
     return targets
 
 
@@ -296,6 +422,7 @@ async def save_note(
     pinned: bool = False,
     trace_session_id: str | None = None,
     frontmatter: dict[str, FmValue] | None = None,
+    aliases: list[str] | None = None,
 ) -> dict:
     """Create a new note and index its wikilinks. Returns the note dict.
 
@@ -303,9 +430,25 @@ async def save_note(
     ``---`` YAML block on top of ``content`` before encryption. The React
     panel parses the same block on read; the body stays editable from
     either side.
+
+    ``aliases`` populates the plaintext ``notes.aliases`` JSON column so
+    ``[[wikilinks]]`` resolve through aliases too — same threat-model
+    note as ``title_key``: if titles are sensitive, leave aliases empty.
+    If ``frontmatter`` carries an ``aliases`` key it is also honoured;
+    the explicit param wins on conflict.
     """
     if not content:
         raise ValueError("content required")
+
+    # Pull aliases out of frontmatter if not passed explicitly. Frontmatter
+    # is the natural authoring surface (Obsidian-style); the explicit
+    # param exists for callers that already have a list in hand.
+    if aliases is None and frontmatter and frontmatter.get("aliases"):
+        raw = frontmatter.get("aliases")
+        if isinstance(raw, list):
+            aliases = [str(a) for a in raw if a]
+        elif isinstance(raw, str):
+            aliases = [raw]
 
     if frontmatter:
         content = serialize_frontmatter(frontmatter, content)
@@ -340,12 +483,19 @@ async def save_note(
     enc_title = encrypt_field(resolved_title, dek, _title_aad(user_id))
     enc_content = encrypt_field(content, dek, _content_aad(user_id))
     tags_json = _dump_tags(_merge_tags(tags, content))
+    aliases_json = _dump_aliases(aliases)
 
     async with db_session(config) as db:
+        # embedding_dirty=1 from the start: the post-save hook below tries to
+        # generate the vector immediately, but if Ollama is down the dirty
+        # flag stays set and the heartbeat reindex pass picks it up later.
+        # Without this a note saved while Ollama is offline would be invisible
+        # to semantic_search forever.
         await db.execute(
             "INSERT INTO notes (id, user_id, title, content, tags, importance, "
-            "pinned, trace_session_id, title_key, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "pinned, trace_session_id, title_key, aliases, embedding_dirty, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 note_id,
                 user_id,
@@ -356,6 +506,8 @@ async def save_note(
                 1 if pinned else 0,
                 trace_session_id,
                 title_key,
+                aliases_json,
+                1,
                 now,
                 now,
             ),
@@ -422,6 +574,7 @@ async def update_note(
     importance: int | None = None,
     pinned: bool | None = None,
     frontmatter_updates: dict[str, FmValue] | None = None,
+    aliases: list[str] | None = None,
 ) -> dict | None:
     """Partial update. Re-indexes wikilinks if content changed. Returns updated dict.
 
@@ -454,10 +607,39 @@ async def update_note(
     title_key = _title_key(new_title)
     now = _now()
 
+    # If the body (or its frontmatter, which lives inside the encrypted
+    # content blob) changed, mark embedding_dirty=1 so the heartbeat
+    # reindex pass re-embeds even if the synchronous ensure_embedding call
+    # below fails (Ollama down etc.).
+    body_changed = content is not None or frontmatter_updates is not None
+
+    # Aliases can be passed explicitly OR via frontmatter_updates. The
+    # explicit param wins when both are set. Passing aliases=None keeps
+    # the existing column unchanged (no destructive nulling on partial
+    # updates that don't touch aliases).
+    aliases_to_set: list[str] | None = aliases
+    if aliases_to_set is None and frontmatter_updates and "aliases" in frontmatter_updates:
+        raw = frontmatter_updates.get("aliases")
+        if isinstance(raw, list):
+            aliases_to_set = [str(a) for a in raw if a]
+        elif isinstance(raw, str):
+            aliases_to_set = [raw]
+        elif raw is None:
+            # None in a frontmatter_updates dict means "delete the key" —
+            # we mirror that by clearing the column.
+            aliases_to_set = []
+    aliases_json: str | None = None
+    if aliases_to_set is not None:
+        aliases_json = _dump_aliases(aliases_to_set) or ""  # "" → null in column path below
+
     async with db_session(config) as db:
         await db.execute(
             "UPDATE notes SET title = ?, content = ?, tags = ?, importance = ?, "
-            "pinned = ?, title_key = ?, updated_at = ? "
+            "pinned = ?, title_key = ?, "
+            "aliases = CASE WHEN ? = 1 THEN ? ELSE aliases END, "
+            "embedding_dirty = "
+            "CASE WHEN ? = 1 THEN 1 ELSE embedding_dirty END, "
+            "updated_at = ? "
             "WHERE id = ? AND user_id = ?",
             (
                 enc_title,
@@ -466,6 +648,9 @@ async def update_note(
                 max(1, min(10, int(new_importance))),
                 1 if new_pinned else 0,
                 title_key,
+                1 if aliases_to_set is not None else 0,
+                aliases_json if aliases_json else None,
+                1 if body_changed else 0,
                 now,
                 note_id,
                 user_id,
@@ -520,6 +705,7 @@ async def list_notes(
     tag: str | None = None,
     pinned_only: bool = False,
     include_rolled_up: bool = False,
+    include_archived: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
@@ -529,6 +715,10 @@ async def list_notes(
     into a weekly/monthly rollup. The originals stay in the DB and remain
     findable by passing ``include_rolled_up=True`` — useful when the agent
     needs historical context that lives behind a rollup wikilink.
+
+    ``include_archived=False`` (default) hides notes flagged ``archived=1``.
+    Powers the skills-vault toggle: ``kind/shape`` cards stay queryable
+    when explicitly requested but don't crowd default recall.
     """
     dek = await get_user_dek(config, user_id)
 
@@ -545,6 +735,10 @@ async def list_notes(
         # the JSON-encoded tags column — fast enough at thousands of rows.
         clauses.append("tags NOT LIKE ?")
         params.append('%"rolled-up"%')
+    if not include_archived:
+        # archived column was added in the Phase 2 migration; default 0
+        # so existing rows behave exactly as before.
+        clauses.append("(archived IS NULL OR archived = 0)")
     where = " AND ".join(clauses)
 
     async with db_session(config) as db:
@@ -583,6 +777,7 @@ async def search_notes(
     *,
     tag: str | None = None,
     include_rolled_up: bool = False,
+    include_archived: bool = False,
     limit: int = 20,
 ) -> list[dict]:
     """Substring search on decrypted content (good enough for thousands of notes).
@@ -592,13 +787,19 @@ async def search_notes(
     behind the rollup. Default ``False`` keeps casual searches focused on
     recent content.
 
+    ``include_archived`` mirrors :func:`list_notes` — pass ``True`` to
+    surface archived notes (e.g. skills-vault shapes) on demand.
+
     Phase 18.5 can swap this for FTS5 without changing the API.
     """
     if not query or not query.strip():
         return []
     q = _fold(query.strip())
     candidates = await list_notes(
-        config, user_id, tag=tag, include_rolled_up=include_rolled_up, limit=500,
+        config, user_id, tag=tag,
+        include_rolled_up=include_rolled_up,
+        include_archived=include_archived,
+        limit=500,
     )
     hits = [
         n
@@ -635,7 +836,13 @@ async def get_backlinks(
 async def find_by_title(
     config: Config, user_id: str, title: str
 ) -> dict | None:
-    """Resolve a wikilink target to a note (most recent match wins)."""
+    """Resolve a wikilink target to a note (most recent match wins).
+
+    Resolution order: ``title_key`` first (exact title match), then a
+    fallback against ``aliases`` so user-set aliases like
+    ``aliases: [SAT, "Tax Office"]`` make ``[[SAT]]`` resolve to the
+    same note. Title match always wins on conflict.
+    """
     key = normalize_page(title)
     async with db_session(config) as db:
         rows = await db.execute(
@@ -644,6 +851,15 @@ async def find_by_title(
             (user_id, key),
         )
         row = await rows.fetchone()
+        if not row:
+            like = f'%"{key}"%'
+            rows = await db.execute(
+                "SELECT id FROM notes "
+                "WHERE user_id = ? AND aliases IS NOT NULL "
+                "AND aliases LIKE ? ORDER BY created_at DESC LIMIT 1",
+                (user_id, like),
+            )
+            row = await rows.fetchone()
     if not row:
         return None
     return await get_note(config, user_id, row[0])
@@ -677,6 +893,130 @@ async def list_tags(config: Config, user_id: str) -> list[dict]:
     return [
         {"tag": t, "count": c}
         for t, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Typed edges (Phase 4 substrate)
+# ---------------------------------------------------------------------------
+
+# Edge types we accept. The default ``wikilink`` covers existing
+# auto-extracted ``[[link]]`` rows. Semantic edges have to be opted into
+# explicitly so a typo can't quietly become a graph claim.
+ALLOWED_EDGE_TYPES: frozenset[str] = frozenset({
+    "wikilink", "supersedes", "contradicts", "references", "derives_from",
+})
+
+
+async def add_relation(
+    config: Config,
+    user_id: str,
+    from_note_id: str,
+    to_note_id: str,
+    *,
+    kind: str,
+    source: str = "manual",
+) -> bool:
+    """Write a typed edge between two notes. Returns True on insert.
+
+    ``kind`` must be in :data:`ALLOWED_EDGE_TYPES`. ``source`` is a free-form
+    provenance string (``skill_lesson_auto`` / ``user`` / ``import`` / etc.)
+    so we can later distinguish agent-written from human-written edges.
+
+    Idempotent on (from, to, kind, source) — re-calling refreshes ``created_at``
+    by replacing the row rather than piling up duplicates. ``to_page_name``
+    is filled with the resolved title key for backwards compatibility with
+    existing query paths that read by page name.
+    """
+    if kind not in ALLOWED_EDGE_TYPES:
+        raise ValueError(f"unsupported edge_type: {kind!r}")
+
+    # Both notes must belong to the user — guard against cross-user edges
+    # if a caller passes wrong ids.
+    target = await get_note(config, user_id, to_note_id)
+    if target is None:
+        return False
+    src = await get_note(config, user_id, from_note_id)
+    if src is None:
+        return False
+    to_page_name = target.get("title_key") or ""
+
+    now = _now()
+    async with db_session(config) as db:
+        # Replace any prior row so re-emission updates timestamp without
+        # creating duplicates.
+        await db.execute(
+            "DELETE FROM note_links "
+            "WHERE user_id = ? AND from_note_id = ? AND to_note_id = ? "
+            "AND edge_type = ? AND (source IS ? OR source = ?)",
+            (user_id, from_note_id, to_note_id, kind, source, source),
+        )
+        await db.execute(
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_page_name, to_note_id, "
+            "edge_type, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                user_id, from_note_id, to_page_name, to_note_id,
+                kind, source, now,
+            ),
+        )
+        await db.commit()
+    return True
+
+
+async def list_relations(
+    config: Config,
+    user_id: str,
+    note_id: str,
+    *,
+    direction: str = "out",
+    kind: str | None = None,
+) -> list[dict]:
+    """Return typed edges for ``note_id``.
+
+    ``direction`` is ``"out"`` (edges from this note, default), ``"in"``
+    (edges TO this note), or ``"both"``. ``kind`` filters by edge type;
+    pass ``None`` for every type. Used by the next-release graph UI to
+    render typed edges differently from plain wikilinks.
+    """
+    if direction not in ("out", "in", "both"):
+        raise ValueError("direction must be out|in|both")
+
+    where = ["user_id = ?"]
+    params: list = [user_id]
+    if direction == "out":
+        where.append("from_note_id = ?")
+        params.append(note_id)
+    elif direction == "in":
+        where.append("to_note_id = ?")
+        params.append(note_id)
+    else:  # both
+        where.append("(from_note_id = ? OR to_note_id = ?)")
+        params.extend([note_id, note_id])
+    if kind:
+        where.append("edge_type = ?")
+        params.append(kind)
+
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT from_note_id, to_note_id, to_page_name, edge_type, "
+            "source, created_at FROM note_links "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY created_at DESC",
+            params,
+        )
+        result = await rows.fetchall()
+    return [
+        {
+            "from_note_id": r[0],
+            "to_note_id": r[1],
+            "to_page_name": r[2],
+            "edge_type": r[3],
+            "source": r[4],
+            "created_at": r[5],
+        }
+        for r in result
     ]
 
 

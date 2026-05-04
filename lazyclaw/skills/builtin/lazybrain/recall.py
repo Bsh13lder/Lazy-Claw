@@ -119,6 +119,16 @@ class SearchNotesSkill(BaseSkill):
                         "into a weekly/monthly rollup. Default False."
                     ),
                 },
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When True, also search archived notes — including "
+                        "the skills-vault (kind/shape replayable shapes). "
+                        "Default False keeps replayable lessons out of "
+                        "casual recall."
+                    ),
+                },
             },
             "required": ["query"],
         }
@@ -130,6 +140,7 @@ class SearchNotesSkill(BaseSkill):
             params["query"],
             tag=params.get("tag"),
             include_rolled_up=bool(params.get("include_rolled_up") or False),
+            include_archived=bool(params.get("include_archived") or False),
             limit=int(params.get("limit") or 10),
         )
         if not hits:

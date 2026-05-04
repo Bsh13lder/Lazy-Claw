@@ -149,6 +149,98 @@ def _truncate_memory(content: str) -> str:
     return cut.rstrip(" ,.;:") + "…"
 
 
+# Negation tokens that strongly signal "this fact contradicts another."
+# Used by the conflict detector below — ANY of these in one of two
+# memories that share a subject = surface a ⚠️ CONFLICT warning to the
+# brain so it asks the user instead of guessing.
+_NEGATION_TOKENS: frozenset[str] = frozenset({
+    "no", "not", "never", "instead", "actually", "no longer",
+    "n't", "doesn't", "don't", "didn't", "isn't", "aren't",
+    "ya no", "no es", "tampoco",  # ES
+})
+
+
+def _memory_subject_key(text: str) -> str:
+    """First 4 non-stopword tokens, joined — the dedup/conflict bucket key.
+
+    Two memories with the same subject key are candidates for conflict
+    detection. E.g. ``"I prefer oat milk"`` and ``"I never drink oat milk"``
+    both reduce to ``prefer/oat/milk`` (modulo negation), so they bucket
+    together and the negation tokens trigger the warning.
+    """
+    toks = [
+        t for t in _TOKEN_RE.findall((text or "").lower())
+        if t not in _MEMORY_STOPWORDS and t not in _NEGATION_TOKENS
+    ]
+    return "/".join(toks[:4])
+
+
+def _detect_conflicts(memories: list[dict]) -> list[tuple[dict, dict]]:
+    """Heuristic contradiction detection over already-picked memories.
+
+    Pairs share a subject key AND at least one carries a negation
+    token — "I prefer oat milk" + "I never drink oat milk" trigger;
+    "I prefer oat milk" + "I prefer almond milk" do NOT (no negation).
+    Heuristic-only by design — we want the brain to ASK rather than
+    invent a merge. False positives are cheap (one warning line) and
+    false negatives just preserve current behaviour.
+
+    Returns up to 3 pairs to keep the warning block bounded.
+    """
+    if len(memories) < 2:
+        return []
+    by_subject: dict[str, list[dict]] = {}
+    for m in memories:
+        key = _memory_subject_key(m.get("content") or "")
+        if not key:
+            continue
+        by_subject.setdefault(key, []).append(m)
+
+    conflicts: list[tuple[dict, dict]] = []
+    for key, group in by_subject.items():
+        if len(group) < 2:
+            continue
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                a_text = (a.get("content") or "").lower()
+                b_text = (b.get("content") or "").lower()
+                a_neg = any(tok in a_text for tok in _NEGATION_TOKENS)
+                b_neg = any(tok in b_text for tok in _NEGATION_TOKENS)
+                # XOR: exactly one side carries negation → likely contradiction.
+                # Both-negation or neither-negation = same polarity, not a conflict.
+                if a_neg != b_neg:
+                    conflicts.append((a, b))
+                if len(conflicts) >= 3:
+                    return conflicts
+    return conflicts
+
+
+def _format_memory_marker(mem: dict) -> str:
+    """``[source:conf ✓ DATE]`` tag prepended to every injected memory.
+
+    Tells the brain at a glance: where did this come from, how strongly
+    do we trust it, and when was it last verified. Without this the
+    LLM treats every fact as equally fresh — stale 2024 facts crowd out
+    new 2026 ones with no signal to disambiguate.
+    """
+    mtype = (mem.get("memory_type") or "").lower()
+    conf = int(mem.get("importance") or 5)
+    last = (mem.get("created_at") or "")[:10]
+
+    # LazyBrain mirrors carry their full updated_at as the verification
+    # date; legacy personal_memory has no verification log.
+    if mtype == "lazybrain":
+        if last:
+            return f"[note:{conf} ✓ {last}]"
+        return f"[note:{conf}]"
+    # Personal-memory sub-types (fact / preference / context / etc.)
+    label = mtype or "fact"
+    if last:
+        return f"[{label}:{conf} ✓ {last}]"
+    return f"[{label}:{conf}]"
+
+
 def _pick_hybrid_memories(
     pool: list[dict],
     user_message: str | None,
@@ -403,10 +495,26 @@ async def build_context(
     if topic_lesson_section:
         sections.append(topic_lesson_section)
     if memories:
-        lines = [f"- {m['content']}" for m in memories]
-        sections.append(
-            "## What I know about you\n" + "\n".join(lines)
-        )
+        # Provenance + confidence on every line so the brain can reason
+        # about staleness instead of treating all facts as equally fresh.
+        lines = [
+            f"- {_format_memory_marker(m)} {m['content']}" for m in memories
+        ]
+        # Conflict scan — if two injected memories contradict, surface a
+        # warning so the brain ASKS the user rather than guesses a merge.
+        conflicts = _detect_conflicts(memories)
+        warning_lines: list[str] = []
+        for a, b in conflicts:
+            a_snip = (a.get("content") or "")[:80]
+            b_snip = (b.get("content") or "")[:80]
+            warning_lines.append(
+                f"- ⚠️ CONFLICT: \"{a_snip}\" vs \"{b_snip}\" — ASK the user "
+                f"to confirm before relying on either."
+            )
+        body = "\n".join(lines)
+        if warning_lines:
+            body = "\n".join(warning_lines) + "\n" + body
+        sections.append("## What I know about you\n" + body)
 
     return "\n\n---\n\n".join(sections)
 

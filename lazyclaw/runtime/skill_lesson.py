@@ -426,6 +426,183 @@ async def save_skill_lesson(
         return None
 
 
+async def transition_outcome(
+    config: "Config",
+    user_id: str,
+    *,
+    lesson_id: str,
+    target: str,
+    reason: str | None = None,
+) -> dict:
+    """Promote (or demote) a lesson card's outcome state.
+
+    Used by the Telegram ``/confirm`` and ``/reject`` commands so the user
+    can close the verification loop manually for shapes the quiet-window
+    pump hasn't promoted yet.
+
+    Allowed transitions:
+      pending  → verified   (``target=verified``, /confirm)
+      pending  → known-bad  (``target=known-bad``, /reject)
+      verified → known-bad  (user explicitly disowns a verified shape)
+
+    Other transitions return ``{"ok": False, "reason": ...}`` without
+    mutating the note. Always ownership-checks ``user_id`` against the
+    note's row before doing anything.
+
+    Returns ``{"ok": True, "lesson_id": ..., "from": ..., "to": ...,
+    "title": ...}`` on success, or ``{"ok": False, "reason": ...}``.
+    """
+    if target not in (OUTCOME_VERIFIED, OUTCOME_KNOWN_BAD):
+        return {"ok": False, "reason": f"target {target!r} not allowed"}
+
+    try:
+        from lazyclaw.lazybrain import journal as lb_journal
+        from lazyclaw.lazybrain import store as lb_store
+        from lazyclaw.lazybrain.frontmatter import parse_frontmatter
+    except Exception:
+        return {"ok": False, "reason": "lazybrain unavailable"}
+
+    note = await lb_store.get_note(config, user_id, lesson_id)
+    if not note:
+        return {"ok": False, "reason": "lesson not found"}
+    tags = [str(t) for t in (note.get("tags") or [])]
+    if "kind/shape" not in tags:
+        return {"ok": False, "reason": "not a skill-shape lesson"}
+
+    # Read current outcome from frontmatter (the source of truth — tag
+    # may lag if a previous transition only touched one of them).
+    props, _body, _has = parse_frontmatter(note.get("content") or "")
+    current = str(props.get("outcome") or "")
+    if current not in {OUTCOME_PENDING, OUTCOME_VERIFIED}:
+        return {
+            "ok": False,
+            "reason": f"can't transition from outcome={current!r}",
+        }
+    if current == target:
+        return {
+            "ok": True, "lesson_id": lesson_id,
+            "from": current, "to": target,
+            "title": note.get("title") or "",
+            "noop": True,
+        }
+
+    # Refresh tags + importance to match new outcome.
+    new_tags = [
+        f"outcome/{target}" if t.startswith("outcome/") else t for t in tags
+    ]
+    if not any(t.startswith("outcome/") for t in new_tags):
+        new_tags.append(f"outcome/{target}")
+
+    new_importance = _OUTCOME_IMPORTANCE.get(target, 5)
+
+    fm_updates: dict[str, Any] = {
+        "outcome": target,
+        "last_used_at": _now_iso(),
+        "pending_since_turn": None,
+    }
+    if reason:
+        fm_updates["transition_reason"] = reason[:240]
+
+    try:
+        await lb_store.update_note(
+            config, user_id, lesson_id,
+            tags=new_tags,
+            importance=new_importance,
+            frontmatter_updates=fm_updates,
+        )
+    except Exception:
+        logger.warning(
+            "transition_outcome update failed for lesson %s",
+            lesson_id, exc_info=True,
+        )
+        return {"ok": False, "reason": "update failed"}
+
+    # Append a small journal entry so the verification trail is visible
+    # in today's daily page. ``[[verified]]`` / ``[[rejected]]`` wikilink
+    # gives the graph an honest edge from "today" to the changed lesson.
+    journal_note_id: str | None = None
+    try:
+        title = note.get("title") or "(untitled lesson)"
+        verb = "verified" if target == OUTCOME_VERIFIED else "rejected"
+        line = f"[[{verb}]] [[{title}]]"
+        if reason:
+            line += f" — {reason[:160]}"
+        journal = await lb_journal.append_journal(config, user_id, line)
+        journal_note_id = (journal or {}).get("id")
+    except Exception:
+        logger.debug(
+            "journal append for lesson %s failed",
+            lesson_id, exc_info=True,
+        )
+
+    # Typed-edge writeback: stamp a ``references`` edge from today's
+    # journal to the lesson with ``source='lesson_transition'``. The
+    # plain [[wikilink]] above still emits a ``wikilink`` edge — this
+    # one carries provenance so the graph UI can later highlight
+    # "user-confirmed" or "user-rejected" links distinctly.
+    if journal_note_id:
+        try:
+            await lb_store.add_relation(
+                config, user_id,
+                from_note_id=journal_note_id,
+                to_note_id=lesson_id,
+                kind="references",
+                source=f"lesson_{target}",
+            )
+        except Exception:
+            logger.debug("typed-edge writeback failed", exc_info=True)
+
+    return {
+        "ok": True,
+        "lesson_id": lesson_id,
+        "from": current,
+        "to": target,
+        "title": note.get("title") or "",
+    }
+
+
+async def _audit_dropped_lessons(
+    config: "Config",
+    user_id: str,
+    *,
+    topic: str,
+    dropped: list[tuple[str, str]],
+) -> None:
+    """Write a debug entry to ``audit_log`` listing lessons dropped by
+    ``recall_skill_lessons``'s outcome filter.
+
+    Transparency play — without this, contested/superseded shapes vanish
+    silently from recall. With it the user can see "why didn't lesson X
+    surface?" via the audit page. ``dropped`` is ``[(note_id, outcome)]``.
+    Best-effort, never raises.
+    """
+    if not dropped:
+        return
+    try:
+        from uuid import uuid4
+
+        from lazyclaw.db.connection import db_session as _db_session
+
+        summary = ", ".join(f"{nid[:8]}={oc}" for nid, oc in dropped[:6])
+        async with _db_session(config) as db:
+            await db.execute(
+                "INSERT INTO audit_log "
+                "(id, user_id, action, skill_name, result_summary, source) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid4()),
+                    user_id,
+                    "lesson_filtered",
+                    "recall_skill_lessons",
+                    f"topic={topic} dropped={summary}",
+                    "system",
+                ),
+            )
+            await db.commit()
+    except Exception:
+        logger.debug("audit dropped-lessons failed", exc_info=True)
+
+
 async def _find_by_title_key(
     config: "Config", user_id: str, title_key: str | None
 ) -> dict | None:
@@ -503,6 +680,7 @@ async def recall_skill_lessons(
         return []
 
     out: list[dict] = []
+    dropped: list[tuple[str, str]] = []
     for note in results:
         tags = [str(t) for t in (note.get("tags") or [])]
         if f"topic/{topic}" not in tags:
@@ -519,6 +697,10 @@ async def recall_skill_lessons(
             None,
         )
         if this_outcome not in wanted_outcomes:
+            # Track silent drops so the user can see what was filtered
+            # via the audit log instead of guessing why a known shape
+            # didn't surface in recall.
+            dropped.append((note.get("id") or "", this_outcome or "?"))
             continue
         parsed = _parse_lesson_body(note.get("content") or "")
         out.append({
@@ -533,6 +715,18 @@ async def recall_skill_lessons(
         })
         if len(out) >= k:
             break
+
+    if dropped:
+        # Best-effort, fire-and-forget — recall must never wait on audit IO.
+        try:
+            import asyncio as _asyncio
+            _asyncio.create_task(
+                _audit_dropped_lessons(
+                    config, user_id, topic=topic, dropped=dropped,
+                )
+            )
+        except Exception:
+            logger.debug("schedule audit-drop failed", exc_info=True)
     return out
 
 
@@ -694,6 +888,7 @@ __all__ = [
     "save_skill_lesson",
     "recall_skill_lessons",
     "recall_known_bad_shapes",
+    "transition_outcome",
     "format_lessons_as_exemplars",
     "format_known_bad_as_warnings",
 ]

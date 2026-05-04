@@ -56,6 +56,8 @@ BOT_COMMANDS = [
     BotCommand("permissions", "\U0001f510 Show permissions"),
     BotCommand("allow", "✅ /allow <category|skill>"),
     BotCommand("deny", "\U0001f6ab /deny <category|skill>"),
+    BotCommand("confirm", "✅ /confirm <lesson_id>"),
+    BotCommand("reject", "\U0001f6ab /reject <lesson_id> [reason]"),
 ]
 
 
@@ -108,6 +110,8 @@ class TelegramCommands:
             "permissions": self._handle_permissions,
             "allow": self._handle_allow,
             "deny": self._handle_deny,
+            "confirm": self._handle_lesson_confirm,
+            "reject": self._handle_lesson_reject,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -2206,6 +2210,80 @@ class TelegramCommands:
             update,
             f"{icon} <b>{label} '<code>{result['target']}</code>' set to {level}</b>",
         )
+
+    # -- /confirm and /reject — close the lesson verification loop ---------
+
+    async def _handle_lesson_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/confirm <lesson_id> — promote pending lesson to verified."""
+        await self._apply_lesson_transition(update, context, target="verified")
+
+    async def _handle_lesson_reject(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/reject <lesson_id> [reason] — mark lesson known-bad."""
+        await self._apply_lesson_transition(update, context, target="known-bad")
+
+    async def _apply_lesson_transition(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        target: str,
+    ) -> None:
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        if not context.args:
+            verb = "confirm" if target == "verified" else "reject"
+            await self._reply(
+                update,
+                f"❓ <b>Usage:</b> <code>/{verb} &lt;lesson_id&gt; [reason]</code>\n\n"
+                "<i>The lesson_id is the LazyBrain note ID of a kind/shape "
+                "card — you'll see it appended to skill-lesson recall lines.</i>",
+            )
+            return
+
+        lesson_id = context.args[0].strip()
+        reason: str | None = None
+        if len(context.args) > 1:
+            reason = " ".join(context.args[1:]).strip() or None
+
+        from lazyclaw.runtime.skill_lesson import transition_outcome
+
+        try:
+            result = await transition_outcome(
+                self._config, user_id,
+                lesson_id=lesson_id,
+                target=target,
+                reason=reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "lesson transition raised: %s", exc, exc_info=True,
+            )
+            await self._reply(update, f"❌ Transition failed: {exc}")
+            return
+
+        if not result.get("ok"):
+            await self._reply(
+                update,
+                f"❌ Could not transition lesson <code>{lesson_id}</code>: "
+                f"{result.get('reason') or 'unknown'}",
+            )
+            return
+
+        icon = "✅" if target == "verified" else "\U0001f6ab"
+        title = result.get("title") or "(untitled)"
+        line = (
+            f"{icon} <b>{result.get('from')} → {result.get('to')}</b>\n"
+            f"<i>{title}</i>"
+        )
+        if reason:
+            line += f"\n\n<code>reason:</code> {reason}"
+        await self._reply(update, line)
 
     # -- Callback query handler (inline keyboards) -------------------------
 

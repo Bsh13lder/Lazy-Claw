@@ -71,6 +71,19 @@ async def init_db(config: Config) -> None:
             ("browser_templates", "auto_saved", "ALTER TABLE browser_templates ADD COLUMN auto_saved INTEGER NOT NULL DEFAULT 0"),
             ("browser_templates", "corrections_pending", "ALTER TABLE browser_templates ADD COLUMN corrections_pending INTEGER NOT NULL DEFAULT 0"),
             ("browser_templates", "version", "ALTER TABLE browser_templates ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+            # Second-Brain Substrate (Phase 2+4) — never-forget + typed edges.
+            #   notes.embedding_dirty: 1 = content changed since last embed; reindex daemon picks these up.
+            #   notes.archived:        1 = hide from default recall (skills-vault toggle, archived plans, etc.)
+            #   notes.aliases:         JSON array of plaintext aliases for [[wikilink]] resolution.
+            #   background_tasks.lazybrain_note_id: backlink to mirrored research note.
+            #   note_links.edge_type:  wikilink | supersedes | contradicts | references | derives_from.
+            #   note_links.source:     skill | user | auto — provenance for the edge.
+            ("notes", "embedding_dirty", "ALTER TABLE notes ADD COLUMN embedding_dirty INTEGER NOT NULL DEFAULT 0"),
+            ("notes", "archived", "ALTER TABLE notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"),
+            ("notes", "aliases", "ALTER TABLE notes ADD COLUMN aliases TEXT"),
+            ("background_tasks", "lazybrain_note_id", "ALTER TABLE background_tasks ADD COLUMN lazybrain_note_id TEXT"),
+            ("note_links", "edge_type", "ALTER TABLE note_links ADD COLUMN edge_type TEXT NOT NULL DEFAULT 'wikilink'"),
+            ("note_links", "source", "ALTER TABLE note_links ADD COLUMN source TEXT"),
         ]
         for table, column, sql in migrations:
             try:

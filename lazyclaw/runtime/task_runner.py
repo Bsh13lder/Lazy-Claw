@@ -58,6 +58,90 @@ logger = logging.getLogger(__name__)
 _task_counter = 0
 
 
+# Cap for the mirrored result body — full result stays in the encrypted
+# background_tasks.result column; this is just the brain-resident excerpt.
+_MIRROR_RESULT_CAP = 4000
+_MIRROR_INSTRUCTION_CAP = 800
+
+
+async def _mirror_background_result(
+    config,
+    user_id: str,
+    *,
+    task_id: str,
+    task_name: str,
+    instruction: str,
+    result: str,
+    summary,
+) -> str | None:
+    """Mirror a completed background task into LazyBrain as a research note.
+
+    Tags ``kind/research source/background-task owner/agent`` so the recall
+    fan-out picks it up alongside user-saved memories. Importance 5 by
+    default (above noise, below explicit user facts). Title carries the
+    task name so the user can wikilink back to the source artifact.
+
+    Returns the new note id on success, ``None`` on any failure.
+    """
+    try:
+        from lazyclaw.lazybrain import store as lb_store
+    except Exception:
+        logger.debug("lazybrain store import failed", exc_info=True)
+        return None
+
+    instr = (instruction or "").strip()
+    if len(instr) > _MIRROR_INSTRUCTION_CAP:
+        instr = instr[: _MIRROR_INSTRUCTION_CAP - 1].rstrip() + "…"
+    res = (result or "").strip()
+    if len(res) > _MIRROR_RESULT_CAP:
+        res = res[: _MIRROR_RESULT_CAP - 1].rstrip() + "…"
+
+    lines: list[str] = [
+        f"**Task:** {task_name}",
+        f"**Background ID:** `{task_id}`",
+        "",
+        "### Instruction",
+        instr or "(empty)",
+        "",
+        "### Result",
+        res or "(empty)",
+    ]
+    if summary is not None:
+        try:
+            stats = (
+                f"Tokens: {summary.total_tokens} · "
+                f"LLM calls: {summary.llm_calls} · "
+                f"Cost: ${summary.total_cost:.4f} · "
+                f"Tools: {', '.join(list(summary.tools_used)[:6]) or 'none'}"
+            )
+            lines.extend(["", "### Stats", stats])
+        except Exception:
+            pass
+
+    body = "\n".join(lines)
+    title = f"Research · {task_name}"
+    tags = ["kind/research", "owner/agent", "source/background-task", "auto"]
+    frontmatter = {
+        "kind": "research",
+        "source": "background-task",
+        "background_task_id": task_id,
+        "task_name": task_name,
+    }
+    try:
+        note = await lb_store.save_note(
+            config, user_id,
+            content=body,
+            title=title,
+            tags=tags,
+            importance=5,
+            frontmatter=frontmatter,
+        )
+        return note.get("id")
+    except Exception:
+        logger.debug("save_note failed for background mirror", exc_info=True)
+        return None
+
+
 def _short_name(instruction: str, task_id: str) -> str:
     """Generate a short human-readable name from the instruction.
 
@@ -422,6 +506,34 @@ class TaskRunner:
                     (encrypted_result, _cost, _tokens, _calls, task_id),
                 )
                 await db.commit()
+
+            # Mirror the result into LazyBrain so it's RAG-searchable.
+            # Without this, every run_background output is lost the moment
+            # the task settles — the user can't ask "what did that research
+            # find?" two hours later. PKM mirror failures never fail the
+            # task itself (Ollama down, encryption error, etc.).
+            try:
+                lb_note_id = await _mirror_background_result(
+                    self._config, user_id,
+                    task_id=task_id,
+                    task_name=task_name,
+                    instruction=instruction,
+                    result=result,
+                    summary=_captured_summary,
+                )
+                if lb_note_id:
+                    async with db_session(self._config) as db:
+                        await db.execute(
+                            "UPDATE background_tasks SET lazybrain_note_id = ? "
+                            "WHERE id = ?",
+                            (lb_note_id, task_id),
+                        )
+                        await db.commit()
+            except Exception:
+                logger.debug(
+                    "background → lazybrain mirror failed for %s",
+                    task_id[:8], exc_info=True,
+                )
 
             logger.info("Background task %s (%s) completed", task_id[:8], task_name)
 

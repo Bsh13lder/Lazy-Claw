@@ -82,6 +82,13 @@ class HeartbeatDaemon:
         # Last day we ran the LazyBrain topic-rollup sweep per user. Cooldown
         # check inside the job is the real gate; this just bounds tick cost.
         self._last_topic_rollup_iso: dict[str, str] = {}
+        # Tick counter so the dirty-embedding reindex pass + plan ingest run
+        # at sensible cadences (every tick / once an hour) without blocking
+        # the cron + watcher passes that need to fire promptly.
+        self._tick_count: int = 0
+        # Last hour we ingested Claude plans per user. Plans don't change
+        # often — every ~60min is plenty.
+        self._last_plan_ingest_hour: dict[str, str] = {}
 
     async def start(self) -> None:
         """Launch the heartbeat loop as a background task."""
@@ -120,6 +127,8 @@ class HeartbeatDaemon:
 
     async def _tick(self) -> None:
         """Single heartbeat: find users with active jobs and check them."""
+        self._tick_count += 1
+
         async with db_session(self._config) as db:
             cursor = await db.execute(
                 "SELECT DISTINCT user_id FROM agent_jobs WHERE status = 'active'"
@@ -154,6 +163,11 @@ class HeartbeatDaemon:
 
         # Run LazyBrain topic-rollup sweep once per day per user.
         await self._sweep_topic_rollups()
+
+        # Second-Brain Substrate (Phase 2): drain dirty embeddings + ingest
+        # CLAUDE plan files. Both are cheap NOOPs when there's nothing to do.
+        await self._reindex_dirty_embeddings()
+        await self._ingest_claude_plans()
 
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
@@ -1044,6 +1058,83 @@ class HeartbeatDaemon:
             except Exception:
                 logger.warning(
                     "topic rollup sweep failed for user %s",
+                    user_id, exc_info=True,
+                )
+
+    async def _reindex_dirty_embeddings(self) -> None:
+        """Drain notes whose ``embedding_dirty=1`` flag is still set.
+
+        Most ticks find zero dirty notes — the SELECT against the indexed
+        column costs microseconds. The flag is set when ``save_note`` /
+        ``update_note`` writes content but the synchronous embedding upsert
+        fails (Ollama down). Without this pass, those notes would be
+        invisible to ``semantic_search`` until the user manually
+        triggered ``lazybrain_reindex_embeddings``.
+        """
+        try:
+            from lazyclaw.lazybrain import embeddings as _lb_emb
+        except Exception:
+            return
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute("SELECT id FROM users")
+                users = [r[0] for r in await cursor.fetchall()]
+        except Exception:
+            logger.debug("reindex pass: list users failed", exc_info=True)
+            return
+        for user_id in users:
+            try:
+                summary = await _lb_emb.reindex_dirty_batch(
+                    self._config, user_id, limit=50,
+                )
+                if summary.get("indexed"):
+                    logger.info(
+                        "embedding reindex: user=%s indexed=%d skipped=%d",
+                        user_id, summary["indexed"], summary["skipped"],
+                    )
+            except Exception:
+                logger.debug(
+                    "embedding reindex failed for user %s",
+                    user_id, exc_info=True,
+                )
+
+    async def _ingest_claude_plans(self) -> None:
+        """Mirror ``~/.claude/plans/*.md`` into LazyBrain once per hour per user.
+
+        Plans rarely change between ticks; the per-plan mtime guard inside
+        ``ingest_claude_plans`` makes the whole call near-free when nothing
+        moved. Hour-bucketed throttle keeps the disk-glob off the hot path.
+        """
+        try:
+            from lazyclaw.lazybrain import plan_ingest
+        except Exception:
+            logger.debug("plan_ingest import failed", exc_info=True)
+            return
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute("SELECT id FROM users")
+                users = [r[0] for r in await cursor.fetchall()]
+        except Exception:
+            return
+        now_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+        for user_id in users:
+            if self._last_plan_ingest_hour.get(user_id) == now_hour:
+                continue
+            try:
+                summary = await plan_ingest.ingest_claude_plans(
+                    self._config, user_id,
+                )
+                self._last_plan_ingest_hour[user_id] = now_hour
+                if summary.get("ingested"):
+                    logger.info(
+                        "claude plan ingest: user=%s ingested=%d skipped=%d "
+                        "(of %d)",
+                        user_id, summary["ingested"], summary["skipped"],
+                        summary["checked"],
+                    )
+            except Exception:
+                logger.debug(
+                    "plan ingest failed for user %s",
                     user_id, exc_info=True,
                 )
 

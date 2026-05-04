@@ -1,10 +1,41 @@
+"""Unified recall fan-out — one skill the brain calls instead of choosing
+between three.
+
+Why one skill: the brain previously had to pick between
+``recall_memories``, ``lazybrain_search_notes`` and ``lazybrain_ask`` per
+turn. The wrong pick = silent miss. This skill fans out to all three
+underlying stores in parallel and returns a single ranked, deduped list
+where every row is labelled ``[source, conf, last_verified]`` so the
+brain can reason about confidence without guessing.
+
+Sources merged:
+  • personal_memory   — substring match on legacy facts table
+  • lazybrain_notes   — semantic + substring (Ollama-backed, fallback safe)
+  • lazybrain_lessons — kind/shape cards filtered to outcome ∈ {verified, pending}
+
+Hard rules:
+  • Never raise. Ollama down → semantic skipped, substring still works.
+  • Dedup by content hash (folded) so the same fact doesn't surface
+    twice as both a personal_memory row and its LazyBrain mirror.
+  • Keep existing skill names ``recall_memories`` and
+    ``lazybrain_search_notes`` working — they delegate to this code path.
+"""
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
+import unicodedata
 
 from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
+
+
+# ── Source labels used in every emitted row ────────────────────────────
+SRC_PERSONAL = "memory"
+SRC_NOTE = "note"
+SRC_LESSON = "lesson"
 
 
 class MemoryRecallSkill(BaseSkill):
@@ -26,13 +57,12 @@ class MemoryRecallSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Search the user's saved memory across BOTH the legacy personal "
-            "facts table AND LazyBrain (the user's second brain — TILs, "
-            "decisions, deadlines, ideas, prices, addresses, plans). "
-            "Substring match on personal facts; semantic + substring search "
-            "on LazyBrain. Use this whenever you suspect the user already "
-            "told you something — phrasing in memory may differ from your "
-            "query."
+            "Search EVERYTHING the user's brain knows in one call: legacy "
+            "personal facts + LazyBrain notes (semantic + substring) + "
+            "verified skill lessons. Each result is labelled with its "
+            "source and confidence so you can reason about staleness. Use "
+            "this whenever you suspect the user (or a past skill run) "
+            "already told you something."
         )
 
     @property
@@ -43,8 +73,18 @@ class MemoryRecallSkill(BaseSkill):
                 "query": {
                     "type": "string",
                     "description": (
-                        "What to search for (e.g., 'name', 'timezone', 'google'). "
-                        "Substring + semantic match, case-insensitive."
+                        "What to search for. Substring + semantic match, "
+                        "case-insensitive."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["default", "skills_vault", "all"],
+                    "default": "default",
+                    "description": (
+                        "default = facts + notes + verified lessons. "
+                        "skills_vault = include archived/legacy skill shapes. "
+                        "all = everything, including superseded/contested."
                     ),
                 },
             },
@@ -54,25 +94,33 @@ class MemoryRecallSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         if not self._config:
             return "Error: Memory system not configured"
-        from lazyclaw.memory.personal import search_memories, get_memories
 
         query = ((params or {}).get("query") or "").strip()
         if not query:
             return "Error: `query` is required."
+        scope = (params or {}).get("scope") or "default"
 
-        # ── 1. Legacy personal_memory substring search ─────────────────
-        personal_hits = await search_memories(self._config, user_id, query)
+        # Fan out to all three sources in parallel — one bad source never
+        # blocks the others. Each helper is wrapped to never raise.
+        personal_task = _safe_personal_search(self._config, user_id, query)
+        notes_task = _safe_lazybrain_search(self._config, user_id, query)
+        lessons_task = _safe_lessons_search(
+            self._config, user_id, query, scope=scope,
+        )
 
-        # ── 2. LazyBrain semantic + substring search ───────────────────
-        lb_hits = await _safe_lazybrain_search(self._config, user_id, query)
+        personal, notes, lessons = await asyncio.gather(
+            personal_task, notes_task, lessons_task,
+        )
 
-        if personal_hits or lb_hits:
-            return _format_combined_hits(query, personal_hits, lb_hits)
+        merged = _merge_and_dedupe(personal, notes, lessons)
 
-        # ── 3. Both empty — return previews from both stores so the brain
-        #      sees what's stored before it gives up. Prevents the "no
-        #      match → I have no memory of X" loop when the answer was
-        #      phrased differently.
+        if merged:
+            return _format_unified_hits(query, merged, scope=scope)
+
+        # All three empty — fall back to a preview so the brain sees
+        # what's stored before it gives up.
+        from lazyclaw.memory.personal import get_memories
+
         vault_keys = await _vault_keys_safe(self._config, user_id)
         all_personal = await get_memories(self._config, user_id, limit=8)
         all_lb = await _safe_recent_lb_notes(self._config, user_id, limit=8)
@@ -93,28 +141,126 @@ class MemoryRecallSkill(BaseSkill):
         )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────
+# ── Source-specific safe wrappers ──────────────────────────────────────
+
+
+async def _safe_personal_search(config, user_id: str, query: str) -> list[dict]:
+    """Substring on legacy personal_memory. Returns labelled rows."""
+    try:
+        from lazyclaw.memory.personal import search_memories
+        hits = await search_memories(config, user_id, query)
+    except Exception:
+        logger.debug("personal search failed", exc_info=True)
+        return []
+    out: list[dict] = []
+    for m in hits:
+        out.append({
+            "source": SRC_PERSONAL,
+            "id": m.get("id"),
+            "title": (m.get("type") or m.get("memory_type") or "fact"),
+            "content": m.get("content") or "",
+            "conf": int(m.get("importance") or 5),
+            "last_verified": None,  # personal_memory has no verification log
+            "tags": [],
+        })
+    return out
 
 
 async def _safe_lazybrain_search(config, user_id: str, query: str) -> list[dict]:
-    """Run semantic_search; return [] on any failure (Ollama down, etc.)."""
+    """Semantic + substring over LazyBrain notes. Filters out tag mirrors
+    of stores already represented in the personal pool, plus kind/shape
+    cards (those go through the lesson path)."""
     try:
         from lazyclaw.lazybrain import embeddings as lb_embeddings
         from lazyclaw.lazybrain.store import is_user_facing_memory_note
     except Exception:
-        logger.debug("LazyBrain unavailable — skill recall personal-only", exc_info=True)
+        logger.debug("LazyBrain import failed", exc_info=True)
         return []
     try:
         result = await lb_embeddings.semantic_search(
             config, user_id, query, k=8,
         )
     except Exception:
-        logger.debug("semantic_search raised — falling back to empty", exc_info=True)
+        logger.debug("semantic_search raised", exc_info=True)
         return []
     raw = result.get("results") if isinstance(result, dict) else None
     if not raw:
         return []
-    return [n for n in raw if is_user_facing_memory_note(n)]
+    out: list[dict] = []
+    for n in raw:
+        if not is_user_facing_memory_note(n):
+            continue
+        out.append({
+            "source": SRC_NOTE,
+            "id": f"lb:{n['id']}",
+            "title": n.get("title") or "(untitled)",
+            "content": n.get("content") or "",
+            "conf": int(n.get("importance") or 5),
+            "last_verified": n.get("updated_at"),
+            "tags": list(n.get("tags") or []),
+            "_score": n.get("_score"),
+        })
+    return out
+
+
+async def _safe_lessons_search(
+    config, user_id: str, query: str, *, scope: str = "default",
+) -> list[dict]:
+    """Semantic search restricted to kind/shape cards.
+
+    ``scope='default'`` keeps only outcome ∈ {verified, pending}.
+    ``scope='skills_vault'`` adds archived/superseded for explicit recall.
+    ``scope='all'`` returns every shape match. Always excludes
+    ``kind/known-bad`` from positive recall — those go through the
+    dedicated negative-example path.
+    """
+    try:
+        from lazyclaw.lazybrain import embeddings as lb_embeddings
+    except Exception:
+        return []
+    try:
+        result = await lb_embeddings.semantic_search(
+            config, user_id, query, k=8,
+        )
+    except Exception:
+        logger.debug("lessons search raised", exc_info=True)
+        return []
+    raw = result.get("results") if isinstance(result, dict) else None
+    if not raw:
+        return []
+
+    if scope == "default":
+        wanted_outcomes = {"verified", "pending"}
+    elif scope == "skills_vault":
+        wanted_outcomes = {"verified", "pending", "superseded"}
+    else:  # "all"
+        wanted_outcomes = {"verified", "pending", "superseded", "failed"}
+
+    out: list[dict] = []
+    for n in raw:
+        tags = [str(t) for t in (n.get("tags") or [])]
+        if "kind/shape" not in tags:
+            continue
+        if "kind/known-bad" in tags:
+            continue
+        outcome = next(
+            (t.split("/", 1)[1] for t in tags if t.startswith("outcome/")),
+            None,
+        )
+        if outcome not in wanted_outcomes:
+            continue
+        out.append({
+            "source": SRC_LESSON,
+            "id": f"lb:{n['id']}",
+            "title": n.get("title") or "(untitled lesson)",
+            "content": n.get("content") or "",
+            "conf": int(n.get("importance") or 5),
+            "last_verified": n.get("updated_at"),
+            "tags": tags,
+            "outcome": outcome,
+            "_score": n.get("_score"),
+        })
+    return out
 
 
 async def _safe_recent_lb_notes(config, user_id: str, limit: int) -> list[dict]:
@@ -132,41 +278,91 @@ async def _safe_recent_lb_notes(config, user_id: str, limit: int) -> list[dict]:
     return filtered[:limit]
 
 
-def _format_combined_hits(
-    query: str,
-    personal: list[dict],
-    lb: list[dict],
-) -> str:
-    """Render personal + LazyBrain hits as a single answer body."""
+async def _vault_keys_safe(config, user_id: str) -> list[str]:
+    try:
+        from lazyclaw.crypto.vault import list_credentials
+        return await list_credentials(config, user_id)
+    except Exception:
+        return []
+
+
+# ── Merge + dedup ──────────────────────────────────────────────────────
+
+
+def _content_hash(text: str) -> str:
+    """Stable hash over folded content — case + accent + whitespace
+    insensitive so a personal_memory row and its LazyBrain mirror
+    collapse into one. SHA-1 is fine; we want speed not crypto."""
+    if not text:
+        return ""
+    folded = "".join(
+        c for c in unicodedata.normalize("NFKD", text.lower())
+        if not unicodedata.combining(c)
+    )
+    return hashlib.sha1(" ".join(folded.split()).encode()).hexdigest()
+
+
+def _merge_and_dedupe(
+    personal: list[dict], notes: list[dict], lessons: list[dict],
+) -> list[dict]:
+    """Combine the three source streams into one ranked list.
+
+    Source priority on tie: lesson > note > personal — verified shapes
+    are higher signal than substring memory hits. Within a source we
+    preserve the upstream order (already cosine-ranked or
+    importance-ranked).
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+    # lessons first so their content hash claims the slot before a
+    # near-duplicate note rolls in.
+    for stream in (lessons, notes, personal):
+        for row in stream:
+            h = _content_hash(row.get("content") or row.get("title") or "")
+            if h and h in seen:
+                continue
+            if h:
+                seen.add(h)
+            merged.append(row)
+    # Soft re-rank: confidence DESC, but keep semantic-score ordering
+    # within each confidence band.
+    merged.sort(
+        key=lambda r: (
+            -int(r.get("conf") or 5),
+            -float(r.get("_score") or 0.0),
+        )
+    )
+    return merged[:20]
+
+
+# ── Formatting ─────────────────────────────────────────────────────────
+
+
+def _row_label(row: dict) -> str:
+    """Render the [source:conf ✓verified DATE] tag the brain reads."""
+    src = row.get("source") or "?"
+    conf = int(row.get("conf") or 5)
+    last = (row.get("last_verified") or "")[:10]
+    if row.get("source") == SRC_LESSON:
+        outcome = row.get("outcome") or "pending"
+        mark = "✓" if outcome == "verified" else "?"
+        return f"[{src}:{conf} {mark} {outcome} {last}]"
+    if last:
+        return f"[{src}:{conf} ✓ {last}]"
+    return f"[{src}:{conf}]"
+
+
+def _format_unified_hits(query: str, rows: list[dict], scope: str) -> str:
     lines: list[str] = []
-    total = len(personal) + len(lb)
-    lines.append(f"Matches for '{query}' ({total}):")
-    if personal:
-        lines.append("")
-        lines.append("**Personal facts:**")
-        for m in personal:
-            mtype = m.get("type") or m.get("memory_type") or "?"
-            lines.append(
-                f"- [{mtype}] {m['content']} "
-                f"(importance: {m['importance']}, id: {m['id']})"
-            )
-    if lb:
-        lines.append("")
-        lines.append("**LazyBrain notes:**")
-        for n in lb:
-            title = (n.get("title") or "(untitled)").strip()
-            content = (n.get("content") or "").strip().replace("\n", " ")
-            preview = content[:200]
-            tags = n.get("tags") or []
-            tag_chip = (
-                f" [{', '.join(t for t in tags if not t.startswith('owner/'))[:60]}]"
-                if tags else ""
-            )
-            score = n.get("_score")
-            score_chip = f" (score: {score})" if score is not None else ""
-            lines.append(
-                f"- **{title}**{tag_chip}{score_chip} — {preview} (id: lb:{n['id']})"
-            )
+    lines.append(
+        f"Matches for '{query}' ({len(rows)}, scope={scope}):"
+    )
+    for row in rows:
+        label = _row_label(row)
+        title = (row.get("title") or "(untitled)").strip()
+        body = (row.get("content") or "").strip().replace("\n", " ")[:200]
+        rid = row.get("id") or ""
+        lines.append(f"- {label} **{title}** — {body} (id: {rid})")
     return "\n".join(lines)
 
 
@@ -206,16 +402,8 @@ def _format_no_match_preview(
         )
     lines.append("")
     lines.append(
-        "STOP. Do not retry recall_memories with other keywords — both "
-        "stores are searched on every call. If the fact isn't above, ask "
+        "STOP. Do not retry recall_memories with other keywords — every "
+        "store is searched on every call. If the fact isn't above, ask "
         "the user instead of guessing."
     )
     return "\n".join(lines)
-
-
-async def _vault_keys_safe(config, user_id: str) -> list[str]:
-    try:
-        from lazyclaw.crypto.vault import list_credentials
-        return await list_credentials(config, user_id)
-    except Exception:
-        return []

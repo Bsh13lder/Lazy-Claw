@@ -30,10 +30,14 @@ import {
   FILTER_CATEGORIES,
   colorForTags,
   categoryKeysFor,
-  categoryMatchCount,
   ringForKey,
 } from "./noteColors";
-import { CategoryIcon, Star, CATEGORY_ICONS, DEFAULT_CATEGORY_ICON } from "./icons";
+import { CategoryIcon, Star, Clock, CATEGORY_ICONS, DEFAULT_CATEGORY_ICON } from "./icons";
+import {
+  displayLabelForNote,
+  isRollupNote,
+  isMonthlyRollupNote,
+} from "./rollupLabel";
 import { Plus, Minus, RotateCcw, ChevronDown, ChevronUp, MousePointer2, Move, ZoomIn, Search, X as XIcon } from "lucide-react";
 
 interface Props {
@@ -99,6 +103,31 @@ function computeNodeRadius(
     ? (isMonthlyRollup ? 16 : 13) + Math.min(14, Math.sqrt(sourceCount) * 2.2)
     : 9 + Math.min(6, Math.sqrt(deg) * 1.1);
   return baseR + Math.min(3, importance / 3) + (note?.pinned ? 1 : 0);
+}
+
+/** Compact relative-time formatter for the hover tooltip. Output:
+ *  "just now", "5m ago", "2h ago", "3d ago", "2w ago", or an
+ *  absolute "Mar 12" / "Mar 12 2024" once we cross 6 weeks. Tight
+ *  enough for a 260px card; readable enough that the user knows
+ *  whether the note is fresh or stale. */
+function formatRelativeShort(date: Date): string {
+  const now = Date.now();
+  const ms = now - date.getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 45) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 14) return `${day}d ago`;
+  const wk = Math.floor(day / 7);
+  if (wk < 6) return `${wk}w ago`;
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return date.toLocaleDateString(undefined, sameYear
+    ? { month: "short", day: "numeric" }
+    : { month: "short", day: "numeric", year: "numeric" });
 }
 
 /** Below this px threshold a pointer-down/up counts as a click, not a drag. */
@@ -404,11 +433,24 @@ export function GraphView({
       degMap.set(e.target, (degMap.get(e.target) ?? 0) + 1);
     }
     const s = new ForceSimulation(
-      graph.nodes.map((n) => ({
-        id: n.id,
-        pinned: false,
-        r: computeNodeRadius(notesById?.[n.id], degMap.get(n.id) ?? 0),
-      })),
+      graph.nodes.map((n) => {
+        const note = notesById?.[n.id];
+        // Pass `kind` so the sim's per-edge spring length and per-node
+        // repulsion mass can give rollup hubs extra breathing room
+        // (see ForceSimulation constructor: ROLLUP_LEN_MUL + ×1.5 mass).
+        const kind: "rollup" | "monthly-rollup" | undefined =
+          isMonthlyRollupNote(note)
+            ? "monthly-rollup"
+            : isRollupNote(note)
+              ? "rollup"
+              : undefined;
+        return {
+          id: n.id,
+          pinned: false,
+          r: computeNodeRadius(note, degMap.get(n.id) ?? 0),
+          kind,
+        };
+      }),
       graph.edges.map((e) => ({ source: e.source, target: e.target })),
       {
         width: size.width,
@@ -741,6 +783,16 @@ export function GraphView({
   // no virtual DOM diff, no commit phase — just O(N) attribute writes
   // straight to the rendered SVG. A 500-node graph at 60fps costs
   // ≈1ms of JS per frame instead of ≈80ms for a full reconcile.
+  // ── id → SimNode lookup, hoisted above the RAF effect ─────────────────
+  // Used inside the RAF loop below so we don't rebuild a 700-entry Map
+  // every animation frame. Stable per `sim` — only rebuilds when the
+  // simulation is replaced (filter / mode change), not on every tick.
+  const nodeById = useMemo(() => {
+    const m = new Map<string, SimNode>();
+    sim.nodes.forEach((n) => m.set(n.id, n));
+    return m;
+  }, [sim]);
+
   useEffect(() => {
     let alive = true;
     const loop = () => {
@@ -807,12 +859,12 @@ export function GraphView({
       // Apply edge `d` paths — single setAttribute per edge (or two
       // when the focused-edge flow stripe is rendered too).
       const edges = graph.edges;
-      const byId = new Map<string, SimNode>();
-      for (let i = 0; i < sNodes.length; i++) byId.set(sNodes[i].id, sNodes[i]);
+      // nodeById is captured from the closure (stable per sim) — no
+      // per-frame Map allocation, no 700-entry rebuild every 16ms.
       for (let i = 0; i < edges.length; i++) {
         const e = edges[i];
-        const a = byId.get(e.source);
-        const b = byId.get(e.target);
+        const a = nodeById.get(e.source);
+        const b = nodeById.get(e.target);
         if (!a || !b) continue;
         const baseEl = edgeBaseRefs.current.get(i);
         const flowEl = edgeFlowRefs.current.get(i);
@@ -840,7 +892,7 @@ export function GraphView({
         frameRef.current = null;
       }
     };
-  }, [sim, graph.edges]);
+  }, [sim, graph.edges, nodeById]);
 
   // Sync hover / select React state into refs the RAF loop reads.
   // ALSO: directly setAttribute the affected nodes' scale so hover
@@ -878,12 +930,6 @@ export function GraphView({
     writeScaleFor(prev);
     writeScaleFor(selectedId);
   }, [selectedId, writeScaleFor]);
-
-  const nodeById = useMemo(() => {
-    const m = new Map<string, SimNode>();
-    sim.nodes.forEach((n) => m.set(n.id, n));
-    return m;
-  }, [sim]);
 
   // ── Adjacency + degree ─────────────────────────────────────────────────
   const { adjacency, degree } = useMemo(() => {
@@ -1043,9 +1089,9 @@ export function GraphView({
           justDraggedRef.current = true;
           const { x, y } = screenToSim(sx, sy);
           sim.pin(drag.id, x, y);
-          // Wake the force sim — dragging a node should re-stir its
-          // neighbors via the spring forces.
-          sim.warm();
+          // Drag-stir: low-alpha re-warm (0.06) so neighbours redistribute
+          // via springs without re-firing full O(N²) repulsion every frame.
+          sim.nudge();
         }
       }
       dragRef.current = { ...drag, lastX: sx, lastY: sy, maxMoved };
@@ -1280,9 +1326,20 @@ export function GraphView({
         ((depths.get(edge.source) ?? 99) <= 1 ||
           (depths.get(edge.target) ?? 99) <= 1);
       const srcNote = notesById?.[edge.source];
-      const stroke = srcNote
-        ? colorForTags(srcNote.tags, srcNote.pinned).ring
-        : "#6b5e4a";
+      const tgtNoteForEdge = notesById?.[edge.target];
+      // Rollup-incident edge: at least one endpoint is a rollup note.
+      // These edges (the wikilinks INSIDE a rollup pointing back to its
+      // sources) tend to dominate the canvas — a 30-source weekly rollup
+      // contributes 30 edges. We dim + dash them by default; the focus
+      // path below brightens them again when the user actually engages
+      // with the rollup. Pure visual change — no edges removed.
+      const isRollupEdge =
+        isRollupNote(srcNote) || isRollupNote(tgtNoteForEdge);
+      const stroke = isRollupEdge
+        ? "#c026d3" // fuchsia-600 — matches noteColors.ts rollup ring
+        : srcNote
+          ? colorForTags(srcNote.tags, srcNote.pinned).ring
+          : "#6b5e4a";
       // Initial `d` for first paint. The RAF loop writes the
       // up-to-date `d` directly via setAttribute on every frame —
       // this string is only ever shown for the first ~16ms before
@@ -1299,9 +1356,13 @@ export function GraphView({
       // shimmer that used to live in JS is now a CSS keyframe applied
       // via .lb-edge-active on focused edges only — zero cost on the
       // ~95% of edges that aren't currently in focus.
+      // Rollup-incident edges run quieter at rest (0.22 vs 0.34) so a
+      // single 30-edge rollup hub doesn't drown the regular note links.
+      // When focused, they get the full active treatment (0.78) so the
+      // user can actually trace the wikilink subgraph on hover.
       const baseOp = dimmed
         ? st.opacity * 0.5
-        : isActive ? 0.78 : 0.34;
+        : isActive ? 0.78 : isRollupEdge ? 0.22 : 0.34;
       // Photon flow: only paint the animated dash on focused edges.
       // At full graph scale this drops the active-animation count from
       // ~500 (one per edge) to ≤ neighbor-count (typically <30).
@@ -1323,6 +1384,13 @@ export function GraphView({
             strokeWidth={isActive ? 1.9 : 1.2}
             strokeOpacity={baseOp}
             strokeLinecap="round"
+            // Rollup edges render dashed at rest so they read as
+            // "membership" links rather than first-class wikilinks
+            // between concepts. When the rollup is focused/active,
+            // drop the dash so the lit subgraph stays solid.
+            strokeDasharray={
+              isRollupEdge && !isActive ? "2 4" : undefined
+            }
             className={isActive ? "lb-edge-active" : undefined}
           />
           {showFlow && (
@@ -1399,7 +1467,15 @@ export function GraphView({
       // Neighbours of the selected node get an always-on title — that
       // surfaces "what does this connect to" without hovering each one.
       const isNeighborOfSelected = !!selectedId && depth === 1;
-      const label = (note?.title || node.label || "").trim();
+      // Display label split: primary topic-name on the first line + a muted
+      // period/source-count suffix on the second (for rollups). Plain notes
+      // get the title verbatim and a null suffix. Helper also strips legacy
+      // "Topic rollup: …" prefixes so existing rows clean up at display time
+      // without a DB migration.
+      const { primary: label, suffix: labelSuffix } =
+        displayLabelForNote(note, node.label);
+      const isRollup = isRollupNote(note);
+      const isMonthlyRollup = isMonthlyRollupNote(note);
       const taskDone = (() => {
         if (categoryKey !== "task") return false;
         const tagsLower = safeTagsLower(note?.tags);
@@ -1419,8 +1495,13 @@ export function GraphView({
       //   • Match: any node hit by the search box.
       //   • Emphasized: hovered or selected — bigger font + halo on top.
       const isRestLabel = restLabelIds.has(node.id);
+      // Rollup primary labels are always visible — they anchor navigation
+      // (the user opens the graph and uses rollups as topical landmarks).
+      // Without always-on, a 30-source rollup hub looked anonymous against
+      // the constellation of plain notes.
       const showSideLabel =
         !!label && (
+          isRollup ||
           isFocus ||
           isSelected ||
           isNeighborOfSelected ||
@@ -1510,6 +1591,35 @@ export function GraphView({
               stroke="var(--color-accent)"
               strokeWidth={2}
             />
+          )}
+          {/* Rollup orbit ring(s) — visual "container" cue. Rendered
+              UNDER the body circle so the fuchsia fill stays primary;
+              the ring reads as a thin orbit around it. Monthly rollups
+              get a thicker inner ring + a wider outer ring so weekly vs
+              monthly is also distinguishable at a glance. */}
+          {isRollup && (
+            <>
+              <circle
+                r={r + 5}
+                fill="none"
+                stroke={color.ring}
+                strokeWidth={isMonthlyRollup ? 1.4 : 0.9}
+                strokeOpacity={isFocus ? 0.85 : 0.55}
+                strokeDasharray="2 3"
+                pointerEvents="none"
+              />
+              {isMonthlyRollup && (
+                <circle
+                  r={r + 9}
+                  fill="none"
+                  stroke={color.ring}
+                  strokeWidth={0.7}
+                  strokeOpacity={isFocus ? 0.55 : 0.32}
+                  strokeDasharray="1 4"
+                  pointerEvents="none"
+                />
+              )}
+            </>
           )}
           {(() => {
             const bodyOpacity = isFocus ? 0.95 : isNeighbor ? 0.85 : 0.72;
@@ -1666,6 +1776,27 @@ export function GraphView({
                 >
                   {truncated}
                 </text>
+                {labelSuffix && (
+                  <text
+                    x={placeBelow ? labelW / 2 : (emphasized ? 3 : 0)}
+                    y={placeBelow ? fontPx + 2 : fontPx + 12}
+                    textAnchor={placeBelow ? "middle" : "start"}
+                    dominantBaseline={placeBelow ? "hanging" : "auto"}
+                    style={{
+                      fontSize: `${Math.max(7, fontPx * 0.85)}px`,
+                      fontWeight: 400,
+                      // Match the primary text colour family but at ~55%
+                      // opacity so the suffix reads as muted metadata
+                      // rather than competing with the topic name.
+                      fill: `rgba(232,213,176,${baseTextOp * 0.55})`,
+                      fontFamily: "var(--font-display, inherit)",
+                      letterSpacing: "-0.005em",
+                      textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+                    }}
+                  >
+                    {labelSuffix}
+                  </text>
+                )}
               </g>
             );
           })()}
@@ -1815,111 +1946,94 @@ export function GraphView({
         </g>
       </svg>
 
-      {/* Micro-tooltip — compact card. Hidden during an active node drag
-          so the user can see the dot clearly while repositioning. */}
+      {/* Micro-tooltip — minimalist card on hover. Only what the user
+          can use at-a-glance: topic title + last-edited time. The bigger
+          peek modal (double-click) carries the full body / actions. */}
       {hoverId && hoverNote && tooltipPos && !(
         dragRef.current?.kind === "node" && dragRef.current.maxMoved > DRAG_THRESHOLD
       ) && (() => {
-        const catKey = pickCategoryKey(hoverNote.tags, !!hoverNote.pinned);
-        const catLabelBase = (FILTER_CATEGORIES.find((c) => c.key === catKey)?.label)
-          ?? catKey.replace(/[-_]/g, " ");
-        const hoverTotalCats = categoryMatchCount(hoverNote.tags, !!hoverNote.pinned);
-        const catLabel = hoverTotalCats > 1
-          ? `${catLabelBase} · +${hoverTotalCats - 1} more`
-          : catLabelBase;
-        const links = degree[hoverId] ?? 0;
-        // Importance → filled-dot count (1..5). 1–2=1, 3–4=2, 5–6=3, 7–8=4, 9–10=5.
-        const filledDots = Math.max(1, Math.min(5, Math.ceil((hoverNote.importance ?? 5) / 2)));
-        // Task completion: tags include done/completed, OR body starts
-        // with a markdown-checked checkbox.
+        // Same display-label helper the dot uses, so legacy "topic rollup:"
+        // prefixes get stripped and topic slugs come out title-cased.
+        const { primary: hoverPrimary, suffix: hoverSuffix } =
+          displayLabelForNote(hoverNote);
+        // "Edited 2h ago" — relative-time, only one row of metadata.
+        // Falls back to created_at when updated_at is missing.
+        const editedAt = hoverNote.updated_at || hoverNote.created_at;
+        const editedLabel = editedAt
+          ? formatRelativeShort(new Date(editedAt + (editedAt.endsWith("Z") ? "" : "Z")))
+          : null;
         const tagsLower = safeTagsLower(hoverNote.tags);
         const doneByTag = tagsLower.includes("done") || tagsLower.includes("completed");
         const doneByCheckbox = /^\s*-\s*\[x\]/im.test(hoverNote.content || "");
+        const catKey = pickCategoryKey(hoverNote.tags, !!hoverNote.pinned);
         const isTask = catKey === "task";
-        const isDeadline = catKey === "deadline";
-        const status: "done" | "open" | "pinned" | "deadline" | null =
-          hoverNote.pinned ? "pinned"
-          : isDeadline ? "deadline"
-          : isTask ? (doneByTag || doneByCheckbox ? "done" : "open")
-          : null;
+        const isDone = isTask && (doneByTag || doneByCheckbox);
         return (
           <div
-            className="lb-tooltip absolute z-20 pointer-events-none rounded-md border bg-bg-secondary/95 backdrop-blur shadow-2xl px-2.5 py-2 w-[216px] animate-fade-in"
+            className="lb-tooltip absolute z-20 pointer-events-none rounded-md border bg-bg-secondary/95 backdrop-blur shadow-2xl px-3 py-2 max-w-[260px] animate-fade-in"
             style={{
-              left: Math.max(8, Math.min(size.width - 224, tooltipPos.sx)),
-              top: Math.max(8, Math.min(size.height - 96, tooltipPos.sy)),
-              borderColor: "rgba(168,144,106,0.24)",
+              left: Math.max(8, Math.min(size.width - 268, tooltipPos.sx)),
+              top: Math.max(8, Math.min(size.height - 64, tooltipPos.sy)),
+              borderColor: "rgba(168,144,106,0.32)",
             }}
           >
-            {/* Row 1: status-icon · title (strikethrough if done)
-                Open tasks show the task icon itself (not an empty circle).
-                Completed tasks get a line-through on the title. */}
-            <div className="flex items-center gap-1.5">
+            {/* Title row — color dot + topic name. Brighter than the
+                old 0.55/0.80-opacity styling so it actually reads on
+                the dark canvas. */}
+            <div className="flex items-center gap-2">
               <span
                 className="w-2 h-2 rounded-full inline-block shrink-0"
                 style={{
                   backgroundColor: colorForTags(hoverNote.tags, hoverNote.pinned).ring,
-                  boxShadow: `0 0 6px ${colorForTags(hoverNote.tags, hoverNote.pinned).ring}66`,
+                  boxShadow: `0 0 6px ${colorForTags(hoverNote.tags, hoverNote.pinned).ring}99`,
                 }}
               />
-              {status === "open" && (
-                <CategoryIcon
-                  keyName="task"
-                  size={12}
-                  color="rgba(232,213,176,0.85)"
-                />
-              )}
-              {status === "pinned" && (
+              {hoverNote.pinned && (
                 <Star size={11} strokeWidth={2} fill="#fbbf24" color="#fbbf24" />
               )}
-              {status === "deadline" && (
-                <span
-                  title="deadline"
-                  className="shrink-0 text-[10px] leading-none"
-                  style={{ color: "#f0a060" }}
-                >
-                  ⏰
-                </span>
-              )}
               <div
-                className="text-[12px] font-semibold truncate flex-1 tracking-tight leading-tight"
+                className="text-[13px] font-semibold truncate flex-1 tracking-tight leading-tight"
                 style={{
                   fontFamily: "var(--font-display, inherit)",
-                  color:
-                    status === "done"
-                      ? "rgba(232,213,176,0.55)"
-                      : "var(--color-text-primary)",
-                  textDecoration: status === "done" ? "line-through" : "none",
+                  // Bumped from `var(--color-text-primary)` → explicit
+                  // high-contrast cream so the title is unmistakably
+                  // readable over the translucent card backdrop.
+                  color: isDone ? "rgba(245,225,193,0.65)" : "#f5e1c1",
+                  textDecoration: isDone ? "line-through" : "none",
                   textDecorationColor: "rgba(110,181,131,0.85)",
                   textDecorationThickness: "1.5px",
                 }}
               >
-                {(hoverNote.title || "(untitled)").slice(0, 38)}
-                {(hoverNote.title || "").length > 38 ? "…" : ""}
+                {hoverPrimary}
               </div>
             </div>
-            {/* Row 2: importance meter — 5 dots, filled by importance/2. */}
-            <div className="flex items-center gap-1 mt-1.5" title={`importance ${hoverNote.importance}/10`}>
-              <span className="text-[9px] uppercase tracking-wider text-text-muted/80 mr-0.5">
-                impact
-              </span>
-              {Array.from({ length: 5 }).map((_, i) => (
-                <span
-                  key={i}
-                  className="w-1.5 h-1.5 rounded-full inline-block"
-                  style={{
-                    background: i < filledDots ? "#d4a26a" : "transparent",
-                    border: i < filledDots ? "none" : "1px solid rgba(168,144,106,0.3)",
-                  }}
-                />
-              ))}
-            </div>
-            {/* Row 3: category · link count. Minimal meta. */}
-            <div className="mt-1.5 text-[9px] uppercase tracking-[0.08em] text-text-muted/80 flex items-center gap-1.5 tabular-nums">
-              <span>{catLabel}</span>
-              <span className="opacity-40">·</span>
-              <span>{links} link{links === 1 ? "" : "s"}</span>
-            </div>
+            {/* Optional rollup suffix (e.g. "W23 · 8 notes"). Only renders
+                when displayLabelForNote produced one. */}
+            {hoverSuffix && (
+              <div
+                className="text-[10px] mt-0.5 truncate"
+                style={{
+                  color: "rgba(212,162,106,0.85)",
+                  fontFamily: "var(--font-display, inherit)",
+                  letterSpacing: "0.01em",
+                }}
+              >
+                {hoverSuffix}
+              </div>
+            )}
+            {editedLabel && (
+              <div
+                className="mt-1 text-[10px] flex items-center gap-1 tabular-nums"
+                style={{
+                  // Was `text-text-muted/80` (~0.55 alpha). Bumped to
+                  // ~0.78 so the timestamp doesn't fade into the card.
+                  color: "rgba(232,213,176,0.78)",
+                }}
+              >
+                <Clock size={9} strokeWidth={1.9} />
+                <span>edited {editedLabel}</span>
+              </div>
+            )}
           </div>
         );
       })()}

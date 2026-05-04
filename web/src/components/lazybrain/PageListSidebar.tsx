@@ -11,6 +11,12 @@ import {
   SKILLS_VAULT_KEYS,
 } from "./noteColors";
 import {
+  isRollupNote,
+  rollupPeriodLabel,
+  rollupSourceCount,
+  lowerTags,
+} from "./rollupLabel";
+import {
   Brain,
   Lock,
   Plus,
@@ -150,46 +156,8 @@ function localDayKey(d: Date): string {
   return `${y}-${m}-${dd}`;
 }
 
-/** Lowercase a tag list defensively. Some legacy notes can carry non-string
- *  tag values (e.g. partially-decoded JSON) — we coerce so the page never
- *  crashes on a single malformed row. */
-function lowerTags(note: LazyBrainNote): string[] {
-  const raw = note.tags;
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const t of raw) {
-    if (typeof t === "string") out.push(t.toLowerCase());
-  }
-  return out;
-}
-
-/** Detects weekly/monthly rollup notes by their tag fingerprint. */
-function isRollupNote(note: LazyBrainNote): boolean {
-  const tags = lowerTags(note);
-  return (
-    tags.includes("kind/rollup")
-    || tags.some((t) => t.startsWith("rollup/weekly") || t.startsWith("rollup/monthly"))
-  );
-}
-
-/** Pulls "12" out of `source-count/12` so the row shows "12 notes folded".
- *  Returns null when the tag is absent (older rollups predate the count tag). */
-function rollupSourceCount(note: LazyBrainNote): number | null {
-  const tag = lowerTags(note).find((t) => t.startsWith("source-count/"));
-  if (!tag) return null;
-  const n = Number(tag.split("/", 2)[1]);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Returns the human-readable period label, e.g. "W23-2026" or "M2026-05". */
-function rollupPeriodLabel(note: LazyBrainNote): string {
-  const tags = lowerTags(note);
-  for (const t of tags) {
-    if (t.startsWith("rollup/weekly/")) return t.slice("rollup/weekly/".length).toUpperCase();
-    if (t.startsWith("rollup/monthly/")) return t.slice("rollup/monthly/".length).toUpperCase();
-  }
-  return "";
-}
+// isRollupNote / rollupPeriodLabel / rollupSourceCount / lowerTags now
+// live in ./rollupLabel.ts so the GraphView shares one impl.
 
 const UNDO_WINDOW_MS = 5000;
 

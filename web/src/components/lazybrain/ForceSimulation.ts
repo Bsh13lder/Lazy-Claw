@@ -41,6 +41,13 @@ export interface SimNodeInput {
   pinned?: boolean;
   /** Visual radius in px. Defaults to 12 if omitted. */
   r?: number;
+  /** Optional node-kind hint. Drives per-node mass scaling and per-edge
+   *  spring length so rollup hubs (aggregations of unrelated sub-graphs)
+   *  sit further from their sources and from other rollups, instead of
+   *  collapsing into a tight blob the way a uniform force model would
+   *  pull them. Pass "rollup" for weekly/topic, "monthly-rollup" for
+   *  monthly. Omit for plain notes. */
+  kind?: "rollup" | "monthly-rollup";
 }
 
 export type SimMode = "orbital" | "force";
@@ -133,6 +140,14 @@ export class ForceSimulation {
   // strength, so cross-cluster connections don't collapse the hubs
   // back together. Index-aligned to _edgePairs/2.
   private _edgeStrengths!: Float32Array;
+  // Per-edge spring TARGET length (px). Index-aligned to _edgePairs/2.
+  // Most edges use SPRING_LEN; rollup-incident edges (where one or both
+  // endpoints carry kind=rollup/monthly-rollup) use SPRING_LEN * 1.4 so
+  // rollup hubs sit further from their sources and from each other.
+  // Without this, a 30-source rollup pulls all 30 sources tight enough
+  // that two rollups touching overlapping source sets collapse into the
+  // same neighborhood.
+  private _edgeLengths!: Float32Array;
   /** Force-mode cooldown — counts consecutive ticks where total kinetic
    *  energy is below COOL_THRESHOLD. Once it crosses COOL_TICKS the sim
    *  is "cooled" and the renderer can stop reconciling React on every
@@ -152,6 +167,11 @@ export class ForceSimulation {
    *  whether to start the graph in "frozen physics" mode (we already
    *  have a settled layout) or run a one-time settle pass. */
   private _usedSavedPositions = false;
+  /** True after `_finalizeCollisions()` has run for the current settle
+   *  cycle. Reset by warm()/nudge()/reflow() so each restir gets its
+   *  own finalize pass. Without this flag, the alpha-min fallback path
+   *  below would re-run the sweep every frame after alpha bottoms out. */
+  private _finalizeRan = false;
 
   constructor(
     nodes: SimNodeInput[],
@@ -326,6 +346,20 @@ export class ForceSimulation {
     );
     this._edgePairs = new Int32Array(this.edges.length * 2);
     this._edgeStrengths = new Float32Array(this.edges.length);
+    this._edgeLengths = new Float32Array(this.edges.length);
+    // Per-node "kind" flag — true when the input carried kind=rollup or
+    // kind=monthly-rollup. Used both for the repel-mass bump below and
+    // for the per-edge length decision in this loop. Index-aligned.
+    const isRollup = new Uint8Array(N);
+    {
+      const kindByIdx = new Map(
+        nodes.map((n) => [n.id, n.kind] as const),
+      );
+      for (let i = 0; i < N; i++) {
+        const k = kindByIdx.get(this.nodes[i].id);
+        if (k === "rollup" || k === "monthly-rollup") isRollup[i] = 1;
+      }
+    }
     let ep = 0;
     let es = 0;
     // Index-aligned helper: degree by node index, used for both edge
@@ -334,6 +368,12 @@ export class ForceSimulation {
     for (let i = 0; i < N; i++) {
       degByIdx[i] = this._degree.get(this.nodes[i].id) ?? 0;
     }
+    // Spring-length base — same value used by stepForce. Multiplied by
+    // 1.4 for rollup-incident edges so rollup hubs sit further from
+    // their sources. Anything that consumes this constant in stepForce
+    // now reads from _edgeLengths instead.
+    const SPRING_LEN_BASE = 130;
+    const ROLLUP_LEN_MUL = 1.4;
     for (const e of this.edges) {
       const i = nodeIndex.get(e.source);
       const j = nodeIndex.get(e.target);
@@ -344,12 +384,18 @@ export class ForceSimulation {
       // (min=1) → strength 1.0. Hub→hub (min=50+) → strength ≤ 0.02
       // → barely pulls, lets hubs separate under repulsion.
       const minDeg = Math.max(1, Math.min(degByIdx[i], degByIdx[j]));
-      this._edgeStrengths[es++] = 1 / minDeg;
+      this._edgeStrengths[es] = 1 / minDeg;
+      // Rollup-incident → longer rest length. Either endpoint counts.
+      this._edgeLengths[es] = (isRollup[i] || isRollup[j])
+        ? SPRING_LEN_BASE * ROLLUP_LEN_MUL
+        : SPRING_LEN_BASE;
+      es += 1;
     }
     // Trim trailing unused slots if any edges were dropped after the filter.
     if (ep < this._edgePairs.length) {
       this._edgePairs = this._edgePairs.slice(0, ep);
       this._edgeStrengths = this._edgeStrengths.slice(0, es);
+      this._edgeLengths = this._edgeLengths.slice(0, es);
     }
 
     // Per-node repulsion mass — heavier nodes (hubs) push everything
@@ -357,9 +403,15 @@ export class ForceSimulation {
     // leaf (deg 1) = 1.4, average (deg 4) = 1.8, hub (deg 130) = 5.6.
     // The 0.4 coefficient was tuned to make hub clusters visibly
     // separate without flying apart on first frame.
+    //
+    // Rollup nodes get an additional ×1.5 multiplier so two rollups
+    // (each already a hub via their wikilink content) push each other
+    // apart harder than two equally-weighted concept hubs would. The
+    // kind flag handles this without breaking degree-based scaling.
     this._repelMass = new Float32Array(N);
     for (let i = 0; i < N; i++) {
-      this._repelMass[i] = 1 + Math.sqrt(degByIdx[i]) * 0.4;
+      const base = 1 + Math.sqrt(degByIdx[i]) * 0.4;
+      this._repelMass[i] = isRollup[i] ? base * 1.5 : base;
     }
 
     // Saved positions: start with a moderate alpha so we get the
@@ -449,7 +501,9 @@ export class ForceSimulation {
     // 0.05; hub→hub nets ~0.03× (50× weaker than before, lets hubs
     // drift apart).
     const SPRING_K      = 0.08;
-    const SPRING_LEN    = 130;   // Obsidian-grade cluster spacing
+    // SPRING_LEN moved to per-edge `_edgeLengths` (constructor) so
+    // rollup-incident edges can sit further apart than concept-link
+    // edges. Most edges still resolve to 130px there.
     const GRAVITY_K     = 0.008; // softer pull so cluster islands fan out
     const DAMPING       = 0.88;
     const V_MAX         = 4.0;
@@ -457,7 +511,22 @@ export class ForceSimulation {
     // Stop integrating entirely once alpha drops below ALPHA_MIN. The
     // existing _quietTicks counter then accumulates → cooled() fires →
     // RAF loop stops reading sim positions → zero CPU at rest.
-    if (this._alpha < ALPHA_MIN) return;
+    if (this._alpha < ALPHA_MIN) {
+      // Fallback finalize path. The cool-down ratchet below normally
+      // runs `_finalizeCollisions()` after 45 quiet frames — but on a
+      // saved-positions cold start the sim oscillates too long for
+      // _quietTicks to ever accumulate, and alpha decays out from
+      // under us first. Catch that case here: when alpha first bottoms
+      // out and we haven't finalized yet, run the sweep once and
+      // promote the sim straight to cooled state so the renderer stops
+      // calling step() entirely. Subsequent ticks early-return cheaply.
+      if (!this._finalizeRan) {
+        this._finalizeCollisions();
+        this._finalizeRan = true;
+        this._quietTicks = COOL_TICKS;
+      }
+      return;
+    }
     const alpha = this._alpha;
     this._alpha *= 1 - ALPHA_DECAY;
 
@@ -519,8 +588,14 @@ export class ForceSimulation {
     // tightly orbiting their hub; weak hub→hub pulls let separate
     // hub clusters drift apart under repulsion. This is THE fix for
     // "all hubs collapse into one center blob".
+    //
+    // Per-edge target length comes from `_edgeLengths` — most edges
+    // use SPRING_LEN; rollup-incident edges sit ~40% further (180px
+    // vs 130px) so rollup hubs and their sources have visible breathing
+    // room and two rollups touching the same source set don't pile up.
     const edgePairs = this._edgePairs;
     const edgeStrengths = this._edgeStrengths;
+    const edgeLengths = this._edgeLengths;
     const EP = edgePairs.length;
     for (let k = 0; k < EP; k += 2) {
       const i = edgePairs[k];
@@ -530,8 +605,9 @@ export class ForceSimulation {
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
-      const delta = d - SPRING_LEN;
-      const f = SPRING_K * edgeStrengths[k >> 1] * delta;
+      const idx = k >> 1;
+      const delta = d - edgeLengths[idx];
+      const f = SPRING_K * edgeStrengths[idx] * delta;
       const ux = dx / d, uy = dy / d;
       fx[i] += ux * f; fy[i] += uy * f;
       fx[j] -= ux * f; fy[j] -= uy * f;
@@ -643,6 +719,65 @@ export class ForceSimulation {
     } else {
       this._quietTicks = 0;
     }
+    // One last hard collision sweep on the frame we cross into cooled.
+    // Without this, leftover stacked dots never get split because cooled()
+    // short-circuits step() entirely from the next frame on.
+    if (this._quietTicks === COOL_TICKS && !this._finalizeRan) {
+      this._finalizeCollisions();
+      this._finalizeRan = true;
+    }
+  }
+
+  /** Hard collision sweep — 6 iterations, no integration. Called once
+   *  when the sim crosses into cooled state to guarantee no two nodes
+   *  remain visually overlapping. After this runs, cooled() returns
+   *  true forever and the renderer never reads positions again. */
+  private _finalizeCollisions(): void {
+    const N = this.nodes.length;
+    const radii = this._radii;
+    const PAD = 4;
+    for (let iter = 0; iter < 6; iter++) {
+      let moved = false;
+      for (let i = 0; i < N; i++) {
+        const a = this.nodes[i];
+        const ri = radii[i];
+        for (let j = i + 1; j < N; j++) {
+          const b = this.nodes[j];
+          const rj = radii[j];
+          const minD = ri + rj + PAD;
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let d2 = dx * dx + dy * dy;
+          if (d2 >= minD * minD) continue;
+          if (d2 < 0.0001) {
+            dx = (i - j) * 0.5;
+            dy = (j - i) * 0.5;
+            d2 = dx * dx + dy * dy;
+          }
+          const d = Math.sqrt(d2);
+          const overlap = (minD - d) * 0.5;
+          const ux = dx / d;
+          const uy = dy / d;
+          const aPinned = a.pinned;
+          const bPinned = b.pinned;
+          if (aPinned && bPinned) continue;
+          if (aPinned) {
+            b.x += ux * overlap * 2;
+            b.y += uy * overlap * 2;
+          } else if (bPinned) {
+            a.x -= ux * overlap * 2;
+            a.y -= uy * overlap * 2;
+          } else {
+            a.x -= ux * overlap;
+            a.y -= uy * overlap;
+            b.x += ux * overlap;
+            b.y += uy * overlap;
+          }
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
   }
 
   /** True once the force sim has settled (60 consecutive quiet frames).
@@ -684,8 +819,22 @@ export class ForceSimulation {
    *  orbital mode (which never cools). */
   warm(): void {
     this._quietTicks = 0;
+    this._finalizeRan = false;
     if (this._mode === "force") {
       this._alpha = Math.max(this._alpha, 0.3);
+    }
+  }
+
+  /** Drag-only warm — keeps the sim running but with a much lower
+   *  alpha than warm(). Drag fires on every pointermove (often >60Hz);
+   *  re-warming to 0.3 each time means full O(N²) repulsion every frame
+   *  for 700 nodes. 0.06 is enough for spring redistribution around the
+   *  dragged node without firing the full force pass. */
+  nudge(): void {
+    this._quietTicks = 0;
+    this._finalizeRan = false;
+    if (this._mode === "force") {
+      this._alpha = Math.max(this._alpha, 0.06);
     }
   }
 
@@ -698,6 +847,7 @@ export class ForceSimulation {
    *  everything else drifts. */
   reflow(): void {
     this._quietTicks = 0;
+    this._finalizeRan = false;
     if (this._mode === "force") {
       this._alpha = 1.0;
     }

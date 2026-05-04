@@ -144,7 +144,11 @@ async def run_topic_rollup_sweep(
             note = await lb_store.save_note(
                 config, user_id,
                 content=body,
-                title=f"Topic rollup: {topic}",
+                # Topic phrase only — matches the explicit instruction at
+                # rollup.py:52 ("NOT 'Weekly rollup — W23'"). The graph and
+                # sidebar render a muted "topic" suffix from the topic/<X>
+                # tag, so the prefix is redundant noise on the dot label.
+                title=topic,
                 tags=[
                     "kind/rollup",
                     f"topic/{topic}",

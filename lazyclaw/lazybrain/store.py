@@ -733,7 +733,10 @@ async def list_notes(
     if not include_rolled_up:
         # Hide notes the cascade has folded into a rollup. Substring match on
         # the JSON-encoded tags column — fast enough at thousands of rows.
-        clauses.append("tags NOT LIKE ?")
+        # IS NULL guard: in SQLite, "NULL NOT LIKE 'x'" evaluates to NULL,
+        # which is treated as FALSE in WHERE, silently dropping all
+        # tag-less notes. Without the guard, save_note(tags=None) → invisible.
+        clauses.append("(tags IS NULL OR tags NOT LIKE ?)")
         params.append('%"rolled-up"%')
     if not include_archived:
         # archived column was added in the Phase 2 migration; default 0

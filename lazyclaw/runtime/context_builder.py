@@ -175,44 +175,60 @@ def _memory_subject_key(text: str) -> str:
     return "/".join(toks[:4])
 
 
+# Minimum shared content tokens for two memories to be considered a
+# conflict candidate. 2 catches "prefer oat milk" + "never drink oat
+# milk" (shared: oat, milk) — verbs differ so the threshold has to be
+# lower than first instinct. False positives are cheap (one warning
+# line that nudges the brain to ask the user) so we err generous.
+_CONFLICT_MIN_SHARED_TOKENS = 2
+
+
 def _detect_conflicts(memories: list[dict]) -> list[tuple[dict, dict]]:
     """Heuristic contradiction detection over already-picked memories.
 
-    Pairs share a subject key AND at least one carries a negation
-    token — "I prefer oat milk" + "I never drink oat milk" trigger;
-    "I prefer oat milk" + "I prefer almond milk" do NOT (no negation).
-    Heuristic-only by design — we want the brain to ASK rather than
-    invent a merge. False positives are cheap (one warning line) and
-    false negatives just preserve current behaviour.
+    Two memories are flagged when:
+      1. Their content-token sets (stopwords + negation tokens stripped)
+         share at least ``_CONFLICT_MIN_SHARED_TOKENS`` tokens — set
+         intersection so "I prefer oat milk" and "I never drink oat milk
+         anymore" still bucket together despite different verbs.
+      2. EXACTLY ONE side carries a negation token (no/never/instead/…).
+         Same-polarity disagreements ("prefer oat" vs "prefer almond")
+         are *preference changes*, not contradictions — we leave those
+         to the LLM.
 
-    Returns up to 3 pairs to keep the warning block bounded.
+    Heuristic-only by design — false positives are cheap (one warning
+    line that nudges the brain to ask), false negatives preserve
+    current behaviour. Returns up to 3 pairs to bound the warning block.
     """
     if len(memories) < 2:
         return []
-    by_subject: dict[str, list[dict]] = {}
+
+    # Cache content-token sets once — avoid re-tokenising in the
+    # quadratic pair scan below.
+    enriched: list[tuple[dict, set[str], bool]] = []
     for m in memories:
-        key = _memory_subject_key(m.get("content") or "")
-        if not key:
+        text = (m.get("content") or "").lower()
+        toks = {
+            t for t in _TOKEN_RE.findall(text)
+            if t not in _MEMORY_STOPWORDS and t not in _NEGATION_TOKENS
+        }
+        if not toks:
             continue
-        by_subject.setdefault(key, []).append(m)
+        has_neg = any(tok in text for tok in _NEGATION_TOKENS)
+        enriched.append((m, toks, has_neg))
 
     conflicts: list[tuple[dict, dict]] = []
-    for key, group in by_subject.items():
-        if len(group) < 2:
-            continue
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                a, b = group[i], group[j]
-                a_text = (a.get("content") or "").lower()
-                b_text = (b.get("content") or "").lower()
-                a_neg = any(tok in a_text for tok in _NEGATION_TOKENS)
-                b_neg = any(tok in b_text for tok in _NEGATION_TOKENS)
-                # XOR: exactly one side carries negation → likely contradiction.
-                # Both-negation or neither-negation = same polarity, not a conflict.
-                if a_neg != b_neg:
-                    conflicts.append((a, b))
-                if len(conflicts) >= 3:
-                    return conflicts
+    for i in range(len(enriched)):
+        for j in range(i + 1, len(enriched)):
+            a, a_toks, a_neg = enriched[i]
+            b, b_toks, b_neg = enriched[j]
+            if a_neg == b_neg:
+                continue  # same polarity → preference change, not conflict
+            if len(a_toks & b_toks) < _CONFLICT_MIN_SHARED_TOKENS:
+                continue
+            conflicts.append((a, b))
+            if len(conflicts) >= 3:
+                return conflicts
     return conflicts
 
 

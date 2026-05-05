@@ -3809,6 +3809,28 @@ class Agent:
                             "[MCP ERROR]", "[NO DATA]", "Error:", "error:",
                             "Tool error:",
                         ))
+                        # MCP tools that return Python dicts (e.g. mcp-upwork's
+                        # ``submit_proposal`` returning {"status": "error",
+                        # "message": "..."}) get JSON-encoded into the result
+                        # string. The string starts with ``{"`` not any of the
+                        # prefixes above, so the prior check missed them — and
+                        # the 3-strikes counter never incremented for the most
+                        # common failure shape in the codebase. Detect via
+                        # cheap substring scan; tolerant to single/double quote
+                        # styles produced by both ``json.dumps`` and ``repr``.
+                        if not _is_err_result and result.startswith(("{", "[")):
+                            _err_status_markers = (
+                                '"status": "error"', '"status":"error"',
+                                "'status': 'error'",
+                                '"status": "unknown"', '"status":"unknown"',
+                                "'status': 'unknown'",
+                                '"status": "failed"', '"status":"failed"',
+                                "'status': 'failed'",
+                                '"isError": true', '"isError":true',
+                                "'isError': True",
+                            )
+                            head = result[:512]  # only check the head; results can be huge
+                            _is_err_result = any(m in head for m in _err_status_markers)
                         if not _is_err_result:
                             _tool_call_cache[_cache_key] = result
                         else:

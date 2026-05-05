@@ -1,12 +1,15 @@
-"""Tests for the 2026-05 "Schedule a rate increase" defuse + improved
-error capture in submit_proposal.
+"""Tests for the Air3 dropdown-aware ``_handle_rate_increase_section``.
 
-The submit form started blocking on two new required dropdowns
-(frequency + percent) under "Schedule a rate increase". Description
-calls them optional but submit fails with red validation errors when
-empty. These tests pin the defuse helper + ensure the improved
-error capture surfaces the real validation messages instead of the
-old generic "Could not confirm submission status" string.
+Verified against the real Upwork DOM on 2026-05-05:
+
+* Section: ``[data-test="sri-input"]``
+* Two combobox toggles: ``[data-test="dropdown-toggle"]`` (frequency, percent)
+* Options: ``.air3-menu-item[role="option"]``
+* Real frequency options: ``Never``, ``Every 3/6/12 months``
+* Real percent options: ``5%``, ``10%``, ``15%``, ``Custom``
+
+The older tests assumed native ``<select>`` elements (which don't exist on
+Upwork's apply form) and have been replaced.
 """
 
 from __future__ import annotations
@@ -15,170 +18,168 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 
+def _option(text: str, *, role: str = "option", cls: str = "air3-menu-item"):
+    """Mock element that responds to text_content() + click()."""
+    el = MagicMock()
+    el.text_content = AsyncMock(return_value=text)
+    el.click = AsyncMock()
+    return el
+
+
 # ---------------------------------------------------------------------------
-# _handle_rate_increase_section: opt-out path
+# 1. Section absent → no-op (don't touch random comboboxes elsewhere)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_rate_increase_opt_out_button_clicked():
-    """When Upwork shows an opt-out toggle, click it and return early."""
+async def test_no_op_when_section_absent():
     from upwork_mcp.tools.proposals import _handle_rate_increase_section
-
-    optout = AsyncMock()
-    page = MagicMock()
-    # Only the very first selector matches; everything else returns None.
-    queries = {0: optout}
-    call_n = {"i": 0}
-
-    async def fake_query(sel):
-        i = call_n["i"]
-        call_n["i"] += 1
-        return queries.get(i)
-
-    page.query_selector = fake_query
-
-    await _handle_rate_increase_section(page)
-    optout.click.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_rate_increase_picks_never_when_opt_out_missing():
-    """No opt-out → frequency dropdown set to the 'Never' option."""
-    from upwork_mcp.tools.proposals import _handle_rate_increase_section
-
-    # Build a fake <select> with options: ["", "Yearly", "Never", "Monthly"]
-    placeholder = MagicMock()
-    placeholder.text_content = AsyncMock(return_value="Select a frequency")
-    placeholder.get_attribute = AsyncMock(return_value="")
-    yearly = MagicMock()
-    yearly.text_content = AsyncMock(return_value="Yearly")
-    yearly.get_attribute = AsyncMock(return_value="yearly")
-    never = MagicMock()
-    never.text_content = AsyncMock(return_value="Never")
-    never.get_attribute = AsyncMock(return_value="never")
-    monthly = MagicMock()
-    monthly.text_content = AsyncMock(return_value="Monthly")
-    monthly.get_attribute = AsyncMock(return_value="monthly")
-
-    freq_dd = MagicMock()
-    freq_dd.query_selector_all = AsyncMock(
-        return_value=[placeholder, yearly, never, monthly]
-    )
-    freq_dd.select_option = AsyncMock()
-
-    # Page returns None for all opt-out selectors, then the freq dropdown
-    # on the first matching frequency selector, then None for percent.
-    call_n = {"i": 0}
-    OPTOUT_COUNT = 8  # number of opt-out selectors in the helper
-    FREQ_COUNT = 4
-
-    async def fake_query(sel):
-        i = call_n["i"]
-        call_n["i"] += 1
-        if i < OPTOUT_COUNT:
-            return None  # no opt-out
-        if i == OPTOUT_COUNT:
-            return freq_dd  # first frequency selector hits
-        return None  # subsequent frequency-selector calls + percent fall through
 
     page = MagicMock()
-    page.query_selector = fake_query
+    page.query_selector = AsyncMock(return_value=None)
 
     await _handle_rate_increase_section(page)
-    freq_dd.select_option.assert_awaited_once_with("never")
 
+    # query_selector_all should never be invoked when section missing
+    assert not page.query_selector_all.called
+
+
+# ---------------------------------------------------------------------------
+# 2. Picks "Never" for frequency
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_rate_increase_picks_lowest_percent():
-    """Percent dropdown set to the lowest numeric option (0% if available)."""
+async def test_picks_never_for_frequency():
     from upwork_mcp.tools.proposals import _handle_rate_increase_section
 
-    # Build a percent <select> with: ["", "5%", "0%", "3%"]
-    def opt(text, val):
-        m = MagicMock()
-        m.text_content = AsyncMock(return_value=text)
-        m.get_attribute = AsyncMock(return_value=val)
-        return m
+    section = MagicMock()
+    freq_toggle = AsyncMock()
+    pct_toggle = AsyncMock()
+    pct_toggle.is_visible = AsyncMock(return_value=False)  # collapses post-Never
 
-    pct_options = [
-        opt("Select a percent", ""),
-        opt("5%", "5"),
-        opt("0%", "0"),
-        opt("3%", "3"),
+    section.query_selector_all = AsyncMock(return_value=[freq_toggle, pct_toggle])
+
+    page = MagicMock()
+    page.query_selector = AsyncMock(return_value=section)
+
+    # First call returns frequency options; second (after pct click) won't fire
+    # because pct_toggle.is_visible() == False.
+    freq_options = [
+        _option("Never"),
+        _option("Every 3 months"),
+        _option("Every 6 months"),
+        _option("Every 12 months"),
     ]
-
-    pct_dd = MagicMock()
-    pct_dd.query_selector_all = AsyncMock(return_value=pct_options)
-    pct_dd.select_option = AsyncMock()
-
-    OPTOUT_COUNT = 8
-    FREQ_COUNT = 4
-    PCT_COUNT = 4
-
-    call_n = {"i": 0}
-
-    async def fake_query(sel):
-        i = call_n["i"]
-        call_n["i"] += 1
-        # All opt-outs miss; all frequency selectors miss; first percent hits.
-        target_i = OPTOUT_COUNT + FREQ_COUNT
-        if i == target_i:
-            return pct_dd
-        return None
-
-    page = MagicMock()
-    page.query_selector = fake_query
+    page.query_selector_all = AsyncMock(return_value=freq_options)
 
     await _handle_rate_increase_section(page)
-    pct_dd.select_option.assert_awaited_once_with("0")
 
+    # Frequency toggle clicked
+    freq_toggle.click.assert_awaited_once()
+    # "Never" option clicked
+    freq_options[0].click.assert_awaited_once()
+    # Other options NOT clicked
+    for opt in freq_options[1:]:
+        opt.click.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 3. Falls back to "Every 12 months" when "Never" missing
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_rate_increase_helper_swallows_all_errors():
-    """Helper must never raise — best-effort across UI revisions."""
+async def test_falls_back_to_yearly_when_never_missing():
+    from upwork_mcp.tools.proposals import _handle_rate_increase_section
+
+    section = MagicMock()
+    freq_toggle = AsyncMock()
+    pct_toggle = AsyncMock()
+    pct_toggle.is_visible = AsyncMock(return_value=False)
+    section.query_selector_all = AsyncMock(return_value=[freq_toggle, pct_toggle])
+
+    page = MagicMock()
+    page.query_selector = AsyncMock(return_value=section)
+
+    options = [
+        _option("Every 3 months"),
+        _option("Every 6 months"),
+        _option("Every 12 months"),
+    ]
+    page.query_selector_all = AsyncMock(return_value=options)
+
+    await _handle_rate_increase_section(page)
+
+    # 12 months picked
+    options[2].click.assert_awaited_once()
+    options[0].click.assert_not_called()
+    options[1].click.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 4. Picks lowest numeric percent, never "Custom"
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_picks_lowest_percent_skipping_custom():
+    from upwork_mcp.tools.proposals import _handle_rate_increase_section
+
+    section = MagicMock()
+    freq_toggle = AsyncMock()
+    pct_toggle = AsyncMock()
+    pct_toggle.is_visible = AsyncMock(return_value=True)
+
+    # First call: original toggles list (used for [0] click + len check)
+    # Second call: re-queried toggles after frequency pick
+    section.query_selector_all = AsyncMock(
+        side_effect=[[freq_toggle, pct_toggle], [freq_toggle, pct_toggle]]
+    )
+
+    page = MagicMock()
+    page.query_selector = AsyncMock(return_value=section)
+
+    freq_options = [_option("Never")]
+    pct_options = [_option("5%"), _option("10%"), _option("15%"), _option("Custom")]
+    page.query_selector_all = AsyncMock(side_effect=[freq_options, pct_options])
+
+    await _handle_rate_increase_section(page)
+
+    # Percent toggle was clicked, "5%" picked, "Custom" never clicked
+    pct_toggle.click.assert_awaited_once()
+    pct_options[0].click.assert_awaited_once()  # "5%"
+    pct_options[3].click.assert_not_called()  # "Custom"
+
+
+# ---------------------------------------------------------------------------
+# 5. Wrong toggle count → bail out (don't click random widgets)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_bails_when_toggle_count_unexpected():
+    from upwork_mcp.tools.proposals import _handle_rate_increase_section
+
+    section = MagicMock()
+    only_one = AsyncMock()
+    section.query_selector_all = AsyncMock(return_value=[only_one])
+
+    page = MagicMock()
+    page.query_selector = AsyncMock(return_value=section)
+    page.query_selector_all = AsyncMock()
+
+    await _handle_rate_increase_section(page)
+
+    # No toggle was clicked because the count didn't match expectation.
+    only_one.click.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 6. All errors swallowed — never raises
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_swallows_all_errors():
     from upwork_mcp.tools.proposals import _handle_rate_increase_section
 
     page = MagicMock()
-    # Every query raises — helper should still return cleanly.
     page.query_selector = AsyncMock(side_effect=RuntimeError("DOM broke"))
 
     # Should not raise.
     await _handle_rate_increase_section(page)
-
-
-@pytest.mark.asyncio
-async def test_rate_increase_picks_yearly_when_no_never_option():
-    """When 'Never' isn't offered, fall back to 'Yearly' (lowest cadence)."""
-    from upwork_mcp.tools.proposals import _handle_rate_increase_section
-
-    def opt(text, val):
-        m = MagicMock()
-        m.text_content = AsyncMock(return_value=text)
-        m.get_attribute = AsyncMock(return_value=val)
-        return m
-
-    options = [
-        opt("Select a frequency", ""),
-        opt("Monthly", "monthly"),
-        opt("Yearly", "yearly"),
-        opt("Quarterly", "quarterly"),
-    ]
-
-    freq_dd = MagicMock()
-    freq_dd.query_selector_all = AsyncMock(return_value=options)
-    freq_dd.select_option = AsyncMock()
-
-    call_n = {"i": 0}
-
-    async def fake_query(sel):
-        i = call_n["i"]
-        call_n["i"] += 1
-        if i == 8:  # first frequency selector after 8 opt-out misses
-            return freq_dd
-        return None
-
-    page = MagicMock()
-    page.query_selector = fake_query
-
-    await _handle_rate_increase_section(page)
-    freq_dd.select_option.assert_awaited_once_with("yearly")

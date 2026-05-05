@@ -23,6 +23,11 @@ class SkillsProfile:
     bio: str = ""
     min_hourly_rate: float = 0.0
     min_fixed_rate: float = 0.0
+    # Default rate the bot bids AT when applying to hourly jobs (vs
+    # ``min_hourly_rate`` which is the FLOOR for which jobs to consider).
+    # Starting low improves visibility on a fresh profile; the user can
+    # tune via NL: "set my default proposal rate to 25".
+    default_proposal_rate: float = 15.0
     max_concurrent_jobs: int = 2
     platforms: tuple[str, ...] = ()
     preferred_categories: tuple[str, ...] = ()
@@ -65,6 +70,7 @@ _TUPLE_FIELDS: frozenset[str] = frozenset({
 
 _NUMERIC_FIELDS: frozenset[str] = frozenset({
     "min_hourly_rate", "min_fixed_rate", "max_tiny_gig_budget",
+    "default_proposal_rate",
 })
 
 _INTEGER_FIELDS: frozenset[str] = frozenset({

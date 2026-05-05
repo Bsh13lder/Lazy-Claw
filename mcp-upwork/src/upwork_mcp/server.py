@@ -177,13 +177,24 @@ async def upwork_submit_proposal(
 
 @mcp.tool()
 async def upwork_withdraw_proposal(
-    proposal_url: Annotated[str, Field(description="URL to the proposal to withdraw")]
+    proposal_url: Annotated[str, Field(description="URL to the proposal to withdraw, e.g. https://www.upwork.com/nx/proposals/<id>")],
+    reason: Annotated[
+        str,
+        Field(
+            description=(
+                "Reason for withdrawal. One of: "
+                "'Applied by mistake' (default), "
+                "'Rate too low', 'Scheduling conflict with client', "
+                "'Unresponsive client', 'Inappropriate client behavior', 'Other'."
+            ),
+        ),
+    ] = "Applied by mistake",
 ) -> dict:
-    """Withdraw a submitted proposal.
+    """Withdraw a submitted proposal via Upwork's two-step modal flow.
 
-    Returns withdrawal status.
+    Opens the proposal page, clicks Withdraw, picks the reason, confirms.
     """
-    return await withdraw_proposal(proposal_url)
+    return await withdraw_proposal(proposal_url, reason)
 
 
 # ============================================================================

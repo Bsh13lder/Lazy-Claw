@@ -210,6 +210,15 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             if i < len(question_inputs):
                 await question_inputs[i].fill(answer)
 
+    # Handle Upwork's new "Schedule a rate increase" required section
+    # (rolled out 2026-05). Description says "optional" but the dropdowns
+    # block submit with a red "Enter a rate-increase frequency / percent"
+    # error. Strategy: try to find an opt-out (checkbox / "no thanks" link),
+    # otherwise pick the lowest non-empty option in each dropdown so the
+    # form validates. We never want to silently lock the freelancer into
+    # a real rate increase, so we prefer "Never" / "0%" / minimum offered.
+    await _handle_rate_increase_section(page)
+
     # Check for connects required
     connects_el = await page.query_selector('[data-test="connects-required"], .connects-info')
     connects_required = 0
@@ -236,13 +245,40 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             "message": "Proposal submitted successfully"
         }
     except Exception:
-        # Check for error message
-        error_el = await page.query_selector('[data-test="error-message"], .error, .alert-danger')
-        if error_el:
-            error_text = (await error_el.text_content() or "").strip()
-            return {"status": "error", "message": error_text}
+        # Collect ALL inline validation errors (Upwork uses red "Enter a X"
+        # messages under each unfilled required field). Without this the
+        # brain only sees a generic "Could not confirm" — useless for
+        # diagnosing which field is blocking. Returning the joined list
+        # lets the agent reason about WHAT to fix.
+        validation_errors = []
+        for sel in (
+            '[data-test*="error"]',
+            '[role="alert"]',
+            '.air3-form-message-error',
+            '.air3-error-message',
+            '.alert-danger',
+        ):
+            try:
+                els = await page.query_selector_all(sel)
+                for el in els:
+                    txt = (await el.text_content() or "").strip()
+                    if txt and len(txt) < 200 and txt not in validation_errors:
+                        validation_errors.append(txt)
+            except Exception:
+                continue
 
-        return {"status": "unknown", "message": "Could not confirm submission status"}
+        if validation_errors:
+            return {
+                "status": "error",
+                "message": "Form validation failed: " + " | ".join(validation_errors[:6]),
+                "validation_errors": validation_errors,
+                "page_url": page.url,
+            }
+
+        return {
+            "status": "unknown",
+            "message": f"Could not confirm submission. Page: {page.url}",
+        }
 
 
 async def withdraw_proposal(proposal_url: str) -> dict:
@@ -276,3 +312,172 @@ async def withdraw_proposal(proposal_url: str) -> dict:
         return {"status": "withdrawn", "message": "Proposal withdrawn successfully"}
     except Exception:
         return {"status": "unknown", "message": "Could not confirm withdrawal"}
+
+
+async def _handle_rate_increase_section(page) -> None:
+    """Defuse Upwork's "Schedule a rate increase" required section.
+
+    Rolled out 2026-05. The description in the form says "optional" but
+    leaving the dropdowns empty triggers two red "Enter a rate-increase
+    frequency / percent" errors and blocks submit. We try, in order:
+
+    1. Click an opt-out toggle / "I don't want a rate increase" link if
+       Upwork exposes one.
+    2. Otherwise, pick the lowest-impact option in each dropdown:
+       - frequency: prefer ``Never`` / ``No rate increase`` / first option
+         containing ``year`` (annual = lowest cadence) / first non-placeholder.
+       - percent: prefer ``0`` / lowest numeric option.
+
+    Best-effort, never raises — if Upwork redesigns the section again,
+    submit just falls through and the new ``validation_errors`` capture
+    surfaces the real reason instead of pretending success.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # ── Try opt-out path first ───────────────────────────────────────
+    optout_selectors = [
+        'button:has-text("don\'t want")',
+        'button:has-text("don’t want")',
+        'button:has-text("No, thanks")',
+        'a:has-text("don\'t want")',
+        'a:has-text("Skip")',
+        'input[type="checkbox"][name*="rate-increase-optout"]',
+        'input[type="checkbox"][data-test*="rate-increase-optout"]',
+        '[data-test="rate-increase-optout"]',
+    ]
+    for sel in optout_selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                await el.click()
+                logger.info("Rate-increase: clicked opt-out (%s)", sel)
+                return
+        except Exception:
+            continue
+
+    # ── Fall back: pick safest non-empty option per dropdown ─────────
+    # Frequency dropdown
+    freq_dropdown = None
+    for sel in (
+        '[data-test*="rate-increase-frequency"] select',
+        '[data-test*="rate-increase-frequency"] [role="combobox"]',
+        'select[name*="frequency"]',
+        'select[id*="frequency"]',
+    ):
+        try:
+            freq_dropdown = await page.query_selector(sel)
+            if freq_dropdown:
+                break
+        except Exception:
+            continue
+
+    if freq_dropdown:
+        try:
+            # Native <select>: enumerate options, prefer "Never" / yearly
+            options = await freq_dropdown.query_selector_all("option")
+            chosen_value = None
+            for opt in options:
+                txt = ((await opt.text_content()) or "").strip().lower()
+                val = (await opt.get_attribute("value") or "").strip()
+                if not val:
+                    continue  # placeholder
+                if "never" in txt or "no rate" in txt or "no increase" in txt:
+                    chosen_value = val
+                    break
+            if not chosen_value:
+                # Prefer yearly (lowest cadence) over monthly/quarterly
+                for opt in options:
+                    txt = ((await opt.text_content()) or "").strip().lower()
+                    val = (await opt.get_attribute("value") or "").strip()
+                    if val and ("year" in txt or "annual" in txt):
+                        chosen_value = val
+                        break
+            if not chosen_value:
+                # Last resort: first non-empty option
+                for opt in options:
+                    val = (await opt.get_attribute("value") or "").strip()
+                    if val:
+                        chosen_value = val
+                        break
+            if chosen_value:
+                await freq_dropdown.select_option(chosen_value)
+                logger.info(
+                    "Rate-increase: frequency dropdown set to value=%r",
+                    chosen_value,
+                )
+        except Exception:
+            logger.debug(
+                "Rate-increase: native frequency select failed, trying combobox click",
+                exc_info=True,
+            )
+            try:
+                await freq_dropdown.click()
+                # Pick the option whose text mentions Never / Yearly
+                for label in ("Never", "Yearly", "Annually"):
+                    opt = await page.query_selector(
+                        f'[role="option"]:has-text("{label}"), li:has-text("{label}")'
+                    )
+                    if opt:
+                        await opt.click()
+                        logger.info("Rate-increase: combobox frequency picked %s", label)
+                        break
+            except Exception:
+                logger.debug("Rate-increase: combobox path failed", exc_info=True)
+
+    # Percent dropdown
+    pct_dropdown = None
+    for sel in (
+        '[data-test*="rate-increase-percent"] select',
+        '[data-test*="rate-increase-percent"] [role="combobox"]',
+        'select[name*="percent"]',
+        'select[id*="percent"]',
+    ):
+        try:
+            pct_dropdown = await page.query_selector(sel)
+            if pct_dropdown:
+                break
+        except Exception:
+            continue
+
+    if pct_dropdown:
+        try:
+            options = await pct_dropdown.query_selector_all("option")
+            chosen_value = None
+            best_pct = None
+            for opt in options:
+                txt = ((await opt.text_content()) or "").strip()
+                val = (await opt.get_attribute("value") or "").strip()
+                if not val:
+                    continue
+                # Prefer 0%, otherwise the lowest numeric percent.
+                import re
+                m = re.search(r"\d+", txt)
+                if m:
+                    pct = int(m.group())
+                    if best_pct is None or pct < best_pct:
+                        best_pct = pct
+                        chosen_value = val
+            if chosen_value:
+                await pct_dropdown.select_option(chosen_value)
+                logger.info(
+                    "Rate-increase: percent dropdown set to value=%r (%s%%)",
+                    chosen_value, best_pct,
+                )
+        except Exception:
+            logger.debug(
+                "Rate-increase: percent select failed, trying combobox click",
+                exc_info=True,
+            )
+            try:
+                await pct_dropdown.click()
+                for label in ("0%", "1%", "2%", "3%"):
+                    opt = await page.query_selector(
+                        f'[role="option"]:has-text("{label}"), li:has-text("{label}")'
+                    )
+                    if opt:
+                        await opt.click()
+                        logger.info("Rate-increase: combobox percent picked %s", label)
+                        break
+            except Exception:
+                logger.debug("Rate-increase: percent combobox failed", exc_info=True)

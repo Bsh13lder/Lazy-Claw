@@ -209,4 +209,40 @@ async def get_job_details(params: JobDetailsParams) -> dict:
                 job["connects_required"] = int(numbers[0])
                 break
 
+    # Fail-fast guard: if neither title nor description came through, the
+    # page never rendered (Cloudflare wall, login redirect, or 404). Raise
+    # so the caller sees an exception — returning an empty dict makes the
+    # lazyclaw skill_lesson auto-recorder mark the call "pending" (success-
+    # like), and the agent retries the same dead path N times waiting for
+    # fields that will never arrive.
+    if not job.get("title") and not job.get("description"):
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = url
+        try:
+            page_html = (await page.content() or "")[:300]
+        except Exception:
+            page_html = ""
+        cloudflare_hit = (
+            "challenges.cloudflare.com" in current_url
+            or "just a moment" in page_html.lower()
+            or "cf-browser-verification" in page_html.lower()
+        )
+        login_redirect = "/ab/account-security/login" in current_url
+        if cloudflare_hit:
+            reason = "cloudflare_blocked"
+        elif login_redirect:
+            reason = "login_required"
+        else:
+            reason = "page_empty"
+        raise RuntimeError(
+            f"upwork_get_job_details {reason}: page returned no title or "
+            f"description. Final URL: {current_url}. The unauthenticated "
+            f"headless browser cannot pass Upwork's gate. Switch to the "
+            f"host browser bridge (use_host_browser) so your real cookies "
+            f"come along, or call browser(action='open', url=...) and read "
+            f"from your VNC takeover session."
+        )
+
     return job

@@ -1,11 +1,44 @@
 """Browser client for Upwork automation using Patchright with CDP."""
 
 import asyncio
+import logging
 import subprocess
 import os
 from pathlib import Path
 from typing import Any
 from patchright.async_api import async_playwright, Browser, BrowserContext, Page
+
+logger = logging.getLogger(__name__)
+
+
+class BrowserDisconnectedError(RuntimeError):
+    """Raised when the underlying CDP page/browser handle is no longer alive.
+
+    Distinguishes "the connection died between calls" from "user is not
+    logged in" — historically swallowed by a bare ``except Exception`` that
+    returned False, causing every disconnect to surface as a misleading
+    "Not logged in. Run 'uvx upwork-mcp --login'" error and pushing the
+    LazyClaw brain to fabricate that fake CLI command in chat.
+    """
+
+
+# Substrings Playwright/Patchright use when the underlying connection is gone.
+# Matched against ``str(exc)`` because the exception classes vary across
+# Playwright versions and we don't want a hard import dependency on internals.
+_DISCONNECT_HINTS = (
+    "Target closed",
+    "Target page, context or browser has been closed",
+    "Browser has been closed",
+    "disconnected",
+    "Page closed",
+    "Connection closed",
+    "BrowserContext closed",
+)
+
+
+def _is_disconnect_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return any(h in msg for h in _DISCONNECT_HINTS)
 
 
 def _resolve_profile_dir() -> Path:
@@ -32,8 +65,45 @@ def _resolve_cdp_port() -> int:
     return 9222
 
 
+def _resolve_cdp_host() -> str:
+    """Resolve CDP host from `LAZYCLAW_CDP_HOST`, fallback 127.0.0.1.
+
+    Set to `host.docker.internal` when running inside the LazyClaw Docker
+    container so the MCP connects to the user's REAL Brave on the Mac/Win
+    host (with their cookies and Cloudflare-passing fingerprint), instead
+    of trying to launch its own Chrome inside the container (which has no
+    Chrome binary).
+
+    KEY DETAIL: we DNS-resolve the hostname to its IP. Chromium's CDP
+    HTTP server only accepts `Host:` headers that are an IP address or
+    `localhost` — it rejects `host.docker.internal` with a 400. By
+    connecting to the resolved IP (e.g. 192.168.65.254) the Host header
+    becomes the IP and Brave accepts it. This means the user can launch
+    Brave with just `--remote-debugging-port=9222` — no
+    `--remote-allow-origins=*` needed.
+    """
+    import socket
+    host = os.environ.get("LAZYCLAW_CDP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
+def _running_in_container() -> bool:
+    """Best-effort check for "running inside a Linux container".
+
+    Used to suppress the in-process `start_chrome_with_debug()` fallback —
+    inside the container there's no Chrome binary and no display, so the
+    fallback always fails with a confusing error. Better to fail fast and
+    tell the user to start Brave on the host with debug port.
+    """
+    return os.path.exists("/.dockerenv")
+
+
 PROFILE_DIR = _resolve_profile_dir()
 CDP_PORT = _resolve_cdp_port()
+CDP_HOST = _resolve_cdp_host()
 
 # Real Chrome paths by platform
 CHROME_PATHS = [
@@ -54,10 +124,17 @@ def find_chrome() -> str | None:
 
 
 def is_chrome_running_with_debug() -> bool:
-    """Check if Chrome is running with debug port."""
+    """Check if Chrome is running with debug port at CDP_HOST:CDP_PORT.
+
+    CDP_HOST defaults to 127.0.0.1 but is set to `host.docker.internal`
+    by LazyClaw's MCP manager when running in Docker, so the probe reaches
+    the user's host Brave instead of the empty container loopback.
+    """
     import urllib.request
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=2) as resp:
+        with urllib.request.urlopen(
+            f"http://{CDP_HOST}:{CDP_PORT}/json/version", timeout=2,
+        ) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -104,14 +181,31 @@ class UpworkBrowser:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._started = False
+        # Captured by is_logged_in for use in ensure_logged_in's error
+        # message — gives the brain real evidence (current url + reason)
+        # instead of a hardcoded "run uvx upwork-mcp --login" lie.
+        self._last_state_url: str = ""
+        self._last_state_reason: str = ""
 
     async def start(self) -> Page:
         """Connect to Chrome via CDP."""
         if self._started and self._page:
             return self._page
 
-        # Ensure Chrome is running with debug port
+        # Ensure Chrome is running with debug port at CDP_HOST:CDP_PORT.
         if not is_chrome_running_with_debug():
+            if _running_in_container():
+                # No Chrome inside the LazyClaw Docker image — surface a
+                # crisp instruction instead of the cryptic "Could not start
+                # Chrome" the host-launch path produces.
+                raise RuntimeError(
+                    f"Cannot reach a Brave/Chrome with --remote-debugging-port "
+                    f"at {CDP_HOST}:{CDP_PORT}. Start Brave on your host with:\n"
+                    f"  /Applications/Brave\\ Browser.app/Contents/MacOS/Brave\\ Browser "
+                    f"--remote-debugging-port={CDP_PORT} "
+                    f"--user-data-dir=$HOME/Library/Application\\ Support/BraveSoftware/Brave-Browser-Lazy\n"
+                    f"(or use scripts/install-host-brave-bridge.sh for a launchd-managed copy)."
+                )
             print("Starting Chrome with debug port...")
             if not start_chrome_with_debug():
                 raise RuntimeError(
@@ -122,9 +216,10 @@ class UpworkBrowser:
 
         self._playwright = await async_playwright().start()
 
-        # Connect via CDP
+        # Connect via CDP — uses CDP_HOST so containerized installs reach
+        # the host Brave through host.docker.internal.
         self._browser = await self._playwright.chromium.connect_over_cdp(
-            f"http://127.0.0.1:{CDP_PORT}"
+            f"http://{CDP_HOST}:{CDP_PORT}"
         )
 
         contexts = self._browser.contexts
@@ -139,16 +234,48 @@ class UpworkBrowser:
         self._started = True
         return self._page
 
+    def _page_is_alive(self) -> bool:
+        """Cheap synchronous check: is the cached page handle still usable?
+
+        Without this, the singleton happily returns a stale Page across MCP
+        calls. The first await on it (e.g. ``page.goto``) raises a
+        Playwright "Target closed" / "disconnected" error, which the bare
+        ``except`` in ``is_logged_in`` swallows as "not logged in" — root
+        cause of the 20ms-fail "Run uvx upwork-mcp --login" lie.
+        """
+        if not self._started or not self._page or not self._browser:
+            return False
+        try:
+            if self._page.is_closed():
+                return False
+            if not self._browser.is_connected():
+                return False
+        except Exception:
+            return False
+        return True
+
     async def get_page(self) -> Page:
-        """Get or create page instance."""
-        if not self._started or not self._page:
+        """Get or create page instance.
+
+        Verifies the cached singleton page is still alive before returning.
+        On a stale handle (CDP socket reset, tab crashed, or user closed
+        the tab), recreate the connection rather than handing the dead
+        handle to callers.
+        """
+        if not self._page_is_alive():
+            if self._started:
+                logger.warning("Upwork browser handle stale, reconnecting via CDP")
+                await self.close()
             return await self.start()
         return self._page
 
     async def close(self):
         """Disconnect from browser (doesn't close Chrome)."""
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception:
+                logger.debug("Playwright stop raised during close (ignored)", exc_info=True)
             self._playwright = None
         self._browser = None
         self._context = None
@@ -156,7 +283,13 @@ class UpworkBrowser:
         self._started = False
 
     async def is_logged_in(self) -> bool:
-        """Check if user is authenticated on Upwork."""
+        """Check if user is authenticated on Upwork.
+
+        Raises ``BrowserDisconnectedError`` when the underlying CDP
+        connection is gone — that's a "your bridge is broken" condition,
+        not a login state, and the caller (``ensure_logged_in``) handles
+        it by reconnecting + retrying once.
+        """
         page = await self.get_page()
         try:
             await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="domcontentloaded")
@@ -173,23 +306,70 @@ class UpworkBrowser:
 
             # Check for Cloudflare (still showing)
             if "moment" in title.lower():
-                print("Cloudflare challenge detected. Please solve it in the browser window.")
+                self._last_state_url = current_url
+                self._last_state_reason = "cloudflare_challenge"
+                logger.info("Upwork: Cloudflare challenge present at %s", current_url)
                 return False
 
             # Check for login redirect
             if "login" in current_url or "ab/account-security" in current_url:
+                self._last_state_url = current_url
+                self._last_state_reason = "login_redirect"
                 return False
 
+            self._last_state_url = current_url
+            self._last_state_reason = "ok"
             return True
         except Exception as e:
-            print(f"Login check error: {e}")
+            if _is_disconnect_error(e):
+                raise BrowserDisconnectedError(str(e)) from e
+            logger.warning("Upwork is_logged_in unexpected error: %s", e)
+            self._last_state_url = ""
+            self._last_state_reason = f"check_error: {type(e).__name__}: {e}"[:200]
             return False
 
     async def ensure_logged_in(self) -> bool:
-        """Verify login status, raise error if not logged in."""
-        if not await self.is_logged_in():
+        """Verify login status with one auto-reconnect retry.
+
+        On disconnect: rebuild the Playwright connection once and retry —
+        a stale singleton between MCP tool calls is the common case and
+        the user shouldn't see a misleading "not logged in" for it.
+
+        On a real not-logged-in result: raise with the actual current URL
+        and reason (cloudflare / login redirect / unexpected). The brain
+        sees evidence and stops fabricating ``uvx upwork-mcp --login``.
+        """
+        try:
+            ok = await self.is_logged_in()
+        except BrowserDisconnectedError as exc:
+            logger.warning("Upwork CDP disconnected during login check: %s — reconnecting once", exc)
+            await self.close()
+            try:
+                ok = await self.is_logged_in()
+            except BrowserDisconnectedError as exc2:
+                raise RuntimeError(
+                    f"Upwork browser bridge unreachable: {exc2}. "
+                    f"Check Brave is running on the host with --remote-debugging-port "
+                    f"and the LazyClaw host bridge is active."
+                ) from exc2
+
+        if not ok:
+            reason = getattr(self, "_last_state_reason", "unknown") or "unknown"
+            current = getattr(self, "_last_state_url", "") or "(unknown url)"
+            if reason == "cloudflare_challenge":
+                raise RuntimeError(
+                    f"Upwork is showing a Cloudflare 'Verify you are human' challenge "
+                    f"at {current}. Open Brave on the host, solve it, then retry."
+                )
+            if reason == "login_redirect":
+                raise RuntimeError(
+                    f"Upwork session expired or signed out (redirected to {current}). "
+                    f"Open Brave at https://www.upwork.com/nx/find-work, sign in, "
+                    f"then retry."
+                )
             raise RuntimeError(
-                "Not logged in to Upwork. Run 'uvx upwork-mcp --login' to authenticate."
+                f"Upwork login check failed ({reason}). Current page: {current}. "
+                f"Open Brave at https://www.upwork.com/nx/find-work to verify."
             )
         return True
 

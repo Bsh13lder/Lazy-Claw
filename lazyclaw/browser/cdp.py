@@ -55,14 +55,33 @@ async def find_chrome_cdp(port: int = DEFAULT_CDP_PORT) -> str | None:
     return None
 
 
-async def list_chrome_tabs(port: int = DEFAULT_CDP_PORT) -> list[CDPTab]:
+async def list_chrome_tabs(
+    port: int = DEFAULT_CDP_PORT,
+    host: str = "localhost",
+) -> list[CDPTab]:
     """List all open Chrome tabs via the /json endpoint.
 
     Returns only 'page' type targets (actual tabs, not service workers).
+
+    ``host`` defaults to ``localhost`` (in-container or native install).
+    For the Docker host-bridge case, callers pass ``host.docker.internal``
+    or the resolved IP — Chromium's CDP HTTP server validates the ``Host:``
+    header and only accepts an IP or literal "localhost", so we DNS-resolve
+    non-localhost hosts before connecting (same trick as probe_host_cdp).
     """
+    target_host = host
+    if host not in ("localhost", "127.0.0.1"):
+        import socket as _socket
+
+        try:
+            target_host = _socket.gethostbyname(host)
+        except OSError as exc:
+            logger.debug("list_chrome_tabs DNS-resolve failed (%s): %s", host, exc)
+            return []
+
     try:
         async with httpx.AsyncClient(timeout=3) as client:
-            resp = await client.get(f"http://localhost:{port}/json")
+            resp = await client.get(f"http://{target_host}:{port}/json")
             if resp.status_code == 200:
                 targets = resp.json()
                 tabs = []

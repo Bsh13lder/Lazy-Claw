@@ -285,13 +285,83 @@ class CDPBackend:
             prefer_host, host_token = await self._resolve_host_preference()
             ws_url, source = await self._find_cdp_endpoint(prefer_host, host_token)
 
+            # Self-heal: bridge is armed but the host probe just failed. Write
+            # a repair flag (so a host-side watcher can react) and retry once
+            # with a short backoff — covers the "launchd just kicked Brave but
+            # the port isn't bound yet" race on cold macOS starts.
+            if prefer_host and source != "host":
+                try:
+                    from lazyclaw.config import load_config
+
+                    cfg = load_config()
+                    flag_path = cfg.database_dir / ".host_bridge_repair_needed"
+                    flag_path.write_text(
+                        f"requested_at={int(time.time())}\nreason=cdp_unreachable_port_{self._port}\n",
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    logger.debug("Could not write host-bridge repair flag", exc_info=True)
+
+                for delay in (2.0, 3.0):
+                    await asyncio.sleep(delay)
+                    ws_url, source = await self._find_cdp_endpoint(prefer_host, host_token)
+                    if source == "host":
+                        break
+
+                # Bridge came back up — clear the flag.
+                if source == "host":
+                    try:
+                        from lazyclaw.config import load_config as _lc
+
+                        flag_path = _lc().database_dir / ".host_bridge_repair_needed"
+                        if flag_path.exists():
+                            flag_path.unlink()
+                    except Exception:
+                        pass
+
             origin: str | None = None
             if source == "host" and host_token:
-                from lazyclaw.browser.host_bridge import origin_for_token
-                origin = origin_for_token(host_token)
-                self._current_tab = CDPTab(id="host-browser", title="",
-                                           url="", ws_url=ws_url,
-                                           tab_type="page")
+                # Chromium 147+ rejects WS handshakes that send a custom
+                # Origin header even when --remote-allow-origins is set to
+                # match — server returns HTTP 403 ("origin not allowed").
+                # When the connection arrives over loopback (we go through
+                # the host-side TCP forwarder so Brave sees 127.0.0.1),
+                # Chromium auto-allows requests WITHOUT an Origin header.
+                # So leave origin=None for host-bridge — the forwarder is
+                # the access-control layer (bound to a Docker-only iface
+                # so LAN traffic can't reach it).
+                #
+                # Empirically verified 2026-05-04 with Brave 147.0.7727.137:
+                #   WITHOUT Origin: handshake succeeds
+                #   WITH    Origin: HTTP 403 InvalidStatus
+
+                # ``ws_url`` from probe_host_cdp is the BROWSER-level WS
+                # (``/devtools/browser/{id}``), which only exposes
+                # ``Browser.*``, ``Target.*`` and ``Tracing.*`` domains.
+                # ``Page.enable`` and ``Runtime.evaluate`` only exist on
+                # PAGE-level WS endpoints (``/devtools/page/{id}``). List
+                # the host's open tabs and switch to a page-level WS so
+                # downstream skills (action_open, screenshot, etc.) work.
+                from lazyclaw.browser.host_bridge import HOST_GATEWAY_HOSTNAME
+
+                page_tabs = await list_chrome_tabs(
+                    port=self._port, host=HOST_GATEWAY_HOSTNAME,
+                )
+                page_tabs = [t for t in page_tabs if t.tab_type == "page"]
+                if not page_tabs:
+                    raise ConnectionError(
+                        f"Host Brave reachable on {HOST_GATEWAY_HOSTNAME}:{self._port} "
+                        "but reports zero page tabs. Open a tab in your Brave window."
+                    )
+                # Use the most recently focused tab (Chromium returns tabs
+                # in MRU order in /json, with the active one first).
+                self._current_tab = page_tabs[0]
+                ws_url = self._current_tab.ws_url
+                logger.info(
+                    "Host bridge: switched to page-level WS for tab %r (%s)",
+                    self._current_tab.title[:40] or "(no title)",
+                    self._current_tab.url[:60] or "(no url)",
+                )
             elif source == "local":
                 # Connect to the first (active) page tab using the regular
                 # discovery endpoint so CDPTab metadata comes through.
@@ -468,17 +538,26 @@ class CDPBackend:
             logger.warning("No browser found (Brave/Chrome/Chromium), cannot auto-launch")
             return None
 
-        # Kill any stale headless browser hogging the debugging port
-        try:
-            kill_proc = await asyncio.create_subprocess_exec(
-                "pkill", "-f", f"--remote-debugging-port={self._port}",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await kill_proc.wait()
-            await asyncio.sleep(0.5)
-        except Exception:
-            logger.warning("Failed to kill existing browser process on port %d", self._port, exc_info=True)
+        # Kill any stale headless browser hogging the debugging port. pkill is
+        # only present in fat container images / hosts — slim Python images
+        # don't ship procps. Skip cleanly when missing rather than logging a
+        # full traceback every launch.
+        import shutil
+
+        pkill_bin = shutil.which("pkill")
+        if pkill_bin:
+            try:
+                kill_proc = await asyncio.create_subprocess_exec(
+                    pkill_bin, "-f", f"--remote-debugging-port={self._port}",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await kill_proc.wait()
+                await asyncio.sleep(0.5)
+            except Exception:
+                logger.warning("Failed to kill existing browser process on port %d", self._port, exc_info=True)
+        else:
+            logger.debug("pkill not on PATH — skipping stale-browser cleanup (container image)")
 
         # Use shared profile dir (same as Playwright) for cookie sharing,
         # or fall back to a persistent temp dir
@@ -601,15 +680,11 @@ class CDPBackend:
             return
 
         await conn.send("Page.navigate", {"url": url})
-        # Human-like wait for page load (0.8-1.5s)
+        # Human-like wait for page load (0.8-1.5s). Page.waitForNavigation isn't
+        # a real CDP method (Playwright invented it on top of frame events) —
+        # wait_for_page_ready below listens for the proper Page.lifecycleEvent /
+        # Page.frameStoppedLoading signals instead.
         await asyncio.sleep(random.uniform(0.8, 1.5))
-        try:
-            await conn.send(
-                "Page.waitForNavigation",
-                {"timeout": 10000},
-            )
-        except Exception:
-            logger.debug("Page.waitForNavigation not triggered (expected for some pages)", exc_info=True)
 
         # Wait for DOM to settle + auto-solve Cloudflare if detected
         try:

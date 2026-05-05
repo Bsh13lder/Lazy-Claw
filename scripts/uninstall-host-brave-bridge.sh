@@ -14,19 +14,29 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 MARKER_FILE="$REPO_ROOT/data/.host_bridge_installed"
+REPAIR_FLAG="$REPO_ROOT/data/.host_bridge_repair_needed"
 PLIST_LABEL="sh.lazyclaw.brave-bridge"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+WATCHER_LABEL="sh.lazyclaw.brave-bridge-watcher"
+WATCHER_PLIST_PATH="$HOME/Library/LaunchAgents/$WATCHER_LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
-echo "→ Stopping + unloading the launchd agent"
-launchctl bootout "$DOMAIN" "$PLIST_PATH" >/dev/null 2>&1 \
-    || launchctl unload "$PLIST_PATH" >/dev/null 2>&1 \
-    || true
+echo "→ Stopping + unloading the launchd agents"
+for plist in "$WATCHER_PLIST_PATH" "$PLIST_PATH"; do
+    launchctl bootout "$DOMAIN" "$plist" >/dev/null 2>&1 \
+        || launchctl unload "$plist" >/dev/null 2>&1 \
+        || true
+done
 
-if [[ -f "$PLIST_PATH" ]]; then
-    rm "$PLIST_PATH"
-    echo "→ Removed $PLIST_PATH"
-fi
+for plist in "$WATCHER_PLIST_PATH" "$PLIST_PATH"; do
+    if [[ -f "$plist" ]]; then
+        rm "$plist"
+        echo "→ Removed $plist"
+    fi
+done
+
+# Drop any stale container repair flag.
+[[ -f "$REPAIR_FLAG" ]] && rm "$REPAIR_FLAG"
 
 if [[ -f "$MARKER_FILE" ]]; then
     rm "$MARKER_FILE"

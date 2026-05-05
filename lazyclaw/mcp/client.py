@@ -51,15 +51,27 @@ def _is_transport_error(exc: BaseException) -> bool:
 
 
 def _get_child_pids(parent_pid: int) -> set[int]:
-    """Get PIDs of direct child processes (macOS/Linux)."""
+    """Get PIDs of direct child processes (macOS/Linux).
+
+    Slim container images don't ship procps, so pgrep won't be on PATH.
+    Treat "missing binary" as "no children" silently — emitting a stack
+    trace every connection just spams the logs. Other failures still log
+    at DEBUG with context.
+    """
+    import shutil
+
+    if not shutil.which("pgrep"):
+        return set()
     try:
         out = subprocess.check_output(
             ["pgrep", "-P", str(parent_pid)],
             text=True, timeout=2,
         )
         return {int(line) for line in out.strip().split("\n") if line.strip()}
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        logger.debug("Failed to get child PIDs for parent %d", parent_pid, exc_info=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return set()
+    except FileNotFoundError:
+        # Race: pgrep removed between which() and exec(). Treat as no children.
         return set()
 
 

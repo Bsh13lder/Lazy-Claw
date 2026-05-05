@@ -154,8 +154,49 @@ class UseHostBrowserSkill(BaseSkill):
             self._config, user_id, {"use_host_browser": "auto"},
         )
 
+        # First probe.
         ws_url = await host_bridge.probe_host_cdp(port)
+
+        # Self-heal: if the bridge marker exists but the probe just failed,
+        # leave a `bridge-repair-needed` flag in data/ so the host-side
+        # watcher (or the user) can react. Then retry the probe a few times
+        # with backoff — covers the "Brave is mid-launch" race when launchd
+        # has just kicked Brave but the port isn't bound yet (~3-6s on cold
+        # macOS starts).
+        if not ws_url and bridge_installed:
+            try:
+                flag_path = self._config.database_dir / ".host_bridge_repair_needed"
+                flag_path.write_text(
+                    f"requested_at={int(__import__('time').time())}\n"
+                    f"reason=cdp_unreachable_port_{port}\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                logger.debug("Could not write host-bridge repair flag", exc_info=True)
+
+            event_bus.publish(event_bus.BrowserEvent(
+                user_id=user_id,
+                kind="host_cdp",
+                detail="Host Brave unreachable — waiting for launchd to relaunch",
+                extra={"source": "local"},
+            ))
+
+            import asyncio
+            for delay in (2.0, 3.0, 4.0):
+                await asyncio.sleep(delay)
+                ws_url = await host_bridge.probe_host_cdp(port)
+                if ws_url:
+                    break
+
         if ws_url:
+            # Clear repair flag if it was set during this call.
+            try:
+                flag_path = self._config.database_dir / ".host_bridge_repair_needed"
+                if flag_path.exists():
+                    flag_path.unlink()
+            except OSError:
+                pass
+
             event_bus.publish(event_bus.BrowserEvent(
                 user_id=user_id,
                 kind="host_cdp",
@@ -168,22 +209,24 @@ class UseHostBrowserSkill(BaseSkill):
                 "Say 'stop host browser' when you want to switch back."
             )
 
-        # Not reachable. Two cases — the user has the auto-start helper
-        # installed but Brave is offline (just kick it), or they haven't
-        # set up the helper yet (recommend the installer).
+        # Still not reachable after retries. Two cases — the user has the
+        # auto-start helper installed but Brave is genuinely down, or they
+        # haven't set up the helper yet.
         if bridge_installed:
             return (
-                f"Host bridge is armed but Brave isn't responding on port {port}. "
-                "Your launchd auto-start helper IS installed — Brave should be "
-                "running. Two things to try:\n\n"
-                "  1. Check if Brave is open. If you Cmd+Q'd it, just open it "
-                "from Spotlight again — the launchd plist only auto-restarts "
-                "on crash, not after a clean quit.\n\n"
-                "  2. Or kick the agent manually:\n"
-                "     ```\n"
-                "     launchctl kickstart -k gui/$(id -u)/sh.lazyclaw.brave-bridge\n"
-                "     ```\n\n"
-                "Once Brave's window is open, say 'use my browser' again."
+                "ACTION REQUIRED FROM USER (you cannot do this yourself — do NOT "
+                "call `run_command`, `terminal`, or any shell tool; the container "
+                f"cannot reach the user's host).\n\nHost bridge is armed but Brave "
+                f"isn't responding on port {port} after a 9-second self-heal probe.\n\n"
+                "**Reply to the user with this exact message and STOP — wait for them "
+                "to confirm Brave is open before retrying anything:**\n\n"
+                "> Your Brave isn't on debug port. Please open a Terminal on your "
+                "Mac and run:\n"
+                "> ```\n"
+                "> bash scripts/repair-host-brave-bridge.sh\n"
+                "> ```\n"
+                "> Or just relaunch Brave yourself with --remote-debugging-port=9222. "
+                "Tell me when it's done and I'll retry."
             )
 
         # No helper installed yet — recommend the one-time installer first,

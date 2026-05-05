@@ -301,11 +301,88 @@ _ACTION_CLAIM_RE = re.compile(
 # Compiled regexes with \b word boundaries so "mail" doesn't match "airmail",
 # "insta" doesn't match "install/instant", etc. (Fixed 2026-04-24 after the
 # scraping task was mis-routed as "email" due to substring match.)
-_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = {
+# Hand-tuned regexes for channels that benefit from typo/abbrev handling.
+# Anything not in this map is auto-derived from BUNDLED_MCPS at lookup time
+# so adding a new MCP automatically gets keyword-routing without code edits.
+_HAND_TUNED_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = {
     "whatsapp":  re.compile(r"\b(whatsapp|wa\s+(?:msg|message))\b", re.IGNORECASE),
     "instagram": re.compile(r"\b(instagram|insta|ig\s+(?:msg|message))\b", re.IGNORECASE),
     "email":     re.compile(r"\b(e-?mail|gmail|inbox)\b", re.IGNORECASE),
+    "upwork":    re.compile(r"\b(upwork)\b|upwork\.com", re.IGNORECASE),
 }
+
+# Manual aliases for multi-keyword MCPs whose name doesn't match the words
+# users actually say. Keys are channel labels (canonical, lowercase, no
+# `mcp-` prefix); values are alternations injected into a single regex.
+# Auto-derivation handles single-name MCPs (e.g. `stripe` → `\bstripe\b`),
+# this map exists for the workspace/email-style aggregators.
+_CHANNEL_KEYWORD_ALIASES: dict[str, list[str]] = {
+    "workspace": [
+        "google sheets", "google drive", "google docs", "google calendar",
+        "gsheets?", "gdrive", "gdocs?", "gcal", r"\bworkspace\b",
+        # Bare words last so the more-specific phrases win regex priority
+        r"\bsheets?\b", r"\bdrive\b", r"\bcalendar\b", r"\bdocs?\b",
+    ],
+    "jobspy": [
+        "jobspy", "indeed", "linkedin", "glassdoor", "ziprecruiter",
+    ],
+}
+
+# Channels that should NOT be auto-routed even if their name appears (too
+# generic, would over-match). e.g. "claude-code" matches "claude" which
+# matches every "hi claude" greeting.
+_CHANNEL_AUTOROUTE_BLOCKLIST: frozenset[str] = frozenset({
+    "claude-code", "n8n-nodes",
+})
+
+
+def _build_channel_keywords() -> dict[str, re.Pattern[str]]:
+    """Build the active channel-keyword map.
+
+    Combines hand-tuned regexes (above) with auto-derived patterns from
+    every enabled MCP in ``BUNDLED_MCPS``. Adding a new MCP requires a
+    daemon restart, which matches the existing behavior for every other
+    MCP-related cache.
+
+    Auto-derivation rules:
+      * Strip ``mcp-`` prefix to get the canonical channel label.
+      * If the label has a hand-tuned regex, use that (skip auto).
+      * Else if the label has an alias list, use those alternations.
+      * Else build ``\\b<label>\\b`` (word-boundary match).
+      * Skip blocklisted labels (too-generic names).
+    """
+    from lazyclaw.mcp.manager import BUNDLED_MCPS
+
+    keywords: dict[str, re.Pattern[str]] = dict(_HAND_TUNED_CHANNEL_KEYWORDS)
+
+    for mcp_name, info in BUNDLED_MCPS.items():
+        if info.get("disabled"):
+            continue
+        # Canonicalize: strip both ``mcp-`` prefix and ``-mcp`` suffix so
+        # ``mcp-upwork`` and ``workspace-mcp`` both reduce to bare names.
+        canonical = mcp_name.lower()
+        if canonical.startswith("mcp-"):
+            canonical = canonical[4:]
+        if canonical.endswith("-mcp"):
+            canonical = canonical[:-4]
+        if canonical in keywords:
+            continue
+        if canonical in _CHANNEL_AUTOROUTE_BLOCKLIST:
+            continue
+        if canonical in _CHANNEL_KEYWORD_ALIASES:
+            patterns = _CHANNEL_KEYWORD_ALIASES[canonical]
+        else:
+            patterns = [rf"\b{re.escape(canonical)}\b"]
+        keywords[canonical] = re.compile("|".join(patterns), re.IGNORECASE)
+
+    return keywords
+
+
+# Computed eagerly at import time so call sites continue to use it as a
+# plain dict (e.g. ``for channel, pattern in _CHANNEL_KEYWORDS.items()``).
+# BUNDLED_MCPS is a module-level dict in lazyclaw.mcp.manager, so it's
+# stable as soon as that module finishes importing.
+_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = _build_channel_keywords()
 
 # Channel tool suffixes to include for simple status/read queries.
 # Full tool set only injected when message indicates action intent.
@@ -320,7 +397,10 @@ _CHANNEL_CORE_SUFFIXES = frozenset({
 # Matched with word boundaries to prevent "followers" matching "follow".
 _CHANNEL_ACTION_RE = re.compile(
     r"\b(post|send|reply|follow|unfollow|like|unlike|comment|story|reel|"
-    r"carousel|delete|move|mark|mute|unmute|forward|image|photo|label)\b",
+    r"carousel|delete|move|mark|mute|unmute|forward|image|photo|label|"
+    # Upwork verbs — without these "apply on upwork link" routed to core-only
+    # tool set and the brain never saw upwork_submit_proposal / *_get_job_details.
+    r"apply|submit|propose|proposal|bid|withdraw|hire)\b",
     re.IGNORECASE,
 )
 
@@ -1709,23 +1789,74 @@ class Agent:
             # tool count (51→~25). Action queries get the full set.
             _channel_tools: list = []
             _wants_action = bool(_CHANNEL_ACTION_RE.search(_msg_lower))
+
+            # Build server_id → channel_label so tools route accurately even
+            # when the channel keyword doesn't appear in the tool name (e.g.
+            # workspace tools are named ``mcp_<id>_search_drive_files`` —
+            # nothing says "workspace", but the server is workspace-mcp).
+            # Falls back to substring matching when the registry doesn't
+            # know the server for a tool (covers non-bundled MCPs).
+            _server_id_to_channel: dict[str, str] = {}
+            if _matched_channels:
+                try:
+                    from lazyclaw.mcp.manager import _active_clients
+
+                    for sid, client in _active_clients.items():
+                        cname = (getattr(client, "name", "") or "").lower()
+                        if cname.startswith("mcp-"):
+                            cname = cname[4:]
+                        if cname.endswith("-mcp"):
+                            cname = cname[:-4]
+                        if cname in _matched_channels:
+                            _server_id_to_channel[sid] = cname
+                except Exception:
+                    logger.debug(
+                        "Could not build server_id → channel map; "
+                        "falling back to substring tool matching",
+                        exc_info=True,
+                    )
+
             if _matched_channels:
                 for tool_info in self.registry.list_mcp_tools():
                     func = tool_info.get("function", {})
                     tname = func.get("name", "").lower()
                     tdesc = func.get("description", "").lower()
-                    for ch in _matched_channels:
-                        if ch in tname or ch in tdesc:
-                            # Filter: only core suffixes unless action intent
-                            if not _wants_action:
-                                _base_name = tname.rsplit("_", 1)[-1] if "_" in tname else tname
-                                _has_core = any(tname.endswith(s) for s in _CHANNEL_CORE_SUFFIXES)
-                                if not _has_core:
-                                    break
-                            schema = self.registry.get_tool_schema(func.get("name", ""))
-                            if schema is not None:
-                                _channel_tools.append(schema)
-                            break
+
+                    # Authoritative path: parse server_id from tool name
+                    # ``mcp_<server_id>_<tool>``. UUIDs use dashes not
+                    # underscores, so split(_, 2) keeps the UUID intact.
+                    parsed_channel: str | None = None
+                    if tname.startswith("mcp_"):
+                        parts = tname.split("_", 2)
+                        if len(parts) >= 2:
+                            parsed_channel = _server_id_to_channel.get(parts[1])
+
+                    matched_via: str | None = None
+                    if parsed_channel and parsed_channel in _matched_channels:
+                        matched_via = parsed_channel
+                    else:
+                        # Fallback: substring match on name/desc — covers
+                        # non-bundled MCPs and hand-tuned channels whose
+                        # keyword genuinely appears in the tool string.
+                        for ch in _matched_channels:
+                            if ch in tname or ch in tdesc:
+                                matched_via = ch
+                                break
+
+                    if not matched_via:
+                        continue
+
+                    # Filter: only core suffixes unless action intent
+                    if not _wants_action:
+                        _has_core = any(
+                            tname.endswith(s) for s in _CHANNEL_CORE_SUFFIXES
+                        )
+                        if not _has_core:
+                            continue
+
+                    schema = self.registry.get_tool_schema(func.get("name", ""))
+                    if schema is not None:
+                        _channel_tools.append(schema)
 
                 # On-demand connect: if channel detected but no MCP tools found,
                 # the optional MCP server was never cached. Connect it now.
@@ -2134,11 +2265,34 @@ class Agent:
             # (WhatsApp/Instagram/Email have dedicated MCP tools — no browser needed).
             # Task and survival tools should NEVER suppress browser — user can
             # browse the web AND have task/job tools available simultaneously.
+            # Tools we deliberately keep OUT of the active set this turn.
+            # The late-inject-from-registry path further down checks this
+            # set and refuses to re-add — without that check, MiniMax would
+            # call ``browser`` from training/history memory, the late-inject
+            # would resurrect it from the registry, and the channel-suppress
+            # decision would be silently undone (this exact bug fired during
+            # 2026-05-04 Upwork debugging — agent kept calling browser even
+            # though Upwork MCP tools were the right path).
+            _suppressed_tool_names: set[str] = set()
+            # When channel MCP routing is active, suppress generic
+            # browser/shell tools — the MCP handles browser automation
+            # internally with the user's real cookies. This applies even
+            # when the user didn't say "browser" in this turn (e.g.
+            # "check upwork and send proposal" — no browser keyword, but
+            # post-MCP the brain would otherwise reach for browser to
+            # "verify the result"). The late-inject-from-registry path
+            # respects this set and refuses to resurrect from history.
+            if _channel_tools:
+                _suppressed_tool_names |= {
+                    "browser", "use_host_browser", "run_command",
+                }
             if _wants_browser and not _channel_tools:
                 _base_names.add("browser")
                 logger.info("Browser keyword detected — browser tool included")
             elif _wants_browser and _channel_tools:
                 logger.info("Channel detected: %s → %d MCP tools, browser suppressed (MCP-first)", _matched_channels, len(_channel_tools))
+            elif _channel_tools:
+                logger.info("Channel detected: %s → %d MCP tools, browser/shell suppressed for MCP-only flow", _matched_channels, len(_channel_tools))
 
             # Shell/file tools only when user explicitly asks. Keeps
             # `run_command` out of the default tool list so the brain can't
@@ -2284,6 +2438,33 @@ class Agent:
         system_messages = [LLMMessage(role="system", content=system_prompt)]
         if channel_context:
             system_messages.append(LLMMessage(role="system", content=channel_context))
+
+        # Channel-routing hint: when MCP tools handle a domain (Upwork,
+        # WhatsApp, Instagram, Email, …), the user often phrases requests
+        # with words like "use my browser" — but that's a description of
+        # the underlying mechanism the MCP already manages internally, not
+        # an instruction to call the generic ``browser`` tool. Without this
+        # hint MiniMax M2.7 reads "use my browser" literally, picks the
+        # generic browser tool from training memory, ignores the MCP, and
+        # falls through to a loop on Cloudflare-blocked pages. Empirically
+        # observed on the 2026-05-04 Upwork apply turn — agent succeeded
+        # on upwork_get_job_details, then immediately switched to browser
+        # and looped 8 times before the loop-guard pulled it out.
+        if _matched_channels and (_channel_tools or _suppressed_tool_names):
+            _ch_label = ", ".join(_matched_channels)
+            _routing_hint = (
+                f"[ROUTING] This conversation is about {_ch_label}. The "
+                f"{_ch_label} MCP tools handle browser automation internally — "
+                "they drive the user's REAL browser with their cookies under "
+                "the hood. So even when the user says 'use my browser', "
+                "'apply via my browser', or similar, you MUST use the MCP "
+                f"tools (mcp_*_{_matched_channels[0]}_*), NOT the generic "
+                "`browser`, `use_host_browser`, or `run_command` tools. "
+                "Those are deliberately excluded from your active tool list "
+                "for this turn. The MCP path is end-to-end automated; the "
+                "browser path is fragile and Cloudflare-blocked."
+            )
+            system_messages.append(LLMMessage(role="system", content=_routing_hint))
         messages: list[LLMMessage] = (
             system_messages
             + chat_history
@@ -2416,6 +2597,7 @@ class Agent:
         _escalated = False  # True after auto-escalation to brain_model
         _escalation_iter = 0  # Iteration when escalation happened
         _tool_call_cache: dict[str, str] = {}  # (name, args_hash) → result
+        _tool_call_hit_count: dict[str, int] = {}  # how many times cache returned the same result this turn
         _denied_approvals: set[str] = set()  # "skill_name:args_hash" — user-denied this turn
         # Graduated escalation level: 0=normal, 1=soft nudge, 2=brain escalation
         # Level 3 (give up) triggers when stuck is detected at level 2.
@@ -2477,6 +2659,21 @@ class Agent:
         _PROMOTE_BG_AT_ITER = 5
         _called_tool_names: set[str] = set()
         _promoted_to_bg = False
+        # Hard-enforce AUTO-PROMOTE: when set, the next iteration's tool list
+        # is narrowed to ONLY ``run_background`` so the brain physically can't
+        # drift back to inline grinding. Soft system messages alone weren't
+        # enough — MiniMax M2.7 ignored them and ran 22+ extra iters with
+        # `browser` / `use_host_browser` calls (see 2026-05-04 Upwork debug).
+        _force_dispatch_only = False
+        _promote_iter: int | None = None
+        # 3-strikes failure tracking — when the same MCP tool returns an
+        # error 3 times this turn, break the loop with a deterministic user-
+        # facing handoff (e.g. "log in at upwork.com/nx/find-work, reply
+        # 'continue'") instead of grinding the safety cap or fabricating a
+        # fake CLI command. Keyed by canonical tool name (mcp_<uuid>_ prefix
+        # stripped) so the counter survives the per-call UUID volatility.
+        _tool_failure_count: dict[str, int] = {}
+        _three_strikes_break: tuple[str, str] | None = None  # (tool_name, last_error_tail)
 
         response = None
         iteration = 0
@@ -2663,6 +2860,33 @@ class Agent:
                             "TAOR Plan phase injected (effort=%s, retry=%s)",
                             _effort, _taor_retry_context is not None,
                         )
+
+                # Hard-enforce AUTO-PROMOTE: previous iter set the flag, so
+                # this iter's tool list is restricted to ONLY run_background.
+                # Anything else the brain calls is dropped by the existing
+                # _suppressed_tool_names path. The system message stays as
+                # the "why" for the model; the tool list is the "how".
+                if _force_dispatch_only and tools:
+                    _bg_only = [
+                        t for t in tools
+                        if t.get("function", {}).get("name") == "run_background"
+                    ]
+                    if _bg_only:
+                        if len(_bg_only) != len(tools):
+                            logger.info(
+                                "AUTO-PROMOTE enforced: tools narrowed %d → 1 (run_background only)",
+                                len(tools),
+                            )
+                            # Suppress every other tool name so the late-inject
+                            # path can't resurrect them from history memory.
+                            _other_names = {
+                                t.get("function", {}).get("name")
+                                for t in tools
+                                if t.get("function", {}).get("name") != "run_background"
+                            }
+                            _other_names.discard(None)
+                            _suppressed_tool_names |= _other_names  # type: ignore[arg-type]
+                        tools = _bg_only
 
                 kwargs: dict = {}
                 if tools:
@@ -3018,10 +3242,20 @@ class Agent:
                     _valid_names = {
                         t.get("function", {}).get("name") for t in tools
                     }
-                    # Before dropping, try to inject missing tools from registry
+                    # Before dropping, try to inject missing tools from registry.
+                    # BUT — never re-inject a tool we DELIBERATELY suppressed for
+                    # this turn (e.g. ``browser`` when Upwork/WhatsApp/etc. MCP
+                    # routing took over). Without this check the LLM's history-
+                    # memory of ``browser`` would silently undo the channel
+                    # routing decision and the agent would loop on browser
+                    # actions instead of using the proper MCP tool.
                     _injected_count = 0
+                    _resurrect_blocked: list[str] = []
                     for tc in response.tool_calls:
                         if tc.name not in _valid_names and self.registry:
+                            if tc.name in _suppressed_tool_names:
+                                _resurrect_blocked.append(tc.name)
+                                continue
                             _schema = self.registry.get_tool_schema(tc.name)
                             if _schema is not None:
                                 tools.append(_schema)
@@ -3031,6 +3265,11 @@ class Agent:
                         logger.info(
                             "Late-injected %d tools from registry (LLM remembered from history)",
                             _injected_count,
+                        )
+                    if _resurrect_blocked:
+                        logger.info(
+                            "Refused to resurrect channel-suppressed tools from history: %s",
+                            _resurrect_blocked,
                         )
 
                     _valid_calls = [
@@ -3522,8 +3761,33 @@ class Agent:
                     # Duplicate call cache — skip re-executing identical tool calls
                     _cache_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
                     if _cache_key in _tool_call_cache:
-                        result = _tool_call_cache[_cache_key]
-                        logger.info("Tool %s cache hit (skipped re-execution)", tc.name)
+                        _tool_call_hit_count[_cache_key] = _tool_call_hit_count.get(_cache_key, 0) + 1
+                        _hits = _tool_call_hit_count[_cache_key]
+                        if _hits >= 2:
+                            # Repeated cache hits = brain is looping. Don't return
+                            # the silent cached result that masks the loop — return
+                            # a steering message that tells the brain it's repeating
+                            # itself with the same args, and to pick a different
+                            # action or finalize. The "Just a moment" hallucination
+                            # bug came from this exact pattern: 7 cache hits in a
+                            # row, brain interpreted "verifier failure" as "page is
+                            # blocked" and fabricated a CAPTCHA story.
+                            result = (
+                                f"[loop guard] You called `{tc.name}` with these "
+                                f"exact args {_hits + 1} times this turn — the "
+                                "result hasn't changed. Stop replaying the same "
+                                "action. Pick a DIFFERENT tool, change the args, "
+                                "or send a final reply describing what you have "
+                                "so far. Re-calling this tool with the same args "
+                                "again will not produce different output."
+                            )
+                            logger.warning(
+                                "Tool %s loop-guard fired (%d cache hits) — steering brain",
+                                tc.name, _hits + 1,
+                            )
+                        else:
+                            result = _tool_call_cache[_cache_key]
+                            logger.info("Tool %s cache hit (skipped re-execution)", tc.name)
                     elif tc.id in _pre_executed:
                         # Already executed in parallel batch above
                         result, _dur_ms = _pre_executed[tc.id]
@@ -3552,6 +3816,32 @@ class Agent:
                                 "Skipping cache for error result on %s (len=%d)",
                                 tc.name, len(result),
                             )
+
+                        # Per-tool consecutive-failure counter — feeds the
+                        # 3-strikes graceful-handoff break further below.
+                        # Strip ``mcp_<uuid>_`` so tool name is stable across
+                        # MCP subprocess restarts (UUID changes per restart).
+                        _short = tc.name
+                        if _short.startswith("mcp_"):
+                            _parts = _short.split("_", 2)
+                            if len(_parts) == 3:
+                                _short = _parts[2]
+                        if _is_err_result:
+                            _tool_failure_count[_short] = (
+                                _tool_failure_count.get(_short, 0) + 1
+                            )
+                            if (
+                                _tool_failure_count[_short] >= 3
+                                and _three_strikes_break is None
+                            ):
+                                _three_strikes_break = (_short, result[-300:])
+                                logger.warning(
+                                    "Three-strikes break: %s failed 3x — "
+                                    "graceful handoff queued",
+                                    _short,
+                                )
+                        else:
+                            _tool_failure_count.pop(_short, None)
 
                     await recorder.record_tool_result(tc.name, result if isinstance(result, str) else str(result))
 
@@ -3907,6 +4197,102 @@ class Agent:
                             ),
                         ))
 
+                # ── 3-strikes graceful handoff ──
+                # Same MCP tool returned an error 3 times in a row this turn.
+                # Don't keep grinding and don't let the brain fabricate a fake
+                # CLI command (e.g. the Upwork "Run uvx upwork-mcp --login" lie
+                # we hit in 2026-05-04 debug). Emit a deterministic, actionable
+                # handoff message and exit the loop. Pick a re-auth URL based
+                # on the failed tool's domain when we can guess one.
+                if _three_strikes_break is not None:
+                    _failed_tool, _last_err = _three_strikes_break
+                    _reauth_url = ""
+                    _service_label = "the relevant service"
+                    _tool_lower = _failed_tool.lower()
+                    if "upwork" in _tool_lower:
+                        _reauth_url = "https://www.upwork.com/nx/find-work"
+                        _service_label = "Upwork"
+                    elif "instagram" in _tool_lower:
+                        _reauth_url = "https://www.instagram.com/"
+                        _service_label = "Instagram"
+                    elif (
+                        "whatsapp" in _tool_lower
+                        or "wa_" in _tool_lower
+                    ):
+                        _reauth_url = "https://web.whatsapp.com/"
+                        _service_label = "WhatsApp Web"
+                    elif "gmail" in _tool_lower or "google" in _tool_lower:
+                        _reauth_url = "https://mail.google.com/"
+                        _service_label = "Gmail / Google"
+
+                    # Best-effort: navigate the (host-bridge) Brave to the
+                    # re-auth URL so the user lands on the right page with
+                    # one click. The host bridge is the user's REAL Brave
+                    # with their cookies — one navigation is enough.
+                    if _reauth_url and self.registry:
+                        try:
+                            _br = self.registry.get_skill("browser")
+                            if _br is not None:
+                                async def _open_for_reauth(skill, url, uid):
+                                    try:
+                                        await skill.execute(
+                                            uid,
+                                            {"action": "open", "target": url},
+                                        )
+                                    except Exception:
+                                        logger.debug(
+                                            "Re-auth browser open failed (non-fatal)",
+                                            exc_info=True,
+                                        )
+                                asyncio.create_task(
+                                    _open_for_reauth(_br, _reauth_url, user_id),
+                                )
+                        except Exception:
+                            logger.debug(
+                                "Re-auth browser dispatch failed (non-fatal)",
+                                exc_info=True,
+                            )
+
+                    _err_tail = (_last_err or "").strip()
+                    if len(_err_tail) > 200:
+                        _err_tail = _err_tail[-200:]
+
+                    if _reauth_url:
+                        _handoff = (
+                            f"I tried `{_failed_tool}` 3 times — each one failed:\n\n"
+                            f"```\n{_err_tail}\n```\n\n"
+                            f"This usually means the {_service_label} session needs a "
+                            f"refresh or there's a 'Verify you are human' check.\n\n"
+                            f"Please:\n"
+                            f"1. Open Brave at {_reauth_url} (I'll try to open it for you)\n"
+                            f"2. Sign in / solve the challenge if needed\n"
+                            f"3. Reply `continue` and I'll retry the request."
+                        )
+                    else:
+                        _handoff = (
+                            f"I tried `{_failed_tool}` 3 times — each one failed:\n\n"
+                            f"```\n{_err_tail}\n```\n\n"
+                            f"This usually means the underlying service needs auth or "
+                            f"is rate-limiting. Please verify your login on the host "
+                            f"browser, then reply `continue` and I'll retry."
+                        )
+
+                    if _delegate_registered and self.registry:
+                        try:
+                            self.registry.unregister("delegate")
+                        except Exception:
+                            pass
+                    await cb.on_event(AgentEvent(
+                        "done",
+                        f"Three-strikes break on {_failed_tool}",
+                        {"failed_tool": _failed_tool, "reauth_url": _reauth_url},
+                    ))
+                    logger.info(
+                        "Three-strikes graceful handoff returned to user (tool=%s, reauth=%s)",
+                        _failed_tool, _reauth_url or "(none)",
+                    )
+                    return _handoff
+
                 # ── Auto-promote-to-background nudge ──
                 # Foreground turns that hit _PROMOTE_BG_AT_ITER without
                 # having dispatched run_background should be moved off the
@@ -3927,6 +4313,8 @@ class Agent:
                     and iteration >= _PROMOTE_BG_AT_ITER
                 ):
                     _promoted_to_bg = True
+                    _force_dispatch_only = True
+                    _promote_iter = iteration
                     _promote_msg = LLMMessage(
                         role="system",
                         content=(
@@ -3941,8 +4329,10 @@ class Agent:
                             "success criteria), then (2) write a short reply to "
                             "the user like 'Continuing in background, will "
                             "report back when done.' DO NOT call any other tool "
-                            "this turn. Background tasks have full tool access "
-                            "and will surface results back to chat when complete."
+                            "this turn — the runtime has restricted your tool "
+                            "list to ONLY `run_background` for this iteration. "
+                            "Background tasks have full tool access and will "
+                            "surface results back to chat when complete."
                         ),
                     )
                     messages.append(_promote_msg)
@@ -3951,6 +4341,53 @@ class Agent:
                         "to dispatch run_background and exit foreground turn",
                         iteration + 1,
                     )
+
+                # Failsafe: if AUTO-PROMOTE fired AND brain went one more
+                # iteration without calling run_background (despite the
+                # tool list being narrowed to that single tool), the
+                # runtime auto-submits the original user message via
+                # task_runner. Guarantees a chat-responsive turn within 1
+                # extra iter regardless of brain compliance.
+                if (
+                    _force_dispatch_only
+                    and _promote_iter is not None
+                    and iteration > _promote_iter
+                    and "run_background" not in _called_tool_names
+                    and self._task_runner is not None
+                    and user_id is not None
+                ):
+                    logger.warning(
+                        "AUTO-PROMOTE failsafe: brain refused run_background "
+                        "even with narrowed tool list at iter=%d (promote_iter=%d) — "
+                        "runtime auto-submitting original message to task_runner",
+                        iteration, _promote_iter,
+                    )
+                    try:
+                        from lazyclaw.runtime.agent_settings import get_agent_settings
+                        _agent_settings = await get_agent_settings(self.config, user_id)
+                        _bg_task_id = await self._task_runner.submit(
+                            user_id=user_id,
+                            instruction=message,
+                            name=None,
+                            timeout=_agent_settings.get("specialist_timeout_s", 600),
+                            callback=callback,
+                        )
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.cancel(_fg_task_id)
+                            _fg_task_id = None
+                        await cb.on_event(AgentEvent(
+                            FAST_DISPATCH,
+                            "Auto-promoted to background after AUTO-PROMOTE refusal",
+                            {"task_id": _bg_task_id},
+                        ))
+                        await cb.on_event(AgentEvent("done", "Dispatched", {}))
+                        if _delegate_registered and self.registry:
+                            self.registry.unregister("delegate")
+                        return "Continuing in background — will report back when done."
+                    except Exception:
+                        logger.exception(
+                            "AUTO-PROMOTE failsafe failed; continuing inline",
+                        )
 
                 # ── Running-long nudge ──
                 # At 80% of safety cap, tell the LLM to wrap up or ask user

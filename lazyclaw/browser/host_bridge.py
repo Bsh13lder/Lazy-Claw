@@ -90,17 +90,36 @@ async def probe_host_cdp(port: int = DEFAULT_CDP_PORT, timeout_s: float = 2.0) -
     We only probe the unauthenticated HTTP ``/json/version`` endpoint here —
     the Origin-token handshake happens later when ``CDPConnection.connect``
     opens the WebSocket.
+
+    KEY DETAIL: Chromium's CDP HTTP server validates the ``Host:`` header
+    and only accepts an IP address or literal ``localhost`` — it rejects
+    ``Host: host.docker.internal:9222`` with a 500 ("Host header is
+    specified and is not an IP address or localhost"). So we DNS-resolve
+    the hostname first and connect to the IP. mcp-upwork's browser/client
+    does the same trick — duplicated here intentionally because this probe
+    runs from inside the lazyclaw daemon, not the MCP subprocess.
     """
-    url = f"http://{HOST_GATEWAY_HOSTNAME}:{port}/json/version"
+    import socket
+
+    try:
+        host_ip = socket.gethostbyname(HOST_GATEWAY_HOSTNAME)
+    except OSError as exc:
+        logger.debug("Host CDP DNS-resolve failed (%s): %s",
+                     HOST_GATEWAY_HOSTNAME, exc)
+        return None
+
+    url = f"http://{host_ip}:{port}/json/version"
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
+                logger.debug("Host CDP non-200 (%s): %d", url, resp.status_code)
                 return None
             data = resp.json()
             ws_url = data.get("webSocketDebuggerUrl")
             if ws_url:
-                logger.info("Host Brave reachable via %s", HOST_GATEWAY_HOSTNAME)
+                logger.info("Host Brave reachable via %s (resolved to %s)",
+                            HOST_GATEWAY_HOSTNAME, host_ip)
                 return ws_url
     except (httpx.ConnectError, httpx.TimeoutException, Exception) as exc:
         logger.debug("Host CDP probe failed (%s): %s", url, exc)

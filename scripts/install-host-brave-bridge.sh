@@ -49,6 +49,9 @@ MARKER_FILE="$DATA_DIR/.host_bridge_installed"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_LABEL="sh.lazyclaw.brave-bridge"
 PLIST_PATH="$PLIST_DIR/$PLIST_LABEL.plist"
+WATCHER_LABEL="sh.lazyclaw.brave-bridge-watcher"
+WATCHER_PLIST_PATH="$PLIST_DIR/$WATCHER_LABEL.plist"
+WATCHER_SCRIPT="$REPO_ROOT/scripts/host-bridge-watcher.sh"
 LOG_DIR="$HOME/Library/Logs/LazyClaw"
 
 # ── Sanity ──────────────────────────────────────────────────────────────
@@ -121,13 +124,23 @@ cat > "$PLIST_PATH" <<EOF
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Restart on CRASH only. SuccessfulExit=false means: if Brave exits cleanly
-         (you Cmd+Q'd it), don't relaunch. Crash → relaunch. -->
+    <!-- Restart on CRASH only. SuccessfulExit=false means: if Brave exits
+         cleanly (you Cmd+Q'd it OR you opened a second Brave manually and
+         this one died on SingletonLock), launchd does NOT respawn. The
+         sibling watcher (sh.lazyclaw.brave-bridge-watcher) is the one that
+         decides when to kickstart this plist — and it explicitly stands down
+         when it sees a user-opened Brave, so we never fight you for the
+         profile lock. -->
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+
+    <!-- Throttle relaunch attempts to ~10s so a hard-failing Brave doesn't
+         spin launchd at 100% CPU. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 
     <key>ProgramArguments</key>
     <array>
@@ -193,6 +206,52 @@ fi
 
 # Kickstart so Brave starts immediately even if it was already loaded.
 launchctl kickstart -k "${DOMAIN}/${PLIST_LABEL}" >/dev/null 2>&1 || true
+
+# ── Watcher plist: self-heals when Brave dies or container raises a flag ─
+
+if [[ -x "$WATCHER_SCRIPT" ]]; then
+    cat > "$WATCHER_PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${WATCHER_LABEL}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Always-on watcher. If it crashes, launchd restarts it within 30s. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${WATCHER_SCRIPT}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${REPO_ROOT}</string>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/brave-bridge-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/brave-bridge-watcher.err</string>
+</dict>
+</plist>
+EOF
+    echo "→ Wrote $WATCHER_PLIST_PATH"
+
+    launchctl bootout "$DOMAIN" "$WATCHER_PLIST_PATH" >/dev/null 2>&1 || true
+    if launchctl bootstrap "$DOMAIN" "$WATCHER_PLIST_PATH" 2>/dev/null; then
+        echo "→ Watcher bootstrapped — auto-heals if Brave dies or container raises a flag"
+    else
+        launchctl load "$WATCHER_PLIST_PATH" 2>/dev/null || true
+    fi
+fi
 
 echo ""
 echo "✓ Host Brave bridge installed."

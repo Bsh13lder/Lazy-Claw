@@ -1,12 +1,11 @@
-"""Browser `ocr` action — local Tesseract text extraction.
+"""Browser `ocr` action — local text extraction.
+
+On macOS, prefers Apple Vision (`ocrmac`) — ~200ms, native, no install of
+weights, multilingual. Falls through to Tesseract on Linux/Windows or
+when Apple Vision isn't available.
 
 Use when the accessibility tree / DOM is weak (canvas-heavy pages, PDFs
-rendered in-browser, banking or gov portals that use bitmap text). This
-is much cheaper than the `ask_vision` escalation — Tesseract is local and
-free, ~200ms on a viewport-sized region.
-
-Falls back to a structured DEPENDENCY_MISSING error that directs the agent
-to ``ask_vision`` when the binary isn't installed.
+rendered in-browser, banking or gov portals that use bitmap text).
 """
 
 from __future__ import annotations
@@ -49,8 +48,25 @@ async def action_ocr(
             retry_strategy="wait",
         ))
 
-    # 2. Lazy import Pillow. We know it's installed (required elsewhere) but
-    #    catch the import error anyway so OCR degrades instead of crashing.
+    # 2. Apple Vision fast path — when no region crop is requested, the
+    #    native engine reads the whole viewport in ~200ms with multi-language
+    #    support and no install of Tesseract.
+    if not _has_region(params):
+        try:
+            from lazyclaw.browser import apple_vision
+
+            if apple_vision.is_available():
+                text = apple_vision.read_plaintext(png_bytes)
+                return text or (
+                    "(Apple Vision OCR returned no text — viewport may be "
+                    "image-free. Consider action=ask_vision.)"
+                )
+        except Exception as exc:
+            logger.debug("Apple Vision OCR failed, falling back: %s", exc)
+
+    # 3. Lazy import Pillow for the Tesseract path. We know it's installed
+    #    (required elsewhere) but catch the import error anyway so OCR
+    #    degrades instead of crashing.
     try:
         from PIL import Image
     except ImportError:
@@ -135,6 +151,13 @@ async def action_ocr(
     return cleaned
 
 
+def _has_region(params: dict) -> bool:
+    """Whether the caller asked for a cropped OCR region."""
+    if params.get("region"):
+        return True
+    return any(k in params for k in ("x", "y", "width", "height"))
+
+
 def _extract_region(params: dict, max_w: int, max_h: int) -> dict | None:
     """Normalise region params and clamp to the viewport."""
     raw = params.get("region")
@@ -165,7 +188,19 @@ def _extract_region(params: dict, max_w: int, max_h: int) -> dict | None:
 
 # Helper retained for tests / future callers that want to pass in raw PNG bytes.
 def ocr_png_bytes(png_bytes: bytes, region: dict | None = None) -> str:
-    """Run Tesseract on raw PNG bytes. Raises on missing deps."""
+    """Run OCR on raw PNG bytes. Apple Vision on macOS, Tesseract elsewhere.
+
+    Raises on missing deps when no engine is available.
+    """
+    if region is None:
+        try:
+            from lazyclaw.browser import apple_vision
+
+            if apple_vision.is_available():
+                return apple_vision.read_plaintext(png_bytes)
+        except Exception:
+            pass
+
     from PIL import Image
     import pytesseract
 

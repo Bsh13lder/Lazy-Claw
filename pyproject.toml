@@ -48,8 +48,13 @@ discord = ["discord.py>=2.3.0"]
 eco = []
 voice = ["openai-whisper>=20231117"]
 local = ["llama-cpp-python>=0.2.0"]
+# Apple Vision OCR for browser screenshots — macOS-only. Pulls in the
+# pyobjc Vision framework binding. `browser(action="ask_vision")` and
+# `browser(action="ocr")` use this when available; both fall back to
+# Tesseract on Linux/Windows so this remains optional.
+mac = ["ocrmac>=1.0.1; sys_platform == 'darwin'"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
-all = ["lazyclaw[telegram,discord,voice,eco,dev]"]
+all = ["lazyclaw[telegram,discord,voice,eco,mac,dev]"]
 
 [project.scripts]
 lazyclaw = "lazyclaw.cli:main"

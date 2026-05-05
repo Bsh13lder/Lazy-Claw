@@ -20,6 +20,15 @@ class SubmitProposalParams(BaseModel):
     rate: float | None = Field(default=None, description="Proposed hourly rate (for hourly jobs)")
     bid: float | None = Field(default=None, description="Bid amount (for fixed-price jobs)")
     answers: list[str] | None = Field(default=None, description="Answers to screening questions")
+    connects_to_send: int | None = Field(
+        default=None,
+        description=(
+            "Total Connects to spend on this proposal (mandatory + boost). "
+            "Upwork defaults vary by job (often 6); pass a lower number to "
+            "spend fewer Connects. Set to your remaining balance to avoid "
+            "overspend. ``None`` keeps Upwork's auto-suggested default."
+        ),
+    )
 
 
 async def get_proposals(params: ProposalsParams) -> list[dict]:
@@ -185,6 +194,12 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     # poll. Cleared either by automatic JS validation (~5s on most home
     # networks) or stays blocked if the IP/UA looks suspicious.
     cf_cleared = await _wait_for_cloudflare_clear(page, max_wait_s=20.0)
+    # Even after Cloudflare clears, Upwork's Vue app finishes hydrating
+    # for ~1-2s. Without this wait the Apply button isn't yet in the
+    # DOM and submit_proposal returns "Apply button not found" on
+    # what's actually a healthy page. Verified 2026-05-05.
+    import asyncio as _aio
+    await _aio.sleep(2.0)
     if not cf_cleared:
         try:
             cur_title = await page.title()
@@ -258,17 +273,25 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             except Exception:
                 pass
 
+            if already_applied:
+                return {
+                    "status": "error",
+                    "message": "Already applied — found 'View Proposal' / 'Withdraw' button",
+                    "page_url": page.url,
+                    "already_applied": True,
+                }
             return {
-                "status": "error",
-                "message": (
-                    "Already applied — found 'View Proposal' / 'Withdraw' button"
-                    if already_applied
-                    else f"Apply button not found at {page.url} (title: {page_title!r}). "
-                         "Job may be closed, the URL may be a proposal-edit URL, or "
-                         "Upwork's selectors changed."
+                "status": "needs_user",
+                "question": (
+                    f"I'm on the job page ({page.url}, title: {page_title!r}) "
+                    f"but can't find an Apply button with any of the known "
+                    f"selectors. The job may be closed, the URL may already "
+                    f"be a proposal-edit URL, or Upwork redesigned the page. "
+                    f"Want me to open Brave so you can verify, give me a "
+                    f"different URL, or skip this job?"
                 ),
                 "page_url": page.url,
-                "already_applied": already_applied,
+                "already_applied": False,
             }
 
         await apply_btn.click()
@@ -302,15 +325,97 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     # Fill rate / bid AFTER rate-increase + cover letter so any
     # form re-validation triggered by these inputs sees the rate-
     # increase already committed.
-    if params.rate:
-        rate_input = await page.query_selector('[data-test="hourly-rate-input"], input[name*="rate"]')
+    #
+    # Selector discovery is DYNAMIC — Upwork rotates data-test attrs
+    # (we've seen ``hourly-rate-input``, ``currency-input``, plain
+    # ``id="step-rate"``). Try the most-specific patterns first and
+    # fall back to anything that visually identifies as a currency
+    # input. The caller controls the VALUE; we control the discovery.
+    if params.rate is not None:
+        rate_input = None
+        for sel in (
+            '[data-test="hourly-rate-input"]',
+            '#step-rate',
+            'input#step-rate',
+            'input[id*="step-rate"]',
+            '[data-test="currency-input"]:not([id*="fee"]):not([id*="receive"])',
+            'input[name*="hourlyRate"]',
+            'input[name*="rate"]:not([id*="fee"]):not([id*="receive"])',
+            'input[aria-label*="rate" i]',
+        ):
+            try:
+                cand = await page.query_selector(sel)
+                if cand:
+                    rate_input = cand
+                    break
+            except Exception:
+                continue
         if rate_input:
-            await rate_input.fill(str(params.rate))
+            try:
+                # Triple-click + type clears prior content + fires focus
+                await rate_input.click(click_count=3)
+                await rate_input.fill(str(params.rate))
+                # Blur to commit (currency inputs often format on blur)
+                await page.keyboard.press("Tab")
+            except Exception:
+                # Last-ditch: at least try plain fill
+                try:
+                    await rate_input.fill(str(params.rate))
+                except Exception:
+                    pass
 
-    if params.bid:
-        bid_input = await page.query_selector('[data-test="bid-input"], input[name*="bid"], input[name*="amount"]')
+    if params.bid is not None:
+        bid_input = None
+        for sel in (
+            '[data-test="bid-input"]',
+            'input[name*="bid"]',
+            'input[name*="amount"]',
+            'input[aria-label*="bid" i]',
+        ):
+            try:
+                cand = await page.query_selector(sel)
+                if cand:
+                    bid_input = cand
+                    break
+            except Exception:
+                continue
         if bid_input:
-            await bid_input.fill(str(params.bid))
+            try:
+                await bid_input.click(click_count=3)
+                await bid_input.fill(str(params.bid))
+                await page.keyboard.press("Tab")
+            except Exception:
+                pass
+
+    # Optional: lower the boost-connects total before submit. Upwork
+    # auto-suggests a connect-spend total (mandatory + boost) on every
+    # proposal — useful for ranking but expensive when you're tight on
+    # connects. ``connects_to_send`` lets the caller cap the total to
+    # whatever balance allows, dynamically: pass the user's remaining
+    # balance and we lower the input to match.
+    if params.connects_to_send is not None and params.connects_to_send > 0:
+        connects_input = None
+        for sel in (
+            'input[type="number"][placeholder*="Connects" i]',
+            'input[type="number"][aria-label*="connects" i]',
+            'input[type="number"][name*="connect" i]',
+            '[data-test*="connects-input"] input',
+            '[data-test*="bid-connects"] input',
+        ):
+            try:
+                cand = await page.query_selector(sel)
+                if cand:
+                    connects_input = cand
+                    break
+            except Exception:
+                continue
+        if connects_input:
+            try:
+                await connects_input.click(click_count=3)
+                await connects_input.fill(str(int(params.connects_to_send)))
+                await page.keyboard.press("Tab")
+            except Exception:
+                pass
 
     # Answer screening questions if provided
     if params.answers:
@@ -392,11 +497,13 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             await modal_submit.click()
         except Exception:
             return {
-                "status": "error",
-                "message": (
-                    "Policy modal opened but its Submit button never enabled — "
-                    "the policy checkbox click didn't register. Form may have "
-                    "redesigned the modal."
+                "status": "needs_user",
+                "question": (
+                    "Policy modal opened (Stay safe & build your reputation) "
+                    "but its Submit button never enabled — the agreement "
+                    "checkbox click didn't register. Upwork may have redesigned "
+                    "the modal. Want me to open Brave so you can tick the "
+                    "checkbox manually, or skip this submit?"
                 ),
                 "page_url": page.url,
             }
@@ -482,19 +589,30 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
 
         # If after visibility-filtering we have NO errors AND URL is
         # still /apply/, the submit click was either silently rejected
-        # by server-side validation OR is still in flight. Don't lie
-        # — return ``unknown`` so the brain treats this as "needs
-        # verification" instead of celebrating.
+        # by server-side validation OR is still in flight. Return
+        # ``needs_user`` so the brain pauses and asks the user to verify
+        # / decide instead of guessing or pretending success.
         if not validation_errors:
+            try:
+                cur_balance = await page.evaluate(
+                    "() => { const m = document.body.textContent.match(/Remaining balance:\\s*(\\d+)/i); return m ? parseInt(m[1]) : null; }"
+                )
+            except Exception:
+                cur_balance = None
             return {
-                "status": "unknown",
-                "message": (
-                    f"Submit clicked, no visible client-side errors, but "
-                    f"page is still at {page.url} (no redirect, no success "
-                    f"element). Server may have rejected silently — verify "
-                    f"by visiting your Upwork proposals list."
+                "status": "needs_user",
+                "question": (
+                    f"Submit clicked but the page didn't navigate. The form "
+                    f"shows no visible validation errors, so Upwork likely "
+                    f"rejected silently — common causes: insufficient "
+                    f"Connects (your remaining balance: {cur_balance}), "
+                    f"a server-side rule, or a duplicate-submit guard. "
+                    f"Verify by checking your Upwork proposals list. Want "
+                    f"me to lower ``connects_to_send`` and retry, or open "
+                    f"Brave so you can see the form yourself?"
                 ),
                 "page_url": page.url,
+                "remaining_connects": cur_balance,
             }
 
         return {

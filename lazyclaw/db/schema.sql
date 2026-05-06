@@ -588,3 +588,64 @@ CREATE TABLE IF NOT EXISTS note_layout_positions (
 );
 CREATE INDEX IF NOT EXISTS idx_note_layout_positions_user_mode
 ON note_layout_positions(user_id, mode);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Bounty hunter (claude-bug-bounty fork integration)
+--
+-- Tracks user-registered bug-bounty programs, the findings the agent
+-- prepares for them, and a per-request audit trail. Sensitive fields
+-- (scope_assets, finding bodies, target URLs) are encrypted via the
+-- existing DEK pattern (`enc:v1:<nonce>:<ct>`). Status / severity /
+-- platform stay plaintext because they're queried.
+CREATE TABLE IF NOT EXISTS bounty_programs (
+    id               TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    platform         TEXT NOT NULL,        -- intigriti | yeswehack | hackerone | bugcrowd
+    scope_assets     TEXT NOT NULL,        -- encrypted JSON: ["*.x.com","api.x.com"]
+    excluded_assets  TEXT,                 -- encrypted JSON
+    excluded_classes TEXT,                 -- encrypted JSON: ["dos","social_engineering"]
+    rate_limit_rps   INTEGER DEFAULT 5,
+    enabled          INTEGER DEFAULT 1,
+    created_at       TEXT DEFAULT (datetime('now')),
+    updated_at       TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_bounty_programs_user
+ON bounty_programs(user_id, enabled);
+
+CREATE TABLE IF NOT EXISTS bounty_findings (
+    id            TEXT PRIMARY KEY,
+    program_id    TEXT NOT NULL REFERENCES bounty_programs(id) ON DELETE CASCADE,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL,           -- encrypted
+    vuln_class    TEXT,                    -- subdomain_takeover | idor | xss | ...
+    severity      TEXT,                    -- info | low | medium | high | critical
+    cvss_vector   TEXT,
+    cvss_score    REAL,
+    poc           TEXT,                    -- encrypted (full reproduction steps)
+    target_url    TEXT,                    -- encrypted
+    status        TEXT NOT NULL DEFAULT 'proposed',
+                  -- proposed | validated | rejected | submitted | paid
+    payout_amount REAL,
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bounty_findings_program_status
+ON bounty_findings(program_id, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS bounty_audit (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    program_id     TEXT NOT NULL REFERENCES bounty_programs(id) ON DELETE CASCADE,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target         TEXT NOT NULL,          -- encrypted
+    tool           TEXT NOT NULL,          -- subfinder | httpx | nuclei | brain | ...
+    method         TEXT,                   -- GET | HEAD | OPTIONS | POST | scope_check
+    decision       TEXT,                   -- allow | refuse | require_approval
+    response_code  INTEGER,
+    ts             TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bounty_audit_program_ts
+ON bounty_audit(program_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_bounty_audit_user_ts
+ON bounty_audit(user_id, ts DESC);

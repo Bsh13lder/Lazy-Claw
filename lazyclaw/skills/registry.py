@@ -177,7 +177,8 @@ class SkillRegistry:
 
         # LazyBrain skills — Python-native Logseq-style PKM shared with the agent
         from lazyclaw.skills.builtin.lazybrain import (
-            AskNotesSkill, MorningBriefingSkill, ReindexEmbeddingsSkill,
+            AskNotesSkill, EmbeddingStatusSkill, MorningBriefingSkill,
+            RebuildFtsSkill, ReindexEmbeddingsSkill,
             SemanticSearchSkill, SuggestLinksSkill, SuggestMetadataSkill,
             TopicRollupSkill,
             SaveNoteSkill, UpdateNoteSkill, DeleteNoteSkill,
@@ -226,7 +227,27 @@ class SkillRegistry:
         self.register(TopicRollupSkill(config=config))
         self.register(MorningBriefingSkill(config=config))
         self.register(ReindexEmbeddingsSkill(config=config))
+        self.register(EmbeddingStatusSkill(config=config))
+        self.register(RebuildFtsSkill(config=config))
         self.register(MorningReviewSkill(config=config))
+
+        # Bounty hunter skills — wraps the vendored claude-bug-bounty fork.
+        # Always registered; the recon skill itself reports a clear error
+        # if `pip install -e claude-bug-bounty/` hasn't been run yet.
+        from lazyclaw.skills.builtin.bounty import (
+            BountyDisableProgramSkill,
+            BountyListFindingsSkill,
+            BountyListProgramsSkill,
+            BountyReconSkill,
+            BountyRegisterProgramSkill,
+            BountyValidateFindingSkill,
+        )
+        self.register(BountyRegisterProgramSkill(config=config))
+        self.register(BountyDisableProgramSkill(config=config))
+        self.register(BountyListProgramsSkill(config=config))
+        self.register(BountyListFindingsSkill(config=config))
+        self.register(BountyReconSkill(config=config))
+        self.register(BountyValidateFindingSkill(config=config))
 
         # Note: real_browser.py skills removed — merged into BrowserSkill above
 
@@ -463,12 +484,13 @@ class SkillRegistry:
         # Team management skills
         from lazyclaw.skills.builtin.team_management import (
             ShowTeamSettingsSkill, SetTeamModeSkill, SetCriticModeSkill,
-            ListSpecialistsSkill, ManageSpecialistSkill,
+            SetCriticModelSkill, ListSpecialistsSkill, ManageSpecialistSkill,
         )
 
         self.register(ShowTeamSettingsSkill(config=config))
         self.register(SetTeamModeSkill(config=config))
         self.register(SetCriticModeSkill(config=config))
+        self.register(SetCriticModelSkill(config=config))
         self.register(ListSpecialistsSkill(config=config))
         self.register(ManageSpecialistSkill(config=config))
 

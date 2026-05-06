@@ -37,7 +37,14 @@ from .browser_actions.ask_vision import action_ask_vision
 from .browser_actions.backends import get_cdp_backend, reset_backend
 from .browser_actions.capture import action_console_logs, action_screenshot, action_snapshot
 from .browser_actions.interact import action_click, action_drag, action_hover, action_press_key, action_type
-from .browser_actions.navigation import action_chain, action_close, action_scroll, action_show, action_tabs
+from .browser_actions.navigation import (
+    action_chain,
+    action_close,
+    action_close_tab,
+    action_scroll,
+    action_show,
+    action_tabs,
+)
 from .browser_actions.network import action_network
 from .browser_actions.ocr import action_ocr
 from .browser_actions.read_open import action_open, action_read
@@ -145,9 +152,9 @@ class BrowserSkill(BaseSkill):
                     "type": "string",
                     "enum": [
                         "read", "open", "click", "type", "press_key",
-                        "screenshot", "tabs", "scroll", "close", "show",
-                        "snapshot", "hover", "drag", "console_logs", "chain",
-                        "network", "ocr", "ask_vision",
+                        "screenshot", "tabs", "scroll", "close", "close_tab",
+                        "show", "snapshot", "hover", "drag", "console_logs",
+                        "chain", "network", "ocr", "ask_vision",
                     ],
                     "description": (
                         "READ actions — gather information:\n"
@@ -170,8 +177,11 @@ class BrowserSkill(BaseSkill):
                         "  hover: hover over element.\n"
                         "  drag: drag element from source to target.\n"
                         "NAVIGATE actions — move between pages/tabs:\n"
-                        "  open: navigate + get content summary AND interactive refs [e1],[e2].\n"
-                        "  close: close/hide the browser.\n"
+                        "  open: navigate + get content summary AND interactive refs [e1],[e2]. "
+                        "Auto-sweeps idle tabs once the count exceeds the configured cap (default 8).\n"
+                        "  close: close/hide the WHOLE browser.\n"
+                        "  close_tab: close ONE tab. target = index from `tabs` (e.g. '2'), "
+                        "URL substring, or title substring. Refuses to close the active or last tab.\n"
                         "  show: make the browser window visible on screen.\n"
                         "  tabs: list all open tabs.\n"
                         "  scroll: scroll up or down.\n"
@@ -390,6 +400,8 @@ class BrowserSkill(BaseSkill):
             return await action_scroll(user_id, params, tab_context)
         elif action == "close":
             return await action_close(user_id, params)
+        elif action == "close_tab":
+            return await action_close_tab(user_id, params)
         elif action == "show":
             return await action_show(user_id)
         elif action == "snapshot":

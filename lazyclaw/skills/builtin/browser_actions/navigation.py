@@ -48,6 +48,156 @@ async def action_tabs(user_id: str, params: dict) -> str:
     return "\n".join(lines)
 
 
+# --- Tab housekeeping ----------------------------------------------------
+#
+# Tabs accumulate in the user's real Brave from target="_blank" links,
+# OAuth popups, and bundled MCPs (mcp-upwork) that open their own tabs.
+# The agent has no concept of pruning them. sweep_idle_tabs is called
+# after every successful navigate and trims the oldest non-active tabs
+# back under the user's configured cap. action_close_tab is the explicit
+# per-tab close the LLM can invoke when it wants to drop a specific tab.
+
+DEFAULT_MAX_TABS = 8
+
+_PINNED_URL_PREFIXES = (
+    "chrome://",
+    "chrome-extension://",
+    "brave://",
+    "devtools://",
+    "edge://",
+)
+
+
+def _is_pinned_url(url: str) -> bool:
+    """System / extension tabs that must never be auto-closed."""
+    if not url:
+        return True
+    if url == "about:blank":
+        return True
+    return url.startswith(_PINNED_URL_PREFIXES)
+
+
+async def _resolve_max_tabs(user_id: str) -> int:
+    """Read the user's configured cap, falling back to DEFAULT_MAX_TABS."""
+    try:
+        from lazyclaw.browser.browser_settings import get_browser_settings
+        from lazyclaw.config import load_config
+
+        settings = await get_browser_settings(load_config(), user_id)
+        cap = int(settings.get("max_open_tabs", DEFAULT_MAX_TABS))
+        # Floor at 2 — anything less would force-close the active tab on
+        # the next navigate. Ceiling at 50 to keep the sweep cheap.
+        return max(2, min(cap, 50))
+    except Exception:
+        logger.debug("max_open_tabs lookup failed, using default", exc_info=True)
+        return DEFAULT_MAX_TABS
+
+
+async def sweep_idle_tabs(backend, max_tabs: int) -> int:
+    """Close oldest non-active tabs until total is at or under max_tabs.
+
+    Brave's /json endpoint returns tabs in MRU order — the active tab is
+    first, the least-recently-used is last. We walk from the tail and
+    close until we're back under the cap. Skips: active tab, system
+    tabs (chrome://, devtools://, brave://, edge://), and about:blank.
+
+    Returns the number of tabs actually closed. Best-effort — any single
+    close failure is logged and the sweep continues.
+    """
+    try:
+        tab_list = await backend.tabs()
+    except Exception:
+        logger.debug("sweep_idle_tabs: tabs() failed", exc_info=True)
+        return 0
+
+    overflow = len(tab_list) - max_tabs
+    if overflow <= 0:
+        return 0
+
+    # MRU → reverse so the oldest are first.
+    candidates = [
+        t for t in reversed(tab_list)
+        if not t.active and not _is_pinned_url(t.url)
+    ]
+    to_close = candidates[:overflow]
+
+    closed = 0
+    for tab in to_close:
+        try:
+            await backend.close_tab(tab.id)
+            closed += 1
+        except Exception:
+            logger.debug(
+                "sweep_idle_tabs: failed to close tab %s", tab.id, exc_info=True,
+            )
+
+    if closed:
+        logger.info(
+            "sweep_idle_tabs: closed %d tab(s), cap=%d, was %d",
+            closed, max_tabs, len(tab_list),
+        )
+    return closed
+
+
+async def action_close_tab(user_id: str, params: dict) -> str:
+    """Close one browser tab by index, URL substring, or title substring.
+
+    Resolution order: numeric target ('1', '2', ...) → 1-based index
+    against the action_tabs listing; otherwise case-insensitive
+    substring match against URL first, then title.
+
+    Refuses to close the only remaining tab (would crash CDP) or the
+    currently active tab — the agent must switch away first.
+    """
+    target = (params.get("target") or "").strip()
+    if not target:
+        return str(ActionError(
+            code=ActionErrorCode.POLICY_DENIED,
+            message="close_tab requires a target.",
+            hint="Pass an index (e.g. '2'), URL substring, or title substring.",
+            retry_strategy=RETRY_GIVE_UP,
+        ))
+
+    backend = await get_cdp_backend(user_id)
+    tab_list = await backend.tabs()
+    if not tab_list:
+        return "No tabs to close."
+    if len(tab_list) == 1:
+        return (
+            "Refusing to close the only open tab — use action='close' to "
+            "shut down the browser instead."
+        )
+
+    match = None
+    if target.isdigit():
+        idx = int(target) - 1
+        if 0 <= idx < len(tab_list):
+            match = tab_list[idx]
+
+    if match is None:
+        needle = target.lower()
+        match = next(
+            (t for t in tab_list
+             if needle in (t.url or "").lower()
+             or needle in (t.title or "").lower()),
+            None,
+        )
+
+    if match is None:
+        return (
+            f"No tab matches '{target}'. Use action='tabs' to list open tabs "
+            "and pass an index or substring that appears in the URL or title."
+        )
+    if match.active:
+        return (
+            f"'{match.title or match.url}' is the active tab — switch away "
+            "first (action='read' on a different target), then close it."
+        )
+
+    await backend.close_tab(match.id)
+    return f"Closed tab: {match.title or match.url}"
+
+
 async def action_scroll(user_id: str, params: dict, tab_context) -> str:
     """Scroll the page up or down."""
     direction = params.get("direction", "down")

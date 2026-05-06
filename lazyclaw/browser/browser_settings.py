@@ -36,6 +36,9 @@ DEFAULT_BROWSER = {
     "host_cdp_token": None,          # Origin-handshake token for --remote-allow-origins
     "host_switch_confirmed": 0,      # counter; >=3 silences per-switch confirmations
     "last_host_cdp_source": None,    # "host" | "local" | None — diagnostic only
+    # Auto-close idle tabs once the open-tab count exceeds this cap. Active
+    # tab + system tabs (chrome://, devtools://) are always preserved.
+    "max_open_tabs": 8,
 }
 
 # In-memory activity tracker (no DB overhead)

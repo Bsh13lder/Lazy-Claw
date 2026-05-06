@@ -237,6 +237,22 @@ async def action_open(
         except Exception:
             logger.debug("lazybrain visit mirror failed", exc_info=True)
 
+    # Auto-sweep idle tabs so the user's Brave doesn't accumulate orphans
+    # (target="_blank" links, OAuth popups, mcp-upwork's tabs, etc.).
+    # Active tab + system tabs are always preserved. Best-effort.
+    try:
+        from .navigation import _resolve_max_tabs, sweep_idle_tabs
+
+        cap = await _resolve_max_tabs(user_id)
+        closed = await sweep_idle_tabs(backend, cap)
+        if closed:
+            result += (
+                f"\n\nAuto-closed {closed} idle tab"
+                f"{'s' if closed != 1 else ''} (cap={cap})."
+            )
+    except Exception:
+        logger.debug("auto-sweep idle tabs failed (best-effort)", exc_info=True)
+
     return result
 
 
@@ -398,6 +414,8 @@ async def _record_visit_in_lazybrain(
             updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             continue
+        if updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
         if updated_dt >= cutoff:
             existing = note
             break

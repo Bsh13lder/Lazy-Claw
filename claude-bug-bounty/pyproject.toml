@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-bug-bounty"
+version = "0.4.0+lazyclaw"
+description = "Claude-powered bug bounty hunting (LazyClaw fork of shuvonsec/claude-bug-bounty)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Claude Bug Bounty Hunter Contributors" },
+    { name = "LazyClaw Project (fork modifications)" },
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+# All upstream code uses only the Python stdlib; deps are optional and
+# only needed when invoking specific providers/clients.
+dependencies = []
+
+[project.optional-dependencies]
+api = ["anthropic>=0.34", "openai>=1.40"]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+# brain.py and agent.py live at the repo root. Expose them via the
+# `claude_bug_bounty` shim package so callers can `import claude_bug_bounty`.
+py-modules = ["brain", "agent"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["claude_bug_bounty*", "tools*", "memory*", "agents*", "skills*", "web3*"]
+exclude = ["tests*", "docs*", "scripts*", "wordlists*"]

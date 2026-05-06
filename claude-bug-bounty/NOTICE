@@ -1,0 +1,29 @@
+Claude Bug Bounty (LazyClaw fork)
+==================================
+
+This product includes software originally developed by:
+
+    Claude Bug Bounty Hunter
+    Copyright 2026 Claude Bug Bounty Hunter Contributors
+    https://github.com/shuvonsec/claude-bug-bounty
+
+Licensed under the MIT License. See LICENSE for the full upstream text.
+
+Modifications by the LazyClaw project:
+
+  - brain.py: added `claude_cli` provider that routes through LazyClaw's
+    `lazyclaw.llm.providers.claude_cli_provider.ClaudeCLIProvider` so
+    requests run on the user's Claude Max subscription via the `claude -p`
+    binary (zero per-call API cost) instead of the paid Anthropic API.
+
+  - brain.py: model registry bumped from claude-opus-4-6 to claude-opus-4-7;
+    claude-sonnet-4-6 added to the priority list.
+
+  - pyproject.toml + claude_bug_bounty/__init__.py added so the project is
+    pip-installable as `claude_bug_bounty`. This enables in-process
+    integration from LazyClaw's skill bundle (no subprocess overhead, shared
+    audit log + DB transactions).
+
+All upstream commands, skills, agents, scope_checker, AutopilotGuard,
+validate (7-Question Gate), CVSS 4.0 scoring, and 280 unit tests preserved
+unchanged.

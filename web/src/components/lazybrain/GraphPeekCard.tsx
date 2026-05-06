@@ -4,8 +4,8 @@
 import type { LazyBrainNote } from "../../api";
 import { WikilinkText } from "./WikilinkText";
 import { colorForTags, ownerOf, OWNER_META } from "./noteColors";
-import { CategoryIcon, Star, X, Clock, Pencil } from "./icons";
-import { Maximize2 } from "lucide-react";
+import { CategoryIcon, Star, X, Clock, Pencil, Maximize2 } from "./icons";
+import { parseFrontmatter } from "./frontmatter";
 
 interface Props {
   note: LazyBrainNote;
@@ -113,11 +113,15 @@ export function GraphPeekCard({
           </button>
         </div>
 
-        {/* Body — full markdown */}
+        {/* Body — full markdown. Strip leading YAML frontmatter
+            (`---\nkey: value\n---\n`) so plan-mirror notes don't
+            open with a wall of `kind: plan source: …` metadata.
+            The frontmatter is still parsed by PropertiesPanel for
+            typed editing — we just stop showing it twice. */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
           <article className="prose-lazybrain">
             <WikilinkText
-              content={note.content}
+              content={parseFrontmatter(note.content).body}
               onLinkClick={(name) => {
                 onClose();
                 onLinkClick(name);

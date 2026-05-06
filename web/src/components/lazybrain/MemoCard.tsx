@@ -1,6 +1,8 @@
 import type { LazyBrainNote } from "../../api";
 import { colorForTags } from "./noteColors";
 import { WikilinkText } from "./WikilinkText";
+import { Trash2 } from "./icons";
+import { parseFrontmatter } from "./frontmatter";
 
 interface Props {
   note: LazyBrainNote;
@@ -92,16 +94,17 @@ export function MemoCard({
             className="p-1 rounded hover:bg-bg-hover text-text-muted hover:text-red-500"
             title="Delete"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 6h18" />
-              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-            </svg>
+            <Trash2 size={16} />
           </button>
         </div>
       </div>
+      {/* Strip leading YAML frontmatter (`---\nkey: value\n---\n`) before
+          rendering. Plan-mirror notes (kind/plan, source/claude-plan)
+          carry an ingest metadata block that's meant for
+          PropertiesPanel, not the markdown view — leaving it raw made
+          every plan card open with a wall of `kind: plan source: …`. */}
       <WikilinkText
-        content={note.content}
+        content={parseFrontmatter(note.content).body}
         onLinkClick={onLinkClick}
         onTagClick={onTagClick}
       />

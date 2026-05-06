@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LazyBrainNote } from "../../api";
 import { WikilinkText } from "./WikilinkText";
-import { Star, Pencil, Trash2, X, Save, Film, Clock } from "./icons";
+import { Star, Pencil, Trash2, X, Save, Film, Clock, Plus, ChevronRight } from "./icons";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { NoteContextStrip } from "./NoteContextStrip";
-import { Plus, ChevronRight } from "lucide-react";
 
 interface Props {
   note: LazyBrainNote;

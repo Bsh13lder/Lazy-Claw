@@ -27,7 +27,7 @@ import {
   PinOff,
   Pin,
   Sparkles,
-} from "lucide-react";
+} from "./icons";
 import type { LucideIcon } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 

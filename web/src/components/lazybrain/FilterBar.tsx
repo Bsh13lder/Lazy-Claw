@@ -1,14 +1,15 @@
 import { useState } from "react";
 import type { Owner } from "./noteColors";
 import { FILTER_CATEGORIES, OWNER_META, SKILLS_VAULT_KEYS } from "./noteColors";
-import { CategoryIcon, OWNER_ICONS } from "./icons";
 import {
+  CategoryIcon,
+  OWNER_ICONS,
   Infinity as InfinityIcon,
   Wrench,
   Archive,
   ChevronRight,
   Filter as FilterIcon,
-} from "lucide-react";
+} from "./icons";
 
 interface Props {
   hiddenCategories: Set<string>;

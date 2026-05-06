@@ -24,7 +24,7 @@ import {
   Quote,
   Sparkles,
   XCircle,
-} from "lucide-react";
+} from "./icons";
 import type { LucideIcon } from "lucide-react";
 
 export interface MdSegment {

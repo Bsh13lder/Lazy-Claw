@@ -8,7 +8,7 @@
  *  Respects callout blocks — headings inside `> [!…]` bodies are NOT
  *  included (they're hidden inside an admonition and have no own id). */
 import { useEffect, useMemo, useState } from "react";
-import { ListTree } from "lucide-react";
+import { ListTree } from "./icons";
 
 interface Heading {
   level: number;

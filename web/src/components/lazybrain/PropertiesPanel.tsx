@@ -4,7 +4,7 @@
  *  are serialized straight back into the note content string and handed
  *  to the parent for save. */
 import { useMemo, useState } from "react";
-import { Calendar, Plus, Tag as TagIcon, Trash2, X } from "lucide-react";
+import { Calendar, Plus, Tag as TagIcon, Trash2, X } from "./icons";
 import {
   guessKind,
   parseFrontmatter,

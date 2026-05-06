@@ -2,7 +2,7 @@
  *  Kept in its own file so `callout.ts` can export the splitter + kind
  *  metadata without tripping react-refresh's only-export-components rule. */
 import type { ReactNode } from "react";
-import { Info } from "lucide-react";
+import { Info } from "./icons";
 import type { CalloutSegment } from "./callout";
 import { KIND_ICON, KIND_LABEL } from "./callout";
 

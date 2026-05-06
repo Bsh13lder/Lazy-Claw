@@ -1,5 +1,5 @@
 import type { LazyBrainNote } from "../../api";
-import { Link2 } from "lucide-react";
+import { Link2 } from "./icons";
 
 interface Props {
   note: LazyBrainNote | null;

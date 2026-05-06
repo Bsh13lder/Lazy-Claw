@@ -5,7 +5,7 @@
  *  or a pre-computed body, and we render markdown with full wikilink
  *  support. No business logic here beyond loading + error display. */
 import { useEffect, useState } from "react";
-import { Sparkles, X } from "lucide-react";
+import { Sparkles, X } from "./icons";
 import type { LazyBrainNote } from "../../api";
 import { WikilinkText } from "./WikilinkText";
 import { motion, AnimatePresence } from "framer-motion";

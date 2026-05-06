@@ -10,7 +10,7 @@
  *    busy:  ring pulses while the API call is in flight
  *    done:  filled solid in the given color with an animated check
  */
-import { Check } from "lucide-react";
+import { Check } from "./icons";
 
 interface Props {
   done: boolean;

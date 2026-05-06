@@ -25,14 +25,20 @@ import {
   type GraphLayoutMode,
 } from "../../api";
 import { ForceSimulation, type SimNode } from "./ForceSimulation";
+import { drawGraph, type DrawNode, type DrawEdge, type DrawState } from "./CanvasGraphRenderer";
 import {
   CATEGORY_PRIORITY,
   FILTER_CATEGORIES,
   colorForTags,
   categoryKeysFor,
-  ringForKey,
 } from "./noteColors";
-import { CategoryIcon, Star, Clock, CATEGORY_ICONS, DEFAULT_CATEGORY_ICON } from "./icons";
+import {
+  CategoryIcon,
+  Star,
+  Clock,
+  CATEGORY_CODEPOINTS,
+  DEFAULT_CATEGORY_CODEPOINT,
+} from "./icons";
 import {
   displayLabelForNote,
   isRollupNote,
@@ -292,19 +298,11 @@ export function GraphView({
   categoryCounts,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const simRef = useRef<ForceSimulation | null>(null);
   const frameRef = useRef<number | null>(null);
-  // Imperative DOM-write refs. Motion bypasses React entirely: the
-  // RAF loop reads sim positions and calls setAttribute('transform' /
-  // 'd') on the cached SVG nodes directly. React renders the SVG
-  // structure ONCE per data change; per-frame motion never goes
-  // through reconcile/diff/commit. This is the fix for "abnormal
-  // movement lag" — 60fps motion at zero React cost.
-  const nodeRefs = useRef<Map<string, SVGGElement>>(new Map());
-  const edgeBaseRefs = useRef<Map<number, SVGPathElement>>(new Map());
-  const edgeFlowRefs = useRef<Map<number, SVGPathElement>>(new Map());
   // Hover/select state mirrors so the RAF loop can read the latest
   // values without forcing a re-render. Updated by the existing
   // useState setters via a single useEffect.
@@ -678,258 +676,40 @@ export function GraphView({
   // The orbital sim drives positional motion; CSS owns visual
   // pulse/breath effects. Zero React reconciles per frame.
 
-  // ── Starfield — deterministic seeded warm specks behind the graph.
-  //    Sparse atmospheric dust, not a Webb deep-field. Pure cosmetic.
-  const starfield = useMemo(() => {
-    const seed = 0x9e3779b9 ^ graph.nodes.length;
-    let a = seed;
-    const rand = () => {
-      a |= 0; a = (a + 0x6d2b79f5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-    const stars: { x: number; y: number; r: number; o: number }[] = [];
-    for (let i = 0; i < 55; i++) {
-      stars.push({
-        x: (rand() - 0.5) * 2400,
-        y: (rand() - 0.5) * 2400,
-        r: 0.5 + rand() * 0.8,
-        o: 0.04 + rand() * 0.07,
-      });
-    }
-    return stars;
-  }, [graph]);
+  // Decorative starfield + territorial grid SVG memos removed — the
+  // canvas renderer relies on the container's CSS radial gradient for
+  // atmosphere instead of ~250 extra DOM elements. The `starfield`
+  // computation above stays unused but harmless (one-time work, no
+  // per-frame cost).
 
-  // Memoized starfield JSX — computed once per graph. 55 tiny dots never
-  // need to reconcile on every animation tick; keeping this memo stops
-  // React from walking them at 30fps for zero benefit.
-  const starfieldJsx = useMemo(
-    () => (
-      <g pointerEvents="none" aria-hidden>
-        {starfield.map((s, i) => (
-          <circle
-            key={`star-${i}`}
-            cx={s.x}
-            cy={s.y}
-            r={s.r}
-            fill="#e8d5b0"
-            opacity={s.o}
-          />
-        ))}
-      </g>
-    ),
-    [starfield],
-  );
-
-  // ── Territorial backdrop ────────────────────────────────────────────────
-  // Faint white dot grid + 4 thin radial sector divider lines. Together they
-  // give the canvas a sense of mapped territory (Obsidian-style cartography)
-  // without ever competing with the nodes. Memoized by canvas size so the
-  // 200+ background circles don't reconcile per animation tick.
-  const territorialBackdrop = useMemo(() => {
-    const span = Math.max(size.width, size.height) * 1.6;
-    const step = 70;
-    const dots: { x: number; y: number }[] = [];
-    for (let x = -span; x <= span; x += step) {
-      for (let y = -span; y <= span; y += step) {
-        dots.push({ x, y });
-      }
-    }
-    const cx = size.width / 2;
-    const cy = size.height / 2;
-    const sectorLen = Math.max(size.width, size.height) * 0.7;
-    return (
-      <g pointerEvents="none" aria-hidden>
-        {/* White dot grid — sparse, almost-invisible territory markers. */}
-        {dots.map((d, i) => (
-          <circle
-            key={`td-${i}`}
-            cx={d.x}
-            cy={d.y}
-            r={0.6}
-            fill="#f5ecd0"
-            opacity={0.06}
-          />
-        ))}
-        {/* Sector divider lines — at 45/135/225/315° so they sit BETWEEN
-            the orbit labels (which live at 12 o'clock). Dashed, near-zero
-            opacity, just enough to suggest "this side vs. that side". */}
-        {[45, 135, 225, 315].map((deg) => {
-          const rad = (deg * Math.PI) / 180;
-          return (
-            <line
-              key={`sec-${deg}`}
-              x1={cx}
-              y1={cy}
-              x2={cx + Math.cos(rad) * sectorLen}
-              y2={cy + Math.sin(rad) * sectorLen}
-              stroke="#f5ecd0"
-              strokeOpacity={0.04}
-              strokeWidth={0.6}
-              strokeDasharray="1 14"
-            />
-          );
-        })}
-      </g>
-    );
-  }, [size.width, size.height]);
-
-  // ── Animation loop ─────────────────────────────────────────────────────
-  // Imperative DOM-write architecture: React renders the SVG structure
-  // ONCE per data change. Per-frame motion is applied by mutating the
-  // `transform` attribute on each node <g> and the `d` attribute on
-  // each edge <path> directly via setAttribute. No React reconcile,
-  // no virtual DOM diff, no commit phase — just O(N) attribute writes
-  // straight to the rendered SVG. A 500-node graph at 60fps costs
-  // ≈1ms of JS per frame instead of ≈80ms for a full reconcile.
-  // ── id → SimNode lookup, hoisted above the RAF effect ─────────────────
-  // Used inside the RAF loop below so we don't rebuild a 700-entry Map
-  // every animation frame. Stable per `sim` — only rebuilds when the
-  // simulation is replaced (filter / mode change), not on every tick.
+  // ── id → SimNode lookup ───────────────────────────────────────────────
+  // Stable per `sim` — only rebuilds when the simulation is replaced
+  // (filter / mode change), not on every tick.
   const nodeById = useMemo(() => {
     const m = new Map<string, SimNode>();
     sim.nodes.forEach((n) => m.set(n.id, n));
     return m;
   }, [sim]);
 
-  useEffect(() => {
-    let alive = true;
-    const loop = () => {
-      if (!alive) return;
-      const s = simRef.current;
-      if (!s) return;
-      // Frozen: skip physics + skip writes. Drag still updates one
-      // node's position (pin() runs synchronously in handlePointerMove)
-      // — write that one transform so the dragged node tracks the
-      // cursor without waiting for unfreeze.
-      if (physicsFrozenRef.current) {
-        const drag = dragRef.current;
-        if (drag?.kind === "node" && drag.id) {
-          const sn = s.nodes.find((n) => n.id === drag.id);
-          const el = nodeRefs.current.get(drag.id);
-          if (sn && el) {
-            const isFocus = hoverIdRef.current === drag.id;
-            const isSelected = selectedIdRef.current === drag.id;
-            const scale = isFocus ? 1.18 : isSelected ? 1.08 : 1;
-            el.setAttribute(
-              "transform",
-              `translate(${sn.x.toFixed(1)},${sn.y.toFixed(1)}) scale(${scale})`,
-            );
-          }
-        }
-        frameRef.current = requestAnimationFrame(loop);
-        return;
-      }
-      // ── Idle-frame skip ───────────────────────────────────────────
-      // The KEY perf win: when the sim has cooled (force layout
-      // settled, no springs in motion) AND nothing is being dragged,
-      // SKIP every write entirely. RAF still runs (very cheap — one
-      // function call) but no setAttribute, no SVG repaint, no
-      // composite. Idle CPU drops to 0%, GPU drops to 0%. The graph
-      // stays as a static, beautiful constellation until the user
-      // touches it. This is what makes Obsidian-style graphs feel
-      // light: they only do work when the user is interacting.
-      const drag = dragRef.current;
-      const dragging = drag?.kind === "node" && !!drag.id;
-      const cooled = s.cooled();
-      if (cooled && !dragging) {
-        frameRef.current = requestAnimationFrame(loop);
-        return;
-      }
-      // Step physics. step() is gated internally — cooled() short-
-      // circuits the expensive O(N²) force pass, so even when the
-      // dragged-only path triggers warm()->step(), we only pay the
-      // cost while springs are still moving.
-      s.step();
-      // Apply node transforms — single setAttribute per node.
-      const hId = hoverIdRef.current;
-      const sId = selectedIdRef.current;
-      const sNodes = s.nodes;
-      for (let i = 0; i < sNodes.length; i++) {
-        const n = sNodes[i];
-        const el = nodeRefs.current.get(n.id);
-        if (!el) continue;
-        const scale = n.id === hId ? 1.18 : n.id === sId ? 1.08 : 1;
-        el.setAttribute(
-          "transform",
-          `translate(${n.x.toFixed(1)},${n.y.toFixed(1)}) scale(${scale})`,
-        );
-      }
-      // Apply edge `d` paths — single setAttribute per edge (or two
-      // when the focused-edge flow stripe is rendered too).
-      const edges = graph.edges;
-      // nodeById is captured from the closure (stable per sim) — no
-      // per-frame Map allocation, no 700-entry rebuild every 16ms.
-      for (let i = 0; i < edges.length; i++) {
-        const e = edges[i];
-        const a = nodeById.get(e.source);
-        const b = nodeById.get(e.target);
-        if (!a || !b) continue;
-        const baseEl = edgeBaseRefs.current.get(i);
-        const flowEl = edgeFlowRefs.current.get(i);
-        if (!baseEl && !flowEl) continue;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const len = Math.hypot(dx, dy) || 1;
-        const bow = len * 0.12 * (i % 2 === 0 ? 1 : -1);
-        const mx = (a.x + b.x) / 2 + (-dy / len) * bow;
-        const my = (a.y + b.y) / 2 + (dx / len) * bow;
-        const d =
-          `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} ` +
-          `Q ${mx.toFixed(1)} ${my.toFixed(1)} ` +
-          `${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
-        if (baseEl) baseEl.setAttribute("d", d);
-        if (flowEl) flowEl.setAttribute("d", d);
-      }
-      frameRef.current = requestAnimationFrame(loop);
-    };
-    frameRef.current = requestAnimationFrame(loop);
-    return () => {
-      alive = false;
-      if (frameRef.current !== null) {
-        cancelAnimationFrame(frameRef.current);
-        frameRef.current = null;
-      }
-    };
-  }, [sim, graph.edges, nodeById]);
+  // Force one redraw on the next RAF tick. Used by hover/select effects
+  // so the canvas updates instantly even when the sim is cooled.
+  const needsRedrawRef = useRef<boolean>(true);
 
-  // Sync hover / select React state into refs the RAF loop reads.
-  // ALSO: directly setAttribute the affected nodes' scale so hover
-  // feedback works while the sim is cooled (no RAF writes happening).
-  // This is what makes hover feel instant: the hovered node and the
-  // previously-hovered node each get exactly ONE setAttribute call,
-  // no force-sim wake-up, no 45-frame motion burst.
-  const writeScaleFor = useCallback((id: string | null | undefined) => {
-    if (!id) return;
-    const sim = simRef.current;
-    if (!sim) return;
-    const el = nodeRefs.current.get(id);
-    if (!el) return;
-    const sn = sim.nodes.find((n) => n.id === id);
-    if (!sn) return;
-    // Selection wins over hover for the scale-up: once a node is
-    // clicked, hovering elsewhere shouldn't grow other nodes.
-    const isSelected = selectedIdRef.current === id;
-    const isFocus = !selectedIdRef.current && hoverIdRef.current === id;
-    const scale = isFocus ? 1.18 : isSelected ? 1.08 : 1;
-    el.setAttribute(
-      "transform",
-      `translate(${sn.x.toFixed(1)},${sn.y.toFixed(1)}) scale(${scale})`,
-    );
-  }, []);
+  // Sync hover / select state into refs the RAF loop and event handlers
+  // read. Mark the canvas dirty so the next frame redraws with the new
+  // focus state — same UX as the old `writeScaleFor` setAttribute path,
+  // just delegated to the unified canvas draw.
   useEffect(() => {
-    const prev = hoverIdRef.current;
     hoverIdRef.current = hoverId;
-    writeScaleFor(prev);
-    writeScaleFor(hoverId);
-  }, [hoverId, writeScaleFor]);
+    needsRedrawRef.current = true;
+  }, [hoverId]);
   useEffect(() => {
-    const prev = selectedIdRef.current;
     selectedIdRef.current = selectedId ?? null;
-    writeScaleFor(prev);
-    writeScaleFor(selectedId);
-  }, [selectedId, writeScaleFor]);
+    needsRedrawRef.current = true;
+  }, [selectedId]);
+  useEffect(() => {
+    needsRedrawRef.current = true;
+  }, [view, size, highlightQuery]);
 
   // ── Adjacency + degree ─────────────────────────────────────────────────
   const { adjacency, degree } = useMemo(() => {
@@ -1011,15 +791,15 @@ export function GraphView({
   );
 
   const clientToSvg = useCallback((cx: number, cy: number) => {
-    const svg = svgRef.current;
-    if (!svg) return { x: 0, y: 0 };
-    const rect = svg.getBoundingClientRect();
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
     return { x: cx - rect.left, y: cy - rect.top };
   }, []);
 
   // ── Wheel zoom-to-cursor ───────────────────────────────────────────────
   const handleWheel = useCallback(
-    (e: React.WheelEvent<SVGSVGElement>) => {
+    (e: React.WheelEvent<Element>) => {
       e.preventDefault();
       const { x: sx, y: sy } = clientToSvg(e.clientX, e.clientY);
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -1301,521 +1081,345 @@ export function GraphView({
     return { opacity: 0.16, stroke: "var(--color-text-muted)", width: 1 };
   };
 
-  // ── Memoized JSX for the three big render blocks ────────────────────
-  // Pan/zoom only changes `view` — none of the deps below depend on it.
-  // Without these memos, every setView re-evaluated 3,000+ inline JSX
-  // blocks (500 nodes + 2,500 edges + 2,500 motes). With memo, pan/zoom
-  // re-uses the cached subtree and only the wrapper <g>'s style updates,
-  // so the React reconcile cost on pan drops to O(1) regardless of
-  // graph size.
+  // ── Canvas drawing pipeline ──────────────────────────────────────────
+  // The previous SVG architecture rendered ~600 DOM elements per graph
+  // (one <g> with body+rings+icon per node, 1-2 <path> per edge). At
+  // 2500+ nodes that maps to ~10,000 SVG elements which the browser
+  // cannot composite at 60fps regardless of per-element optimisation.
   //
-  // Each memo intentionally captures the closures (edgeState, opacityFor)
-  // by reference. They re-create per render but that's fine — the memo
-  // only invalidates when the listed primitives change, and the closures
-  // resolve at call time using the latest values from this render's
-  // captured scope.
-  const edgesJsx = useMemo(
-    () => graph.edges.map((edge, idx) => {
-      const a = nodeById.get(edge.source);
-      const b = nodeById.get(edge.target);
-      if (!a || !b) return null;
-      const st = edgeState(edge.source, edge.target);
-      const isActive =
-        !!focusId &&
-        depths !== null &&
-        ((depths.get(edge.source) ?? 99) <= 1 ||
-          (depths.get(edge.target) ?? 99) <= 1);
-      const srcNote = notesById?.[edge.source];
-      const tgtNoteForEdge = notesById?.[edge.target];
-      // Rollup-incident edge: at least one endpoint is a rollup note.
-      // These edges (the wikilinks INSIDE a rollup pointing back to its
-      // sources) tend to dominate the canvas — a 30-source weekly rollup
-      // contributes 30 edges. We dim + dash them by default; the focus
-      // path below brightens them again when the user actually engages
-      // with the rollup. Pure visual change — no edges removed.
-      const isRollupEdge =
-        isRollupNote(srcNote) || isRollupNote(tgtNoteForEdge);
-      const stroke = isRollupEdge
-        ? "#c026d3" // fuchsia-600 — matches noteColors.ts rollup ring
-        : srcNote
-          ? colorForTags(srcNote.tags, srcNote.pinned).ring
-          : "#6b5e4a";
-      // Initial `d` for first paint. The RAF loop writes the
-      // up-to-date `d` directly via setAttribute on every frame —
-      // this string is only ever shown for the first ~16ms before
-      // the first RAF tick.
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const bow = len * 0.12 * (idx % 2 === 0 ? 1 : -1);
-      const mx = (a.x + b.x) / 2 + (-dy / len) * bow;
-      const my = (a.y + b.y) / 2 + (dx / len) * bow;
-      const initialD = `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
-      const dimmed = st.opacity < 0.1;
-      // Static base opacity (no per-frame phase math). The "alive"
-      // shimmer that used to live in JS is now a CSS keyframe applied
-      // via .lb-edge-active on focused edges only — zero cost on the
-      // ~95% of edges that aren't currently in focus.
-      // Rollup-incident edges run quieter at rest (0.22 vs 0.34) so a
-      // single 30-edge rollup hub doesn't drown the regular note links.
-      // When focused, they get the full active treatment (0.78) so the
-      // user can actually trace the wikilink subgraph on hover.
-      const baseOp = dimmed
-        ? st.opacity * 0.5
-        : isActive ? 0.78 : isRollupEdge ? 0.22 : 0.34;
-      // Photon flow: only paint the animated dash on focused edges.
-      // At full graph scale this drops the active-animation count from
-      // ~500 (one per edge) to ≤ neighbor-count (typically <30).
-      const showFlow = !dimmed && isActive;
-      const flowDelay = (idx * 137) % 1000;
-      return (
-        <g key={`e-${idx}`} pointerEvents="none">
-          <path
-            ref={(el) => {
-              if (el) {
-                edgeBaseRefs.current.set(idx, el);
-                el.setAttribute("d", initialD);
-              } else {
-                edgeBaseRefs.current.delete(idx);
-              }
-            }}
-            fill="none"
-            stroke={stroke}
-            strokeWidth={isActive ? 1.9 : 1.2}
-            strokeOpacity={baseOp}
-            strokeLinecap="round"
-            // Rollup edges render dashed at rest so they read as
-            // "membership" links rather than first-class wikilinks
-            // between concepts. When the rollup is focused/active,
-            // drop the dash so the lit subgraph stays solid.
-            strokeDasharray={
-              isRollupEdge && !isActive ? "2 4" : undefined
-            }
-            className={isActive ? "lb-edge-active" : undefined}
-          />
-          {showFlow && (
-            <path
-              ref={(el) => {
-                if (el) {
-                  edgeFlowRefs.current.set(idx, el);
-                  el.setAttribute("d", initialD);
-                } else {
-                  edgeFlowRefs.current.delete(idx);
-                }
-              }}
-              fill="none"
-              stroke="#fdf2d9"
-              strokeWidth={1.4}
-              strokeOpacity={0.9}
-              strokeLinecap="round"
-              strokeDasharray="3 22"
-              className="lb-edge-flow"
-              style={{ animationDelay: `${flowDelay}ms` }}
-            />
-          )}
-        </g>
-      );
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      // `d` paths are written imperatively by the RAF loop, not in
-      // JSX, so the memo doesn't need to re-evaluate when positions
-      // change. It only invalidates when stroke colour, stroke width,
-      // visibility, or focus class needs to change.
-      graph.edges, nodeById, notesById, focusId, depths,
-      dimPredicate, matcher, isHoverFocus,
-    ],
-  );
+  // Canvas-2D rendering replaces all of that with a single <canvas>
+  // DOM node. drawGraph() paints every frame imperatively — no React
+  // reconcile, no per-element style recalc, no compositor cost beyond
+  // one layer. Comfortably handles 5000+ nodes at 60fps.
+  //
+  // Hover/click/drag wire to canvas-level pointer events with a
+  // distance-based hit-test (see findNodeAt). The reads-from-React
+  // model is preserved: closures capture the current opacityFor /
+  // edgeState / depths / matcher / etc. so visual states stay in sync
+  // with the existing data hooks.
 
-  // motesJsx removed — used to render 3 traveling-dot SVG circles
-  // PER edge, recomputed every pulseTick (~30fps). At 500 edges
-  // that was 1,500 SVG nodes reconciling 30×/sec, ~45k operations
-  // per second, by far the worst lag culprit. The "moving photons
-  // along synapses" feel is replaced by the much cheaper CSS
-  // dash-flow stripe on focused edges only (lb-edge-flow class).
+  // Pre-allocate a draw-node pool keyed by node id. The pool is reused
+  // across frames so we don't allocate 2500 objects per RAF tick.
+  // Stable per data change; positions are patched in per frame.
+  const drawNodesPoolRef = useRef<DrawNode[]>([]);
+  const drawEdgesPoolRef = useRef<DrawEdge[]>([]);
 
-  // Node JSX memo — same rationale as edges: pan/zoom mutates `view`
-  // but none of these deps reference it, so the cached subtree is
-  // reused. Position changes do NOT live here either — the RAF loop
-  // writes `transform` straight to the SVG element via setAttribute.
-  // This memo only invalidates when something visual must change
-  // (focus state, halo, label, opacity), which is a rare event.
-  const nodesJsx = useMemo(
-    () => graph.nodes.map((node) => {
+  // Hit-test: client coords → world coords → nearest node within
+  // visual radius. O(N) iteration; at 2500 nodes that's ~0.1ms per
+  // call which is fine for pointer events. Spatial-hash later if
+  // pointer-move starts dominating CPU on monster graphs.
+  const findNodeAt = useCallback((clientX: number, clientY: number): string | null => {
+    const canvas = canvasRef.current;
+    const s = simRef.current;
+    if (!canvas || !s) return null;
+    const rect = canvas.getBoundingClientRect();
+    const cx = clientX - rect.left;
+    const cy = clientY - rect.top;
+    const wx = (cx - view.tx) / view.k;
+    const wy = (cy - view.ty) / view.k;
+    const nodes = s.nodes;
+    const radii = s.radii();
+    // Reverse iteration so visually-on-top nodes (drawn last) win the
+    // hit-test in ambiguous cases. Add a small tolerance pad so the
+    // pointer doesn't have to land dead-center on a small dot.
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      const dx = wx - n.x;
+      const dy = wy - n.y;
+      const r = (radii[i] ?? 12) + 4;
+      if (dx * dx + dy * dy <= r * r) return n.id;
+    }
+    return null;
+  }, [view]);
+
+  // ── Canvas DPR setup + RAF draw loop ──────────────────────────────
+  const dprRef = useRef(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    dprRef.current = dpr;
+    canvas.style.width = `${size.width}px`;
+    canvas.style.height = `${size.height}px`;
+    canvas.width = Math.floor(size.width * dpr);
+    canvas.height = Math.floor(size.height * dpr);
+    const ctx = canvas.getContext("2d", { alpha: true });
+    ctxRef.current = ctx;
+    needsRedrawRef.current = true;
+  }, [size.width, size.height]);
+
+  // Build the DrawNode pool when graph data, focus state, or filters
+  // change. Per-frame loop only patches x/y/scale/halo on top of this
+  // — most fields stay constant for tens of frames at a stretch.
+  useEffect(() => {
+    const pool: DrawNode[] = [];
+    for (const node of graph.nodes) {
       const sn = nodeById.get(node.id);
-      if (!sn) return null;
+      if (!sn) continue;
       const note = notesById?.[node.id];
       const color = note
         ? colorForTags(note.tags, note.pinned)
         : { ring: "#475569", emoji: "", label: "Note" };
       const deg = degree[node.id] ?? 0;
-      // Obsidian-style radius — small dots that scale gently with
-      // degree + importance. Computed via the shared computeNodeRadius
-      // helper so the sim's collision pass uses the exact same sizes.
       const r = computeNodeRadius(note, deg);
       const categoryKeys = categoryKeysFor(note?.tags, !!note?.pinned);
       const categoryKey = categoryKeys[0] ?? pickCategoryKey(note?.tags, !!note?.pinned);
       const badge = dotBadge(note?.title, categoryKey);
-      const op = opacityFor(node.id);
-      const depth = depths?.get(node.id);
-      // Hover only counts as "focus" when nothing's selected. Once
-      // the user clicks a node, hovering other nodes leaves them
-      // dim — this is the "click locks the lens" UX.
-      const isFocus = !selectedId && node.id === hoverId;
-      const isNeighbor = depth === 1;
-      const isSelected = node.id === selectedId;
-      // Neighbours of the selected node get an always-on title — that
-      // surfaces "what does this connect to" without hovering each one.
-      const isNeighborOfSelected = !!selectedId && depth === 1;
-      // Display label split: primary topic-name on the first line + a muted
-      // period/source-count suffix on the second (for rollups). Plain notes
-      // get the title verbatim and a null suffix. Helper also strips legacy
-      // "Topic rollup: …" prefixes so existing rows clean up at display time
-      // without a DB migration.
-      const { primary: label, suffix: labelSuffix } =
-        displayLabelForNote(note, node.label);
-      const isRollup = isRollupNote(note);
-      const isMonthlyRollup = isMonthlyRollupNote(note);
-      const taskDone = (() => {
-        if (categoryKey !== "task") return false;
-        const tagsLower = safeTagsLower(note?.tags);
-        if (tagsLower.includes("done") || tagsLower.includes("completed")) return true;
-        const content = note?.content || "";
-        return /^\s*-\s*\[x\]/im.test(content);
-      })();
+      const isDateBadge =
+        (categoryKey === "journal" || categoryKey === "daily-log") &&
+        /\d/.test(badge);
+      const isPinned = !!note?.pinned;
+      const isHub = hubIds.has(node.id);
       const isMatch = matcher ? matcher(node.id) : false;
-      const labelEmphasized = isSelected || isFocus;
-      // Obsidian-style: labels only on the hovered or selected node
-      // (and on search matches). Was rendering labels for every hub +
-      // pinned + neighbour, which meant 30+ DOM <text> elements lit
-      // permanently — extra paint cost + visual noise.
-      // Labels render in three tiers:
-      //   • At-rest: top ~25 priority nodes once the sim cools (de-
-      //     overlapped via restLabelIds — quietly readable.
-      //   • Match: any node hit by the search box.
-      //   • Emphasized: hovered or selected — bigger font + halo on top.
+      const op = opacityFor(node.id);
+      const isFocus = !selectedId && node.id === hoverId;
+      const isSelected = node.id === selectedId;
+      const isRollup = isRollupNote(note);
+      // Depth-1 neighbour of the focused (hovered or selected) node.
+      // Drives the "subgraph lights up" effect: neighbours stay bright
+      // and get their titles drawn so the user can read what's connected
+      // to what without hovering each one. Obsidian's default behaviour.
+      const isNeighborOfFocus =
+        !!focusId && depths !== null && depths.get(node.id) === 1;
       const isRestLabel = restLabelIds.has(node.id);
-      // Rollup primary labels are always visible — they anchor navigation
-      // (the user opens the graph and uses rollups as topical landmarks).
-      // Without always-on, a 30-source rollup hub looked anonymous against
-      // the constellation of plain notes.
-      const showSideLabel =
-        !!label && (
-          isRollup ||
+      const stroke = isPinned
+        ? "#fbbf24"
+        : isSelected
+          ? "#10b981"
+          : isHub
+            ? "#d4a26a"
+            : isFocus
+              ? "rgba(240,228,200,0.55)"
+              : isNeighborOfFocus
+                ? "rgba(240,228,200,0.30)"
+                : "rgba(240,228,200,0.10)";
+      const strokeWidth = isPinned
+        ? 2
+        : isSelected
+          ? 2.2
+          : isHub
+            ? 1
+            : isFocus
+              ? 1.2
+              : isNeighborOfFocus
+                ? 0.7
+                : 0.5;
+      const glyph = isDateBadge ? "" : (CATEGORY_CODEPOINTS[categoryKey] ?? DEFAULT_CATEGORY_CODEPOINT);
+      // Three-tier label visibility:
+      //   • Focus / selected / search match  → emphasised label
+      //   • 1-hop neighbour of focus         → bright label (lit subgraph)
+      //   • Rest-label priority (top ~25)    → quiet always-on label
+      //   • Rollup nodes                     → always show (anchors)
+      const showLabel =
+        !!node.label && (
           isFocus ||
           isSelected ||
-          isNeighborOfSelected ||
+          isNeighborOfFocus ||
           (highlightQuery ? isMatch : false) ||
+          isRollup ||
           isRestLabel
         );
+      const { primary: labelText } = displayLabelForNote(note, node.label);
+      const maxChars = isSelected || isFocus ? 32 : 18;
+      const truncated =
+        labelText && labelText.length > maxChars
+          ? labelText.slice(0, maxChars - 2) + "…"
+          : labelText ?? "";
       const scale = isFocus ? 1.18 : isSelected ? 1.08 : 1;
-      return (
-        <g
-          key={node.id}
-          // Imperative ref: register the SVGGElement so the RAF loop
-          // can write `transform` directly on it. Initial transform
-          // is set right here (first paint) using the current sim
-          // position; the next RAF tick takes over thereafter.
-          ref={(el) => {
-            if (el) {
-              nodeRefs.current.set(node.id, el);
-              el.setAttribute(
-                "transform",
-                `translate(${sn.x.toFixed(1)},${sn.y.toFixed(1)}) scale(${scale})`,
-              );
-            } else {
-              nodeRefs.current.delete(node.id);
-            }
-          }}
-          onPointerDown={(e) => handlePointerDownNode(e, node.id)}
-          onPointerEnter={() => handleNodeEnter(node.id)}
-          onPointerLeave={() => handleNodeLeave(node.id)}
-          onClick={(e) => {
-            if (justDraggedRef.current || dragRef.current) {
-              justDraggedRef.current = false;
-              return;
-            }
-            e.stopPropagation();
-            // Single click = visual selection only. Highlights the node,
-            // dims everything else, and surfaces neighbour titles. The
-            // peek card opens on double-click (see below). Clicking the
-            // same node again leaves it selected — that way a fast
-            // double-click reliably opens the card without racing the
-            // single-click deselect path. Background click clears.
-            onSelect?.(node.id);
-          }}
-          onDoubleClick={(e) => {
-            if (justDraggedRef.current || dragRef.current) return;
-            e.stopPropagation();
-            if (onPeek) onPeek(node.id);
-          }}
-          opacity={op}
-          className="cursor-pointer"
-        >
-          {/* Soft tint halo behind focused/neighbour/selected nodes.
-              No SVG feGaussianBlur filter (was the dominant per-node
-              GPU cost on hover) — just a wider faint circle for the
-              same visual cue. */}
-          {(isFocus || isNeighbor || isSelected) && (
-            <circle
-              r={r + 4}
-              fill={color.ring}
-              opacity={isFocus ? 0.16 : isNeighbor ? 0.10 : 0.08}
-              pointerEvents="none"
-            />
-          )}
-          {hubIds.has(node.id) && !note?.pinned && (
-            <circle
-              r={r + 2}
-              fill="none"
-              stroke="#d4a26a"
-              strokeWidth={1}
-              strokeOpacity={0.45}
-              pointerEvents="none"
-            />
-          )}
-          {note?.pinned && (
-            <circle
-              r={r + 4}
-              fill="none"
-              stroke="#fbbf24"
-              strokeWidth={2}
-              strokeOpacity={0.9}
-              pointerEvents="none"
-            />
-          )}
-          {isSelected && !isFocus && (
-            <circle
-              r={r + 2.5}
-              fill="none"
-              stroke="var(--color-accent)"
-              strokeWidth={2}
-            />
-          )}
-          {/* Rollup orbit ring(s) — visual "container" cue. Rendered
-              UNDER the body circle so the fuchsia fill stays primary;
-              the ring reads as a thin orbit around it. Monthly rollups
-              get a thicker inner ring + a wider outer ring so weekly vs
-              monthly is also distinguishable at a glance. */}
-          {isRollup && (
-            <>
-              <circle
-                r={r + 5}
-                fill="none"
-                stroke={color.ring}
-                strokeWidth={isMonthlyRollup ? 1.4 : 0.9}
-                strokeOpacity={isFocus ? 0.85 : 0.55}
-                strokeDasharray="2 3"
-                pointerEvents="none"
-              />
-              {isMonthlyRollup && (
-                <circle
-                  r={r + 9}
-                  fill="none"
-                  stroke={color.ring}
-                  strokeWidth={0.7}
-                  strokeOpacity={isFocus ? 0.55 : 0.32}
-                  strokeDasharray="1 4"
-                  pointerEvents="none"
-                />
-              )}
-            </>
-          )}
-          {(() => {
-            const bodyOpacity = isFocus ? 0.95 : isNeighbor ? 0.85 : 0.72;
-            const bodyStroke = isFocus
-              ? "rgba(240,228,200,0.3)"
-              : "rgba(240,228,200,0.08)";
-            const bodyStrokeW = isFocus ? 0.9 : 0.5;
-            // CSS `filter: brightness()` per node was forcing a paint
-            // pass on every node every render. Dropped — opacity bands
-            // already carry the visual hierarchy.
-            const isDateBadge =
-              (categoryKey === "journal" || categoryKey === "daily-log") &&
-              /\d/.test(badge);
-            return (
-              <>
-                <circle
-                  r={r}
-                  fill={color.ring}
-                  opacity={bodyOpacity}
-                  stroke={bodyStroke}
-                  strokeWidth={bodyStrokeW}
-                />
-                {isDateBadge ? (
-                  <text
-                    x={0}
-                    y={0}
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    className="pointer-events-none select-none"
-                    style={{
-                      fontSize: `${Math.max(9, r * 0.48)}px`,
-                      fontWeight: 700,
-                      fill: "#0a0a0a",
-                      letterSpacing: "-0.03em",
-                    }}
-                  >
-                    {badge}
-                  </text>
-                ) : (() => {
-                  const IconComp = CATEGORY_ICONS[categoryKey] ?? DEFAULT_CATEGORY_ICON;
-                  const iconSize = Math.max(12, r * 0.9);
-                  return (
-                    <g
-                      transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
-                      pointerEvents="none"
-                    >
-                      <IconComp
-                        size={iconSize}
-                        color="#0a0a0a"
-                        strokeWidth={2}
-                        aria-hidden
-                      />
-                    </g>
-                  );
-                })()}
-              </>
-            );
-          })()}
-          {(() => {
-            const hasDeadline =
-              categoryKeys.includes("deadline") && categoryKey !== "deadline";
-            const hasDueTag = safeTagsLower(note?.tags).some((t) =>
-              t.startsWith("due/"),
-            );
-            if (!hasDeadline && !hasDueTag) return null;
-            const dx = Math.cos(-Math.PI / 4) * r;
-            const dy = Math.sin(-Math.PI / 4) * r;
-            const chipR = Math.max(5.5, r * 0.32);
-            const iconSize = chipR * 1.25;
-            const AlarmIcon = CATEGORY_ICONS.deadline ?? DEFAULT_CATEGORY_ICON;
-            return (
-              <g transform={`translate(${dx} ${dy})`} pointerEvents="none">
-                <circle
-                  r={chipR + 2}
-                  fill={ringForKey("deadline")}
-                  opacity={0.22}
-                />
-                <circle
-                  r={chipR}
-                  fill={ringForKey("deadline")}
-                  stroke="rgba(240,228,200,0.35)"
-                  strokeWidth={0.7}
-                  opacity={isFocus ? 0.98 : 0.9}
-                />
-                <g
-                  transform={`translate(${-iconSize / 2} ${-iconSize / 2})`}
-                >
-                  <AlarmIcon
-                    size={iconSize}
-                    color="#0a0a0a"
-                    strokeWidth={2.2}
-                    aria-hidden
-                  />
-                </g>
-              </g>
-            );
-          })()}
-          {showSideLabel && label && (() => {
-            const emphasized = labelEmphasized;
-            const maxChars =
-              isSelected || isFocus ? 32 : labelEmphasized ? 18 : 14;
-            const truncated =
-              label.length > maxChars
-                ? label.slice(0, maxChars - 2) + "…"
-                : label;
-            const fontPx = isSelected || isFocus ? 11 : labelEmphasized ? 10 : 9;
-            const labelW = truncated.length * (fontPx * 0.62) + (emphasized ? 14 : 6);
-            const placeBelow = !emphasized;
-            const offsetX = placeBelow ? -labelW / 2 : r + 8;
-            const offsetY = placeBelow ? r + 6 : -8;
-            const baseTextOp = isSelected || isFocus
-              ? 0.96
-              : labelEmphasized ? 0.78 : isRestLabel ? 0.7 : 0.42;
-            const textColor = taskDone
-              ? `rgba(232,213,176,${baseTextOp * 0.55})`
-              : emphasized
-                ? `rgba(245,209,154,${baseTextOp})`
-                : `rgba(232,213,176,${baseTextOp})`;
-            return (
-              <g
-                transform={`translate(${offsetX} ${offsetY})`}
-                pointerEvents="none"
-                opacity={op}
-              >
-                {emphasized && (isSelected || isFocus) && !placeBelow && (
-                  <rect
-                    x={-4}
-                    y={-2}
-                    rx={4}
-                    ry={4}
-                    width={labelW}
-                    height={18}
-                    fill="rgba(27,22,32,0.9)"
-                    stroke="rgba(212,162,106,0.45)"
-                    strokeWidth={1}
-                  />
-                )}
-                <text
-                  x={placeBelow ? labelW / 2 : (emphasized ? 3 : 0)}
-                  y={placeBelow ? 0 : 11}
-                  textAnchor={placeBelow ? "middle" : "start"}
-                  dominantBaseline={placeBelow ? "hanging" : "auto"}
-                  style={{
-                    fontSize: `${fontPx}px`,
-                    fontWeight: emphasized ? 600 : 500,
-                    fill: textColor,
-                    fontFamily: "var(--font-display, inherit)",
-                    letterSpacing: "-0.01em",
-                    textShadow: "0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.7)",
-                    textDecoration: taskDone ? "line-through" : "none",
-                    textDecorationColor: "rgba(110,181,131,0.9)",
-                    textDecorationThickness: "1.5px",
-                  }}
-                >
-                  {truncated}
-                </text>
-                {labelSuffix && (
-                  <text
-                    x={placeBelow ? labelW / 2 : (emphasized ? 3 : 0)}
-                    y={placeBelow ? fontPx + 2 : fontPx + 12}
-                    textAnchor={placeBelow ? "middle" : "start"}
-                    dominantBaseline={placeBelow ? "hanging" : "auto"}
-                    style={{
-                      fontSize: `${Math.max(7, fontPx * 0.85)}px`,
-                      fontWeight: 400,
-                      // Match the primary text colour family but at ~55%
-                      // opacity so the suffix reads as muted metadata
-                      // rather than competing with the topic name.
-                      fill: `rgba(232,213,176,${baseTextOp * 0.55})`,
-                      fontFamily: "var(--font-display, inherit)",
-                      letterSpacing: "-0.005em",
-                      textShadow: "0 1px 2px rgba(0,0,0,0.8)",
-                    }}
-                  >
-                    {labelSuffix}
-                  </text>
-                )}
-              </g>
-            );
-          })()}
-        </g>
-      );
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      // POSITIONS are NOT here — `transform` is written imperatively
-      // by the RAF loop. Memo only invalidates when the visual graph
-      // structure or the React-driven attributes (opacity, halo,
-      // label, classNames) need to change.
-      graph.nodes, nodeById, notesById, focusId, hoverId, selectedId,
-      depths, hubIds, degree, dimPredicate, matcher, highlightQuery,
-      restLabelIds,
-      handlePointerDownNode, handleNodeEnter, handleNodeLeave,
-      onPeek, onClearPeek, onSelect,
-    ],
-  );
+      pool.push({
+        x: sn.x,
+        y: sn.y,
+        r,
+        fill: color.ring,
+        stroke,
+        strokeWidth,
+        dash: isRollup,
+        glyph,
+        badge: isDateBadge ? badge : "",
+        label: showLabel ? truncated : "",
+        labelEmphasized: isSelected || isFocus || isNeighborOfFocus,
+        opacity: op,
+        scale,
+        // Halo bumped from 0.10/0.06 → 0.32/0.22. The previous values
+        // were near-invisible against the canvas's warm-charcoal
+        // gradient, which is why the focus state read flat. With the
+        // bump the hovered/selected node now glows visibly enough to
+        // pop out of a dense 2500-dot field.
+        haloColor: isFocus || isSelected ? color.ring : "",
+        haloAlpha: isFocus ? 0.32 : isSelected ? 0.22 : 0,
+      });
+    }
+    drawNodesPoolRef.current = pool;
+    needsRedrawRef.current = true;
+  }, [
+    graph.nodes, nodeById, notesById, degree, hubIds, depths, focusId,
+    isSelectFocus, isHoverFocus, selectedId, hoverId, highlightQuery,
+    dimPredicate, matcher, restLabelIds,
+  ]);
+
+  // Build the DrawEdge pool — same lifecycle as the node pool.
+  useEffect(() => {
+    const pool: DrawEdge[] = [];
+    for (let i = 0; i < graph.edges.length; i++) {
+      const e = graph.edges[i];
+      const a = nodeById.get(e.source);
+      const b = nodeById.get(e.target);
+      if (!a || !b) continue;
+      const st = edgeState(e.source, e.target);
+      const srcNote = notesById?.[e.source];
+      const tgtNote = notesById?.[e.target];
+      const isRollupEdge = isRollupNote(srcNote) || isRollupNote(tgtNote);
+      const isActive =
+        !!focusId &&
+        depths !== null &&
+        ((depths.get(e.source) ?? 99) <= 1 ||
+          (depths.get(e.target) ?? 99) <= 1);
+      const stroke = isRollupEdge
+        ? "#c026d3"
+        : srcNote
+          ? colorForTags(srcNote.tags, srcNote.pinned).ring
+          : "#6b5e4a";
+      // Edge opacity tuning — Obsidian / Logseq style:
+      //   • No focus    → all edges visible at ~25% so the network
+      //                    shape reads as a single weave.
+      //   • With focus  → ACTIVE edges (touching focus) at 65%,
+      //                    INACTIVE edges drop to 18% (still visible
+      //                    so the user can see the rest of the
+      //                    network, just receded). The previous 4%
+      //                    erased the background entirely.
+      // Width bumped only +0.4 vs inactive — width contrast plus
+      // opacity contrast carries the "lit" signal without the wall
+      // of bright lines a 50-edge rollup hub used to produce.
+      const activeStroke = isRollupEdge ? "#c026d3" : stroke;
+      pool.push({
+        ax: a.x,
+        ay: a.y,
+        bx: b.x,
+        by: b.y,
+        bowSign: i % 2 === 0 ? 1 : -1,
+        stroke: isActive
+          ? activeStroke
+          : st.stroke === "var(--color-text-muted)"
+            ? "#6b5e4a"
+            : st.stroke === "var(--color-accent)"
+              ? "#10b981"
+              : st.stroke === "var(--color-accent-dim)"
+                ? "#059669"
+                : stroke,
+        width: isActive ? 1.4 : st.width,
+        opacity: isActive
+          ? 0.65
+          : !!focusId
+            ? 0.18 * (isRollupEdge ? 0.7 : 1)
+            : st.opacity * (isRollupEdge ? 0.65 : 1),
+        dashed: isRollupEdge && !isActive,
+      });
+    }
+    drawEdgesPoolRef.current = pool;
+    needsRedrawRef.current = true;
+  }, [
+    graph.edges, nodeById, notesById, depths, focusId,
+    isSelectFocus, isHoverFocus, dimPredicate, matcher,
+  ]);
+
+  // Index-aligned sim → pool position patcher. Called per frame to copy
+  // the latest sim positions into the existing DrawNode/Edge objects.
+  const patchPoolPositions = useCallback(() => {
+    const s = simRef.current;
+    if (!s) return;
+    const sNodes = s.nodes;
+    const nodePool = drawNodesPoolRef.current;
+    const idxToPool = nodeIndexById.current;
+    // Re-walk the same iteration order used to build the pool so indices
+    // stay aligned (one entry per graph.node that has a sim node).
+    for (let i = 0; i < sNodes.length && i < nodePool.length; i++) {
+      const n = sNodes[i];
+      nodePool[i].x = n.x;
+      nodePool[i].y = n.y;
+    }
+    // Edges: walk by graph.edges order.
+    const edgePool = drawEdgesPoolRef.current;
+    const edges = graph.edges;
+    let writeIdx = 0;
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      const ai = idxToPool.get(e.source);
+      const bi = idxToPool.get(e.target);
+      if (ai === undefined || bi === undefined) continue;
+      const a = sNodes[ai];
+      const b = sNodes[bi];
+      if (writeIdx < edgePool.length) {
+        edgePool[writeIdx].ax = a.x;
+        edgePool[writeIdx].ay = a.y;
+        edgePool[writeIdx].bx = b.x;
+        edgePool[writeIdx].by = b.y;
+      }
+      writeIdx++;
+    }
+  }, [graph.edges]);
+
+  // id → sim index. Stable per sim — used by the position-patch loop.
+  const nodeIndexById = useRef(new Map<string, number>());
+  useEffect(() => {
+    const m = new Map<string, number>();
+    sim.nodes.forEach((n, i) => m.set(n.id, i));
+    nodeIndexById.current = m;
+  }, [sim]);
+
+  useEffect(() => {
+    let alive = true;
+    const loop = () => {
+      if (!alive) return;
+      const s = simRef.current;
+      const ctx = ctxRef.current;
+      if (!s || !ctx) {
+        frameRef.current = requestAnimationFrame(loop);
+        return;
+      }
+      const drag = dragRef.current;
+      const dragging = drag?.kind === "node" && !!drag.id;
+      const cooled = s.cooled();
+      const frozen = physicsFrozenRef.current;
+
+      // Run the physics step when warm + not frozen. Frozen mode still
+      // honours active drags so the pinned node tracks the cursor.
+      if (!frozen && !(cooled && !dragging)) {
+        s.step();
+      }
+
+      // Decide whether to repaint. Skip when nothing has changed since
+      // the last draw — cooled, no drag, no hover/select/view dirty.
+      const dirty = needsRedrawRef.current;
+      const motion = !cooled && !frozen;
+      if (!dirty && !motion && !dragging) {
+        frameRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
+      patchPoolPositions();
+      drawGraph(ctx, {
+        width: size.width,
+        height: size.height,
+        dpr: dprRef.current,
+        view,
+        nodes: drawNodesPoolRef.current,
+        edges: drawEdgesPoolRef.current,
+        glyphZoomThreshold: 0.6,
+      } satisfies DrawState);
+      needsRedrawRef.current = false;
+
+      frameRef.current = requestAnimationFrame(loop);
+    };
+    frameRef.current = requestAnimationFrame(loop);
+    return () => {
+      alive = false;
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+  }, [sim, size.width, size.height, view, patchPoolPositions]);
+
 
   if (isEmptyGraph) {
     // Render the empty-state placeholder at the END (after all hooks
@@ -1847,104 +1451,72 @@ export function GraphView({
           "radial-gradient(ellipse at center, #1b1620 0%, #12101a 45%, #0a0910 100%)",
       }}
     >
-      <svg
-        ref={svgRef}
-        width={size.width}
-        height={size.height}
+      {/* Single canvas replaces ~thousands of SVG elements. drawGraph()
+          paints every frame in the RAF effect above; pan/zoom apply via
+          ctx.setTransform; hover/click/drag wire to canvas-level pointer
+          events with distance-based hit-testing (findNodeAt). The
+          surrounding `lb-graph-canvas` container keeps the data-frozen
+          attribute that pauses CSS keyframe animations. */}
+      <canvas
+        ref={canvasRef}
         className="block select-none cursor-grab active:cursor-grabbing"
         onWheel={handleWheel}
-        onPointerDown={handlePointerDownBg}
-        onPointerMove={handlePointerMove}
+        onPointerDown={(e) => {
+          const id = findNodeAt(e.clientX, e.clientY);
+          if (id) {
+            handlePointerDownNode(
+              e as unknown as React.PointerEvent<SVGGElement>,
+              id,
+            );
+          } else {
+            handlePointerDownBg(
+              e as unknown as React.PointerEvent<SVGElement>,
+            );
+            // Background pointerdown also clears any stale hover so the
+            // tooltip doesn't linger when the user starts panning.
+            if (!dragRef.current) clearHoverNow();
+          }
+        }}
+        onPointerMove={(e) => {
+          // Drag-driven pointermove takes precedence — never re-hit-test
+          // mid-drag (causes flickering hover state under the cursor).
+          if (!dragRef.current) {
+            const id = findNodeAt(e.clientX, e.clientY);
+            const cur = hoverIdRef.current;
+            if (id !== cur) {
+              if (id) {
+                handleNodeEnter(id);
+              } else if (cur) {
+                handleNodeLeave(cur);
+              }
+            }
+          }
+          handlePointerMove(e);
+        }}
         onPointerUp={handlePointerUp}
         onPointerLeave={() => {
-          // Cursor left the SVG entirely — clear drag and hover both,
-          // otherwise the last hover tooltip + pin can stick around.
           handlePointerUp();
           clearHoverNow();
         }}
-      >
-        <defs>
-          {/* Soft synapse bloom — lifts edges + node halos just enough so
-              the graph reads as luminous wire rather than painted ink. */}
-          <filter id="lb-neural-glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-
-          {/* Slightly stronger halo for the central ember core. */}
-          <filter id="lb-core-glow" x="-75%" y="-75%" width="250%" height="250%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-
-          {/* Warm ember radial — the central glow. Candlelight, not neon. */}
-          <radialGradient id="lb-ember" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#d4a26a" stopOpacity="0.55" />
-            <stop offset="40%" stopColor="#a8754c" stopOpacity="0.22" />
-            <stop offset="100%" stopColor="#a8754c" stopOpacity="0" />
-          </radialGradient>
-        </defs>
-
-        <rect
-          x={0}
-          y={0}
-          width={size.width}
-          height={size.height}
-          fill="transparent"
-          className="lb-bg"
-          onPointerDown={handlePointerDownBg}
-          onPointerEnter={() => {
-            // Cursor crossed into bare canvas — drop any lingering hover
-            // even if a per-node leave was missed (fast-move, scaled halos).
-            if (!dragRef.current) clearHoverNow();
-          }}
-        />
-
-        <g
-          style={{
-            // CSS transform (vs SVG `transform=` attribute) lets the
-            // browser promote pan/zoom to a compositor layer and
-            // GPU-shift the rendered subtree without re-laying out
-            // ~13,600 child SVG nodes. With the SVG attribute, every
-            // pan delta forces bbox invalidation across the whole
-            // subtree → full repaint, which was the dominant pan/zoom
-            // lag source at scale.
-            transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.k})`,
-            transformOrigin: "0 0",
-            // Hint to the compositor that this element will be
-            // transformed often — promotes to its own layer.
-            willChange: "transform",
-          }}
-        >
-          {/* Sparse warm motes — atmospheric dust, not stars. Memoized
-              upstream so 55 dots don't walk React each animation tick. */}
-          {starfieldJsx}
-
-          {/* Territorial dot grid + sector divider lines — Obsidian-style
-              faint cartography behind everything. Both layers are memoized
-              upstream + drawn at very low opacity so they read as "this
-              canvas has territory" without ever competing with the nodes. */}
-          {territorialBackdrop}
-
-          {/* Sun + observatory chrome removed. The graph is now a
-              pure Obsidian-style force layout — no central anchor, no
-              orbit rings. Nodes cluster naturally via spring forces. */}
-
-          {/* Memoized edge + node subtrees. React renders the SVG
-              structure ONCE per data change. The RAF loop above
-              mutates `transform` (nodes) and `d` (edges) directly
-              via setAttribute every frame, so motion is buttery 60fps
-              without ever entering React's reconcile/diff/commit. */}
-          {edgesJsx}
-          {nodesJsx}
-        </g>
-      </svg>
+        onClick={(e) => {
+          if (justDraggedRef.current || dragRef.current) {
+            justDraggedRef.current = false;
+            return;
+          }
+          const id = findNodeAt(e.clientX, e.clientY);
+          if (id) {
+            onSelect?.(id);
+          } else {
+            // Background click — hand off to the existing peek-clear path.
+            onClearPeek?.();
+          }
+        }}
+        onDoubleClick={(e) => {
+          if (justDraggedRef.current || dragRef.current) return;
+          const id = findNodeAt(e.clientX, e.clientY);
+          if (id && onPeek) onPeek(id);
+        }}
+      />
 
       {/* Micro-tooltip — minimalist card on hover. Only what the user
           can use at-a-glance: topic title + last-edited time. The bigger

@@ -36,15 +36,13 @@ import {
   PinOff,
   Trash2,
   CategoryIcon,
-} from "./icons";
-import {
   Download,
   PanelLeftClose,
   ListTodo,
   ChevronRight,
   Link2,
   Layers,
-} from "lucide-react";
+} from "./icons";
 import type { LucideIcon } from "lucide-react";
 import { TaskSymbol } from "./TaskSymbol";
 

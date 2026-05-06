@@ -12,8 +12,7 @@
 import { useMemo } from "react";
 import type { LazyBrainNote } from "../../api";
 import { OWNER_META, ownerOf } from "./noteColors";
-import { OWNER_ICONS } from "./icons";
-import { AlarmClock, CheckSquare, Clock, ListTodo, Link2 } from "lucide-react";
+import { OWNER_ICONS, AlarmClock, CheckSquare, Clock, ListTodo, Link2 } from "./icons";
 import { Checkbox } from "./Checkbox";
 
 interface Props {

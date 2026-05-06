@@ -5,7 +5,7 @@
  *  rewrites the current note's content to wrap the matched substring in
  *  `[[ ]]`, then dispatches a save patch through the parent. */
 import { useEffect, useMemo, useState } from "react";
-import { Sparkles, X, Check, Zap, RotateCcw } from "lucide-react";
+import { Sparkles, X, Check, Zap, RotateCcw } from "./icons";
 import * as api from "../../api";
 import type { AutolinkSuggestion } from "../../api";
 import { motion, AnimatePresence } from "framer-motion";

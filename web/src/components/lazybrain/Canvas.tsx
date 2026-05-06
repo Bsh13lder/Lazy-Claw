@@ -32,7 +32,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import * as api from "../../api";
 import type { CanvasBoardMeta, LazyBrainNote } from "../../api";
-import { FileText, Plus, Save, StickyNote, Trash2 } from "lucide-react";
+import { FileText, Plus, Save, StickyNote, Trash2 } from "./icons";
 
 interface CanvasNodeData {
   kind: "text" | "note";

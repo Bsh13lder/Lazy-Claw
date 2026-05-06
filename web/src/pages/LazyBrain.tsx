@@ -11,14 +11,32 @@ import {
   ownerOf,
   type Owner,
 } from "../components/lazybrain/noteColors";
-import { Brain, BookOpen, Plus, Network, Search, X as XIcon, Pin, PinOff, Save, Trash2 } from "../components/lazybrain/icons";
-import { PanelLeftOpen, PanelRightClose, PanelRightOpen, Command as CommandIcon } from "lucide-react";
+import {
+  Brain,
+  BookOpen,
+  Plus,
+  Network,
+  Search,
+  X as XIcon,
+  Pin,
+  PinOff,
+  Save,
+  Trash2,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Command as CommandIcon,
+  Sparkles,
+  MessageSquare,
+  Zap,
+  RefreshCw,
+  Layout,
+} from "../components/lazybrain/icons";
 import { CommandModal, type CommandAction } from "../components/lazybrain/CommandModal";
 import { OutlinePane } from "../components/lazybrain/OutlinePane";
 import { AIResultModal } from "../components/lazybrain/AIResultModal";
 import { AutolinkResultModal } from "../components/lazybrain/AutolinkResultModal";
 import { Canvas } from "../components/lazybrain/Canvas";
-import { Sparkles, MessageSquare, Zap, RefreshCw, Layout } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 const LS_LEFT = "lazybrain.leftCollapsed";

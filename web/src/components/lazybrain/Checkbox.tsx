@@ -9,7 +9,7 @@
  *  context strip's next-steps panel, or any markdown checkbox surface
  *  without restyling.
  */
-import { Check } from "lucide-react";
+import { Check } from "./icons";
 
 interface Props {
   checked: boolean;

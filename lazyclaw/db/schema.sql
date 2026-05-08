@@ -649,3 +649,25 @@ CREATE INDEX IF NOT EXISTS idx_bounty_audit_program_ts
 ON bounty_audit(program_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_bounty_audit_user_ts
 ON bounty_audit(user_id, ts DESC);
+
+-- Unified person store: one row per real person, multiple handles per row.
+-- All PII columns AES-256-GCM. source tells us where the record came from
+-- so we can re-sync from macOS Contacts without losing manual edits
+-- (manual_overrides keys always win at merge time).
+CREATE TABLE IF NOT EXISTS contacts (
+    id                TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL REFERENCES users(id),
+    name_canonical    TEXT NOT NULL,           -- encrypted display name
+    aliases           TEXT,                    -- encrypted JSON array of nicknames / transliterations
+    handles           TEXT,                    -- encrypted JSON: {phone:[E.164], email:[], instagram, telegram, whatsapp_jid}
+    notes             TEXT,                    -- encrypted free-form notes
+    manual_overrides  TEXT,                    -- encrypted JSON: keys here win over re-sync
+    source            TEXT NOT NULL DEFAULT 'manual',  -- macos_contacts | manual | imported
+    external_id       TEXT,                    -- macOS Contacts identifier when source=macos_contacts
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_user
+ON contacts(user_id, source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_external
+ON contacts(user_id, source, external_id) WHERE external_id IS NOT NULL;

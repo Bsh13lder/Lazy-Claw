@@ -134,6 +134,20 @@ class SkillRegistry:
 
         self.register(PaymentSkill(config=config))
 
+        # Unified contact store — name → verified handle (phone / email / Instagram).
+        # Brain MUST call find_contact before any channel send when the user
+        # names a person. Closes the silent-drop bug (whatsapp + others).
+        from lazyclaw.skills.builtin.contacts import (
+            FindContactSkill, ListContactsSkill, SaveContactSkill,
+            SyncMacOSContactsSkill, UpdateContactSkill,
+        )
+
+        self.register(FindContactSkill(config=config))
+        self.register(SaveContactSkill(config=config))
+        self.register(UpdateContactSkill(config=config))
+        self.register(ListContactsSkill(config=config))
+        self.register(SyncMacOSContactsSkill(config=config))
+
         from lazyclaw.skills.builtin.computer import (
             RunCommandSkill, ReadFileSkill, WriteFileSkill,
             ListDirectorySkill, TakeScreenshotSkill,

@@ -1163,8 +1163,29 @@ async function handleSend(args) {
   const message = args.message;
   if (!to || !message) return err("Both 'to' and 'message' are required.");
 
+  const inputLooksLikePhone = /^\+?\d{7,}$/.test(String(to).replace(/[^0-9+]/g, ""));
   const resolved = resolveContact(to);
-  if (!resolved) return err(`Contact '${to}' not found. Try a phone number or use whatsapp_list_chats to see available contacts.`);
+  if (!resolved) {
+    return err(`Contact '${to}' not found. STOP and ASK the user for the correct name or full international phone number (with country code, e.g. +34XXXXXXXXX). Do NOT guess a number — silent delivery failures look identical to success.`);
+  }
+
+  // Verify recipient is a real WhatsApp user when we routed via a bare phone number
+  // OR when the cached contact is an unverified stub (no name AND no notify).
+  // Closes the silent-drop bug: Baileys' sendMessage queues happily to non-existent JIDs.
+  if (resolved.jid.endsWith("@s.whatsapp.net")) {
+    const c = contacts.get(resolved.jid);
+    const isStub = !c || ((!c.name || c.name === "") && (!c.notify || c.notify === ""));
+    if (inputLooksLikePhone || isStub) {
+      try {
+        const [check] = await sock.onWhatsApp(resolved.jid);
+        if (!check || !check.exists) {
+          return err(`'${to}' (${resolved.jid}) is NOT a registered WhatsApp user. The number is likely missing a country code or wrong. STOP — ask the user for the correct full international number before retrying.`);
+        }
+      } catch (e) {
+        log(`onWhatsApp check failed for ${resolved.jid} (continuing): ${e.message}`);
+      }
+    }
+  }
 
   try {
     log(`Sending to ${resolved.name} (${resolved.jid}): "${message.slice(0, 50)}"`);

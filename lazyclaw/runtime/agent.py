@@ -518,6 +518,34 @@ _MCP_MGMT_TOOL_NAMES = frozenset({
     "favorite_mcp_server", "unfavorite_mcp_server",
 })
 
+# Contact-store keywords → inject find/save/update/list/sync_macos_contacts.
+# Detection covers both contact MANAGEMENT phrases ("save Buchvardi's number",
+# "sync my contacts") and the messaging-with-name pattern ("tell Buchvardi",
+# "DM Marcos"). Channel-keyword matches separately also force-inject
+# find_contact (see _MESSAGING_CHANNELS below) so the brain always resolves
+# names before whatsapp_send / instagram_send / email_send.
+_CONTACT_KEYWORDS = frozenset({
+    "contact", "contacts", "address book", "phonebook", "phone book",
+    "save contact", "find contact", "look up contact", "lookup contact",
+    "his number", "her number", "their number", "phone number of",
+    "his email", "her email", "their email", "email of",
+    "his instagram", "her instagram", "instagram of",
+    "sync contacts", "sync my contacts", "sync macos contacts",
+    "add to contacts", "save number", "save phone",
+})
+
+_CONTACT_TOOL_NAMES = frozenset({
+    "find_contact", "save_contact", "update_contact",
+    "list_contacts", "sync_macos_contacts",
+})
+
+# Channels where the brain almost always needs to resolve a name to a
+# verified handle before sending. When any of these match, find_contact
+# is force-injected on top of the channel MCP tools.
+_MESSAGING_CHANNELS: frozenset[str] = frozenset({
+    "whatsapp", "instagram", "email", "telegram",
+})
+
 # Survival/job keywords → inject search_jobs + survival tools directly.
 # NOTE: bare "jobs" intentionally removed — it overloaded with cron-job
 # intent. Specific phrases ("find job", "find work", "apply job",
@@ -2038,6 +2066,36 @@ class Agent:
                         len(_mcp_mgmt_tools),
                     )
 
+            # Contact-store keyword detection → inject find/save/update/list/sync.
+            # Also force-inject find_contact when a messaging channel matched
+            # (whatsapp/instagram/email/telegram) so the brain resolves names
+            # to verified handles before any send call.
+            _contact_tools_extra: list = []
+            _wants_contacts = any(kw in _msg_lower for kw in _CONTACT_KEYWORDS)
+            if not _wants_contacts and _history_tool_names & _CONTACT_TOOL_NAMES:
+                _wants_contacts = True
+                logger.info("Contact tools re-injected from recent history context")
+            _channel_messaging_match = bool(
+                _matched_channels and (set(_matched_channels) & _MESSAGING_CHANNELS)
+            )
+            if _wants_contacts:
+                _names_to_inject = _CONTACT_TOOL_NAMES
+            elif _channel_messaging_match:
+                # Minimal injection — only the lookup tool, not save/update/sync.
+                _names_to_inject = frozenset({"find_contact"})
+            else:
+                _names_to_inject = frozenset()
+            for cname in _names_to_inject:
+                schema = self.registry.get_tool_schema(cname)
+                if schema is not None:
+                    _contact_tools_extra.append(schema)
+            if _contact_tools_extra:
+                logger.info(
+                    "Contact keywords %s → %d contact tools injected",
+                    "explicit" if _wants_contacts else "via messaging channel",
+                    len(_contact_tools_extra),
+                )
+
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
             _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
@@ -2334,6 +2392,12 @@ class Agent:
             for mt in _mcp_mgmt_tools:
                 if mt.get("function", {}).get("name") not in _existing_names:
                     tools.append(mt)
+
+            # Add contact-store tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for ct in _contact_tools_extra:
+                if ct.get("function", {}).get("name") not in _existing_names:
+                    tools.append(ct)
 
             # Add survival tools (deduplicated)
             _existing_names = {t.get("function", {}).get("name") for t in tools}

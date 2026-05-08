@@ -77,6 +77,7 @@ class ShowTeamSettingsSkill(BaseSkill):
 
             mode = _display_mode(settings.get("mode", "never"))
             critic = _display_mode(settings.get("critic_mode", "auto"))
+            critic_model = settings.get("critic_model") or "(default worker model)"
             max_p = settings.get("max_parallel", 3)
             timeout = settings.get("specialist_timeout", 120)
 
@@ -85,6 +86,7 @@ class ShowTeamSettingsSkill(BaseSkill):
                 "=============",
                 f"Team mode:            {mode}",
                 f"Critic mode:          {critic}",
+                f"Critic model:         {critic_model}",
                 f"Max parallel:         {max_p}",
                 f"Specialist timeout:   {timeout}s",
                 "",
@@ -208,6 +210,102 @@ class SetCriticModeSkill(BaseSkill):
             return f"Critic mode set to '{display}'."
         except Exception as exc:
             return f"Error setting critic mode: {exc}"
+
+
+class SetCriticModelSkill(BaseSkill):
+    """Pick which model audits the assistant's reply when critic mode is on."""
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def category(self) -> str:
+        return "teams"
+
+    @property
+    def name(self) -> str:
+        return "set_critic_model"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Choose which AI model audits the assistant's final reply when "
+            "critic mode is on. Pass an exact model id (e.g. "
+            "'claude-sonnet-4-6', 'claude-cli', 'minimax-m2-7') or pass "
+            "an empty string to clear the override and fall back to the "
+            "default worker model. Use list_models to see all model ids."
+        )
+
+    @property
+    def permission_hint(self) -> str:
+        return "ask"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Model id (e.g. claude-sonnet-4-6) or empty string "
+                        "to clear and use the default worker model."
+                    ),
+                },
+            },
+            "required": ["model"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if not self._config:
+            return "Error: Not configured"
+        try:
+            from lazyclaw.teams.settings import update_team_settings
+            from lazyclaw.llm.model_registry import (
+                MODEL_CATALOG, get_model,
+            )
+
+            raw = (params.get("model") or "").strip()
+
+            if not raw:
+                await update_team_settings(
+                    self._config, user_id, {"critic_model": None},
+                )
+                return (
+                    "Critic model cleared — auditor will use the default "
+                    "worker model."
+                )
+
+            # Allow exact id match OR fuzzy display-name match.
+            model_id: str | None = None
+            if raw == "claude-cli" or get_model(raw) is not None:
+                model_id = raw
+            else:
+                lower = raw.lower()
+                for profile in MODEL_CATALOG.values():
+                    if profile.display_name.lower() == lower:
+                        model_id = profile.name
+                        break
+                if model_id is None:
+                    for profile in MODEL_CATALOG.values():
+                        if lower in profile.display_name.lower():
+                            model_id = profile.name
+                            break
+
+            if model_id is None:
+                ids = sorted(MODEL_CATALOG.keys())
+                return (
+                    f"Unknown model '{raw}'. Available ids: {', '.join(ids)} "
+                    "or 'claude-cli'."
+                )
+
+            await update_team_settings(
+                self._config, user_id, {"critic_model": model_id},
+            )
+            display = get_model(model_id).display_name if get_model(model_id) else model_id
+            return f"Critic model set to {display} ({model_id})."
+        except Exception as exc:
+            return f"Error setting critic model: {exc}"
 
 
 class ListSpecialistsSkill(BaseSkill):

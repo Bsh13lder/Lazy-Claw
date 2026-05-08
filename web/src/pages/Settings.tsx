@@ -815,12 +815,14 @@ function TeamSessionsSection() {
 function TeamsTab({
   team,
   specialists,
+  modelsData,
   onTeamUpdate,
   onSpecialistDelete,
   onSpecialistCreate,
 }: {
   readonly team: TeamSettings | null;
   readonly specialists: readonly Specialist[];
+  readonly modelsData: ModelsData | null;
   readonly onTeamUpdate: (updates: Partial<TeamSettings>) => Promise<void>;
   readonly onSpecialistDelete: (name: string) => Promise<void>;
   readonly onSpecialistCreate: (body: {
@@ -949,13 +951,34 @@ function TeamsTab({
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="text-sm text-text-primary">Critic Mode</p>
-              <p className="text-xs text-text-muted">Review specialist outputs before returning</p>
+              <p className="text-xs text-text-muted">Audit the assistant's reply on HIGH/MAX effort turns and rewrite when it fails the audit (max 3 loops)</p>
             </div>
             <Toggle
               on={team?.critic_mode ?? false}
               onChange={() => handleTeamChange({ critic_mode: !(team?.critic_mode) })}
               disabled={saving === "critic_mode"}
             />
+          </div>
+
+          {/* Critic model — picks which LLM does the audit + rewrites */}
+          <div className="flex items-center justify-between py-2">
+            <div className="pr-4">
+              <p className="text-sm text-text-primary">Critic Model</p>
+              <p className="text-xs text-text-muted">Which model audits the reply (defaults to the worker model when none picked)</p>
+            </div>
+            <select
+              value={team?.critic_model ?? ""}
+              onChange={(e) => handleTeamChange({ critic_model: e.target.value === "" ? null : e.target.value })}
+              disabled={saving === "critic_model" || !team?.critic_mode || !modelsData}
+              className="w-72 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light appearance-none cursor-pointer disabled:opacity-50"
+            >
+              <option value="">Default (worker model)</option>
+              {modelsData?.models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name} — {m.provider}{m.optimized ? " *" : ""}{m.is_local ? " (local)" : ""}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="border-t border-border" />
@@ -1870,6 +1893,7 @@ export default function Settings() {
           <TeamsTab
             team={team}
             specialists={specialists}
+            modelsData={modelsData}
             onTeamUpdate={handleTeamUpdate}
             onSpecialistDelete={handleSpecialistDelete}
             onSpecialistCreate={handleSpecialistCreate}

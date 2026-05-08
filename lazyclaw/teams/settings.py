@@ -21,6 +21,7 @@ VALID_MODES = {"auto", "always", "never"}
 DEFAULT_TEAMS = {
     "mode": "never",
     "critic_mode": False,
+    "critic_model": None,           # User-picked model id; None → ROLE_WORKER fallback
     "max_parallel": 3,
     "specialist_timeout": 120,
 }
@@ -66,6 +67,17 @@ async def update_team_settings(config: Config, user_id: str, updates: dict) -> d
 
     if "critic_mode" in updates:
         updates["critic_mode"] = bool(updates["critic_mode"])
+
+    if "critic_model" in updates:
+        val = updates["critic_model"]
+        if val is None or val == "":
+            updates["critic_model"] = None
+        elif not isinstance(val, str):
+            raise ValueError("critic_model must be a model id string or null")
+        else:
+            from lazyclaw.llm.model_registry import get_model
+            if val != "claude-cli" and get_model(val) is None:
+                raise ValueError(f"Unknown critic_model: {val}")
 
     if "max_parallel" in updates:
         val = updates["max_parallel"]

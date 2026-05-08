@@ -212,6 +212,21 @@ def make_user_facing_plan_prompt(
     "scrape ⇒ browser" training bias.
     """
     tools_hint = ", ".join(tool_names[:20]) if tool_names else "(none available)"
+    # Scope-estimate block goes FIRST so the brain plans dispatch upfront
+    # — multi-agent platforms waste their fan-out advantage when the brain
+    # runs 3-4 tools sequentially before realising it should have
+    # dispatched. Counts beat keywords as a primary signal.
+    scope_estimate = (
+        "SCOPE ESTIMATE — do this BEFORE your first tool call:\n"
+        "1. Count: how many tool calls will this task need? Be honest.\n"
+        "2. If estimate ≥ 5 OR the task has independent sub-targets "
+        "(multiple sites, multiple records, multiple checks):\n"
+        "   → call `dispatch_subagents` in your FIRST tool call, fanning "
+        "out the parallelizable parts.\n"
+        "   → DO NOT run tools sequentially first and dispatch later — "
+        "that wastes the multi-agent advantage.\n"
+        "3. If estimate < 5 AND task is sequential: run tools normally.\n\n"
+    )
     # Routing block goes BEFORE the tool list — the model reads in order
     # and the first rule wins over the browser schema staring it in the
     # face. Multi-target work should never be a foreground browser loop.
@@ -244,6 +259,7 @@ def make_user_facing_plan_prompt(
         "tools in this response — only write the plan as plain markdown.\n\n"
         f"User request:\n{message}\n\n"
         + findings_block
+        + scope_estimate
         + routing_rules
         + f"Available tools (pick the ones you actually need):\n{tools_hint}\n\n"
         "Response shapes (pick exactly one):\n"

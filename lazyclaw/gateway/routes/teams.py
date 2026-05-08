@@ -26,6 +26,7 @@ router = APIRouter(prefix="/api/teams", tags=["teams"])
 class UpdateTeamSettingsRequest(BaseModel):
     mode: str | None = None
     critic_mode: str | None = None
+    critic_model: str | None = None
     max_parallel: int | None = None
     specialist_timeout: int | None = None
 

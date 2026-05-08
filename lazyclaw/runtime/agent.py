@@ -4807,6 +4807,71 @@ class Agent:
                     logger.warning("TAOR verify correction call failed: %s", _ve)
                     break
 
+        # ── TAOR Phase 4: CRITIC (real LLM audit) ─────────────────────
+        # When the user has critic_mode ON and the turn is HIGH/MAX
+        # effort, run a real LLM auditor over the assistant's last
+        # reply. Loops up to 3 attempts: pass → ship as-is; fail → ask
+        # brain to rewrite text-only → re-check. Fails open on any
+        # exception (network, parse, rate limit) so a flaky critic can
+        # never block a reply that might already be fine. Top-level
+        # only — subagents skip this.
+        if (
+            _effort in (EffortLevel.HIGH, EffortLevel.MAX)
+            and needs_tools
+            and all_new_messages
+            and all_new_messages[-1].role == "assistant"
+        ):
+            try:
+                from lazyclaw.runtime.dispatcher import _IS_SUBAGENT
+                if not _IS_SUBAGENT.get():
+                    from lazyclaw.teams.settings import get_team_settings
+                    _team_cfg = await get_team_settings(self.config, user_id)
+                    if _team_cfg.get("critic_mode"):
+                        from lazyclaw.runtime.critic import (
+                            run_critic, build_tool_trace,
+                        )
+                        _critic_trace = build_tool_trace(
+                            _tool_call_history, _tool_results,
+                        )
+                        _critic_reply_in = all_new_messages[-1].content or ""
+                        _critic_result = await run_critic(
+                            user_message=message,
+                            reply=_critic_reply_in,
+                            tool_trace=_critic_trace,
+                            base_messages=list(messages),
+                            eco_router=self.eco_router,
+                            user_id=user_id,
+                            model_id=_team_cfg.get("critic_model") or None,
+                            max_loops=3,
+                        )
+                        logger.info(
+                            "TAOR critic: passed=%s loops=%d rewrites=%d",
+                            _critic_result.passed,
+                            _critic_result.loops_used,
+                            _critic_result.rewrite_count,
+                        )
+                        if _critic_result.final_reply != _critic_reply_in:
+                            all_new_messages[-1] = LLMMessage(
+                                role="assistant",
+                                content=_critic_result.final_reply,
+                            )
+                            try:
+                                await cb.on_event(AgentEvent(
+                                    "critic",
+                                    f"Critic {'passed' if _critic_result.passed else 'flagged'} "
+                                    f"after {_critic_result.loops_used} pass(es)",
+                                    {
+                                        "passed": _critic_result.passed,
+                                        "loops_used": _critic_result.loops_used,
+                                        "rewrite_count": _critic_result.rewrite_count,
+                                        "issues": list(_critic_result.last_issues),
+                                    },
+                                ))
+                            except Exception:
+                                pass
+            except Exception as _ce:
+                logger.warning("TAOR critic call failed (failing open): %s", _ce)
+
         # ── Post-loop: persist + cleanup (guarded by finally) ─────────
         content = ""
         try:

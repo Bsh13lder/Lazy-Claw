@@ -207,7 +207,30 @@ html, body {
   --color-lb-accent-cream-soft: rgba(228, 212, 176, 0.14);
   --color-lb-border-warm: rgba(255, 245, 220, 0.08);
 
+  /* Graph theme — read by ForceGraph.tsx via getComputedStyle on
+     `.lazybrain-root`. Override at the page level to retheme the graph
+     without recompiling. Hex strings only (parsed to ints by pixi). */
+  --lb-graph-node: #a78bfa;
+  --lb-graph-node-visited: #c4b5fd;
+  --lb-graph-node-hover: #fbbf24;
+  --lb-graph-node-selected: #10b981;
+  --lb-graph-link: #3a3450;
+  --lb-graph-link-active: #a78bfa;
+  --lb-graph-text: #f0e4c8;
+  --lb-graph-halo-hover: #fbbf24;
+  --lb-graph-halo-selected: #10b981;
+  --lb-graph-halo-pinned: #fbbf24;
+  --lb-graph-ring-subtle: #2a2334;
+  --lb-font-ui: "Inter", system-ui, sans-serif;
+
   color: var(--color-lb-text-primary);
+}
+
+/* Pan cursor on the canvas — pixi's stage cursor doesn't propagate to
+   the host canvas element, so we set it here for empty-area panning.
+   The grabbing variant kicks in via :active. */
+.lb-graph-canvas canvas:active {
+  cursor: grabbing !important;
 }
 
 /* Warmer border + softer text on glass chrome inside LazyBrain only. */

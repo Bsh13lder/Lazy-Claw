@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../api";
 import type { LazyBrainGraph, LazyBrainNote, LazyBrainTag } from "../api";
 import { BacklinksPanel } from "../components/lazybrain/BacklinksPanel";
-import { GraphView } from "../components/lazybrain/GraphView";
+import { ForceGraphView as GraphView } from "../components/lazybrain/ForceGraphView";
 import { GraphInspector } from "../components/lazybrain/GraphInspector";
 import { GraphPeekCard } from "../components/lazybrain/GraphPeekCard";
 import { NoteEditor } from "../components/lazybrain/NoteEditor";

@@ -1261,11 +1261,19 @@ export function GraphView({
     needsRedrawRef.current = true;
   }, [size.width, size.height]);
 
+  // id → pool index, rebuilt by the pool useEffect below. Used by the
+  // per-frame patcher to look up each sim node's slot — pool length can
+  // be < sim.nodes length (we skip graph nodes with no sim node), so
+  // index-based alignment silently drifts and produces hover/label
+  // mismatches.
+  const poolIndexById = useRef(new Map<string, number>());
+
   // Build the DrawNode pool when graph data, focus state, or filters
   // change. Per-frame loop only patches x/y/scale/halo on top of this
   // — most fields stay constant for tens of frames at a stretch.
   useEffect(() => {
     const pool: DrawNode[] = [];
+    const poolIdx = new Map<string, number>();
     for (const node of graph.nodes) {
       const sn = nodeById.get(node.id);
       if (!sn) continue;
@@ -1372,8 +1380,10 @@ export function GraphView({
         haloColor: isFocus || isSelected ? color.ring : "",
         haloAlpha: isFocus ? 0.32 : isSelected ? 0.22 : 0,
       });
+      poolIdx.set(node.id, pool.length - 1);
     }
     drawNodesPoolRef.current = pool;
+    poolIndexById.current = poolIdx;
     needsRedrawRef.current = true;
   }, [
     graph.nodes, nodeById, notesById, degree, hubIds, depths, focusId,
@@ -1446,20 +1456,22 @@ export function GraphView({
     isSelectFocus, isHoverFocus, dimPredicate, matcher,
   ]);
 
-  // Index-aligned sim → pool position patcher. Called per frame to copy
-  // the latest sim positions into the existing DrawNode/Edge objects.
+  // Sim → pool position patcher. Called per frame to copy the latest sim
+  // positions into the existing DrawNode/Edge objects. Looks up the pool
+  // slot by node id (NOT array index — those diverge).
   const patchPoolPositions = useCallback(() => {
     const s = simRef.current;
     if (!s) return;
     const sNodes = s.nodes;
     const nodePool = drawNodesPoolRef.current;
-    const idxToPool = nodeIndexById.current;
-    // Re-walk the same iteration order used to build the pool so indices
-    // stay aligned (one entry per graph.node that has a sim node).
-    for (let i = 0; i < sNodes.length && i < nodePool.length; i++) {
+    const idxToSim = nodeIndexById.current;
+    const idxToPool = poolIndexById.current;
+    for (let i = 0; i < sNodes.length; i++) {
       const n = sNodes[i];
-      nodePool[i].x = n.x;
-      nodePool[i].y = n.y;
+      const pi = idxToPool.get(n.id);
+      if (pi === undefined || pi >= nodePool.length) continue;
+      nodePool[pi].x = n.x;
+      nodePool[pi].y = n.y;
     }
     // Edges: walk by graph.edges order.
     const edgePool = drawEdgesPoolRef.current;
@@ -1467,8 +1479,8 @@ export function GraphView({
     let writeIdx = 0;
     for (let i = 0; i < edges.length; i++) {
       const e = edges[i];
-      const ai = idxToPool.get(e.source);
-      const bi = idxToPool.get(e.target);
+      const ai = idxToSim.get(e.source);
+      const bi = idxToSim.get(e.target);
       if (ai === undefined || bi === undefined) continue;
       const a = sNodes[ai];
       const b = sNodes[bi];
@@ -1482,7 +1494,7 @@ export function GraphView({
     }
   }, [graph.edges]);
 
-  // id → sim index. Stable per sim — used by the position-patch loop.
+  // id → sim index. Stable per sim — used by the edge-position patch loop.
   const nodeIndexById = useRef(new Map<string, number>());
   useEffect(() => {
     const m = new Map<string, number>();

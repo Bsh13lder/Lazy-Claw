@@ -67,6 +67,107 @@ def _row_to_dict(row, key: bytes) -> dict:
     return out
 
 
+def _slugify(name: str) -> str:
+    """Lowercase + dash-join name for the ``template/<slug>`` LazyBrain tag."""
+    cleaned = "".join(
+        c if c.isalnum() else "-" for c in (name or "").strip().lower()
+    )
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-") or "untitled"
+
+
+def _build_template_note_body(tpl: dict) -> str:
+    """Render a template dict as a searchable LazyBrain note body.
+
+    Pure function. Truncates the playbook + system_prompt so the
+    embedding signal stays focused (nomic-embed-text caps at 8192 tokens
+    anyway) and the note doesn't bloat the vault.
+    """
+    name = tpl.get("name") or "(unnamed)"
+    icon = tpl.get("icon") or ""
+    setup_urls = tpl.get("setup_urls") or []
+    checkpoints = tpl.get("checkpoints") or []
+    playbook = (tpl.get("playbook") or "").strip()
+    system_prompt = (tpl.get("system_prompt") or "").strip()
+    watch_url = tpl.get("watch_url") or ""
+
+    parts = [f"**Browser template:** {icon} {name}".strip()]
+    if setup_urls:
+        parts.append("\n**Setup URLs:**")
+        parts.extend(f"- {u}" for u in setup_urls[:10])
+    if checkpoints:
+        parts.append("\n**Checkpoints:**")
+        parts.extend(f"- {c}" for c in checkpoints[:20])
+    if watch_url:
+        parts.append(f"\n**Watch URL:** {watch_url}")
+    if playbook:
+        snippet = playbook if len(playbook) <= 2000 else playbook[:2000] + "\n…(truncated)"
+        parts.append("\n**Playbook:**")
+        parts.append(snippet)
+    if system_prompt:
+        snippet = system_prompt if len(system_prompt) <= 1000 else system_prompt[:1000] + "\n…(truncated)"
+        parts.append("\n**System prompt:**")
+        parts.append(snippet)
+    return "\n".join(parts)
+
+
+async def _mirror_template_note(config: Config, user_id: str, tpl: dict) -> None:
+    """Mirror a browser template into LazyBrain so semantic search can
+    find it (e.g. "do I have a flow for booking medical appointments?").
+
+    Idempotent via ``find_by_title`` — re-saving the same template
+    updates the existing note instead of duplicating. Silent on failure
+    (a PKM hiccup must NEVER break template CRUD).
+    """
+    if not tpl or not tpl.get("name"):
+        return
+    try:
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        body = _build_template_note_body(tpl)
+        note_title = f"Template: {tpl['name'][:60]}"
+        tags = [
+            "browser-template", "auto", "owner/agent",
+            f"template/{_slugify(tpl['name'])}",
+        ]
+        # Stamp primary host as a site/<domain> tag if we have setup_urls,
+        # so the template shows up under the same domain bucket as its
+        # site_memory siblings in the graph.
+        urls = tpl.get("setup_urls") or []
+        if urls:
+            host = _host_of(urls[0])
+            if host:
+                tags.append(f"site/{host}")
+
+        existing = await lb_store.find_by_title(config, user_id, note_title)
+        if existing:
+            updated = await lb_store.update_note(
+                config, user_id, existing["id"],
+                content=body, tags=tags,
+            )
+            if updated:
+                lb_events.publish_note_saved(
+                    user_id, updated["id"], updated.get("title"),
+                    updated.get("tags"), source="browser-template",
+                )
+            return
+
+        note = await lb_store.save_note(
+            config, user_id,
+            content=body, title=note_title, tags=tags, importance=5,
+        )
+        lb_events.publish_note_saved(
+            user_id, note["id"], note["title"], note["tags"],
+            source="browser-template",
+        )
+    except Exception:
+        logger.warning(
+            "lazybrain template mirror failed for user %s", user_id, exc_info=True,
+        )
+
+
 # ── CRUD ──────────────────────────────────────────────────────────────────
 
 
@@ -110,7 +211,10 @@ async def create_template(
         )
         await db.commit()
     logger.info("Created browser template %s ('%s') for user %s", tpl_id, name, user_id)
-    return await get_template(config, user_id, tpl_id) or {}
+    tpl = await get_template(config, user_id, tpl_id) or {}
+    if tpl:
+        await _mirror_template_note(config, user_id, tpl)
+    return tpl
 
 
 async def get_template(config: Config, user_id: str, tpl_id: str) -> dict | None:
@@ -185,7 +289,16 @@ async def update_template(
             values,
         )
         await db.commit()
-    return await get_template(config, user_id, tpl_id)
+    tpl = await get_template(config, user_id, tpl_id)
+    # Mirror only when user-visible content actually changed — bumping
+    # run_count or last_run_at on every successful run shouldn't
+    # re-touch the LazyBrain note (would spam embedding work for no
+    # signal change).
+    if tpl and any(
+        f in fields for f in ("name", "playbook", "system_prompt", "setup_urls", "checkpoints", "icon", "watch_url")
+    ):
+        await _mirror_template_note(config, user_id, tpl)
+    return tpl
 
 
 async def delete_template(config: Config, user_id: str, tpl_id: str) -> bool:

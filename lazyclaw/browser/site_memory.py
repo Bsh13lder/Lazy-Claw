@@ -97,6 +97,51 @@ async def remember(
     return memory_id
 
 
+def _render_content_as_bullets(content, indent: int = 0, max_chars: int = 1500) -> str:
+    """Recursive prose renderer for the LazyBrain mirror note body.
+
+    Replaces ``json.dumps(content)`` with a bullet-list shape so the
+    embedding signal isn't drowned in JSON syntax. Walks dicts, lists,
+    and scalars; truncates the final string at ``max_chars`` to match
+    the previous size budget.
+
+    Pure function — no I/O. Same caller, same byte budget, better
+    embedding recall.
+    """
+    pad = "  " * indent
+    if isinstance(content, dict):
+        lines: list[str] = []
+        for k, v in content.items():
+            if isinstance(v, (dict, list)):
+                lines.append(f"{pad}- {k}:")
+                nested = _render_content_as_bullets(v, indent + 1, max_chars=max_chars * 2)
+                if nested:
+                    lines.append(nested)
+            else:
+                v_str = str(v).strip().replace("\n", " ")
+                if v_str:
+                    lines.append(f"{pad}- {k}: {v_str}")
+        out = "\n".join(lines)
+    elif isinstance(content, list):
+        lines = []
+        for i, item in enumerate(content):
+            if isinstance(item, (dict, list)):
+                lines.append(f"{pad}- item {i + 1}:")
+                nested = _render_content_as_bullets(item, indent + 1, max_chars=max_chars * 2)
+                if nested:
+                    lines.append(nested)
+            else:
+                item_str = str(item).strip().replace("\n", " ")
+                if item_str:
+                    lines.append(f"{pad}- {item_str}")
+        out = "\n".join(lines)
+    else:
+        out = f"{pad}{str(content).strip()}" if str(content).strip() else ""
+    if indent == 0 and len(out) > max_chars:
+        out = out[:max_chars] + "\n…(truncated)"
+    return out
+
+
 async def _mirror_site_memory_note(
     config: Config,
     user_id: str,
@@ -119,7 +164,7 @@ async def _mirror_site_memory_note(
         body = (
             f"**Site knowledge:** {title}\n\n"
             f"Domain: `{domain}` — type `{memory_type}`\n\n"
-            f"```json\n{json.dumps(content, indent=2)[:1500]}\n```"
+            f"{_render_content_as_bullets(content)}"
         )
         note_title = f"Site: {domain} — {title[:40]}"
         tags = [

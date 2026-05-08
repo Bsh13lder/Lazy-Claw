@@ -36,6 +36,113 @@ def _empty_payload() -> dict[str, Any]:
     return {"nodes": [], "edges": [], "viewport": {"x": 0, "y": 0, "zoom": 1}}
 
 
+# Fields on a React Flow node's `data` dict that carry user-readable text.
+# Order matters: first hit wins, so the most descriptive field comes first.
+_TEXT_FIELDS = ("text", "content", "body", "label", "title", "noteTitle", "name")
+
+
+def _extract_canvas_text(payload: dict[str, Any]) -> list[str]:
+    """Walk a canvas payload and collect text-bearing strings.
+
+    Pure function — no I/O. Returns the list of distinct text snippets
+    found across all node ``data`` dicts, plus any note-reference
+    ``noteTitle`` so wikilinks paint as ``[[Title]]`` for downstream
+    embedding signal.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    nodes = (payload or {}).get("nodes") or []
+    if not isinstance(nodes, list):
+        return out
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data")
+        if not isinstance(data, dict):
+            continue
+        # Note-reference: prefer the wikilink form so embeddings see the
+        # title in its canonical [[…]] shape (matches LazyBrain prose).
+        if data.get("noteId") and data.get("noteTitle"):
+            snippet = f"[[{str(data['noteTitle']).strip()}]]"
+            if snippet not in seen:
+                seen.add(snippet)
+                out.append(snippet)
+            continue
+        for field in _TEXT_FIELDS:
+            v = data.get(field)
+            if not isinstance(v, str):
+                continue
+            stripped = v.strip()
+            if not stripped or stripped in seen:
+                continue
+            seen.add(stripped)
+            out.append(stripped)
+            break  # one snippet per node — avoids duplicating label+text
+    return out
+
+
+async def _mirror_canvas_note(
+    config: Config,
+    user_id: str,
+    board_id: str,
+    name: str,
+    payload: dict[str, Any],
+) -> None:
+    """Mirror a canvas board's text content into LazyBrain so semantic
+    search reaches it (text trapped in encrypted React-Flow JSON is
+    otherwise invisible to embeddings + word search).
+
+    Idempotent via ``find_by_title``. Skips boards with zero
+    text-bearing nodes — pure shape/image canvases produce no useful
+    embedding signal. Silent on failure.
+    """
+    try:
+        snippets = _extract_canvas_text(payload)
+        if not snippets:
+            return  # nothing searchable on this board
+
+        from lazyclaw.lazybrain import events as lb_events
+        from lazyclaw.lazybrain import store as lb_store
+
+        # Cap body so a 1000-node board doesn't bloat the vault.
+        bullets = "\n".join(f"- {s}" for s in snippets[:200])
+        if len(bullets) > 4000:
+            bullets = bullets[:4000] + "\n…(truncated)"
+        body = f"**Canvas:** {name}\n\n{bullets}"
+        note_title = f"Canvas: {(name or 'Untitled')[:60]}"
+        tags = [
+            "canvas-board", "auto", "owner/user",
+            f"canvas/{board_id}",
+        ]
+
+        existing = await lb_store.find_by_title(config, user_id, note_title)
+        if existing:
+            updated = await lb_store.update_note(
+                config, user_id, existing["id"],
+                content=body, tags=tags,
+            )
+            if updated:
+                lb_events.publish_note_saved(
+                    user_id, updated["id"], updated.get("title"),
+                    updated.get("tags"), source="canvas-board",
+                )
+            return
+
+        note = await lb_store.save_note(
+            config, user_id,
+            content=body, title=note_title, tags=tags, importance=4,
+        )
+        lb_events.publish_note_saved(
+            user_id, note["id"], note["title"], note["tags"],
+            source="canvas-board",
+        )
+    except Exception:
+        logger.warning(
+            "lazybrain canvas mirror failed for user %s board %s",
+            user_id, board_id, exc_info=True,
+        )
+
+
 async def list_boards(config: Config, user_id: str) -> list[dict[str, Any]]:
     """Return a plaintext index: id, name, timestamps (no payload)."""
     async with db_session(config) as db:
@@ -102,6 +209,7 @@ async def save_board(
                 (board_id, user_id, name[:120], enc, now, now),
             )
             await db.commit()
+        await _mirror_canvas_note(config, user_id, board_id, name, payload)
         return {"id": board_id, "name": name, "created_at": now, "updated_at": now}
 
     async with db_session(config) as db:
@@ -118,6 +226,7 @@ async def save_board(
                 (board_id, user_id, name[:120], enc, now, now),
             )
         await db.commit()
+    await _mirror_canvas_note(config, user_id, board_id, name, payload)
     return {"id": board_id, "name": name, "updated_at": now}
 
 

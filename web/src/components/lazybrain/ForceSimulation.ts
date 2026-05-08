@@ -48,7 +48,25 @@ export interface SimNodeInput {
    *  pull them. Pass "rollup" for weekly/topic, "monthly-rollup" for
    *  monthly. Omit for plain notes. */
   kind?: "rollup" | "monthly-rollup";
+  /** Backend-provided Leiden community index. Currently unused by the
+   *  layout — kept for potential future hue-rotation. The visible
+   *  clustering signal is now `categoryKey` + a fixed-anchor pull. */
+  community_id?: number | null;
+  /** Stellar-atlas category key (e.g. "rollup", "journal", "task").
+   *  Resolves to a fixed (x, y) zone anchor on the canvas via
+   *  `categoryAnchorAt()` in noteColors.ts. The force pass applies a
+   *  STRONG linear pull toward that anchor every tick so categories
+   *  stay visibly separated as named constellations instead of melting
+   *  into a single central blob. ``undefined`` → "_default" (periphery). */
+  categoryKey?: string;
 }
+
+/** Legacy resolver type — kept for backwards compatibility on the option
+ *  shape. The new layout is internal (sun + belt by topology), so this
+ *  is not consumed anywhere; remove on the next API revision. */
+export type AnchorResolver = (
+  categoryKey: string,
+) => { x: number; y: number } | null;
 
 export type SimMode = "orbital" | "force";
 
@@ -68,6 +86,11 @@ export interface SimOptions {
    *  default seeding so known nodes skip the random scatter and open at
    *  the coordinates the user left them. Unknown nodes keep their seed. */
   savedPositions?: Record<string, [number, number]>;
+  /** Resolves a category key to a fixed (x, y) anchor on the current
+   *  canvas. When supplied, every node is yanked toward its anchor each
+   *  tick — that's what produces the named "constellations". Omit for
+   *  legacy unanchored layout. */
+  anchorResolver?: AnchorResolver;
 }
 
 export interface OrbitMeta {
@@ -133,6 +156,47 @@ export class ForceSimulation {
   // instead of stacking into one center blob — vanilla d3-force with
   // a uniform charge doesn't do this; Obsidian's graph view does.
   private _repelMass!: Float32Array;
+  // Topology-driven layout (sun + belt):
+  //   - Supernote (max-degree node across the whole graph) pins at
+  //     canvas centre. Its connected component spreads out as the
+  //     central starburst.
+  //   - Every OTHER multi-node connected component is anchored on a
+  //     belt ring at radius 0.65 × half-canvas. Angle is hash-stable
+  //     (derived from the component's hub id) so the user's mental map
+  //     of "where is X system" persists across reloads.
+  //   - Singleton components (orphan notes, no wikilinks) drift to a
+  //     wider outer halo at radius 0.92 so they don't pollute the void.
+  //
+  //   _componentAnchorX/Y: per-component anchor (x, y) in canvas space.
+  //                        Index-aligned with _componentSize / _componentHub.
+  //   _supernoteIdx:       node-array index of the global max-degree node
+  //                        (or -1 if every node is isolated).
+  //
+  // Categorical metadata still flows through SimNodeInput.categoryKey
+  // but only drives the spring modulator (same-cat 1.5×, cross-cat 0.25×)
+  // — categories no longer determine position. POSITION is pure topology;
+  // COLOUR is category. The renderer marries them.
+  private _categoryIdx!: Int32Array;
+  private _edgeCategoryMul!: Float32Array;
+  private _componentAnchorX!: Float32Array;
+  private _componentAnchorY!: Float32Array;
+  private _supernoteIdx: number = -1;
+  // Connected-component cohesion — the "planet system" layer of the
+  // three-tier hierarchy:
+  //   1. Galaxy = category zone (anchorX/Y)
+  //   2. Planet system = connected component (centroid + hub gravity)
+  //   3. Star + moons = component hub + degree-1 leaves
+  // _componentIdx: per-node component index (-1 = isolated)
+  // _componentHub: per-component hub node index (max-degree member)
+  // _componentSize: per-component member count
+  // _centroidX/Y: per-tick scratch — recomputed at the start of every
+  //   force tick from current node positions. Allocated once at
+  //   construction sized to component count.
+  private _componentIdx!: Int32Array;
+  private _componentHub!: Int32Array;
+  private _componentSize!: Int32Array;
+  private _centroidX!: Float32Array;
+  private _centroidY!: Float32Array;
   // Per-edge spring strength scale — d3-force convention:
   //   strength = 1 / min(deg(a), deg(b))
   // High-degree → low-degree edges (hub→leaf) keep full strength, so
@@ -218,9 +282,12 @@ export class ForceSimulation {
 
     this.nodes = [];
     if (this._mode === "force") {
-      // Force mode: seed all nodes with a small random jitter around the
-      // canvas center. The force pass will sort them out into clusters
-      // over the next ~60 ticks. No ring math involved.
+      // Force mode: seed at canvas centre + light scatter. Component
+      // detection + anchor placement happens later in the constructor
+      // (it depends on degree, which depends on the edge list, which
+      // we don't have here yet). The first stepForce tick yanks every
+      // node toward its computed anchor under CLUSTER_K=0.18, so the
+      // sun-and-belt arrangement materialises within ~80 ticks.
       for (let o = 0; o < NUM_ORBITS; o++) {
         this._orbitCounts[o] = buckets[o].length;
       }
@@ -355,6 +422,29 @@ export class ForceSimulation {
     this._edgePairs = new Int32Array(this.edges.length * 2);
     this._edgeStrengths = new Float32Array(this.edges.length);
     this._edgeLengths = new Float32Array(this.edges.length);
+    this._edgeCategoryMul = new Float32Array(this.edges.length);
+    // Per-node category index — drives the spring modulator only
+    // (position is decided by the per-component anchors below).
+    this._categoryIdx = new Int32Array(N);
+    {
+      const keyByIdx = new Map(
+        nodes.map((n) => [n.id, n.categoryKey] as const),
+      );
+      const idByCat = new Map<string, number>();
+      for (let i = 0; i < N; i++) {
+        const key = keyByIdx.get(this.nodes[i].id);
+        if (!key || typeof key !== "string") {
+          this._categoryIdx[i] = -1;
+          continue;
+        }
+        let idx = idByCat.get(key);
+        if (idx === undefined) {
+          idx = idByCat.size;
+          idByCat.set(key, idx);
+        }
+        this._categoryIdx[i] = idx;
+      }
+    }
     // Per-node "kind" flag — true when the input carried kind=rollup or
     // kind=monthly-rollup. Used both for the repel-mass bump below and
     // for the per-edge length decision in this loop. Index-aligned.
@@ -376,12 +466,100 @@ export class ForceSimulation {
     for (let i = 0; i < N; i++) {
       degByIdx[i] = this._degree.get(this.nodes[i].id) ?? 0;
     }
+    // ── Connected-component detection ───────────────────────────────
+    // Union-find over the edge list to find the topology components —
+    // the "planet systems" within each category zone. Each component
+    // gets a hub (max-degree member) and a centroid pull so members
+    // physically cluster around their hub like moons orbiting a planet.
+    // Cheap O(N + E) — runs once at construction.
+    this._componentIdx = new Int32Array(N);
+    {
+      const parent = new Int32Array(N);
+      for (let i = 0; i < N; i++) parent[i] = i;
+      const find = (x: number): number => {
+        let r = x;
+        while (parent[r] !== r) r = parent[r];
+        while (parent[x] !== r) {
+          const next = parent[x];
+          parent[x] = r;
+          x = next;
+        }
+        return r;
+      };
+      for (const e of this.edges) {
+        const a = nodeIndex.get(e.source);
+        const b = nodeIndex.get(e.target);
+        if (a === undefined || b === undefined) continue;
+        const ra = find(a);
+        const rb = find(b);
+        if (ra !== rb) parent[ra] = rb;
+      }
+      const rootToIdx = new Map<number, number>();
+      let compCount = 0;
+      for (let i = 0; i < N; i++) {
+        const r = find(i);
+        let idx = rootToIdx.get(r);
+        if (idx === undefined) {
+          idx = compCount++;
+          rootToIdx.set(r, idx);
+        }
+        this._componentIdx[i] = idx;
+      }
+      // Hub per component = max-degree member. Iterate once, track
+      // best degree per component slot. Falls back to first member
+      // when every node in a component has degree 0 (unreachable here
+      // since orphans are their own components, but defensive).
+      this._componentSize = new Int32Array(compCount);
+      this._componentHub = new Int32Array(compCount);
+      const bestDeg = new Int32Array(compCount).fill(-1);
+      for (let i = 0; i < N; i++) {
+        const c = this._componentIdx[i];
+        this._componentSize[c] += 1;
+        const d = degByIdx[i];
+        if (d > bestDeg[c]) {
+          bestDeg[c] = d;
+          this._componentHub[c] = i;
+        }
+      }
+      // Per-tick scratch for the centroid pass — sized to component count.
+      this._centroidX = new Float32Array(compCount);
+      this._centroidY = new Float32Array(compCount);
+      // ── Topology-driven layout: sun + belt ──────────────────────────
+      // The supernote is the single highest-degree node in the entire
+      // graph. Whichever component contains it becomes the "core" and
+      // anchors at the canvas centre; every other component is anchored
+      // somewhere on a belt ring (multi-node) or outer halo (singleton).
+      // Without this, the force model alone never produces the strong
+      // visual "one big thing in the middle" the user is asking for —
+      // gravity is too weak vs spring repulsion across 800 nodes.
+      this._componentAnchorX = new Float32Array(compCount);
+      this._componentAnchorY = new Float32Array(compCount);
+      this._supernoteIdx = -1;
+      let bestSuperDeg = -1;
+      for (let i = 0; i < N; i++) {
+        if (degByIdx[i] > bestSuperDeg) {
+          bestSuperDeg = degByIdx[i];
+          this._supernoteIdx = i;
+        }
+      }
+      this._computeComponentAnchors();
+    }
+
     // Spring-length base — same value used by stepForce. Multiplied by
     // 1.4 for rollup-incident edges so rollup hubs sit further from
     // their sources. Anything that consumes this constant in stepForce
     // now reads from _edgeLengths instead.
     const SPRING_LEN_BASE = 130;
     const ROLLUP_LEN_MUL = 1.4;
+    // Hub-and-moon spring lengths — leaves cling tight to their hub
+    // (60-80px feels like a planet-moon distance), mid-degree edges
+    // sit at the default, hub-hub edges stretch wide. Computed from
+    // min(deg) on each edge:
+    //   1   → leaf-anchored        : 70px  (moon orbiting a planet)
+    //   2-3 → tight family          : 100px
+    //   4+  → hub-hub or backbone   : 130px (default) — keeps wide arms
+    const SPRING_LEN_LEAF = 70;
+    const SPRING_LEN_TIGHT = 100;
     for (const e of this.edges) {
       const i = nodeIndex.get(e.source);
       const j = nodeIndex.get(e.target);
@@ -393,10 +571,35 @@ export class ForceSimulation {
       // → barely pulls, lets hubs separate under repulsion.
       const minDeg = Math.max(1, Math.min(degByIdx[i], degByIdx[j]));
       this._edgeStrengths[es] = 1 / minDeg;
-      // Rollup-incident → longer rest length. Either endpoint counts.
-      this._edgeLengths[es] = (isRollup[i] || isRollup[j])
-        ? SPRING_LEN_BASE * ROLLUP_LEN_MUL
-        : SPRING_LEN_BASE;
+      // Rest length: rollup-incident edges sit further apart; otherwise
+      // pick by degree-of-tighter-end so leaves snap close to their hub
+      // ("moon" feel) and hub-hub edges stay wide ("orbital arm" feel).
+      let restLen: number;
+      if (isRollup[i] || isRollup[j]) {
+        restLen = SPRING_LEN_BASE * ROLLUP_LEN_MUL;
+      } else if (minDeg <= 1) {
+        restLen = SPRING_LEN_LEAF;
+      } else if (minDeg <= 3) {
+        restLen = SPRING_LEN_TIGHT;
+      } else {
+        restLen = SPRING_LEN_BASE;
+      }
+      this._edgeLengths[es] = restLen;
+      // Categorical modulator — same-zone springs pull harder (1.5×)
+      // so a constellation tightens around its anchor; cross-zone
+      // springs pull weaker (0.25×) so a stray rollup→task wikilink
+      // doesn't drag the rollup out of its zone. Unanchored either
+      // side → neutral 1.0 (legacy behaviour for graphs without
+      // category metadata).
+      const ci = this._categoryIdx[i];
+      const cj = this._categoryIdx[j];
+      if (ci < 0 || cj < 0) {
+        this._edgeCategoryMul[es] = 1.0;
+      } else if (ci === cj) {
+        this._edgeCategoryMul[es] = 1.5;
+      } else {
+        this._edgeCategoryMul[es] = 0.25;
+      }
       es += 1;
     }
     // Trim trailing unused slots if any edges were dropped after the filter.
@@ -404,6 +607,7 @@ export class ForceSimulation {
       this._edgePairs = this._edgePairs.slice(0, ep);
       this._edgeStrengths = this._edgeStrengths.slice(0, es);
       this._edgeLengths = this._edgeLengths.slice(0, es);
+      this._edgeCategoryMul = this._edgeCategoryMul.slice(0, es);
     }
 
     // Per-node repulsion mass — heavier nodes (hubs) push everything
@@ -522,7 +726,33 @@ export class ForceSimulation {
     // SPRING_LEN moved to per-edge `_edgeLengths` (constructor) so
     // rollup-incident edges can sit further apart than concept-link
     // edges. Most edges still resolve to 130px there.
-    const GRAVITY_K     = 0.008; // softer pull so cluster islands fan out
+    // Gravity halved (was 0.008) so cluster islands have room to drift
+    // apart instead of being yanked back to centre. The cluster-centroid
+    // attractor below now provides intra-cluster cohesion; gravity only
+    // needs to keep the WHOLE graph on-screen, not pack it tight.
+    const GRAVITY_K     = 0.004;
+    // Three-tier hierarchy strengths:
+    //   CLUSTER_K — galaxy: pull toward category zone anchor (primary)
+    //   COMPONENT_K — planet system: pull toward connected-component
+    //                 centroid (secondary)
+    //   HUB_K — moons: non-hub members pulled toward their hub
+    // Stacked weakest-to-strongest so each layer refines without
+    // overpowering the one above it. Empirically: 0.18 / 0.06 / 0.04
+    // makes 800 nodes resolve into clearly-named zones with clean
+    // planet systems within them.
+    const CLUSTER_K     = 0.18;
+    // COMPONENT_K and HUB_K loosened so the sun's leaves orbit by
+    // springs alone (LEAF=70 px) instead of being compressed into a
+    // tight ring by FOUR co-aligned forces. The sun+belt SEPARATION
+    // is still owned by CLUSTER_K=0.18; only the WITHIN-system pull
+    // is gentled.
+    const COMPONENT_K   = 0.020;
+    const HUB_K         = 0.012;
+    // Skip component cohesion above this size — the "giant component"
+    // (everything wikilinked to everything) shouldn't all be pulled to
+    // one centroid; that would defeat the category-zone separation.
+    // Below the cap, planet systems feel taut.
+    const COMPONENT_MAX = 60;
     const DAMPING       = 0.88;
     const V_MAX         = 4.0;
 
@@ -564,6 +794,87 @@ export class ForceSimulation {
       const n = this.nodes[i];
       fx[i] += (this.cx - n.x) * GRAVITY_K;
       fy[i] += (this.cy - n.y) * GRAVITY_K;
+    }
+
+    // Categorical anchor pull — the heart of the stellar-atlas layout.
+    // One O(N) pass: each unpinned node feels a linear spring toward
+    // its category's FIXED (x, y) anchor, recomputed only on resize.
+    // Replaces the prior community-centroid attractor (which depended
+    // on the existing positions and so couldn't break a saved blob).
+    // Static anchors give every reload the same skyline — a node's
+    // zone identity is the same on Tuesday morning as it was Monday
+    // night, even if 50 new notes joined the constellation in between.
+    // ── Galaxy layer (sun + belt) ────────────────────────────────────
+    // Each node feels a strong linear pull toward its COMPONENT anchor.
+    // The supernote's component anchors at canvas centre (forming the
+    // central starburst); belt-ring components anchor at fixed angles
+    // around the void; singletons anchor on the outer halo. Position
+    // is therefore purely topology-driven — categories no longer
+    // determine where a node sits, only what colour it paints.
+    const compIdxBuf = this._componentIdx;
+    const cax = this._componentAnchorX;
+    const cay = this._componentAnchorY;
+    if (cax) {
+      for (let i = 0; i < N; i++) {
+        const c = compIdxBuf[i];
+        if (c < 0 || c >= cax.length) continue;
+        const n = this.nodes[i];
+        fx[i] += (cax[c] - n.x) * CLUSTER_K;
+        fy[i] += (cay[c] - n.y) * CLUSTER_K;
+      }
+    }
+
+    // ── Planet-system layer ──────────────────────────────────────────
+    // Component-centroid pull. Each connected sub-graph (e.g. a topic
+    // rollup + its 12 wikilinked sources) becomes a "planet system"
+    // whose members physically cluster. The hub gets full pull; non-
+    // hubs get the pull PLUS an extra moon-ward gravity toward the hub.
+    // Singletons (size 1) and giants (size > COMPONENT_MAX) skip the
+    // pass — singletons have no centroid signal and giants would
+    // pull every connected note toward one mega-centroid that defeats
+    // category separation.
+    const compIdx = this._componentIdx;
+    const compSize = this._componentSize;
+    const compHub = this._componentHub;
+    const compCount = compSize.length;
+    if (compCount > 0) {
+      const ccX = this._centroidX;
+      const ccY = this._centroidY;
+      ccX.fill(0);
+      ccY.fill(0);
+      // Centroid sums.
+      for (let i = 0; i < N; i++) {
+        const c = compIdx[i];
+        const n = this.nodes[i];
+        ccX[c] += n.x;
+        ccY[c] += n.y;
+      }
+      for (let c = 0; c < compCount; c++) {
+        const k = compSize[c];
+        if (k > 0) {
+          ccX[c] /= k;
+          ccY[c] /= k;
+        }
+      }
+      // Pull toward centroid + (for non-hubs) toward hub. Each force
+      // is gentle on its own — together they form the planetary feel
+      // without overpowering the category anchor.
+      for (let i = 0; i < N; i++) {
+        const c = compIdx[i];
+        const sz = compSize[c];
+        if (sz < 2 || sz > COMPONENT_MAX) continue;
+        const n = this.nodes[i];
+        // Centroid pull (whole system breathes together).
+        fx[i] += (ccX[c] - n.x) * COMPONENT_K;
+        fy[i] += (ccY[c] - n.y) * COMPONENT_K;
+        // Hub gravity (moons orbit the planet). The hub itself feels
+        // no extra pull — staying still is its job.
+        const hubIdx = compHub[c];
+        if (hubIdx === i) continue;
+        const hub = this.nodes[hubIdx];
+        fx[i] += (hub.x - n.x) * HUB_K;
+        fy[i] += (hub.y - n.y) * HUB_K;
+      }
     }
 
     // Pairwise repulsion — Coulomb 1/r², O(N²), fine up to ~500 nodes.
@@ -625,6 +936,7 @@ export class ForceSimulation {
     const edgePairs = this._edgePairs;
     const edgeStrengths = this._edgeStrengths;
     const edgeLengths = this._edgeLengths;
+    const edgeCategoryMul = this._edgeCategoryMul;
     const EP = edgePairs.length;
     for (let k = 0; k < EP; k += 2) {
       const i = edgePairs[k];
@@ -636,7 +948,11 @@ export class ForceSimulation {
       const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
       const idx = k >> 1;
       const delta = d - edgeLengths[idx];
-      const f = SPRING_K * edgeStrengths[idx] * delta;
+      // Spring force: base SPRING_K × per-edge degree-weighting ×
+      // categorical modulator (1.0 / 1.5 / 0.25). Same-zone springs
+      // tighten the constellation; cross-zone springs relax so a stray
+      // wikilink can't drag a node out of its anchor's gravity well.
+      const f = SPRING_K * edgeStrengths[idx] * edgeCategoryMul[idx] * delta;
       const ux = dx / d, uy = dy / d;
       fx[i] += ux * f; fy[i] += uy * f;
       fx[j] -= ux * f; fy[j] -= uy * f;
@@ -880,6 +1196,191 @@ export class ForceSimulation {
     return this._radii;
   }
 
+  /** Snapshot of every connected-component "planet system" with at
+   *  least 4 members. Drives the orbital-ring rendering pass: each
+   *  hub gets a faint dashed ring at the average leaf distance so the
+   *  user sees discrete planet systems, not just dots in a cloud.
+   *
+   *  Returned shape:
+   *    hubX/Y     — hub node's CURRENT position (changes per frame).
+   *    avgRadius  — mean distance from hub to its non-hub members.
+   *                 Used as the orbital-ring radius. Clamped 80..220px
+   *                 so tiny systems still get a visible ring and very
+   *                 wide systems don't paint a ring across the whole
+   *                 canvas.
+   *    size       — total members. Used to fade the ring on huge
+   *                 components (visual noise control). */
+  componentHubs(): Array<{
+    hubX: number;
+    hubY: number;
+    avgRadius: number;
+    size: number;
+    hubId: string;
+  }> {
+    const out: Array<{
+      hubX: number;
+      hubY: number;
+      avgRadius: number;
+      size: number;
+      hubId: string;
+    }> = [];
+    const compCount = this._componentSize.length;
+    for (let c = 0; c < compCount; c++) {
+      const sz = this._componentSize[c];
+      // Lower bound 4 — singletons + tiny pairs aren't planet systems.
+      // Upper bound 60 — giant components don't read as one system.
+      if (sz < 4 || sz > 60) continue;
+      const hubIdx = this._componentHub[c];
+      const hub = this.nodes[hubIdx];
+      let sum = 0;
+      let count = 0;
+      for (let i = 0; i < this._componentIdx.length; i++) {
+        if (this._componentIdx[i] !== c || i === hubIdx) continue;
+        const n = this.nodes[i];
+        const dx = n.x - hub.x;
+        const dy = n.y - hub.y;
+        sum += Math.sqrt(dx * dx + dy * dy);
+        count += 1;
+      }
+      const avg = count > 0 ? sum / count : 0;
+      const ringR = Math.min(220, Math.max(80, avg));
+      out.push({
+        hubX: hub.x,
+        hubY: hub.y,
+        avgRadius: ringR,
+        size: sz,
+        hubId: hub.id,
+      });
+    }
+    return out;
+  }
+
+  /** Deprecated — categorical zones no longer drive layout. Returned
+   *  for backwards compatibility on the rendering pipeline; always
+   *  empty so the canvas renderer skips the zone-painting pass. */
+  zoneAnchors(): Array<{ key: string; x: number; y: number; count: number }> {
+    return [];
+  }
+
+  /** ID of the global max-degree node — the "supernote" pinned at canvas
+   *  centre. Returns ``null`` when the graph has no edges (no degree
+   *  signal). Callers use this to sanity-check stale layout snapshots:
+   *  if a server overlay puts the supernote far from (cx, cy), the
+   *  overlay is from before the v3 redesign and should be discarded. */
+  supernoteId(): string | null {
+    if (this._supernoteIdx < 0) return null;
+    return this.nodes[this._supernoteIdx]?.id ?? null;
+  }
+
+  /** Canvas centre — used together with `supernoteId()` for the stale-
+   *  overlay guard in GraphView. */
+  centerXY(): { x: number; y: number } {
+    return { x: this.cx, y: this.cy };
+  }
+
+  /** Recompute per-component (x, y) anchors against the current canvas
+   *  dimensions. Called on construction and on resize.
+   *
+   *  Layout rules:
+   *    - Core component (the one containing the supernote) → anchor at
+   *      (cx, cy). The supernote itself is also pinned here so it
+   *      stays put through the entire force settle.
+   *    - Other multi-node components → anchored on a belt ring at
+   *      radius BELT_R from centre. Angle is hash-stable per component
+   *      (derived from the hub node's id) so reloads place the same
+   *      system in the same arc of the sky. A small rejection sweep
+   *      separates pairs that hash within ~0.04 rad.
+   *    - Singleton components → anchored on an outer halo at HALO_R.
+   *      Same hash-stable angle distribution. They drift far from the
+   *      core so the void between centre and belt stays clean.
+   *
+   *  Numbers calibrated to the user's reference image: belt at 0.62,
+   *  halo at 0.92 of the half-canvas-min-dim. Wide enough that the
+   *  central starburst (typically 100-250 nodes for the lazybrain
+   *  super-rollup) doesn't bleed into belt systems even at peak
+   *  spread. */
+  private _computeComponentAnchors(): void {
+    if (!this._componentAnchorX) return;
+    const compCount = this._componentSize.length;
+    const half = Math.min(this.w, this.h) * 0.5;
+    // Belt at 85% of half-min — wide enough that a 100-200 node central
+    // starburst (~150-200 px wide) leaves a ~150-250 px void before the
+    // ring of belt systems. Halo pushes singletons past the canvas
+    // edge so orphans drift away rather than competing with belt
+    // systems for arc.
+    const BELT_R = half * 0.85;
+    const HALO_R = half * 1.18;
+    // Identify core component by the supernote's component index. If
+    // the graph has zero edges, no supernote → no core; everything
+    // ends up on the halo, which is a valid degenerate render.
+    const coreComp =
+      this._supernoteIdx >= 0
+        ? this._componentIdx[this._supernoteIdx]
+        : -1;
+    // Collect non-core component indices into two buckets:
+    // multi-node (belt) vs singleton (halo). Sort each by stable
+    // hash so rebuilds preserve placement.
+    const beltComps: Array<{ c: number; angle: number }> = [];
+    const haloComps: Array<{ c: number; angle: number }> = [];
+    for (let c = 0; c < compCount; c++) {
+      if (c === coreComp) continue;
+      const hubIdx = this._componentHub[c];
+      const hubId = this.nodes[hubIdx].id;
+      const angle = hash(hubId + "belt") * Math.PI * 2;
+      if (this._componentSize[c] >= 2) beltComps.push({ c, angle });
+      else haloComps.push({ c, angle });
+    }
+    // Light collision-resolution: sort by angle, push apart any pair
+    // closer than MIN_SEP. Two passes is enough for typical density.
+    const MIN_SEP = 0.11; // ~6.3° — each belt system gets at least this much arc; doubles the prior 3.4° so dense-hash collisions don't pile up
+    beltComps.sort((a, b) => a.angle - b.angle);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < beltComps.length; i++) {
+        const cur = beltComps[i];
+        const nxt = beltComps[(i + 1) % beltComps.length];
+        let gap = nxt.angle - cur.angle;
+        if (gap < 0) gap += Math.PI * 2;
+        if (gap < MIN_SEP) {
+          const push = (MIN_SEP - gap) * 0.5;
+          cur.angle -= push;
+          nxt.angle += push;
+        }
+      }
+    }
+    // Halo singletons get even spacing (no clusters allowed in halo).
+    if (haloComps.length > 0) {
+      haloComps.sort((a, b) => a.angle - b.angle);
+      const arc = (Math.PI * 2) / haloComps.length;
+      haloComps.forEach((h, i) => {
+        h.angle = i * arc;
+      });
+    }
+    // Apply anchors. Core sits at centre.
+    if (coreComp >= 0) {
+      this._componentAnchorX[coreComp] = this.cx;
+      this._componentAnchorY[coreComp] = this.cy;
+    }
+    for (const { c, angle } of beltComps) {
+      this._componentAnchorX[c] = this.cx + Math.cos(angle) * BELT_R;
+      this._componentAnchorY[c] = this.cy + Math.sin(angle) * BELT_R;
+    }
+    for (const { c, angle } of haloComps) {
+      this._componentAnchorX[c] = this.cx + Math.cos(angle) * HALO_R;
+      this._componentAnchorY[c] = this.cy + Math.sin(angle) * HALO_R;
+    }
+    // Pin the supernote so the whole layout pivots around it. The
+    // central starburst's hub node is the visual anchor of the entire
+    // graph — letting it drift would unmoor the user's mental map.
+    if (this._supernoteIdx >= 0) {
+      const sun = this.nodes[this._supernoteIdx];
+      sun.x = this.cx;
+      sun.y = this.cy;
+      sun.vx = 0;
+      sun.vy = 0;
+      sun.pinned = true;
+    }
+  }
+
   /** True if the constructor restored at least one node position from
    *  ``options.savedPositions``. Renderer uses this to start frozen
    *  on prior-session graphs (no warm-up settle storm). */
@@ -971,6 +1472,16 @@ export class ForceSimulation {
         n.radius = Math.max(1, Math.sqrt(dx * dx + dy * dy));
       }
     }
+    // Re-pin the supernote at canvas centre. The overlay loop above
+    // would otherwise let a stale server snapshot drag the layout's
+    // pivot off-centre, leaving every belt anchor pointing at a
+    // location the supernote no longer occupies. Calling
+    // _computeComponentAnchors() also re-resolves every component
+    // anchor against the current canvas dimensions, which is cheap
+    // and guarantees the layout's geometry stays internally consistent.
+    if (this._mode === "force") {
+      this._computeComponentAnchors();
+    }
     // Settle any unscaled neighbours — small alpha bump rather than full
     // re-warm, so newly arrived server positions don't visibly bounce.
     this._quietTicks = 0;
@@ -1013,6 +1524,10 @@ export class ForceSimulation {
     this.h = h;
     this.cx = newCx;
     this.cy = newCy;
+    // Re-anchor every component to the new canvas centre so the
+    // categorical pull keeps targeting the correct on-screen positions
+    // after a window drag. Supernote pin recalculates here too.
+    this._computeComponentAnchors();
     // Resize may unsettle tight clusters — small alpha bump so any
     // residual forces can redistribute instead of snapping suddenly.
     this._quietTicks = 0;

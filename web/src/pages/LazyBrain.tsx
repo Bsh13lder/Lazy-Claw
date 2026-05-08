@@ -3,6 +3,7 @@ import * as api from "../api";
 import type { LazyBrainGraph, LazyBrainNote, LazyBrainTag } from "../api";
 import { BacklinksPanel } from "../components/lazybrain/BacklinksPanel";
 import { GraphView } from "../components/lazybrain/GraphView";
+import { GraphInspector } from "../components/lazybrain/GraphInspector";
 import { GraphPeekCard } from "../components/lazybrain/GraphPeekCard";
 import { NoteEditor } from "../components/lazybrain/NoteEditor";
 import { PageListSidebar } from "../components/lazybrain/PageListSidebar";
@@ -627,6 +628,81 @@ export default function LazyBrain() {
     [titleMap],
   );
 
+  // ── Graph inspector adjacency + component size ────────────────────
+  // Used by the right-side `GraphInspector` to show "X connections /
+  // in system of N notes" without needing to reach into ForceSimulation.
+  // Both maps are cheap (O(N+E)) and only rebuild when graph data
+  // changes — typically once per page load.
+  const graphAdjacency = useMemo(() => {
+    const adj = new Map<string, Set<string>>();
+    for (const e of graph.edges) {
+      if (!adj.has(e.source)) adj.set(e.source, new Set());
+      if (!adj.has(e.target)) adj.set(e.target, new Set());
+      adj.get(e.source)!.add(e.target);
+      adj.get(e.target)!.add(e.source);
+    }
+    return adj;
+  }, [graph]);
+
+  const graphComponentSize = useMemo(() => {
+    // Union-find over edges — same algorithm ForceSimulation uses
+    // internally. We keep it duplicated (rather than threading
+    // sim state out through a callback) so the inspector works even
+    // when graph mode hasn't mounted yet.
+    const idToIdx = new Map<string, number>();
+    graph.nodes.forEach((n, i) => idToIdx.set(n.id, i));
+    const N = graph.nodes.length;
+    const parent = new Int32Array(N);
+    for (let i = 0; i < N; i++) parent[i] = i;
+    const find = (x: number): number => {
+      let r = x;
+      while (parent[r] !== r) r = parent[r];
+      while (parent[x] !== r) {
+        const nx = parent[x];
+        parent[x] = r;
+        x = nx;
+      }
+      return r;
+    };
+    for (const e of graph.edges) {
+      const a = idToIdx.get(e.source);
+      const b = idToIdx.get(e.target);
+      if (a === undefined || b === undefined) continue;
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent[ra] = rb;
+    }
+    const sizeByRoot = new Int32Array(N);
+    for (let i = 0; i < N; i++) sizeByRoot[find(i)] += 1;
+    const out = new Map<string, number>();
+    for (let i = 0; i < N; i++) {
+      out.set(graph.nodes[i].id, sizeByRoot[find(i)]);
+    }
+    return out;
+  }, [graph]);
+
+  // Wraps the existing top-level `handleTogglePin` (declared earlier
+  // in this file) in a per-note signature so the GraphInspector's prop
+  // type stays explicit. The inspector only ever toggles the currently-
+  // selected note, but this lets it pass `note` through unambiguously.
+  const handleInspectorTogglePin = useCallback(
+    async (n: LazyBrainNote) => {
+      try {
+        const updated = await api.updateLazyBrainNote(n.id, { pinned: !n.pinned });
+        if (selected?.id === n.id) setSelected(updated);
+        await refresh();
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    },
+    [selected, refresh],
+  );
+
+  const handleOpenInEditor = useCallback((id: string) => {
+    setSelectedId(id);
+    setViewMode("notes");
+  }, []);
+
   // Global escape: close peek first, then graph mode
   useEffect(() => {
     if (!peekId) return;
@@ -1066,7 +1142,13 @@ export default function LazyBrain() {
               highlightQuery={searchQ}
               onSearchChange={setSearchQ}
               dimPredicate={graphDimPredicate}
-              onSelect={(id) => setGraphFocusId(id)}
+              onSelect={(id) => {
+                setGraphFocusId(id);
+                // Also update the right-side inspector in real time so
+                // the user can read about every node they click without
+                // ever leaving the graph.
+                setSelectedId(id);
+              }}
               onPeek={(id) => setPeekId(id)}
               onClearPeek={() => {
                 setPeekId(null);
@@ -1190,39 +1272,56 @@ export default function LazyBrain() {
         onCreateNote={handleCreateWithTitle}
       />
 
-      {/* RIGHT backlinks — only in notes mode, collapsible */}
-      {viewMode === "notes" && (
+      {/* RIGHT panel — collapsible. Notes mode shows backlinks +
+          outline; graph mode shows the inspector for the clicked node. */}
+      {(viewMode === "notes" || viewMode === "graph") && (
         rightCollapsed ? (
           <button
             onClick={() => setRightCollapsed(false)}
-            title="Show backlinks"
+            title={viewMode === "graph" ? "Show graph inspector" : "Show backlinks"}
             className="shrink-0 w-5 h-full bg-bg-secondary/60 border-l border-border flex items-center justify-center text-text-muted hover:text-accent hover:bg-bg-hover transition-colors group"
           >
             <PanelRightOpen size={14} strokeWidth={1.75} className="group-hover:scale-110 transition-transform" />
           </button>
         ) : (
           <aside className="w-72 shrink-0 h-full border-l border-border bg-bg-secondary/60 flex flex-col">
-            <div className="shrink-0 flex items-center justify-end px-2 py-1.5 border-b border-border">
+            <div className="shrink-0 flex items-center justify-between px-3 py-1.5 border-b border-border">
+              <span className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+                {viewMode === "graph" ? "Inspector" : "Backlinks"}
+              </span>
               <button
                 onClick={() => setRightCollapsed(true)}
-                title="Hide backlinks"
+                title={viewMode === "graph" ? "Hide inspector" : "Hide backlinks"}
                 className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
               >
                 <PanelRightClose size={13} strokeWidth={1.75} />
               </button>
             </div>
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
-              <BacklinksPanel
+            {viewMode === "graph" ? (
+              <GraphInspector
                 note={selected}
                 backlinks={backlinks}
-                onSelect={(n) => setSelectedId(n.id)}
+                notesByTitle={titleMap}
+                degree={selected ? (graphAdjacency.get(selected.id)?.size ?? 0) : 0}
+                componentSize={selected ? (graphComponentSize.get(selected.id) ?? 1) : 0}
+                onSelectId={(id) => setSelectedId(id)}
+                onOpenInEditor={handleOpenInEditor}
+                onTogglePin={handleInspectorTogglePin}
               />
-              {selected && (
-                <div className="border-t border-border">
-                  <OutlinePane content={selected.content} />
-                </div>
-              )}
-            </div>
+            ) : (
+              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+                <BacklinksPanel
+                  note={selected}
+                  backlinks={backlinks}
+                  onSelect={(n) => setSelectedId(n.id)}
+                />
+                {selected && (
+                  <div className="border-t border-border">
+                    <OutlinePane content={selected.content} />
+                  </div>
+                )}
+              </div>
+            )}
           </aside>
         )
       )}

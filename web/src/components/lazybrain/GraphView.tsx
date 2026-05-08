@@ -271,21 +271,22 @@ const BADGE_MAP: Record<string, string> = {
   _default: "•",
 };
 
-/** 1–5 char badge that goes INSIDE the dot. Journal / daily-log nodes show
- *  `DD/MM` (European format — matches the user's Madrid locale); every other
- *  category renders its letter/symbol from BADGE_MAP. */
+/** Letter/symbol badge for in-dot rendering. Used as a fallback only —
+ *  the canvas renderer prefers the Phosphor `glyph` set on each
+ *  `DrawNode`. Returning the BADGE_MAP letter keeps the data path live
+ *  for any consumer that still wants the short text form (e.g. legend
+ *  rows, tests).
+ *
+ *  Journal / daily-log nodes used to render `DD/MM` here, which gave
+ *  them a visually different in-dot treatment from every other
+ *  category (numerics vs Phosphor glyphs). The user reads category
+ *  via colour and shape; the date already lives in the side label
+ *  + the inspector panel — so this branch was dropped to keep all
+ *  category dots visually unified. */
 function dotBadge(
-  title: string | null | undefined,
+  _title: string | null | undefined,
   categoryKey: string,
 ): string {
-  if (categoryKey === "journal" || categoryKey === "daily-log") {
-    // Trailing `MM-DD` — short titles like "Journal 04-21".
-    const m = (title || "").match(/(\d{2})-(\d{2})$/);
-    if (m) return `${m[2]}/${m[1]}`;
-    // Full `YYYY-MM-DD` anywhere in the title.
-    const m2 = (title || "").match(/\d{4}-(\d{2})-(\d{2})/);
-    if (m2) return `${m2[2]}/${m2[1]}`;
-  }
   return BADGE_MAP[categoryKey] ?? "?";
 }
 
@@ -373,10 +374,13 @@ export function GraphView({
   }, [legendOpen]);
 
   // Edge-visibility mode. "faint" keeps a ghost constellation (alpha
-  // 0.04) so the user sees the graph silhouette before clicking; "off"
-  // hides every wire until they focus a node, the strongest possible
-  // separation cue. Persisted so the user's choice survives reload.
-  const [edgesMode, setEdgesMode] = useState<"faint" | "off">(() => {
+  // 0.04) so the user sees the graph silhouette before clicking. The
+  // user-facing toggle that flipped this to "off" was removed because
+  // the label was opaque ("what does Edges faint mean?"). The state
+  // itself is preserved (read-only) so anyone who previously chose
+  // "off" keeps that preference until they clear localStorage; new
+  // users default to "faint", which is what most graph viewers do.
+  const [edgesMode] = useState<"faint" | "off">(() => {
     try {
       const raw = localStorage.getItem("lazybrain-edges-mode");
       if (raw === "off") return "off";
@@ -386,14 +390,6 @@ export function GraphView({
     }
     return "faint";
   });
-  useEffect(() => {
-    try {
-      localStorage.setItem("lazybrain-edges-mode", edgesMode);
-    } catch {
-      // Best-effort.
-    }
-    needsRedrawRef.current = true;
-  }, [edgesMode]);
   // No per-frame `tick` state — the RAF loop writes node transforms
   // and edge `d` attributes directly via setAttribute. React only
   // reconciles on data/hover/select changes (rare). Pulse animations
@@ -1292,9 +1288,10 @@ export function GraphView({
       const categoryKeys = categoryKeysFor(note?.tags, !!note?.pinned);
       const categoryKey = categoryKeys[0] ?? pickCategoryKey(note?.tags, !!note?.pinned);
       const badge = dotBadge(note?.title, categoryKey);
-      const isDateBadge =
-        (categoryKey === "journal" || categoryKey === "daily-log") &&
-        /\d/.test(badge);
+      // Date-badge branch retired — every category dot now renders the
+      // same way (Phosphor glyph at center). Kept the binding for the
+      // local read below so the diff stays surgical.
+      const isDateBadge = false;
       const isPinned = !!note?.pinned;
       const isHub = hubIds.has(node.id);
       const isMatch = matcher ? matcher(node.id) : false;
@@ -1978,28 +1975,6 @@ export function GraphView({
         >
           <span aria-hidden>↻</span>
           <span>Re-flow</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setEdgesMode((m) => (m === "off" ? "faint" : "off"))}
-          title={
-            edgesMode === "off"
-              ? "Edges hidden — click any node to light up its connections. Click here to show ghost edges always."
-              : "Edges faint — a constellation of ghost wires is always visible. Click here to hide them until you focus a node."
-          }
-          className={`flex items-center gap-1 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-2.5 py-1 transition-colors tracking-wide ${
-            edgesMode === "off"
-              ? "text-text-primary"
-              : "text-text-muted hover:text-text-primary"
-          }`}
-          style={
-            edgesMode === "off"
-              ? { boxShadow: "inset 0 -2px 0 #a78bfa" }
-              : undefined
-          }
-        >
-          <span aria-hidden>{edgesMode === "off" ? "○" : "◌"}</span>
-          <span>Edges {edgesMode === "off" ? "off" : "faint"}</span>
         </button>
       </div>
 

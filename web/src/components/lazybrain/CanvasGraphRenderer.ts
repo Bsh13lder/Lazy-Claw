@@ -68,6 +68,31 @@ export interface DrawEdge {
   dashed: boolean;
 }
 
+export interface DrawZone {
+  /** Zone anchor centre in world (sim) coordinates. */
+  x: number;
+  y: number;
+  /** Hex colour for the nebula bloom + label (matches the category palette). */
+  color: string;
+  /** Display title — small caps at render time. */
+  title: string;
+  /** Active member count, used for bloom radius + label size. */
+  count: number;
+}
+
+/** A connected-component "planet system" — hub + orbiting leaves.
+ *  Renderer paints a faint dashed orbital ring at `radius` around
+ *  (x, y) so the user sees discrete planet systems rather than just
+ *  dots in a cloud. Color is the palette colour of the hub's
+ *  category; size is rendered as a tiny chip on the ring. */
+export interface DrawHub {
+  x: number;
+  y: number;
+  radius: number;
+  size: number;
+  color: string;
+}
+
 export interface DrawState {
   width: number;
   height: number;
@@ -75,6 +100,14 @@ export interface DrawState {
   view: { tx: number; ty: number; k: number };
   nodes: DrawNode[];
   edges: DrawEdge[];
+  /** Stellar-atlas zones — painted UNDER edges + nodes as faint nebula
+   *  blooms with a constellation title. Empty array → no zone rendering
+   *  (legacy graphs without category metadata). */
+  zones?: DrawZone[];
+  /** Planet-system orbital rings — one per connected component (size
+   *  4..60). Painted between zone blooms and edges so rings frame
+   *  their members without occluding them. */
+  hubs?: DrawHub[];
   /** Global gate: skip glyph rendering below this zoom (text is illegible
    *  + costs the most per-frame). 0.6 is the readable threshold. */
   glyphZoomThreshold: number;
@@ -99,6 +132,105 @@ export function drawGraph(
   ctx.scale(view.k, view.k);
 
   const k = view.k;
+
+  // ── Zone blooms + constellation titles ──────────────────────────────
+  // Painted UNDER edges + nodes so the dots float over a soft nebula in
+  // their category colour. Each zone gets:
+  //   1. A radial gradient bloom centred on the anchor — sized by member
+  //      count (sqrt-scaled so a 200-member zone isn't 10× the radius
+  //      of a 20-member zone).
+  //   2. A single-line title rendered in small caps, letter-spaced, in
+  //      the zone's category colour at ~32% alpha. Sized larger when
+  //      the user is zoomed out so the labels act as a navigational
+  //      atlas; fades when zoomed in so the dots take centre stage.
+  // Skipped entirely when no zones are passed — keeps legacy paths free.
+  const zones = state.zones;
+  if (zones && zones.length > 0) {
+    // Bloom pass — additive radial gradients. globalCompositeOperation
+    // "lighter" makes overlapping nebulas blend like real glow instead
+    // of stacking opaque blobs.
+    const prevComposite = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < zones.length; i++) {
+      const z = zones[i];
+      if (z.count <= 0) continue;
+      // Bloom radius: 220px floor + 26px per sqrt(count). A 4-member
+      // zone reads as a small wisp; a 200-member zone glows as a wide
+      // halo. World-space radius — bloom scales with zoom alongside
+      // the nodes it backs.
+      const r = 220 + Math.sqrt(z.count) * 26;
+      const grad = ctx.createRadialGradient(z.x, z.y, 0, z.x, z.y, r);
+      grad.addColorStop(0,    hexWithAlpha(z.color, 0.18));
+      grad.addColorStop(0.45, hexWithAlpha(z.color, 0.08));
+      grad.addColorStop(1,    hexWithAlpha(z.color, 0.00));
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(z.x, z.y, r, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = prevComposite;
+
+    // Title pass — small-caps serif, letter-spaced. Drawn last among
+    // zone passes (above bloom, below nodes) so titles live in the
+    // background plane but read clearly against the dark canvas.
+    // Sized in CSS px (divide by k) so titles stay readable at any
+    // zoom — they're navigational, not decorative.
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < zones.length; i++) {
+      const z = zones[i];
+      if (z.count <= 0) continue;
+      // Bigger when zoomed out (atlas mode); softer when zoomed in.
+      const fontPx = Math.max(11, Math.min(22, 16 / Math.max(0.55, k)));
+      ctx.font = `600 ${fontPx}px "Source Serif 4", "Source Serif Pro", Georgia, serif`;
+      // Stroke pass for legibility against any colour bloom underneath.
+      ctx.lineWidth = (fontPx * 0.18) / k;
+      ctx.strokeStyle = "rgba(8, 6, 18, 0.85)";
+      ctx.lineJoin = "round";
+      const display = formatZoneTitle(z.title, z.count);
+      // Stroke first, fill on top — cheap drop-shadow effect without
+      // shadowBlur (which is much more expensive on Canvas2D).
+      ctx.globalAlpha = 0.85;
+      ctx.strokeText(display, z.x, z.y);
+      ctx.globalAlpha = z.count >= 6 ? 0.42 : 0.32;
+      ctx.fillStyle = z.color;
+      ctx.fillText(display, z.x, z.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ── Planet-system orbital rings ─────────────────────────────────────
+  // One faint dashed ring around each connected-component hub at the
+  // average leaf-distance radius. Reads as "this is a planet system"
+  // — the user sees discrete orbital trails rather than a featureless
+  // cloud of dots. Skipped at low zoom so the rings don't smear.
+  const hubs = state.hubs;
+  if (hubs && hubs.length > 0 && k >= 0.4) {
+    const dash = [3 / k, 5 / k];
+    ctx.setLineDash(dash);
+    for (let i = 0; i < hubs.length; i++) {
+      const h = hubs[i];
+      // Ring opacity scales gently with system size so a 4-member
+      // family doesn't outshout a 30-member topic system; capped at
+      // 0.25 so rings never overpower the nodes themselves.
+      const alpha = Math.min(0.25, 0.10 + Math.sqrt(h.size) * 0.025);
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = h.color;
+      ctx.lineWidth = 1.0 / k;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, h.radius, 0, TAU);
+      ctx.stroke();
+      // Tiny accent dot at the ring's "12 o'clock" — a subtle marker
+      // that the system has structure (hub + orbit), not just chaos.
+      ctx.globalAlpha = alpha + 0.18;
+      ctx.fillStyle = h.color;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y - h.radius, 1.6 / k, 0, TAU);
+      ctx.fill();
+    }
+    ctx.setLineDash(EMPTY_DASH);
+    ctx.globalAlpha = 1;
+  }
 
   // ── Edges ───────────────────────────────────────────────────────────
   // Two passes:
@@ -236,6 +368,40 @@ export function drawGraph(
 const TAU = Math.PI * 2;
 const EMPTY_DASH: number[] = [];
 const GLYPH_FILL = "#0a0a0a";
+
+/** Hex (#rrggbb / #rgb) → rgba string. Used by the zone bloom pass to
+ *  build per-zone radial gradients in the category colour. Returns a
+ *  safe slate-grey fallback when the hex is malformed so a stray bad
+ *  palette entry can never crash the render loop. */
+function hexWithAlpha(hex: string, alpha: number): string {
+  let r = 100, g = 116, b = 139;
+  if (hex.length === 7) {
+    r = parseInt(hex.slice(1, 3), 16);
+    g = parseInt(hex.slice(3, 5), 16);
+    b = parseInt(hex.slice(5, 7), 16);
+  } else if (hex.length === 4) {
+    r = parseInt(hex[1] + hex[1], 16);
+    g = parseInt(hex[2] + hex[2], 16);
+    b = parseInt(hex[3] + hex[3], 16);
+  }
+  if (!Number.isFinite(r)) r = 100;
+  if (!Number.isFinite(g)) g = 116;
+  if (!Number.isFinite(b)) b = 139;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/** Render a zone title as small caps with the active member count
+ *  trailing in subscript-style. ("Daily log · 12") — letter-spacing is
+ *  applied via en-spaces between letters because Canvas2D doesn't
+ *  expose a `letterSpacing` property in the way CSS does (yet — the
+ *  property exists on modern Chromium but is unreliable cross-browser
+ *  for fillText). En-space-padding is fast, deterministic, and visually
+ *  matches the Source Serif aesthetic without a property polyfill. */
+function formatZoneTitle(title: string, count: number): string {
+  const upper = title.toUpperCase();
+  const spaced = upper.split("").join(" "); // thin-space between letters
+  return `${spaced} · ${count}`;
+}
 
 /** Build a quadratic-bow path between two endpoints. Reused by the
  *  inactive + active edge passes so the bow geometry stays consistent. */

@@ -1,9 +1,12 @@
 """Claude Code CLI as an LLM provider.
 
-Routes LLM calls through `claude -p` (covered by Claude Code subscription).
-Tool calling is prompt-engineered: tool schemas are injected into the system
-prompt, Claude responds with [TOOL_CALL] tags, and we parse them back into
-ToolCall objects.
+Routes LLM calls through `claude -p` (covered by Claude Code subscription —
+NOT the API; we shell out to the official binary the user already pays for).
+
+Tool calling primary path: `--json-schema` constrains the model to return
+{content, tool_calls[]}; we read the parsed `structured_output` field
+directly. A legacy [TOOL_CALL] tag parser stays in place as a safety net
+for older CLI versions or schema validation slips.
 
 Session persistence via --session-id / --resume enables multi-turn context
 within a single agentic loop.
@@ -31,50 +34,90 @@ from lazyclaw.llm.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_S = 90  # 90s allows complex tool prompts; retries handle hangs
+_TIMEOUT_S = 120  # 120s — cold-cache Sonnet turn can exceed 90s; retries handle stalls
 _MAX_RETRIES = 2  # Retry once before giving up (total 2 attempts)
-_WARM_POOL_SIZE = 1  # Pre-warmed processes ready for instant use
+_WARM_POOL_SIZE = 3  # 3 pre-warmed processes — covers chat bursts without queueing
 _WARM_EXPIRE_S = 60  # Kill warm process if unused after 60s
+
+# Built-in Claude Code tools / MCP defaults that must be explicitly
+# disallowed. `--tools ""` only disables the *built-in core* tools but
+# does NOT block MCP servers or capabilities the user's subscription
+# has globally (Canva, Gmail, Google Drive, Calendar, WebSearch, etc.).
+# Without this list Sonnet will use its own WebSearch / WebFetch and
+# put the answer in `content`, bypassing our agent loop entirely.
+_DISALLOWED_BUILT_INS = [
+    "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+    "WebSearch", "WebFetch", "Task", "Agent",
+    "TodoWrite", "NotebookEdit", "BashOutput", "KillShell",
+]
 _TOOL_CALL_PATTERN = re.compile(
     r"\[TOOL_CALL\](.*?)\[/TOOL_CALL\]",
     re.DOTALL,
 )
 
-# System prompt fragment that teaches Claude how to call tools.
-# Order rationale: format spec + concrete examples FIRST so the model
-# locks onto the [TOOL_CALL] convention, then tool defs. A separate
-# "REMINDER" block is appended AFTER the (large) tool list at call site
-# — instructions placed closest to generation have higher recall in
-# long contexts, which matters for Opus-with-1M-context users.
+# JSON Schema passed via --json-schema when tools are available.
+# Claude is forced to emit a single object matching this shape; the CLI
+# then surfaces it under `structured_output` in the JSON envelope, so
+# parsing becomes a dict lookup instead of regex over chatty prose.
+_TOOL_OUTPUT_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "content": {
+            "type": "string",
+            "description": (
+                "Plain-text reply for the user. Empty string when only "
+                "tool calls are needed."
+            ),
+        },
+        "tool_calls": {
+            "type": "array",
+            "description": (
+                "Tools to invoke. Empty array when no tools are needed. "
+                "ONLY use tool names from the Tool Definitions block."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["name", "arguments"],
+            },
+        },
+    },
+    "required": ["content", "tool_calls"],
+}
+
+# Slimmer instructions — the schema enforces structure, so this block
+# focuses on *which* tools are real, *when* to call vs. answer, and
+# (critically) clarifies that EMITTING a tool_call is how you call it —
+# LazyClaw's runtime executes them in a follow-up turn.
 _TOOL_CALLING_INSTRUCTIONS = """
-## Available Tools
+## How tool calling works here
 
-To use a tool, output ONE [TOOL_CALL] tag per tool:
+You are running inside LazyClaw, a Python agent runtime. You have NO
+direct internet access, NO web search, NO file system access, NO MCP
+servers, NO code execution. The ONLY way to take any action is to EMIT
+a tool call from the Tool Definitions block. LazyClaw's runtime then
+executes it and sends the result back next turn as `[Tool Result: ...]`.
 
-[TOOL_CALL]{"name": "tool_name", "arguments": {"param": "value"}}[/TOOL_CALL]
+This is exactly like Anthropic's tool_use API: you propose, the runtime
+returns the result.
 
-CRITICAL RULES:
-- Each tool call MUST be in its OWN [TOOL_CALL]...[/TOOL_CALL] tags
-- NEVER put multiple JSON objects inside one [TOOL_CALL] tag
-- Do NOT output any text before the first [TOOL_CALL] when calling tools
-- If you don't need any tools, respond with plain text only (no tags)
-- ONLY use tools listed below. Do NOT invent tool names.
-- NEVER report numbers, stats, or data from memory or previous messages. If the user asks for live data (follower counts, message counts, status), you MUST call a tool. If no tool exists for it, say "I don't have a tool to check that" — NEVER guess or repeat old numbers.
+## Output contract (enforced by JSON Schema)
 
-### Examples
+Return a single JSON object with two keys:
+- `content`: plain-text reply for the user (empty string when only emitting tool calls)
+- `tool_calls`: array of `{name, arguments}` objects (empty array when no tools needed)
 
-User: "what's my name?"
-[TOOL_CALL]{"name": "recall_memories", "arguments": {"query": "name"}}[/TOOL_CALL]
-
-User: "check google sheet 1abc2def what's inside"
-[TOOL_CALL]{"name": "read_sheet_values", "arguments": {"spreadsheet_id": "1abc2def", "user_google_email": "user@example.com"}}[/TOOL_CALL]
-
-User: "find a tool for whatsapp"
-[TOOL_CALL]{"name": "search_tools", "arguments": {"query": "whatsapp"}}[/TOOL_CALL]
-
-User: "hi"
-Hey! 👋 What's up?
-(plain text only — no tags, because no tool is needed)
+Behavioural rules:
+- A tool listed below IS available. Emit it. Never refuse with "tool X is listed but not callable in this environment" — that's wrong, the runtime *will* call it.
+- ONLY use tool names from the Tool Definitions block. Do NOT invent names.
+- If the user asks for live data (counts, status, prices, search results, files, messages), `tool_calls` MUST be non-empty. Saying "Searching..." with an empty array is a hallucination.
+- NEVER fabricate data and put it in `content`. Numbers, prices, stats, search results — all must come from a tool call. If no tool fits, say "I don't have a tool for that".
+- For greetings or casual chat with no action needed, leave `tool_calls` empty and answer in `content`.
 
 ### Tool Definitions
 
@@ -87,9 +130,10 @@ _TOOL_CALLING_REMINDER = """
 
 ---
 REMINDER before responding:
-1. You are NOT Claude Code. Tools named Read, Edit, Bash, Grep, Write, Glob, WebSearch, WebFetch, Agent do NOT exist. ONLY call tools from the Tool Definitions above.
-2. If the user is asking you to DO something (check, find, search, send, look up, scrape, read, write, list), you MUST emit at least one [TOOL_CALL] tag. Never just say "I'll check" or "Let me look" without an actual tool call — that's a hallucination.
-3. Tag format: [TOOL_CALL]{"name":"<tool_name>","arguments":{<args>}}[/TOOL_CALL]
+1. You are NOT Claude Code. Built-in names like Read, Edit, Bash, Grep, Write, Glob, WebSearch, WebFetch, Agent do NOT exist here. ONLY emit tool names from the Tool Definitions above.
+2. Every tool above IS available — LazyClaw's runtime executes it once you emit it. Never refuse with "not available in this environment".
+3. If the user wants you to DO something (check, find, search, send, look up, scrape, read, write, list), `tool_calls` MUST be non-empty.
+4. Output exactly one JSON object: `{"content": "...", "tool_calls": [{"name": "...", "arguments": {...}}]}`. No prose outside the JSON.
 """
 
 
@@ -354,9 +398,10 @@ class ClaudeCLIProvider(BaseLLMProvider):
         self._model = model
         self._active_sessions: dict[str, bool] = {}  # session_id → has_been_used
         # Warm pool: pre-spawned processes ready for immediate use
-        # Each entry: (process, spawn_time, args_tuple) — args must match to reuse
+        # Each entry: (process, spawn_time, args_tuple) — args must match to reuse.
+        # Pool is filled in parallel after each chat() so bursty chat traffic
+        # gets near-zero startup overhead on follow-up turns.
         self._warm_procs: list[tuple[asyncio.subprocess.Process, float, tuple]] = []
-        self._warming: bool = False
 
     async def verify_key(self) -> bool:
         """Check if claude CLI is available."""
@@ -395,11 +440,18 @@ class ClaudeCLIProvider(BaseLLMProvider):
         prompt_text = _serialize_messages(messages)
 
         # Build CLI args — prompt piped via stdin (not CLI arg) to avoid
-        # OS argument length limits on large conversations.
+        # OS argument length limits on large conversations. Note: do NOT
+        # pass "-" as a positional arg. The Claude CLI does NOT treat "-"
+        # as a stdin marker — it treats it as the literal prompt string,
+        # which corrupted every call (verified empirically with --json-schema:
+        # structured_output.echo came back as "-" instead of the user's text).
+        # Omitting the positional arg lets the CLI read stdin automatically
+        # when something is piped in.
         args = [
-            self._claude_bin, "-p", "-",  # "-" reads prompt from stdin
+            self._claude_bin, "-p",
             "--output-format", "json",
-            "--tools", "",  # Disable Claude Code's built-in tools
+            "--tools", "",  # Disable Claude Code's built-in core tools
+            "--disallowedTools", *_DISALLOWED_BUILT_INS,  # Block MCPs + WebSearch
             "--model", self._model,
         ]
 
@@ -413,27 +465,36 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
         if tools:
             _tools_text, self._tool_name_map = _serialize_tools(tools)
-            # Order: intro → format spec + examples → tool defs →
-            # REMINDER. The reminder lands closest to generation, which
-            # is where prompt adherence is highest in long contexts.
-            # See commit msg / plan for why this matters with Opus +
-            # large tool lists.
+            # Order: intro → output contract → tool defs → REMINDER.
+            # The reminder lands closest to generation, which is where
+            # prompt adherence is highest in long contexts. The output
+            # is *also* constrained by --json-schema below; the prompt
+            # stays in for behavioural rules (which tools, when to call).
+            #
+            # Intro deliberately does NOT reference [System Context]
+            # blocks — those only exist when system messages are passed,
+            # and pointing the model at missing context made Sonnet
+            # refuse with "I can't see my capabilities" hallucinations.
             tool_system = (
-                "You are LazyClaw, an AI agent. The user's instructions "
-                "and your capabilities are in the [System Context] blocks "
-                "in the conversation. Follow those rules.\n\n"
+                "You are LazyClaw, an AI agent. Any [System Context] "
+                "blocks in the conversation contain your project rules; "
+                "your tools are listed in the Tool Definitions block "
+                "below.\n\n"
                 + _TOOL_CALLING_INSTRUCTIONS
                 + _tools_text
                 + _TOOL_CALLING_REMINDER
             )
-            args.extend(["--system-prompt", tool_system])
+            args.extend([
+                "--system-prompt", tool_system,
+                "--json-schema", json.dumps(_TOOL_OUTPUT_SCHEMA),
+            ])
         else:
             args.extend([
                 "--system-prompt",
-                "You are LazyClaw, an AI agent. The user's instructions "
-                "and your capabilities are in the [System Context] blocks "
-                "in the conversation. Follow those rules. "
-                "Respond concisely. Do NOT use any tools.",
+                "You are LazyClaw, an AI agent. Any [System Context] "
+                "blocks in the conversation contain your project rules. "
+                "Respond concisely. You have no tools available; "
+                "answer from your knowledge or say you don't know.",
             ])
 
         # Session management
@@ -455,7 +516,6 @@ class ClaudeCLIProvider(BaseLLMProvider):
         # Dump first 500 chars of prompt for debugging
         logger.debug("Claude CLI prompt preview: %s", prompt_text[:500])
 
-        last_error = None
         for attempt in range(_MAX_RETRIES):
             # Try to grab a pre-warmed process first
             proc = self._grab_warm_proc(args)
@@ -483,6 +543,8 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 try:
                     proc.kill()
                     await proc.wait()
+                except ProcessLookupError:
+                    pass
                 except Exception:
                     logger.warning("Failed to kill timed-out Claude CLI process", exc_info=True)
                 if attempt < _MAX_RETRIES - 1:
@@ -525,8 +587,13 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
             raw = stdout.decode("utf-8", errors="replace").strip()
 
-            # Pre-warm next process in background (for next iteration)
-            asyncio.create_task(self._pre_warm(args))
+            # Refill warm pool in the background. Spawn (POOL_SIZE - current)
+            # in parallel — args-keyed, so identical follow-up calls hit a
+            # ready proc with ~0ms startup overhead. Pool size = 3 covers
+            # typical chat bursts (user fires 2-3 messages in a row).
+            slots_to_fill = max(0, _WARM_POOL_SIZE - len(self._warm_procs))
+            for _ in range(slots_to_fill):
+                asyncio.create_task(self._pre_warm(args))
 
             return self._parse_response(raw)
 
@@ -551,9 +618,12 @@ class ClaudeCLIProvider(BaseLLMProvider):
         for proc, spawned_at, warm_args in self._warm_procs:
             age = now - spawned_at
             if age > _WARM_EXPIRE_S or proc.returncode is not None:
-                # Expired or dead — kill it
+                # Expired or dead — kill it (best-effort; ProcessLookupError
+                # means it already died, which is exactly what we wanted).
                 try:
                     proc.kill()
+                except ProcessLookupError:
+                    pass
                 except Exception:
                     logger.warning("Failed to kill expired warm Claude CLI process", exc_info=True)
                 continue
@@ -571,12 +641,13 @@ class ClaudeCLIProvider(BaseLLMProvider):
         """Spawn a process in the background so it's ready for the next call.
 
         The process starts, loads claude, and blocks on stdin.read().
-        When we later call proc.communicate(input=...), it gets the prompt instantly.
-        Args are stored so _grab_warm_proc only reuses matching processes.
+        When we later call proc.communicate(input=...), it gets the prompt
+        instantly. Args are stored so _grab_warm_proc only reuses matching
+        processes. Concurrent callers are permitted — each checks the pool
+        ceiling before spawning so we don't over-fill.
         """
-        if self._warming or len(self._warm_procs) >= _WARM_POOL_SIZE:
+        if len(self._warm_procs) >= _WARM_POOL_SIZE:
             return
-        self._warming = True
         try:
             import time
             _env = {k: v for k, v in os.environ.items()
@@ -588,12 +659,20 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 stderr=asyncio.subprocess.PIPE,
                 env=_env,
             )
+            # Re-check after spawn (avoid race where multiple coroutines
+            # all spawned before the first appended). If we're now over
+            # the cap, kill this one immediately rather than leak it.
+            if len(self._warm_procs) >= _WARM_POOL_SIZE:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return
             self._warm_procs.append((proc, time.monotonic(), tuple(args)))
-            logger.debug("Pre-warmed CLI process (PID %s)", proc.pid)
+            logger.debug("Pre-warmed CLI process (PID %s, pool=%d/%d)",
+                         proc.pid, len(self._warm_procs), _WARM_POOL_SIZE)
         except Exception as exc:
             logger.debug("Pre-warm failed: %s", exc)
-        finally:
-            self._warming = False
 
     def _parse_response(self, raw: str) -> LLMResponse:
         """Parse claude -p --output-format json response."""
@@ -627,7 +706,11 @@ class ClaudeCLIProvider(BaseLLMProvider):
 
         result_text = data.get("result", "")
         usage_raw = data.get("usage", {})
-        # CLI reports API cost but it's covered by subscription — always $0
+        # CLI reports API-equivalent cost but it's covered by the
+        # subscription — surfaced as $0 to the cost tracker. The actual
+        # API-equivalent value lives in usage["cost_usd_subscription"]
+        # for diagnostic visibility ("how much would this have cost?").
+        api_equiv_cost = float(data.get("total_cost_usd") or 0.0)
         cost = 0.0
 
         # Strip Claude Code artifacts that sometimes leak into output
@@ -635,7 +718,8 @@ class ClaudeCLIProvider(BaseLLMProvider):
             r"<system-reminder>.*?</system-reminder>", "", result_text, flags=re.DOTALL
         ).strip()
 
-        # Parse usage into standard format
+        # Parse usage into standard format. CLI exposes cache stats —
+        # forward them so the dashboard can show prompt-cache savings.
         usage = {
             "prompt_tokens": usage_raw.get("input_tokens", 0),
             "completion_tokens": usage_raw.get("output_tokens", 0),
@@ -643,12 +727,59 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 usage_raw.get("input_tokens", 0)
                 + usage_raw.get("output_tokens", 0)
             ),
+            "cache_read_tokens": usage_raw.get("cache_read_input_tokens", 0),
+            "cache_creation_tokens": usage_raw.get("cache_creation_input_tokens", 0),
             "cost_usd": cost,
+            "cost_usd_subscription": api_equiv_cost,
             "provider": "claude_cli",
         }
 
-        # Check for tool calls in the result text
-        remaining, tool_calls = _parse_tool_calls(result_text)
+        # Primary path: schema-validated structured_output. The CLI
+        # populates this when --json-schema is passed AND the model
+        # returned a schema-conformant object. Skip prose entirely.
+        structured = data.get("structured_output")
+        tool_calls: list[ToolCall] = []
+        remaining: str = ""
+
+        if isinstance(structured, dict) and "tool_calls" in structured:
+            remaining = (structured.get("content") or "").strip()
+            for raw_tc in structured.get("tool_calls") or []:
+                if not isinstance(raw_tc, dict):
+                    continue
+                name = raw_tc.get("name")
+                if not name:
+                    continue
+                args_obj = raw_tc.get("arguments") or {}
+                if not isinstance(args_obj, dict):
+                    # Schema requires object; defensively coerce.
+                    logger.debug(
+                        "Claude CLI structured_output tool '%s' has non-dict arguments (%s); coercing to {}",
+                        name, type(args_obj).__name__,
+                    )
+                    args_obj = {}
+                tool_calls.append(
+                    ToolCall(
+                        id=f"cli_{uuid.uuid4().hex[:8]}",
+                        name=name,
+                        arguments=args_obj,
+                    )
+                )
+            logger.debug(
+                "Claude CLI structured_output parsed: content_len=%d tool_calls=%d",
+                len(remaining), len(tool_calls),
+            )
+        else:
+            # Legacy/safety path: parse [TOOL_CALL] tags from prose.
+            # Triggered when running an older CLI that doesn't emit
+            # structured_output, or when the model slipped past schema
+            # validation (rare but observed).
+            remaining, tool_calls = _parse_tool_calls(result_text)
+            if "[TOOL_CALL]" in result_text and not tool_calls:
+                logger.warning(
+                    "Claude CLI: [TOOL_CALL] found in text but parser returned 0 calls. "
+                    "First 200 chars: %s",
+                    result_text[:200],
+                )
 
         # Reverse-map short MCP names back to full UUID names
         _nmap = getattr(self, "_tool_name_map", {})
@@ -667,13 +798,6 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 "Claude CLI parsed %d tool calls: %s",
                 len(tool_calls),
                 [tc.name for tc in tool_calls],
-            )
-        elif "[TOOL_CALL]" in result_text:
-            # Tag present but parser didn't match — log for debugging
-            logger.warning(
-                "Claude CLI: [TOOL_CALL] found in text but parser returned 0 calls. "
-                "First 200 chars: %s",
-                result_text[:200],
             )
 
         return LLMResponse(

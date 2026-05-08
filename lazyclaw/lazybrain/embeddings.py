@@ -199,12 +199,43 @@ async def upsert_embedding(
     note_id: str,
     text: str,
 ) -> bool:
-    """Compute + store encrypted embedding for one note. Returns success flag."""
+    """Compute + store encrypted embedding for one note. Returns success flag.
+
+    Phase G: alongside the whole-note vector this also chunks the note
+    body, embeds each chunk, and writes ``note_chunks`` + ``note_chunks_fts``
+    rows. The whole-note vector stays — it's a cheap centroid for graph
+    "neighbour" queries — and is recomputed as the *mean* of its chunk
+    vectors when the note is long enough to chunk.
+    """
     vec = await _ollama_embed(text)
     if vec is None:
         return False
 
     dek = await get_user_dek(config, user_id)
+
+    # ── Chunked indexes (Phase G) ─────────────────────────────────────
+    # Compute first so we have the chunk vectors for the centroid below.
+    from lazyclaw.lazybrain import chunker as _chunker
+    from lazyclaw.lazybrain import fts as _fts
+    chunks = _chunker.chunk_note(text)
+    chunk_vectors: list[list[float]] = []
+    if len(chunks) > 1:  # only multi-chunk notes need separate rows
+        for c in chunks:
+            cvec = await _ollama_embed(c.text)
+            if cvec is None:
+                # If Ollama died mid-chunking, fall back to the whole-note
+                # vector for the rest — better than zero rows.
+                cvec = vec
+            chunk_vectors.append(cvec)
+        # Use the mean of chunk vectors as the new whole-note centroid.
+        # Same dim, so summing is safe.
+        if chunk_vectors:
+            mean_vec = [
+                sum(v[i] for v in chunk_vectors) / len(chunk_vectors)
+                for i in range(EMBED_DIM)
+            ]
+            vec = mean_vec
+
     enc = encrypt_field(_pack(vec).hex(), dek, _emb_aad(user_id))
 
     async with db_session(config) as db:
@@ -216,7 +247,46 @@ async def upsert_embedding(
             "vector = excluded.vector, updated_at = excluded.updated_at",
             (note_id, user_id, EMBED_MODEL, EMBED_DIM, enc),
         )
+        # Multi-chunk path: rebuild chunk rows from scratch — cheaper
+        # than per-chunk diffing and idempotent for the common edit case.
+        if chunk_vectors:
+            await db.execute(
+                "DELETE FROM note_chunks WHERE note_id = ?", (note_id,),
+            )
+            for c, cvec in zip(chunks, chunk_vectors):
+                cenc = encrypt_field(_pack(cvec).hex(), dek, _emb_aad(user_id))
+                await db.execute(
+                    "INSERT INTO note_chunks "
+                    "(note_id, user_id, chunk_idx, model, dim, vector, "
+                    "chunk_text, updated_at) VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                    (
+                        note_id, user_id, c.idx, EMBED_MODEL, EMBED_DIM,
+                        cenc, c.text,
+                    ),
+                )
+        else:
+            # Short note → no per-chunk rows; clean up any stale entries
+            # left from a previous longer revision.
+            await db.execute(
+                "DELETE FROM note_chunks WHERE note_id = ?", (note_id,),
+            )
         await db.commit()
+
+    # Chunk-FTS write-through (best-effort; never blocks the embedding write).
+    try:
+        await _fts.delete_chunks(config, note_id)
+        if chunk_vectors:
+            for c in chunks:
+                await _fts.upsert_chunk(
+                    config, user_id, note_id, c.idx, c.text,
+                )
+        else:
+            # Single-chunk path still indexes the body for BM25 — without
+            # it, a short note's content can never be matched by chunk-FTS.
+            await _fts.upsert_chunk(config, user_id, note_id, 0, text)
+    except Exception:
+        logger.debug("note_chunks_fts upsert failed", exc_info=True)
 
     # Warm-cache writethrough: we already have the plaintext vector here,
     # so we can populate without paying another decrypt later. Evict
@@ -228,7 +298,7 @@ async def upsert_embedding(
     try:
         async with db_session(config) as db:
             await db.execute(
-                "UPDATE notes SET embedding_dirty = 0 "
+                "UPDATE notes SET embedding_dirty = 0, chunks_dirty = 0 "
                 "WHERE id = ? AND user_id = ?",
                 (note_id, user_id),
             )
@@ -343,12 +413,15 @@ async def semantic_search(
     tag_prefix: str | None = None,
     min_similarity: float = MIN_SIMILARITY,
     diversify: bool = True,
+    hybrid: bool = True,
 ) -> dict:
     """Return ``{query, results, source}`` with top-k notes.
 
-    ``source`` is ``"semantic"`` when the embedding path worked end-to-end,
-    ``"substring"`` when we fell through to the substring index, or
-    ``"empty"`` when the user has zero notes.
+    ``source`` is one of:
+      - ``"hybrid"``  — RRF fusion of dense + BM25 (Phase F default).
+      - ``"semantic"`` — dense-only path (Ollama up, FTS empty / disabled).
+      - ``"substring"`` — fell through to the legacy substring scan.
+      - ``"empty"`` — the user has zero notes.
 
     ``tag_prefix`` (e.g. ``"topic/browser"``) filters the candidate set at
     the SQL layer before any embedding decryption happens — drops post-hoc
@@ -361,6 +434,11 @@ async def semantic_search(
     the returned set isn't dominated by paraphrases of the same note. Set
     ``False`` for callers that explicitly want pure-cosine ordering
     (e.g. nearest-neighbour exemplar pulls).
+
+    ``hybrid`` (default ``True``) layers BM25 over the title + chunk FTS
+    indexes alongside dense, fuses them with RRF, and only falls back to
+    pure-cosine when BM25 returns nothing. Pass ``False`` to force the
+    pre-Phase-F dense-only behaviour.
     """
     q = (query or "").strip()
     if not q:
@@ -372,6 +450,32 @@ async def semantic_search(
         if q_vec else []
     )
 
+    # ── Hybrid branch — fuse BM25 + dense via RRF ─────────────────────
+    bm25_ids: list[str] = []
+    if hybrid:
+        try:
+            from lazyclaw.lazybrain import fts as _fts, rrf as _rrf
+            # Pull both the title-level and chunk-level BM25 lists; collapse
+            # chunk hits into a deduped note id list (best chunk wins by
+            # definition of MATCH ordering).
+            title_hits = await _fts.search_titles(config, user_id, q, limit=50)
+            chunk_hits = await _fts.search_chunks(config, user_id, q, limit=50)
+            seen_chunk: set[str] = set()
+            chunk_ids: list[str] = []
+            for note_id, _idx in chunk_hits:
+                if note_id in seen_chunk:
+                    continue
+                seen_chunk.add(note_id)
+                chunk_ids.append(note_id)
+            # Fuse the two BM25 lists into one before fusing with dense —
+            # gives chunk hits and title hits equal weight at the BM25 layer.
+            bm25_ids = _rrf.fuse_to_ids(
+                [title_hits, chunk_ids], limit=max(50, k * 5),
+            )
+        except Exception:
+            logger.debug("hybrid BM25 path failed", exc_info=True)
+            bm25_ids = []
+
     if q_vec and vectors:
         # Keep vectors alongside scores so MMR can compute doc-doc similarity.
         scored: list[tuple[str, float, list[float]]] = [
@@ -382,8 +486,56 @@ async def semantic_search(
         scored.sort(key=lambda x: x[1], reverse=True)
 
         cap = max(1, min(50, k))
+        # Build the dense-ranked id list before optional fusion so RRF and
+        # the legacy MMR path see the same pool ordering.
+        dense_ids = [t[0] for t in scored]
+
+        if hybrid and bm25_ids:
+            # RRF fuse dense + BM25, then re-attach vectors (for MMR) only
+            # for the fused top — saves cosine recompute on dropped docs.
+            from lazyclaw.lazybrain import rrf as _rrf
+            fused_ids = _rrf.fuse_to_ids(
+                [dense_ids, bm25_ids], limit=max(cap * 3, 30),
+            )
+            vec_by_id = {nid: vec for nid, _s, vec in scored}
+            score_by_id = {nid: s for nid, s, _v in scored}
+            # Surface BM25-only hits (no dense vector) as dense_score=0 so
+            # MMR can still operate over them — gives them a vector via
+            # nearest pivot lookup if needed.
+            fused_scored: list[tuple[str, float, list[float]]] = []
+            for nid in fused_ids:
+                vec = vec_by_id.get(nid)
+                if vec is None:
+                    # No dense vector cached — skip from MMR pool but keep
+                    # for return ordering by appending to results later.
+                    continue
+                fused_scored.append((nid, score_by_id.get(nid, 0.0), vec))
+            if diversify and len(fused_scored) > cap:
+                top = _mmr_rerank(fused_scored, k=cap)
+            else:
+                top = fused_scored[:cap]
+            # If MMR thinned us below cap and BM25 has unused candidates,
+            # pad with BM25-only hits at the tail (they have positional
+            # rank but no dense embedding) — better recall on rare nouns.
+            if len(top) < cap:
+                seen = {nid for nid, _s, _v in top}
+                for nid in fused_ids:
+                    if nid in seen or nid in vec_by_id:
+                        continue
+                    top.append((nid, 0.0, []))  # type: ignore[list-item]
+                    seen.add(nid)
+                    if len(top) >= cap:
+                        break
+            results: list[dict] = []
+            for nid, score, _vec in top:
+                note = await store.get_note(config, user_id, nid)
+                if note:
+                    note = {**note, "_score": round(score, 4)}
+                    results.append(note)
+            return {"query": q, "results": results, "source": "hybrid"}
+
+        # Dense-only path (legacy)
         if diversify and len(scored) > cap:
-            # Widen pool to 3·k pre-rerank — gives MMR room to drop dups.
             pool = scored[: max(cap, min(50, cap * 3))]
             top = _mmr_rerank(pool, k=cap)
         else:
@@ -396,6 +548,16 @@ async def semantic_search(
                 note = {**note, "_score": round(score, 4)}
                 results.append(note)
         return {"query": q, "results": results, "source": "semantic"}
+
+    # ── Dense path unavailable — try BM25 alone before substring fall-through ─
+    if bm25_ids:
+        results = []
+        for nid in bm25_ids[: max(1, min(50, k))]:
+            note = await store.get_note(config, user_id, nid)
+            if note:
+                results.append(note)
+        if results:
+            return {"query": q, "results": results, "source": "bm25"}
 
     # Fallback: substring search. The user never sees a hard error.
     hits = await store.search_notes(config, user_id, q, limit=k)
@@ -428,9 +590,13 @@ async def reindex_dirty_batch(
         return {"indexed": 0, "skipped": 0, "checked": 0}
 
     async with db_session(config) as db:
+        # Phase G: pick up chunk-dirty rows too. After the migration first
+        # lands every existing row has chunks_dirty=1 and embedding_dirty=0
+        # — without the OR they'd never be chunked until the user edited
+        # them.
         rows = await db.execute(
             "SELECT id FROM notes "
-            "WHERE user_id = ? AND embedding_dirty = 1 "
+            "WHERE user_id = ? AND (embedding_dirty = 1 OR chunks_dirty = 1) "
             "ORDER BY updated_at DESC LIMIT ?",
             (user_id, max(1, min(500, limit))),
         )

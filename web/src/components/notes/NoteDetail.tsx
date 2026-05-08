@@ -4,8 +4,11 @@ import remarkGfm from "remark-gfm";
 import {
   deleteLazyBrainNote,
   getLazyBrainNote,
+  getNoteCollisions,
+  listLazyBrainNotes,
   updateLazyBrainNote,
   type LazyBrainNote,
+  type WikilinkCollision,
 } from "../../api";
 import {
   KIND_META,
@@ -13,6 +16,7 @@ import {
   type NoteKind,
   visibleTags,
 } from "./noteHelpers";
+import { iterWikilinks, wikilinkLabel, wikilinkHref } from "../../lib/wikilink";
 
 type Props = {
   noteId: string;
@@ -138,14 +142,77 @@ export function NoteDetail({ noteId, onChange, onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Render `[[Wikilinks]]` inside the body before passing to ReactMarkdown.
-  // We swap them for a markdown link so they get the same styling as URLs.
+  // ── Phase J: wikilink collision soft warnings ─────────────────────
+  // ``[[Madrid]]`` could resolve to two different notes — the resolver
+  // picks the most recent silently and writes an audit entry; we surface
+  // it inline so the user can rename / alias to disambiguate.
+  const [collisions, setCollisions] = useState<WikilinkCollision[]>([]);
+  useEffect(() => {
+    setCollisions([]);
+    if (!note?.id) return;
+    let cancelled = false;
+    getNoteCollisions(note.id)
+      .then((rows) => {
+        if (!cancelled) setCollisions(rows);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [note?.id]);
+
+  // ── Phase H: "Folded into [[Rollup]]" banner ──────────────────────
+  // When a note carries `rolled-up` it was folded into a weekly/monthly
+  // rollup; we look up the rollup's title (via the matching `rollup/<period>`
+  // tag) and surface a banner so the user knows where the note now lives.
+  const [foldedInto, setFoldedInto] = useState<LazyBrainNote | null>(null);
+  useEffect(() => {
+    setFoldedInto(null);
+    if (!note) return;
+    const tags = note.tags || [];
+    if (!tags.includes("rolled-up")) return;
+    const sourceTag = tags.find((t) => t.startsWith("source-of/"));
+    if (!sourceTag) return;
+    const period = sourceTag.slice("source-of/".length);
+    if (!period) return;
+    // Period like "W23-2026" → weekly; "M2026-05" → monthly. Try both.
+    const tier = period.startsWith("M") ? "monthly" : "weekly";
+    const targetTag = `rollup/${tier}/${period}`;
+    let cancelled = false;
+    listLazyBrainNotes({ tag: targetTag, limit: 1, include_rolled_up: true })
+      .then((notes) => {
+        if (!cancelled && notes && notes.length > 0) setFoldedInto(notes[0]);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [note]);
+
+  // Render `[[target#anchor|display]]` inside the body before passing to
+  // ReactMarkdown — swap them for a markdown link so they get the same
+  // styling as URLs. Uses the shared parser in `lib/wikilink.ts` so syntax
+  // stays in lockstep with WikilinkText + the backend.
   const previewBody = useMemo(() => {
     if (!note) return "";
-    return (note.content || "").replace(
-      /\[\[([^\]]+)\]\]/g,
-      (_, name) => `[${name}](#wikilink/${encodeURIComponent(name)})`,
-    );
+    const src = note.content || "";
+    const matches = Array.from(iterWikilinks(src));
+    if (matches.length === 0) return src;
+    let out = "";
+    let last = 0;
+    for (const m of matches) {
+      if (m.start > last) out += src.slice(last, m.start);
+      // Embed (`![[..]]`) is rendered by WikilinkText, not here — keep raw.
+      if (m.kind === "embed") {
+        out += m.raw;
+      } else {
+        const label = wikilinkLabel(m);
+        out += `[${label}](${wikilinkHref(m.target, m.anchor || undefined)})`;
+      }
+      last = m.end;
+    }
+    if (last < src.length) out += src.slice(last);
+    return out;
   }, [note]);
 
   if (loading) {
@@ -223,6 +290,55 @@ export function NoteDetail({ noteId, onChange, onClose }: Props) {
           </button>
         </div>
       </div>
+
+      {/* Phase J — wikilink collision warnings. */}
+      {collisions.length > 0 && (
+        <div
+          className="mx-6 mt-3 px-3 py-2 rounded-md text-[12px] flex flex-col gap-1"
+          style={{
+            background: "rgba(245, 158, 11, 0.08)",
+            border: "1px solid rgba(245, 158, 11, 0.3)",
+            color: "var(--color-text-secondary)",
+          }}
+        >
+          {collisions.slice(0, 3).map((c) => (
+            <div key={c.target} className="flex items-center gap-2">
+              <span style={{ fontSize: 14 }}>⚠️</span>
+              <span>
+                <code style={{ fontWeight: 600 }}>[[{c.target}]]</code>{" "}
+                could mean {c.candidates.length} notes — rename or add an
+                alias to disambiguate.
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Phase H — "Folded into [[Rollup]]" banner. Pure UI: data already
+          comes from existing tags + listLazyBrainNotes. */}
+      {foldedInto && (
+        <div
+          className="mx-6 mt-3 px-3 py-2 rounded-md text-[12px] flex items-center gap-2"
+          style={{
+            background: "rgba(167, 139, 250, 0.08)",
+            border: "1px solid rgba(167, 139, 250, 0.25)",
+            color: "var(--color-text-secondary)",
+          }}
+        >
+          <span style={{ fontSize: 14 }}>📎</span>
+          <span>
+            Folded into{" "}
+            <a
+              href={`#wikilink/${encodeURIComponent(foldedInto.title || "")}`}
+              className="lb-wikilink"
+              style={{ fontWeight: 600 }}
+            >
+              {foldedInto.title || "(untitled rollup)"}
+            </a>{" "}
+            <span style={{ opacity: 0.7 }}>· sources stay searchable</span>
+          </span>
+        </div>
+      )}
 
       {/* Title */}
       <div className="px-6 pt-5 pb-2">

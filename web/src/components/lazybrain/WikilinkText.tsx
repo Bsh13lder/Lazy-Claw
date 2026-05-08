@@ -11,18 +11,19 @@ import type { LazyBrainNote } from "../../api";
 import { WikilinkPreviewCard } from "./WikilinkPreviewCard";
 import { splitCallouts } from "./callout";
 import { CalloutBlock } from "./CalloutBlock";
+import { iterWikilinks, wikilinkLabel } from "../../lib/wikilink";
 
 interface Props {
   content: string;
-  onLinkClick?: (pageName: string) => void;
+  /** Wikilink click — `pageName` is the resolved target (NOT the display text).
+   *  `anchor` is the optional `#heading` part of `[[Page#anchor]]`. */
+  onLinkClick?: (pageName: string, anchor?: string) => void;
   onTagClick?: (tag: string) => void;
   /** Optional — when provided, hovering a wikilink shows a floating preview
    *  of the target page. Obsidian-style page preview. */
   resolveLink?: (pageName: string) => LazyBrainNote | null;
 }
 
-// `!` prefix = transclusion (![[Note]]), no prefix = plain wikilink.
-const WIKILINK_RE = /(!?)\[\[([^\[\]\n]{1,120})\]\]/g;
 const TAG_RE = /(^|\s)#([A-Za-z][A-Za-z0-9_/\-]{0,63})/g;
 
 interface HoverState {
@@ -51,41 +52,45 @@ function WikilinkTextInner({ content, onLinkClick, onTagClick, resolveLink }: Pr
     (text: string, keyPrefix: string): ReactNode[] => {
       const parts: ReactNode[] = [];
       let last = 0;
-      let match: RegExpExecArray | null;
-      WIKILINK_RE.lastIndex = 0;
-      while ((match = WIKILINK_RE.exec(text))) {
-        if (match.index > last) parts.push(text.slice(last, match.index));
-        const isEmbed = match[1] === "!";
-        const target = match[2].trim();
-        if (isEmbed) {
-          const embedded = resolveLink?.(target) ?? null;
+      for (const m of iterWikilinks(text)) {
+        if (m.start > last) parts.push(text.slice(last, m.start));
+        if (m.kind === "embed") {
+          const embedded = resolveLink?.(m.target) ?? null;
           parts.push(
             <Transclusion
-              key={`${keyPrefix}-emb-${match.index}`}
-              title={target}
+              key={`${keyPrefix}-emb-${m.start}`}
+              title={m.target}
               note={embedded}
               onLinkClick={onLinkClick}
               onTagClick={onTagClick}
             />,
           );
         } else {
+          const label = wikilinkLabel(m);
           parts.push(
             <span
-              key={`${keyPrefix}-lnk-${match.index}`}
+              key={`${keyPrefix}-lnk-${m.start}`}
               onClick={(e) => {
                 e.stopPropagation();
                 setHover(null);
-                onLinkClick?.(target);
+                onLinkClick?.(m.target, m.anchor || undefined);
               }}
-              onMouseEnter={(e) => handleEnter(e, target)}
+              onMouseEnter={(e) => handleEnter(e, m.target)}
               onMouseLeave={handleLeave}
               className="lb-wikilink"
+              title={
+                m.display
+                  ? `${m.target}${m.anchor ? "#" + m.anchor : ""}`
+                  : m.anchor
+                    ? `${m.target}#${m.anchor}`
+                    : undefined
+              }
             >
-              {target}
+              {label}
             </span>,
           );
         }
-        last = match.index + match[0].length;
+        last = m.end;
       }
       if (last < text.length) parts.push(text.slice(last));
       return parts;
@@ -235,7 +240,7 @@ function Transclusion({
 }: {
   title: string;
   note: LazyBrainNote | null;
-  onLinkClick?: (page: string) => void;
+  onLinkClick?: (page: string, anchor?: string) => void;
   onTagClick?: (tag: string) => void;
 }) {
   const [open, setOpen] = useState(true);

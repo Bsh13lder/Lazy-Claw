@@ -84,6 +84,10 @@ async def init_db(config: Config) -> None:
             ("background_tasks", "lazybrain_note_id", "ALTER TABLE background_tasks ADD COLUMN lazybrain_note_id TEXT"),
             ("note_links", "edge_type", "ALTER TABLE note_links ADD COLUMN edge_type TEXT NOT NULL DEFAULT 'wikilink'"),
             ("note_links", "source", "ALTER TABLE note_links ADD COLUMN source TEXT"),
+            # LazyBrain Phase B: pipe-alias display text on resolved wikilinks.
+            ("note_links", "display_text", "ALTER TABLE note_links ADD COLUMN display_text TEXT"),
+            # LazyBrain Phase G: chunked embeddings dirty flag (mirrors embedding_dirty).
+            ("notes", "chunks_dirty", "ALTER TABLE notes ADD COLUMN chunks_dirty INTEGER NOT NULL DEFAULT 1"),
         ]
         for table, column, sql in migrations:
             try:
@@ -93,6 +97,65 @@ async def init_db(config: Config) -> None:
                     await db.execute(sql)
             except Exception:
                 logger.debug("Migration %s.%s skipped (column may already exist)", table, column, exc_info=True)
+
+        # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
+        # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.
+        # Phase G adds chunk-level embeddings + chunk-level BM25.
+        #
+        # Threat-model note: ``notes_fts`` indexes only ``title_key`` (already
+        # plaintext per the existing wikilink-resolution design). ``note_chunks_fts``
+        # indexes the chunk text in plaintext — a deliberate tradeoff for BM25
+        # recall on rare proper nouns / code identifiers. Users who consider
+        # content tokens too sensitive can drop ``note_chunks_fts`` and
+        # ``hybrid_search`` will fall back to title-FTS + dense.
+        substrate_migrations: list[tuple[str, str]] = [
+            (
+                "notes_fts",
+                # Contentless: we manage rowids ourselves, look up note rows
+                # via the unindexed note_id column. unicode61+remove_diacritics
+                # mirrors store._fold() so accented + non-accented forms match.
+                "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5("
+                "note_id UNINDEXED, user_id UNINDEXED, title, "
+                "tokenize = 'unicode61 remove_diacritics 2'"
+                ")",
+            ),
+            (
+                "note_chunks",
+                # Encrypted vector blob per chunk. Same envelope shape as
+                # note_embeddings; PRIMARY KEY on (note_id, chunk_idx).
+                "CREATE TABLE IF NOT EXISTS note_chunks ("
+                "note_id     TEXT NOT NULL, "
+                "user_id     TEXT NOT NULL, "
+                "chunk_idx   INTEGER NOT NULL, "
+                "model       TEXT NOT NULL, "
+                "dim         INTEGER NOT NULL, "
+                "vector      TEXT NOT NULL, "
+                "chunk_text  TEXT, "
+                "updated_at  TEXT DEFAULT (datetime('now')), "
+                "PRIMARY KEY (note_id, chunk_idx), "
+                "FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE"
+                ")",
+            ),
+            (
+                "idx_note_chunks_user",
+                "CREATE INDEX IF NOT EXISTS idx_note_chunks_user "
+                "ON note_chunks(user_id, model, dim)",
+            ),
+            (
+                "note_chunks_fts",
+                # Plaintext chunk text for BM25 — see threat-model comment above.
+                "CREATE VIRTUAL TABLE IF NOT EXISTS note_chunks_fts USING fts5("
+                "note_id UNINDEXED, user_id UNINDEXED, chunk_idx UNINDEXED, "
+                "chunk_text, "
+                "tokenize = 'unicode61 remove_diacritics 2'"
+                ")",
+            ),
+        ]
+        for name, sql in substrate_migrations:
+            try:
+                await db.execute(sql)
+            except Exception:
+                logger.debug("Substrate migration %s skipped", name, exc_info=True)
 
         # Partial unique index — enforces one primary session per user.
         # Created after the column migration above in case we're upgrading an

@@ -68,11 +68,28 @@ async def topic_rollup(
 
     topic = topic.strip()
 
-    # 1. Gather the corpus: backlinks + substring hits, deduped by note id.
+    # 1. Gather the corpus: backlinks + substring hits + semantic hits,
+    # deduped by note id. Semantic search recovers paraphrase matches that
+    # exact-substring + backlinks both miss (e.g. "moved to Madrid" for the
+    # topic "Madrid"); it degrades to [] when Ollama is down so this stays
+    # safe in offline mode.
     backlinked = await store.get_backlinks(config, user_id, topic)
     searched = await store.search_notes(config, user_id, topic, limit=30)
+
+    semantic_results: list[dict] = []
+    try:
+        from lazyclaw.lazybrain import embeddings  # local import: avoids cycles
+        sem = await embeddings.semantic_search(
+            config, user_id, topic, k=12, diversify=False,
+        )
+        semantic_results = sem.get("results") or []
+    except Exception as exc:
+        logger.debug("topic_rollup semantic enrichment failed: %s", exc)
+
     by_id: dict[str, dict] = {}
-    for n in list(backlinked) + list(searched):
+    for n in list(backlinked) + list(searched) + list(semantic_results):
+        if not isinstance(n, dict) or not n.get("id"):
+            continue
         by_id.setdefault(n["id"], n)
 
     corpus_notes = sorted(

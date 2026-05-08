@@ -40,7 +40,9 @@ from lazyclaw.skills.builtin.lazybrain.rollup import (
 )
 from lazyclaw.skills.builtin.lazybrain.ai_skills import (
     AskNotesSkill,
+    EmbeddingStatusSkill,
     MorningBriefingSkill,
+    RebuildFtsSkill,
     ReindexEmbeddingsSkill,
     SemanticSearchSkill,
     SuggestLinksSkill,
@@ -75,7 +77,9 @@ __all__ = [
     "ListRollupsSkill",
     "MarkRolledUpSkill",
     "AskNotesSkill",
+    "EmbeddingStatusSkill",
     "MorningBriefingSkill",
+    "RebuildFtsSkill",
     "ReindexEmbeddingsSkill",
     "SemanticSearchSkill",
     "SuggestLinksSkill",

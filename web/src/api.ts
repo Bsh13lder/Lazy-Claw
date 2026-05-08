@@ -132,6 +132,7 @@ export interface RateLimits {
 export interface TeamSettings {
   mode: string;
   critic_mode: boolean;
+  critic_model: string | null;
   max_parallel: number;
   specialist_timeout: number;
 }
@@ -1230,12 +1231,20 @@ export interface LazyBrainGraphNode {
   pinned: boolean;
   importance: number;
   is_root?: boolean;
+  /** Number of plaintext tags on the underlying note. */
+  tag_count?: number;
+  /** Phase I — Leiden community index assigned by the backend.
+   *  ``null`` when python-igraph / leidenalg aren't installed; UI then
+   *  falls back to tag-based coloring. */
+  community_id?: number | null;
 }
 
 export interface LazyBrainGraphEdge {
   source: string;
   target: string;
   label: string;
+  edge_type?: string;
+  edge_source?: string | null;
 }
 
 export interface LazyBrainGraph {
@@ -1296,6 +1305,17 @@ export const deleteLazyBrainNote = (id: string) =>
   request<{ status: string; id: string }>(`/api/lazybrain/notes/${id}`, {
     method: "DELETE",
   });
+
+export interface WikilinkCollision {
+  target: string;
+  candidates: string[];
+  at: string;
+}
+
+export const getNoteCollisions = (id: string) =>
+  request<{ note_id: string; collisions: WikilinkCollision[] }>(
+    `/api/lazybrain/notes/${id}/collisions`,
+  ).then((r) => r.collisions || []);
 
 export const getLazyBrainBacklinks = (id: string) =>
   request<{ note_id: string; backlinks: LazyBrainNote[] }>(

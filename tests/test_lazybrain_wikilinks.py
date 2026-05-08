@@ -63,8 +63,13 @@ def test_wikilinks_ignore_overlong_targets() -> None:
 
 
 def test_rewrite_wikilink_target_basic_and_case_insensitive() -> None:
+    """Phase C: by default, rename preserves the old surface text as a
+    pipe alias so backlink display text doesn't lurch. Pass
+    ``preserve_display=False`` to opt out."""
     md = "See [[Redis]] docs. Also [[REDIS]] and [[redis]] are same page."
-    new_md, count = wikilinks.rewrite_wikilink_target(md, "Redis", "Valkey")
+    new_md, count = wikilinks.rewrite_wikilink_target(
+        md, "Redis", "Valkey", preserve_display=False,
+    )
     assert count == 3
     assert "[[Valkey]]" in new_md
     assert "[[Redis]]" not in new_md
@@ -73,7 +78,9 @@ def test_rewrite_wikilink_target_basic_and_case_insensitive() -> None:
 
 def test_rewrite_wikilink_target_preserves_other_links() -> None:
     md = "Compare [[Redis]] with [[Memcached]]."
-    new_md, count = wikilinks.rewrite_wikilink_target(md, "Redis", "Valkey")
+    new_md, count = wikilinks.rewrite_wikilink_target(
+        md, "Redis", "Valkey", preserve_display=False,
+    )
     assert count == 1
     assert "[[Memcached]]" in new_md
     assert "[[Valkey]]" in new_md
@@ -81,7 +88,9 @@ def test_rewrite_wikilink_target_preserves_other_links() -> None:
 
 def test_rewrite_wikilink_target_skips_fenced_code() -> None:
     md = "```\n[[Redis]] is a sample\n```\nBut [[Redis]] here is real."
-    new_md, count = wikilinks.rewrite_wikilink_target(md, "Redis", "Valkey")
+    new_md, count = wikilinks.rewrite_wikilink_target(
+        md, "Redis", "Valkey", preserve_display=False,
+    )
     assert count == 1
     # Fenced occurrence must stay untouched
     assert "[[Redis]] is a sample" in new_md
@@ -91,7 +100,9 @@ def test_rewrite_wikilink_target_skips_fenced_code() -> None:
 
 def test_rewrite_wikilink_target_skips_inline_code() -> None:
     md = "Quote `[[Redis]]` but rewrite [[Redis]] outside."
-    new_md, count = wikilinks.rewrite_wikilink_target(md, "Redis", "Valkey")
+    new_md, count = wikilinks.rewrite_wikilink_target(
+        md, "Redis", "Valkey", preserve_display=False,
+    )
     assert count == 1
     assert "`[[Redis]]`" in new_md
     assert "[[Valkey]] outside." in new_md
@@ -99,9 +110,49 @@ def test_rewrite_wikilink_target_skips_inline_code() -> None:
 
 def test_rewrite_wikilink_target_whitespace_normalization() -> None:
     md = "Pages: [[Lazy   Brain]] and [[ lazy brain ]]"
-    new_md, count = wikilinks.rewrite_wikilink_target(md, "Lazy Brain", "Second Brain")
+    new_md, count = wikilinks.rewrite_wikilink_target(
+        md, "Lazy Brain", "Second Brain", preserve_display=False,
+    )
     assert count == 2
     assert "[[Second Brain]]" in new_md
+
+
+def test_rewrite_wikilink_target_smart_rename_preserves_display() -> None:
+    """Phase C: default ``preserve_display=True`` keeps the old surface
+    text visible as a pipe alias."""
+    md = "Compare [[Redis]] with [[Memcached]]."
+    new_md, count = wikilinks.rewrite_wikilink_target(md, "Redis", "Valkey")
+    assert count == 1
+    assert "[[Valkey|Redis]]" in new_md
+    assert "[[Memcached]]" in new_md
+
+
+def test_rewrite_wikilink_target_explicit_display_kept() -> None:
+    """An explicit ``|display`` always survives the rewrite verbatim."""
+    md = "See [[Redis|the cache]] docs."
+    new_md, _ = wikilinks.rewrite_wikilink_target(md, "Redis", "Valkey")
+    assert "[[Valkey|the cache]]" in new_md
+
+
+def test_rewrite_wikilink_target_anchor_kept() -> None:
+    """``#anchor`` survives across the rewrite."""
+    md = "See [[Redis#install]] for setup."
+    new_md, _ = wikilinks.rewrite_wikilink_target(
+        md, "Redis", "Valkey", preserve_display=False,
+    )
+    assert "[[Valkey#install]]" in new_md
+
+
+def test_extract_wikilinks_full_parses_pipe_and_anchor() -> None:
+    md = "see [[Real#Section|nice label]] and [[Plain]]"
+    parsed = wikilinks.extract_wikilinks_full(md)
+    assert len(parsed) == 2
+    assert parsed[0].target == "real"
+    assert parsed[0].anchor == "Section"
+    assert parsed[0].display == "nice label"
+    assert parsed[1].target == "plain"
+    assert parsed[1].anchor == ""
+    assert parsed[1].display == ""
 
 
 def test_rewrite_wikilink_target_no_match_is_noop() -> None:

@@ -35,7 +35,12 @@ from lazyclaw.lazybrain.frontmatter import (
     FmValue,
     serialize_frontmatter,
 )
-from lazyclaw.lazybrain.wikilinks import extract_tags, extract_wikilinks, normalize_page
+from lazyclaw.lazybrain.wikilinks import (
+    extract_tags,
+    extract_wikilinks,
+    extract_wikilinks_full,
+    normalize_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +254,8 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
     Edge_type defaults to ``'wikilink'`` and source to ``'auto'`` so the
     semantic-edge column added in Phase 4 carries provenance for free.
     """
-    targets = extract_wikilinks(markdown)
+    parsed = extract_wikilinks_full(markdown)
+    targets = [w.target for w in parsed]
     # Only delete the wikilink-type rows we own — don't blow away typed
     # edges (supersedes/contradicts/etc.) the agent or user wrote via
     # add_relation. Without this filter every save_note would wipe the
@@ -302,18 +308,30 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
             resolved[target] = row[0]
 
     now = _now()
-    for target in targets:
+    for w in parsed:
+        # Persist `display` so backlink panels can show the surface text the
+        # author chose (e.g. ``[[Page|nice label]]``). Empty when not given.
         await db.execute(
             "INSERT INTO note_links "
             "(user_id, from_note_id, to_page_name, to_note_id, "
-            "edge_type, source, created_at) "
-            "VALUES (?, ?, ?, ?, 'wikilink', 'auto', ?)",
-            (user_id, note_id, target, resolved.get(target), now),
+            "edge_type, source, display_text, created_at) "
+            "VALUES (?, ?, ?, ?, 'wikilink', 'auto', ?, ?)",
+            (
+                user_id,
+                note_id,
+                w.target,
+                resolved.get(w.target),
+                w.display or None,
+                now,
+            ),
         )
 
     # Best-effort audit log entry for any collisions we found. Writes
     # happen on the same db handle so they ride the same transaction
     # as the reindex itself — failure here is silent (logger.debug).
+    # Phase J: include from_note_id in the result_summary so the UI can
+    # scope the inline warning to the surfacing note. Format is
+    # ``from=<id>;target=<key>;candidates=<id1,id2,…>`` — parse-friendly.
     if collisions:
         try:
             from uuid import uuid4 as _uuid4
@@ -327,7 +345,8 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
                         user_id,
                         "wikilink_collision",
                         "lazybrain_store",
-                        f"target={key} candidates={','.join(candidates[:6])}",
+                        f"from={note_id};target={key};candidates="
+                        f"{','.join(candidates[:6])}",
                         "system",
                     ),
                 )
@@ -349,12 +368,16 @@ async def _resolve_pending_links(db, user_id: str, new_note: dict) -> None:
 
 
 def _schedule_post_save_hooks(
-    config: Config, user_id: str, note_id: str, content: str
+    config: Config,
+    user_id: str,
+    note_id: str,
+    content: str,
+    *,
+    title_key: str | None = None,
 ) -> None:
     """Fire-and-forget secondary indexes after save_note/update_note commits.
 
-    Two hooks the brain needs to keep recall working — both were defined
-    elsewhere but never wired:
+    Hooks the brain needs to keep recall working:
 
     1. ``ensure_embedding`` — upserts the note's vector into
        ``note_embeddings`` so ``semantic_search`` actually finds new
@@ -363,8 +386,12 @@ def _schedule_post_save_hooks(
     2. ``wikilink_injector.invalidate_cache`` — drops the 30s LRU of
        known titles so a freshly-titled note can become a ``[[wikilink]]``
        in the agent's next reply, not 30 seconds later.
+    3. ``aho_index.invalidate`` — drops the auto-link suggester's per-user
+       Aho-Corasick automaton; rebuilds lazily on the next suggest_links call.
+    4. ``fts.upsert_title`` — refreshes the BM25 title index for hybrid
+       retrieval. Best-effort; missing FTS5 falls through silently.
 
-    Both are best-effort: PKM bookkeeping must never block a save.
+    All hooks are best-effort: PKM bookkeeping must never block a save.
     """
     try:
         from lazyclaw.lazybrain import embeddings as _lb_emb
@@ -387,6 +414,28 @@ def _schedule_post_save_hooks(
         invalidate_cache(user_id)
     except Exception:
         logger.debug("wikilink cache invalidation failed", exc_info=True)
+    try:
+        # Aho-Corasick automaton cache for the auto-link suggester. Cheap
+        # to drop — rebuilds lazily on the next suggest_links call.
+        from lazyclaw.lazybrain import aho_index as _aho
+        _aho.invalidate(user_id)
+    except Exception:
+        logger.debug("aho_index cache invalidation failed", exc_info=True)
+    try:
+        # BM25 title index for hybrid retrieval (Phase F). Schedule on the
+        # running loop; safe-noop in sync test contexts.
+        from lazyclaw.lazybrain import fts as _fts
+        if title_key:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                asyncio.create_task(
+                    _fts.upsert_title(config, user_id, note_id, title_key),
+                )
+    except Exception:
+        logger.debug("fts title upsert schedule failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +569,9 @@ async def save_note(
         )
         await db.commit()
 
-    _schedule_post_save_hooks(config, user_id, note_id, content)
+    _schedule_post_save_hooks(
+        config, user_id, note_id, content, title_key=title_key,
+    )
 
     return {
         "id": note_id,
@@ -639,6 +690,8 @@ async def update_note(
             "aliases = CASE WHEN ? = 1 THEN ? ELSE aliases END, "
             "embedding_dirty = "
             "CASE WHEN ? = 1 THEN 1 ELSE embedding_dirty END, "
+            "chunks_dirty = "
+            "CASE WHEN ? = 1 THEN 1 ELSE chunks_dirty END, "
             "updated_at = ? "
             "WHERE id = ? AND user_id = ?",
             (
@@ -650,6 +703,7 @@ async def update_note(
                 title_key,
                 1 if aliases_to_set is not None else 0,
                 aliases_json if aliases_json else None,
+                1 if body_changed else 0,
                 1 if body_changed else 0,
                 now,
                 note_id,
@@ -676,13 +730,26 @@ async def update_note(
     # Frontmatter-only updates also count as a body change because the
     # serialized YAML block is part of the encrypted content blob.
     if content is not None or title is not None or frontmatter_updates is not None:
-        _schedule_post_save_hooks(config, user_id, note_id, new_content)
+        _schedule_post_save_hooks(
+            config, user_id, note_id, new_content, title_key=title_key,
+        )
 
     return await get_note(config, user_id, note_id)
 
 
 async def delete_note(config: Config, user_id: str, note_id: str) -> bool:
-    """Delete a note. ``note_links`` rows clean up via ON DELETE CASCADE."""
+    """Delete a note. ``note_links`` rows clean up via ON DELETE CASCADE.
+
+    Best-effort cleanup of the FTS title + chunk indexes — they have no
+    foreign key, so we sweep them ourselves to avoid orphaned BM25 hits
+    pointing at deleted ids.
+    """
+    try:
+        from lazyclaw.lazybrain import fts as _fts
+        await _fts.delete(config, note_id)
+        await _fts.delete_chunks(config, note_id)
+    except Exception:
+        logger.debug("fts cleanup on delete failed", exc_info=True)
     async with db_session(config) as db:
         cursor = await db.execute(
             "DELETE FROM notes WHERE id = ? AND user_id = ?",

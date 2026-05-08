@@ -190,6 +190,62 @@ async def backlinks_route(
     return {"note_id": note_id, "backlinks": linked}
 
 
+@router.get("/notes/{note_id}/collisions")
+async def collisions_route(
+    note_id: str, user: User = Depends(get_current_user)
+):
+    """Phase J — return wikilink collision warnings for this note.
+
+    Reads ``audit_log`` rows where ``action='wikilink_collision'`` and the
+    ``result_summary`` carries ``from=<note_id>``. The DB is
+    encrypted-at-rest at the field level, but ``audit_log`` is plaintext
+    by design (it's debug telemetry, never user content).
+
+    Response shape::
+
+        {
+          "note_id": "<id>",
+          "collisions": [
+            {"target": "madrid", "candidates": ["id1", "id2"], "at": "..."}
+          ]
+        }
+    """
+    from lazyclaw.db.connection import db_session
+
+    rows: list[dict] = []
+    try:
+        async with db_session(_config) as db:
+            cursor = await db.execute(
+                "SELECT result_summary, created_at FROM audit_log "
+                "WHERE user_id = ? AND action = 'wikilink_collision' "
+                "AND result_summary LIKE ? "
+                "ORDER BY created_at DESC LIMIT 50",
+                (user.id, f"%from={note_id};%"),
+            )
+            data = await cursor.fetchall()
+        # Dedupe by target — many edits → many rows; keep most-recent only.
+        seen: set[str] = set()
+        for r in data:
+            summary = r[0] or ""
+            parts = dict(
+                kv.split("=", 1) for kv in summary.split(";") if "=" in kv
+            )
+            target = (parts.get("target") or "").strip()
+            cand_str = (parts.get("candidates") or "").strip()
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            rows.append({
+                "target": target,
+                "candidates": [c for c in cand_str.split(",") if c],
+                "at": r[1],
+            })
+    except Exception:
+        # Audit-log queries must never break the detail page.
+        return {"note_id": note_id, "collisions": []}
+    return {"note_id": note_id, "collisions": rows[:10]}
+
+
 @router.post("/notes/{note_id}/mark-task-done")
 async def mark_task_done_route(
     note_id: str, user: User = Depends(get_current_user)

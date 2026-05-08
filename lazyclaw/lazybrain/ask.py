@@ -54,10 +54,25 @@ async def ask_notes(
             "source_count": 0,
         }
 
-    # Retrieve with semantic_search (auto-falls-back to substring).
-    retrieval = await embeddings.semantic_search(config, user_id, q, k=k)
+    # Retrieve with semantic_search (auto-falls-back to substring + BM25).
+    # When the user has opted into the reranker we widen the retrieval pool
+    # by 2× and let the cross-encoder pick the final top-k — gives the rerank
+    # pass meaningful options instead of just re-shuffling the top-k.
+    from lazyclaw.lazybrain import rerank as _rerank
+    rerank_enabled = await _rerank.is_enabled(config, user_id)
+    retrieval_k = max(k, k * 2) if rerank_enabled else k
+    retrieval = await embeddings.semantic_search(
+        config, user_id, q, k=retrieval_k,
+    )
     results = retrieval.get("results") or []
     retrieval_source = retrieval.get("source", "none")
+
+    if rerank_enabled and results:
+        try:
+            results = _rerank.rerank_results(q, results, top_k=k)
+            retrieval_source = f"{retrieval_source}+rerank"
+        except Exception as exc:
+            logger.debug("rerank pass skipped: %s", exc)
 
     if not results:
         return {

@@ -21,7 +21,7 @@ import re
 from typing import Any
 
 from lazyclaw.config import Config
-from lazyclaw.lazybrain import store
+from lazyclaw.lazybrain import aho_index, store
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +51,41 @@ Rules:
 - Output ONLY JSON. No prose, no markdown fence."""
 
 
-def _pure_substring_suggestions(text: str, titles: list[str]) -> list[dict]:
-    """Deterministic offline fallback: find verbatim occurrences of any title.
+def _wikilink_mask_spans(text: str) -> list[tuple[int, int]]:
+    """Return [(start, end)] of every existing ``[[...]]`` block in ``text``.
 
-    Respects word boundaries and skips matches already inside ``[[...]]`` by
-    masking wikilink spans first. Case-insensitive.
+    Used to keep the auto-link scanner from suggesting a re-link inside a
+    wikilink the user already wrote.
+    """
+    spans: list[tuple[int, int]] = []
+    for m in re.finditer(r"\[\[[^\[\]\n]+\]\]", text):
+        spans.append((m.start(), m.end()))
+    return spans
+
+
+def _aho_substring_suggestions(
+    user_id: str, text: str, titles: list[str]
+) -> list[dict]:
+    """Aho-Corasick scan over the user's title set. Returns [] when the
+    C extension is missing — caller falls through to the legacy regex path.
+    """
+    automaton = aho_index.get_automaton(user_id, titles)
+    if automaton is None:
+        return []
+    return aho_index.scan(
+        automaton,
+        text,
+        masked_spans=_wikilink_mask_spans(text),
+        max_suggestions=8,
+    )
+
+
+def _legacy_substring_suggestions(text: str, titles: list[str]) -> list[dict]:
+    """Pre-Aho-Corasick fallback: per-title regex sweep, longest-first.
+
+    Kept verbatim so a missing ``ahocorasick`` install (e.g. exotic
+    architectures) still yields suggestions with identical filtering rules
+    to the AC path.
     """
     if not text or not titles:
         return []
@@ -65,19 +95,21 @@ def _pure_substring_suggestions(text: str, titles: list[str]) -> list[dict]:
     lower = masked.lower()
 
     # Sort titles longest-first so "New York City" wins over "New York".
-    sorted_titles = sorted({t.strip() for t in titles if t and len(t) > 2}, key=len, reverse=True)
+    sorted_titles = sorted(
+        {t.strip() for t in titles if t and len(t) > 2},
+        key=len,
+        reverse=True,
+    )
 
     seen_spans: list[tuple[int, int]] = []
     out: list[dict] = []
     for title in sorted_titles:
         needle = title.lower()
-        # require word boundary on both sides so "cat" doesn't hit "category"
         pattern = re.compile(
             rf"(?<![A-Za-z0-9_]){re.escape(needle)}(?![A-Za-z0-9_])",
         )
         for m in pattern.finditer(lower):
             start, end = m.span()
-            # skip if overlaps a mask (wikilink) or a previously matched span
             if any(s < end and start < e for s, e in seen_spans):
                 continue
             if "\0" in masked[start:end]:
@@ -87,6 +119,23 @@ def _pure_substring_suggestions(text: str, titles: list[str]) -> list[dict]:
             if len(out) >= 8:
                 return out
     return out
+
+
+def _pure_substring_suggestions(
+    user_id: str, text: str, titles: list[str]
+) -> list[dict]:
+    """Deterministic offline suggestions — Aho-Corasick when available,
+    legacy regex otherwise. Word-boundary aware, mask-aware, capped at 8.
+    """
+    if not text or not titles:
+        return []
+    if aho_index.is_available():
+        ac_hits = _aho_substring_suggestions(user_id, text, titles)
+        if ac_hits:
+            return ac_hits
+        # AC built but produced zero — fall through to the legacy scanner
+        # so install differences don't silently regress recall.
+    return _legacy_substring_suggestions(text, titles)
 
 
 async def _llm_suggestions(
@@ -187,7 +236,10 @@ async def suggest_links(
     if llm_suggestions:
         return {"suggestions": llm_suggestions, "source": "llm"}
 
-    fallback = _pure_substring_suggestions(text, titles)
+    fallback = _pure_substring_suggestions(user_id, text, titles)
     if fallback:
-        return {"suggestions": fallback, "source": "substring"}
+        return {
+            "suggestions": fallback,
+            "source": "aho" if aho_index.is_available() else "substring",
+        }
     return {"suggestions": [], "source": "none"}

@@ -11,6 +11,7 @@ from lazyclaw.lazybrain import (
     ask,
     autolink,
     embeddings,
+    fts,
     metadata_suggest,
     recap,
     topic_rollup,
@@ -417,4 +418,137 @@ class ReindexEmbeddingsSkill(BaseSkill):
         return (
             f"Indexed {data['indexed']} / {data['total']} notes "
             f"(skipped {data['skipped']}, model {data['model']})."
+        )
+
+
+class EmbeddingStatusSkill(BaseSkill):
+    """Report semantic-index health without rebuilding anything.
+
+    Quick way to verify the embedding pipeline is alive after changes
+    (Ollama URL fix, new model pull, fresh container) without trawling
+    log files. Reports total notes, embedded count, dirty count, and
+    the last embed timestamp.
+    """
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "lazybrain_embedding_status"
+
+    @property
+    def display_name(self) -> str:
+        return "Embedding status"
+
+    @property
+    def category(self) -> str:
+        return "lazybrain"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Show how many notes are embedded for semantic search, how "
+            "many are still dirty (waiting for the heartbeat re-embedder), "
+            "and when the last embedding was written. Read-only, cheap. "
+            "Use it to confirm the pipeline is alive."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.db.connection import db_session
+        from lazyclaw.lazybrain import embeddings
+
+        try:
+            async with db_session(self._config) as db:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM notes WHERE user_id = ? "
+                    "AND deleted_at IS NULL",
+                    (user_id,),
+                )
+                total_row = await cur.fetchone()
+                total = int(total_row[0]) if total_row else 0
+
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM note_embeddings "
+                    "WHERE user_id = ? AND model = ?",
+                    (user_id, embeddings.EMBED_MODEL),
+                )
+                emb_row = await cur.fetchone()
+                embedded = int(emb_row[0]) if emb_row else 0
+
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM notes WHERE user_id = ? "
+                    "AND deleted_at IS NULL "
+                    "AND (embedding_dirty = 1 OR chunks_dirty = 1)",
+                    (user_id,),
+                )
+                dirty_row = await cur.fetchone()
+                dirty = int(dirty_row[0]) if dirty_row else 0
+
+                cur = await db.execute(
+                    "SELECT MAX(updated_at) FROM note_embeddings "
+                    "WHERE user_id = ?",
+                    (user_id,),
+                )
+                last_row = await cur.fetchone()
+                last_at = last_row[0] if last_row and last_row[0] else "never"
+
+            pct = int(round(100 * embedded / total)) if total else 0
+            return (
+                f"Embedding status (model {embeddings.EMBED_MODEL}):\n"
+                f"  total notes:   {total}\n"
+                f"  embedded:      {embedded} ({pct}%)\n"
+                f"  dirty / queued: {dirty}\n"
+                f"  last embed at: {last_at}"
+            )
+        except Exception as exc:
+            return f"Embedding status check failed: {exc}"
+
+
+class RebuildFtsSkill(BaseSkill):
+    """Backfill the BM25 title FTS5 index for the user's vault.
+
+    Idempotent — clears and rewrites every row. Useful once after the
+    Phase F migration first lands; the regular save path keeps the index
+    fresh thereafter.
+    """
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "lazybrain_rebuild_fts"
+
+    @property
+    def display_name(self) -> str:
+        return "Rebuild BM25 search index"
+
+    @property
+    def category(self) -> str:
+        return "lazybrain"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Repopulate the SQLite FTS5 title index used by the hybrid "
+            "(BM25 + dense) retrieval path. Run once after upgrading to "
+            "the Phase F substrate; safe to re-run any time."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        data = await fts.rebuild_for_user(self._config, user_id)
+        if data.get("error"):
+            return f"⚠️ FTS rebuild failed: {data['error']}"
+        return (
+            f"Rebuilt BM25 title index — wrote {data['written']} rows "
+            f"(skipped {data['skipped']} title-less)."
         )

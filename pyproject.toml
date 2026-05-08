@@ -40,6 +40,10 @@ dependencies = [
     # agent to fall back to `ask_vision` — OCR is a cheap optimisation, not
     # a correctness requirement.
     "pytesseract>=0.3.10",
+    # LazyBrain Phase E — Aho-Corasick auto-link suggester. Tiny C extension
+    # (~50 KB wheel); when import fails the autolink path falls back to the
+    # legacy substring scanner so install isn't a hard requirement.
+    "pyahocorasick>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -54,7 +58,14 @@ local = ["llama-cpp-python>=0.2.0"]
 # Tesseract on Linux/Windows so this remains optional.
 mac = ["ocrmac>=1.0.1; sys_platform == 'darwin'"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
-all = ["lazyclaw[telegram,discord,voice,eco,mac,dev]"]
+# LazyBrain Phase I — Leiden community detection on the galaxy graph.
+# When unavailable (e.g. install failure on exotic platforms) the graph
+# endpoint silently falls back to tag-based coloring.
+graph = ["python-igraph>=0.11", "leidenalg>=0.10"]
+# LazyBrain Phase K — BGE cross-encoder reranker for /ask. ~280 MB model
+# downloads on first call; gated behind `lazybrain.reranker_enabled`.
+rerank = ["rerankers>=0.3.0"]
+all = ["lazyclaw[telegram,discord,voice,eco,mac,dev,graph]"]
 
 [project.scripts]
 lazyclaw = "lazyclaw.cli:main"

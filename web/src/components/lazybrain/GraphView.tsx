@@ -29,8 +29,10 @@ import { drawGraph, type DrawNode, type DrawEdge, type DrawState } from "./Canva
 import {
   CATEGORY_PRIORITY,
   FILTER_CATEGORIES,
+  colorForNode,
   colorForTags,
   categoryKeysFor,
+  ringForKey,
 } from "./noteColors";
 import {
   CategoryIcon,
@@ -152,7 +154,13 @@ const MAX_DEPTH = 3;
 // nuke the other. JSON shape: { [nodeId]: [x, y] }. Private-mode Safari
 // throws on setItem — wrap every call in try/catch so the graph never
 // crashes because storage is unavailable.
-const POSITIONS_KEY_PREFIX = "lazybrain-graph-positions:";
+//
+// `:v3` bump (sun + belt redesign): the v2 categorical zone layout is
+// also incompatible with the new topology-driven anchors (supernote
+// pinned at centre, components on a belt ring). Old v1/v2 keys are
+// simply ignored once; the next cool-down writes a fresh sun+belt
+// snapshot under v3.
+const POSITIONS_KEY_PREFIX = "lazybrain-graph-positions-v3:";
 
 function readPositionsFromLocalStorage(
   mode: string,
@@ -310,7 +318,35 @@ export function GraphView({
   const selectedIdRef = useRef<string | null>(null);
 
   const [size, setSize] = useState({ width: 800, height: 600 });
-  const [view, setView] = useState({ tx: 0, ty: 0, k: 1 });
+  // Auto-fit on first load: the v3 sun+belt layout pushes belt systems
+  // out to ~85% of half-canvas and singletons past the canvas edge,
+  // which would clip badly at k=1.0. Default to k=0.7 the FIRST time
+  // the user sees the redesign; once they've manually zoomed/panned
+  // we mark this slot in localStorage so subsequent reloads keep their
+  // choice. Cheap, no layout-then-measure flicker.
+  const [view, setView] = useState(() => {
+    if (typeof window === "undefined") return { tx: 0, ty: 0, k: 1 };
+    try {
+      if (window.localStorage.getItem("lazybrain-graph-view-fitted") === "true") {
+        return { tx: 0, ty: 0, k: 1 };
+      }
+    } catch {
+      // Private mode / disabled — fall through to fitted default.
+    }
+    return { tx: 0, ty: 0, k: 0.7 };
+  });
+  // Mark the view as user-managed once the user actually zooms or pans.
+  const viewFittedFlagWrittenRef = useRef(false);
+  useEffect(() => {
+    if (viewFittedFlagWrittenRef.current) return;
+    if (view.k === 0.7 && view.tx === 0 && view.ty === 0) return;
+    viewFittedFlagWrittenRef.current = true;
+    try {
+      window.localStorage.setItem("lazybrain-graph-view-fitted", "true");
+    } catch {
+      // Best-effort.
+    }
+  }, [view]);
   const [hoverId, setHoverId] = useState<string | null>(null);
   // Mirror hoverId / selectedId into refs so the RAF loop can read
   // the latest value without subscribing to a re-render. These get
@@ -335,6 +371,29 @@ export function GraphView({
       // Best-effort.
     }
   }, [legendOpen]);
+
+  // Edge-visibility mode. "faint" keeps a ghost constellation (alpha
+  // 0.04) so the user sees the graph silhouette before clicking; "off"
+  // hides every wire until they focus a node, the strongest possible
+  // separation cue. Persisted so the user's choice survives reload.
+  const [edgesMode, setEdgesMode] = useState<"faint" | "off">(() => {
+    try {
+      const raw = localStorage.getItem("lazybrain-edges-mode");
+      if (raw === "off") return "off";
+      if (raw === "faint") return "faint";
+    } catch {
+      // Private mode / disabled — fall through to default.
+    }
+    return "faint";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("lazybrain-edges-mode", edgesMode);
+    } catch {
+      // Best-effort.
+    }
+    needsRedrawRef.current = true;
+  }, [edgesMode]);
   // No per-frame `tick` state — the RAF loop writes node transforms
   // and edge `d` attributes directly via setAttribute. React only
   // reconciles on data/hover/select changes (rare). Pulse animations
@@ -442,11 +501,23 @@ export function GraphView({
             : isRollupNote(note)
               ? "rollup"
               : undefined;
+        // Categorical zone — the load-bearing signal for the new
+        // stellar-atlas layout. Falls through to "_default" (peripheral
+        // anchor) when the note isn't loaded yet OR when no recognised
+        // category tag matched — same priority order the palette uses
+        // so dot colour, badge, filter row, and zone all agree.
+        const categoryKey = note
+          ? pickCategoryKey(note.tags ?? null, !!note.pinned)
+          : "_default";
         return {
           id: n.id,
           pinned: false,
           r: computeNodeRadius(note, degMap.get(n.id) ?? 0),
           kind,
+          // community_id retained for potential hue-rotation; layout
+          // no longer reads it (replaced by categoryKey-driven anchors).
+          community_id: n.community_id ?? null,
+          categoryKey,
         };
       }),
       graph.edges.map((e) => ({ source: e.source, target: e.target })),
@@ -454,8 +525,8 @@ export function GraphView({
         width: size.width,
         height: size.height,
         // Force layout always — orbital was removed. No `orbitOf` and
-        // no central pin: the graph organically clusters via edge
-        // springs and node-vs-node repulsion, just like Obsidian.
+        // no central pin from the caller: the sim picks its own
+        // supernote (max-degree node) and anchors it at canvas centre.
         mode: "force",
         savedPositions,
       },
@@ -479,15 +550,45 @@ export function GraphView({
   // Async server overlay — fetch saved positions on mount + mode change
   // and apply them on top of the localStorage cache. Server wins on
   // conflict; unknown nodes (new since last save) keep their seed.
+  //
+  // Stellar-atlas escape hatch: if the sim was constructed WITHOUT
+  // local saved positions, the user is on a fresh categorical layout
+  // (post v2 cache bump). Skipping the server overlay here lets the
+  // strong CLUSTER_K pull settle into clean constellations without
+  // an old blob snapshot yanking everything back to centre. Once the
+  // categorical layout cools, it persists to localStorage AND the
+  // server (`saveGraphPositions` debounce below), so the next reload
+  // sees the new positions and the overlay path becomes safe again.
   useEffect(() => {
     let cancelled = false;
     const mode: GraphLayoutMode =
       layoutMode === "neural-link" ? "neural-link" : "category";
+    const hasLocalCache = !!simRef.current?.usedSavedPositions();
+    if (!hasLocalCache) return;
     getGraphPositions(mode)
       .then((res) => {
         if (cancelled) return;
         const positions = res.positions ?? {};
         if (Object.keys(positions).length === 0) return;
+        // Stale-overlay guard: if the server's snapshot puts the
+        // supernote (which v3 always pins at canvas centre) far from
+        // the actual centre, the snapshot is from a previous force
+        // model (v1 blob or v2 categorical zones). Drop it — the local
+        // v3 cache is authoritative.
+        const sim = simRef.current;
+        if (sim) {
+          const supId = sim.supernoteId();
+          const centre = sim.centerXY();
+          if (supId && positions[supId]) {
+            const [sx, sy] = positions[supId];
+            const dist = Math.hypot(sx - centre.x, sy - centre.y);
+            if (dist > 120) {
+              // Server snapshot is stale — silently drop. Don't refresh
+              // the localStorage cache either; let the v3 settle stand.
+              return;
+            }
+          }
+        }
         simRef.current?.applyPositions(positions);
         // Also refresh the localStorage cache so offline next-load matches.
         writePositionsToLocalStorage(mode, positions);
@@ -1017,17 +1118,23 @@ export function GraphView({
   // wins over a clean layout. User can zoom/pan to resolve overlaps.
   const hoverNote = hoverId ? notesById?.[hoverId] : undefined;
 
-  // Per-node opacity. Three modes:
-  //   • Selection: clicked node + 1-hop neighbours pop, everything else
-  //     fades to 0.14 — clean "I'm reading this subgraph" view.
-  //   • Hover (no selection): hovered node + neighbours light up, the
-  //     rest dims hard (0.08) for momentary inspection.
-  //   • Idle: graph at 0.85, no hierarchy.
-  const NON_FOCUS_DIM = isSelectFocus ? 0.14 : isHoverFocus ? 0.08 : 0.35;
+  // Per-node opacity. Obsidian-style: every dot stays clearly visible
+  // even when a subgraph is selected — only relative brightness shifts.
+  // Earlier tuning faded non-focus nodes to 0.14, which read as "the
+  // dots disappeared" on click. New floor is 0.55 for non-focus and
+  // 0.5 for momentary hover, so the spatial layout always remains
+  // readable.
+  //   • Idle (no hover, no select): every node at 0.95 — graph fully on.
+  //   • Hover (no selection): hovered + 1-hop pop, the rest at 0.5.
+  //   • Selection: selected + 1-hop pop, the rest at 0.55.
+  const NON_FOCUS_DIM = isSelectFocus ? 0.55 : isHoverFocus ? 0.5 : 0.95;
   const opacityFor = (noteId: string): number => {
     const note = notesById?.[noteId];
     const dimmed = dimPredicate?.(note) ?? false;
     const match = matcher ? matcher(noteId) : true;
+    // Filter / search miss is the ONE place we drop hard — that's an
+    // explicit user "hide these" signal. Selection focus does NOT count
+    // as such a signal.
     if (dimmed || !match) return 0.08;
     // Hover only brightens when nothing is locked-in via click. Once
     // the user has selected a node, hovering elsewhere does NOT
@@ -1038,11 +1145,11 @@ export function GraphView({
       const d = depths.get(noteId);
       if (d === undefined) return NON_FOCUS_DIM;
       if (d === 0) return 1;
-      if (d === 1) return isSelectFocus ? 0.92 : 0.95;
-      if (d === 2) return isSelectFocus ? 0.5 : 0.7;
-      return Math.max(NON_FOCUS_DIM, isSelectFocus ? 0.28 : 0.45);
+      if (d === 1) return 1;
+      if (d === 2) return isSelectFocus ? 0.85 : 0.9;
+      return Math.max(NON_FOCUS_DIM, 0.7);
     }
-    return 0.85;
+    return 0.95;
   };
 
   const edgeState = (src: string, tgt: string) => {
@@ -1058,27 +1165,37 @@ export function GraphView({
     // slider > 1). Keeping edges to visible notes preserves the wikilink
     // topology even when half the graph is dimmed by user filters.
     if ((dimA && dimB) || !(matchA || matchB)) {
-      return { opacity: 0.03, stroke: "var(--color-text-muted)", width: 0.8 };
+      return { opacity: 0, stroke: "var(--color-text-muted)", width: 0.8 };
     }
+    // No-focus baseline. "faint" leaves a ghost constellation visible
+    // (alpha 0.04) so the user sees the graph's silhouette from across
+    // the room. "off" hides every wire until they click — the strongest
+    // possible separation cue.
+    const baseAlpha = edgesMode === "off" ? 0 : 0.04;
     if (depths) {
       const dSrc = depths.get(src);
       const dTgt = depths.get(tgt);
       if (dSrc === undefined && dTgt === undefined) {
-        // Edge not in focus neighbourhood — fade hard in select mode
-        // (cleanup the visual noise around the selected subgraph), a
-        // little less hard for momentary hover.
+        // Edge not in focus neighbourhood — fully invisible. Non-neighbor
+        // wires never paint while a node is focused, so the lit subgraph
+        // pops against an empty background. This is the click-to-reveal
+        // experience the user asked for.
         return {
-          opacity: isSelectFocus ? 0.05 : isHoverFocus ? 0.04 : 0.12,
+          opacity: 0,
           stroke: "var(--color-text-muted)",
           width: 0.8,
         };
       }
       const minD = Math.min(dSrc ?? 99, dTgt ?? 99);
-      if (minD === 0) return { opacity: 1, stroke: "var(--color-accent)", width: 2 };
-      if (minD === 1) return { opacity: 0.7, stroke: "var(--color-accent)", width: 1.5 };
-      return { opacity: 0.3, stroke: "var(--color-accent-dim)", width: 1 };
+      if (minD === 0) return { opacity: 0.95, stroke: "var(--color-accent)", width: 2 };
+      if (minD === 1) return { opacity: isSelectFocus ? 0.95 : 0.85, stroke: "var(--color-accent)", width: 1.5 };
+      // Two-hop edges trace the next ring out — faint but present so
+      // users can follow the chain without it looking like fuzz.
+      if (minD === 2) return { opacity: 0.18, stroke: "var(--color-accent-dim)", width: 1 };
+      // Three+ hops: gone. Keeps the focus subgraph visually isolated.
+      return { opacity: 0, stroke: "var(--color-accent-dim)", width: 1 };
     }
-    return { opacity: 0.16, stroke: "var(--color-text-muted)", width: 1 };
+    return { opacity: baseAlpha, stroke: "var(--color-text-muted)", width: 1 };
   };
 
   // ── Canvas drawing pipeline ──────────────────────────────────────────
@@ -1157,8 +1274,18 @@ export function GraphView({
       const sn = nodeById.get(node.id);
       if (!sn) continue;
       const note = notesById?.[node.id];
+      // Phase I — when the backend stamped a Leiden community_id on the
+      // graph node, route coloring through colorForNode so neural-link
+      // mode gets topic-distinct hues instead of tag-bucket coloring.
       const color = note
-        ? colorForTags(note.tags, note.pinned)
+        ? colorForNode(
+            {
+              pinned: note.pinned,
+              tags: note.tags,
+              community_id: node.community_id,
+            },
+            layoutMode,
+          )
         : { ring: "#475569", emoji: "", label: "Note" };
       const deg = degree[node.id] ?? 0;
       const r = computeNodeRadius(note, deg);
@@ -1397,6 +1524,26 @@ export function GraphView({
       }
 
       patchPoolPositions();
+      // Topology-driven layout: no painted zones / serif titles. The
+      // structure (sun + belt) carries the meaning. Hub orbital rings
+      // remain — they suit this aesthetic and read as the orbital
+      // paths of a genuine star chart.
+      const hubList = simRef.current?.componentHubs() ?? [];
+      const nodeMap = nodeById;
+      const hubs = hubList.map((h) => {
+        const sn = nodeMap.get(h.hubId);
+        const note = sn ? notesById?.[sn.id] : undefined;
+        const key = note
+          ? pickCategoryKey(note.tags ?? null, !!note.pinned)
+          : "_default";
+        return {
+          x: h.hubX,
+          y: h.hubY,
+          radius: h.avgRadius,
+          size: h.size,
+          color: ringForKey(key),
+        };
+      });
       drawGraph(ctx, {
         width: size.width,
         height: size.height,
@@ -1404,6 +1551,7 @@ export function GraphView({
         view,
         nodes: drawNodesPoolRef.current,
         edges: drawEdgesPoolRef.current,
+        hubs,
         glyphZoomThreshold: 0.6,
       } satisfies DrawState);
       needsRedrawRef.current = false;
@@ -1830,6 +1978,28 @@ export function GraphView({
         >
           <span aria-hidden>↻</span>
           <span>Re-flow</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setEdgesMode((m) => (m === "off" ? "faint" : "off"))}
+          title={
+            edgesMode === "off"
+              ? "Edges hidden — click any node to light up its connections. Click here to show ghost edges always."
+              : "Edges faint — a constellation of ghost wires is always visible. Click here to hide them until you focus a node."
+          }
+          className={`flex items-center gap-1 rounded-full border border-border bg-bg-secondary/80 backdrop-blur px-2.5 py-1 transition-colors tracking-wide ${
+            edgesMode === "off"
+              ? "text-text-primary"
+              : "text-text-muted hover:text-text-primary"
+          }`}
+          style={
+            edgesMode === "off"
+              ? { boxShadow: "inset 0 -2px 0 #a78bfa" }
+              : undefined
+          }
+        >
+          <span aria-hidden>{edgesMode === "off" ? "○" : "◌"}</span>
+          <span>Edges {edgesMode === "off" ? "off" : "faint"}</span>
         </button>
       </div>
 

@@ -3,13 +3,82 @@
 
 Everything here runs off plaintext columns (``title_key``, ``to_page_name``,
 ``tags``) so it stays cheap — no per-row decrypt pass.
+
+Phase I — Leiden community detection: when ``python-igraph`` + ``leidenalg``
+are installed, every node carries a ``community_id`` (small int) the
+frontend can hue-rotate so topic clusters get distinct colors. Falls back
+to ``community_id=None`` when the libs are missing — UI then keeps the
+existing tag-based palette.
 """
 from __future__ import annotations
+
+import logging
+import time
 
 from lazyclaw.config import Config
 from lazyclaw.db.connection import db_session
 from lazyclaw.lazybrain import store
 from lazyclaw.lazybrain.wikilinks import normalize_page
+
+logger = logging.getLogger(__name__)
+
+# Lazy-imported community detection. We only build the leidenalg graph
+# once per (user_id, layout) within a 60 s window — partition is stable
+# given the same edge set, so caching avoids burning CPU on UI panel
+# toggles. Set to None when import or partition fails.
+_PARTITION_TTL_SECONDS = 60.0
+_partition_cache: dict[
+    tuple[str, str],
+    tuple[float, dict[str, int]],  # (expiry_ts, {node_id: community_id})
+] = {}
+
+
+def _try_leiden(
+    cache_key: tuple[str, str],
+    node_ids: list[str],
+    edges: list[tuple[str, str]],
+) -> dict[str, int]:
+    """Compute a Leiden partition over the given (nodes, edges).
+
+    Returns ``{node_id: community_id}`` or ``{}`` when leidenalg /
+    python-igraph aren't installed or partitioning fails. Result is
+    cached for ``_PARTITION_TTL_SECONDS`` per cache_key.
+    """
+    now = time.monotonic()
+    cached = _partition_cache.get(cache_key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    try:
+        import igraph  # type: ignore
+        import leidenalg  # type: ignore
+    except Exception:
+        return {}
+    try:
+        idx_of = {nid: i for i, nid in enumerate(node_ids)}
+        e_indexed = [
+            (idx_of[a], idx_of[b])
+            for a, b in edges
+            if a in idx_of and b in idx_of and a != b
+        ]
+        g = igraph.Graph(n=len(node_ids), edges=e_indexed, directed=False)
+        # RBConfigurationVertexPartition with resolution=1.0 is the
+        # community-default for "natural" cluster size on sparse PKM graphs.
+        partition = leidenalg.find_partition(
+            g,
+            leidenalg.RBConfigurationVertexPartition,
+            resolution_parameter=1.0,
+            seed=42,  # deterministic — same vault → same colors
+        )
+        out: dict[str, int] = {}
+        for community_id, members in enumerate(partition):
+            for vertex_idx in members:
+                if 0 <= vertex_idx < len(node_ids):
+                    out[node_ids[vertex_idx]] = community_id
+        _partition_cache[cache_key] = (now + _PARTITION_TTL_SECONDS, out)
+        return out
+    except Exception:
+        logger.debug("leiden partition failed", exc_info=True)
+        return {}
 
 
 async def get_graph(
@@ -68,17 +137,6 @@ async def get_graph(
         )
         edges_raw = await edge_rows.fetchall()
 
-    nodes = [
-        {
-            "id": row[0],
-            "label": row[1] or row[0][:8],
-            "pinned": bool(row[2]),
-            "importance": row[3],
-            "tag_count": len((row[4] or "[]").count('"') // 2 and row[4] or "[]"),
-        }
-        for row in node_rows
-    ]
-
     edges = []
     for from_id, to_id, to_page, edge_type, source in edges_raw:
         if to_id and to_id in ids:
@@ -91,6 +149,30 @@ async def get_graph(
             })
         # Unresolved edges (no target note yet) are dropped from the graph
         # view — they surface instead in the backlinks panel of the orphan.
+
+    # Phase I — Leiden community partition. Cache key disambiguates by the
+    # filter mode so "default", "include_rolled_up", and "include_archived"
+    # views don't trample each other.
+    cache_mode = (
+        f"r{int(include_rolled_up)}a{int(include_archived)}"
+    )
+    community_by_id = _try_leiden(
+        (user_id, cache_mode),
+        node_ids=[row[0] for row in node_rows],
+        edges=[(e["source"], e["target"]) for e in edges],
+    )
+
+    nodes = [
+        {
+            "id": row[0],
+            "label": row[1] or row[0][:8],
+            "pinned": bool(row[2]),
+            "importance": row[3],
+            "tag_count": len((row[4] or "[]").count('"') // 2 and row[4] or "[]"),
+            "community_id": community_by_id.get(row[0]),
+        }
+        for row in node_rows
+    ]
 
     return {"nodes": nodes, "edges": edges}
 

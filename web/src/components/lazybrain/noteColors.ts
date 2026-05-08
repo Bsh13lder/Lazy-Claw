@@ -327,6 +327,63 @@ export function colorForTags(
   return PALETTE[key] ?? DEFAULT;
 }
 
+// Phase I — golden-ratio hue rotation. Mapping a small int → distinct,
+// readable colors uses the same trick d3-scheme-category10 / Stripe / Mapbox
+// reach for: multiply by the conjugate of the golden ratio so adjacent
+// community ids land far apart on the color wheel.
+const GOLDEN_RATIO_CONJUGATE = 0.6180339887498949;
+
+function hslToHex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(255 * c)
+      .toString(16)
+      .padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+/** Color for a Leiden community. ``community_id`` is an int; we map it to
+ *  hue via golden-ratio rotation so neighbouring ids look distinct.
+ *
+ *  When ``community_id`` is null/undefined returns null so callers fall
+ *  through to ``colorForTags`` (preserves existing tag palette in the
+ *  "categories" view of the galaxy graph). */
+export function colorForCommunity(
+  community_id: number | null | undefined,
+): NoteColor | null {
+  if (community_id == null || !Number.isFinite(community_id)) return null;
+  const hue = ((community_id * GOLDEN_RATIO_CONJUGATE) % 1) * 360;
+  const ring = hslToHex(hue, 0.55, 0.62);
+  return {
+    ring,
+    emoji: "✨",
+    label: `Cluster ${community_id}`,
+  };
+}
+
+/** Resolve a graph-node fill: prefer Leiden community color when the
+ *  backend stamped one (``neural-link`` mode), else fall back to tag
+ *  palette. Pinned always wins (gold) so user emphasis survives both
+ *  modes. */
+export function colorForNode(
+  node: {
+    pinned?: boolean;
+    community_id?: number | null;
+    tags?: string[] | null;
+  },
+  mode: "category" | "neural-link" = "category",
+): NoteColor {
+  if (node.pinned) return { ...PALETTE.pinned };
+  if (mode === "neural-link") {
+    const c = colorForCommunity(node.community_id);
+    if (c) return c;
+  }
+  return colorForTags(node.tags ?? [], false);
+}
+
 /** Halo (drop-shadow) color for a category — same hue, ~35% alpha so nodes
  *  glow against the dark bg without smearing into neighbors. */
 export function haloForKey(key: string | null | undefined): string {
@@ -351,6 +408,122 @@ export function readableTextOn(hex: string): string {
   const b = parseInt(m[3], 16) / 255;
   const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   return lum > 0.62 ? "#1a1625" : "#ffffff";
+}
+
+// ── Stellar atlas: categorical zone anchors ───────────────────────────────
+//
+// The graph view organises nodes into named "constellations" — one fixed
+// anchor per category, laid out on three concentric orbits around the
+// canvas centre. Every node feels a STRONG gravitational pull toward
+// its category's anchor (see ForceSimulation.CLUSTER_K) so the user
+// always sees journals in the journal zone, rollups orbiting the centre,
+// daily-logs in their own quadrant, etc. — no more "one big blob".
+//
+// Layout philosophy:
+//   • CENTRE — rollup. Aggregations sit at the gravitational sun
+//     because everything cross-references back to them.
+//   • INNER ORBIT — the active life: journal, daily-log, task,
+//     deadline, idea + the four shape variants. Cardinal directions
+//     so the user's eye finds them first.
+//   • MIDDLE ORBIT — durable knowledge: lesson, decision, fact,
+//     memory, til, learned_preference, context.
+//   • OUTER ORBIT — operational + infrastructure: contact, command,
+//     recipe, price, reference, layer, survival, site-memory,
+//     imported, auto, pinned. These tend to be smaller, quieter
+//     populations so the periphery suits them.
+//
+// Coordinates are normalised: (angle in radians, radius in 0..1 of
+// half-canvas). `categoryAnchorAt(key, w, h)` resolves to absolute
+// (x, y) given the current canvas size.
+const TAU = Math.PI * 2;
+const D = (deg: number): number => (deg / 360) * TAU;
+
+interface ZoneAnchor {
+  /** Angle measured CCW from +X (east = 0, north = -π/2). */
+  angle: number;
+  /** Distance from centre, in units of half-min-canvas-dimension. 0 = centre. */
+  radius: number;
+}
+
+const ZONE_ANCHORS: Record<string, ZoneAnchor> = {
+  // CENTRE — gravitational sun
+  rollup:               { angle: 0,        radius: 0    },
+
+  // INNER ORBIT — active life (cardinals + shape cluster SE)
+  journal:              { angle: D(-90),   radius: 0.34 }, // N
+  task:                 { angle: D(-30),   radius: 0.34 }, // NE
+  "daily-log":          { angle: D(-150),  radius: 0.34 }, // NW
+  deadline:             { angle: D(20),    radius: 0.34 }, // E-of-NE
+  idea:                 { angle: D(-70),   radius: 0.34 }, // NNE
+
+  // SHAPE CLUSTER — fans out around SE so 4 variants stay visibly grouped
+  shape:                { angle: D(60),    radius: 0.36 },
+  "shape-pending":      { angle: D(72),    radius: 0.42 },
+  "shape-failed":       { angle: D(48),    radius: 0.42 },
+  "shape-known-bad":    { angle: D(80),    radius: 0.48 },
+
+  // MIDDLE ORBIT — knowledge
+  lesson:               { angle: D(108),   radius: 0.55 },
+  til:                  { angle: D(128),   radius: 0.55 },
+  decision:             { angle: D(148),   radius: 0.55 },
+  fact:                 { angle: D(180),   radius: 0.50 }, // W
+  memory:               { angle: D(202),   radius: 0.55 },
+  learned_preference:   { angle: D(222),   radius: 0.55 },
+  context:              { angle: D(242),   radius: 0.55 },
+
+  // OUTER ORBIT — operational / infrastructure (NE → N → NW going CCW)
+  reference:            { angle: D(-50),   radius: 0.85 },
+  command:              { angle: D(-12),   radius: 0.85 },
+  recipe:               { angle: D(8),     radius: 0.85 },
+  contact:              { angle: D(38),    radius: 0.85 },
+  price:                { angle: D(-2),    radius: 0.78 },
+  survival:             { angle: D(168),   radius: 0.85 },
+  layer:                { angle: D(258),   radius: 0.78 },
+  "site-memory":        { angle: D(282),   radius: 0.85 },
+  imported:             { angle: D(300),   radius: 0.85 },
+  auto:                 { angle: D(322),   radius: 0.85 },
+  pinned:               { angle: D(-110),  radius: 0.78 },
+  _default:             { angle: D(0),     radius: 0.95 }, // periphery — uncategorised drift outwards
+};
+
+/** Resolve a category key to its absolute (x, y) anchor on the current
+ *  canvas. Falls back to the canvas centre when the key is unknown. */
+export function categoryAnchorAt(
+  key: string | null | undefined,
+  w: number,
+  h: number,
+): { x: number; y: number } {
+  const cx = w / 2;
+  const cy = h / 2;
+  const anchor = (key && ZONE_ANCHORS[key]) || ZONE_ANCHORS._default;
+  // Half of the SHORTER dimension so anchors sit comfortably inside the
+  // canvas regardless of aspect ratio. Soft 0.95 so the outer orbit isn't
+  // clipped by the legend / search overlays.
+  const half = Math.min(w, h) * 0.5;
+  const r = anchor.radius * half * 0.95;
+  return {
+    x: cx + Math.cos(anchor.angle) * r,
+    y: cy + Math.sin(anchor.angle) * r,
+  };
+}
+
+/** All categories that have a defined anchor — driver for zone-label
+ *  rendering on the canvas (skip any zone with zero active members so
+ *  the sky stays uncluttered). */
+export const ZONE_KEYS: readonly string[] = Object.keys(ZONE_ANCHORS).filter(
+  (k) => k !== "_default",
+);
+
+/** Human-readable zone title for the canvas label. Reuses the palette's
+ *  `label` (e.g. "Daily log", "Failed shape") when available, else falls
+ *  back to a Title-Cased version of the key. */
+export function zoneTitle(key: string): string {
+  const fromPalette = PALETTE[key]?.label;
+  if (fromPalette) return fromPalette;
+  return key
+    .split(/[_-]/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 /** Hex (#rrggbb or #rgb) → rgba string. Defensive — falls back to bg-muted. */

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import struct
 from collections import OrderedDict
 from typing import Iterable
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 EMBED_MODEL = "nomic-embed-text"
 EMBED_DIM = 768
-OLLAMA_BASE = "http://localhost:11434"
+OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 # Drop hits below this cosine similarity. Lowered from 0.45 → 0.32 so
 # legitimate paraphrase hits at 0.35–0.44 (which a 768-d nomic-embed-text

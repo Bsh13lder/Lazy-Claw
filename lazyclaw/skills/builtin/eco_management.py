@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from lazyclaw.skills.base import BaseSkill
+
+_OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +292,7 @@ class EcoSetModelSkill(BaseSkill):
             try:
                 import httpx
                 async with httpx.AsyncClient(timeout=5) as client:
-                    resp = await client.get("http://localhost:11434/api/tags")
+                    resp = await client.get(f"{_OLLAMA_BASE}/api/tags")
                     data = resp.json()
                 installed = [m.get("name", "") for m in data.get("models", [])]
                 # Check exact match or prefix match (ollama adds :latest)

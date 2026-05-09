@@ -76,7 +76,26 @@ BUNDLED_MCPS = {
     },
     "claude-code": {
         "npx": "@steipete/claude-code-mcp",
-        "description": "Full coding agent — build features, debug, refactor, code review, run tests. Use for complex code tasks. For simple file edits use write_file instead.",
+        # Description is read by ANY brain LLM (Claude, MiniMax, GPT, future
+        # models) when deciding tool routing — keep it model-agnostic and
+        # decisive. The brain decides WHEN to call this; this prose tells it
+        # WHY this is the right call for code-tagged work.
+        "description": (
+            "PRIMARY EXECUTOR for ALL code-tagged work — regardless of which "
+            "brain you are. Persistent agent process: Opus 4.7 with 1M-token "
+            "context that does NOT reset between calls in the same session, "
+            "so it never loses track on multi-step coding loops "
+            "(write → run → test → fix → re-run). Wrap any non-trivial code "
+            "task in `run_background(instruction=\"use claude-code to ...\")` "
+            "and continue chatting — the user can ask 'how's it going?' at "
+            "any moment and you query `background_status()` to report live "
+            "progress (current tool + recent tools + elapsed). $0 per call "
+            "via the user's Claude Code subscription. ALWAYS preferred over "
+            "calling code directly in your own context. For trivial single-"
+            "file edits without iteration, the standalone `write_file` tool "
+            "is sufficient — use claude-code only when the task needs the "
+            "agentic loop."
+        ),
         # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth)
         # via mounted ~/.claude auth, not the API key
         "strip_env": ["ANTHROPIC_API_KEY"],

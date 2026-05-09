@@ -62,6 +62,11 @@ class TrackedTask:
     phase: str = ""              # Current TAOR phase: think|act|observe|reflect
     current_tool: str = ""       # Current tool name (cleaner than current_step)
     recent_tools: tuple = ()     # Last N tool names in order (tuple of str)
+    # Free-text project group tag, e.g. "upwork:job-id-XXX", "reddit:dm",
+    # "gig:abc123", "user_request". Used by the Code Specialist Web UI page
+    # to group tasks ("what did the agent last work on for Upwork?").
+    # Empty string = no project context (untagged user-driven request).
+    project_tag: str = ""
 
 
 # ── Team Lead ─────────────────────────────────────────────────────────
@@ -110,6 +115,7 @@ class TeamLead:
         instruction_full: str = "",
         cancel_token: object | None = None,
         user_id: str = "",
+        project_tag: str = "",
     ) -> TrackedTask:
         """Register a new running task. Returns the created snapshot."""
         full = instruction_full or description
@@ -121,6 +127,7 @@ class TeamLead:
             status="running",
             started_at=time.monotonic(),
             instruction_full=full,
+            project_tag=project_tag,
         )
         self._active[task_id] = task
         if cancel_token is not None:
@@ -133,6 +140,7 @@ class TeamLead:
             "name": name,
             "lane": lane,
             "description": task.description,
+            "project_tag": project_tag,
         })
         return task
 

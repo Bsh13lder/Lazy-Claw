@@ -20,12 +20,15 @@ from lazyclaw.skills.base import BaseSkill
 logger = logging.getLogger(__name__)
 
 
-_PROMPT_TEMPLATE = """You are drafting a freelance proposal on behalf of a developer who runs LazyClaw — an open-source AI agent platform (MIT, Python, E2E encrypted). The developer's name is Bsh.
+_PROMPT_TEMPLATE = """You are drafting a freelance proposal on behalf of a developer who runs LazyClaw — an open-source AI agent platform (MIT, Python, E2E encrypted). The developer's display name is {display_name}.
 
 The developer's profile:
+  Display name: {display_name}
   Title: {title}
   Skills: {skills}
   Bio: {bio}
+  Value pitch (use as opener): {value_pitch}
+  GitHub: {github_url}
   Min fixed rate: {min_fixed}
 
 Job description (from the platform):
@@ -33,7 +36,7 @@ Job description (from the platform):
 
 Write the proposal with this exact structure:
 
-1. **Opener (2-3 lines):** Warm greeting using the developer's name. Mention LazyClaw as your platform and why this specific job fits.
+1. **Opener (2-3 lines):** Warm greeting using {display_name}. Use the value pitch above (lightly adapted to the specific job) — DO NOT replace it with a generic opener. Mention LazyClaw as your platform and why this specific job fits.
 
 2. **"How we'd work" section (CRITICAL — be transparent):**
    - The day-to-day responder is a personal AI agent (LazyClaw)
@@ -51,13 +54,13 @@ Write the proposal with this exact structure:
    - Show you understood the actual problem, not buzzwords
 
 4. **"About me" section:**
-   - GitHub link as proof of work: https://github.com/Bsh13lder/Lazy-Claw
+   - If GitHub is set above, include it verbatim as proof of work. If empty, skip the link.
    - 1-2 lines on why LazyClaw stack (or relevant skills) fit this job
    - Stack relevance line (Python / FastAPI / browser automation / multi-channel / etc.)
 
 5. **Next step:** Propose a 15-min discovery call to understand the project before quoting price. NEVER quote a fixed price in the proposal — always defer pricing until after the call.
 
-6. **Sign-off:** "— Bsh"
+6. **Sign-off:** "— {display_name}"
 
 Rules:
 - 250-400 words total (NOT 150 — be substantial, this is a credibility play)
@@ -155,9 +158,12 @@ class DraftFreelanceProposalSkill(BaseSkill):
             return f"Could not load LLM router: {exc}"
 
         prompt = _PROMPT_TEMPLATE.format(
+            display_name=profile.display_name or "the developer",
             title=profile.title or "Freelance developer",
             skills=", ".join(profile.skills) or "Python, automation, web",
             bio=profile.bio or "(none set)",
+            value_pitch=profile.value_pitch or "(no pitch set — fall back to a 1-sentence opener built from skills)",
+            github_url=profile.github_url or "(none set)",
             min_fixed=f"${profile.min_fixed_rate:.0f}" if profile.min_fixed_rate else "flexible",
             description=description[:3500],
         )

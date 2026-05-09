@@ -26,10 +26,14 @@ class SetSkillsProfileSkill(BaseSkill):
             "Platforms: upwork, indeed, glassdoor, freelancer, fiverr. "
             "Examples: 'my skills are python, fastapi, react' / "
             "'set min rate $40/hour' / 'set title Senior Python Developer' / "
+            "'set my display name to Vato' / "
+            "'set my github to https://github.com/Bsh13lder/Lazy-Claw' / "
             "'set tiny gig cap to 75' / 'only search indeed and linkedin' / "
             "'show only jobs from last 24 hours' / "
             "'switch branding to personal' / "
-            "'show my skills profile' (no args = view)."
+            "'show my skills profile' (no args = view). "
+            "For the polished value pitch use 'set_freelance_pitch' instead "
+            "(routes through the worker LLM for AI polish)."
         )
 
     @property
@@ -113,6 +117,22 @@ class SetSkillsProfileSkill(BaseSkill):
                     "type": "integer",
                     "description": "Max active gigs at once (default 2).",
                 },
+                "display_name": {
+                    "type": "string",
+                    "description": (
+                        "Name used as proposal sign-off. MUST match the name "
+                        "on your actual freelance profile (mismatch breaks "
+                        "client trust). NL: 'set my display name to Vato'."
+                    ),
+                },
+                "github_url": {
+                    "type": "string",
+                    "description": (
+                        "Public portfolio link rendered in the 'About me' "
+                        "block of every proposal. NL: 'set my github to "
+                        "https://github.com/...'."
+                    ),
+                },
             },
         }
 
@@ -128,10 +148,17 @@ class SetSkillsProfileSkill(BaseSkill):
         if not raw_updates:
             profile = await get_profile(self._config, user_id)
             branding = "LazyClaw AI Agent" if profile.branding_mode == "lazyclaw" else "Personal"
+            pitch_preview = (
+                profile.value_pitch[:140] + ("..." if len(profile.value_pitch) > 140 else "")
+                if profile.value_pitch else "Not set (use set_freelance_pitch)"
+            )
             return (
                 f"Your Skills Profile:\n\n"
                 f"Identity: {branding}\n"
+                f"Display name: {profile.display_name or 'Not set'}\n"
+                f"GitHub: {profile.github_url or 'Not set'}\n"
                 f"Title: {profile.title or 'Not set'}\n"
+                f"Pitch: {pitch_preview}\n"
                 f"Skills: {', '.join(profile.skills) or 'None'}\n"
                 f"Bio: {profile.bio or 'Not set'}\n"
                 f"Min hourly: ${profile.min_hourly_rate}/hr\n"

@@ -1,7 +1,8 @@
 """Survival instinct skills: job hunting, proposals, work execution, and tracking.
 
 Skills:
-  - set_skills_profile: configure freelance profile
+  - set_skills_profile: configure freelance profile (name, github, skills, etc.)
+  - set_freelance_pitch: NL pitch + AI polish — opens every proposal
   - search_jobs: find matching jobs via JobSpy MCP or browser
   - apply_job: generate cover letter + submit (user must approve)
   - apply_reddit_dm: send Reddit DM via the user's logged-in Brave (with
@@ -22,7 +23,10 @@ from lazyclaw.skills.builtin.survival.draft_proposal_skill import DraftFreelance
 from lazyclaw.skills.builtin.survival.gig_skill import StartGigSkill
 from lazyclaw.skills.builtin.survival.invoice_skill import InvoiceClientSkill
 from lazyclaw.skills.builtin.survival.mode_skill import SurvivalModeSkill, SurvivalStatusSkill
+from lazyclaw.skills.builtin.survival.pitch_skill import SetFreelancePitchSkill
 from lazyclaw.skills.builtin.survival.profile_skill import SetSkillsProfileSkill
+from lazyclaw.skills.builtin.survival.upwork_bot_skill import SetUpworkBotBehaviorSkill
+from lazyclaw.skills.builtin.survival.upwork_inbox_check import UpworkInboxCheckSkill
 from lazyclaw.skills.builtin.survival.reddit_apply_skill import ApplyRedditDmSkill
 from lazyclaw.skills.builtin.survival.reddit_watch_skill import WatchRedditForHireSkill
 from lazyclaw.skills.builtin.survival.review_skill import ReviewDeliverableSkill
@@ -35,10 +39,13 @@ __all__ = [
     "InvoiceClientSkill",
     "ReviewDeliverableSkill",
     "SearchJobsSkill",
+    "SetFreelancePitchSkill",
     "SetSkillsProfileSkill",
+    "SetUpworkBotBehaviorSkill",
     "StartGigSkill",
     "SubmitDeliverableSkill",
     "SurvivalModeSkill",
     "SurvivalStatusSkill",
+    "UpworkInboxCheckSkill",
     "WatchRedditForHireSkill",
 ]

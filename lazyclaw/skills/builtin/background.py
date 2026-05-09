@@ -95,6 +95,16 @@ class RunBackgroundSkill(BaseSkill):
                         "'email_draft'). Shown in notifications and /tasks."
                     ),
                 },
+                "project_tag": {
+                    "type": "string",
+                    "description": (
+                        "Optional project group tag for the Code Specialist UI "
+                        "(format: 'upwork:job-XXX', 'reddit:dm', 'gig:abc123', "
+                        "'user_request', etc.). Lets the user filter / group "
+                        "background runs by what business workflow they're for. "
+                        "Empty = untagged user-driven request."
+                    ),
+                },
             },
             "required": ["instruction"],
         }
@@ -108,6 +118,7 @@ class RunBackgroundSkill(BaseSkill):
             return "Error: instruction is required"
 
         name = params.get("name", "").strip() or None
+        project_tag = (params.get("project_tag") or "").strip()
 
         try:
             # source="brain" + fanout_group_id route this submit through
@@ -123,6 +134,7 @@ class RunBackgroundSkill(BaseSkill):
                 source="brain",
                 fanout_group_id=self._fanout_group_id,
                 chat_session_id=self._chat_session_id,
+                project_tag=project_tag,
             )
         except RuntimeError as exc:
             return f"Cannot start background task: {exc}"

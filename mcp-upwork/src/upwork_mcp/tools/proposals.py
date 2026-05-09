@@ -20,6 +20,33 @@ class SubmitProposalParams(BaseModel):
     rate: float | None = Field(default=None, description="Proposed hourly rate (for hourly jobs)")
     bid: float | None = Field(default=None, description="Bid amount (for fixed-price jobs)")
     answers: list[str] | None = Field(default=None, description="Answers to screening questions")
+    milestone_description: str | None = Field(
+        default=None,
+        description=(
+            "Single-milestone description for fixed-price jobs. Required by "
+            "Upwork's milestone-breakdown form when bid is set. ``None`` falls "
+            "back to a generic 'Project completion' string. Multi-milestone "
+            "splits are not yet supported — use a single milestone equal to "
+            "the bid and discuss the breakdown on the discovery call."
+        ),
+    )
+    milestone_due_date: str | None = Field(
+        default=None,
+        description=(
+            "Due date for the single milestone, format MM/DD/YYYY. Required "
+            "by Upwork's fixed-price form. ``None`` defaults to 30 days "
+            "from today (the freelancer can renegotiate after acceptance)."
+        ),
+    )
+    project_duration: str | None = Field(
+        default=None,
+        description=(
+            "Project duration label as Upwork shows it in the 'How long "
+            "will this project take?' dropdown. Options seen 2026-05-09: "
+            "'Less than 1 month', '1 to 3 months', '3 to 6 months', "
+            "'More than 6 months'. ``None`` defaults to 'Less than 1 month'."
+        ),
+    )
     connects_to_send: int | None = Field(
         default=None,
         description=(
@@ -386,6 +413,80 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
                 await page.keyboard.press("Tab")
             except Exception:
                 pass
+
+        # Fixed-price proposals also require the milestone breakdown
+        # (description + amount). Default mode = single milestone equal
+        # to the total bid; that's what we fill here. Without this the
+        # form returns "A description is needed | Minimum of $5.00 |
+        # Total price of the project must be greater than $5.00".
+        # Verified 2026-05-09 against the live form DOM:
+        #   [data-test="milestone-description"]  → text input
+        #   [data-test="currency-input"]         → milestone amount
+        # When a Boost dropdown / hourly-rate input is also on the page
+        # the rate-fill block above already consumed currency-input, so
+        # we narrow the milestone amount to the input still showing the
+        # `$0.00` placeholder.
+        ms_desc = (params.milestone_description or "Project completion").strip()
+        try:
+            desc_input = await page.query_selector('[data-test="milestone-description"]')
+            if desc_input:
+                await desc_input.click(click_count=3)
+                await desc_input.fill(ms_desc)
+                await page.keyboard.press("Tab")
+        except Exception:
+            pass
+        try:
+            currency_inputs = await page.query_selector_all('[data-test="currency-input"]')
+            for cand in currency_inputs:
+                try:
+                    val = (await cand.input_value()) or ""
+                except Exception:
+                    val = ""
+                # The milestone-amount field is the one still at $0.00
+                # (rate / fee / receive fields are pre-filled or read-only)
+                if val.strip() in ("", "$0.00", "$0", "0", "0.00"):
+                    await cand.click(click_count=3)
+                    await cand.fill(str(params.bid))
+                    await page.keyboard.press("Tab")
+                    break
+        except Exception:
+            pass
+
+        # Milestone due date — Upwork renders an Air3 date-picker input
+        # (inputmode="none", typed entry blocked). The DOM signature on
+        # the apply form is the only `[data-test="input"]` text input
+        # in a wrapper labeled "Due date for the milestone". Pattern:
+        #   1. Click the input → popover calendar opens
+        #   2. Use the calendar's MM/YYYY navigation + day-cell click
+        # Falls back to an empty no-op when the picker isn't found so
+        # hourly proposals (no milestone) keep working unchanged.
+        from datetime import datetime, timedelta
+        if params.milestone_due_date:
+            target_str = params.milestone_due_date.strip()
+            try:
+                target_dt = datetime.strptime(target_str, "%m/%d/%Y")
+            except ValueError:
+                target_dt = datetime.now() + timedelta(days=30)
+        else:
+            target_dt = datetime.now() + timedelta(days=30)
+        try:
+            await _fill_milestone_due_date(page, target_dt)
+        except Exception:
+            pass
+
+        # Project duration dropdown — required on fixed-price submits.
+        # Toggle is `[data-test="dropdown-toggle"]` with
+        # `aria-labelledby="duration-label"`; menu items appear in
+        # `.air3-menu-item[role="option"]` once expanded.
+        duration_label = (params.project_duration or "Less than 1 month").strip()
+        try:
+            await _select_dropdown_by_label(
+                page,
+                toggle_selector='[data-test="dropdown-toggle"][aria-labelledby="duration-label"]',
+                option_text=duration_label,
+            )
+        except Exception:
+            pass
 
     # Optional: lower the boost-connects total before submit. Upwork
     # auto-suggests a connect-spend total (mandatory + boost) on every
@@ -806,6 +907,95 @@ async def withdraw_proposal(
         ),
         "page_url": page.url,
     }
+
+
+async def _select_dropdown_by_label(page, toggle_selector: str, option_text: str) -> None:
+    """Open an Air3 dropdown and click the option whose text contains
+    ``option_text``. Best-effort — silently no-ops on any failure.
+
+    Used for the project-duration dropdown on fixed-price submits where
+    the value is required but the field has no native ``<select>``.
+    """
+    import asyncio as _aio
+
+    toggle = page.locator(toggle_selector).first
+    try:
+        await toggle.wait_for(state="visible", timeout=4000)
+        await toggle.click()
+    except Exception:
+        return
+    await _aio.sleep(0.4)
+
+    # Air3 menu items: `.air3-menu-item[role="option"]` containing the
+    # option label as plain text (sometimes wrapped in nested <span>s).
+    option = page.locator(
+        f'.air3-menu-item[role="option"]:has-text("{option_text}"),'
+        f'[role="option"]:has-text("{option_text}")'
+    ).first
+    try:
+        await option.click(timeout=2500)
+        await _aio.sleep(0.3)
+    except Exception:
+        return
+
+
+async def _fill_milestone_due_date(page, target) -> None:
+    """Drive Upwork's Air3 date picker for the milestone due-date field.
+
+    The date input has ``inputmode="none"`` so typed entry is blocked —
+    we have to open the popover calendar and click a day cell.
+
+    Verified DOM (2026-05-09):
+      - Input: ``input[data-test="input"][inputmode="none"]``
+        sitting in a wrapper labelled "Due date for the milestone".
+      - Day cells: ``button.air3-datepicker-table-btn`` with each
+        button containing a ``<span class="sr-only">`` carrying the
+        full English date e.g. ``"Saturday, June 6, 2026"``.
+      - Month nav: anchor uses ``data-ev-label="datepicker_*_month"``
+        but defensive selectors below also try aria-label hints.
+
+    Strategy: open popover, look for a day-button whose sr-only text
+    contains the target date string (locale-stable English output).
+    If the target month isn't visible, click the next-month nav and
+    retry up to 6 hops. Best-effort — silently no-ops on failure.
+    """
+    import asyncio as _aio
+
+    # Upwork zero-pads day-of-month in the sr-only label
+    # ("Saturday, June 06, 2026" — verified 2026-05-09). Use %d not %-d.
+    target_text = target.strftime("%B %d, %Y")  # e.g. "June 06, 2026"
+
+    locator = page.locator('input[data-test="input"][inputmode="none"]').first
+    try:
+        await locator.wait_for(state="visible", timeout=4000)
+    except Exception:
+        return
+    try:
+        await locator.click()
+    except Exception:
+        return
+    await _aio.sleep(0.5)
+
+    # Walk up to 6 months forward looking for a day button whose
+    # sr-only label contains the target date string.
+    for hop in range(6):
+        day_btn = page.locator(
+            f'button.air3-datepicker-table-btn:has(span.sr-only:has-text("{target_text}"))'
+        ).first
+        try:
+            if await day_btn.count() > 0:
+                await day_btn.click(timeout=2000)
+                await _aio.sleep(0.4)
+                return
+        except Exception:
+            pass
+        # Advance one month — Upwork's nav uses data-ev-label
+        next_btn = page.locator('button[data-ev-label="datepicker_next_month"]').first
+        try:
+            await next_btn.click(timeout=1500)
+            await _aio.sleep(0.4)
+        except Exception:
+            return
 
 
 async def _wait_for_cloudflare_clear(page, max_wait_s: float = 20.0) -> bool:

@@ -34,6 +34,20 @@ class SkillsProfile:
     excluded_keywords: tuple[str, ...] = ()
     work_hours: str = "flexible"
     branding_mode: str = "lazyclaw"  # "lazyclaw" = AI agent identity, "personal" = human freelancer
+    # Identity threaded into every proposal.
+    # `display_name` is the SIGN-OFF on cover letters — must match the
+    # name on the actual freelance platform profile, otherwise the client
+    # sees a mismatch and trust drops. NL-set via `set_display_name`.
+    display_name: str = ""
+    # `value_pitch` is the polished "what I offer" paragraph the AI uses
+    # as the warm opener of every proposal. Set via the dedicated NL skill
+    # `set_freelance_pitch` which polishes the raw user input via the
+    # ROLE_WORKER LLM before saving. Empty = proposal opener falls back to
+    # generic skills-based phrasing.
+    value_pitch: str = ""
+    # Public portfolio link rendered in proposals. Empty = "About me"
+    # block is shown without a clickable link.
+    github_url: str = ""
     # Tiny-gig matcher bonus — `score_job` adds +0.10 when 0 < budget <= cap.
     # NL-editable via set_skills_profile: "set tiny gig cap to 75".
     max_tiny_gig_budget: float = 100.0
@@ -58,6 +72,9 @@ DEFAULT_PROFILE = SkillsProfile(
     platforms=("upwork", "indeed"),
     max_tiny_gig_budget=100.0,
     branding_mode="lazyclaw",
+    display_name="",
+    value_pitch="",
+    github_url="",
 )
 
 _PROFILE_FIELDS = frozenset(SkillsProfile.__dataclass_fields__.keys())

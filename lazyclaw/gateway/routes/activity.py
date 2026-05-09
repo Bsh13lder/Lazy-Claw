@@ -61,6 +61,7 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                 "step_count": t.step_count,
                 "phase": t.phase,
                 "recent_tools": list(t.recent_tools),
+                "project_tag": getattr(t, "project_tag", "") or "",
             })
         for t in _team_lead.recent_tasks[:10]:
             duration = None
@@ -111,6 +112,7 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                     row["recent_tools"] = list(getattr(tl, "recent_tools", ()) or ())
                     row["phase"] = getattr(tl, "phase", "") or ""
                     row["step_count"] = getattr(tl, "step_count", 0) or 0
+                    row["project_tag"] = getattr(tl, "project_tag", "") or ""
                 bg_running.append(row)
             # Pull historical (completed/failed) so the UI can render the
             # decrypted result body. Excluding rows still in ``running``

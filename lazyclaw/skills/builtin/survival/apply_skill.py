@@ -14,12 +14,17 @@ _SEARCH_PREFIX = "SURVIVAL_SEARCH:"
 # LazyClaw branding prompt injected into cover letter generation.
 # Style anchor: warm + transparent + structured. Detailed style template
 # in draft_proposal_skill.py:_PROMPT_TEMPLATE — keep these two in sync.
-_LAZYCLAW_BRANDING = (
-    "IMPORTANT CONTEXT: You are writing this proposal on behalf of Bsh, "
+# Identity tokens ({display_name}, {github_url}, {value_pitch}) are filled
+# from SkillsProfile at render time so a fresh user with their own name +
+# pitch never gets a proposal signed by someone else.
+_LAZYCLAW_BRANDING_TEMPLATE = (
+    "IMPORTANT CONTEXT: You are writing this proposal on behalf of {display_name}, "
     "founder of LazyClaw — an open-source AI agent platform "
     "(MIT, Python, E2E encrypted). Use this exact style:\n\n"
+    "OPENER ANCHOR — adapt this pitch to the specific job, do NOT replace it:\n"
+    "  {value_pitch}\n\n"
     "STRUCTURE (in order):\n"
-    "1. Warm opener — name + LazyClaw context + why this job fits (2-3 lines)\n"
+    "1. Warm opener — name + the pitch above (lightly adapted) + why this job fits (2-3 lines)\n"
     "2. 'How we'd work' section with these 3 transparency bullets:\n"
     "     ⚡ Fast responses (agent 24/7, founder approves in Madrid hours)\n"
     "     ✅ Supervised quality — every deliverable passes human review\n"
@@ -28,11 +33,11 @@ _LAZYCLAW_BRANDING = (
     "   EVERY deliverable, agent escalates to founder when human input needed.\n"
     "3. 'For your project I propose:' — numbered phase list (1..5) tailored\n"
     "   to THIS specific job. Each phase = one short concrete deliverable.\n"
-    "4. 'About me' — GitHub: https://github.com/Bsh13lder/Lazy-Claw + stack\n"
-    "   relevance line.\n"
+    "4. 'About me' — if a GitHub URL is provided ({github_url}) include it\n"
+    "   verbatim; otherwise skip the link. Add a stack relevance line.\n"
     "5. Next step — propose a 15-min discovery call. NEVER quote a fixed\n"
     "   price in the proposal itself.\n"
-    "6. Sign-off: '— Bsh'\n\n"
+    "6. Sign-off: '— {display_name}'\n\n"
     "RULES:\n"
     "- 250-400 words (substantial, NOT 150)\n"
     "- Bullet / numbered lists ENCOURAGED for readability\n"
@@ -43,6 +48,18 @@ _LAZYCLAW_BRANDING = (
     "- NO 'I hope this message finds you well' / 'Dear Hiring Manager'\n"
     "- NEVER promise to auto-submit anything to the client\n\n"
 )
+
+
+def _render_branding(profile) -> str:
+    """Format the branding template with the user's identity fields."""
+    return _LAZYCLAW_BRANDING_TEMPLATE.format(
+        display_name=profile.display_name or "the founder",
+        value_pitch=profile.value_pitch or (
+            "(no pitch set — write a generic 1-sentence opener referencing "
+            "the user's skills and LazyClaw)"
+        ),
+        github_url=profile.github_url or "(none set)",
+    )
 
 
 class ApplyJobSkill(BaseSkill):
@@ -217,7 +234,7 @@ class ApplyJobSkill(BaseSkill):
         desc = job.get("description", "N/A")[:1500]
 
         # Build prompt with optional LazyClaw branding
-        branding = _LAZYCLAW_BRANDING if profile.branding_mode == "lazyclaw" else ""
+        branding = _render_branding(profile) if profile.branding_mode == "lazyclaw" else ""
 
         letter_prompt = (
             f"{branding}"
@@ -251,7 +268,14 @@ class ApplyJobSkill(BaseSkill):
                 "- Sound human, not AI-generated\n"
             )
 
-        # Try Claude Code MCP for letter generation
+        # Code-execution ladder per architecture decision (2026-05-09):
+        #   1. Claude Code MCP (primary — persistent session, never loses
+        #      track, full agentic loop)
+        #   2. `claude -p` CLI (fallback — one-shot, slower spawn but
+        #      $0 via subscription and avoids MCP-disconnect surprises)
+        #   3. Template (deep fallback — used only when both above fail)
+        # Skip directly to step 3 for non-lazyclaw branding mode (template
+        # is fine for a generic 150-word letter).
         registry = self._registry
         if registry is not None:
             for tool_info in registry.list_mcp_tools():
@@ -263,18 +287,51 @@ class ApplyJobSkill(BaseSkill):
                         try:
                             return await tool.execute(user_id, {"prompt": letter_prompt})
                         except Exception as exc:
-                            logger.warning("Claude Code letter gen failed: %s", exc)
+                            logger.warning("Claude Code MCP letter gen failed, trying CLI: %s", exc)
+                            break  # MCP is reachable but failed — drop to CLI, don't retry MCP
+
+        # CLI fallback — `claude -p` via LLMRouter. The model name
+        # "claude-cli" routes to ClaudeCliProvider (see router.py:21).
+        try:
+            from lazyclaw.llm.providers.base import LLMMessage
+            from lazyclaw.llm.router import LLMRouter
+            cli_router = LLMRouter(self._config)
+            cli_resp = await cli_router.chat(
+                messages=[LLMMessage(role="user", content=letter_prompt)],
+                model="claude-cli",
+                user_id=user_id,
+                max_tokens=1100,
+                temperature=0.7,
+            )
+            cli_text = (cli_resp.content or "").strip()
+            if cli_text:
+                return cli_text
+            logger.warning("Claude CLI returned empty letter, falling to template")
+        except Exception as exc:
+            logger.warning("Claude CLI letter gen failed: %s", exc)
 
         # Fallback: template-based letter (used when LLM is unavailable).
-        # Keep aligned with the structure in _LAZYCLAW_BRANDING above.
+        # Keep aligned with the structure in _LAZYCLAW_BRANDING_TEMPLATE.
         skills_str = ", ".join(profile.skills[:3]) if profile.skills else "various technologies"
+        signoff = profile.display_name or "the founder"
+        github_block = (
+            f"**About me:** open-source code at {profile.github_url}\n\n"
+            if profile.github_url else ""
+        )
+        # Pitch opener — falls back to a skills-based 1-liner so the letter
+        # still flows when the user hasn't set a value_pitch yet.
+        pitch_opener = (
+            profile.value_pitch
+            or (
+                f"My name is {signoff} and I run **LazyClaw** — an open-source "
+                f"AI agent platform (MIT, Python, E2E encrypted)."
+            )
+        )
         if profile.branding_mode == "lazyclaw":
             return (
                 f"Hi,\n\n"
-                f"My name is Bsh and I run **LazyClaw** — an open-source AI "
-                f"agent platform (MIT, Python, E2E encrypted). Your project "
-                f"'{job.get('title', '')}' fits my stack ({skills_str}) "
-                f"directly.\n\n"
+                f"{pitch_opener} Your project '{job.get('title', '')}' fits "
+                f"my stack ({skills_str}) directly.\n\n"
                 f"**How we'd work:** day-to-day responses come from my "
                 f"personal AI agent (LazyClaw); the agent does the technical "
                 f"work, but **I review and approve every deliverable** before "
@@ -282,12 +339,11 @@ class ApplyJobSkill(BaseSkill):
                 f"⚡ Fast responses (agent 24/7, I approve in Madrid hours)\n"
                 f"✅ Supervised quality — human review on every delivery\n"
                 f"💰 Competitive pricing — agent speed = savings passed on\n\n"
-                f"**About me:** open-source code at "
-                f"https://github.com/Bsh13lder/Lazy-Claw\n\n"
+                f"{github_block}"
                 f"**Next step:** a 15-min discovery call to scope the work, "
                 f"then I'll send a phased plan with fixed prices per "
                 f"deliverable — no surprises.\n\n"
-                f"— Bsh"
+                f"— {signoff}"
             )
         return (
             f"Hi,\n\n"

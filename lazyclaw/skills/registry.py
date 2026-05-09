@@ -600,10 +600,12 @@ class SkillRegistry:
             SearchJobsSkill,
             SetFreelancePitchSkill,
             SetSkillsProfileSkill,
+            SetUpworkBotBehaviorSkill,
             StartGigSkill,
             SubmitDeliverableSkill,
             SurvivalModeSkill,
             SurvivalStatusSkill,
+            UpworkInboxCheckSkill,
             WatchRedditForHireSkill,
         )
 
@@ -613,17 +615,33 @@ class SkillRegistry:
         self.register(SurvivalModeSkill(config=config))
         self.register(SetSkillsProfileSkill(config=config))
         self.register(SetFreelancePitchSkill(config=config))
+        self.register(SetUpworkBotBehaviorSkill(config=config))
         self.register(SurvivalStatusSkill(config=config))
         self.register(ReviewDeliverableSkill(config=config, registry=self))
         self.register(StartGigSkill(config=config, registry=self))
         self.register(SubmitDeliverableSkill(config=config, registry=self))
         self.register(InvoiceClientSkill(config=config, registry=self))
         self.register(DraftFreelanceProposalSkill(config=config, registry=self))
+        self.register(UpworkInboxCheckSkill(config=config, registry=self))
         self.register(WatchRedditForHireSkill(config=config))
+
+        # Generic escalation channel (used by Upwork inbox bot + any
+        # other skill that hits an off-scope / sensitive client message
+        # and needs the human user to decide). See Telegram /esc command
+        # wiring in lazyclaw/channels/telegram_commands.py.
+        from lazyclaw.skills.builtin.escalate_to_human import EscalateToHumanSkill
+        self.register(EscalateToHumanSkill(config=config))
 
         # TodoWrite — real-time task plan tracking (mandatory for 3+ step tasks)
         from lazyclaw.skills.builtin.todo_write import TodoWriteSkill
         self.register(TodoWriteSkill(config=config))
+
+        # Background status — brain-facing query for live progress of
+        # running background tasks. Read-only state snapshot from TeamLead
+        # (no LLM call). The `attach_team_lead()` hook is wired by Agent
+        # at construction time (see runtime/agent.py).
+        from lazyclaw.skills.builtin.background_status import BackgroundStatusSkill
+        self.register(BackgroundStatusSkill(config=config))
 
         # Lazydoctor — weekly maintenance audit (deps + Phase 2 broken-tool /
         # stale-config). Setup wizard configures cadence; bridge surfaces

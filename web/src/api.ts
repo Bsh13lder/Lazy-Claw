@@ -231,6 +231,30 @@ export const sendMessage = (message: string, chatSessionId?: string) =>
     body: JSON.stringify({ message, chat_session_id: chatSessionId }),
   });
 
+// ── Audio (speech-to-text) ─────────────────────────────────────────────────
+
+export async function transcribeAudio(blob: Blob, filename = "voice.webm"): Promise<string> {
+  const form = new FormData();
+  form.append("file", blob, filename);
+  const res = await fetch("/api/audio/transcribe", {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) {
+    let message = `Transcription failed (${res.status})`;
+    try {
+      const body = await res.json();
+      message = body.detail || body.message || message;
+    } catch {
+      // not JSON
+    }
+    throw new ApiError(message, res.status);
+  }
+  const data = (await res.json()) as { text: string };
+  return data.text || "";
+}
+
 // ── Chat Sessions ─────────────────────────────────────────────────────────
 
 export const listChatSessions = () =>
@@ -941,6 +965,7 @@ export interface AgentTask {
   cost_usd?: number;
   tokens_used?: number;
   llm_calls?: number;
+  project_tag?: string;    // "upwork:job-XXX", "reddit:dm", "user_request", etc.
 }
 
 export interface AgentStatus {

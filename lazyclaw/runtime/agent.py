@@ -1179,6 +1179,13 @@ class Agent:
         )
         self._task_runner = task_runner
         self._team_lead = team_lead
+        # Wire TeamLead into the read-only background_status skill so the
+        # brain can query live task progress on demand. Best-effort —
+        # missing skill (older builds) silently no-ops.
+        if self.registry is not None and team_lead is not None:
+            bg_status = self.registry.get("background_status")
+            if bg_status is not None and hasattr(bg_status, "attach_team_lead"):
+                bg_status.attach_team_lead(team_lead)
 
     async def _run_plan_gate(
         self,

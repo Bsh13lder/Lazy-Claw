@@ -277,6 +277,7 @@ class TaskRunner:
         source: str = "user",
         fanout_group_id: str | None = None,
         chat_session_id: str | None = None,
+        project_tag: str = "",
     ) -> str:
         """Submit a task for background execution. Returns task_id immediately.
 
@@ -362,6 +363,7 @@ class TaskRunner:
                 task_id, task_name, instruction[:80], "background",
                 instruction_full=instruction,
                 user_id=user_id,
+                project_tag=project_tag,
             )
 
         # Announce on the per-user task event bus so a connected web chat

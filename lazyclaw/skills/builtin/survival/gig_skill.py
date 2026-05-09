@@ -107,6 +107,7 @@ class StartGigSkill(BaseSkill):
                 instruction=work_instruction,
                 timeout=3600,  # 1 hour for gig work
                 name=f"gig_{gig.id[:8]}",
+                project_tag=f"gig:{gig.id[:8]}",
             )
         except Exception as exc:
             logger.warning("Failed to submit gig work to TaskRunner: %s", exc)

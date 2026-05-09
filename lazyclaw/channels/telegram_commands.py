@@ -58,6 +58,7 @@ BOT_COMMANDS = [
     BotCommand("deny", "\U0001f6ab /deny <category|skill>"),
     BotCommand("confirm", "✅ /confirm <lesson_id>"),
     BotCommand("reject", "\U0001f6ab /reject <lesson_id> [reason]"),
+    BotCommand("esc", "\U0001f4ac /esc <id> <reply> — answer escalation"),
     BotCommand("snooze", "⏰ /snooze <task> <duration>"),
     BotCommand("postpone", "📅 /postpone <task> <when>"),
     BotCommand("whenisdue", "📅 /whenisdue <task>"),
@@ -116,6 +117,7 @@ class TelegramCommands:
             "deny": self._handle_deny,
             "confirm": self._handle_lesson_confirm,
             "reject": self._handle_lesson_reject,
+            "esc": self._handle_escalation_response,
             "snooze": self._handle_snooze,
             "postpone": self._handle_postpone,
             "whenisdue": self._handle_whenisdue,
@@ -2217,6 +2219,54 @@ class TelegramCommands:
         await self._reply(
             update,
             f"{icon} <b>{label} '<code>{result['target']}</code>' set to {level}</b>",
+        )
+
+    # -- /esc — deliver the user's response to a pending escalation -------
+
+    async def _handle_escalation_response(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/esc <escalation_id> <reply text>
+
+        Wakes a pending escalation registered by ``escalate_to_human``
+        with the user's decision. The skill execute() returns this text
+        back to the calling agent so it can act on it (typically reply
+        to an Upwork client).
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+
+        if not context.args or len(context.args) < 2:
+            await self._reply(
+                update,
+                "❓ <b>Usage:</b> <code>/esc &lt;escalation_id&gt; &lt;your reply&gt;</code>\n\n"
+                "<i>The escalation_id is the short code shown in the "
+                "escalation push (e.g. 'a3f1d92e44'). The reply can be "
+                "either a numeric option (1-4) or free text.</i>",
+            )
+            return
+
+        escalation_id = context.args[0].strip()
+        response = " ".join(context.args[1:]).strip()
+        if not response:
+            await self._reply(update, "⚠️ Reply text is empty.")
+            return
+
+        from lazyclaw.skills.builtin.escalate_to_human import deliver_response
+        ok = deliver_response(escalation_id, response)
+        if not ok:
+            await self._reply(
+                update,
+                f"⚠️ No pending escalation with id <code>{escalation_id}</code>.\n\n"
+                "<i>It may have already been resolved or timed out. "
+                "Check the chat where the original push appeared.</i>",
+            )
+            return
+        await self._reply(
+            update,
+            f"✅ <b>Escalation <code>{escalation_id}</code> delivered.</b>\n"
+            f"<i>The agent will use your reply to respond to the client.</i>",
         )
 
     # -- /confirm and /reject — close the lesson verification loop ---------

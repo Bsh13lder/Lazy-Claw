@@ -6,7 +6,7 @@ import ApprovalDialog from "./ApprovalDialog";
 import { useChat } from "../context/ChatContext";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
+export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -17,6 +17,7 @@ interface NavShellProps {
 const PAGE_META: Record<Page, { label: string; description: string }> = {
   overview: { label: "Overview", description: "System health & activity" },
   activity: { label: "Activity", description: "Live agent & task monitor" },
+  "code-specialist": { label: "Code Specialist", description: "Live Claude Code MCP background runs — what the code agent is doing now, grouped by project" },
   chat: { label: "Chat", description: "Full-screen agent conversation + live console" },
   tasks: { label: "Tasks", description: "Encrypted todos with NL time + steps" },
   notes: { label: "Notes", description: "Quick notes, ideas, memory — capture from anywhere" },
@@ -145,7 +146,7 @@ const ICONS: Record<Page, NavIcon> = {
 // Disciplined grouping — read top-to-bottom as the typical user journey:
 // start on Home, work in your brain, run automations, configure tools, debug.
 const NAV_GROUPS: { label: string; items: Page[] }[] = [
-  { label: "Home",       items: ["overview", "activity", "chat", "tasks"] },
+  { label: "Home",       items: ["overview", "activity", "code-specialist", "chat", "tasks"] },
   { label: "Knowledge",  items: ["lazybrain", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
   { label: "Tools",      items: ["hub", "skills", "mcp"] },

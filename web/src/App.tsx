@@ -5,6 +5,7 @@ import { AgentStatusProvider } from "./context/AgentStatusContext";
 import Login from "./pages/Login";
 import Overview from "./pages/Overview";
 import Activity from "./pages/Activity";
+import CodeSpecialist from "./pages/CodeSpecialist";
 import ChatPage from "./pages/ChatPage";
 import Tasks from "./pages/Tasks";
 import Replay from "./pages/Replay";
@@ -23,7 +24,7 @@ import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
 
 const VALID_PAGES: readonly Page[] = [
-  "overview", "activity", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
+  "overview", "activity", "code-specialist", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
   "templates", "jobs", "watchers", "mcp", "memory", "lazybrain",
   "vault", "settings",
 ];
@@ -76,6 +77,7 @@ function AppContent() {
     switch (page) {
       case "overview": return <Overview onNavigate={setPage} />;
       case "activity": return <Activity />;
+      case "code-specialist": return <CodeSpecialist />;
       case "chat": return <ChatPage />;
       case "tasks": return <Tasks />;
       // /notes is now the Notes tab inside the Tasks workspace. Redirect

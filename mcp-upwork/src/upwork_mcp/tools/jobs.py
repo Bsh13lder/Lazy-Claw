@@ -121,11 +121,46 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
     return jobs
 
 
+async def _first_text(page, selectors: list[str]) -> str:
+    """Return the first non-empty text from the given selector list."""
+    for sel in selectors:
+        try:
+            el = await page.query_selector(sel)
+        except Exception:
+            continue
+        if not el:
+            continue
+        txt = (await el.text_content() or "").strip()
+        if txt:
+            return txt
+    return ""
+
+
+async def _all_text(page, selector: str, max_items: int = 20) -> list[str]:
+    """Return cleaned text from up to max_items elements matching selector."""
+    out: list[str] = []
+    try:
+        els = await page.query_selector_all(selector)
+    except Exception:
+        return out
+    for el in els[:max_items]:
+        txt = await el.text_content()
+        if txt:
+            txt = txt.strip()
+            if txt:
+                out.append(txt)
+    return out
+
+
 async def get_job_details(params: JobDetailsParams) -> dict:
     """Get detailed information about a specific Upwork job posting.
 
     Returns comprehensive job details including description, client history,
     skills required, and application requirements.
+
+    Selectors target Upwork's 2026 Air3 design system landmarks (data-cy /
+    data-test / data-qa). Avoids blind ``p, span, div`` scans that previously
+    leaked raw JS/CSS into the description and budget fields.
     """
     browser = get_browser()
     page = await browser.get_page()
@@ -140,74 +175,137 @@ async def get_job_details(params: JobDetailsParams) -> dict:
 
     job = {"url": url}
 
-    # Title
-    title_el = await page.query_selector("h1, h2")
-    if title_el:
-        job["title"] = (await title_el.text_content() or "").strip()
+    # Title — Upwork uses [data-cy="job-title"] on freelancer-facing detail pages.
+    # h1 is the safe fallback; h2 is NOT (it pulls section headings).
+    job["title"] = await _first_text(page, [
+        '[data-cy="job-title"]',
+        '[data-test="job-title"]',
+        "h1",
+    ])
 
-    # Full description
-    desc_el = await page.query_selector("[data-test='description'], .description, article p")
-    if desc_el:
-        job["description"] = (await desc_el.text_content() or "").strip()
+    # Description — capital-D [data-test="Description"] is the actual section.
+    # The lowercase variant and ".description" selectors fired before but
+    # matched outer wrappers that included sidebar JS.
+    desc = await _first_text(page, [
+        '[data-test="Description"] .text-body-sm',
+        '[data-test="Description"] [data-test*="Body"]',
+        '[data-test="Description"]',
+        '[data-cy="description"]',
+    ])
+    if desc:
+        # Strip the literal "Summary" header Upwork prepends to the section
+        # and trim to a sane size for downstream LLM consumption.
+        if desc.lower().startswith("summary"):
+            desc = desc[len("summary"):].lstrip()
+        job["description"] = desc[:6000]
 
-    # Get all text blocks to find budget, experience, etc.
-    all_text = await page.query_selector_all("p, span, div")
-    for el in all_text:
-        text = await el.text_content()
-        if not text:
-            continue
-        text = text.strip()
+    # Budget block — distinct selectors for fixed-price vs hourly.
+    fixed_text = await _first_text(page, [
+        '[data-test="BudgetAmount"]',
+        '[data-cy="budget-amount"]',
+    ])
+    hourly_range = await _first_text(page, [
+        '[data-test="HourlyBudget"]',
+        '[data-cy="clock-hourly"] + *',
+    ])
+    if fixed_text:
+        job["budget"] = fixed_text
+        job["project_type"] = "fixed"
+    elif hourly_range:
+        job["budget"] = hourly_range
+        job["project_type"] = "hourly"
+    else:
+        # Fallback — scan only short, $-bearing pills near the budget block.
+        for txt in await _all_text(page, "li", max_items=30):
+            if "$" in txt and len(txt) < 60:
+                job["budget"] = txt
+                break
+        # Detect type from the work-diary / fixed-price label pill
+        if not job.get("project_type"):
+            for txt in await _all_text(page, "li", max_items=30):
+                low = txt.lower()
+                if "hourly" in low:
+                    job["project_type"] = "hourly"
+                    break
+                if "fixed" in low:
+                    job["project_type"] = "fixed"
+                    break
 
-        # Budget
-        if "$" in text and len(text) < 50 and not job.get("budget"):
-            job["budget"] = text
+    # Experience level — from the dedicated pill, not blind text scan
+    exp = await _first_text(page, [
+        '[data-test="ContractorTier"]',
+        '[data-cy="experience"]',
+    ])
+    if exp:
+        job["experience_level"] = exp
 
-        # Experience level
-        if any(x in text.lower() for x in ["entry level", "intermediate", "expert"]):
-            if not job.get("experience_level"):
-                job["experience_level"] = text
+    # Project length / duration
+    duration = await _first_text(page, [
+        '[data-test="Duration"]',
+        '[data-cy="duration"]',
+    ])
+    if duration:
+        job["project_length"] = duration
 
-        # Project length
-        if any(x in text.lower() for x in ["less than", "1 to 3", "3 to 6", "more than"]):
-            if "month" in text.lower() and not job.get("project_length"):
-                job["project_length"] = text
+    # Posted timestamp
+    posted = await _first_text(page, [
+        '[data-test="PostedOn"]',
+        '[data-test="Posted"]',
+    ])
+    if posted:
+        job["posted"] = posted
 
-    # Skills
-    skill_els = await page.query_selector_all("[class*='skill'], [class*='token'], button")
-    skills = []
-    for el in skill_els[:15]:
-        text = await el.text_content()
-        if text and 2 < len(text.strip()) < 30:
-            skills.append(text.strip())
-    if skills:
-        job["skills"] = list(set(skills))[:10]
+    # Skills/tags — Upwork's actual skill-token selector
+    skills = await _all_text(page, '[data-test="Skill"], [data-test="Tag-tag"]', max_items=15)
+    # Dedupe while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for s in skills:
+        key = s.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(s)
+    if deduped:
+        job["skills"] = deduped[:10]
 
-    # Client info
-    client = {}
-    client_section = await page.query_selector("[data-test='client-info'], [class*='client']")
-    if client_section:
-        client_text = await client_section.text_content()
-        if client_text:
-            # Look for location, rating, etc.
-            if "Payment" in client_text and "verified" in client_text.lower():
-                client["payment_verified"] = True
-            # Extract spending info
-            spent_match = re.search(r"\$[\d,]+[KMB]?\+?\s*(spent|total)", client_text, re.I)
-            if spent_match:
-                client["total_spent"] = spent_match.group(0)
+    # Client info via data-qa attributes (verified live on /jobs/<id> pages)
+    client: dict = {}
+    location = await _first_text(page, ['[data-qa="client-location"]'])
+    if location:
+        client["location"] = location
+
+    jobs_posted = await _first_text(page, ['[data-qa="client-job-posting-stats"]'])
+    if jobs_posted:
+        client["jobs_posted"] = jobs_posted
+
+    verification = await _first_text(page, ['[data-qa="client-verification-status"]'])
+    if verification:
+        client["payment_verified"] = "verified" in verification.lower() and "not" not in verification.lower()
+
+    spent = await _first_text(page, ['[data-qa="client-total-spent"]'])
+    if spent:
+        m = re.search(r"\$[\d,]+(?:\.\d+)?[KMB]?\+?", spent)
+        if m:
+            client["total_spent"] = m.group(0)
+
+    rating = await _first_text(page, ['[data-qa="client-feedback"], [data-test="ClientFeedback"]'])
+    if rating:
+        m = re.search(r"\d\.\d{1,2}", rating)
+        if m:
+            client["rating"] = m.group(0)
 
     if client:
         job["client"] = client
 
-    # Connects required
-    connects_els = await page.query_selector_all("span, div")
-    for el in connects_els:
-        text = await el.text_content()
-        if text and "connect" in text.lower():
-            numbers = re.findall(r"\d+", text)
-            if numbers:
-                job["connects_required"] = int(numbers[0])
-                break
+    # Connects required — narrow selector, only inside the apply button area
+    connects_text = await _first_text(page, [
+        '[data-test="ConnectsAmount"]',
+        '[data-cy="connects"]',
+    ])
+    if connects_text:
+        m = re.search(r"\d+", connects_text)
+        if m:
+            job["connects_required"] = int(m.group(0))
 
     # Fail-fast guard: if neither title nor description came through, the
     # page never rendered (Cloudflare wall, login redirect, or 404). Raise

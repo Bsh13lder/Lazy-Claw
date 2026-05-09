@@ -607,6 +607,8 @@ CREATE TABLE IF NOT EXISTS bounty_programs (
     excluded_classes TEXT,                 -- encrypted JSON: ["dos","social_engineering"]
     rate_limit_rps   INTEGER DEFAULT 5,
     enabled          INTEGER DEFAULT 1,
+    cookies_jar      TEXT,                 -- encrypted JSON: list of cookie dicts
+    cookies_saved_at TEXT,                 -- when cookies were captured
     created_at       TEXT DEFAULT (datetime('now')),
     updated_at       TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, name)

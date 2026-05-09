@@ -274,8 +274,11 @@ class SkillRegistry:
         # if `pip install -e claude-bug-bounty/` hasn't been run yet.
         from lazyclaw.skills.builtin.bounty import (
             BountyDisableProgramSkill,
+            BountyHuntSkill,
             BountyListFindingsSkill,
             BountyListProgramsSkill,
+            BountyLoginSkill,
+            BountyProbeSkill,
             BountyReconSkill,
             BountyRegisterProgramSkill,
             BountyValidateFindingSkill,
@@ -286,6 +289,9 @@ class SkillRegistry:
         self.register(BountyListFindingsSkill(config=config))
         self.register(BountyReconSkill(config=config))
         self.register(BountyValidateFindingSkill(config=config))
+        self.register(BountyLoginSkill(config=config))
+        self.register(BountyProbeSkill(config=config))
+        self.register(BountyHuntSkill(config=config))
 
         # Note: real_browser.py skills removed — merged into BrowserSkill above
 

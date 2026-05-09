@@ -9,10 +9,13 @@ unmodified from the fork to inherit their 280-test safety coverage.
 """
 from __future__ import annotations
 
+from lazyclaw.skills.builtin.bounty.hunt_skill import BountyHuntSkill
 from lazyclaw.skills.builtin.bounty.list_skill import (
     BountyListFindingsSkill,
     BountyListProgramsSkill,
 )
+from lazyclaw.skills.builtin.bounty.login_skill import BountyLoginSkill
+from lazyclaw.skills.builtin.bounty.probe_skill import BountyProbeSkill
 from lazyclaw.skills.builtin.bounty.recon_skill import BountyReconSkill
 from lazyclaw.skills.builtin.bounty.register_skill import (
     BountyDisableProgramSkill,
@@ -27,4 +30,7 @@ __all__ = [
     "BountyListFindingsSkill",
     "BountyReconSkill",
     "BountyValidateFindingSkill",
+    "BountyLoginSkill",
+    "BountyProbeSkill",
+    "BountyHuntSkill",
 ]

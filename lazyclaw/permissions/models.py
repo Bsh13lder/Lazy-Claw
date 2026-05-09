@@ -74,6 +74,11 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     # Read-only diagnostics + user-facing config toggles:
     "system": ALLOW,         # status / about / health
     "ai_management": ALLOW,  # ECO mode toggles — user-facing settings
+    # Bug-bounty hunting — sandbox-only by program scope, every external
+    # request is gated by the deterministic ScopeChecker + audit-logged.
+    # Without ALLOW the orchestrator stalls on every probe; the in-band
+    # safety is the scope guard, not the per-call approval prompt.
+    "bounty": ALLOW,
     # ── Sensitive (ASK) — KEEP gated ─────────────────────────────────────
     "vault": ASK,            # credentials / API keys
     "computer": ASK,         # shell / subprocess execution

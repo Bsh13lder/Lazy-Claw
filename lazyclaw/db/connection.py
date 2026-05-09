@@ -111,6 +111,9 @@ async def init_db(config: Config) -> None:
             ("note_links", "display_text", "ALTER TABLE note_links ADD COLUMN display_text TEXT"),
             # LazyBrain Phase G: chunked embeddings dirty flag (mirrors embedding_dirty).
             ("notes", "chunks_dirty", "ALTER TABLE notes ADD COLUMN chunks_dirty INTEGER NOT NULL DEFAULT 1"),
+            # Bounty hunting — encrypted per-program session cookies for authenticated probes.
+            ("bounty_programs", "cookies_jar", "ALTER TABLE bounty_programs ADD COLUMN cookies_jar TEXT"),
+            ("bounty_programs", "cookies_saved_at", "ALTER TABLE bounty_programs ADD COLUMN cookies_saved_at TEXT"),
         ]
         for table, column, sql in migrations:
             try:

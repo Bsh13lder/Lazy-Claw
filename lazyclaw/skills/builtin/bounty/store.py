@@ -53,6 +53,10 @@ def _audit_target_aad(user_id: str) -> bytes:
     return f"bounty:audit:target:{user_id}".encode("utf-8")
 
 
+def _cookies_aad(user_id: str) -> bytes:
+    return f"bounty:cookies:{user_id}".encode("utf-8")
+
+
 # ── Programs ────────────────────────────────────────────────────────────────
 
 
@@ -178,6 +182,49 @@ async def get_program(
     """Look up one program by name. Returns None if absent."""
     programs = await list_programs(config, user_id)
     return next((p for p in programs if p["name"] == name), None)
+
+
+async def save_session_cookies(
+    config: Config, user_id: str, name: str, cookies: list[dict[str, Any]],
+) -> bool:
+    """Persist a list of cookie dicts (name, value, domain, path, secure,
+    httpOnly, expires) for a program. Encrypted at rest with AAD bound to
+    (user_id, "cookies"). Returns True if a row was updated, False if no
+    program by that name."""
+    dek = await get_user_dek(config, user_id)
+    enc = encrypt_field(json.dumps(cookies), dek, _cookies_aad(user_id))
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_session(config) as conn:
+        cur = await conn.execute(
+            "UPDATE bounty_programs "
+            "SET cookies_jar = ?, cookies_saved_at = ?, updated_at = ? "
+            "WHERE user_id = ? AND name = ?",
+            (enc, now, now, user_id, name),
+        )
+        await conn.commit()
+        return cur.rowcount > 0
+
+
+async def load_session_cookies(
+    config: Config, user_id: str, name: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return (cookies_list, saved_at_iso). Empty list if no cookies stored."""
+    dek = await get_user_dek(config, user_id)
+    async with db_session(config) as conn:
+        async with conn.execute(
+            "SELECT cookies_jar, cookies_saved_at "
+            "FROM bounty_programs WHERE user_id = ? AND name = ?",
+            (user_id, name),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row[0]:
+        return [], None
+    try:
+        cookies = json.loads(decrypt_field(row[0], dek, _cookies_aad(user_id)))
+    except Exception:
+        logger.warning("decrypt cookies_jar failed for %s/%s", user_id, name)
+        return [], None
+    return cookies, row[1]
 
 
 async def set_enabled(

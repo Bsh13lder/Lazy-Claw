@@ -605,6 +605,7 @@ class SkillRegistry:
             SubmitDeliverableSkill,
             SurvivalModeSkill,
             SurvivalStatusSkill,
+            SyncUpworkProfileSkill,
             UpworkInboxCheckSkill,
             WatchRedditForHireSkill,
         )
@@ -612,7 +613,8 @@ class SkillRegistry:
         self.register(SearchJobsSkill(config=config, registry=self))
         self.register(ApplyJobSkill(config=config, registry=self))
         self.register(ApplyRedditDmSkill(config=config, registry=self))
-        self.register(SurvivalModeSkill(config=config))
+        self.register(SurvivalModeSkill(config=config, registry=self))
+        self.register(SyncUpworkProfileSkill(config=config, registry=self))
         self.register(SetSkillsProfileSkill(config=config))
         self.register(SetFreelancePitchSkill(config=config))
         self.register(SetUpworkBotBehaviorSkill(config=config))

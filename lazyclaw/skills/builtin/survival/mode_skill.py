@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 class SurvivalModeSkill(BaseSkill):
     """Enable or disable automatic job hunting."""
 
-    def __init__(self, config=None) -> None:
+    def __init__(self, config=None, registry=None) -> None:
         self._config = config
+        self._registry = registry
 
     @property
     def name(self) -> str:
@@ -69,6 +70,22 @@ class SurvivalModeSkill(BaseSkill):
 
         if enabled:
             await self._remove_survival_jobs(user_id)
+
+            # Auto-pull display_name from the user's actual Upwork profile
+            # the first time survival_mode is enabled. Without this the
+            # user has to manually NL-set the name and risks a typo
+            # mismatch with what clients see on Upwork. Best-effort —
+            # silently no-ops if the MCP isn't reachable yet.
+            if not profile.display_name and self._registry is not None:
+                sync = self._registry.get("sync_upwork_profile")
+                if sync is not None:
+                    try:
+                        await sync.execute(user_id, {})
+                        # Re-load profile so the success message shows the
+                        # newly-pulled display_name.
+                        profile = await get_profile(self._config, user_id)
+                    except Exception as exc:
+                        logger.debug("auto sync_upwork_profile failed: %s", exc)
 
             keywords = " ".join(profile.skills[:5])
             branding = "LazyClaw AI Agent" if profile.branding_mode == "lazyclaw" else "Personal"

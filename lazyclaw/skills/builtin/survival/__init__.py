@@ -25,6 +25,7 @@ from lazyclaw.skills.builtin.survival.invoice_skill import InvoiceClientSkill
 from lazyclaw.skills.builtin.survival.mode_skill import SurvivalModeSkill, SurvivalStatusSkill
 from lazyclaw.skills.builtin.survival.pitch_skill import SetFreelancePitchSkill
 from lazyclaw.skills.builtin.survival.profile_skill import SetSkillsProfileSkill
+from lazyclaw.skills.builtin.survival.sync_upwork_skill import SyncUpworkProfileSkill
 from lazyclaw.skills.builtin.survival.upwork_bot_skill import SetUpworkBotBehaviorSkill
 from lazyclaw.skills.builtin.survival.upwork_inbox_check import UpworkInboxCheckSkill
 from lazyclaw.skills.builtin.survival.reddit_apply_skill import ApplyRedditDmSkill
@@ -46,6 +47,7 @@ __all__ = [
     "SubmitDeliverableSkill",
     "SurvivalModeSkill",
     "SurvivalStatusSkill",
+    "SyncUpworkProfileSkill",
     "UpworkInboxCheckSkill",
     "WatchRedditForHireSkill",
 ]

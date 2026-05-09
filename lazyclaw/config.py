@@ -28,6 +28,10 @@ class Config:
     anthropic_api_key: str | None = None
     minimax_api_key: str | None = None
     minimax_base_url: str = "https://api.minimax.io/anthropic"
+    # Token Plan tier: starter / plus / max / ultra. Sets the rolling
+    # 5-hour request cap (1500 / 4500 / 15000 / 30000). Plus is the
+    # default because that's the user's actual subscription.
+    minimax_token_plan_tier: str = "plus"
     telegram_bot_token: str | None = None
     browser_timeout: int = 300
     computer_timeout: int = 30
@@ -88,6 +92,7 @@ def load_config() -> Config:
         anthropic_api_key=anthropic_key,
         minimax_api_key=minimax_key,
         minimax_base_url=minimax_base_url,
+        minimax_token_plan_tier=(os.getenv("MINIMAX_TIER", "plus") or "plus").lower().strip(),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
         browser_timeout=int(os.getenv("BROWSER_TIMEOUT", "300")),
         computer_timeout=int(os.getenv("COMPUTER_TIMEOUT", "30")),

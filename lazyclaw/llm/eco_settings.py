@@ -3,9 +3,11 @@
 Settings stored in the existing users.settings JSON column
 under the "eco" key. No new DB table needed.
 
-Two modes (3 roles: Brain, Worker, Fallback):
-  hybrid  — Sonnet brain + Gemma 4 E2B local worker ($0) + Haiku fallback (auto)
-  full    — User-configurable brain/worker/fallback (paid, auto)
+Four modes (3 roles each: Brain, Worker, Fallback):
+  hybrid   — Sonnet brain + Gemma 4 E2B local worker ($0) + Haiku fallback (auto)
+  full     — User-configurable brain/worker/fallback (paid, auto)
+  claude   — All roles via Claude CLI ($0 via subscription)
+  minimax  — MiniMax M2.7 brain+worker (Token Plan) + Haiku fallback on 5h cap
 """
 
 from __future__ import annotations
@@ -55,6 +57,9 @@ DEFAULT_ECO = {
     "claude_brain_model": None,
     "claude_worker_model": None,
     "claude_fallback_model": None,
+    "minimax_brain_model": None,
+    "minimax_worker_model": None,
+    "minimax_fallback_model": None,
     "locked_provider": None,
     "allowed_providers": None,
     "free_providers": None,    # None = auto-detect from env
@@ -98,6 +103,17 @@ async def get_eco_settings(config: Config, user_id: str) -> dict:
     if merged.get("specialist_model") and not merged.get("worker_model"):
         merged["worker_model"] = merged["specialist_model"]
 
+    # Scrub legacy CLI-mode values that aren't valid `claude --model X`
+    # arguments. The old ModelAssignment dropdown stored registry profile
+    # names like "claude-cli" / "haiku-cli" verbatim, which now spam the
+    # eco_router fallback warning every tick. Coerce to None so the router
+    # picks its safe default (claude-sonnet-4-6) without complaining.
+    from lazyclaw.llm.eco_router import _is_valid_cli_model
+    for cli_field in ("claude_brain_model", "claude_worker_model", "claude_fallback_model"):
+        val = merged.get(cli_field)
+        if val and not _is_valid_cli_model(val):
+            merged[cli_field] = None
+
     return merged
 
 
@@ -112,7 +128,7 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         if normalized not in VALID_MODES:
             raise ValueError(
                 f"Invalid eco mode: {updates['mode']}. "
-                f"Use: hybrid, full, claude"
+                f"Use: hybrid, full, claude, minimax"
             )
         updates["mode"] = normalized
 

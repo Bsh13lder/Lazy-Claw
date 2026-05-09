@@ -17,9 +17,21 @@ class ProviderLimits:
     requests_per_minute: int = 0  # 0 = unlimited
     requests_per_day: int = 0
     tokens_per_minute: int = 0
+    requests_per_5h: int = 0      # Rolling 5h window (MiniMax Token Plan)
 
 
-# Known free tier limits (conservative estimates)
+# MiniMax Token Plan tiers — flat monthly fee, request-count metered over
+# a rolling 5-hour window. Source:
+# https://platform.minimax.io/docs/guides/pricing-token-plan
+MINIMAX_TIER_LIMITS: dict[str, int] = {
+    "starter": 1_500,    # $10/mo
+    "plus":    4_500,    # $20/mo  (default — user is on this tier)
+    "max":     15_000,   # $50/mo
+    "ultra":   30_000,   # $150/mo
+}
+
+
+# Known free / subscription tier limits (conservative estimates)
 KNOWN_LIMITS: dict[str, ProviderLimits] = {
     "groq": ProviderLimits(requests_per_minute=30, tokens_per_minute=14_000),
     "gemini": ProviderLimits(requests_per_minute=15, requests_per_day=500),
@@ -28,6 +40,9 @@ KNOWN_LIMITS: dict[str, ProviderLimits] = {
     "mistral": ProviderLimits(requests_per_minute=30),
     "huggingface": ProviderLimits(requests_per_minute=10),
     "ollama": ProviderLimits(),  # Local, unlimited
+    # MiniMax: Plus tier default. Override at runtime via
+    # `RateLimiter.set_minimax_tier(...)` once the user picks a tier.
+    "minimax": ProviderLimits(requests_per_5h=MINIMAX_TIER_LIMITS["plus"]),
 }
 
 
@@ -82,6 +97,7 @@ class RateLimiter:
             self._limits.update(custom_limits)
         self._minute_counters: dict[str, _WindowCounter] = {}
         self._day_counters: dict[str, _WindowCounter] = {}
+        self._fivehour_counters: dict[str, _WindowCounter] = {}
         self._init_counters()
 
     def _init_counters(self) -> None:
@@ -92,15 +108,39 @@ class RateLimiter:
             self._day_counters[name] = _WindowCounter(
                 window_seconds=86400, max_count=limits.requests_per_day
             )
+            self._fivehour_counters[name] = _WindowCounter(
+                window_seconds=18000, max_count=limits.requests_per_5h
+            )
+
+    def set_provider_limit(self, provider: str, limits: ProviderLimits) -> None:
+        """Replace a provider's limits (used to apply MiniMax tier choice)."""
+        self._limits[provider] = limits
+        self._minute_counters[provider] = _WindowCounter(
+            window_seconds=60, max_count=limits.requests_per_minute
+        )
+        self._day_counters[provider] = _WindowCounter(
+            window_seconds=86400, max_count=limits.requests_per_day
+        )
+        self._fivehour_counters[provider] = _WindowCounter(
+            window_seconds=18000, max_count=limits.requests_per_5h
+        )
+
+    def set_minimax_tier(self, tier: str) -> None:
+        """Configure MiniMax 5-hour cap from Token Plan tier name."""
+        cap = MINIMAX_TIER_LIMITS.get(tier.lower().strip(), MINIMAX_TIER_LIMITS["plus"])
+        self.set_provider_limit("minimax", ProviderLimits(requests_per_5h=cap))
 
     def has_capacity(self, provider: str) -> bool:
         """Check if provider has rate limit capacity right now."""
         now = time.monotonic()
         minute = self._minute_counters.get(provider)
         day = self._day_counters.get(provider)
+        fivehour = self._fivehour_counters.get(provider)
         if minute and not minute.has_capacity(now):
             return False
         if day and not day.has_capacity(now):
+            return False
+        if fivehour and not fivehour.has_capacity(now):
             return False
         return True
 
@@ -109,34 +149,52 @@ class RateLimiter:
         now = time.monotonic()
         minute = self._minute_counters.get(provider)
         day = self._day_counters.get(provider)
+        fivehour = self._fivehour_counters.get(provider)
         if minute:
             minute.record(now)
         if day:
             day.record(now)
+        if fivehour:
+            fivehour.record(now)
 
     def wait_seconds(self, provider: str) -> float:
         """Seconds until this provider has capacity again."""
         now = time.monotonic()
         minute_wait = 0.0
         day_wait = 0.0
+        fivehour_wait = 0.0
         minute = self._minute_counters.get(provider)
         day = self._day_counters.get(provider)
+        fivehour = self._fivehour_counters.get(provider)
         if minute:
             minute_wait = minute.wait_seconds(now)
         if day:
             day_wait = day.wait_seconds(now)
-        return max(minute_wait, day_wait)
+        if fivehour:
+            fivehour_wait = fivehour.wait_seconds(now)
+        return max(minute_wait, day_wait, fivehour_wait)
 
     def get_available_providers(self, providers: list[str]) -> list[str]:
         """Filter to providers that currently have capacity."""
         return [p for p in providers if self.has_capacity(p)]
 
     def record_rate_limit_hit(self, provider: str) -> None:
-        """Called when we get a 429 — fill up the minute window to block it."""
+        """Called when we get a 429 — fill the active window to block retries.
+
+        For providers with a 5h window (MiniMax) we saturate that window
+        so the limiter blocks until the rolling cap actually opens up.
+        For minute-windowed providers we fill the minute counter as before.
+        """
         now = time.monotonic()
+        fivehour = self._fivehour_counters.get(provider)
+        if fivehour and fivehour.max_count > 0:
+            fivehour._prune(now)
+            remaining = fivehour.max_count - len(fivehour.timestamps)
+            for _ in range(remaining):
+                fivehour.record(now)
+            return
         minute = self._minute_counters.get(provider)
         if minute and minute.max_count > 0:
-            # Fill remaining slots to prevent immediate retry
             minute._prune(now)
             remaining = minute.max_count - len(minute.timestamps)
             for _ in range(remaining):
@@ -149,10 +207,14 @@ class RateLimiter:
         for name in self._limits:
             minute = self._minute_counters.get(name)
             day = self._day_counters.get(name)
+            fivehour = self._fivehour_counters.get(name)
             minute_used = 0
             minute_max = 0
             day_used = 0
             day_max = 0
+            fivehour_used = 0
+            fivehour_max = 0
+            fivehour_reset_seconds = 0.0
             if minute:
                 minute._prune(now)
                 minute_used = len(minute.timestamps)
@@ -161,12 +223,24 @@ class RateLimiter:
                 day._prune(now)
                 day_used = len(day.timestamps)
                 day_max = day.max_count
+            if fivehour:
+                fivehour._prune(now)
+                fivehour_used = len(fivehour.timestamps)
+                fivehour_max = fivehour.max_count
+                if fivehour_max > 0 and fivehour.timestamps:
+                    oldest = fivehour.timestamps[0]
+                    fivehour_reset_seconds = max(
+                        0.0, (oldest + fivehour.window_seconds) - now
+                    )
             result[name] = {
                 "has_capacity": self.has_capacity(name),
                 "minute_used": minute_used,
                 "minute_max": minute_max,
                 "day_used": day_used,
                 "day_max": day_max,
+                "fivehour_used": fivehour_used,
+                "fivehour_max": fivehour_max,
+                "fivehour_reset_seconds": round(fivehour_reset_seconds, 1),
                 "wait_seconds": round(self.wait_seconds(name), 1),
             }
         return result

@@ -50,6 +50,15 @@ MODE_MODELS: dict[str, dict[str, str]] = {
         "worker":   "claude-haiku-4-5-20251001",
         "fallback": "claude-cli",
     },
+    "minimax": {
+        # MiniMax Token Plan ($20/mo Plus = 4,500 M2.7 req / 5h).
+        # M2.7 brain + worker through Anthropic-compat endpoint. Falls
+        # back to Haiku when the rolling 5-hour quota is hit so the
+        # agent never goes dead mid-loop.
+        "brain":    "MiniMax-M2.7",
+        "worker":   "MiniMax-M2.7",
+        "fallback": "claude-haiku-4-5-20251001",
+    },
 }
 
 # Ollama local models (custom Modelfiles with agent identity baked in)

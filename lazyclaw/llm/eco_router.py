@@ -43,9 +43,10 @@ logger = logging.getLogger(__name__)
 
 # ── ECO Modes ─────────────────────────────────────────────────────────
 
-MODE_HYBRID = "hybrid"  # Sonnet brain + Gemma 4 E2B local worker, auto-fallback
-MODE_FULL = "full"      # User-configurable brain/worker/fallback (paid)
-MODE_CLAUDE = "claude"  # All roles via claude -p CLI ($0 via subscription)
+MODE_HYBRID = "hybrid"   # Sonnet brain + Gemma 4 E2B local worker, auto-fallback
+MODE_FULL = "full"       # User-configurable brain/worker/fallback (paid)
+MODE_CLAUDE = "claude"   # All roles via claude -p CLI ($0 via subscription)
+MODE_MINIMAX = "minimax" # MiniMax M2.7 brain + worker (Token Plan), Haiku fallback
 
 # Legacy aliases — map old names to the supported modes
 _MODE_ALIASES = {
@@ -53,6 +54,9 @@ _MODE_ALIASES = {
     "full": MODE_FULL,
     "off": MODE_FULL,
     "claude": MODE_CLAUDE,
+    "minimax": MODE_MINIMAX,
+    "m2": MODE_MINIMAX,
+    "m2.7": MODE_MINIMAX,
 }
 
 # Old eco/local modes are disabled (require 32GB+ RAM)
@@ -63,7 +67,7 @@ DISABLED_MODE_MESSAGE = (
     "Use HYBRID for the best balance of cost and quality."
 )
 
-VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL, MODE_CLAUDE})
+VALID_MODES = frozenset({MODE_HYBRID, MODE_FULL, MODE_CLAUDE, MODE_MINIMAX})
 
 
 # ── Claude CLI model validator ────────────────────────────────────────
@@ -219,6 +223,9 @@ class EcoSettings:
     claude_brain_model: str | None = None
     claude_worker_model: str | None = None
     claude_fallback_model: str | None = None
+    minimax_brain_model: str | None = None
+    minimax_worker_model: str | None = None
+    minimax_fallback_model: str | None = None
     locked_provider: str | None = None      # Lock to specific free provider
     allowed_providers: list[str] | None = None
     free_providers: list[str] | None = None
@@ -271,6 +278,9 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
         claude_brain_model=eco.get("claude_brain_model"),
         claude_worker_model=eco.get("claude_worker_model"),
         claude_fallback_model=eco.get("claude_fallback_model"),
+        minimax_brain_model=eco.get("minimax_brain_model"),
+        minimax_worker_model=eco.get("minimax_worker_model"),
+        minimax_fallback_model=eco.get("minimax_fallback_model"),
         locked_provider=eco.get("locked_provider"),
         allowed_providers=allowed,
         free_providers=free_providers,
@@ -299,6 +309,28 @@ def _infer_paid_provider(model: str) -> str:
     return "openai"
 
 
+# 429 / quota / rate-limit signal substrings. MiniMax's Anthropic-compat
+# layer surfaces the 5-hour quota cap as one of these — the exact wording
+# varies by which proxy returns it (cloudflare 429, MiniMax adapter
+# `quota_exhausted`, anthropic SDK `RateLimitError`). Substring match
+# stays SDK-version agnostic.
+_QUOTA_SIGNALS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "quota",
+    "too many requests",
+    "exceeded",
+)
+
+
+def _is_quota_error(exc_str: str) -> bool:
+    """True if the exception string looks like a 429 / quota cap."""
+    s = exc_str.lower()
+    return any(sig in s for sig in _QUOTA_SIGNALS)
+
+
 # ── EcoRouter ─────────────────────────────────────────────────────────
 
 class EcoRouter:
@@ -321,6 +353,13 @@ class EcoRouter:
         self._config = config
         self._paid_router = paid_router
         self._rate_limiter = RateLimiter()
+        # Apply MiniMax Token Plan tier to the limiter's 5h window so the
+        # TUI shows the right cap (Plus=4500, Max=15000, etc.).
+        tier = getattr(config, "minimax_token_plan_tier", "plus")
+        try:
+            self._rate_limiter.set_minimax_tier(tier)
+        except Exception:  # pragma: no cover — defensive
+            logger.warning("Invalid MiniMax tier %r — using plus default", tier)
         self._usage: dict[str, dict] = {}  # user_id → {local, free, paid}
 
         # Local providers (lazy init)
@@ -699,6 +738,22 @@ class EcoRouter:
                 )
                 resp.fallback_reason = "overloaded"
                 return resp
+            # MiniMax 5-hour quota exhausted — fall to mode's fallback model
+            # (Haiku for mode=minimax). Block further minimax calls until the
+            # rolling window opens by saturating the rate-limiter window.
+            if _is_quota_error(exc_str) and _infer_paid_provider(brain_name) == "minimax":
+                logger.warning(
+                    "MiniMax quota exhausted (brain) — falling back to %s: %s",
+                    models["fallback"], exc,
+                )
+                self._rate_limiter.record_rate_limit_hit("minimax")
+                resp = await self._fallback(
+                    messages, user_id, settings, models,
+                    reason=f"{settings.mode}: minimax_quota -> {models['fallback']}",
+                    **kwargs,
+                )
+                resp.fallback_reason = "quota"
+                return resp
             raise
 
     # ── Claude CLI routing (all roles through claude -p) ───────────────
@@ -815,6 +870,20 @@ class EcoRouter:
                 )
             except Exception as exc:
                 exc_str = str(exc)
+                # MiniMax 5-hour quota — fallback to mode's fallback model
+                # (typically Haiku) instead of going Claude CLI. Saturates
+                # the limiter window to suppress retry storms.
+                if _is_quota_error(exc_str) and _infer_paid_provider(worker_name) == "minimax":
+                    logger.warning(
+                        "MiniMax quota exhausted (worker) — falling back to %s: %s",
+                        models["fallback"], exc,
+                    )
+                    self._rate_limiter.record_rate_limit_hit("minimax")
+                    return await self._fallback(
+                        messages, user_id, settings, models,
+                        reason=f"{settings.mode}: minimax_quota_worker -> {models['fallback']}",
+                        **kwargs,
+                    )
                 if "401" in exc_str or "authentication" in exc_str.lower() or "529" in exc_str or "overloaded" in exc_str.lower():
                     logger.warning(
                         "Paid worker error — falling back to Claude CLI: %s", exc,
@@ -871,6 +940,11 @@ class EcoRouter:
         response = await self._paid_router.chat(
             messages, model=model, user_id=user_id, **kwargs
         )
+        # MiniMax Token Plan is request-count metered (4,500 / 5h on Plus).
+        # Record every successful call so the TUI/limiter has a live count
+        # and pre-emptively blocks before the proxy returns 429.
+        if provider == "minimax":
+            self._rate_limiter.record_request("minimax")
         self._record_routing_stats(model, response.usage)
         return response
 

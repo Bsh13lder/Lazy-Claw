@@ -535,8 +535,27 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
         if numbers:
             connects_required = int(numbers[0])
 
-    # Submit the proposal
-    submit_btn = await page.query_selector('[data-test="submit-proposal"], button[type="submit"]:has-text("Submit"), button:has-text("Send")')
+    # Submit the proposal. Selector list is deliberately fat — verified
+    # 2026-05-09 the live "Submit proposal" button has NO data-test attr
+    # and is ``type="button"`` (not ``type="submit"``), so each of the
+    # three legacy selectors silently misses. Match by visible text and
+    # walk the fallbacks in order so older flows ("Send for N Connects")
+    # still work.
+    submit_btn = None
+    for sel in (
+        '[data-test="submit-proposal"]',
+        'button:has-text("Submit proposal")',
+        'button:has-text("Submit a Proposal")',
+        'button:has-text("Send for")',
+        'button[type="submit"]:has-text("Submit")',
+        'button:has-text("Send")',
+    ):
+        try:
+            submit_btn = await page.query_selector(sel)
+            if submit_btn:
+                break
+        except Exception:
+            continue
     if not submit_btn:
         return {"status": "error", "message": "Submit button not found"}
 

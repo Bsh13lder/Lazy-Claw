@@ -49,9 +49,11 @@ class SurvivalModeSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         from lazyclaw.heartbeat.orchestrator import create_job
         from lazyclaw.survival.profile import get_profile
+        from lazyclaw.survival.upwork_bot import get_behavior as get_upwork_bot
 
         enabled = params.get("enabled", False)
         profile = await get_profile(self._config, user_id)
+        upwork_bot = await get_upwork_bot(self._config, user_id)
 
         if enabled and not profile.skills:
             return (
@@ -84,16 +86,18 @@ class SurvivalModeSkill(BaseSkill):
                 context=json.dumps({"survival_mode": True}),
             )
 
-            # Message checker cron (every 15 min)
+            # Message checker cron — uses the upwork_inbox_check skill
+            # which classifies messages via deterministic regex (zero LLM
+            # cost on safe categories) and routes sensitive ones through
+            # the escalate_to_human Telegram /esc channel. Cadence comes
+            # from UpworkBotBehavior so the user can tune it via NL:
+            # "check upwork messages every 6 hours".
             await create_job(
                 self._config, user_id,
                 name="survival_message_check",
-                instruction=(
-                    "Check for new messages from clients on Upwork. "
-                    "Notify me on Telegram if any need response."
-                ),
+                instruction="check my upwork inbox now",
                 job_type="cron",
-                cron_expression="*/15 * * * *",
+                cron_expression=upwork_bot.inbox_check_cron,
                 context=json.dumps({"survival_mode": True}),
             )
 
@@ -118,7 +122,8 @@ class SurvivalModeSkill(BaseSkill):
                 f"Platforms: {', '.join(profile.platforms) or 'all'}\n"
                 f"Max concurrent jobs: {profile.max_concurrent_jobs}\n\n"
                 f"Job search: every 30 min\n"
-                f"Message check: every 15 min\n"
+                f"Message check: {upwork_bot.inbox_check_cron} "
+                f"(NL: 'check upwork messages every Nh')\n"
                 f"Gig monitor: every hour\n\n"
                 f"I'll notify you on Telegram when I find matches.\n"
                 f"You approve every application and submission."

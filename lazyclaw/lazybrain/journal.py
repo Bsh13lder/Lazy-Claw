@@ -203,3 +203,37 @@ async def list_journal(
     return await store.list_notes(
         config, user_id, tag="journal", limit=limit
     )
+
+
+# Wikilink targets reject [, ], #, |, newline (see wikilinks._WIKILINK_RE).
+# We strip those and cap at 100 chars so the resulting [[link]] always parses.
+_WIKILINK_BAD = str.maketrans({"[": " ", "]": " ", "#": " ", "|": " ", "\n": " "})
+
+
+def _sanitize_wikilink(title: str) -> str:
+    cleaned = " ".join(title.translate(_WIKILINK_BAD).split())
+    return cleaned[:100]
+
+
+async def link_note_today(
+    config: Config,
+    user_id: str,
+    *,
+    title: str,
+    kind: str,
+) -> None:
+    """Append a `[[Title]] — kind` bullet to today's journal page.
+
+    Why: clicking the today node in the LazyBrain graph should reveal what
+    actually happened today. The wikilink reindexer (`store._reindex_links`)
+    converts the `[[Title]]` into a `note_links` row → graph edge.
+    How to apply: call after any user-visible event whose target note already
+    exists (auto_capture save, task completion). Silent on failure.
+    """
+    safe = _sanitize_wikilink(title)
+    if not safe:
+        return
+    try:
+        await append_journal(config, user_id, f"[[{safe}]] — {kind}")
+    except Exception:
+        logger.debug("link_note_today failed for %r", title, exc_info=True)

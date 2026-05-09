@@ -694,6 +694,23 @@ async def complete_task(
     task["completed_at"] = now
     await _mirror_status_to_lazybrain(config, user_id, task, "done")
 
+    # Link the completed task into today's journal so it shows up as a
+    # graph edge from the today node. Fire-and-forget — never blocks the
+    # task-complete reply on PKM bookkeeping.
+    try:
+        from lazyclaw.lazybrain import journal as _lb_journal
+        from lazyclaw.runtime.aio_helpers import fire_and_forget
+        fire_and_forget(
+            _lb_journal.link_note_today(
+                config, user_id,
+                title=f"Task: {task.get('title', '')}",
+                kind="done",
+            ),
+            name=f"journal-link-task-done-{task_id}",
+        )
+    except Exception:
+        logger.debug("journal link for completed task failed", exc_info=True)
+
     # Recurring: create the next occurrence
     if task.get("recurring"):
         try:

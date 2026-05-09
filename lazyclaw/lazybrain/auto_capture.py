@@ -483,4 +483,14 @@ async def _persist(
             source="auto",
         )
         note_ids.append(note["id"])
+        # Stitch into today's journal so the today node has live edges in
+        # the graph instead of being an empty stub. Best-effort.
+        if note.get("title"):
+            try:
+                from lazyclaw.lazybrain import journal as _journal
+                await _journal.link_note_today(
+                    config, user_id, title=note["title"], kind=cap.kind,
+                )
+            except Exception:
+                logger.debug("link_note_today failed", exc_info=True)
     return note_ids

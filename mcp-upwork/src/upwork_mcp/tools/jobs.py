@@ -200,6 +200,11 @@ async def get_job_details(params: JobDetailsParams) -> dict:
         job["description"] = desc[:6000]
 
     # Budget block — distinct selectors for fixed-price vs hourly.
+    # Only set project_type from explicit job-info landmarks, never from
+    # blind page-wide ``li`` scans — the navbar carries a generic "Hourly
+    # work diary" pill that previously poisoned every fixed-price job
+    # with project_type="hourly". Leave the field unset when uncertain
+    # so callers fall back to sniffing the apply-page form.
     fixed_text = await _first_text(page, [
         '[data-test="BudgetAmount"]',
         '[data-cy="budget-amount"]',
@@ -214,22 +219,6 @@ async def get_job_details(params: JobDetailsParams) -> dict:
     elif hourly_range:
         job["budget"] = hourly_range
         job["project_type"] = "hourly"
-    else:
-        # Fallback — scan only short, $-bearing pills near the budget block.
-        for txt in await _all_text(page, "li", max_items=30):
-            if "$" in txt and len(txt) < 60:
-                job["budget"] = txt
-                break
-        # Detect type from the work-diary / fixed-price label pill
-        if not job.get("project_type"):
-            for txt in await _all_text(page, "li", max_items=30):
-                low = txt.lower()
-                if "hourly" in low:
-                    job["project_type"] = "hourly"
-                    break
-                if "fixed" in low:
-                    job["project_type"] = "fixed"
-                    break
 
     # Experience level — from the dedicated pill, not blind text scan
     exp = await _first_text(page, [

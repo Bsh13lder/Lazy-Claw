@@ -33,7 +33,29 @@ TASK_COLUMNS = [
     # fire before reminder_at (e.g. T-2h, T-1h). Each timestamp pops
     # off the list once delivered.
     "pre_reminders",
+    # Atomic nag claim (set on the conditional UPDATE in the heartbeat
+    # daemon, cleared by stale-claim sweep after 5 minutes).
+    "nag_fired_at",
+    # Recurring offset — minutes between due_date and reminder_at,
+    # stamped at create time. Recurring respawn uses this directly so
+    # the offset can't drift on parse failure (the original silent-drift
+    # bug). Null = "no offset", treat next reminder = next due.
+    "reminder_offset_minutes",
+    # Progress tracking — encrypted JSON timeline. Each entry is
+    # {ts, kind, text, source}. Append-only via append_progress_entry.
+    "progress_log",
+    # Pulse cadence (cron expression) + template FK + state-machine
+    # fields used by the heartbeat stale detector and pulse cooldown.
+    "check_every",
+    "progress_template_id",
+    "nudge_sent_at",
+    "last_pulse_fired_at",
 ]
+
+# progress_log is encrypted JSON — same envelope as tags/steps. Adding
+# it to ENCRYPTED_FIELDS would route it through decrypt_field, but the
+# JSON shape is more useful unwrapped lazily by callers.
+_PROGRESS_LOG_AAD = "task:progress_log"
 
 TASK_SELECT = ", ".join(TASK_COLUMNS)
 
@@ -56,6 +78,75 @@ def _row_to_dict(row, key: bytes) -> dict:
             value = decrypt_field(value, key)
         result[col] = value
     return result
+
+
+def _validate_iso_dt(value: str | None, field_name: str) -> str | None:
+    """Validate that ``value`` is a parseable ISO-8601 datetime string.
+
+    Used at write time so malformed ``reminder_at`` / ``pre_reminders``
+    entries can't reach the heartbeat daemon and silently stop firing.
+    Returns the trimmed value on success, raises ``ValueError`` on bad
+    input. None / empty pass through.
+    """
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be an ISO-8601 string, got {type(value).__name__}")
+    trimmed = value.strip()
+    try:
+        datetime.fromisoformat(trimmed)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"{field_name}={trimmed!r} is not a parseable ISO-8601 datetime"
+        ) from exc
+    return trimmed
+
+
+def _compute_reminder_offset_minutes(
+    due_date: str | None, reminder_at: str | None,
+) -> int | None:
+    """Compute minutes between due_date (date or datetime) and reminder_at.
+
+    Returns None when either value is missing or unparseable. Stored on
+    create so the recurring respawn path doesn't have to re-derive it
+    by parsing fields that may have been mutated since.
+    """
+    if not due_date or not reminder_at:
+        return None
+    try:
+        # ``due_date`` may be a bare YYYY-MM-DD or a full datetime.
+        if "T" in due_date:
+            due_dt = datetime.fromisoformat(due_date)
+        else:
+            due_dt = datetime.fromisoformat(f"{due_date}T00:00:00")
+        rem_dt = datetime.fromisoformat(reminder_at)
+    except (ValueError, TypeError):
+        return None
+    if due_dt.tzinfo is None:
+        due_dt = due_dt.replace(tzinfo=timezone.utc)
+    if rem_dt.tzinfo is None:
+        rem_dt = rem_dt.replace(tzinfo=timezone.utc)
+    delta = rem_dt - due_dt
+    return int(delta.total_seconds() // 60)
+
+
+_VALID_PROGRESS_KINDS = frozenset({
+    "started", "working", "progress", "stuck", "blocked",
+    "paused", "resumed", "done", "pulse_fired",
+})
+
+_VALID_PROGRESS_SOURCES = frozenset({"nl", "pulse", "button", "manual", "auto"})
+
+
+def _normalize_progress_kind(kind: str | None) -> str:
+    """Map free-form kind input onto the canonical set; default 'progress'."""
+    k = (kind or "progress").strip().lower()
+    return k if k in _VALID_PROGRESS_KINDS else "progress"
+
+
+def _normalize_progress_source(source: str | None) -> str:
+    s = (source or "manual").strip().lower()
+    return s if s in _VALID_PROGRESS_SOURCES else "manual"
 
 
 def _normalize_steps(steps: list[dict] | None) -> list[dict]:
@@ -115,6 +206,19 @@ async def create_task(
     ``steps`` is an optional list of sub-task dicts shaped ``{id, title, done}``.
     IDs are auto-assigned when missing.
     """
+    # Strict validation up-front: malformed timestamps used to slip
+    # through and silently stop firing at heartbeat-tick time. Raise so
+    # the API surface returns a 400 with a real reason instead of the
+    # row landing in the table and never being nagged.
+    reminder_at = _validate_iso_dt(reminder_at, "reminder_at")
+    if pre_reminders:
+        validated_pre: list[str] = []
+        for entry in pre_reminders:
+            cleaned = _validate_iso_dt(entry, "pre_reminders[entry]")
+            if cleaned:
+                validated_pre.append(cleaned)
+        pre_reminders = validated_pre or None
+
     key = await get_user_dek(config, user_id)
     task_id = str(uuid4())
 
@@ -139,6 +243,10 @@ async def create_task(
         # Auto-set due_date from reminder_at if not provided
         if not due_date:
             due_date = reminder_at[:10]
+
+    # Stamp the offset once at create so the recurring respawn path uses
+    # a deterministic value instead of re-parsing fields that may drift.
+    reminder_offset_minutes = _compute_reminder_offset_minutes(due_date, reminder_at)
 
     created_at = datetime.now(timezone.utc).isoformat()
 
@@ -204,6 +312,13 @@ async def create_task(
                 None, 0, None, trace_session_id, lazybrain_note_id,
                 enc_steps,
                 pre_reminders_json,
+                None,  # nag_fired_at — set atomically by daemon on first nag
+                reminder_offset_minutes,
+                None,  # progress_log — populated by append_progress_entry
+                None,  # check_every — set when user opts in to pulses
+                None,  # progress_template_id
+                None,  # nudge_sent_at
+                None,  # last_pulse_fired_at
             ),
         )
         await db.commit()
@@ -224,6 +339,13 @@ async def create_task(
         "lazybrain_note_id": lazybrain_note_id,
         "steps": json.dumps(normalized_steps) if normalized_steps else None,
         "pre_reminders": pre_reminders_json,
+        "nag_fired_at": None,
+        "reminder_offset_minutes": reminder_offset_minutes,
+        "progress_log": None,
+        "check_every": None,
+        "progress_template_id": None,
+        "nudge_sent_at": None,
+        "last_pulse_fired_at": None,
     }
 
 
@@ -401,6 +523,27 @@ async def update_task(
     set_clauses: list[str] = []
     params: list = []
 
+    # Strict validation: ``reminder_at`` must be parseable, every entry in
+    # ``pre_reminders`` must be parseable. Reject the whole update on the
+    # first invalid value — better than silent stop-firing later.
+    if "reminder_at" in fields and fields["reminder_at"] is not None:
+        fields["reminder_at"] = _validate_iso_dt(fields["reminder_at"], "reminder_at")
+    if "pre_reminders" in fields and fields["pre_reminders"] is not None:
+        raw_list = fields["pre_reminders"]
+        if isinstance(raw_list, str):
+            try:
+                raw_list = json.loads(raw_list)
+            except (json.JSONDecodeError, TypeError):
+                raise ValueError("pre_reminders JSON string is not a valid array")
+        if not isinstance(raw_list, list):
+            raise ValueError("pre_reminders must be a list of ISO-8601 strings")
+        cleaned: list[str] = []
+        for entry in raw_list:
+            v = _validate_iso_dt(entry, "pre_reminders[entry]")
+            if v:
+                cleaned.append(v)
+        fields["pre_reminders"] = cleaned
+
     for field_name, value in fields.items():
         if field_name in ENCRYPTED_FIELDS and value is not None:
             value = encrypt(value, key)
@@ -430,6 +573,27 @@ async def update_task(
             else:
                 set_clauses.append("reminder_job_id = ?")
                 params.append(None)
+
+    # Keep reminder_offset_minutes in sync when due_date or reminder_at
+    # change. The recurring respawn path reads this directly, so a stale
+    # offset would re-introduce the silent-drift bug.
+    if "reminder_at" in fields or "due_date" in fields:
+        # Re-fetch in case only one of the two fields was supplied.
+        latest = await get_task(config, user_id, task_id)
+        if latest:
+            new_due = fields.get("due_date", latest.get("due_date"))
+            new_rem = fields.get("reminder_at", latest.get("reminder_at"))
+            offset = _compute_reminder_offset_minutes(new_due, new_rem)
+            set_clauses.append("reminder_offset_minutes = ?")
+            params.append(offset)
+
+    # Reset nag state on any reminder_at change so the user gets a fresh
+    # escalation series instead of jumping mid-sequence.
+    if "reminder_at" in fields:
+        set_clauses.append("nag_count = ?")
+        params.append(0)
+        set_clauses.append("nag_fired_at = ?")
+        params.append(None)
 
     # Auto-set completed_at when status becomes done
     if fields.get("status") == "done" and "completed_at" not in fields:
@@ -667,7 +831,12 @@ async def _mirror_status_to_lazybrain(
 async def complete_task(
     config: Config, user_id: str, task_id: str
 ) -> bool:
-    """Mark task done. Deletes reminder job. Handles recurring (creates next)."""
+    """Mark task done. Deletes reminder job. Handles recurring (creates next).
+
+    Writes a ``done`` entry to the progress log + clears ``nudge_sent_at``
+    so the timeline closes cleanly and any future occurrence of the same
+    title (recurring) starts with a fresh nudge state machine.
+    """
     task = await get_task(config, user_id, task_id)
     if not task:
         return False
@@ -676,12 +845,35 @@ async def complete_task(
     if task.get("reminder_job_id"):
         await _delete_reminder_job(config, user_id, task["reminder_job_id"])
 
+    # Pause any active pulse job so the daemon doesn't fire on a done
+    # task before it gets the orchestrator-side pause from _fire_task_pulse.
+    try:
+        from lazyclaw.heartbeat.orchestrator import list_jobs, pause_job
+        jobs = await list_jobs(config, user_id)
+        prefix = f"[PULSE:{task_id}:"
+        for j in jobs:
+            if (j.get("instruction") or "").startswith(prefix):
+                await pause_job(config, user_id, j["id"])
+    except Exception:
+        logger.debug("complete_task: could not pause pulses", exc_info=True)
+
+    # Timeline: log a done entry before flipping status so the
+    # progress_log is the canonical "what happened" record.
+    try:
+        await append_progress_entry(
+            config, user_id, task_id,
+            kind="done", source="auto",
+        )
+    except Exception:
+        logger.debug("complete_task: progress entry failed", exc_info=True)
+
     now = datetime.now(timezone.utc).isoformat()
 
     async with db_session(config) as db:
         await db.execute(
             "UPDATE tasks SET status = 'done', completed_at = ?, "
-            "reminder_job_id = NULL, nag_count = 0 "
+            "reminder_job_id = NULL, nag_count = 0, "
+            "nudge_sent_at = NULL "
             "WHERE id = ? AND user_id = ?",
             (now, task_id, user_id),
         )
@@ -711,24 +903,35 @@ async def complete_task(
     except Exception:
         logger.debug("journal link for completed task failed", exc_info=True)
 
-    # Recurring: create the next occurrence
+    # Recurring: create the next occurrence using the stored offset.
+    # The original parse-and-fallback path silently dropped the offset on
+    # any parse error, so reminders drifted to bare next_due over time.
+    # We now use ``reminder_offset_minutes`` (stamped at create) directly.
     if task.get("recurring"):
         try:
             from lazyclaw.heartbeat.cron import get_next_run
             next_due = get_next_run(task["recurring"])
             next_date = next_due[:10] if next_due else None
-            # Calculate reminder_at offset from original due_date
+
             next_reminder = None
-            if task.get("reminder_at") and task.get("due_date"):
+            offset_min = task.get("reminder_offset_minutes")
+            if next_due and offset_min is not None:
                 try:
-                    orig_due = datetime.fromisoformat(task["due_date"])
-                    orig_rem = datetime.fromisoformat(task["reminder_at"])
-                    offset = orig_rem - orig_due
                     next_due_dt = datetime.fromisoformat(next_due)
-                    next_reminder = (next_due_dt + offset).isoformat()
+                    if next_due_dt.tzinfo is None:
+                        next_due_dt = next_due_dt.replace(tzinfo=timezone.utc)
+                    next_reminder = (
+                        next_due_dt + timedelta(minutes=int(offset_min))
+                    ).isoformat()
                 except (ValueError, TypeError):
-                    logger.debug("Failed to compute next reminder offset, using next_due", exc_info=True)
-                    next_reminder = next_due
+                    # Should never happen — get_next_run always emits ISO
+                    # — but if it does, surface loudly instead of silently
+                    # collapsing the reminder onto next_due.
+                    logger.warning(
+                        "Recurring respawn: could not apply offset_min=%s to "
+                        "next_due=%r for task %s — leaving next_reminder=None",
+                        offset_min, next_due, task_id,
+                    )
 
             tags = None
             if task.get("tags"):
@@ -885,3 +1088,133 @@ async def toggle_step(
 
     await set_steps(config, user_id, task_id, current)
     return await get_task(config, user_id, task_id)
+
+
+# ---------------------------------------------------------------------------
+# Progress log — encrypted JSON timeline of {ts, kind, text, source}.
+# ---------------------------------------------------------------------------
+
+
+def _decrypt_progress_log(raw: str | None, key: bytes) -> list[dict]:
+    """Decrypt + parse a progress_log column value. Empty/garbage → []."""
+    if not raw:
+        return []
+    try:
+        decrypted = decrypt_field(raw, key)
+        if not decrypted:
+            return []
+        parsed = json.loads(decrypted)
+    except Exception:
+        logger.debug("malformed progress_log; returning empty", exc_info=True)
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+async def append_progress_entry(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    *,
+    kind: str,
+    text: str | None = None,
+    source: str = "manual",
+) -> dict | None:
+    """Append a single timestamped entry to a task's progress log.
+
+    Returns the appended entry dict, or None if the task doesn't exist.
+    Mirrors a ``[!progress]`` callout to the task's LazyBrain note so
+    the timeline is searchable in the PKM. Mirror failures are logged
+    but never block the write — the canonical record is the encrypted
+    log on the task row.
+    """
+    task = await get_task(config, user_id, task_id)
+    if not task:
+        return None
+
+    key = await get_user_dek(config, user_id)
+    current = _decrypt_progress_log(task.get("progress_log"), key)
+
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": _normalize_progress_kind(kind),
+        "text": (text or "").strip()[:500] or None,
+        "source": _normalize_progress_source(source),
+    }
+    current.append(entry)
+    # Cap at 200 entries — keeps decrypt cheap and the LazyBrain mirror
+    # readable. Older entries fall off; the LazyBrain note keeps a full
+    # archived view.
+    if len(current) > 200:
+        current = current[-200:]
+
+    enc = encrypt(json.dumps(current), key)
+
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE tasks SET progress_log = ? WHERE id = ? AND user_id = ?",
+            (enc, task_id, user_id),
+        )
+        await db.commit()
+
+    # Mirror a [!progress] callout to the task's LazyBrain note. Heals
+    # missing notes via _mirror_status_to_lazybrain on the next status
+    # transition; we don't force-create here to avoid PKM noise on every
+    # NL phrase.
+    try:
+        from lazyclaw.lazybrain import store as lb_store
+        note_id = task.get("lazybrain_note_id")
+        if note_id:
+            note = await lb_store.get_note(config, user_id, note_id)
+            if note is not None:
+                ts_short = entry["ts"][11:16]  # HH:MM
+                kind = entry["kind"]
+                txt = entry["text"] or ""
+                callout = (
+                    f"\n\n> [!progress] {ts_short} · {kind}\n> {txt}"
+                    if txt else f"\n\n> [!progress] {ts_short} · {kind}"
+                )
+                new_body = (note.get("content") or "") + callout
+                await lb_store.update_note(
+                    config, user_id, note_id, content=new_body,
+                )
+    except Exception:
+        logger.debug("progress mirror to LazyBrain failed", exc_info=True)
+
+    return entry
+
+
+async def read_progress_log(
+    config: Config,
+    user_id: str,
+    task_id: str,
+    *,
+    limit: int = 20,
+) -> list[dict]:
+    """Decrypt and return the most recent ``limit`` progress entries.
+
+    Returns oldest-first within the trailing window so callers can
+    render the timeline naturally.
+    """
+    task = await get_task(config, user_id, task_id)
+    if not task:
+        return []
+    key = await get_user_dek(config, user_id)
+    log = _decrypt_progress_log(task.get("progress_log"), key)
+    if limit and len(log) > limit:
+        return log[-limit:]
+    return log
+
+
+async def clear_nudge_sent(
+    config: Config, user_id: str, task_id: str,
+) -> None:
+    """Clear ``nudge_sent_at`` so the stale detector can fire again next
+    time the task goes silent. Called from any path that registers user
+    intent on a task (callback, NL response, manual edit)."""
+    async with db_session(config) as db:
+        await db.execute(
+            "UPDATE tasks SET nudge_sent_at = NULL "
+            "WHERE id = ? AND user_id = ?",
+            (task_id, user_id),
+        )
+        await db.commit()

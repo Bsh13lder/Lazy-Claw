@@ -123,12 +123,15 @@ async def suggest_intake(
     if not title:
         return _empty_suggestion()
 
+    from lazyclaw.tasks.timezone import get_user_tz
+    user_tz = await get_user_tz(config, user_id)
+
     recent_tasks, existing_cats = await _gather_recent_context(config, user_id)
     needs_clarif_hint = bool(_TIME_SENSITIVE_RE.search(title)) or priority in {
         "high", "urgent",
     }
 
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(user_tz).date().isoformat()
     bug_hint = ""
     if _BUG_HINT_RE.search(title):
         bug_hint = (
@@ -139,7 +142,7 @@ async def suggest_intake(
 
     prompt = _PROMPT.format(
         today=today,
-        tz="Europe/Madrid",
+        tz=str(user_tz),
         title=title[:200],
         description=(description or "(none)")[:400],
         priority=priority,
@@ -189,7 +192,7 @@ async def suggest_intake(
     if not isinstance(data, dict):
         return _empty_suggestion(needs_clarif=needs_clarif_hint)
 
-    deadline_iso = _validate_deadline(data.get("deadline_iso"))
+    deadline_iso = _validate_deadline(data.get("deadline_iso"), user_tz)
     category = _validate_category(data.get("category"))
     confidence = (str(data.get("confidence") or "low")).strip().lower()
     if confidence not in {"high", "medium", "low"}:
@@ -266,8 +269,13 @@ def _format_recent(tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _validate_deadline(value: Any) -> str | None:
-    """Accept null or a parseable ISO datetime; reject anything else."""
+def _validate_deadline(value: Any, user_tz: Any = None) -> str | None:
+    """Accept null or a parseable ISO datetime; reject anything else.
+
+    When the LLM omits the offset, attach the user's timezone (passed in
+    by the caller) instead of UTC — otherwise inferred deadlines like
+    "tomorrow at 3pm" land 1–2 hours off for non-UTC users.
+    """
     if value is None or value == "":
         return None
     if not isinstance(value, str):
@@ -277,7 +285,9 @@ def _validate_deadline(value: Any) -> str | None:
     except (ValueError, TypeError):
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        # Attach user tz when supplied; legacy callers (no user_tz) still
+        # get the old UTC behavior so existing tests don't regress.
+        dt = dt.replace(tzinfo=user_tz or timezone.utc)
     if dt <= datetime.now(timezone.utc):
         return None
     return dt.isoformat()

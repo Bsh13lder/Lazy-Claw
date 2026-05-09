@@ -36,6 +36,14 @@ DEFAULT_GENERAL = {
     # Auto-save successful multi-step browser flows as templates (upsert by
     # primary host). Off → user must manually save via canvas/chat skill.
     "auto_save_browser_templates": True,
+    # IANA timezone for the user. Drives smart_intake, nl_time, the
+    # heartbeat nag loop, and recurring task respawn. Default Madrid since
+    # that's the primary deploy; settable via Settings UI or NL.
+    "timezone": "Europe/Madrid",
+    # End-of-day progress summary at 20:00 user-tz. Lists every
+    # in_progress task and its day's progress entries. Off-switch for
+    # users who don't want a daily push.
+    "eod_summary": True,
 }
 
 # Validates "-Xh", "-Xm", "-Xd" with an optional combined form like "-2h30m".
@@ -89,6 +97,9 @@ async def update_general_settings(
     if "show_cost_badges" in updates and updates["show_cost_badges"] is not None:
         clean["show_cost_badges"] = bool(updates["show_cost_badges"])
 
+    if "eod_summary" in updates and updates["eod_summary"] is not None:
+        clean["eod_summary"] = bool(updates["eod_summary"])
+
     if (
         "auto_save_browser_templates" in updates
         and updates["auto_save_browser_templates"] is not None
@@ -96,6 +107,19 @@ async def update_general_settings(
         clean["auto_save_browser_templates"] = bool(
             updates["auto_save_browser_templates"]
         )
+
+    if "timezone" in updates and updates["timezone"] is not None:
+        tz_val = str(updates["timezone"]).strip()
+        if not tz_val:
+            raise ValueError("timezone must be a non-empty IANA name (e.g. 'Europe/Madrid')")
+        try:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+            ZoneInfo(tz_val)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(
+                f"Invalid timezone {tz_val!r}. Use an IANA name like 'Europe/Madrid'."
+            )
+        clean["timezone"] = tz_val
 
     if "reminder_offsets" in updates and updates["reminder_offsets"] is not None:
         vals = updates["reminder_offsets"]

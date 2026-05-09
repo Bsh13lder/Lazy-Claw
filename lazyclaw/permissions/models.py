@@ -63,6 +63,14 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "replay": ALLOW,         # session trace recordings
     "session": ALLOW,        # session lifecycle ops
     "teams": ALLOW,          # specialist dispatch — twin of orchestration
+    # Contact store — local encrypted person directory. find_contact /
+    # list_contacts are read-only lookups against the user's own data;
+    # save / update mutate that same local store. Without ALLOW the
+    # brain hits an ASK prompt every time it tries to resolve a name
+    # before whatsapp/instagram/email send — the user sees a popup
+    # captioned "find_contact" and reads it as "search permission".
+    # Same blast-radius profile as lazybrain / tasks (both already ALLOW).
+    "contacts": ALLOW,
     # Read-only diagnostics + user-facing config toggles:
     "system": ALLOW,         # status / about / health
     "ai_management": ALLOW,  # ECO mode toggles — user-facing settings

@@ -950,17 +950,37 @@ class TelegramAdapter(ChannelAdapter):
             task_runner=self._task_runner,
             team_lead=self._team_lead,
         )
-        self._commands.register(self._app)
-
-        # /status still handled here (needs access to active callbacks)
-        self._app.add_handler(
-            CommandHandler("status", self._handle_status_cmd),
-        )
+        # Patterned callback handlers MUST be registered before the
+        # catch-all CallbackQueryHandler in TelegramCommands; PTB only
+        # runs the first matching handler per update, so a no-pattern
+        # catch-all would otherwise swallow plan: and task: taps.
         # Plan-mode inline button callbacks — business agent approval gate.
         self._app.add_handler(
             CallbackQueryHandler(
                 self._handle_plan_callback, pattern=r"^plan:",
             )
+        )
+        # Task reminder inline button callbacks — Done / 1h / Tomorrow / Edit.
+        # Without this handler the buttons emitted by the heartbeat daemon
+        # were decorative; tapping them did nothing.
+        self._app.add_handler(
+            CallbackQueryHandler(
+                self._handle_task_callback, pattern=r"^task:",
+            )
+        )
+        # Progress pulse callbacks — buttons on pulse messages and
+        # stale-nudge prompts. Format: "progress:<kind>:<task_id>".
+        self._app.add_handler(
+            CallbackQueryHandler(
+                self._handle_progress_callback, pattern=r"^progress:",
+            )
+        )
+
+        self._commands.register(self._app)
+
+        # /status still handled here (needs access to active callbacks)
+        self._app.add_handler(
+            CommandHandler("status", self._handle_status_cmd),
         )
         # Text messages → agent (must be AFTER command handlers)
         self._app.add_handler(
@@ -1045,6 +1065,196 @@ class TelegramAdapter(ChannelAdapter):
                 parse_mode="Markdown",
             )
 
+    async def _handle_task_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle inline button taps on a task reminder.
+
+        Routes ``task:done:<id>`` / ``task:snooze:<id>`` /
+        ``task:tomorrow:<id>`` / ``task:edit:<id>`` callbacks through
+        ``complete_task`` / ``update_task`` / a stored "next message is
+        a reschedule phrase" hint, respectively. ``task:edit`` doesn't
+        mutate immediately — it primes ``self._pending_task_edit`` so
+        the next plain-text message from the same chat goes to
+        ``RescheduleTaskSkill`` instead of the agent.
+        """
+        from datetime import datetime as _dt
+        from datetime import time as _time
+        from datetime import timedelta as _td
+
+        from lazyclaw.tasks.store import (
+            complete_task, get_task, update_task,
+        )
+
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3 or parts[0] != "task":
+            return
+        action, task_id = parts[1], parts[2]
+
+        # Resolve user via the chat (same path as plan callbacks).
+        try:
+            cb_chat_id = str(query.message.chat_id) if query.message else None
+            lc_user_id = await resolve_user_id(self._config, chat_id=cb_chat_id)
+        except Exception:
+            logger.warning("Task callback user resolution failed", exc_info=True)
+            return
+
+        # Tasks may belong to a different user_id than the chat's resolved
+        # one (the daemon pushes every user's nag to the admin chat).
+        # Look up the actual owner before mutating.
+        try:
+            from lazyclaw.tasks.store import get_task_owner
+            owner_id = await get_task_owner(self._config, task_id) or lc_user_id
+        except Exception:
+            owner_id = lc_user_id
+
+        try:
+            if action == "done":
+                ok = await complete_task(self._config, owner_id, task_id)
+                msg = "✅ Done" if ok else "⚠️ Could not complete"
+            elif action == "snooze":
+                new_at = _dt.now(timezone.utc) + _td(hours=1)
+                ok = await update_task(
+                    self._config, owner_id, task_id,
+                    reminder_at=new_at.isoformat(),
+                )
+                msg = f"⏰ Snoozed 1h → {new_at.astimezone().strftime('%H:%M')}" if ok else "⚠️ Snooze failed"
+            elif action == "tomorrow":
+                from lazyclaw.tasks.timezone import get_user_tz
+                tz = await get_user_tz(self._config, owner_id)
+                tomorrow = _dt.now(tz).date() + _td(days=1)
+                new_at = _dt.combine(tomorrow, _time(9, 0), tzinfo=tz)
+                ok = await update_task(
+                    self._config, owner_id, task_id,
+                    reminder_at=new_at.isoformat(),
+                    due_date=tomorrow.isoformat(),
+                )
+                msg = f"📅 Tomorrow 09:00 ({tomorrow.isoformat()})" if ok else "⚠️ Reschedule failed"
+            elif action == "edit":
+                # Prime the next message: the user types a phrase like
+                # "push to Friday 10am" and our message handler routes
+                # it to RescheduleTaskSkill against this task_id.
+                if not hasattr(self, "_pending_task_edit"):
+                    self._pending_task_edit = {}
+                self._pending_task_edit[cb_chat_id] = task_id
+                task = await get_task(self._config, owner_id, task_id)
+                title = (task or {}).get("title") or "task"
+                msg = (
+                    f"✏️ Editing: {title}\n"
+                    "Reply with: 'snooze 2h', 'push to Friday 10am', "
+                    "'next Monday 9', 'clear deadline', or 'set priority high'."
+                )
+            else:
+                msg = "(unknown action)"
+        except Exception as exc:
+            logger.warning("Task callback %s failed: %s", action, exc, exc_info=True)
+            msg = "⚠️ Action failed — check /tasks."
+
+        try:
+            current = query.message.text_markdown or query.message.text or ""
+            await query.edit_message_text(
+                f"{current}\n\n{msg}", parse_mode="Markdown",
+            )
+        except Exception:
+            # Editing can fail if the message is too old; just send a new one.
+            try:
+                await query.message.reply_text(msg)
+            except Exception:
+                logger.debug("Could not surface task callback result", exc_info=True)
+
+    async def _handle_progress_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle progress:<kind>:<task_id> callbacks from pulse + stale prompts.
+
+        Maps the kind onto the canonical progress_log entry kinds and
+        delegates to ``append_progress_entry``. Also clears
+        ``nudge_sent_at`` so the stale detector can fire again next
+        silence window. ``progress:done`` flips status via
+        ``complete_task`` so recurring respawn + LazyBrain mirror fire.
+        """
+        from lazyclaw.tasks.progress_templates import bump_run_count
+        from lazyclaw.tasks.store import (
+            append_progress_entry, clear_nudge_sent, complete_task,
+            get_task, get_task_owner,
+        )
+
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3 or parts[0] != "progress":
+            return
+        kind, task_id = parts[1], parts[2]
+
+        try:
+            cb_chat_id = str(query.message.chat_id) if query.message else None
+            chat_user_id = await resolve_user_id(self._config, chat_id=cb_chat_id)
+            owner_id = await get_task_owner(self._config, task_id) or chat_user_id
+        except Exception:
+            logger.warning("progress callback user resolution failed", exc_info=True)
+            return
+
+        try:
+            if kind == "done":
+                ok = await complete_task(self._config, owner_id, task_id)
+                msg = "✅ Done" if ok else "⚠️ Could not complete"
+            else:
+                kind_canonical = {
+                    "working": "working",
+                    "stuck": "stuck",
+                    "blocked": "blocked",
+                    "paused": "paused",
+                }.get(kind, "progress")
+                entry = await append_progress_entry(
+                    self._config, owner_id, task_id,
+                    kind=kind_canonical, source="button",
+                )
+                if entry is None:
+                    msg = "⚠️ Could not record progress"
+                else:
+                    icon = {
+                        "working": "🟡", "stuck": "🔴",
+                        "blocked": "🚧", "paused": "⏸️",
+                    }.get(kind_canonical, "📝")
+                    msg = f"{icon} Recorded: {kind_canonical}"
+
+            # Any user signal clears the stale-nudge state machine.
+            await clear_nudge_sent(self._config, owner_id, task_id)
+
+            # Bump the active template's success_count (the "user
+            # actually replied" signal for learned-skill promotion).
+            task = await get_task(self._config, owner_id, task_id)
+            template_id = (task or {}).get("progress_template_id")
+            if template_id:
+                try:
+                    await bump_run_count(
+                        self._config, owner_id, template_id, success=True,
+                    )
+                except Exception:
+                    logger.debug("bump_run_count on success failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("progress callback %s failed: %s", kind, exc, exc_info=True)
+            msg = "⚠️ Action failed."
+
+        try:
+            current = query.message.text_markdown or query.message.text or ""
+            await query.edit_message_text(
+                f"{current}\n\n{msg}", parse_mode="Markdown",
+            )
+        except Exception:
+            try:
+                await query.message.reply_text(msg)
+            except Exception:
+                logger.debug("could not surface progress callback result", exc_info=True)
+
     async def _handle_status_cmd(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
@@ -1118,6 +1328,51 @@ class TelegramAdapter(ChannelAdapter):
         # binding set via /link so Telegram matches the Web UI session user.
         user_id = await resolve_user_id(self._config, chat_id=chat_id)
         logger.info("Telegram message from chat %s (user %s): %s", chat_id, user_id[:8], text[:100])
+
+        # ── Bare-NL task router: cheap regex check at message-start
+        # for "snooze X 2h", "postpone Y Friday", "complete Z",
+        # "cancel Q", "when is W due?". When unambiguous → execute
+        # locally and skip the brain entirely. Ambiguous matches fall
+        # through to the brain on the user's preference.
+        try:
+            from lazyclaw.channels.task_nl_router import try_route_task_nl
+            nl_reply = await try_route_task_nl(self._config, user_id, text)
+            if nl_reply is not None:
+                await update.message.reply_text(nl_reply)
+                return
+        except Exception:
+            logger.debug("task_nl_router raised; falling through", exc_info=True)
+
+        # ── Task edit follow-up: if the user just tapped ✏️ Edit on a
+        # nag, route the next plain-text message straight to the
+        # reschedule skill instead of the agent. One-shot per chat.
+        pending_edit = getattr(self, "_pending_task_edit", {}).get(chat_id)
+        if pending_edit:
+            self._pending_task_edit.pop(chat_id, None)
+            try:
+                from lazyclaw.skills.builtin.task_reschedule import (
+                    RescheduleTaskSkill,
+                )
+                from lazyclaw.tasks.store import get_task
+
+                # Resolve the actual owner so we don't send a chat-level
+                # user_id to a task they don't own.
+                from lazyclaw.tasks.store import get_task_owner
+                owner_id = await get_task_owner(self._config, pending_edit) or user_id
+                task = await get_task(self._config, owner_id, pending_edit)
+                title = (task or {}).get("title") or "task"
+
+                skill = RescheduleTaskSkill(config=self._config)
+                result = await skill.execute(
+                    owner_id, {"task_name": title, "phrase": text},
+                )
+                await update.message.reply_text(result)
+            except Exception as exc:
+                logger.warning("Pending task edit failed: %s", exc, exc_info=True)
+                await update.message.reply_text(
+                    "⚠️ Couldn't apply that — try /snooze <task> <phrase> instead."
+                )
+            return
 
         # ── Recovery phrase: intercept password message ──
         if user_id in self._pending_recovery:

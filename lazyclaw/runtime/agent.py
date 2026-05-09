@@ -1410,6 +1410,42 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Response ready", {}))
             return verify_reply
 
+        # ── Plan-mode fix-task gate ──────────────────────────────────────
+        # Intercepted before the compound splitter so the user gets one
+        # coherent plan dialogue instead of N independent sub-task plans.
+        # On approval the plan markdown is prepended to the message so the
+        # brain treats it as locked-in scope. On reject we acknowledge and
+        # return without invoking the brain at all.
+        try:
+            from lazyclaw.runtime import fix_plan as _fix_plan
+            if await _fix_plan.should_enter_plan_mode(
+                self.config, user_id, message,
+            ):
+                approved, plan, reason = await _fix_plan.gate_with_plan(
+                    self.config, user_id, message,
+                )
+                if not approved:
+                    msg = (
+                        f"❌ Plan rejected — {reason or 'no reason given'}. "
+                        "Tell me what to change and I'll regenerate."
+                    )
+                    await cb.on_event(AgentEvent(INSTANT_COMMAND, msg, {}))
+                    await cb.on_event(AgentEvent("done", "Plan rejected", {}))
+                    return msg
+                if plan is not None:
+                    # Lock the approved plan into the message. The brain
+                    # sees the structured steps and is heavily biased
+                    # toward following them — far more reliably than a
+                    # free-form "please follow this plan" sentence.
+                    plan_block = (
+                        "## Approved plan (do these steps in order)\n"
+                        f"{plan.to_markdown()}\n\n"
+                        "## Original request\n"
+                    )
+                    message = f"{plan_block}{message}"
+        except Exception:
+            logger.debug("fix_plan gate raised; continuing without plan", exc_info=True)
+
         # Advance the agent's monotonic turn counter once per user message.
         # The lesson verification pump uses this as its quiet-window clock.
         try:

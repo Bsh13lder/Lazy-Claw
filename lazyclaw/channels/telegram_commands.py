@@ -58,6 +58,10 @@ BOT_COMMANDS = [
     BotCommand("deny", "\U0001f6ab /deny <category|skill>"),
     BotCommand("confirm", "✅ /confirm <lesson_id>"),
     BotCommand("reject", "\U0001f6ab /reject <lesson_id> [reason]"),
+    BotCommand("snooze", "⏰ /snooze <task> <duration>"),
+    BotCommand("postpone", "📅 /postpone <task> <when>"),
+    BotCommand("whenisdue", "📅 /whenisdue <task>"),
+    BotCommand("progress", "📊 /progress <task>"),
 ]
 
 
@@ -112,6 +116,10 @@ class TelegramCommands:
             "deny": self._handle_deny,
             "confirm": self._handle_lesson_confirm,
             "reject": self._handle_lesson_reject,
+            "snooze": self._handle_snooze,
+            "postpone": self._handle_postpone,
+            "whenisdue": self._handle_whenisdue,
+            "progress": self._handle_progress,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -2284,6 +2292,171 @@ class TelegramCommands:
         if reason:
             line += f"\n\n<code>reason:</code> {reason}"
         await self._reply(update, line)
+
+    # -- Task NL reschedule shortcuts -------------------------------------
+
+    async def _handle_snooze(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/snooze <task_name> <duration> — push reminder by 'snooze 2h' style.
+
+        Duration is anything ``RescheduleTaskSkill`` accepts: '2h', '30m',
+        '1d', or even a bare time like '10am'. The skill itself does the
+        heavy lifting; this handler just splits args.
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        if len(context.args) < 2:
+            await self._reply(
+                update,
+                "❓ <b>Usage:</b> <code>/snooze &lt;task name&gt; &lt;duration&gt;</code>\n"
+                "<i>Examples:</i> <code>/snooze upwork 2h</code>, "
+                "<code>/snooze dentist tomorrow 9am</code>",
+            )
+            return
+        # Last token is the duration, everything before it the task name.
+        # Heuristic: take everything after the FIRST clearly-temporal
+        # token as the phrase. Fallback: split on the last space.
+        phrase = context.args[-1]
+        task_name = " ".join(context.args[:-1])
+        # Extend phrase to "snooze <X>" so the skill's regex catches it.
+        await self._dispatch_reschedule(update, user_id, task_name, f"snooze {phrase}")
+
+    async def _handle_postpone(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/postpone <task_name> <when> — reschedule with NL date phrase."""
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        if len(context.args) < 2:
+            await self._reply(
+                update,
+                "❓ <b>Usage:</b> <code>/postpone &lt;task name&gt; &lt;when&gt;</code>\n"
+                "<i>Examples:</i> <code>/postpone dentist Friday 10am</code>, "
+                "<code>/postpone upwork next Monday 9</code>",
+            )
+            return
+        # Same name/phrase split as snooze — the user's phrase format
+        # ("Friday 10am") is multi-token, so we anchor on a heuristic:
+        # take the last 1-3 tokens as the phrase based on whether they
+        # look like time/date words. Simpler: if the whole arg list has
+        # a known time word, split there; else last 2 tokens.
+        phrase = " ".join(context.args[-2:])
+        task_name = " ".join(context.args[:-2]) or context.args[0]
+        await self._dispatch_reschedule(update, user_id, task_name, phrase)
+
+    async def _handle_progress(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/progress <task_name> — raw timeline of progress entries.
+
+        Read-only. No LLM. Returns up to 20 most-recent entries with
+        timestamps, kind, and free-text. Falls through to brain only
+        if no task name was given (better UX than a usage stub).
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        if not context.args:
+            await self._reply(
+                update,
+                "❓ <b>Usage:</b> <code>/progress &lt;task name&gt;</code>",
+            )
+            return
+        task_name = " ".join(context.args).strip()
+        from lazyclaw.skills.builtin.task_manager import _fuzzy_match_task
+        from lazyclaw.tasks.store import list_tasks, read_progress_log
+        from lazyclaw.tasks.timezone import get_user_tz
+
+        tasks = await list_tasks(self._config, user_id)
+        match = _fuzzy_match_task(tasks, task_name)
+        if not match:
+            await self._reply(update, f"No task matching '{task_name}'.")
+            return
+        log = await read_progress_log(
+            self._config, user_id, match["id"], limit=20,
+        )
+        if not log:
+            await self._reply(
+                update,
+                f"<b>{match['title']}</b> — no progress entries yet.",
+            )
+            return
+
+        from datetime import datetime as _dt, timezone as _tz
+        tz = await get_user_tz(self._config, user_id)
+        icon_map = {
+            "started": "🚀", "working": "🟡", "progress": "📊",
+            "stuck": "🔴", "blocked": "🚧",
+            "paused": "⏸️", "resumed": "▶️", "done": "✅",
+            "pulse_fired": "🔔",
+        }
+        lines = [f"<b>{match['title']}</b> — progress timeline:"]
+        for entry in log:
+            try:
+                dt = _dt.fromisoformat(entry["ts"])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=_tz.utc)
+                local = dt.astimezone(tz)
+                ts_short = local.strftime("%a %H:%M")
+            except Exception:
+                ts_short = (entry.get("ts") or "")[:16]
+            kind = entry.get("kind") or "progress"
+            icon = icon_map.get(kind, "📝")
+            text = entry.get("text") or ""
+            line = f"{icon} {ts_short} · {kind}"
+            if text:
+                # Cap free text at 80 chars per line so the timeline
+                # stays scannable.
+                line += f": {text[:80]}"
+            lines.append(line)
+        await self._reply(update, "\n".join(lines))
+
+    async def _handle_whenisdue(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/whenisdue <task_name> — read-only lookup via ask_about_task."""
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        if not context.args:
+            await self._reply(
+                update,
+                "❓ <b>Usage:</b> <code>/whenisdue &lt;task name&gt;</code>",
+            )
+            return
+        task_name = " ".join(context.args).strip()
+        from lazyclaw.skills.builtin.task_reschedule import AskAboutTaskSkill
+        skill = AskAboutTaskSkill(config=self._config)
+        try:
+            result = await skill.execute(user_id, {"task_name": task_name})
+        except Exception as exc:
+            logger.warning("ask_about_task failed: %s", exc, exc_info=True)
+            await self._reply(update, f"❌ Lookup failed: {exc}")
+            return
+        await self._reply(update, result)
+
+    async def _dispatch_reschedule(
+        self,
+        update: Update,
+        user_id: str,
+        task_name: str,
+        phrase: str,
+    ) -> None:
+        """Shared dispatcher — both /snooze and /postpone funnel here."""
+        from lazyclaw.skills.builtin.task_reschedule import RescheduleTaskSkill
+        skill = RescheduleTaskSkill(config=self._config)
+        try:
+            result = await skill.execute(
+                user_id, {"task_name": task_name, "phrase": phrase},
+            )
+        except Exception as exc:
+            logger.warning("reschedule skill failed: %s", exc, exc_info=True)
+            await self._reply(update, f"❌ Reschedule failed: {exc}")
+            return
+        await self._reply(update, result)
 
     # -- Callback query handler (inline keyboards) -------------------------
 

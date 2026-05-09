@@ -189,6 +189,30 @@ class SkillRegistry:
         self.register(WorkTodosSkill(config=config))
         self.register(StopBackgroundSkill(config=config))
 
+        # NL reschedule + read-only "what's on this task?" — accepts the
+        # phrases the user actually types so the brain doesn't need to
+        # round-trip "snooze 2h" → discrete reminder_at field.
+        from lazyclaw.skills.builtin.task_reschedule import (
+            AskAboutTaskSkill, RescheduleTaskSkill,
+        )
+        self.register(RescheduleTaskSkill(config=config))
+        self.register(AskAboutTaskSkill(config=config))
+
+        # Progress tracking — pulse check-ins via templates (Tier 2 of
+        # the progress-tracking system). Templates store
+        # questions + buttons + cadence; the heartbeat fires them on
+        # schedule via [PULSE:<task_id>:<template_id>] agent_jobs rows.
+        from lazyclaw.skills.builtin.progress_templates import (
+            ApplyProgressTemplateSkill, ListProgressTemplatesSkill,
+            PauseProgressPulseSkill, ResumeProgressPulseSkill,
+            SaveProgressTemplateSkill,
+        )
+        self.register(SaveProgressTemplateSkill(config=config))
+        self.register(ListProgressTemplatesSkill(config=config))
+        self.register(ApplyProgressTemplateSkill(config=config))
+        self.register(PauseProgressPulseSkill(config=config))
+        self.register(ResumeProgressPulseSkill(config=config))
+
         # LazyBrain skills — Python-native Logseq-style PKM shared with the agent
         from lazyclaw.skills.builtin.lazybrain import (
             AskNotesSkill, EmbeddingStatusSkill, MorningBriefingSkill,

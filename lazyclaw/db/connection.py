@@ -57,6 +57,29 @@ async def init_db(config: Config) -> None:
             # Advance reminders — JSON array of pending ISO timestamps that fire
             # before reminder_at (e.g. T-2h, T-1h for important appointments).
             ("tasks", "pre_reminders", "ALTER TABLE tasks ADD COLUMN pre_reminders TEXT"),
+            # Atomic nag claim — set on UPDATE..WHERE so a heartbeat crash
+            # mid-fire can't double-send. Boot sweep clears claims older
+            # than 5 minutes so a hard crash doesn't permanently block.
+            ("tasks", "nag_fired_at", "ALTER TABLE tasks ADD COLUMN nag_fired_at TEXT"),
+            # Recurring offset — minutes between due_date and reminder_at.
+            # Stored once on create so recurring respawn doesn't have to
+            # reparse-and-fallback (the silent-drift bug).
+            ("tasks", "reminder_offset_minutes", "ALTER TABLE tasks ADD COLUMN reminder_offset_minutes INTEGER"),
+            # Progress tracking — encrypted JSON timeline of {ts, kind, text, source}
+            # entries. Drives /progress, ask_about_task summaries, EOD nudges.
+            ("tasks", "progress_log", "ALTER TABLE tasks ADD COLUMN progress_log TEXT"),
+            # Pulse cadence — cron expression set when user opts a task into
+            # check-in pulses. Heartbeat creates/manages a paired agent_jobs row.
+            ("tasks", "check_every", "ALTER TABLE tasks ADD COLUMN check_every TEXT"),
+            # FK to progress_templates.id — drives the questions/buttons for pulses.
+            ("tasks", "progress_template_id", "ALTER TABLE tasks ADD COLUMN progress_template_id TEXT"),
+            # Stale-nudge state machine — set when a 4h-silent in_progress task
+            # gets the soft "still going?" ping; cleared on user response or
+            # task completion. Prevents nudge loops on every heartbeat tick.
+            ("tasks", "nudge_sent_at", "ALTER TABLE tasks ADD COLUMN nudge_sent_at TEXT"),
+            # Last pulse fire timestamp — used for cooldown so the stale-
+            # detector doesn't fire 30m after a pulse already pinged.
+            ("tasks", "last_pulse_fired_at", "ALTER TABLE tasks ADD COLUMN last_pulse_fired_at TEXT"),
             # Plan Mode — per-user toggle for Claude-Code-style approval gate.
             ("users", "auto_plan", "ALTER TABLE users ADD COLUMN auto_plan INTEGER NOT NULL DEFAULT 1"),
             # Cross-channel history — primary session flag on chat sessions.
@@ -97,6 +120,36 @@ async def init_db(config: Config) -> None:
                     await db.execute(sql)
             except Exception:
                 logger.debug("Migration %s.%s skipped (column may already exist)", table, column, exc_info=True)
+
+        # ── Progress templates — bundled function + learned skill ─────────
+        # Schema cloned from browser_templates: name + playbook are encrypted,
+        # category match + cron + auto-save metrics are plaintext for the
+        # daemon's tick-time queries. questions are encrypted (free-form NL),
+        # buttons are plaintext (label + structured action callback).
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS progress_templates ("
+                "id TEXT PRIMARY KEY, "
+                "user_id TEXT NOT NULL REFERENCES users(id), "
+                "name TEXT NOT NULL, "
+                "applies_to_category TEXT, "
+                "every TEXT NOT NULL, "
+                "questions TEXT, "
+                "buttons TEXT, "
+                "auto_saved INTEGER NOT NULL DEFAULT 0, "
+                "run_count INTEGER NOT NULL DEFAULT 0, "
+                "success_count INTEGER NOT NULL DEFAULT 0, "
+                "last_run_at TEXT, "
+                "version INTEGER NOT NULL DEFAULT 1, "
+                "created_at TEXT DEFAULT (datetime('now'))"
+                ")"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_progress_templates_user_cat "
+                "ON progress_templates(user_id, applies_to_category)"
+            )
+        except Exception:
+            logger.debug("progress_templates table migration skipped", exc_info=True)
 
         # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
         # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.

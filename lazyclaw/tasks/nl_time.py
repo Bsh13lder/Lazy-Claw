@@ -14,25 +14,34 @@ Output shape: a dict with
 Returning ``remaining`` lets the caller use the stripped text as the task
 title, so the user can type "tomorrow at 9 buy milk" and get a "buy milk"
 task due tomorrow 09:00 without extra plumbing.
+
+Timezone handling: every entry point accepts an optional ``tz`` (a
+``ZoneInfo`` or ``tzinfo``). When omitted the parser falls back to the
+deploy default (Europe/Madrid). Storage is always UTC ISO; only display
+and "what does 'today' mean" depend on the user's tz.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Callable
 
 from dateutil import parser as dateutil_parser
 
-# Madrid is the user's primary timezone (Europe/Madrid, UTC+1/+2).
-# When the input carries no timezone, we assume the user's local one. We
-# store everything as UTC ISO internally — the UI converts for display.
+# Madrid is the deploy default; per-user override flows in via the ``tz``
+# parameter on ``parse`` / ``parse_full``. Keeping the module fallback
+# means existing call sites that don't yet thread tz still work.
 try:
     from zoneinfo import ZoneInfo
-    _LOCAL_TZ = ZoneInfo("Europe/Madrid")
+    _DEFAULT_TZ: tzinfo = ZoneInfo("Europe/Madrid")
 except Exception:  # pragma: no cover - zoneinfo always present on 3.9+
-    _LOCAL_TZ = timezone.utc
+    _DEFAULT_TZ = timezone.utc
+
+
+def _resolve_tz(tz: tzinfo | None) -> tzinfo:
+    return tz if tz is not None else _DEFAULT_TZ
 
 
 WEEKDAYS_EN = {
@@ -67,24 +76,24 @@ class ParsedTime:
         }
 
 
-def _to_utc_iso(dt_local: datetime) -> str:
+def _to_utc_iso(dt_local: datetime, tz: tzinfo) -> str:
     """Serialize a local-timezone datetime to UTC ISO-8601."""
     if dt_local.tzinfo is None:
-        dt_local = dt_local.replace(tzinfo=_LOCAL_TZ)
+        dt_local = dt_local.replace(tzinfo=tz)
     return dt_local.astimezone(timezone.utc).isoformat()
 
 
-def _today_local() -> date:
-    return datetime.now(_LOCAL_TZ).date()
+def _today_local(tz: tzinfo | None = None) -> date:
+    return datetime.now(_resolve_tz(tz)).date()
 
 
-def _combine_local(d: date, t: time | None) -> datetime:
+def _combine_local(d: date, t: time | None, tz: tzinfo | None = None) -> datetime:
     """Build a local-timezone datetime from a date and optional time.
 
     When no time is given we default to 09:00 local — matches what most
     todo apps do for "tomorrow" with no explicit hour.
     """
-    return datetime.combine(d, t or time(9, 0), tzinfo=_LOCAL_TZ)
+    return datetime.combine(d, t or time(9, 0), tzinfo=_resolve_tz(tz))
 
 
 def _extract_time(text: str) -> tuple[time | None, str]:
@@ -124,49 +133,50 @@ def _strip_phrase(text: str, start: int, end: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Rules — ordered. First match wins.
+# Rules — ordered. First match wins. Each rule receives the resolved tz so
+# "tomorrow" lands on the user's wall clock, not the server's.
 # ---------------------------------------------------------------------------
 
-Rule = Callable[[str], ParsedTime | None]
+Rule = Callable[[str, tzinfo], "ParsedTime | None"]
 
 
-def _rule_tomorrow(text: str) -> ParsedTime | None:
+def _rule_tomorrow(text: str, tz: tzinfo) -> ParsedTime | None:
     m = re.search(r"\b(tomorrow|mañana|manana)\b", text, re.IGNORECASE)
     if not m:
         return None
     rest = _strip_phrase(text, m.start(), m.end())
     t, rest = _extract_time(rest)
-    d = _today_local() + timedelta(days=1)
-    dt_local = _combine_local(d, t)
+    d = _today_local(tz) + timedelta(days=1)
+    dt_local = _combine_local(d, t, tz)
     return ParsedTime(
         due_date=d.isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_today(text: str) -> ParsedTime | None:
+def _rule_today(text: str, tz: tzinfo) -> ParsedTime | None:
     m = re.search(r"\b(today|hoy)\b", text, re.IGNORECASE)
     if not m:
         return None
     rest = _strip_phrase(text, m.start(), m.end())
     t, rest = _extract_time(rest)
-    d = _today_local()
+    d = _today_local(tz)
     # If no explicit time and the default 09:00 already passed, push reminder
     # to "one hour from now" so the user doesn't get an instantly-overdue reminder.
-    dt_local = _combine_local(d, t)
-    if t is None and dt_local < datetime.now(_LOCAL_TZ):
-        dt_local = datetime.now(_LOCAL_TZ) + timedelta(hours=1)
+    dt_local = _combine_local(d, t, tz)
+    if t is None and dt_local < datetime.now(tz):
+        dt_local = datetime.now(tz) + timedelta(hours=1)
     return ParsedTime(
         due_date=d.isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_in_duration(text: str) -> ParsedTime | None:
+def _rule_in_duration(text: str, tz: tzinfo) -> ParsedTime | None:
     # "in 2 hours", "within 2 days", "after 2 hours", "en 2 horas",
     # "dentro de 3 días", "por 2 días", "before 30 minutes" — all collapse
     # to the same semantics (deadline = now + N units). Spanish "por" is a
@@ -193,18 +203,18 @@ def _rule_in_duration(text: str) -> ParsedTime | None:
         delta = timedelta(weeks=qty)
     else:
         return None
-    now_local = datetime.now(_LOCAL_TZ)
+    now_local = datetime.now(tz)
     dt_local = now_local + delta
     rest = _strip_phrase(text, m.start(), m.end())
     return ParsedTime(
         due_date=dt_local.date().isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_n_unit_deadline(text: str) -> ParsedTime | None:
+def _rule_n_unit_deadline(text: str, tz: tzinfo) -> ParsedTime | None:
     """Match "2 days deadline", "1 day deadline", "3 horas límite".
 
     Phrasing the agent or user types when stating *how long they have*
@@ -231,18 +241,18 @@ def _rule_n_unit_deadline(text: str) -> ParsedTime | None:
         delta = timedelta(weeks=qty)
     else:
         return None
-    now_local = datetime.now(_LOCAL_TZ)
+    now_local = datetime.now(tz)
     dt_local = now_local + delta
     rest = _strip_phrase(text, m.start(), m.end())
     return ParsedTime(
         due_date=dt_local.date().isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_by_weekday(text: str) -> ParsedTime | None:
+def _rule_by_weekday(text: str, tz: tzinfo) -> ParsedTime | None:
     """Match "by Friday", "before Monday", "antes del viernes".
 
     Resolves to the *coming* weekday (today if matches and not past 09:00,
@@ -258,26 +268,26 @@ def _rule_by_weekday(text: str) -> ParsedTime | None:
     if not m:
         return None
     target = WEEKDAYS[m.group(1).lower()]
-    today = _today_local()
+    today = _today_local(tz)
     days = (target - today.weekday()) % 7
     # Same weekday as today and it's still morning → keep today; otherwise
     # roll forward. Avoids "by Monday" (typed Monday afternoon) silently
     # resolving to today and being instantly overdue.
     d = today + timedelta(days=days if days > 0 else 7)
-    if days == 0 and datetime.now(_LOCAL_TZ).time() < time(9, 0):
+    if days == 0 and datetime.now(tz).time() < time(9, 0):
         d = today
     rest = _strip_phrase(text, m.start(), m.end())
     t, rest = _extract_time(rest)
-    dt_local = _combine_local(d, t)
+    dt_local = _combine_local(d, t, tz)
     return ParsedTime(
         due_date=d.isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_next_weekday(text: str) -> ParsedTime | None:
+def _rule_next_weekday(text: str, tz: tzinfo) -> ParsedTime | None:
     names = "|".join(sorted(WEEKDAYS.keys(), key=len, reverse=True))
     pattern = re.compile(
         rf"\b(?:next|próximo|proximo|on|el)\s+({names})\b",
@@ -287,7 +297,7 @@ def _rule_next_weekday(text: str) -> ParsedTime | None:
     if not m:
         return None
     target = WEEKDAYS[m.group(1).lower()]
-    today = _today_local()
+    today = _today_local(tz)
     days = (target - today.weekday()) % 7
     # "next X" = the coming X, and if today matches, push a week forward.
     if days == 0:
@@ -295,32 +305,32 @@ def _rule_next_weekday(text: str) -> ParsedTime | None:
     d = today + timedelta(days=days)
     rest = _strip_phrase(text, m.start(), m.end())
     t, rest = _extract_time(rest)
-    dt_local = _combine_local(d, t)
+    dt_local = _combine_local(d, t, tz)
     return ParsedTime(
         due_date=d.isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_tonight(text: str) -> ParsedTime | None:
+def _rule_tonight(text: str, tz: tzinfo) -> ParsedTime | None:
     m = re.search(r"\b(tonight|esta\s+noche)\b", text, re.IGNORECASE)
     if not m:
         return None
     rest = _strip_phrase(text, m.start(), m.end())
     t, rest = _extract_time(rest)
     # Default to 20:00 local if no time is explicit.
-    dt_local = _combine_local(_today_local(), t or time(20, 0))
+    dt_local = _combine_local(_today_local(tz), t or time(20, 0), tz)
     return ParsedTime(
-        due_date=_today_local().isoformat(),
-        reminder_at=_to_utc_iso(dt_local),
+        due_date=_today_local(tz).isoformat(),
+        reminder_at=_to_utc_iso(dt_local, tz),
         remaining=rest,
         matched=m.group(0),
     )
 
 
-def _rule_bare_time(text: str) -> ParsedTime | None:
+def _rule_bare_time(text: str, tz: tzinfo) -> ParsedTime | None:
     """Match a time-only phrase like "at 2pm" / "a las 15:30" with no day anchor.
 
     Defaults to today if the time is still ahead, or tomorrow if it's past.
@@ -332,20 +342,20 @@ def _rule_bare_time(text: str) -> ParsedTime | None:
     # in the original text — we don't want to grab random digits.
     if not re.search(r"\b(at|a\s+las)\b", text, re.IGNORECASE):
         return None
-    d = _today_local()
-    candidate = _combine_local(d, t)
-    if candidate < datetime.now(_LOCAL_TZ):
+    d = _today_local(tz)
+    candidate = _combine_local(d, t, tz)
+    if candidate < datetime.now(tz):
         d = d + timedelta(days=1)
-        candidate = _combine_local(d, t)
+        candidate = _combine_local(d, t, tz)
     return ParsedTime(
         due_date=d.isoformat(),
-        reminder_at=_to_utc_iso(candidate),
+        reminder_at=_to_utc_iso(candidate, tz),
         remaining=rest,
         matched=None,
     )
 
 
-def _rule_absolute_date(text: str) -> ParsedTime | None:
+def _rule_absolute_date(text: str, tz: tzinfo) -> ParsedTime | None:
     """Fallback: try dateutil for absolute phrases like "Apr 24", "24/04".
 
     dateutil is lenient, so we only accept results that contain at least
@@ -358,7 +368,7 @@ def _rule_absolute_date(text: str) -> ParsedTime | None:
         # dateutil's fuzzy mode also returns the tokens it consumed so we
         # can strip them out of the remaining text.
         parsed, tokens = dateutil_parser.parse(
-            text, default=_combine_local(_today_local(), time(9, 0)),
+            text, default=_combine_local(_today_local(tz), time(9, 0), tz),
             fuzzy_with_tokens=True,
         )
     except (ValueError, OverflowError):
@@ -369,11 +379,11 @@ def _rule_absolute_date(text: str) -> ParsedTime | None:
     rest = re.sub(r"\s+", " ", rest).strip()
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_LOCAL_TZ)
+        parsed = parsed.replace(tzinfo=tz)
 
     return ParsedTime(
         due_date=parsed.date().isoformat(),
-        reminder_at=_to_utc_iso(parsed),
+        reminder_at=_to_utc_iso(parsed, tz),
         remaining=rest,
         matched=None,  # dateutil doesn't hand back the exact matched substring
     )
@@ -396,17 +406,19 @@ _RULES: tuple[Rule, ...] = (
 )
 
 
-def parse(text: str) -> ParsedTime:
+def parse(text: str, tz: tzinfo | None = None) -> ParsedTime:
     """Parse a free-form user phrase. Always returns a ParsedTime.
 
     When no rule matches, ``due_date`` and ``reminder_at`` are ``None`` and
-    ``remaining`` is the original text.
+    ``remaining`` is the original text. Pass the user's tz so "tomorrow"
+    resolves on their wall clock, not the server's.
     """
     text = text.strip()
     if not text:
         return ParsedTime(None, None, "", None)
+    resolved = _resolve_tz(tz)
     for rule in _RULES:
-        result = rule(text)
+        result = rule(text, resolved)
         if result is not None:
             return result
     return ParsedTime(None, None, text, None)
@@ -449,9 +461,9 @@ def extract_tags(text: str) -> tuple[list[str], str]:
     return tags, cleaned
 
 
-def parse_full(text: str) -> dict:
+def parse_full(text: str, tz: tzinfo | None = None) -> dict:
     """Parse time + priority + tags in one pass — the quick-add entry point."""
-    time_result = parse(text)
+    time_result = parse(text, tz=tz)
     priority, working = extract_priority(time_result.remaining)
     tags, working = extract_tags(working)
     title = working.strip()

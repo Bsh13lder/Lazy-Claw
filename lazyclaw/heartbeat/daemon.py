@@ -89,6 +89,9 @@ class HeartbeatDaemon:
         # Last hour we ingested Claude plans per user. Plans don't change
         # often — every ~60min is plenty.
         self._last_plan_ingest_hour: dict[str, str] = {}
+        # Last day we fired the end-of-day progress summary per user.
+        # Same pattern as _last_journal_seed_iso — bounds tick cost.
+        self._last_eod_summary_iso: dict[str, str] = {}
 
     async def start(self) -> None:
         """Launch the heartbeat loop as a background task."""
@@ -169,6 +172,27 @@ class HeartbeatDaemon:
         await self._reindex_dirty_embeddings()
         await self._ingest_claude_plans()
 
+        # Retry tasks whose initial LazyBrain mirror failed (Ollama down,
+        # encryption hiccup, etc.). Cheap NOOP when there's nothing to retry.
+        try:
+            await self._retry_lazybrain_mirrors()
+        except Exception:
+            logger.debug("LazyBrain mirror retry sweep failed", exc_info=True)
+
+        # Stale-task soft nudge — fire once per 4h-silent in_progress task
+        # so forgotten work doesn't drift forever. Cleared on user reply.
+        try:
+            await self._sweep_stale_progress()
+        except Exception:
+            logger.debug("stale progress sweep failed", exc_info=True)
+
+        # End-of-day progress summary — once per user per day at 20:00
+        # local. Read-only, no LLM call. Opt-in via settings.general.eod_summary.
+        try:
+            await self._sweep_eod_summary()
+        except Exception:
+            logger.debug("EOD summary sweep failed", exc_info=True)
+
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
 
@@ -207,6 +231,19 @@ class HeartbeatDaemon:
                     if enc_instruction and is_encrypted(enc_instruction)
                     else enc_instruction
                 )
+
+                # Pulse jobs short-circuit before the brain. Instruction
+                # shape is "[PULSE:<task_id>:<template_id>]" — we render
+                # the template via Telegram directly with zero LLM cost.
+                if instruction and instruction.startswith("[PULSE:"):
+                    handled = await self._fire_task_pulse(
+                        user_id, job_id, instruction, cron_expression,
+                    )
+                    if handled:
+                        continue
+                    # Fall through if pulse couldn't be fired (template
+                    # missing, task done) — orchestrator.mark_run pauses
+                    # below.
 
                 logger.info("Job '%s' (%s) is due, enqueueing", job_name, job_id)
                 if not self._lane_queue._running:
@@ -740,6 +777,15 @@ class HeartbeatDaemon:
         Pass 2: existing reminder_at + nag escalation (15m / 30m / 60m / 60m,
                 capped at 5). Sends Telegram push with inline [Done] [Snooze]
                 [Tomorrow] buttons.
+
+        Atomic claim: every nag fire goes through a conditional UPDATE
+        that bumps ``nag_count`` and stamps ``nag_fired_at`` in the same
+        statement. A heartbeat crash between the SELECT and the UPDATE
+        can no longer cause a double-fire — the WHERE clause anchors on
+        the exact ``nag_count`` we read, so a concurrent tick that
+        already fired the same nag finds rowcount=0 and skips. Stale
+        claims older than 5 minutes are auto-released so a hard crash
+        doesn't permanently block a task from nagging again.
         """
         from datetime import timedelta
 
@@ -748,6 +794,11 @@ class HeartbeatDaemon:
 
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
+        # Stale-claim window: a nag whose ``nag_fired_at`` is older than
+        # this is treated as abandoned (process crashed before delivering)
+        # and re-claimable. 5min is comfortably longer than any expected
+        # Telegram push round-trip.
+        stale_threshold = (now - timedelta(minutes=5)).isoformat()
 
         # ── Pass 1: advance pre-reminders ──────────────────────────────────
         try:
@@ -770,7 +821,8 @@ class HeartbeatDaemon:
 
             async with db_session(self._config) as db:
                 cursor = await db.execute(
-                    "SELECT id, title, reminder_at, nag_count FROM tasks "
+                    "SELECT id, title, reminder_at, nag_count, nag_fired_at "
+                    "FROM tasks "
                     "WHERE user_id = ? AND status IN ('todo', 'in_progress') "
                     "AND reminder_at IS NOT NULL AND reminder_at <= ? "
                     "AND nag_count < 5",
@@ -778,7 +830,7 @@ class HeartbeatDaemon:
                 )
                 rows = await cursor.fetchall()
 
-            for task_id, enc_title, reminder_at, nag_count in rows:
+            for task_id, enc_title, reminder_at, nag_count, nag_fired_at in rows:
                 # Calculate if this nag is due based on escalation
                 # Intervals: 0=immediate, 1=+15min, 2=+30min, 3+=+1hr
                 intervals = [0, 15, 30, 60, 60]
@@ -795,6 +847,41 @@ class HeartbeatDaemon:
                     except (ValueError, TypeError):
                         logger.debug("Failed to parse reminder datetime for nag check, skipping", exc_info=True)
                         continue
+
+                # ── Atomic claim ──────────────────────────────────────────
+                # Bump nag_count + stamp nag_fired_at + push reminder_at
+                # forward (so the next escalation interval is computed
+                # from "now") in a single UPDATE. The WHERE clause
+                # anchors on the exact ``nag_count`` we read; a concurrent
+                # tick that already fired the same nag finds rowcount=0
+                # and we skip the push. Stale claims (>5min) get
+                # re-claimed automatically so a crash can't permanently
+                # block a task.
+                async with db_session(self._config) as db:
+                    claim_result = await db.execute(
+                        "UPDATE tasks SET nag_count = ?, reminder_at = ?, "
+                        "nag_fired_at = ? "
+                        "WHERE id = ? AND user_id = ? "
+                        "AND status IN ('todo', 'in_progress') "
+                        "AND nag_count = ? "
+                        "AND (nag_fired_at IS NULL OR nag_fired_at <= ?)",
+                        (
+                            nag_count + 1, now_iso, now_iso,
+                            task_id, user_id,
+                            nag_count, stale_threshold,
+                        ),
+                    )
+                    await db.commit()
+
+                if claim_result.rowcount == 0:
+                    # Either another tick is already firing this nag, the
+                    # task was completed/cancelled in the gap, or our read
+                    # was stale. No double-send either way.
+                    logger.debug(
+                        "Skipping task %s nag #%d — claim lost",
+                        task_id, nag_count + 1,
+                    )
+                    continue
 
                 # Decrypt title and get task details
                 try:
@@ -827,13 +914,13 @@ class HeartbeatDaemon:
                 except Exception:
                     logger.warning("Failed to load task category/priority for reminder notification", exc_info=True)
 
-                # Format local time
+                # Format wall-clock time using the user's tz, not the server's.
+                # Falls back to the server local clock if settings lookup fails.
                 _local_time = ""
                 try:
-                    import time as _time
-                    _offset_s = -_time.timezone if _time.daylight == 0 else -_time.altzone
-                    _local_tz = timezone(timedelta(seconds=_offset_s))
-                    _local_now = now.astimezone(_local_tz)
+                    from lazyclaw.tasks.timezone import get_user_tz
+                    user_tz = await get_user_tz(self._config, user_id)
+                    _local_now = now.astimezone(user_tz)
                     _local_time = _local_now.strftime("%H:%M")
                 except Exception:
                     logger.warning("Failed to format local time for reminder notification", exc_info=True)
@@ -860,6 +947,9 @@ class HeartbeatDaemon:
                         InlineKeyboardButton(
                             "\U0001f4c5 Tomorrow", callback_data=f"task:tomorrow:{task_id}"
                         ),
+                        InlineKeyboardButton(
+                            "\u270f\ufe0f Edit", callback_data=f"task:edit:{task_id}"
+                        ),
                     ]])
 
                     await self._telegram_push(msg_text, reply_markup=keyboard)
@@ -869,15 +959,6 @@ class HeartbeatDaemon:
                 except ImportError:
                     logger.debug("Telegram library not available for keyboard, sending plain text")
                     await self._telegram_push(msg_text)
-
-                # Update nag_count and reminder_at to now (for next nag calculation)
-                async with db_session(self._config) as db:
-                    await db.execute(
-                        "UPDATE tasks SET nag_count = ?, reminder_at = ? "
-                        "WHERE id = ? AND user_id = ?",
-                        (nag_count + 1, now_iso, task_id, user_id),
-                    )
-                    await db.commit()
 
                 logger.debug(
                     "Task nag #%d for %s: %s", nag_count + 1, task_id, title,
@@ -986,6 +1067,417 @@ class HeartbeatDaemon:
             mins = total_min % 60
             return f"in {hours}h" if mins == 0 else f"in {hours}h{mins}m"
         return f"in {total_min}m"
+
+    async def _fire_task_pulse(
+        self,
+        user_id: str,
+        job_id: str,
+        instruction: str,
+        cron_expression: str,
+    ) -> bool:
+        """Send a check-in pulse for a task, render the template's
+        questions + buttons, and bump run_count.
+
+        Returns True when the pulse was fired (or intentionally skipped
+        because the task is done) so the caller can ``continue`` and
+        not enqueue the instruction to the brain. Returns False on
+        infrastructure failure so the caller falls through.
+
+        Format of ``instruction``: ``[PULSE:<task_id>:<template_id>]``.
+        """
+        from lazyclaw.heartbeat import orchestrator as _orchestrator
+        from lazyclaw.tasks import progress_templates as _pt
+        from lazyclaw.tasks.store import (
+            append_progress_entry, get_task,
+        )
+
+        # Parse instruction — bail on any deformation.
+        try:
+            payload = instruction[len("[PULSE:"):].rstrip("]")
+            task_id, template_id = payload.split(":", 1)
+        except Exception:
+            logger.debug("malformed PULSE instruction: %r", instruction)
+            return False
+        if not task_id or not template_id:
+            return False
+
+        try:
+            task = await get_task(self._config, user_id, task_id)
+        except Exception:
+            logger.debug("pulse: get_task failed", exc_info=True)
+            return False
+        if not task:
+            # Task deleted under us — auto-clean the job.
+            try:
+                await _orchestrator.delete_job(self._config, user_id, job_id)
+            except Exception:
+                logger.debug("pulse: cleanup of orphan job failed", exc_info=True)
+            return True
+
+        # If the task already completed, pause the pulse job and skip.
+        if task.get("status") in {"done", "cancelled", "failed"}:
+            try:
+                await _orchestrator.pause_job(self._config, user_id, job_id)
+            except Exception:
+                logger.debug("pulse: pause-on-complete failed", exc_info=True)
+            return True
+
+        try:
+            template = await _pt.get_template(
+                self._config, user_id, template_id,
+            )
+        except Exception:
+            logger.debug("pulse: get_template failed", exc_info=True)
+            return False
+        if not template:
+            return False
+
+        # Render the pulse message — just the questions + inline buttons.
+        # No LLM. No "should I be helpful here?" — the user opted in.
+        title = task.get("title") or "task"
+        question_lines = [
+            f"• {q.get('label')}" for q in (template.get("questions") or [])
+            if q.get("label")
+        ]
+        msg_lines = [f"🟡 Still on \"{title}\"?"]
+        if question_lines:
+            msg_lines.extend(question_lines)
+        msg_text = "\n".join(msg_lines)
+
+        # Send Telegram message with inline keyboard from template buttons.
+        if self._telegram_push:
+            try:
+                from telegram import (
+                    InlineKeyboardButton, InlineKeyboardMarkup,
+                )
+                buttons = template.get("buttons") or []
+                if buttons:
+                    keyboard_row = [
+                        InlineKeyboardButton(
+                            (b.get("label") or "")[:30],
+                            callback_data=f"{b['action']}:{task_id}",
+                        )
+                        for b in buttons if b.get("action")
+                    ]
+                    keyboard = InlineKeyboardMarkup([keyboard_row]) if keyboard_row else None
+                    if keyboard is not None:
+                        await self._telegram_push(msg_text, reply_markup=keyboard)
+                    else:
+                        await self._telegram_push(msg_text)
+                else:
+                    await self._telegram_push(msg_text)
+            except (TypeError, ImportError):
+                await self._telegram_push(msg_text)
+            except Exception:
+                logger.debug("pulse: telegram push failed", exc_info=True)
+                return False
+
+        # Record state — progress log entry, run_count bump,
+        # last_pulse_fired_at on the task row.
+        try:
+            await append_progress_entry(
+                self._config, user_id, task_id,
+                kind="pulse_fired", text=None, source="pulse",
+            )
+        except Exception:
+            logger.debug("pulse: append_progress_entry failed", exc_info=True)
+        try:
+            await _pt.bump_run_count(
+                self._config, user_id, template_id, success=False,
+            )
+        except Exception:
+            logger.debug("pulse: bump_run_count failed", exc_info=True)
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            async with db_session(self._config) as db:
+                await db.execute(
+                    "UPDATE tasks SET last_pulse_fired_at = ? "
+                    "WHERE id = ? AND user_id = ?",
+                    (now_iso, task_id, user_id),
+                )
+                await db.commit()
+        except Exception:
+            logger.debug("pulse: last_pulse_fired_at stamp failed", exc_info=True)
+
+        # Advance next_run + mark success on the orchestrator side so
+        # the daemon doesn't re-fire on the next tick.
+        try:
+            from lazyclaw.heartbeat.cron import calculate_next_run
+            next_run = calculate_next_run(cron_expression)
+            await _orchestrator.mark_run(self._config, job_id, next_run)
+            await _orchestrator.mark_run_outcome(
+                self._config, user_id, job_id, "success",
+            )
+        except Exception:
+            logger.debug("pulse: mark_run failed", exc_info=True)
+
+        return True
+
+    async def _sweep_stale_progress(self) -> None:
+        """One-time soft nudge for in_progress tasks gone silent > 4h.
+
+        Detection: task is in_progress AND ((latest progress entry OR
+        last_attempted_at OR created_at) older than 4h) AND no pulse
+        fired within the last 30min AND ``nudge_sent_at`` is null
+        (one-time per silence window).
+
+        Cleared by user response (any ``progress:*`` callback or NL
+        progress entry) or task completion. Both clearing paths set
+        ``nudge_sent_at = NULL`` via ``clear_nudge_sent`` in store.py.
+        """
+        from datetime import timedelta as _td
+
+        if not self._telegram_push:
+            return
+
+        now = datetime.now(timezone.utc)
+        stale_threshold = (now - _td(hours=4)).isoformat()
+        recent_pulse = (now - _td(minutes=30)).isoformat()
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute(
+                "SELECT id, user_id, title, last_attempted_at, created_at, "
+                "last_pulse_fired_at "
+                "FROM tasks "
+                "WHERE status = 'in_progress' "
+                "AND nudge_sent_at IS NULL "
+                "AND (last_pulse_fired_at IS NULL OR last_pulse_fired_at < ?) "
+                "AND ((last_attempted_at IS NULL AND created_at < ?) "
+                "OR last_attempted_at < ?) "
+                "LIMIT 10",
+                (recent_pulse, stale_threshold, stale_threshold),
+            )
+            rows = await cursor.fetchall()
+
+        if not rows:
+            return
+
+        from lazyclaw.crypto.encryption import is_encrypted as _is_encrypted
+        from lazyclaw.tasks.store import _decrypt_progress_log
+
+        for task_id, user_id, enc_title, last_attempted, created_at, last_pulse in rows:
+            try:
+                key = await get_user_dek(self._config, user_id)
+                # The latest progress_log entry beats last_attempted_at —
+                # users may not be triggering attempts but talking about
+                # the task constantly.
+                async with db_session(self._config) as db:
+                    cursor = await db.execute(
+                        "SELECT progress_log FROM tasks WHERE id = ?",
+                        (task_id,),
+                    )
+                    plog_row = await cursor.fetchone()
+                last_entry_ts = None
+                if plog_row and plog_row[0]:
+                    log = _decrypt_progress_log(plog_row[0], key)
+                    if log:
+                        last_entry_ts = log[-1].get("ts")
+                # Recompute staleness against the freshest signal.
+                latest_signal = max(
+                    [s for s in (last_entry_ts, last_attempted, last_pulse) if s],
+                    default=created_at,
+                )
+                if latest_signal and latest_signal > stale_threshold:
+                    continue
+
+                title = (
+                    decrypt(enc_title, key) if _is_encrypted(enc_title)
+                    else enc_title
+                ) if enc_title else "task"
+
+                msg = (
+                    f"🤔 Last update on \"{title}\" was over 4h ago — "
+                    "still going?"
+                )
+                try:
+                    from telegram import (
+                        InlineKeyboardButton, InlineKeyboardMarkup,
+                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "✅ Done", callback_data=f"progress:done:{task_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "🟡 Working", callback_data=f"progress:working:{task_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "⏸️ Pause", callback_data=f"progress:paused:{task_id}",
+                        ),
+                    ]])
+                    await self._telegram_push(msg, reply_markup=keyboard)
+                except (TypeError, ImportError):
+                    await self._telegram_push(msg)
+
+                # Stamp nudge_sent_at so we don't loop on the next tick.
+                async with db_session(self._config) as db:
+                    await db.execute(
+                        "UPDATE tasks SET nudge_sent_at = ? "
+                        "WHERE id = ? AND user_id = ?",
+                        (now.isoformat(), task_id, user_id),
+                    )
+                    await db.commit()
+            except Exception:
+                logger.debug(
+                    "stale-nudge fire failed for task %s", task_id, exc_info=True,
+                )
+
+    async def _sweep_eod_summary(self) -> None:
+        """End-of-day progress summary at 20:00 user-tz.
+
+        Read-only: counts in_progress tasks per user, summarizes their
+        day's progress entries, pushes one Telegram message. Gated by
+        ``users.settings.general.eod_summary`` (default True) and a
+        per-user once-per-day in-memory marker so a multi-tick window
+        only fires once.
+        """
+        from lazyclaw.settings.general import get_general_settings
+        from lazyclaw.tasks.store import _decrypt_progress_log
+        from lazyclaw.tasks.timezone import get_user_tz
+
+        if not self._telegram_push:
+            return
+
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute("SELECT id FROM users")
+                users = [r[0] for r in await cursor.fetchall()]
+        except Exception:
+            return
+
+        for user_id in users:
+            try:
+                tz = await get_user_tz(self._config, user_id)
+                local_now = datetime.now(tz)
+                today = local_now.date().isoformat()
+
+                # 20:00–22:00 firing window — fire once per day even if
+                # the daemon was off at exactly 20:00.
+                if not (20 <= local_now.hour < 22):
+                    continue
+                if self._last_eod_summary_iso.get(user_id) == today:
+                    continue
+
+                settings = await get_general_settings(self._config, user_id)
+                if not settings.get("eod_summary", True):
+                    self._last_eod_summary_iso[user_id] = today
+                    continue
+
+                key = await get_user_dek(self._config, user_id)
+
+                async with db_session(self._config) as db:
+                    cursor = await db.execute(
+                        "SELECT id, title, progress_log, created_at "
+                        "FROM tasks "
+                        "WHERE user_id = ? AND status = 'in_progress' "
+                        "ORDER BY created_at DESC LIMIT 20",
+                        (user_id,),
+                    )
+                    rows = await cursor.fetchall()
+
+                if not rows:
+                    self._last_eod_summary_iso[user_id] = today
+                    continue
+
+                from lazyclaw.crypto.encryption import (
+                    is_encrypted as _is_encrypted,
+                )
+
+                lines = [f"📋 Today's progress ({today}):"]
+                for row in rows:
+                    task_id, enc_title, plog, created_at = row
+                    try:
+                        title = (
+                            decrypt(enc_title, key)
+                            if _is_encrypted(enc_title) else enc_title
+                        ) if enc_title else "(untitled)"
+                    except Exception:
+                        title = "(undecryptable)"
+                    log = _decrypt_progress_log(plog, key)
+                    today_entries = [
+                        e for e in log
+                        if (e.get("ts") or "").startswith(today)
+                    ]
+                    if today_entries:
+                        last = today_entries[-1]
+                        lines.append(
+                            f"• {title} — {len(today_entries)} entries; "
+                            f"last: {last.get('kind')} "
+                            f"({(last.get('text') or '')[:60]})"
+                        )
+                    else:
+                        lines.append(f"• {title} — 0 entries today")
+
+                try:
+                    await self._telegram_push("\n".join(lines))
+                except Exception:
+                    logger.debug("EOD summary push failed", exc_info=True)
+                self._last_eod_summary_iso[user_id] = today
+            except Exception:
+                logger.debug(
+                    "EOD summary failed for user %s", user_id, exc_info=True,
+                )
+
+    async def _retry_lazybrain_mirrors(self) -> None:
+        """Retry tasks whose initial LazyBrain mirror save silently failed.
+
+        The create_task path is fire-and-forget on mirror failure so a
+        flaky LazyBrain or Ollama hiccup doesn't break task creation.
+        Without this sweep those tasks would forever lack a brain note —
+        the user thinks "the system lost my task" because they can't
+        find it in the PKM.
+
+        Strategy: every tick, scan tasks created in the last 24h with
+        ``lazybrain_note_id IS NULL`` and re-run the mirror via the
+        store's status mirror (which already heals missing notes). 24h
+        is the cutoff so an old, intentionally orphan task (deleted note)
+        doesn't get auto-recreated forever.
+
+        Bounded at 20 retries per tick to keep the sweep cheap.
+        """
+        from datetime import timedelta as _td
+
+        from lazyclaw.tasks.store import _mirror_status_to_lazybrain, get_task
+
+        cutoff = (datetime.now(timezone.utc) - _td(hours=24)).isoformat()
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute(
+                "SELECT id, user_id, status FROM tasks "
+                "WHERE lazybrain_note_id IS NULL "
+                "AND created_at >= ? "
+                "ORDER BY created_at DESC LIMIT 20",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+
+        if not rows:
+            return
+
+        healed = 0
+        for task_id, user_id, status in rows:
+            try:
+                task = await get_task(self._config, user_id, task_id)
+                if not task:
+                    continue
+                # _mirror_status_to_lazybrain auto-heals when the note id
+                # is missing (creates a fresh mirror with the current
+                # status baked in). On success it stamps the note id back
+                # onto the task row, so the next sweep won't pick this up.
+                await _mirror_status_to_lazybrain(
+                    self._config, user_id, task, status or "todo",
+                )
+                refreshed = await get_task(self._config, user_id, task_id)
+                if refreshed and refreshed.get("lazybrain_note_id"):
+                    healed += 1
+            except Exception:
+                logger.debug(
+                    "mirror-retry: task %s remained orphan", task_id, exc_info=True,
+                )
+
+        if healed:
+            logger.info(
+                "LazyBrain mirror retry healed %d/%d orphan tasks", healed, len(rows),
+            )
 
     async def _seed_today_journals(self) -> None:
         """Ensure each registered user has a journal note for today.

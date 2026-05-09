@@ -24,6 +24,21 @@ from lazyclaw.db.connection import db_session
 logger = logging.getLogger(__name__)
 
 
+def _safe_match(query: str) -> str:
+    """Build an FTS5 MATCH expression from a free-text query.
+
+    Each whitespace-split token is wrapped in double quotes so FTS5
+    treats it as a literal phrase. Without this, a colon inside a
+    token (e.g. ``topic:foo``) makes FTS5 parse the prefix as a column
+    name and raise ``no such column: topic`` against indexes that only
+    have ``title`` / ``chunk_text``. Embedded quotes are dropped — they
+    can't appear inside an FTS5 phrase token anyway.
+    """
+    cleaned = (query or "").replace('"', " ")
+    tokens = [tok for tok in cleaned.split() if tok]
+    return " ".join(f'"{tok}"' for tok in tokens)
+
+
 async def upsert_title(
     config: Config, user_id: str, note_id: str, title_key: str | None
 ) -> None:
@@ -75,12 +90,11 @@ async def search_titles(
     q = (query or "").strip()
     if not q:
         return []
-    # FTS5 MATCH expects double-quoted phrases for safety against
-    # special characters; for word-level OR matching the user's bare
-    # tokens are fine. We sanitise quotes to avoid syntax errors on
-    # weird input.
-    safe = q.replace('"', " ")
-    fts_query = " ".join(tok for tok in safe.split() if tok)
+    # Wrap each token as a double-quoted FTS5 phrase. Bare tokens trigger
+    # FTS5's `column:term` parser, so a query like ``topic:foo`` raises
+    # ``no such column: topic`` against this title-only index. Quoting
+    # neutralises colons and every other special char in one stroke.
+    fts_query = _safe_match(q)
     if not fts_query:
         return []
     try:
@@ -150,8 +164,7 @@ async def search_chunks(
     q = (query or "").strip()
     if not q:
         return []
-    safe = q.replace('"', " ")
-    fts_query = " ".join(tok for tok in safe.split() if tok)
+    fts_query = _safe_match(q)
     if not fts_query:
         return []
     try:

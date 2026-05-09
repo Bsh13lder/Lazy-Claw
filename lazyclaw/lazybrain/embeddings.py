@@ -131,28 +131,52 @@ def _mmr_rerank(
 # Ollama embed call (async, short timeout)
 # ---------------------------------------------------------------------------
 
+import asyncio as _asyncio
+import random as _random
+
+# Bound concurrent embed requests. Ollama serialises GPU work but accepts
+# all in-flight HTTP calls — without throttling the overflow turns into
+# bursts of HTTP 500. 3 in-flight calls is the empirical sweet spot for a
+# single-GPU desktop: keeps the GPU saturated without queue overflow.
+_OLLAMA_SEM = _asyncio.Semaphore(3)
+
+
 async def _ollama_embed(text: str) -> list[float] | None:
-    """Ollama /api/embeddings. Returns None if unreachable / model missing."""
+    """Ollama /api/embeddings. Returns None if unreachable / model missing.
+
+    Two layers of protection against transient 5xx under load:
+      1. Module-level semaphore caps concurrent calls at 3 — Ollama's
+         single-GPU queue can't keep up with N parallel chunk embeds.
+      2. One retry with jittered backoff catches the rare 5xx that still
+         leaks through (model warm-up, brief paging).
+    """
     if not text or not text.strip():
         return None
+    payload = {"model": EMBED_MODEL, "prompt": text[:8000]}
+    last_status: int | None = None
     try:
-        async with httpx.AsyncClient(base_url=OLLAMA_BASE, timeout=30) as client:
-            resp = await client.post(
-                "/api/embeddings",
-                json={"model": EMBED_MODEL, "prompt": text[:8000]},
-            )
-            if resp.status_code == 404:
-                logger.info(
-                    "Embedding model %s not installed — run `ollama pull %s`",
-                    EMBED_MODEL, EMBED_MODEL,
-                )
+        async with _OLLAMA_SEM:
+            async with httpx.AsyncClient(base_url=OLLAMA_BASE, timeout=30) as client:
+                for attempt in range(2):
+                    resp = await client.post("/api/embeddings", json=payload)
+                    if resp.status_code == 404:
+                        logger.info(
+                            "Embedding model %s not installed — run `ollama pull %s`",
+                            EMBED_MODEL, EMBED_MODEL,
+                        )
+                        return None
+                    if 500 <= resp.status_code < 600 and attempt == 0:
+                        last_status = resp.status_code
+                        await _asyncio.sleep(0.2 + _random.random() * 0.3)
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    vec = data.get("embedding")
+                    if not isinstance(vec, list) or len(vec) != EMBED_DIM:
+                        return None
+                    return [float(x) for x in vec]
+                logger.debug("Ollama embed failed after retry: HTTP %s", last_status)
                 return None
-            resp.raise_for_status()
-            data = resp.json()
-            vec = data.get("embedding")
-            if not isinstance(vec, list) or len(vec) != EMBED_DIM:
-                return None
-            return [float(x) for x in vec]
     except httpx.ConnectError:
         logger.debug("Ollama unreachable — semantic search falls back to substring")
         return None
@@ -568,6 +592,15 @@ async def semantic_search(
     }
 
 
+# Process-local cooldown gate. Set to a future epoch when a full reindex
+# pass produces zero successes — subsequent passes short-circuit until the
+# cooldown lapses, so 3 stuck dirty notes don't drive 9 Ollama 500s every
+# tick. Cleared on first successful embed.
+import time as _time
+_REINDEX_COOLDOWN_UNTIL: float = 0.0
+_REINDEX_COOLDOWN_SECS = 300.0  # 5 minutes
+
+
 async def reindex_dirty_batch(
     config: Config,
     user_id: str,
@@ -581,8 +614,14 @@ async def reindex_dirty_batch(
     succeeds, ``upsert_embedding`` clears the flag — so a stuck dirty row
     is one whose content can't be embedded (Ollama down, model missing).
     Stops early if the first three attempts in a row fail to avoid
-    hammering a dead Ollama.
+    hammering a dead Ollama. After a fully-failed pass we engage a 5-min
+    process-level cooldown so persistently-broken rows (e.g. notes whose
+    decrypted plaintext fails Ollama's tokeniser) don't burn 9 HTTP 500s
+    every tick.
     """
+    global _REINDEX_COOLDOWN_UNTIL
+    if _time.time() < _REINDEX_COOLDOWN_UNTIL:
+        return {"indexed": 0, "skipped": 0, "checked": 0, "cooldown": True}
     try:
         from lazyclaw.lazybrain import store as _lb_store
     except Exception:
@@ -621,10 +660,24 @@ async def reindex_dirty_batch(
         else:
             skipped += 1
             consecutive_skip += 1
-            # Three failures in a row → Ollama is almost certainly down.
-            # Bail out so we don't grind through the whole batch.
-            if consecutive_skip >= 3 and indexed == 0:
+            # Three failures in a row → bail unconditionally. The previous
+            # ``and indexed == 0`` guard meant a single early success kept
+            # the loop grinding through hundreds of persistently-broken
+            # rows every heartbeat tick (9 dirty notes × 60 ticks/h = the
+            # 540/h Ollama-500 noise floor we saw post-throttle).
+            if consecutive_skip >= 3:
                 break
+
+    # Engage cooldown only when the pass was non-trivially attempted but
+    # produced zero successes. A pass with at least one success means
+    # Ollama is alive and the failures are content-specific — no point
+    # silencing the next 5 minutes of healthy traffic.
+    if indexed == 0 and skipped >= 3:
+        _REINDEX_COOLDOWN_UNTIL = _time.time() + _REINDEX_COOLDOWN_SECS
+        logger.debug(
+            "Embedding reindex cooldown engaged for %ds (no successes in pass)",
+            int(_REINDEX_COOLDOWN_SECS),
+        )
 
     return {
         "indexed": indexed,

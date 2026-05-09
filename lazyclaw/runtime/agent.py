@@ -75,8 +75,11 @@ _HEARTBEAT_TELEMETRY_RE = re.compile(
 # Slim-context branch — Tier A (announce-style): bypasses build_context() and
 # the full SOUL.md to keep heartbeat reminders cheap. JOB:<name> deliberately
 # excluded; those can be arbitrary work and stay on the full path.
+# GOAL_PROGRESS rides the slim path so a user-wired daily progress cron
+# costs ~5k tokens instead of ~40k — the brain just calls
+# goal_progress_report(), no SOUL.md, no capabilities, no hybrid memory.
 _SLIM_HEARTBEAT_PREFIX_RE = re.compile(
-    r"^\[(REMINDER|WATCHER|MCP_WATCHER|TASK_REMINDER:[^\]]+)\]"
+    r"^\[(REMINDER|WATCHER|MCP_WATCHER|TASK_REMINDER:[^\]]+|GOAL_PROGRESS)\]"
 )
 
 

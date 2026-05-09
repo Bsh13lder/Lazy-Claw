@@ -184,9 +184,10 @@ async def _open_browser_tab(
     """
     from lazyclaw.browser.cdp import find_chrome_cdp
     from lazyclaw.browser.cdp_backend import CDPBackend
+    from lazyclaw.browser.profile_resolver import resolve_profile_dir
 
     port = getattr(config, "cdp_port", 9222)
-    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+    profile_dir = str(resolve_profile_dir(config, user_id))
 
     ws_url = await find_chrome_cdp(port)
     if not ws_url:

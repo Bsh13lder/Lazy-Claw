@@ -368,9 +368,10 @@ class HeartbeatDaemon:
         """
         from lazyclaw.browser.cdp import find_chrome_cdp
         from lazyclaw.browser.cdp_backend import CDPBackend
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
 
         primary_port = getattr(self._config, "cdp_port", 9222)
-        profile_dir = self._config.database_dir / "browser_profiles" / user_id
+        profile_dir = resolve_profile_dir(self._config, user_id)
 
         # Check if something is running on the primary port
         ws_url = await find_chrome_cdp(primary_port)
@@ -1776,11 +1777,10 @@ class HeartbeatDaemon:
     async def _launch_browser(self, user_id: str, port: int) -> None:
         """Launch headless browser for a user."""
         from lazyclaw.browser.cdp_backend import CDPBackend
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
 
         logger.info("Launching persistent browser for user %s", user_id)
-        profile_dir = str(
-            self._config.database_dir / "browser_profiles" / user_id
-        )
+        profile_dir = str(resolve_profile_dir(self._config, user_id))
         backend = CDPBackend(port=port, profile_dir=profile_dir)
         ws_url = await backend._auto_launch_chrome()
         if ws_url:

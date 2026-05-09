@@ -654,8 +654,9 @@ async def _connect_browser(config: Config) -> None:
 
         # Auto-launch headless with CDP
         from lazyclaw.browser.cdp_backend import CDPBackend
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
         user_id = await _get_default_user(config)
-        profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+        profile_dir = str(resolve_profile_dir(config, user_id))
         backend = CDPBackend(port=port, profile_dir=profile_dir)
         ws_url = await backend._auto_launch_chrome()
 

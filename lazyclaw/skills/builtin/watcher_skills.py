@@ -217,9 +217,8 @@ class WatchSiteSkill(BaseSkill):
         # Launch if not running
         port = getattr(self._config, "cdp_port", 9222)
         if not await find_chrome_cdp(port):
-            profile_dir = str(
-                self._config.database_dir / "browser_profiles" / user_id
-            )
+            from lazyclaw.browser.profile_resolver import resolve_profile_dir
+            profile_dir = str(resolve_profile_dir(self._config, user_id))
             backend = CDPBackend(port=port, profile_dir=profile_dir)
             await backend._auto_launch_chrome()
 

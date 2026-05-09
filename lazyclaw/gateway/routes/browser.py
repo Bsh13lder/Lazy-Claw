@@ -266,8 +266,9 @@ async def remote_session_start(user: User = Depends(get_current_user)):
             ),
         )
     try:
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
         port = getattr(_config, "cdp_port", 9222)
-        profile_dir = str(_config.database_dir / "browser_profiles" / user.id)
+        profile_dir = str(resolve_profile_dir(_config, user.id))
         if is_server_mode():
             session = await start_remote_session(
                 user_id=user.id, cdp_port=port,

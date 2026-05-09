@@ -673,3 +673,29 @@ CREATE INDEX IF NOT EXISTS idx_contacts_user
 ON contacts(user_id, source);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_external
 ON contacts(user_id, source, external_id) WHERE external_id IS NOT NULL;
+
+
+-- ─────────────────────────────────────────────────────────────────────
+--  Goal Executor (Phase B)
+-- ─────────────────────────────────────────────────────────────────────
+-- High-level objectives the agent runs autonomously. Plan is drafted
+-- via fix_plan.build_fix_plan() then dispatched to the browser
+-- specialist; progress lands here so /goal status survives restarts.
+CREATE TABLE IF NOT EXISTS goals (
+    id                TEXT PRIMARY KEY,
+    user_id           TEXT NOT NULL REFERENCES users(id),
+    title             TEXT NOT NULL,            -- encrypted
+    status            TEXT NOT NULL DEFAULT 'drafting',
+    plan_json         TEXT,                     -- encrypted JSON {steps, questions, answers, risks, confidence, summary}
+    steps_total       INTEGER NOT NULL DEFAULT 0,
+    steps_done        INTEGER NOT NULL DEFAULT 0,
+    blocked_on        TEXT,
+    last_action       TEXT,
+    last_progress_at  TEXT,
+    account_slug      TEXT,                     -- which browser identity (multi-account)
+    task_id           TEXT,                     -- live tracked-task FK (in-mem only)
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_goals_user_status ON goals(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_goals_user_progress ON goals(user_id, last_progress_at DESC);

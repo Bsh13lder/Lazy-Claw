@@ -27,7 +27,7 @@
 
 **LazyClaw** is an open-source AI agent platform where every piece of user data is encrypted with AES-256-GCM before it touches disk. Conversations, memories, skills, credentials, scheduled jobs — all encrypted. The server never sees plaintext.
 
-Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, and saved templates for recurring flows like government appointments**. Telegram + WhatsApp + Instagram + Email. **196 builtin skills + ~85 MCP-bridged tools** discoverable at runtime. React Web UI with **18 pages** (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
+Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, saved templates for recurring flows, multi-account profile isolation, and per-domain human-cadence tuning**. **Goal Executor** for autonomous high-level objectives — drafts a plan, batch-asks every required answer upfront, then dispatches to the browser specialist. Telegram + WhatsApp + Instagram + Email. **~206 builtin skills + ~85 MCP-bridged tools** discoverable at runtime. React Web UI with **18 pages** (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
 
 ## Why LazyClaw?
 
@@ -303,11 +303,30 @@ CDP-based control of the user's real Brave/Chrome browser. No separate Chromium 
 - **Structured error capture** — every failed action returns a typed error (`NavigationTimeout`, `SelectorMissing`, `DetachedFrame`, etc.) so the agent knows *why* something broke and can recover, not just retry blindly.
 - **Remote takeover** — noVNC via the `share_browser_control` NL skill or the canvas `🎮 Take control` button. Works from Telegram, web chat, and CLI identically.
 - **Shared profiles** — login once, all tools see it
+- **Multi-account profiles** — register isolated Chromium profiles per account (e.g. two Reddit accounts for two businesses) via the `register_browser_account` skill. Cookies / local storage / extensions never collide. NL: *"register a reddit account called marketing"*, *"switch reddit to marketing"*. Single source of truth in `lazyclaw/browser/profile_resolver.py`.
+- **Per-domain cadence** — tunable click / type / scroll / dwell timing in `lazyclaw/browser/cadence.py`. Slower defaults out of the box on bot-sensitive sites (Reddit, X, Instagram, Facebook, LinkedIn). NL: *"slow down reddit by 30%"* → `tune_browser_cadence` persists a per-domain factor; the next click samples from the widened range.
 - **Brave auto-detect** — Brave > Chrome > Chromium (built-in ad blocking = cleaner pages for LLM)
-- **Human-like delays** — random 0.2-1.5s between clicks, 0.03-0.12s typing
+- **Human-like delays** — random 0.1-0.4s between clicks, 0.03-0.10s typing (default cadence, fully tunable per-domain)
 - **Ref-ID snapshots** — interactive elements with click refs (~1-4KB) instead of full accessibility tree (50KB)
 - **DOM click engine** — real JavaScript clicks (works with Gmail, React, Angular SPAs)
 - **Site memory** — encrypted per-domain learning, auto-saved from specialist experience
+
+## Goal Executor
+
+Take a high-level objective ("sell my product on hirossa.com", "post the same campaign across both Reddit accounts") and let LazyClaw run it autonomously. The wedge over Google's Chrome Auto Browse: every required answer surfaces in **one batch upfront**, not drip-asked turn-by-turn.
+
+```
+> "start a goal: sell my product on Hirossa"
+   → LazyClaw pulls what LazyBrain knows about your business
+   → drafts a 4-step plan (login → add product → set price → publish)
+   → asks 3 questions in ONE card: account email, product name, price
+   → on answer: dispatches to the browser specialist
+   → /goal status any time
+```
+
+State machine: `DRAFTING → AWAITING_USER_INFO → EXECUTING → DONE / BLOCKED / FAILED / ABORTED`. Encrypted `goals` table (Fernet, AAD-bound). Built on existing `plan_research` + `fix_plan.build_fix_plan` + `dispatcher` + `lazybrain.semantic_search` — no new architecture, just thin orchestration.
+
+**6 NL skills**: `start_goal`, `answer_goal_questions`, `goal_status`, `list_goals`, `abort_goal`, `goal_progress_report`. **No auto-cron** — wire your own daily progress digest with the existing `schedule_job` skill (`[GOAL_PROGRESS] all` rides the slim heartbeat path, ~5k tokens per fire). v1 is browser-only specialist; multi-channel goals (browser + WhatsApp + Instagram + Email in one plan) deferred to v1.1.
 
 ## MCP
 
@@ -473,6 +492,9 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] Task Manager AI quick-add + live countdown + markdown notes
 - [x] LazyBrain galaxy graph + persistent node positions (per-user, per-mode, cross-device)
 - [x] WebSocket streaming (`/ws/chat`) for real-time Web UI chat
+- [x] **Goal Executor** — autonomous high-level objectives. Encrypted `goals` table, state machine, batch-asks every required input upfront in ONE card (vs. drip-asking turn-by-turn the way most agents do), dispatches to the browser specialist, reports progress on demand. Built on existing `plan_research` + `fix_plan` + `dispatcher` — no new architecture.
+- [x] **Multi-account browser identity** — full Chromium profile isolation per account (e.g. two Reddit accounts for two businesses), single-source-of-truth profile resolver. Cookies / local-storage / extensions never collide.
+- [x] **Per-domain browser cadence** — tunable click/type/scroll/dwell timing, slower defaults on bot-sensitive sites (Reddit, X, Instagram, Facebook, LinkedIn), NL skill to retune ("slow down reddit by 30%").
 - [ ] Skill Hub — universal skill/MCP registry (cross-framework, works with OpenClaw and others)
 - [ ] More channels (Discord, Signal, SimpleX)
 - [x] Docker + Docker Compose (Dockerfile, docker-compose.yml, web/Dockerfile)

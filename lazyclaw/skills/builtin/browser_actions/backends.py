@@ -63,9 +63,10 @@ async def get_cdp_backend(user_id: str = "default"):
     """
     global _cdp_backend
     from lazyclaw.config import load_config
+    from lazyclaw.browser.profile_resolver import resolve_profile_dir
 
     config = load_config()
-    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+    profile_dir = str(resolve_profile_dir(config, user_id))
 
     # Check if user wants browser-use backend
     backend_pref = await _get_user_backend_pref(user_id)
@@ -113,11 +114,12 @@ async def get_visible_cdp_backend(user_id: str = "default"):
 
     from lazyclaw.browser.cdp import find_chrome_cdp
     from lazyclaw.browser.cdp_backend import CDPBackend, restart_browser_with_cdp
+    from lazyclaw.browser.profile_resolver import resolve_profile_dir
     from lazyclaw.config import load_config
 
     config = load_config()
     port = getattr(config, "cdp_port", 9222)
-    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+    profile_dir = str(resolve_profile_dir(config, user_id))
     global _cdp_backend
 
     ws_url = await find_chrome_cdp(port)
@@ -246,12 +248,13 @@ async def _get_remote_cdp_backend(user_id: str = "default"):
         get_active_session,
         start_remote_session,
     )
+    from lazyclaw.browser.profile_resolver import resolve_profile_dir
     from lazyclaw.config import load_config
 
     global _cdp_backend
     config = load_config()
     port = getattr(config, "cdp_port", 9222)
-    profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+    profile_dir = str(resolve_profile_dir(config, user_id))
 
     existing = get_active_session(user_id)
     if existing:

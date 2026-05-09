@@ -935,9 +935,10 @@ async def auto_register_bundled_mcps(
         # CDP port without hardcoding ~/.upwork-mcp.
         per_user_env: dict[str, str] = {}
         if info.get("inject_user_context"):
+            from lazyclaw.browser.profile_resolver import resolve_profile_dir
             per_user_env["LAZYCLAW_USER_ID"] = user_id
             per_user_env["LAZYCLAW_BROWSER_PROFILE_DIR"] = str(
-                config.database_dir / "browser_profiles" / user_id,
+                resolve_profile_dir(config, user_id),
             )
             cdp_port_env = _os.environ.get("LAZYCLAW_CDP_PORT")
             if cdp_port_env:

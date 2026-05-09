@@ -444,9 +444,10 @@ class BrowserSkill(BaseSkill):
             )
 
         from lazyclaw.browser.cdp_backend import CDPBackend, restart_browser_with_cdp
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
 
         port = getattr(config, "cdp_port", 9222)
-        profile_dir = str(config.database_dir / "browser_profiles" / user_id)
+        profile_dir = str(resolve_profile_dir(config, user_id))
         ws_url = await restart_browser_with_cdp(port=port, profile_dir=profile_dir)
 
         if not ws_url:

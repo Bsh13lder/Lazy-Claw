@@ -598,6 +598,7 @@ class SkillRegistry:
             InvoiceClientSkill,
             ReviewDeliverableSkill,
             SearchJobsSkill,
+            SetFreelancePitchSkill,
             SetSkillsProfileSkill,
             StartGigSkill,
             SubmitDeliverableSkill,
@@ -611,6 +612,7 @@ class SkillRegistry:
         self.register(ApplyRedditDmSkill(config=config, registry=self))
         self.register(SurvivalModeSkill(config=config))
         self.register(SetSkillsProfileSkill(config=config))
+        self.register(SetFreelancePitchSkill(config=config))
         self.register(SurvivalStatusSkill(config=config))
         self.register(ReviewDeliverableSkill(config=config, registry=self))
         self.register(StartGigSkill(config=config, registry=self))
@@ -638,6 +640,34 @@ class SkillRegistry:
         self.register(LazydoctorRunNowSkill(config=config))
         self.register(LazydoctorReviewFindingSkill(config=config))
         self.register(LazydoctorSummarizePendingSkill(config=config))
+
+        # Goal Executor (Phase B/C — autonomous high-level objectives).
+        from lazyclaw.skills.builtin.goal import (
+            AbortGoalSkill,
+            AnswerGoalQuestionsSkill,
+            GoalProgressReportSkill,
+            GoalStatusSkill,
+            ListGoalsSkill,
+            StartGoalSkill,
+        )
+        self.register(StartGoalSkill(config=config))
+        self.register(AnswerGoalQuestionsSkill(config=config))
+        self.register(GoalStatusSkill(config=config))
+        self.register(ListGoalsSkill(config=config))
+        self.register(AbortGoalSkill(config=config))
+        self.register(GoalProgressReportSkill(config=config))
+
+        # Multi-account browser identity skills (Phase A — Goal Executor).
+        from lazyclaw.skills.builtin.browser_account import (
+            ListBrowserAccountsSkill,
+            RegisterBrowserAccountSkill,
+            SwitchBrowserAccountSkill,
+            TuneBrowserCadenceSkill,
+        )
+        self.register(RegisterBrowserAccountSkill(config=config))
+        self.register(ListBrowserAccountsSkill(config=config))
+        self.register(SwitchBrowserAccountSkill(config=config))
+        self.register(TuneBrowserCadenceSkill(config=config))
 
     def get_skill(self, name: str) -> "BaseSkill | None":
         """Get a registered skill instance by name."""

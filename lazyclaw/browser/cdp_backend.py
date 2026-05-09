@@ -58,10 +58,12 @@ class CDPBackend:
         port: int = 9222,
         profile_dir: str | None = None,
         user_id: str | None = None,
+        account_slug: str | None = None,
     ) -> None:
         self._port = port
         self._profile_dir = profile_dir  # Shared with Playwright when set
         self._user_id = user_id           # When set, action events are published
+        self._account_slug = account_slug  # Multi-account browser identity (Phase A)
         self._conn: CDPConnection | None = None
         self._current_tab: CDPTab | None = None
         self._last_activity: float = 0.0
@@ -72,10 +74,61 @@ class CDPBackend:
         # or None until the first connect. Gates apply_stealth and drives the
         # UI badge so the user knows which browser identity the agent is using.
         self._cdp_source: str | None = None
+        # Phase A — per-domain cadence: derived from the active tab's URL on
+        # every action via :meth:`_active_cadence`. ``_cadence_overrides`` is
+        # the user's persisted per-domain factor map (lazy-loaded from
+        # browser_settings on first use; agent runtime can refresh via
+        # :meth:`set_cadence_overrides`).
+        self._current_domain: str | None = None
+        self._cadence_overrides: dict[str, dict[str, float]] = {}
 
     def set_user_id(self, user_id: str | None) -> None:
         """Late-bind user_id (used by the shared singleton when user switches)."""
         self._user_id = user_id
+
+    def set_account_slug(self, account_slug: str | None) -> None:
+        """Late-bind the multi-account browser identity."""
+        self._account_slug = account_slug
+
+    def set_cadence_overrides(
+        self, overrides: dict[str, dict[str, float]] | None,
+    ) -> None:
+        """Push the user's per-domain cadence factor map.
+
+        Agent runtime calls this after loading the user's browser
+        settings; subsequent click/type/scroll calls sample from the
+        adjusted ranges. Pass ``None`` or empty dict to clear.
+        """
+        self._cadence_overrides = dict(overrides) if overrides else {}
+
+    def _set_current_domain_from_url(self, url: str | None) -> None:
+        """Update ``_current_domain`` from a CDP-reported URL.
+
+        Called internally on tab activation / navigation. Failures are
+        non-fatal — leaves the previous domain in place rather than
+        silently switching to DEFAULT cadence on a malformed URL.
+        """
+        if not url:
+            return
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+            host = host.lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if host:
+                self._current_domain = host
+        except Exception:
+            logger.debug("cdp_backend._set_current_domain_from_url failed", exc_info=True)
+
+    def _active_cadence(self):
+        """Resolve the cadence profile for the current domain.
+
+        Returns a :class:`CadenceProfile`. Lookup chain:
+        user-override (per-domain factors) → DOMAIN_OVERRIDES → DEFAULT.
+        """
+        from lazyclaw.browser.cadence import get_cadence
+        return get_cadence(self._current_domain, self._cadence_overrides or None)
 
     def _emit(
         self,
@@ -699,12 +752,15 @@ class CDPBackend:
 
     async def _post_nav_emit(self, requested_url: str) -> None:
         """Emit navigate event with final URL+title and capture a thumbnail."""
-        if not self._user_id:
-            return
         try:
             final_url = await self.current_url()
         except Exception:
             final_url = requested_url
+        # Update the active domain so subsequent click/type/scroll calls
+        # sample from the right per-domain cadence profile.
+        self._set_current_domain_from_url(final_url)
+        if not self._user_id:
+            return
         try:
             page_title = await self.title()
         except Exception:
@@ -832,7 +888,10 @@ class CDPBackend:
         await self._emit_action_with_frames(
             action="click", target=selector[:80],
             detail=f"Clicked {selector[:60]}",
-            coro=human_click(conn, x, y, target_size=target_size),
+            coro=human_click(
+                conn, x, y, target_size=target_size,
+                cadence=self._active_cadence(),
+            ),
         )
 
     async def type_text(self, selector: str, text: str) -> None:
@@ -868,6 +927,7 @@ class CDPBackend:
                 conn, text,
                 field_x=coords["x"] if coords else None,
                 field_y=coords["y"] if coords else None,
+                cadence=self._active_cadence(),
             ),
         )
 
@@ -932,7 +992,10 @@ class CDPBackend:
         await self._emit_action_with_frames(
             action="scroll", target=direction,
             detail=f"Scrolled {direction} {amount}px",
-            coro=human_scroll(conn, direction=direction, amount=amount),
+            coro=human_scroll(
+                conn, direction=direction, amount=amount,
+                cadence=self._active_cadence(),
+            ),
         )
 
     async def wait_for_selector(

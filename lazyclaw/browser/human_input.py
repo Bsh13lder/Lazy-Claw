@@ -18,7 +18,19 @@ import math
 import random
 from dataclasses import dataclass
 
+from lazyclaw.browser.cadence import DEFAULT as DEFAULT_CADENCE, CadenceProfile, sample_ms
+
 logger = logging.getLogger(__name__)
+
+
+def _resolve_cadence(cadence: CadenceProfile | None) -> CadenceProfile:
+    """Fall back to the module DEFAULT when caller passed nothing.
+
+    Keeps the function signatures fully back-compat: any old call site
+    that doesn't know about cadence yet gets the same behavior as before
+    Phase A (the DEFAULT values are the original hardcoded ranges).
+    """
+    return cadence if cadence is not None else DEFAULT_CADENCE
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -244,14 +256,18 @@ async def human_click(
     y: float,
     target_size: float = 20.0,
     move: bool = True,
+    cadence: CadenceProfile | None = None,
 ) -> None:
     """Click at (x, y) with full human-like event chain.
 
     Complete chain: mousemove approach → mouseover → mouseenter →
-    mousedown → [50-150ms hold] → mouseup → click.
+    mousedown → [hold] → mouseup → click.
 
-    Optionally skips the move phase (if cursor is already positioned).
+    Pass ``cadence`` to override the default per-domain timing — see
+    :mod:`lazyclaw.browser.cadence`. Defaults to :data:`DEFAULT_CADENCE`,
+    which keeps the pre-Phase-A behavior.
     """
+    profile = _resolve_cadence(cadence)
     # Phase 1: Move cursor to target (Bezier path)
     if move:
         await human_move_to(conn, x, y, target_size)
@@ -263,8 +279,9 @@ async def human_click(
         "y": round(y),
     })
 
-    # Brief hesitation before clicking (reading/aiming)
-    await asyncio.sleep(random.uniform(0.05, 0.2))
+    # Brief hesitation before clicking (reading/aiming) — half the click_pause range
+    lo, hi = profile.click_pause_ms
+    await asyncio.sleep(random.uniform(lo / 2, hi / 2) / 1000.0)
 
     # Phase 3: mousedown
     await conn.send("Input.dispatchMouseEvent", {
@@ -275,8 +292,8 @@ async def human_click(
         "clickCount": 1,
     })
 
-    # Phase 4: Hold (human finger press duration)
-    await asyncio.sleep(random.uniform(0.05, 0.15))
+    # Phase 4: Hold (human finger press duration) — quarter of click_pause range
+    await asyncio.sleep(random.uniform(lo / 4, hi / 4) / 1000.0)
 
     # Phase 5: mouseup
     await conn.send("Input.dispatchMouseEvent", {
@@ -288,7 +305,7 @@ async def human_click(
     })
 
     # Post-click pause (human reaction time)
-    await asyncio.sleep(random.uniform(0.1, 0.4))
+    await asyncio.sleep(sample_ms(profile.click_pause_ms))
 
 
 async def human_type(
@@ -296,16 +313,24 @@ async def human_type(
     text: str,
     field_x: float | None = None,
     field_y: float | None = None,
+    cadence: CadenceProfile | None = None,
 ) -> None:
     """Type text with human-like keystroke timing.
 
     Variable inter-key delay: faster for common sequences,
     slower at word boundaries, occasional micro-pauses.
+
+    Pass ``cadence`` to apply per-domain tuning — see
+    :mod:`lazyclaw.browser.cadence`.
     """
+    profile = _resolve_cadence(cadence)
+
     # Click field first if coordinates provided
     if field_x is not None and field_y is not None:
-        await human_click(conn, field_x, field_y)
-        await asyncio.sleep(random.uniform(0.1, 0.3))
+        await human_click(conn, field_x, field_y, cadence=profile)
+        # Settle pause before typing — third of click_pause range
+        lo, hi = profile.click_pause_ms
+        await asyncio.sleep(random.uniform(lo, hi) / 1000.0)
 
     for i, char in enumerate(text):
         # keyDown with text
@@ -319,15 +344,13 @@ async def human_type(
             "key": char,
         })
 
-        # Variable timing
-        base_delay = random.uniform(0.03, 0.10)
-
-        # Slower at word boundaries
+        # Variable timing — sample from cadence profile
         if char == " ":
-            base_delay = random.uniform(0.08, 0.18)
-        # Occasional micro-pause (thinking while typing)
+            base_delay = sample_ms(profile.word_boundary_ms)
         elif random.random() < 0.05:
-            base_delay = random.uniform(0.15, 0.35)
+            base_delay = sample_ms(profile.micro_pause_ms)
+        else:
+            base_delay = sample_ms(profile.type_speed_ms)
 
         await asyncio.sleep(base_delay)
 
@@ -336,11 +359,14 @@ async def human_scroll(
     conn,
     direction: str = "down",
     amount: int = 300,
+    cadence: CadenceProfile | None = None,
 ) -> None:
     """Scroll with variable momentum like a real mousewheel/trackpad.
 
     Splits the scroll into 2-4 smaller increments with deceleration.
+    Pass ``cadence`` for per-domain step + post-scroll dwell timing.
     """
+    profile = _resolve_cadence(cadence)
     delta_y = amount if direction == "down" else -amount
     scroll_steps = random.randint(2, 4)
     remaining = delta_y
@@ -369,7 +395,7 @@ async def human_scroll(
         })
 
         # Deceleration pause
-        await asyncio.sleep(random.uniform(0.03, 0.08))
+        await asyncio.sleep(sample_ms(profile.scroll_step_ms))
 
     # Post-scroll reading pause
-    await asyncio.sleep(random.uniform(0.2, 0.5))
+    await asyncio.sleep(sample_ms(profile.post_scroll_dwell_ms))

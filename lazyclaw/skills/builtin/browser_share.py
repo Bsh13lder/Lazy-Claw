@@ -110,8 +110,9 @@ class ShareBrowserControlSkill(BaseSkill):
             return "Error: configuration unavailable."
 
         try:
+            from lazyclaw.browser.profile_resolver import resolve_profile_dir
             port = getattr(self._config, "cdp_port", 9222)
-            profile_dir = str(self._config.database_dir / "browser_profiles" / user_id)
+            profile_dir = str(resolve_profile_dir(self._config, user_id))
             if is_server_mode():
                 session = await start_remote_session(
                     user_id=user_id,

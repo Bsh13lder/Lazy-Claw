@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { transcribeAudio } from "../api";
 
 interface ChatInputProps {
   onSend: (message: string) => void;
@@ -6,6 +7,8 @@ interface ChatInputProps {
   isStreaming: boolean;
   onCancel: () => void;
 }
+
+type VoiceState = "idle" | "recording" | "transcribing" | "error";
 
 const MAX_LENGTH = 50_000;
 
@@ -157,6 +160,113 @@ export default function ChatInput({
   const [selectedCmd, setSelectedCmd] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // ── Voice input ──
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [voiceError, setVoiceError] = useState<string>("");
+  const [recordingSecs, setRecordingSecs] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recorderStreamRef = useRef<MediaStream | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
+
+  const stopRecorderTracks = useCallback(() => {
+    recorderStreamRef.current?.getTracks().forEach((t) => t.stop());
+    recorderStreamRef.current = null;
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  }, []);
+
+  // Tear down on unmount so we never leak the mic.
+  useEffect(() => {
+    return () => stopRecorderTracks();
+  }, [stopRecorderTracks]);
+
+  const startRecording = useCallback(async () => {
+    if (voiceState !== "idle") return;
+    setVoiceError("");
+
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setVoiceError("Microphone not supported in this browser.");
+      setVoiceState("error");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recorderStreamRef.current = stream;
+      // Browser default (webm/opus on Chromium, mp4/m4a on Safari) — ffmpeg
+      // handles both transparently in the backend, no MIME negotiation needed.
+      const recorder = new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        const chunks = recordedChunksRef.current;
+        recordedChunksRef.current = [];
+        stopRecorderTracks();
+        if (chunks.length === 0) {
+          setVoiceState("idle");
+          return;
+        }
+        const blob = new Blob(chunks, { type: chunks[0].type || "audio/webm" });
+        setVoiceState("transcribing");
+        try {
+          const text = await transcribeAudio(blob, `voice.${blob.type.includes("mp4") ? "m4a" : "webm"}`);
+          setVoiceState("idle");
+          if (!text) {
+            setVoiceError("Couldn't make out anything.");
+            setVoiceState("error");
+            window.setTimeout(() => setVoiceState("idle"), 2000);
+            return;
+          }
+          // Append to existing draft so users can keep multiple snippets.
+          setValue((prev) => (prev ? prev.trimEnd() + " " + text : text));
+          textareaRef.current?.focus();
+        } catch (err) {
+          console.error("transcribeAudio failed", err);
+          setVoiceError(err instanceof Error ? err.message : "Transcription failed");
+          setVoiceState("error");
+          window.setTimeout(() => setVoiceState("idle"), 3000);
+        }
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+      setRecordingSecs(0);
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSecs((s) => s + 1);
+      }, 1000);
+      setVoiceState("recording");
+    } catch (err) {
+      console.error("getUserMedia failed", err);
+      setVoiceError(
+        err instanceof Error && err.name === "NotAllowedError"
+          ? "Microphone permission denied."
+          : "Couldn't access microphone.",
+      );
+      setVoiceState("error");
+      stopRecorderTracks();
+      window.setTimeout(() => setVoiceState("idle"), 3000);
+    }
+  }, [voiceState, stopRecorderTracks]);
+
+  const stopRecording = useCallback(() => {
+    const r = recorderRef.current;
+    if (r && r.state !== "inactive") r.stop();
+    recorderRef.current = null;
+    if (recordingTimerRef.current !== null) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  }, []);
+
+  const toggleRecording = useCallback(() => {
+    if (voiceState === "recording") stopRecording();
+    else if (voiceState === "idle") void startRecording();
+  }, [voiceState, startRecording, stopRecording]);
+
   // Filter for command palette
   const cmdFilter = useMemo(() => {
     if (!showCommands) return "";
@@ -296,6 +406,52 @@ export default function ChatInput({
               </button>
             )}
             <button
+              onClick={toggleRecording}
+              disabled={disabled || voiceState === "transcribing"}
+              className={`p-1.5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+                voiceState === "recording"
+                  ? "bg-error/20 text-error animate-pulse"
+                  : voiceState === "transcribing"
+                  ? "bg-cyan/20 text-cyan"
+                  : voiceState === "error"
+                  ? "bg-amber/20 text-amber"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text-primary"
+              }`}
+              aria-label={
+                voiceState === "recording"
+                  ? "Stop recording"
+                  : voiceState === "transcribing"
+                  ? "Transcribing…"
+                  : "Record voice"
+              }
+              title={
+                voiceState === "recording"
+                  ? `Stop recording (${recordingSecs}s)`
+                  : voiceState === "transcribing"
+                  ? "Transcribing audio…"
+                  : voiceState === "error"
+                  ? voiceError
+                  : "Record voice — click to start, click again to stop"
+              }
+            >
+              {voiceState === "transcribing" ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="animate-spin">
+                  <path d="M21 12a9 9 0 1 1-6.2-8.55" />
+                </svg>
+              ) : voiceState === "recording" ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              )}
+            </button>
+            <button
               onClick={handleSend}
               disabled={disabled || !value.trim()}
               className={`p-1.5 rounded-lg disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-80 transition-opacity ${
@@ -325,7 +481,21 @@ export default function ChatInput({
 
         <div className="flex items-center justify-between mt-2 px-1">
           <p className="text-[11px] text-text-muted">
-            {isStreaming ? (
+            {voiceState === "recording" ? (
+              <>
+                <span className="text-error">● Recording</span>
+                <span className="mx-1.5">—</span>
+                {recordingSecs}s · click the stop icon when done.
+              </>
+            ) : voiceState === "transcribing" ? (
+              <>
+                <span className="text-cyan">● Transcribing</span>
+                <span className="mx-1.5">—</span>
+                whisper.cpp is processing your audio…
+              </>
+            ) : voiceState === "error" && voiceError ? (
+              <span className="text-amber">⚠ {voiceError}</span>
+            ) : isStreaming ? (
               <>
                 <span className="text-cyan">● Side-note mode</span>
                 <span className="mx-1.5">—</span>

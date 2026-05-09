@@ -50,7 +50,16 @@ dependencies = [
 telegram = []
 discord = ["discord.py>=2.3.0"]
 eco = []
-voice = ["openai-whisper>=20231117"]
+# Speech-to-text for voice messages (Telegram voice notes + Web UI mic).
+# whisper.cpp via pywhispercpp — MIT, ~244 MB `small` model, Metal + CoreML
+# ANE acceleration on Apple Silicon, 99 languages incl. Georgian.
+# imageio-ffmpeg bundles a static ffmpeg binary (BSD-2-Clause) so users don't
+# have to `brew install ffmpeg` separately — stt.py prefers the bundled
+# binary, falls back to system PATH if it's missing.
+voice = [
+    "pywhispercpp>=1.2.0",
+    "imageio-ffmpeg>=0.4.9",
+]
 local = ["llama-cpp-python>=0.2.0"]
 # Apple Vision OCR for browser screenshots — macOS-only. Pulls in the
 # pyobjc Vision framework binding. `browser(action="ask_vision")` and

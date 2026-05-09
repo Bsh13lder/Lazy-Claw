@@ -986,6 +986,11 @@ class TelegramAdapter(ChannelAdapter):
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
+        # Voice notes / forwarded audio → STT → agent (same path as text).
+        # Transcript is echoed back so the user can confirm what we heard.
+        self._app.add_handler(
+            MessageHandler(filters.VOICE | filters.AUDIO, self._handle_voice)
+        )
 
         await self._app.initialize()
         await self._app.start()
@@ -1279,6 +1284,80 @@ class TelegramAdapter(ChannelAdapter):
         if not self._allowed_chats:
             return True
         return chat_id in self._allowed_chats
+
+    async def _handle_voice(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Voice / audio message → whisper.cpp → re-route as text."""
+        if not update.message:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._is_allowed(chat_id):
+            logger.warning("Unauthorized Telegram voice from chat %s", chat_id)
+            return
+
+        media = update.message.voice or update.message.audio
+        if media is None:
+            return
+
+        ack = None
+        try:
+            ack = await update.message.reply_text("\U0001f399️ Listening…")
+        except Exception as exc:
+            logger.debug("Voice ack send failed: %s", exc)
+
+        import tempfile
+        from pathlib import Path
+
+        suffix = ".ogg" if update.message.voice else ".m4a"
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="lazyclaw_voice_")
+        os.close(fd)
+        tmp = Path(tmp_path)
+        try:
+            try:
+                tg_file = await media.get_file()
+                await tg_file.download_to_drive(custom_path=str(tmp))
+            except Exception as exc:
+                logger.warning("Failed to download voice file: %s", exc)
+                if ack is not None:
+                    await ack.edit_text("\U0001f399️ Couldn't download audio.")
+                return
+
+            try:
+                from lazyclaw.audio.stt import STTUnavailableError, transcribe_file
+                transcript = await transcribe_file(tmp)
+            except STTUnavailableError as exc:
+                logger.warning("STT unavailable: %s", exc)
+                if ack is not None:
+                    await ack.edit_text(f"\U0001f399️ STT unavailable: {exc}")
+                return
+            except Exception as exc:
+                logger.exception("Transcription failed")
+                if ack is not None:
+                    await ack.edit_text(f"\U0001f399️ Transcription failed: {exc}")
+                return
+
+            if not transcript:
+                if ack is not None:
+                    await ack.edit_text("\U0001f399️ Couldn't make out anything.")
+                return
+
+            # Echo what we heard so the user can correct mis-hearings.
+            if ack is not None:
+                try:
+                    await ack.edit_text(f"\U0001f399️ {transcript}")
+                except Exception as exc:
+                    logger.debug("Voice ack edit failed: %s", exc)
+
+            # Inject transcript into the message and re-use the text handler.
+            try:
+                update.message._unfreeze()
+            except Exception:
+                pass
+            update.message.text = transcript
+            await self._handle_message(update, context)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     async def _handle_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,

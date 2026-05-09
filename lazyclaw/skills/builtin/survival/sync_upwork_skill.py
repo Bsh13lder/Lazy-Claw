@@ -124,24 +124,42 @@ class SyncUpworkProfileSkill(BaseSkill):
         applied: list[str] = []
         skipped: list[str] = []
 
+        # Lazyclaw-set values always win over Upwork — but surface the
+        # Upwork value side-by-side when they differ, so the user can
+        # spot a mismatch and decide whether to re-sync with force=true.
+        def _diff_note(label: str, lazy_val: str, upwork_val: str) -> str:
+            if lazy_val.strip().lower() == upwork_val.strip().lower():
+                return f"{label} (matches Upwork: '{lazy_val}')"
+            return (
+                f"{label} — lazyclaw='{lazy_val}', upwork='{upwork_val}' "
+                f"(MISMATCH — pass force=true to overwrite with Upwork)"
+            )
+
         if upwork_name:
             if force or not current.display_name:
                 updates["display_name"] = upwork_name
                 applied.append(f"display_name → {upwork_name}")
             else:
-                skipped.append(f"display_name (already '{current.display_name}')")
+                skipped.append(_diff_note(
+                    "display_name", current.display_name, upwork_name
+                ))
         if upwork_title:
             if force or not current.title:
                 updates["title"] = upwork_title
                 applied.append(f"title → {upwork_title}")
             else:
-                skipped.append(f"title (already '{current.title}')")
+                skipped.append(_diff_note(
+                    "title", current.title, upwork_title
+                ))
         if upwork_bio:
             if force or not current.bio:
                 updates["bio"] = upwork_bio[:500]
                 applied.append("bio → (filled from Upwork overview)")
             else:
-                skipped.append("bio (already set)")
+                skipped.append(
+                    "bio (lazyclaw value kept; Upwork has its own — "
+                    "pass force=true to overwrite)"
+                )
 
         if not updates:
             return (

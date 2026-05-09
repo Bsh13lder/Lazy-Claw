@@ -27,7 +27,7 @@
 
 **LazyClaw** is an open-source AI agent platform where every piece of user data is encrypted with AES-256-GCM before it touches disk. Conversations, memories, skills, credentials, scheduled jobs — all encrypted. The server never sees plaintext.
 
-Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, saved templates for recurring flows, multi-account profile isolation, and per-domain human-cadence tuning**. **Goal Executor** for autonomous high-level objectives — drafts a plan, batch-asks every required answer upfront, then dispatches to the browser specialist. Telegram + WhatsApp + Instagram + Email. **~206 builtin skills + ~85 MCP-bridged tools** discoverable at runtime. React Web UI with **18 pages** (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
+Built in Python. Native MCP. Multi-agent delegation with brain-as-dispatcher routing. Cost-aware routing. Browser automation via CDP with a **live canvas, checkpoints, saved templates for recurring flows, multi-account profile isolation, and per-domain human-cadence tuning**. **Goal Executor** for autonomous high-level objectives — drafts a plan, batch-asks every required answer upfront, then dispatches to the browser specialist. Telegram + WhatsApp + Instagram + Email — text or **voice** (whisper.cpp on-device, 99 languages). **~206 builtin skills + ~85 MCP-bridged tools** discoverable at runtime. React Web UI with **18 pages** (incl. dedicated `/chat` page with collapsible AgentConsole dashboard) + persistent chat sidebar.
 
 ## Why LazyClaw?
 
@@ -390,7 +390,7 @@ Bot: ✅ Created workflow "Daily Sales Summary" — cron 0 9 * * *, nodes: Sheet
 
 ## Telegram
 
-Send a message on Telegram, get AI responses back with full tool calling. Admin chat lock (first `/start` claims the bot). Screenshots auto-forwarded. Retry with exponential backoff.
+Send a message on Telegram, get AI responses back with full tool calling. Admin chat lock (first `/start` claims the bot). Screenshots auto-forwarded. Retry with exponential backoff. **Voice notes and forwarded audio** auto-transcribe via whisper.cpp and run through the same chat pipeline (transcript echoed back so you can correct mis-hearings) — install with `pipx inject lazyclaw 'lazyclaw[voice]'`, ~1 GB RAM on the default `small` model, Metal + Core ML ANE acceleration on Apple Silicon, 99 languages incl. Georgian.
 
 ```
 You: check my WhatsApp messages
@@ -407,7 +407,7 @@ While the agent works, type `/status` or "what's happening" to see live progress
 
 React 19 + TypeScript + Vite + Tailwind control panel with 18 pages, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
 
-- **Chat** — Dedicated `/chat` route with full-width conversation + collapsible **AgentConsole** dashboard (agent status, queued items, active background tasks, BrowserCanvas)
+- **Chat** — Dedicated `/chat` route with full-width conversation + collapsible **AgentConsole** dashboard (agent status, queued items, active background tasks, BrowserCanvas). Mic button records via MediaRecorder → `/api/audio/transcribe` → whisper.cpp; transcript appended to the draft so multiple voice snippets stack before send.
 - **Overview** — System dashboard with health stats and pending approvals
 - **Activity** — Live agent and task monitor (active, background, recent)
 - **Replay** — Session trace playback and debugging

@@ -223,3 +223,128 @@ async def parse_task_route(
     else:
         draft = regex_parse_full(body.text)
     return {"draft": draft, "mode": body.mode}
+
+
+# ---------------------------------------------------------------------------
+# Reschedule — NL phrase or worker-LLM "smart" suggestion
+# ---------------------------------------------------------------------------
+
+
+class RescheduleBody(BaseModel):
+    # `phrase` is the user's typed input (e.g. "tomorrow 3pm", "+2h",
+    # "next Monday", "snooze 30m"). Required for mode=nl.
+    phrase: str | None = Field(default=None, max_length=500)
+    # mode=smart — backend picks a sensible new time via the worker LLM
+    # given the task's title + current schedule. No user input needed.
+    mode: Literal["nl", "smart"] = "nl"
+
+
+@router.post("/{task_id}/reschedule")
+async def reschedule_task_route(
+    task_id: str,
+    body: RescheduleBody,
+    user: User = Depends(get_current_user),
+):
+    """Reschedule a task from NL or via worker-LLM suggestion.
+
+    ``mode=nl``: parse ``phrase`` with ``nl_time`` (regex) → patch the task.
+    ``mode=smart``: ask the ECO worker for a sensible reschedule phrase
+    based on title + current due/reminder, then run that through the same
+    NL parser. Returns ``{task, applied}`` where ``applied`` is the human-
+    readable summary the UI shows in the toast.
+    """
+    task = await get_task(_config, user.id, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    from lazyclaw.tasks.nl_time import parse as nl_parse
+    from lazyclaw.tasks.timezone import get_user_tz
+
+    user_tz = await get_user_tz(_config, user.id)
+
+    if body.mode == "smart":
+        suggested = await _smart_reschedule_phrase(_config, user.id, task)
+        if not suggested:
+            raise HTTPException(
+                status_code=503,
+                detail="Smart reschedule unavailable — worker LLM offline.",
+            )
+        phrase_to_use = suggested
+    else:
+        phrase_to_use = (body.phrase or "").strip()
+        if not phrase_to_use:
+            raise HTTPException(status_code=400, detail="Phrase is required for mode=nl")
+
+    parsed = nl_parse(phrase_to_use, tz=user_tz)
+    if not parsed.reminder_at and not parsed.due_date:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Couldn't parse a time from {phrase_to_use!r}. "
+            "Try 'tomorrow 3pm', 'next Monday', '+2h', 'snooze 30m'.",
+        )
+
+    updates: dict = {}
+    if parsed.reminder_at:
+        updates["reminder_at"] = parsed.reminder_at
+    if parsed.due_date:
+        updates["due_date"] = parsed.due_date
+
+    try:
+        ok = await update_task(_config, user.id, task_id, **updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    refreshed = await get_task(_config, user.id, task_id)
+    return {
+        "task": refreshed,
+        "applied": phrase_to_use,
+        "mode": body.mode,
+    }
+
+
+async def _smart_reschedule_phrase(config, user_id: str, task: dict) -> str | None:
+    """Ask the worker LLM for a one-line reschedule phrase for ``task``.
+
+    Returns the raw phrase (e.g. "tomorrow 9am", "+2 days") or None when
+    the LLM is unavailable. The caller feeds the result into the same
+    nl_time parser used for user-typed phrases — no second pipeline.
+    """
+    from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+    from lazyclaw.llm.providers.base import LLMMessage
+    from lazyclaw.llm.router import LLMRouter
+
+    title = (task.get("title") or "").strip()
+    priority = task.get("priority") or "medium"
+    cur_due = task.get("due_date") or "—"
+    cur_rem = task.get("reminder_at") or "—"
+
+    prompt = (
+        "You reschedule a task to a sensible new time based on its title, "
+        "priority, and current schedule. Pick a reasonable working-hours "
+        "slot. Reply with ONE short phrase only that the task parser can "
+        "handle. Examples of valid replies:\n"
+        "  tomorrow 9am\n  next Monday 14:00\n  +2 days\n  Friday 10am\n"
+        "  in 3 hours\n\n"
+        "No quotes. No explanation. No prefix. Just the phrase.\n\n"
+        f"Task: {title}\n"
+        f"Priority: {priority}\n"
+        f"Current due: {cur_due}\n"
+        f"Current reminder: {cur_rem}"
+    )
+    try:
+        eco = EcoRouter(config, LLMRouter(config))
+        response = await eco.chat(
+            [LLMMessage(role="user", content=prompt)],
+            user_id=user_id,
+            role=ROLE_WORKER,
+        )
+    except Exception:
+        return None
+    raw = (response.content or "").strip() if response else ""
+    # Strip quotes / a leading bullet — the parser is permissive but the
+    # model sometimes wraps anyway.
+    raw = raw.strip('"').strip("'").lstrip("-•·").strip()
+    raw = raw.splitlines()[0].strip()
+    return raw or None

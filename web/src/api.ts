@@ -737,6 +737,15 @@ export const completeTask = (id: string) =>
     method: "POST",
   });
 
+export const rescheduleTask = (
+  id: string,
+  body: { phrase?: string; mode: "nl" | "smart" },
+) =>
+  request<{ task: TaskItem; applied: string; mode: "nl" | "smart" }>(
+    `/api/tasks/${id}/reschedule`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
 export const deleteTask = (id: string) =>
   request<{ status: string; id: string }>(`/api/tasks/${id}`, {
     method: "DELETE",

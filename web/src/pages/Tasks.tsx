@@ -93,6 +93,105 @@ function writeDetailOpen(open: boolean): void {
   }
 }
 
+function renderEmptyState({
+  bucket,
+  search,
+  channel,
+}: {
+  bucket: Bucket;
+  search: string;
+  channel: Channel;
+}) {
+  if (search) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-3 px-6">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-text-muted opacity-40">
+          <circle cx="11" cy="11" r="8" />
+          <path d="M21 21l-4.3-4.3M8 11h6" />
+        </svg>
+        <p className="text-[12px] text-text-secondary">No matches for "{search.slice(0, 36)}".</p>
+        <p className="text-[10.5px] text-text-muted max-w-[28ch] leading-relaxed">
+          Search scans titles, descriptions, categories, and steps. Try a single keyword.
+        </p>
+      </div>
+    );
+  }
+
+  if (bucket === "done") {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-3 px-6">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-text-muted opacity-40">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 12h6M9 8h6M9 16h6" />
+        </svg>
+        <p className="text-[12px] text-text-secondary">Nothing finished yet.</p>
+        <p className="text-[10.5px] text-text-muted max-w-[28ch] leading-relaxed">
+          Once you tick tasks off, they land here. The Done bucket keeps the last 90 days for review.
+        </p>
+      </div>
+    );
+  }
+
+  if (bucket === "today") {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-3 px-6">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.1" className="text-accent/50">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M9 12l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <p className="text-[12px] text-text-secondary">Inbox zero. Nothing's due today.</p>
+        <p className="text-[10.5px] text-text-muted max-w-[28ch] leading-relaxed">
+          Pull something forward from <span className="text-accent">Upcoming</span>, or capture
+          a new one with the bar above — "tomorrow 9am buy milk urgent".
+        </p>
+      </div>
+    );
+  }
+
+  if (bucket === "upcoming") {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-3 px-6">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-text-muted opacity-40">
+          <rect x="3" y="4" width="18" height="18" rx="2" />
+          <path d="M16 2v4M8 2v4M3 10h18" />
+        </svg>
+        <p className="text-[12px] text-text-secondary">Nothing scheduled ahead.</p>
+        <p className="text-[10.5px] text-text-muted max-w-[28ch] leading-relaxed">
+          The road's clear. Add a future task with a phrase like "next Monday 14:00 review PRD".
+        </p>
+      </div>
+    );
+  }
+
+  if (bucket === "someday") {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-3 px-6">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-text-muted opacity-40">
+          <path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M5 19l3-3M16 8l3-3" />
+        </svg>
+        <p className="text-[12px] text-text-secondary">No undated tasks.</p>
+        <p className="text-[10.5px] text-text-muted max-w-[28ch] leading-relaxed">
+          Add things you'll get to "eventually" by typing a title without a time.
+        </p>
+      </div>
+    );
+  }
+
+  // bucket === "all"
+  return (
+    <div className="flex flex-col items-center justify-center py-20 text-center gap-3 px-6">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-text-muted opacity-40">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M7 9l2 2 4-4M7 15l2 2 4-4" />
+      </svg>
+      <p className="text-[12px] text-text-secondary">No tasks {channel === "ai" ? "for the agent" : channel === "mine" ? "of yours" : ""} yet.</p>
+      <p className="text-[10.5px] text-text-muted max-w-[28ch] leading-relaxed">
+        Use the bar above to dictate one — natural language only, no forms.
+      </p>
+    </div>
+  );
+}
+
 function groupByDueBucket(tasks: TaskItem[]): Record<string, TaskItem[]> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -270,13 +369,31 @@ export default function Tasks() {
     </div>
   );
 
+  const emptyState = renderEmptyState({ bucket, search, channel });
+  const groupRule: Record<string, string> = {
+    Overdue: "before:bg-red-400/40",
+    Today: "before:bg-amber/40",
+    Tomorrow: "before:bg-accent/30",
+    "This week": "before:bg-text-muted/20",
+    Later: "before:bg-text-muted/10",
+    Someday: "before:bg-text-muted/10",
+  };
+  const groupTone: Record<string, string> = {
+    Overdue: "text-red-400",
+    Today: "text-amber",
+    Tomorrow: "text-accent",
+    "This week": "text-text-secondary",
+    Later: "text-text-secondary",
+    Someday: "text-text-muted",
+  };
+
   const listPane = (
-    <main className="relative rounded-xl bg-bg-secondary/40 border border-border overflow-y-auto min-h-0">
+    <main className="relative rounded-xl bg-bg-secondary/30 ring-1 ring-border/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] overflow-y-auto min-h-0">
       {/* Wide-screen detail toggle, pinned to top-right of the list area. */}
       <button
         type="button"
         onClick={() => setDetailOpen((o) => !o)}
-        className="hidden lg:flex absolute top-2 right-2 items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-border bg-bg-secondary/80 backdrop-blur text-text-muted hover:text-accent hover:border-accent/40 transition-colors z-20"
+        className="hidden lg:flex absolute top-2 right-2 items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-1 rounded border border-border/60 bg-bg-secondary/80 backdrop-blur text-text-muted hover:text-accent hover:border-accent/40 transition-colors z-20"
         title={detailOpen ? "Hide detail pane for a wider list" : "Show the detail pane"}
       >
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -290,37 +407,16 @@ export default function Tasks() {
       </button>
 
       {!loaded ? (
-        <p className="text-xs text-text-muted text-center py-16">Loading…</p>
-      ) : filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center gap-2">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="text-text-muted opacity-30">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M7 9l2 2 4-4M7 15l2 2 4-4" />
-          </svg>
-          <p className="text-xs text-text-muted">
-            {search
-              ? "Nothing matches that search."
-              : bucket === "today"
-                ? "Nothing due today. Ahead of the game."
-                : "No tasks in this bucket."}
-          </p>
-          {bucket !== "done" && !search && (
-            <p className="text-[10px] text-text-muted max-w-[26ch]">
-              Type "tomorrow at 9 buy milk urgent" above and hit ⏎.
-            </p>
-          )}
-        </div>
-      ) : (
+        <p className="text-xs text-text-muted text-center py-16 italic">Loading tasks…</p>
+      ) : filtered.length === 0 ? emptyState : (
         Object.entries(grouped).map(([groupName, groupTasks]) => {
           if (groupTasks.length === 0) return null;
           return (
             <section key={groupName}>
-              <header className="flex items-center gap-2 px-4 py-2 bg-bg-tertiary/40 border-b border-border/60 sticky top-0 backdrop-blur-sm z-10">
-                <p className={`text-[10px] font-semibold uppercase tracking-[0.12em] ${
-                  groupName === "Overdue" ? "text-red-400" :
-                  groupName === "Today" ? "text-amber" :
-                  "text-text-secondary"
-                }`}>
+              <header
+                className={`relative flex items-center gap-2 px-4 py-1.5 bg-bg-tertiary/30 border-b border-border/40 sticky top-0 backdrop-blur-md z-10 before:content-[''] before:absolute before:left-0 before:top-1/2 before:-translate-y-1/2 before:h-[2px] before:w-3 ${groupRule[groupName] ?? "before:bg-text-muted/10"}`}
+              >
+                <p className={`text-[10px] font-semibold uppercase tracking-[0.14em] pl-3 ${groupTone[groupName] ?? "text-text-secondary"}`}>
                   {groupName}
                 </p>
                 <span className="text-[10px] ticker text-text-muted">{groupTasks.length}</span>
@@ -347,14 +443,14 @@ export default function Tasks() {
       onChanged={() => setReloadTick((n) => n + 1)}
     />
   ) : (
-    <div className="rounded-xl bg-bg-secondary/40 border border-dashed border-border p-8 text-center text-sm text-text-muted min-h-[320px] flex flex-col items-center justify-center gap-2">
-      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="opacity-30">
+    <div className="rounded-xl bg-bg-secondary/30 ring-1 ring-border/40 ring-dashed p-8 text-center text-sm text-text-muted min-h-[320px] flex flex-col items-center justify-center gap-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.1" className="text-accent/40">
         <path d="M9 11l3 3L22 4" />
         <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
       </svg>
-      <p>Pick a task on the left.</p>
-      <p className="text-[10px] text-text-muted max-w-[22ch]">
-        Full control: title, priority, due date, reminders, steps, tags, notes.
+      <p className="text-[12px] text-text-secondary">Pick a task on the left.</p>
+      <p className="text-[10.5px] text-text-muted max-w-[24ch] leading-relaxed">
+        Detail pane handles title, priority, deadline, reschedule, steps, tags, and notes — all inline.
       </p>
     </div>
   );

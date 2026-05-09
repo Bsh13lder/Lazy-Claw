@@ -16,6 +16,7 @@ import {
 } from "./taskHelpers";
 import { AiStepsButton } from "./AiStepsButton";
 import { MarkdownNotes } from "./MarkdownNotes";
+import { TaskRescheduleInput } from "./TaskRescheduleInput";
 import { useLiveCountdown } from "./useLiveCountdown";
 
 /**
@@ -271,6 +272,23 @@ export function TaskDetail({
             </label>
           </div>
         </div>
+
+        {/* Reschedule — NL composer + Smart suggestion */}
+        {!done && (
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+                Reschedule
+              </h3>
+              <span className="text-[10px] text-text-muted">type a phrase or let the worker pick</span>
+            </div>
+            <TaskRescheduleInput
+              taskId={task.id}
+              variant="full"
+              onChanged={onChanged}
+            />
+          </div>
+        )}
 
         {/* Steps */}
         <div>

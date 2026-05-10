@@ -1,5 +1,6 @@
 .PHONY: claude-login claude-status up down rebuild logs \
-        host-bridge host-bridge-uninstall host-bridge-status host-bridge-restart
+        host-bridge host-bridge-uninstall host-bridge-status host-bridge-restart \
+        host-stt host-stt-uninstall host-stt-status host-stt-restart
 
 up:
 	docker compose up -d
@@ -74,3 +75,40 @@ host-bridge-status:
 host-bridge-restart:
 	@launchctl kickstart -k "gui/$$(id -u)/sh.lazyclaw.brave-bridge" \
 	    && echo "Brave restarted via launchd."
+
+# ── Host STT bridge — Metal-accelerated whisper.cpp on the macOS host ────────
+# Docker on macOS runs Linux containers in a VM that can't access Metal or
+# Core ML, so pywhispercpp inside the container falls back to CPU (~5x
+# slower than Metal). `make host-stt` installs a launchd-managed FastAPI
+# service on the host that runs whisper.cpp natively with Metal+ANE; the
+# container POSTs audio to it via host.docker.internal:18790. Falls back
+# to CPU whisper transparently if the bridge is down.
+host-stt:
+	@bash scripts/install-host-stt-bridge.sh
+	@echo ""
+	@echo "Now: docker compose restart lazyclaw   # so the container reads the new .env token"
+
+host-stt-uninstall:
+	@bash scripts/uninstall-host-stt-bridge.sh
+
+host-stt-status:
+	@if [ -f "$$HOME/Library/LaunchAgents/sh.lazyclaw.stt-bridge.plist" ]; then \
+	    echo "launchd plist:  installed at ~/Library/LaunchAgents/sh.lazyclaw.stt-bridge.plist"; \
+	else \
+	    echo "launchd plist:  NOT installed (run: make host-stt)"; \
+	fi
+	@if grep -qE '^LAZYCLAW_HOST_STT_TOKEN=' .env 2>/dev/null; then \
+	    echo "shared token:   set in .env"; \
+	else \
+	    echo "shared token:   NOT set in .env"; \
+	fi
+	@if curl -fsS --max-time 2 http://localhost:18790/health >/dev/null 2>&1; then \
+	    echo "STT service:    healthy on localhost:18790 ✓"; \
+	    curl -s http://localhost:18790/health | python3 -m json.tool 2>/dev/null || true; \
+	else \
+	    echo "STT service:    not reachable (check ~/Library/Logs/LazyClaw/stt-bridge.err)"; \
+	fi
+
+host-stt-restart:
+	@launchctl kickstart -k "gui/$$(id -u)/sh.lazyclaw.stt-bridge" \
+	    && echo "Host STT bridge restarted via launchd."

@@ -7,12 +7,20 @@ env var (``tiny`` / ``base`` / ``small`` / ``medium`` / ``large-v3``).
 Apple Silicon: pywhispercpp uses Metal + Core ML when an ANE-encoded model
 is present at the pywhispercpp model dir. CPU fallback otherwise.
 
+Host bridge (Docker on macOS): when ``LAZYCLAW_HOST_STT_TOKEN`` is set AND
+the marker file ``/app/data/.host_stt_bridge_installed`` exists, we POST
+audio to the host's launchd-managed STT service at
+``host.docker.internal:18790`` instead of running pywhispercpp inside the
+container. That gets Metal + ANE acceleration which the Linux VM cannot
+access. Any HTTP / connection error transparently falls back to in-container
+CPU whisper, so the bridge is a strict performance optimisation, never a
+correctness dependency. See ``stt_host_server.py``.
+
 Telegram voice notes arrive as OGG/Opus, so we shell out to ``ffmpeg`` to
 decode to 16 kHz mono WAV before handing off to whisper.cpp.
 
 ffmpeg resolution order:
-1. ``imageio-ffmpeg`` bundled binary (installed automatically with the
-   ``voice`` extra — no system install needed).
+1. ``imageio-ffmpeg`` bundled binary (always installed — base dep).
 2. ``ffmpeg`` on ``$PATH`` (Homebrew / apt / etc).
 3. Raise :class:`STTUnavailableError` with install instructions.
 """
@@ -25,11 +33,21 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = os.environ.get("LAZYCLAW_STT_MODEL", "small")
+
+_HOST_BRIDGE_MARKER = Path("/app/data/.host_stt_bridge_installed")
+_HOST_BRIDGE_HOST = "host.docker.internal"
+_HOST_BRIDGE_PORT = int(os.environ.get("LAZYCLAW_HOST_STT_PORT", "18790"))
+# Don't keep retrying the host bridge if it's down — flip a process-local
+# circuit breaker after the first connection failure so we don't add 1-2s
+# of dead-air to every voice note while the bridge is missing.
+_host_bridge_disabled_until: float = 0.0
+_HOST_BRIDGE_BACKOFF_S = 60.0
 
 _model_lock = asyncio.Lock()
 _model_instance = None  # cached pywhispercpp.model.Model
@@ -131,6 +149,76 @@ async def _decode_to_wav(src: Path) -> Path:
     return Path(dst)
 
 
+def _host_bridge_token() -> str | None:
+    val = os.environ.get("LAZYCLAW_HOST_STT_TOKEN", "").strip()
+    return val or None
+
+
+def _host_bridge_available() -> bool:
+    """True iff the launchd host-STT bridge looks installed AND we're not
+    inside the post-failure backoff window.
+    """
+    if _host_bridge_token() is None:
+        return False
+    if not _HOST_BRIDGE_MARKER.exists():
+        return False
+    return time.monotonic() >= _host_bridge_disabled_until
+
+
+async def _transcribe_via_host(
+    path: Path,
+    *,
+    language: str | None,
+) -> str | None:
+    """POST audio to the host-STT bridge. Returns transcript on success,
+    ``None`` on any failure (caller falls back to in-container whisper).
+    """
+    global _host_bridge_disabled_until
+    token = _host_bridge_token()
+    if token is None:
+        return None
+
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    url = f"http://{_HOST_BRIDGE_HOST}:{_HOST_BRIDGE_PORT}/transcribe"
+    headers = {"Authorization": f"Bearer {token}"}
+    data: dict = {}
+    if language:
+        data["language"] = language
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            with path.open("rb") as fh:
+                files = {"audio": (path.name, fh, "application/octet-stream")}
+                resp = await client.post(url, headers=headers, data=data, files=files)
+        if resp.status_code != 200:
+            logger.warning(
+                "host-stt bridge returned %d (%s) — falling back to local whisper",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        payload = resp.json()
+        transcript = payload.get("transcript", "")
+        logger.info(
+            "host-stt bridge transcribed in %s ms (%d chars)",
+            payload.get("duration_ms", "?"), len(transcript),
+        )
+        return transcript
+    except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
+        logger.warning(
+            "host-stt bridge unreachable (%s) — falling back to local whisper "
+            "for %ds", exc, int(_HOST_BRIDGE_BACKOFF_S),
+        )
+        _host_bridge_disabled_until = time.monotonic() + _HOST_BRIDGE_BACKOFF_S
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("host-stt bridge error (%s) — falling back", exc)
+        return None
+
+
 async def transcribe_file(
     path: str | Path,
     *,
@@ -142,12 +230,23 @@ async def transcribe_file(
     *language* is an optional ISO-639-1 code (``"en"``, ``"es"``, ``"ka"``);
     leave ``None`` to let whisper auto-detect.
 
+    When the host-STT bridge is installed and reachable, audio is forwarded
+    there for Metal-accelerated transcription (~3-5x faster on Apple Silicon
+    than CPU-only inside the Docker VM). Any bridge failure falls back to
+    in-container CPU whisper transparently.
+
     Returns the concatenated, whitespace-trimmed transcript. Raises
     :class:`STTUnavailableError` when dependencies are missing.
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
+
+    if _host_bridge_available():
+        transcript = await _transcribe_via_host(path, language=language)
+        if transcript is not None:
+            return transcript
+        # else: fall through to in-container whisper
 
     wav_path = await _decode_to_wav(path)
     try:

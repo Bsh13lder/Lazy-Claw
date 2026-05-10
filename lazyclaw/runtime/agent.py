@@ -2766,7 +2766,15 @@ class Agent:
         # Lowered 8 → 5 (Round 2): brain-as-dispatcher pattern. By iter 5
         # the user has been waiting ~30s with frozen UI; that's the line
         # where dispatching beats inline grinding.
-        _PROMOTE_BG_AT_ITER = 5
+        # Lowered 5 → 2 (Round 3): prompt-side fixes (SOUL.md TRIAGE +
+        # MiniMax discipline suffix) didn't move the needle. User wants
+        # brain-agnostic enforcement — doesn't matter which model is the
+        # brain, big tasks must dispatch. With threshold=2 a foreground
+        # turn gets two inline tool calls to wrap up; on the third the
+        # tool list is narrowed to run_background only and the brain
+        # physically can't keep grinding. 1- and 2-tool quick tasks
+        # ("price of X", "save this") finish before the check ever fires.
+        _PROMOTE_BG_AT_ITER = 2
         _called_tool_names: set[str] = set()
         _promoted_to_bg = False
         # Hard-enforce AUTO-PROMOTE: when set, the next iteration's tool list

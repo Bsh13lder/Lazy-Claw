@@ -20,3 +20,9 @@ mcp>=1.0.0
 n8n-mcp-server>=0.1.0
 workspace-mcp>=1.19.0,<1.21.0
 pytesseract>=0.3.10
+pyahocorasick>=2.0.0
+# Voice STT — Telegram voice notes + Web UI mic. Mirrors pyproject.toml base
+# deps so `pip install -r requirements.txt` (Dockerfile layer-cache step)
+# pre-fetches the wheels before the slow `pip install -e .` step.
+pywhispercpp>=1.2.0
+imageio-ffmpeg>=0.4.9

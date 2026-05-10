@@ -390,7 +390,7 @@ Bot: ✅ Created workflow "Daily Sales Summary" — cron 0 9 * * *, nodes: Sheet
 
 ## Telegram
 
-Send a message on Telegram, get AI responses back with full tool calling. Admin chat lock (first `/start` claims the bot). Screenshots auto-forwarded. Retry with exponential backoff. **Voice notes and forwarded audio** auto-transcribe via whisper.cpp and run through the same chat pipeline (transcript echoed back so you can correct mis-hearings) — install with `pipx inject lazyclaw 'lazyclaw[voice]'`, ~1 GB RAM on the default `small` model, Metal + Core ML ANE acceleration on Apple Silicon, 99 languages incl. Georgian.
+Send a message on Telegram, get AI responses back with full tool calling. Admin chat lock (first `/start` claims the bot). Screenshots auto-forwarded. Retry with exponential backoff. **Voice notes and forwarded audio** auto-transcribe via whisper.cpp and run through the same chat pipeline (transcript echoed back so you can correct mis-hearings) — installed by default (no extras flag needed), ~1 GB RAM on the default `small` model, Metal + Core ML ANE acceleration on Apple Silicon, 99 languages incl. Georgian.
 
 ```
 You: check my WhatsApp messages

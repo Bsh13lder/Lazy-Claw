@@ -44,22 +44,28 @@ dependencies = [
     # (~50 KB wheel); when import fails the autolink path falls back to the
     # legacy substring scanner so install isn't a hard requirement.
     "pyahocorasick>=2.0.0",
+    # Speech-to-text for voice messages (Telegram voice notes + Web UI mic).
+    # whisper.cpp via pywhispercpp — MIT, ~244 MB `small` model, Metal + CoreML
+    # ANE acceleration on Apple Silicon, 99 languages incl. Georgian.
+    # imageio-ffmpeg bundles a static ffmpeg binary (BSD-2-Clause) so users
+    # don't have to `brew install ffmpeg` separately — stt.py prefers the
+    # bundled binary, falls back to system PATH if it's missing.
+    # Both are base deps (not optional) since voice is a first-class channel:
+    # Telegram voice notes + Web UI mic both fail-closed without them.
+    # stt.py keeps a graceful ImportError fallback for platforms where
+    # pywhispercpp wheels are missing and source builds aren't available.
+    "pywhispercpp>=1.2.0",
+    "imageio-ffmpeg>=0.4.9",
 ]
 
 [project.optional-dependencies]
 telegram = []
 discord = ["discord.py>=2.3.0"]
 eco = []
-# Speech-to-text for voice messages (Telegram voice notes + Web UI mic).
-# whisper.cpp via pywhispercpp — MIT, ~244 MB `small` model, Metal + CoreML
-# ANE acceleration on Apple Silicon, 99 languages incl. Georgian.
-# imageio-ffmpeg bundles a static ffmpeg binary (BSD-2-Clause) so users don't
-# have to `brew install ffmpeg` separately — stt.py prefers the bundled
-# binary, falls back to system PATH if it's missing.
-voice = [
-    "pywhispercpp>=1.2.0",
-    "imageio-ffmpeg>=0.4.9",
-]
+# Kept as empty no-op alias — `pip install lazyclaw[voice]` still works for
+# back-compat with the pre-2026-05-10 install instructions and any external
+# scripts. Real deps moved to base above.
+voice = []
 local = ["llama-cpp-python>=0.2.0"]
 # Apple Vision OCR for browser screenshots — macOS-only. Pulls in the
 # pyobjc Vision framework binding. `browser(action="ask_vision")` and

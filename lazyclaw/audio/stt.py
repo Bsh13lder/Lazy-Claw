@@ -79,7 +79,12 @@ async def _ensure_model():
             from pywhispercpp.model import Model
         except ImportError as exc:
             raise STTUnavailableError(
-                "pywhispercpp not installed. Run: pip install lazyclaw[voice]",
+                "pywhispercpp not importable — usually means the wheel failed "
+                "to build at install time. pywhispercpp is a base dependency "
+                "of lazyclaw, so reinstall: "
+                "`pipx reinstall lazyclaw` (or `pip install --force-reinstall "
+                "pywhispercpp` inside your venv). On platforms without "
+                "prebuilt wheels you may need cmake + a C++ toolchain.",
             ) from exc
 
         loop = asyncio.get_running_loop()
@@ -103,10 +108,12 @@ async def _decode_to_wav(src: Path) -> Path:
     ff = _ffmpeg_path()
     if ff is None:
         raise STTUnavailableError(
-            "ffmpeg missing. Reinstall the voice extra "
-            "(`pipx inject lazyclaw 'lazyclaw[voice]'`) so imageio-ffmpeg "
-            "ships the bundled binary, or install system ffmpeg "
-            "(`brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux).",
+            "ffmpeg missing. imageio-ffmpeg is a base dep of lazyclaw and "
+            "ships a bundled binary, so this usually means a broken venv. "
+            "Reinstall: `pipx reinstall lazyclaw` (or `pip install "
+            "--force-reinstall imageio-ffmpeg`). Alternatively install "
+            "system ffmpeg (`brew install ffmpeg` on macOS, "
+            "`apt install ffmpeg` on Linux).",
         )
     fd, dst = tempfile.mkstemp(suffix=".wav", prefix="lazyclaw_stt_")
     os.close(fd)

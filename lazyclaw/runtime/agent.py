@@ -3454,6 +3454,71 @@ class Agent:
                 if not response.tool_calls:
                     _final_content = response.content or streamed_content or ""
 
+                    # AUTO-PROMOTE text-only failsafe: if the runtime already
+                    # narrowed the tool list to ONLY run_background but the
+                    # brain dodged it by returning a text summary instead of
+                    # dispatching, force the dispatch via task_runner here.
+                    # The downstream failsafe at the bottom of the iter loop
+                    # (line ~4491) only catches the "next iter, still calling
+                    # tools" path — a text-only response exits the loop right
+                    # below this block, so without this check the user gets
+                    # the brain's summary instead of the background dispatch.
+                    # Fixes the 16:04:24 turn-1 case (MiniMax wrote a job
+                    # listing markdown table instead of run_background).
+                    if (
+                        _force_dispatch_only
+                        and _promote_iter is not None
+                        and "run_background" not in _called_tool_names
+                        and self._task_runner is not None
+                        and user_id is not None
+                    ):
+                        logger.warning(
+                            "AUTO-PROMOTE failsafe (text-only path): brain "
+                            "returned text instead of dispatching at iter=%d "
+                            "(promote_iter=%d) — runtime auto-submitting "
+                            "original message to task_runner",
+                            iteration, _promote_iter,
+                        )
+                        try:
+                            from lazyclaw.runtime.agent_settings import (
+                                get_agent_settings,
+                            )
+                            _agent_settings = await get_agent_settings(
+                                self.config, user_id,
+                            )
+                            _bg_task_id = await self._task_runner.submit(
+                                user_id=user_id,
+                                instruction=message,
+                                name=None,
+                                timeout=_agent_settings.get(
+                                    "specialist_timeout_s", 600,
+                                ),
+                                callback=callback,
+                            )
+                            if self._team_lead and _fg_task_id:
+                                self._team_lead.cancel(_fg_task_id)
+                                _fg_task_id = None
+                            await cb.on_event(AgentEvent(
+                                FAST_DISPATCH,
+                                "Auto-promoted to background after text-only "
+                                "refusal",
+                                {"task_id": _bg_task_id},
+                            ))
+                            await cb.on_event(AgentEvent(
+                                "done", "Dispatched", {},
+                            ))
+                            if _delegate_registered and self.registry:
+                                self.registry.unregister("delegate")
+                            return (
+                                "Continuing in background — will report "
+                                "back when done."
+                            )
+                        except Exception:
+                            logger.exception(
+                                "AUTO-PROMOTE failsafe (text-only) failed; "
+                                "continuing inline",
+                            )
+
                     # Action-claim hallucination: the brain returned text
                     # like "Already on it! Background task is running…" or
                     # "I'll ping you on Telegram when done" but emitted ZERO

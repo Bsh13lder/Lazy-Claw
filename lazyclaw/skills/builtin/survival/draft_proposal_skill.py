@@ -36,9 +36,9 @@ Job description (from the platform):
 
 Write the proposal with this exact structure:
 
-1. **Opener (2-3 lines):** Warm greeting using {display_name}. Use the value pitch above (lightly adapted to the specific job) — DO NOT replace it with a generic opener. Mention LazyClaw as your platform and why this specific job fits.
+1. Opener (2-3 lines): Warm greeting using {display_name}. Use the value pitch above (lightly adapted to the specific job) — DO NOT replace it with a generic opener. Mention LazyClaw as your platform and why this specific job fits.
 
-2. **"How we'd work" section (CRITICAL — be transparent):**
+2. "How we'd work" section (CRITICAL — be transparent):
    - The day-to-day responder is a personal AI agent (LazyClaw)
    - The agent does the technical work: design, integration, scripts, tests
    - The HUMAN founder reviews and approves EVERY deliverable before it reaches the client — nothing ships without human sign-off
@@ -48,29 +48,29 @@ Write the proposal with this exact structure:
      ✅ Supervised quality — every deliverable passes human review
      💰 Competitive pricing — agent speed = lower cost, savings passed on
 
-3. **"For your project I propose:" section:**
+3. "For your project I propose:" section:
    - Numbered list (1, 2, 3, 4, 5) of concrete phases tailored to THIS job
    - Each phase = one short line with what's delivered
    - Show you understood the actual problem, not buzzwords
 
-4. **"About me" section:**
-   - If GitHub is set above, include it verbatim as proof of work. If empty, skip the link.
+4. "About me" section:
+   - If GitHub is set above, include it verbatim as proof of work — write the bare URL on its own line. If empty, skip the link.
    - 1-2 lines on why LazyClaw stack (or relevant skills) fit this job
    - Stack relevance line (Python / FastAPI / browser automation / multi-channel / etc.)
 
-5. **Next step:** Propose a 15-min discovery call to understand the project before quoting price. NEVER quote a fixed price in the proposal — always defer pricing until after the call.
+5. Next step: If "Min fixed rate" above is a number (e.g. "$20", not "flexible"), end with a one-line offer: "Fixed price: {min_fixed} for the full build (phased delivery)." Otherwise end with: "Can we hop on a 15-min call to scope this and confirm price?"
 
-6. **Sign-off:** "— {display_name}"
+6. Sign-off: "— {display_name}"
 
 Rules:
 - 250-400 words total (NOT 150 — be substantial, this is a credibility play)
-- Bullet/numbered lists are ENCOURAGED (structure helps readability)
+- PLAIN TEXT ONLY — Upwork's cover-letter field does NOT render Markdown. Do NOT use **bold**, __bold__, *italic*, [link](url), `code`, or # headers. Write bare URLs on their own line. Use CAPS sparingly when you need emphasis. The Upwork client sees raw characters otherwise.
+- Bullet/numbered lists are ENCOURAGED for readability — use plain "1." / "2." / "•" or "-" markers
 - Sparing emojis OK in the "How we'd work" bullets only (⚡ ✅ 💰)
-- Bold key phrases with **markdown** (Upwork renders markdown in proposals)
 - If the brief is in Spanish, write the ENTIRE proposal in Spanish (use Iberian Spanish: tú, "matrícula", "presupuesto"). Otherwise English.
 - NO "I hope this message finds you well."
 - NO "Dear Hiring Manager."
-- NEVER quote a fixed price — always end with a discovery call
+- Quote the fixed price ONLY when "Min fixed rate" above is a number, NEVER fabricate a number when it's "flexible"
 - NEVER promise to auto-submit anything
 
 Return ONLY the proposal text, no headers, no footers."""

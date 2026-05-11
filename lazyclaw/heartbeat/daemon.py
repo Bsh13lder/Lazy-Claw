@@ -51,6 +51,45 @@ def _store_watcher_context(
     }
 
 
+def _scan_proc_cmdlines(needle: str) -> list[tuple[int, str]]:
+    """Scan /proc/[pid]/cmdline for entries containing ``needle``.
+
+    Returns a list of (pid, full_cmdline_with_spaces). Used by the
+    idle-browser reaper instead of shelling out to ``ps aux`` — that
+    binary isn't installed in the slim Debian Docker image we ship,
+    and the reaper was logging a WARNING every 60s as a result.
+
+    /proc/<pid>/cmdline holds the args separated by NUL bytes; we
+    flatten to spaces so callers can do simple substring matches.
+    Quietly skips PIDs we can't read (other-uid, race, kernel threads).
+    """
+    matches: list[tuple[int, str]] = []
+    try:
+        proc_root = "/proc"
+        if not os.path.isdir(proc_root):
+            return matches  # macOS host without /proc — no-op
+        for entry in os.listdir(proc_root):
+            if not entry.isdigit():
+                continue
+            cmdline_path = f"{proc_root}/{entry}/cmdline"
+            try:
+                with open(cmdline_path, "rb") as fh:
+                    raw = fh.read()
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            if needle in cmdline:
+                try:
+                    matches.append((int(entry), cmdline))
+                except ValueError:
+                    continue
+    except Exception:
+        # /proc may be unavailable or restricted — fall back to empty
+        # list; callers must already handle the no-match case.
+        pass
+    return matches
+
+
 class HeartbeatDaemon:
     """Periodically checks for due cron jobs and enqueues them."""
 
@@ -380,19 +419,13 @@ class HeartbeatDaemon:
             # Nothing running — use primary port, auto-launch will handle it
             return CDPBackend(port=primary_port, profile_dir=str(profile_dir)), None
 
-        # Something IS running — check if it's headless
+        # Something IS running — check if it's headless. /proc scan
+        # works in both the slim container (no ``ps`` binary) and on
+        # the host.
         is_headless = False
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ps", "aux",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            is_headless = any(
-                "headless" in line and f"remote-debugging-port={primary_port}" in line
-                for line in stdout.decode("utf-8", errors="replace").splitlines()
-            )
+            matches = _scan_proc_cmdlines(f"remote-debugging-port={primary_port}")
+            is_headless = any("headless" in cmdline for _, cmdline in matches)
         except Exception:
             # Can't tell — assume it's visible to be safe
             logger.debug("Failed to check if browser is headless, assuming visible", exc_info=True)
@@ -1730,35 +1763,26 @@ class HeartbeatDaemon:
                             idle, timeout,
                         )
                         try:
-                            proc = await asyncio.create_subprocess_exec(
-                                "ps", "aux",
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.DEVNULL,
-                            )
-                            stdout, _ = await proc.communicate()
-                            for line in stdout.decode("utf-8", errors="replace").splitlines():
-                                if f"remote-debugging-port={port}" in line:
-                                    parts = line.split()
-                                    if len(parts) > 1:
-                                        try:
-                                            os.kill(int(parts[1]), signal.SIGTERM)
-                                        except (ProcessLookupError, ValueError):
-                                            # Intentional: process may have exited before SIGTERM
-                                            pass
-                                        except PermissionError:
-                                            # Host Brave bridge is running as
-                                            # a different uid (typical when
-                                            # the daemon is in a Docker
-                                            # container and the browser is
-                                            # on the host). Stop trying to
-                                            # kill it — log once at info and
-                                            # let the user manage it.
-                                            logger.info(
-                                                "Idle-browser PID %s on port %d is "
-                                                "owned by another uid (likely host "
-                                                "Brave bridge) — leaving it alone",
-                                                parts[1], port,
-                                            )
+                            matches = _scan_proc_cmdlines(f"remote-debugging-port={port}")
+                            for pid, _cmdline in matches:
+                                try:
+                                    os.kill(pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    # Intentional: process may have exited before SIGTERM
+                                    pass
+                                except PermissionError:
+                                    # Host Brave bridge is running as a
+                                    # different uid (typical when the daemon
+                                    # is in a Docker container and the browser
+                                    # is on the host). Stop trying to kill it —
+                                    # log once at info and let the user manage
+                                    # it.
+                                    logger.info(
+                                        "Idle-browser PID %s on port %d is "
+                                        "owned by another uid (likely host "
+                                        "Brave bridge) — leaving it alone",
+                                        pid, port,
+                                    )
                         except Exception as exc:
                             logger.warning(
                                 "Idle-browser reap on port %d failed: %s: %s",

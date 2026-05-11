@@ -384,6 +384,30 @@ class MCPClient:
                 parts.append(block.text)
             else:
                 parts.append(str(block))
+
+        # FastMCP serializes ``list[dict]`` tool returns as ONE TextContent
+        # block per list item — naively joining with "\n" produces N concat
+        # JSON objects with NO outer array brackets:
+        #     {"a":1}
+        #     {"b":2}
+        # That is not valid JSON, json.loads fails on the second `{`, and
+        # callers (e.g. survival.search_skill) log "Upwork MCP returned
+        # non-JSON: {" and fall back to web_search / browser specialists —
+        # 5+ minute round-trips for what should have been a 1-call lookup.
+        # When every block parses individually as JSON, wrap the whole thing
+        # in `[...]` and emit valid JSON-array text.
+        if len(parts) >= 2:
+            import json as _json
+            try:
+                _objs = [_json.loads(p) for p in parts if p.strip()]
+                if _objs:
+                    return _json.dumps(_objs)
+            except (_json.JSONDecodeError, ValueError):
+                # At least one part isn't standalone JSON — fall through to
+                # the original "\n"-join behavior (preserves human-readable
+                # multi-line text outputs).
+                pass
+
         text = "\n".join(parts)
 
         # Guard against empty results that cause LLM hallucination

@@ -20,29 +20,44 @@ class SendMessageParams(BaseModel):
 async def get_messages(params: MessagesParams) -> list[dict]:
     """Get messages from Upwork inbox.
 
+    The 2026 inbox lives at /ab/messages/rooms/ (not /nx/messages — that path
+    returns 404). Empty inbox renders a `[data-test="empty-state"]` placeholder
+    inside `[data-test="rooms-panel"]`, which we detect to short-circuit the
+    wait instead of timing out.
+
     Returns a list of conversations with last message, sender info, and unread status.
     """
     browser = get_browser()
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Navigate to messages
-    url = "https://www.upwork.com/nx/messages"
+    url = "https://www.upwork.com/ab/messages/rooms/"
     if params.unread_only:
         url += "?filter=unread"
 
     await page.goto(url, wait_until="networkidle")
 
-    conversations = []
+    conversations: list[dict] = []
 
-    # Wait for message list
+    # Wait for either the rooms panel OR the explicit empty state.
     try:
-        await page.wait_for_selector('[data-test="room-list"], .room-list, .message-list', timeout=10000)
+        await page.wait_for_selector(
+            '[data-test="rooms-panel"], [data-test="empty-state"], .rooms-panel-body',
+            timeout=10000,
+        )
     except Exception:
         pass
 
-    # Extract conversation items
-    room_els = await page.query_selector_all('[data-test="room-item"], .room-item, .conversation-item')
+    # If the empty state is rendered, there are no conversations — bail early.
+    empty_state = await page.query_selector('[data-test="empty-state"]')
+    if empty_state:
+        return []
+
+    # Extract conversation items. The 2026 layout uses .desktop-layout-room as
+    # the row class; older / mobile fallbacks kept for resilience.
+    room_els = await page.query_selector_all(
+        '.desktop-layout-room, [data-test="room-item"], .room-item, .conversation-item'
+    )
 
     for el in room_els[:params.limit]:
         try:
@@ -112,11 +127,11 @@ async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Build URL
+    # Build URL — Upwork moved /nx/messages/ → /ab/messages/rooms/ in the 2026 redesign.
     if room_id.startswith("http"):
         url = room_id
     else:
-        url = f"https://www.upwork.com/nx/messages/{room_id}"
+        url = f"https://www.upwork.com/ab/messages/rooms/{room_id}"
 
     await page.goto(url, wait_until="networkidle")
 
@@ -198,11 +213,11 @@ async def send_message(params: SendMessageParams) -> dict:
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Navigate to conversation
+    # Navigate to conversation — same /ab/messages/rooms/ migration as above.
     if params.room_id.startswith("http"):
         url = params.room_id
     else:
-        url = f"https://www.upwork.com/nx/messages/{params.room_id}"
+        url = f"https://www.upwork.com/ab/messages/rooms/{params.room_id}"
 
     await page.goto(url, wait_until="networkidle")
 

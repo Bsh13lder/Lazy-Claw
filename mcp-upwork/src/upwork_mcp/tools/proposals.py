@@ -1,14 +1,27 @@
 """Proposal tools for Upwork MCP."""
 
+import logging
+
 from pydantic import BaseModel, Field
+
 from ..browser.client import get_browser
+
+logger = logging.getLogger(__name__)
 
 
 class ProposalsParams(BaseModel):
     """Parameters for getting proposals."""
     status: str = Field(
-        default="active",
-        description="Filter by status: active, submitted, archived, or all"
+        default="all",
+        description=(
+            "Filter by status: 'active' (live proposals waiting for client "
+            "response — usually 0 in the 2026 layout), 'submitted' (sent and "
+            "still pending), 'archived' (rejected/withdrawn — not yet wired), "
+            "or 'all' (active + submitted). Default 'all' so 'have I applied "
+            "to this job?'-style checks see everything; the brain LLM was "
+            "previously getting [NO DATA] from default-active calls because "
+            "Upwork moves rows out of 'active' immediately after submission."
+        ),
     )
     limit: int = Field(default=20, ge=1, le=50, description="Maximum number of results")
 
@@ -19,7 +32,19 @@ class SubmitProposalParams(BaseModel):
     cover_letter: str = Field(description="Cover letter content")
     rate: float | None = Field(default=None, description="Proposed hourly rate (for hourly jobs)")
     bid: float | None = Field(default=None, description="Bid amount (for fixed-price jobs)")
-    answers: list[str] | None = Field(default=None, description="Answers to screening questions")
+    answers: list[str] | None = Field(
+        default=None,
+        description=(
+            "Answers to the job's screening questions, in the same order "
+            "the apply page displays them. If the job has questions and "
+            "this is ``None`` (or shorter than the question count), the "
+            "tool returns early with ``status='needs_answers'`` and the "
+            "question text — draft answers, then re-call with this list "
+            "populated. Skipping this round-trip causes Upwork to reject "
+            "the submit silently with red inline 'Please answer this "
+            "question' errors."
+        ),
+    )
     milestone_description: str | None = Field(
         default=None,
         description=(
@@ -61,93 +86,120 @@ class SubmitProposalParams(BaseModel):
 async def get_proposals(params: ProposalsParams) -> list[dict]:
     """Get your submitted proposals on Upwork.
 
-    Returns a list of proposals with job title, status, bid amount, and dates.
+    Upwork dropped the ?status= query in the 2026 redesign — when the targeted
+    sub-list is empty (e.g. ?status=active with no live proposals) Upwork now
+    redirects to /nx/find-work/best-matches. We always land on the bare
+    /nx/proposals/ page and select the right card by data-qa instead.
+
+    Returns a list of proposals with job title, proposal URL, initiated date,
+    profile used, and inferred status (active|submitted). Bid amounts are no
+    longer rendered in the list view — fetch get_proposal_details for those.
     """
     browser = get_browser()
     await browser.ensure_logged_in()
     page = await browser.get_page()
 
-    # Navigate to proposals page
-    status_path = {
-        "active": "active",
-        "submitted": "submitted",
-        "archived": "archived",
-        "all": ""
-    }.get(params.status.lower(), "active")
+    await page.goto("https://www.upwork.com/nx/proposals/", wait_until="networkidle")
 
-    url = f"https://www.upwork.com/nx/proposals/{'?status=' + status_path if status_path else ''}"
-    await page.goto(url, wait_until="networkidle")
-
-    proposals = []
-
-    # Wait for proposals to load
+    # The 2026 layout uses [data-qa] (not data-test) on container cards and
+    # [data-qa^="item"] on each row. Wait for either container to materialize.
     try:
-        await page.wait_for_selector('[data-test="proposal-tile"], .proposal-row', timeout=10000)
+        await page.wait_for_selector(
+            '[data-qa="card-active-proposals"], [data-qa="card-submitted-proposals"]',
+            timeout=10000,
+        )
     except Exception:
-        # No proposals or different structure
+        # No proposals at all, or the user landed on something unexpected.
         pass
 
-    # Extract proposal cards
-    proposal_els = await page.query_selector_all('[data-test="proposal-tile"], .proposal-row, article')
+    requested = params.status.lower()
+    if requested == "active":
+        containers = ["card-active-proposals"]
+    elif requested == "submitted":
+        containers = ["card-submitted-proposals"]
+    elif requested == "archived":
+        # Archived lives behind a tab click; not implemented in this patch.
+        # Caller should treat empty result as "feature not yet wired".
+        return []
+    else:
+        # "all" or unknown → both visible cards
+        containers = ["card-active-proposals", "card-submitted-proposals"]
 
-    for el in proposal_els[:params.limit]:
-        try:
-            proposal = await _extract_proposal(el)
+    proposals: list[dict] = []
+    for container_qa in containers:
+        row_els = await page.query_selector_all(
+            f'[data-qa="{container_qa}"] [data-qa^="item"]'
+        )
+        status_value = "active" if container_qa == "card-active-proposals" else "submitted"
+        for el in row_els:
+            if len(proposals) >= params.limit:
+                break
+            try:
+                proposal = await _extract_proposal(el)
+            except Exception:
+                continue
             if proposal:
+                proposal["status"] = status_value
                 proposals.append(proposal)
-        except Exception:
-            continue
+        if len(proposals) >= params.limit:
+            break
 
     return proposals
 
 
 async def _extract_proposal(el) -> dict | None:
-    """Extract proposal data from element."""
-    proposal = {}
+    """Extract proposal data from a 2026-layout proposals row.
 
-    # Job title
-    title_el = await el.query_selector('[data-test="job-title"], .job-title, a h3, h4')
+    Row structure (table row, data-qa="item0"/"item1"/...):
+      td[data-cy="time-slot"]      → "Initiated <date>" + relative time
+      td[data-cy="job-info"] a     → job title + href to /nx/proposals/<id>
+      td[data-cy="ai-interview-slot"]
+      td[data-qa="reason-slot"]
+      td[data-cy="default-slot"]   → profile used (e.g. "General Profile")
+      td[data-cy="proposal-views-slot"]
+      td[data-cy="requirements-met-slot"]
+    """
+    proposal: dict = {}
+
+    title_el = await el.query_selector('[data-cy="job-info"] a, a.up-n-link')
     if title_el:
         proposal["job_title"] = (await title_el.text_content() or "").strip()
         href = await title_el.get_attribute("href")
         if href:
-            proposal["job_url"] = href if href.startswith("http") else f"https://www.upwork.com{href}"
+            url = href if href.startswith("http") else f"https://www.upwork.com{href}"
+            proposal["proposal_url"] = url
+            # Proposal ID is the last path segment of /nx/proposals/<id>
+            tail = href.rstrip("/").split("/")[-1]
+            if tail.isdigit():
+                proposal["proposal_id"] = tail
 
     if not proposal.get("job_title"):
         return None
 
-    # Status
-    status_el = await el.query_selector('[data-test="proposal-status"], .status-badge, .proposal-status')
-    if status_el:
-        proposal["status"] = (await status_el.text_content() or "").strip()
+    time_slot = await el.query_selector('[data-cy="time-slot"]')
+    if time_slot:
+        text = (await time_slot.text_content() or "").strip()
+        # Collapse the multi-line "Initiated\n<date>\n<relative>" into a single
+        # line so the agent gets a clean string.
+        proposal["initiated"] = " ".join(text.split())
 
-    # Bid/rate
-    bid_el = await el.query_selector('[data-test="bid-amount"], .bid, .rate')
-    if bid_el:
-        proposal["bid"] = (await bid_el.text_content() or "").strip()
+    profile_slot = await el.query_selector('[data-cy="default-slot"]')
+    if profile_slot:
+        text = (await profile_slot.text_content() or "").strip()
+        if text:
+            proposal["profile_used"] = " ".join(text.split())
 
-    # Submitted date
-    date_el = await el.query_selector('[data-test="submitted-date"], .date, time')
-    if date_el:
-        proposal["submitted"] = (await date_el.text_content() or "").strip()
+    views_slot = await el.query_selector('[data-cy="proposal-views-slot"]')
+    if views_slot:
+        text = (await views_slot.text_content() or "").strip()
+        if text:
+            proposal["views_info"] = " ".join(text.split())
 
-    # Client viewed
-    viewed_el = await el.query_selector('[data-test="client-viewed"], .viewed')
-    proposal["client_viewed"] = viewed_el is not None
-
-    # Interview status
-    interview_el = await el.query_selector('[data-test="interview-status"], .interview')
-    if interview_el:
-        proposal["interview_status"] = (await interview_el.text_content() or "").strip()
-
-    # Connects used
-    connects_el = await el.query_selector('[data-test="connects-used"], .connects')
-    if connects_el:
-        text = (await connects_el.text_content() or "").strip()
-        import re
-        numbers = re.findall(r'\d+', text)
-        if numbers:
-            proposal["connects_used"] = int(numbers[0])
+    interview_slot = await el.query_selector('[data-cy="ai-interview-slot"]')
+    if interview_slot:
+        text = (await interview_slot.text_content() or "").strip()
+        if text:
+            proposal["interview_status"] = " ".join(text.split())
 
     return proposal
 
@@ -206,10 +258,43 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     IMPORTANT: This is a sensitive action that will spend Connects.
     Make sure the cover letter and rate/bid are correct before submitting.
 
-    Returns submission status and connects used.
+    Returns submission status and connects used (int — actual delta from
+    a pre/post Connects-balance snapshot, or None when either snapshot
+    couldn't read the balance page).
     """
+    from .profile import get_connects_balance
+
     browser = get_browser()
     await browser.ensure_logged_in()
+
+    # Pre-submit Connects balance snapshot. The selector-based extraction
+    # this replaces (data-test="connects-required" near the legacy
+    # line 555 site) was stale on the 2026 apply form and silently
+    # shipped 0, so callers got "Connects used: 0" reports for every
+    # submit. We pay ~3-5s extra here for an honest delta.
+    #
+    # CRITICAL ORDERING: take the balance BEFORE grabbing the submit-flow
+    # page handle. get_connects_balance internally calls browser.get_page(),
+    # which can rotate/reconnect the underlying CDP session. Holding a page
+    # reference across this call leaves a stale handle and the subsequent
+    # page.goto(job_url) silently lands on whatever tab the browser
+    # auto-attaches to (typically /nx/find-work/best-matches), making the
+    # apply flow short-circuit with "Apply button not found".
+    # 8s hard cap. /nx/plans/connects/balance currently 404s in the 2026
+    # layout and the helper falls back to /nx/find-work/ with selectors
+    # that may also be stale, so an unbounded call hangs and triggers
+    # the 60s outer tool-timeout — killing an otherwise-successful submit.
+    import asyncio as _aio_balance
+    pre_connects: int | None = None
+    try:
+        pre_balance = await _aio_balance.wait_for(get_connects_balance(), timeout=8.0)
+        raw_pre = pre_balance.get("available")
+        if isinstance(raw_pre, int):
+            pre_connects = raw_pre
+    except (Exception, _aio_balance.TimeoutError):
+        pre_connects = None
+
+    # NOW grab the page handle for the submit flow — fresh, not stale.
     page = await browser.get_page()
 
     # Navigate to job page first
@@ -345,9 +430,24 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     # Fill cover letter — helper already focused the textarea as part of
     # the dropdown-blur step, so we just fill (no extra click) to avoid
     # disturbing the rate-increase commit state.
+    #
+    # Strip Markdown before fill: Upwork's cover-letter textarea is plain
+    # text in the 2026 layout, so **bold** and [link](url) survive the
+    # round-trip as literal characters. Sanitizer is idempotent — already
+    # plain text passes through unchanged.
+    from ..utils.sanitize import strip_markdown_to_plaintext
+    clean_cover = strip_markdown_to_plaintext(params.cover_letter or "")
     cover_textarea = await page.query_selector('[data-test="cover-letter-input"], textarea[name*="cover"], textarea')
     if cover_textarea:
-        await cover_textarea.fill(params.cover_letter)
+        await cover_textarea.fill(clean_cover)
+
+    # Attach Profile highlights from the user's portfolio (best-effort).
+    # 2026 apply form has a "Profile highlights (NEW)" picker — without
+    # this step every proposal ships with zero portfolio attachments,
+    # because Upwork no longer auto-suggests them. Failures here never
+    # block submit — function is wrapped in try/except internally.
+    highlights_status = await _attach_profile_highlights(page)
+    logger.info("Profile highlights: %s", highlights_status)
 
     # Fill rate / bid AFTER rate-increase + cover letter so any
     # form re-validation triggered by these inputs sees the rate-
@@ -518,22 +618,160 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             except Exception:
                 pass
 
-    # Answer screening questions if provided
+    # Pre-submit: surface screening questions to the brain so it can draft
+    # answers BEFORE the submit click. Without this, submit fires with empty
+    # textareas, Upwork rejects with generic "Please answer this question"
+    # inline errors, and the brain has no clean way to know what was asked
+    # — it retries with the same empty params forever (verified 2026-05-11
+    # on a Cyprus Claude/Codex job: 5 screening questions, every retry
+    # burned ~60s and landed back on the same "Value is required" error).
+    #
+    # Scoping: the 2026 Upwork apply form uses Air3's ``air3-textarea
+    # inner-textarea`` for every textarea, including the cover letter
+    # which the brain has already populated. So we anchor on the
+    # "Additional details" heading and collect textareas that fall
+    # between it and the "Attachments" heading — that's exactly the
+    # screening-question block. No ``data-test`` / ``aria-label`` /
+    # ``placeholder`` exists on the textareas themselves, so the label
+    # comes from walking up to the nearest ``<label>`` / ``<legend>`` /
+    # heading / paragraph (verified 2026-05-11).
+    question_texts: list[str] = await page.evaluate(
+        """
+        () => {
+          const headings = [...document.querySelectorAll(
+            'h2, h3, h4, h5, label, legend, div, span'
+          )];
+          const lc = s => (s || '').trim().toLowerCase();
+          const startAnchor = headings.find(
+            el => lc(el.textContent).startsWith('additional details')
+          );
+          if (!startAnchor) return [];
+          const endAnchor = headings.find(
+            el => lc(el.textContent).startsWith('attachments')
+              || lc(el.textContent).startsWith('profile highlights')
+          );
+
+          const FOLLOWS = Node.DOCUMENT_POSITION_FOLLOWING;
+          const textareas = [...document.querySelectorAll('textarea')].filter(ta => {
+            const cs = getComputedStyle(ta);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || ta.offsetParent === null) return false;
+            // Must come AFTER "Additional details"…
+            if (!(startAnchor.compareDocumentPosition(ta) & FOLLOWS)) return false;
+            // …and BEFORE "Attachments"/"Profile highlights" if those exist.
+            if (endAnchor && !(ta.compareDocumentPosition(endAnchor) & FOLLOWS)) return false;
+            return true;
+          });
+
+          const out = [];
+          for (const ta of textareas) {
+            let label = '';
+            let p = ta;
+            for (let i = 0; i < 7 && p && !label; i++) {
+              p = p.parentElement;
+              if (!p) break;
+              const cand = p.querySelector(
+                'label, legend, [class*="question"], [class*="label"], h4, h5, p strong, p b, p'
+              );
+              if (cand && !cand.contains(ta)) {
+                const txt = (cand.textContent || '').trim();
+                if (txt && txt.length > 5 && txt.length < 500) { label = txt; break; }
+              }
+            }
+            if (!label) {
+              label = ta.getAttribute('aria-label')
+                   || ta.getAttribute('placeholder')
+                   || 'Untitled screening question';
+            }
+            // The Cover Letter textarea lives inside the same "Additional
+            // details" section on the 2026 form. Skip it by semantic label
+            // (stable: Upwork's section name has been "Cover Letter" for
+            // years) so we don't surface it as a fake question.
+            if (lc(label) === 'cover letter') continue;
+            out.push(label);
+          }
+          return out;
+        }
+        """
+    )
+
+    if question_texts and (
+        not params.answers or len(params.answers) < len(question_texts)
+    ):
+        return {
+            "status": "needs_answers",
+            "questions": question_texts,
+            "message": (
+                f"This job has {len(question_texts)} screening question(s). "
+                "Draft an answer for each (same order as listed), then re-call "
+                "``submit_proposal`` with ``answers=[...]`` matching that order. "
+                "Cover-letter and rate from this call are already on the page — "
+                "no need to re-supply them, but pass the same values to be safe."
+            ),
+            "page_url": page.url,
+        }
+
+    # Answer screening questions if provided. Use the same "between
+    # Additional details and Attachments" scoping as the detection block
+    # above so we never overwrite the cover-letter textarea (which shares
+    # the ``air3-textarea inner-textarea`` class on the 2026 form).
     if params.answers:
-        question_inputs = await page.query_selector_all('[data-test="question-input"], .question-answer textarea, .screening-question textarea')
+        question_handles = await page.evaluate_handle(
+            """
+            () => {
+              const headings = [...document.querySelectorAll(
+                'h2, h3, h4, h5, label, legend, div, span'
+              )];
+              const lc = s => (s || '').trim().toLowerCase();
+              const startAnchor = headings.find(
+                el => lc(el.textContent).startsWith('additional details')
+              );
+              if (!startAnchor) return [];
+              const endAnchor = headings.find(
+                el => lc(el.textContent).startsWith('attachments')
+                  || lc(el.textContent).startsWith('profile highlights')
+              );
+              const FOLLOWS = Node.DOCUMENT_POSITION_FOLLOWING;
+              // Resolve a textarea's nearest label so we can skip
+              // "Cover Letter" — same heuristic as the detection block.
+              const labelOf = ta => {
+                let p = ta;
+                for (let i = 0; i < 7; i++) {
+                  p = p.parentElement;
+                  if (!p) break;
+                  const cand = p.querySelector(
+                    'label, legend, [class*="question"], [class*="label"], h4, h5, p strong, p b, p'
+                  );
+                  if (cand && !cand.contains(ta)) {
+                    const txt = (cand.textContent || '').trim();
+                    if (txt && txt.length > 5 && txt.length < 500) return txt;
+                  }
+                }
+                return '';
+              };
+              return [...document.querySelectorAll('textarea')].filter(ta => {
+                const cs = getComputedStyle(ta);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || ta.offsetParent === null) return false;
+                if (!(startAnchor.compareDocumentPosition(ta) & FOLLOWS)) return false;
+                if (endAnchor && !(ta.compareDocumentPosition(endAnchor) & FOLLOWS)) return false;
+                if (lc(labelOf(ta)) === 'cover letter') return false;
+                return true;
+              });
+            }
+            """
+        )
+        props = await question_handles.get_properties()
+        question_inputs = [
+            await prop.as_element() for prop in props.values()
+        ]
+        question_inputs = [el for el in question_inputs if el is not None]
         for i, answer in enumerate(params.answers):
             if i < len(question_inputs):
                 await question_inputs[i].fill(answer)
 
-    # Check for connects required
-    connects_el = await page.query_selector('[data-test="connects-required"], .connects-info')
-    connects_required = 0
-    if connects_el:
-        text = (await connects_el.text_content() or "")
-        import re
-        numbers = re.findall(r'\d+', text)
-        if numbers:
-            connects_required = int(numbers[0])
+    # NB: the legacy `[data-test="connects-required"]` extraction that
+    # used to live here was stale on the 2026 layout and always shipped 0.
+    # Truthful Connects-used now comes from the pre/post balance diff
+    # captured at the top of the function and finalized after success.
 
     # Submit the proposal. Selector list is deliberately fat — verified
     # 2026-05-09 the live "Submit proposal" button has NO data-test attr
@@ -630,25 +868,52 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
 
     # Now poll for the actual submission outcome.
     _deadline = _aio.get_event_loop().time() + 15.0
+    success_message: str | None = None
     while _aio.get_event_loop().time() < _deadline:
         # 1. Explicit success element
         ok = await page.query_selector('[data-test="proposal-submitted"], .success-message')
         if ok:
-            return {
-                "status": "submitted",
-                "connects_used": connects_required,
-                "message": "Proposal submitted successfully",
-                "page_url": page.url,
-            }
+            success_message = "Proposal submitted successfully"
+            break
         # 2. URL changed away from /apply/ → Upwork redirected, success.
         if "/apply/" not in page.url and page.url != pre_submit_url:
-            return {
-                "status": "submitted",
-                "connects_used": connects_required,
-                "message": f"Proposal submitted (redirected to {page.url})",
-                "page_url": page.url,
-            }
+            success_message = f"Proposal submitted (redirected to {page.url})"
+            break
         await _aio.sleep(0.5)
+
+    if success_message:
+        # Capture the success URL BEFORE the post-balance fetch — same
+        # stale-handle reason as the pre-submit ordering above. Once
+        # get_connects_balance navigates to /nx/plans/connects/balance,
+        # this `page` handle may rotate and `page.url` would read the
+        # balance page (or raise on a closed handle).
+        success_page_url = page.url
+
+        # Post-submit balance snapshot, computed once outside the poll
+        # loop so both success branches share the same logic. Same 8s
+        # hard cap as the pre-submit fetch — we never block a confirmed
+        # submit on a flaky balance read.
+        import asyncio as _aio_post_balance
+        post_connects: int | None = None
+        if pre_connects is not None:
+            try:
+                post_balance = await _aio_post_balance.wait_for(get_connects_balance(), timeout=8.0)
+                raw_post = post_balance.get("available")
+                if isinstance(raw_post, int):
+                    post_connects = raw_post
+            except (Exception, _aio_post_balance.TimeoutError):
+                post_connects = None
+        connects_used = (
+            pre_connects - post_connects
+            if pre_connects is not None and post_connects is not None
+            else None
+        )
+        return {
+            "status": "submitted",
+            "connects_used": connects_used,  # int or None — never a fabricated 0
+            "message": success_message,
+            "page_url": success_page_url,
+        }
 
     # Polling exhausted — fall through to error capture.
     try:
@@ -1041,6 +1306,124 @@ async def _wait_for_cloudflare_clear(page, max_wait_s: float = 20.0) -> bool:
             return True
         await _aio.sleep(0.5)
     return False
+
+
+async def _attach_profile_highlights(page, max_items: int = 4) -> str:
+    """Open the apply form's Profile-highlights modal, select up to four
+    of the user's portfolio items, and click "Add to highlights" to
+    confirm.
+
+    Verified against the live 2026 apply form on 2026-05-10:
+      - Open trigger: clicking [data-test="highlights-selector"] [data-test="portfolio"]
+        opens a [role=dialog] with three tabs (Upwork jobs / Portfolio /
+        Certificates). Clicking the [data-test="portfolio"] card lands
+        with the Portfolio tab pre-selected.
+      - Per-item Add: button.item-add[data-ev-label="profile_highlights_editor_btn_add"]
+        toggles each portfolio item; text changes from "Select highlight"
+        to "Selected".
+      - Confirm:    button.air3-btn-primary[data-ev-label="profile_highlights_editor_btn_add"]
+        commits the selection and closes the dialog. Both desktop ("Add
+        to highlights") and mobile ("Add N/4") variants share these
+        attrs — pick the visible one.
+
+    Returns a short status string ("attached_2", "no_items_to_attach",
+    "no_highlights_section", "modal_did_not_open", "highlights_error_<X>")
+    for the caller to log. Never raises — failures here must not block
+    submit_proposal.
+    """
+    try:
+        cta = await page.query_selector(
+            '[data-test="highlights-selector"] [data-test="portfolio"]'
+        )
+        if cta is None:
+            return "no_highlights_section"
+
+        await cta.click()
+
+        try:
+            await page.wait_for_selector(
+                '[role="dialog"] button[data-ev-label="profile_highlights_editor_btn_add"]',
+                timeout=4000,
+            )
+        except Exception:
+            return "modal_did_not_open"
+
+        items = await page.query_selector_all(
+            '[role="dialog"] button.item-add[data-ev-label="profile_highlights_editor_btn_add"]'
+        )
+
+        clicked = 0
+        for item in items[:max_items]:
+            try:
+                text = (await item.text_content() or "").strip().lower()
+                # Already-selected items show "Selected" — don't toggle
+                # them off by clicking again.
+                if text == "selected":
+                    clicked += 1
+                    continue
+                await item.click()
+                clicked += 1
+            except Exception:
+                continue
+
+        if clicked == 0:
+            # No items at all — close the modal cleanly so the rest of
+            # the submit flow has a stable form.
+            cancel = await page.query_selector(
+                '[role="dialog"] button[data-ev-label="profile_highlights_editor_btn_cancel"]'
+            )
+            if cancel:
+                try:
+                    await cancel.click()
+                except Exception:
+                    pass
+            return "no_items_to_attach"
+
+        # Pick the visible, enabled "Add to highlights" primary button.
+        # Both desktop and mobile counter variants share data-ev-label
+        # and class "air3-btn-primary"; only one is actually rendered.
+        confirm_candidates = await page.query_selector_all(
+            '[role="dialog"] button.air3-btn-primary[data-ev-label="profile_highlights_editor_btn_add"]'
+        )
+        confirm = None
+        for cand in confirm_candidates:
+            try:
+                disabled = await cand.get_attribute("disabled")
+                if disabled is not None:
+                    continue
+                # offsetParent is null for hidden mobile/desktop variants
+                visible = await cand.evaluate("e => e.offsetParent !== null")
+                if visible:
+                    confirm = cand
+                    break
+            except Exception:
+                continue
+        # Last-ditch fallback: any non-disabled candidate
+        if confirm is None:
+            for cand in confirm_candidates:
+                try:
+                    if await cand.get_attribute("disabled") is None:
+                        confirm = cand
+                        break
+                except Exception:
+                    continue
+
+        if confirm is None:
+            return "confirm_button_not_found"
+
+        await confirm.click()
+
+        # Wait for dialog to detach so the rest of the flow runs against
+        # a stable form layout.
+        try:
+            await page.wait_for_selector('[role="dialog"]', state="detached", timeout=4000)
+        except Exception:
+            # Even if detach detection misses, the click already fired.
+            pass
+
+        return f"attached_{clicked}"
+    except Exception as exc:
+        return f"highlights_error_{type(exc).__name__}"
 
 
 async def _handle_rate_increase_section(page) -> None:

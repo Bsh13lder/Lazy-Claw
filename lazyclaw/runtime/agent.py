@@ -311,7 +311,12 @@ _HAND_TUNED_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = {
     "whatsapp":  re.compile(r"\b(whatsapp|wa\s+(?:msg|message))\b", re.IGNORECASE),
     "instagram": re.compile(r"\b(instagram|insta|ig\s+(?:msg|message))\b", re.IGNORECASE),
     "email":     re.compile(r"\b(e-?mail|gmail|inbox)\b", re.IGNORECASE),
-    "upwork":    re.compile(r"\b(upwork)\b|upwork\.com", re.IGNORECASE),
+    # Catch "upwork", "Upwork", "upwork.com", and the user-typo variants
+    # "upworker" / "upworks" (verified live 2026-05-11 — "can you vcheck
+    # upworker works small projects" routed to core-only tools because
+    # \bupwork\b doesn't match the "er" suffix, so the brain hallucinated
+    # tool names from history instead of having them properly injected).
+    "upwork":    re.compile(r"\bupwork(?:er|ers|s)?\b|upwork\.com", re.IGNORECASE),
 }
 
 # Manual aliases for multi-keyword MCPs whose name doesn't match the words

@@ -165,10 +165,31 @@ async def get_job_details(params: JobDetailsParams) -> dict:
     browser = get_browser()
     page = await browser.get_page()
 
-    # Normalize URL
-    url = params.job_url
-    if not url.startswith("http"):
-        url = f"https://www.upwork.com/jobs/{url}"
+    # Normalize URL to the canonical /jobs/~<id> form. Upwork exposes the
+    # same posting under several paths (verified live 2026-05-11):
+    #   /jobs/<title>_~<id>/                      → canonical, all extractors work
+    #   /jobs/~<id>                               → canonical short form
+    #   /freelance-jobs/apply/<title>_~<id>/      → apply-page layout, h1/data-cy
+    #                                              selectors miss → empty title
+    #                                              → cache layer flags as error
+    #                                              → brain retries forever
+    #   /jobs/<title>_~<id>/?referrer_url_path=…  → canonical + tracking
+    # The pattern is always "~<digits>" somewhere in the path. Extract that
+    # ID and always rebuild as the canonical short form so we hit the
+    # 2026 Air3 layout the rest of the extractors target.
+    raw = params.job_url
+    id_match = re.search(r"~(\d{10,})", raw)
+    if id_match:
+        url = f"https://www.upwork.com/jobs/~{id_match.group(1)}"
+    elif not raw.startswith("http"):
+        # Bare ID passed (legacy callers) — treat as ~<id>.
+        ident = raw.lstrip("~")
+        url = f"https://www.upwork.com/jobs/~{ident}"
+    else:
+        # Already an http(s) URL but no ~<id> we recognize — let it through
+        # and surface whatever the page returns. Final empty-title guard
+        # below will return a structured error if extraction fails.
+        url = raw
 
     await page.goto(url, wait_until="networkidle")
     await asyncio.sleep(3)

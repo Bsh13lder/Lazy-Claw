@@ -495,6 +495,33 @@ class TaskRunner:
                     user_id, instruction, callback=callback,
                 )
 
+            # Empty-reply fallback: when the brain's final LLM call returns
+            # ``content_len=0`` (no synthesis text), the user otherwise sees
+            # only a generic "Task completed" with no actionable info.
+            # Build a one-shot summary from tools_used so the user at least
+            # knows what ran. Real diagnosis still lives in the logs, but
+            # this turns "??? task completed" into something readable.
+            if not (result or "").strip() and _captured_summary is not None:
+                tools = list(_captured_summary.tools_used or [])
+                duration_s = (_captured_summary.duration_ms or 0) // 1000
+                if tools:
+                    tool_lines = "\n".join(f"  • {t}" for t in tools[:10])
+                    if len(tools) > 10:
+                        tool_lines += f"\n  • … +{len(tools) - 10} more"
+                    result = (
+                        f"⚠️ Background task ran but returned no synthesis text "
+                        f"(brain LLM had nothing left to say after the tool calls).\n\n"
+                        f"Tools called ({len(tools)}, {duration_s}s):\n{tool_lines}\n\n"
+                        f"If this was an Upwork apply that didn't submit, ask me "
+                        f"to retry — the get_proposals default-status fix in 5/10's "
+                        f"patches should now keep the brain unblocked."
+                    )
+                else:
+                    result = (
+                        f"⚠️ Background task ran for {duration_s}s but produced no "
+                        f"text and called no tools. Likely brain stalled — please retry."
+                    )
+
             # Store result (encrypted) + cost stats from work_summary
             encrypted_result = encrypt(result, key)
             _cost = _captured_summary.total_cost if _captured_summary else 0.0

@@ -1,6 +1,10 @@
 """Profile and connects tools for Upwork MCP."""
 
-from ..browser.client import get_browser
+import logging
+
+from ..browser.client import _is_nav_noise, get_browser
+
+logger = logging.getLogger(__name__)
 
 
 async def get_my_profile() -> dict:
@@ -11,14 +15,27 @@ async def get_my_profile() -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    await page.goto("https://www.upwork.com/freelancers/settings/profile", wait_until="networkidle")
+    # safe_goto serializes navigation + clears Cloudflare. The old direct
+    # page.goto landed on the settings page before content rendered and
+    # fell through to the `h1` fallback selector, which matches the
+    # literal page heading "Settings". The agent then wrote "Settings"
+    # to the user's display_name via the auto-pull skill — every
+    # subsequent proposal was signed off "— Settings".
+    page = await browser.safe_goto(
+        "https://www.upwork.com/freelancers/settings/profile"
+    )
 
     profile = {}
 
-    # Name
-    name_el = await page.query_selector('[data-test="profile-name"], h1, .profile-name')
+    # Name. The `h1` fallback is intentionally NOT here — h1 on the
+    # settings page is the word "Settings", which we'd capture as the
+    # user's name. Only structured selectors. If they all miss, the
+    # caller surfaces an error rather than storing a nav label.
+    name_el = await page.query_selector(
+        '[data-test="profile-name"], [data-qa="user-name"], .profile-name, '
+        '[data-cy="profile-name"]'
+    )
     if name_el:
         profile["name"] = (await name_el.text_content() or "").strip()
 
@@ -37,16 +54,24 @@ async def get_my_profile() -> dict:
     if overview_el:
         profile["overview"] = (await overview_el.text_content() or "").strip()
 
-    # Skills
+    # Skills. Filter out Upwork's accessibility-skip nav labels
+    # ("Skip skills", "Previous skills. Update list") that the .air3-token
+    # selector used to capture from the page's nav region. Real skill
+    # chips never have those exact strings.
     skill_els = await page.query_selector_all('[data-test="skill"], .skill-badge, .air3-token')
-    profile["skills"] = []
+    skill_list: list[str] = []
     for el in skill_els:
         text = await el.text_content()
-        if text:
-            profile["skills"].append(text.strip())
+        if not text:
+            continue
+        candidate = text.strip()
+        if not candidate or _is_nav_noise(candidate):
+            continue
+        skill_list.append(candidate)
+    profile["skills"] = skill_list
 
     # Now get stats from a different page
-    await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="networkidle")
+    page = await browser.safe_goto("https://www.upwork.com/nx/find-work/best-matches")
 
     # Try to get JSS from sidebar or header
     jss_el = await page.query_selector('[data-test="jss"], .jss-score, [data-cy="jss"]')
@@ -67,6 +92,22 @@ async def get_my_profile() -> dict:
     connects = await get_connects_balance()
     profile["connects"] = connects
 
+    # Defensive guard: if the scraped name is a known Upwork nav label
+    # ("Settings", "Edit Profile", "My Profile", etc.) drop it. The
+    # auto-pull skill in lazyclaw treats empty name as "skip" and never
+    # writes garbage to the user's stored display_name. Same for title.
+    if profile.get("name") and _is_nav_noise(profile["name"]):
+        logger.warning(
+            "upwork_get_my_profile: dropped nav-label name %r — selectors "
+            "missed the real profile-name element", profile["name"],
+        )
+        profile.pop("name", None)
+    if profile.get("title") and _is_nav_noise(profile["title"]):
+        logger.warning(
+            "upwork_get_my_profile: dropped nav-label title %r", profile["title"],
+        )
+        profile.pop("title", None)
+
     return profile
 
 
@@ -78,10 +119,11 @@ async def get_connects_balance() -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    # Navigate to connects page
-    await page.goto("https://www.upwork.com/nx/plans/connects/balance", wait_until="networkidle")
+    # Navigate to connects page via safe_goto (Cloudflare-resilient,
+    # serialized under _NAV_LOCK so a parallel get_messages call can't
+    # collapse the tab mid-extract).
+    page = await browser.safe_goto("https://www.upwork.com/nx/plans/connects/balance")
 
     connects = {}
 
@@ -97,7 +139,7 @@ async def get_connects_balance() -> dict:
 
     # If we couldn't find it, try the header/sidebar on main page
     if "available" not in connects:
-        await page.goto("https://www.upwork.com/nx/find-work/", wait_until="networkidle")
+        page = await browser.safe_goto("https://www.upwork.com/nx/find-work/")
         connects_el = await page.query_selector('[data-test="connects-count"], .connects-count')
         if connects_el:
             text = (await connects_el.text_content() or "").strip()

@@ -11,6 +11,83 @@ from patchright.async_api import async_playwright, Browser, BrowserContext, Page
 logger = logging.getLogger(__name__)
 
 
+# ── Module-level navigation lock ─────────────────────────────────────
+# Two MCP tool calls in flight (e.g. get_messages running while search_jobs
+# also fires) race on the same Playwright Page handle — one calls
+# ``page.goto`` while the other is mid-extract, the tab navigates, the
+# extract returns garbage / Target-closed. Symptom in logs:
+#     "Upwork browser handle stale, reconnecting via CDP"  (10×/hour)
+#     "Page.goto: Target page, context or browser has been closed"
+# Serialize all navigation under this lock. Cheap, deterministic, and
+# doesn't slow down anything because Upwork's CDN dominates wall time.
+_NAV_LOCK = asyncio.Lock()
+
+
+# Page titles / URL fragments that the legacy fallback selectors used
+# to capture instead of the real profile data — never store these as
+# the user's name / title / skill list.
+_NAV_LABEL_NOISE = frozenset({
+    "settings", "edit profile", "my profile", "messages", "find work",
+    "find work feed", "best matches", "saved jobs", "proposals",
+    "contracts", "all job posts", "reports", "skip skills",
+    "previous skills. update list",
+})
+
+
+def _is_nav_noise(value: str) -> bool:
+    """True if a scraped string is one of Upwork's navigation labels."""
+    return value.strip().lower() in _NAV_LABEL_NOISE
+
+
+def _looks_like_upwork(page) -> bool:
+    """True if a page handle is currently on the upwork.com origin."""
+    try:
+        if page.is_closed():
+            return False
+        return "upwork.com" in (page.url or "").lower()
+    except Exception:
+        return False
+
+
+async def _pick_upwork_page(browser):
+    """Walk every context + page in the connected browser, prefer an
+    existing tab that's already on upwork.com.
+
+    Falls back to the first non-closed page if no Upwork tab is open.
+    This is the single biggest fix for the Cloudflare-challenge flow:
+    if the user has a logged-in Upwork tab open and we navigate IT,
+    Cloudflare passes us straight through. If we navigate a generic
+    fresh tab (e.g. their YouTube tab) Cloudflare sees a cold visit
+    and throws up a JS-challenge wall even with cookies attached.
+    """
+    contexts = browser.contexts if browser else []
+    upwork_candidates = []
+    fallback = None
+    for ctx in contexts:
+        for p in ctx.pages:
+            try:
+                if p.is_closed():
+                    continue
+                if _looks_like_upwork(p):
+                    upwork_candidates.append((ctx, p))
+                elif fallback is None:
+                    fallback = (ctx, p)
+            except Exception:
+                continue
+    if upwork_candidates:
+        # Prefer non-`/ab/messages/rooms/<id>` tabs for goto-heavy tools
+        # so we don't navigate the user away from an open conversation.
+        for ctx, p in upwork_candidates:
+            try:
+                url = (p.url or "").lower()
+            except Exception:
+                url = ""
+            if "/ab/messages/rooms/" not in url:
+                return ctx, p
+        return upwork_candidates[0]
+    return fallback
+
+
 class BrowserDisconnectedError(RuntimeError):
     """Raised when the underlying CDP page/browser handle is no longer alive.
 
@@ -222,13 +299,27 @@ class UpworkBrowser:
             f"http://{CDP_HOST}:{CDP_PORT}"
         )
 
-        contexts = self._browser.contexts
-        if contexts:
-            self._context = contexts[0]
-            self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
+        # Prefer an EXISTING Upwork tab over the generic contexts[0]/pages[0]
+        # default. Picking a tab that's already on upwork.com means Cloudflare
+        # sees a warm session and lets every subsequent goto through without a
+        # JS challenge. Picking a YouTube tab (or any non-Upwork pages[0])
+        # makes Cloudflare treat the first goto as a cold visit and block it
+        # — exactly the upwork_get_job_details "cloudflare_blocked" failure.
+        picked = await _pick_upwork_page(self._browser)
+        if picked is not None:
+            self._context, self._page = picked
         else:
-            self._context = await self._browser.new_context()
-            self._page = await self._context.new_page()
+            contexts = self._browser.contexts
+            if contexts:
+                self._context = contexts[0]
+                self._page = (
+                    self._context.pages[0]
+                    if self._context.pages
+                    else await self._context.new_page()
+                )
+            else:
+                self._context = await self._browser.new_context()
+                self._page = await self._context.new_page()
 
         self._page.set_default_timeout(self.timeout)
         self._started = True
@@ -261,13 +352,87 @@ class UpworkBrowser:
         On a stale handle (CDP socket reset, tab crashed, or user closed
         the tab), recreate the connection rather than handing the dead
         handle to callers.
+
+        Also: if the cached page drifted off upwork.com (the user opened a
+        new tab on a different origin and the existing Upwork tab is now
+        further back), try to re-pick a real Upwork tab before falling
+        back to the stale handle. Cookies are shared at the context level
+        so this only changes WHICH tab we drive, never the auth state.
         """
         if not self._page_is_alive():
             if self._started:
                 logger.warning("Upwork browser handle stale, reconnecting via CDP")
                 await self.close()
             return await self.start()
+        # Page is alive but may be on a non-upwork origin (e.g. the user
+        # alt-tabbed to YouTube). Try to swap to an existing Upwork tab —
+        # cheap because we don't reconnect, just re-pick.
+        if not _looks_like_upwork(self._page) and self._browser is not None:
+            picked = await _pick_upwork_page(self._browser)
+            if picked is not None:
+                ctx, p = picked
+                if _looks_like_upwork(p):
+                    self._context = ctx
+                    self._page = p
+                    p.set_default_timeout(self.timeout)
         return self._page
+
+    async def safe_goto(
+        self,
+        url: str,
+        wait_until: str = "networkidle",
+        warm: bool = True,
+        cloudflare_retry_s: int = 15,
+    ) -> Page:
+        """Navigate to a URL with Cloudflare-resilient semantics.
+
+        Three things this does that a bare ``page.goto`` does not:
+
+        1. Serialize concurrent navigations via the module-level
+           ``_NAV_LOCK`` so two MCP tools in flight don't race and
+           collapse each other's tab into "Target closed".
+        2. Warm the session: if the picked tab isn't currently on
+           upwork.com, navigate to /nx/find-work/ first and dwell so
+           Cloudflare sees a logged-in browsing session before we
+           jump to a deep ``/jobs/~<id>`` URL.
+        3. Wait out Cloudflare's JS challenge: if the final URL contains
+           ``challenges.cloudflare.com`` or the page body still says
+           "just a moment", poll for clearance up to
+           ``cloudflare_retry_s`` seconds. Real users wait this out;
+           we should too.
+        """
+        async with _NAV_LOCK:
+            page = await self.get_page()
+
+            if warm and not _looks_like_upwork(page):
+                try:
+                    await page.goto(
+                        "https://www.upwork.com/nx/find-work/",
+                        wait_until="domcontentloaded",
+                    )
+                    await asyncio.sleep(1.5)
+                except Exception as exc:
+                    logger.debug("upwork warmup nav failed: %s — proceeding", exc)
+
+            await page.goto(url, wait_until=wait_until)
+
+            # Cloudflare-pass retry loop. Cheap polling — no busy wait.
+            for _ in range(cloudflare_retry_s):
+                try:
+                    current = (page.url or "").lower()
+                    body_lower = ((await page.content()) or "").lower()[:2000]
+                except Exception:
+                    break
+                cf_url = "challenges.cloudflare.com" in current
+                cf_body = (
+                    "just a moment" in body_lower
+                    or "cf-browser-verification" in body_lower
+                )
+                if not cf_url and not cf_body:
+                    break
+                await asyncio.sleep(1)
+
+            return page
 
     async def close(self):
         """Disconnect from browser (doesn't close Chrome)."""

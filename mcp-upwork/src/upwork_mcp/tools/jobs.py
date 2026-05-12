@@ -48,7 +48,10 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
             query_params["contractor_tier"] = level
 
     url = f"{base_url}?{urllib.parse.urlencode(query_params)}"
-    await page.goto(url, wait_until="networkidle")
+    # safe_goto picks an existing Upwork tab (cookies + warm session),
+    # serializes concurrent navigations under _NAV_LOCK, and waits out
+    # Cloudflare's JS challenge before returning the page.
+    page = await browser.safe_goto(url)
     await asyncio.sleep(3)
 
     jobs = []
@@ -163,7 +166,6 @@ async def get_job_details(params: JobDetailsParams) -> dict:
     leaked raw JS/CSS into the description and budget fields.
     """
     browser = get_browser()
-    page = await browser.get_page()
 
     # Normalize URL to the canonical /jobs/~<id> form. Upwork exposes the
     # same posting under several paths (verified live 2026-05-11):
@@ -191,7 +193,10 @@ async def get_job_details(params: JobDetailsParams) -> dict:
         # below will return a structured error if extraction fails.
         url = raw
 
-    await page.goto(url, wait_until="networkidle")
+    # safe_goto: prefer existing Upwork tab + warm session + Cloudflare
+    # retry. Eliminates the "cloudflare_blocked" failure on /jobs/~<id>
+    # that fires when Playwright lands on a cold tab.
+    page = await browser.safe_goto(url)
     await asyncio.sleep(3)
 
     job = {"url": url}

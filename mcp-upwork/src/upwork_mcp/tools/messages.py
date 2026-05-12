@@ -81,13 +81,16 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     url = "https://www.upwork.com/ab/messages/rooms/"
     if params.unread_only:
         url += "?filter=unread"
 
-    await page.goto(url, wait_until="networkidle")
+    # safe_goto: serialized + Cloudflare-resilient + prefers existing
+    # Upwork tab. Fixes the contention bug where get_messages and
+    # search_jobs in flight at the same time would knock each other's
+    # page handle out.
+    page = await browser.safe_goto(url)
 
     conversations: list[dict] = []
 
@@ -194,7 +197,6 @@ async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Build URL — Upwork moved /nx/messages/ → /ab/messages/rooms/ in the 2026 redesign.
     if room_id.startswith("http"):
@@ -202,7 +204,7 @@ async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
     else:
         url = f"https://www.upwork.com/ab/messages/rooms/{room_id}"
 
-    await page.goto(url, wait_until="networkidle")
+    page = await browser.safe_goto(url)
 
     conversation = {"room_id": room_id, "messages": []}
 
@@ -280,7 +282,6 @@ async def send_message(params: SendMessageParams) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Navigate to conversation — same /ab/messages/rooms/ migration as above.
     if params.room_id.startswith("http"):
@@ -288,7 +289,7 @@ async def send_message(params: SendMessageParams) -> dict:
     else:
         url = f"https://www.upwork.com/ab/messages/rooms/{params.room_id}"
 
-    await page.goto(url, wait_until="networkidle")
+    page = await browser.safe_goto(url)
 
     # Find message input
     input_el = await page.query_selector('[data-test="message-input"], textarea[name*="message"], .message-input textarea')
@@ -325,10 +326,9 @@ async def get_unread_count() -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Check messages badge in header
-    await page.goto("https://www.upwork.com/nx/find-work/", wait_until="networkidle")
+    page = await browser.safe_goto("https://www.upwork.com/nx/find-work/")
 
     unread_el = await page.query_selector('[data-test="messages-badge"], .messages-count, .unread-count')
     if unread_el:

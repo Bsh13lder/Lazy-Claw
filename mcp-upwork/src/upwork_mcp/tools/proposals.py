@@ -97,9 +97,11 @@ async def get_proposals(params: ProposalsParams) -> list[dict]:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    await page.goto("https://www.upwork.com/nx/proposals/", wait_until="networkidle")
+    # safe_goto: serializes navigation under _NAV_LOCK so a parallel
+    # get_messages or get_job_details can't collapse our tab with
+    # "Target page, context or browser has been closed" mid-call.
+    page = await browser.safe_goto("https://www.upwork.com/nx/proposals/")
 
     # The 2026 layout uses [data-qa] (not data-test) on container cards and
     # [data-qa^="item"] on each row. Wait for either container to materialize.
@@ -214,9 +216,8 @@ async def get_proposal_details(proposal_url: str) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    await page.goto(proposal_url, wait_until="networkidle")
+    page = await browser.safe_goto(proposal_url)
 
     details = {"url": proposal_url}
 
@@ -295,10 +296,10 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
         pre_connects = None
 
     # NOW grab the page handle for the submit flow — fresh, not stale.
-    page = await browser.get_page()
-
-    # Navigate to job page first
-    await page.goto(params.job_url, wait_until="networkidle")
+    # safe_goto serializes + Cloudflare-retries + prefers existing Upwork
+    # tab. The local _wait_for_cloudflare_clear poll below stays as a
+    # second-stage guard for the apply-form-specific challenge.
+    page = await browser.safe_goto(params.job_url)
 
     # Wait for Cloudflare "Just a moment..." interstitial to clear.
     # Upwork wraps every fresh navigation in this challenge — networkidle
@@ -1049,9 +1050,8 @@ async def withdraw_proposal(
 
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    await page.goto(proposal_url, wait_until="networkidle")
+    page = await browser.safe_goto(proposal_url)
     if not await _wait_for_cloudflare_clear(page, 15.0):
         return {
             "status": "error",

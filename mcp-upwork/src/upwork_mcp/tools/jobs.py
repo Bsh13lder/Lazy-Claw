@@ -22,6 +22,67 @@ def _clean_posted(raw: str) -> str:
     return text.strip()
 
 
+# Skill names that are themselves CamelCase (no space) and must NOT be
+# split when they appear at the head of a merged-span string. Splitting
+# "FastAPI" would yield "FastA" + "PI" — broken.
+_CAMELCASE_SKILL_ALLOWLIST = frozenset({
+    "fastapi", "graphql", "javascript", "typescript", "postgresql",
+    "mongodb", "mysql", "pytorch", "tensorflow", "nodejs", "nextjs",
+    "vuejs", "reactjs", "github", "gitlab", "bitbucket", "openai",
+    "openapi", "openssh", "openssl", "linkedin", "youtube", "powerpoint",
+    "wordpress", "shopify", "woocommerce", "bigquery", "snowflake",
+    "elasticsearch", "kubernetes", "openshift", "datadog", "pagerduty",
+    "stripeapi",
+})
+
+# Prefixes that, when followed by another capitalized word with no
+# space, mean Upwork's keyword-highlighter span merged two distinct
+# skill chips ("Python" + "Scripting" → "PythonScripting"). Splitting
+# is safe because the prefix is a complete standalone skill name and
+# the suffix starts with a capital letter (the next chip's first char).
+_SPLIT_PREFIXES = (
+    "Python", "Microsoft", "Data", "AI", "Linux", "Windows", "Docker",
+    "Kubernetes", "Django", "Flask", "FastAPI", "REST", "API", "Web",
+    "Mobile", "Cloud", "Frontend", "Backend", "Selenium", "Scrapy",
+    "Pandas", "NumPy", "Beautiful", "Make.com", "n8n", "Zapier",
+    "Automation", "Scripting", "TypeScript", "JavaScript", "Node.js",
+    "Next.js", "Vue.js", "React", "Angular",
+)
+
+
+def _split_merged_skill(value: str) -> list[str]:
+    """Best-effort split of a merged-span skill string into chip parts.
+
+    Upwork's search-keyword highlighter wraps the matched word in
+    ``<span class="highlight">``. When two skill chips render adjacent
+    in the tile DOM and one of them is highlighted, text_content()
+    concatenates them without whitespace — "PythonScripting" from
+    [Python][Scripting], "PythonMicrosoft Excel" from [Python][Microsoft
+    Excel].
+
+    Strategy: only split when the head is a known single-token skill in
+    ``_SPLIT_PREFIXES`` and the suffix starts with a capital letter.
+    Real CamelCase names (FastAPI, GraphQL) are preserved untouched
+    because the WHOLE string is in ``_CAMELCASE_SKILL_ALLOWLIST``.
+
+    Returns a list — single-element when no merge is detected.
+    """
+    if not value:
+        return []
+    if value.lower() in _CAMELCASE_SKILL_ALLOWLIST:
+        return [value]
+    for prefix in _SPLIT_PREFIXES:
+        if (
+            value.startswith(prefix)
+            and len(value) > len(prefix)
+            and value[len(prefix)].isupper()
+        ):
+            # Recurse on the suffix in case 3+ chips merged
+            # ("PythonAutomationMake.comAPI").
+            return [prefix] + _split_merged_skill(value[len(prefix):])
+    return [value]
+
+
 class JobSearchParams(BaseModel):
     """Parameters for job search."""
     query: str = Field(description="Search keywords")
@@ -160,16 +221,19 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
                 text = await el.text_content()
                 if not text:
                     continue
-                candidate = text.strip()
-                if not (1 < len(candidate) < 30):
-                    continue
-                if _is_nav_noise(candidate):
-                    continue
-                key = candidate.lower()
-                if key in seen_skills:
-                    continue
-                seen_skills.add(key)
-                skills.append(candidate)
+                # Splitter handles Upwork's keyword-highlighter span merge
+                # ("PythonScripting" → ["Python", "Scripting"]). Preserves
+                # real CamelCase names (FastAPI, GraphQL) via allowlist.
+                for candidate in _split_merged_skill(text.strip()):
+                    if not (1 < len(candidate) < 30):
+                        continue
+                    if _is_nav_noise(candidate):
+                        continue
+                    key = candidate.lower()
+                    if key in seen_skills:
+                        continue
+                    seen_skills.add(key)
+                    skills.append(candidate)
             if skills:
                 job["skills"] = skills
 
@@ -271,20 +335,72 @@ async def get_job_details(params: JobDetailsParams) -> dict:
 
     job = {"url": url}
 
-    # Title — Upwork's 2026 layout uses a few different attribute hooks
-    # depending on whether the post is rendered in its modern Air3 layout
-    # or the legacy fallback. Try them in order, then h1 only as a last
-    # resort (h1 on /freelancers/settings/profile would match "Settings",
-    # but on a /jobs/~<id> page it should match the actual posting title).
-    job["title"] = await _first_text(page, [
-        '[data-cy="job-title"]',
-        '[data-test="job-title"]',
-        '[data-test="JobTitle"]',
-        '[data-qa="job-title"]',
-        '[data-test*="JobTitle"]',
-        'header h1',
-        'h1',
-    ])
+    # Title. The 2026 layout uses <h4> for the actual posting title
+    # (verified live 2026-05-12). All 5 `[data-cy="job-title"]` matches
+    # are sidebar entries from "Other open jobs by this client" —
+    # following any of them captured a different client's posting
+    # (e.g. "DropShipping Business expert" on what was actually a
+    # "Script Developer" posting).
+    #
+    # Strategy: try the h4 first (cleanest 2026 signal), then the
+    # browser tab <title> (always has the real job title prefixed
+    # before " - <category>"), then fall back to legacy selectors
+    # for older layouts and forks. Each candidate is filtered against
+    # the "similar / related / sidebar" ancestor chain to defend
+    # against future DOM moves of `[data-cy="job-title"]`.
+    title_text = ""
+    title_candidates = await page.query_selector_all(
+        "h4, h1, header h1, "
+        '[data-test="job-title"], [data-test="JobTitle"], '
+        '[data-qa="job-title"], [data-test*="JobTitle"], '
+        '[data-cy="job-title"]'
+    )
+    for el in title_candidates:
+        try:
+            in_sidebar = await el.evaluate(
+                """e => {
+                    let p = e.parentElement;
+                    while (p) {
+                        const tag = (p.tagName || '').toLowerCase();
+                        if (tag === 'aside') return true;
+                        const cls = (p.className || '').toLowerCase();
+                        const dt = (p.getAttribute('data-test') || '').toLowerCase();
+                        if (cls.includes('similar') || cls.includes('related') || cls.includes('sidebar')) return true;
+                        if (dt.includes('similar') || dt.includes('related') || dt.includes('sidebar')) return true;
+                        // 2026 sidebar wraps each entry in <div class="item">
+                        // under <section class="items air3-card-section">.
+                        // Detect by walking up to a section whose class
+                        // contains 'items'.
+                        if (tag === 'section' && cls.includes('items')) return true;
+                        p = p.parentElement;
+                    }
+                    return false;
+                }"""
+            )
+        except Exception:
+            in_sidebar = False
+        if in_sidebar:
+            continue
+        text = (await el.text_content() or "").strip()
+        if text and len(text) > 4:
+            title_text = text
+            break
+
+    # Fallback: parse the browser tab <title> ("Real Title - Category"
+    # on Upwork's 2026 layout). Reliable for /jobs/~<id> pages because
+    # Upwork sets <title> server-side from the canonical posting.
+    if not title_text:
+        try:
+            page_title = await page.title()
+        except Exception:
+            page_title = ""
+        if page_title:
+            # Drop the " - Category - Upwork" tail
+            head = page_title.split(" - ")[0].strip()
+            if head and len(head) > 4:
+                title_text = head
+
+    job["title"] = title_text
 
     # Description — capital-D [data-test="Description"] is the actual section.
     # The lowercase variant and ".description" selectors fired before but

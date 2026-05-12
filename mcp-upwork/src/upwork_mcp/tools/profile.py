@@ -117,36 +117,49 @@ async def get_connects_balance() -> dict:
     Returns the number of available connects, pending connects,
     and connects balance details.
     """
+    import re
+
     browser = get_browser()
     await browser.ensure_logged_in()
 
-    # Navigate to connects page via safe_goto (Cloudflare-resilient,
-    # serialized under _NAV_LOCK so a parallel get_messages call can't
-    # collapse the tab mid-extract).
-    page = await browser.safe_goto("https://www.upwork.com/nx/plans/connects/balance")
+    # 2026 layout: /nx/plans/connects/balance returns 404; the actual
+    # page is /nx/plans/connects/history. Body text shape (live probe
+    # 2026-05-12) is "...My balance28 ConnectsBuy Connects..." — no
+    # structured attribute hooks (no data-test="connects-balance" etc),
+    # so we extract the digit from the readable text following "My
+    # balance" in <main>.
+    page = await browser.safe_goto("https://www.upwork.com/nx/plans/connects/history")
 
-    connects = {}
+    connects: dict = {}
+    main_el = await page.query_selector("main")
+    if main_el:
+        main_text = (await main_el.text_content() or "")
+        m = re.search(r"My balance\s*(\d+)\s*Connects?", main_text, re.IGNORECASE)
+        if m:
+            connects["available"] = int(m.group(1))
+        else:
+            # Fallback: first "<number> Connects" pattern anywhere in main
+            m2 = re.search(r"(\d+)\s*Connects?\b", main_text)
+            if m2:
+                connects["available"] = int(m2.group(1))
 
-    # Available connects
-    available_el = await page.query_selector('[data-test="connects-available"], .connects-balance, [data-cy="available-connects"]')
-    if available_el:
-        text = (await available_el.text_content() or "").strip()
-        # Extract number
-        import re
-        numbers = re.findall(r'\d+', text)
-        if numbers:
-            connects["available"] = int(numbers[0])
-
-    # If we couldn't find it, try the header/sidebar on main page
+    # Header-pill fallback (e.g. when /connects/history itself is down)
     if "available" not in connects:
         page = await browser.safe_goto("https://www.upwork.com/nx/find-work/")
-        connects_el = await page.query_selector('[data-test="connects-count"], .connects-count')
-        if connects_el:
-            text = (await connects_el.text_content() or "").strip()
-            import re
-            numbers = re.findall(r'\d+', text)
-            if numbers:
-                connects["available"] = int(numbers[0])
+        for sel in (
+            '[data-test="connects-count"]',
+            '.connects-count',
+            '[data-test="connects-amount"]',
+            '[data-cy="connects"]',
+        ):
+            el = await page.query_selector(sel)
+            if not el:
+                continue
+            text = (await el.text_content() or "").strip()
+            digits = re.findall(r"\d+", text)
+            if digits:
+                connects["available"] = int(digits[0])
+                break
 
     # Try to get additional connects info
     pending_el = await page.query_selector('[data-test="pending-connects"]')

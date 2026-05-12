@@ -4,7 +4,22 @@ import re
 import asyncio
 import urllib.parse
 from pydantic import BaseModel, Field
-from ..browser.client import get_browser
+from ..browser.client import _is_nav_noise, get_browser
+
+
+def _clean_posted(raw: str) -> str:
+    """Strip 'Posted' prefix + collapse whitespace from a posted-time string.
+
+    Upwork's search results render this as:
+        "Posted\\n            \\n              6 hours ago"
+    We want: "6 hours ago".
+    """
+    if not raw:
+        return ""
+    text = " ".join(raw.split())
+    if text.lower().startswith("posted"):
+        text = text[len("posted"):].lstrip(" :-")
+    return text.strip()
 
 
 class JobSearchParams(BaseModel):
@@ -34,8 +49,18 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
     browser = get_browser()
     page = await browser.get_page()
 
-    # Build search URL
-    base_url = "https://www.upwork.com/nx/find-work/best-matches"
+    # Build search URL.
+    #
+    # /nx/find-work/best-matches is Upwork's personalized recommendations
+    # feed — ~20-50 jobs that Upwork picks for the user. Adding ?q=...
+    # filters within THAT small set, not across the open job board. That's
+    # why every search came back with the same 2 jobs regardless of
+    # keyword change.
+    #
+    # /nx/search/jobs/ is the global keyword search across the full board
+    # (100k+ active postings). That's what users actually want when they
+    # say "find me python upwork jobs".
+    base_url = "https://www.upwork.com/nx/search/jobs/"
     query_params = {"q": params.query}
 
     if params.job_type:
@@ -55,16 +80,33 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
     await asyncio.sleep(3)
 
     jobs = []
+    seen_urls: set[str] = set()
 
-    # Get job sections (each section contains one job)
-    sections = await page.query_selector_all("section")
+    # Get job tiles. The 2026 search page (/nx/search/jobs/) renders each
+    # tile as <article data-test="JobTile">, NOT the old <section> wrapper
+    # the /best-matches page used. Falling back to <section> here meant
+    # we matched only the page-level <section> (count=1) and returned 0
+    # jobs from the new URL. Try the new selectors first; <section> is
+    # kept as a last-resort fallback in case Upwork ships a third layout.
+    #
+    # NOTE: the comma-separated list matches each tile multiple times
+    # (once per matching selector), so 10 tiles → 30 hits. We dedupe by
+    # url further down in the extraction loop so each unique job only
+    # appears once in the returned list.
+    sections = await page.query_selector_all(
+        'article[data-test="JobTile"], article, [data-test="JobTile"], section'
+    )
 
-    for section in sections[:params.limit * 2]:  # Check more sections
+    for section in sections[:params.limit * 6]:  # 3× overlap from selector list, plus headroom
         try:
             job = {}
 
-            # Get title from h3 or h4 link
-            title_link = await section.query_selector("h3 a, h4 a")
+            # Title link. The 2026 search results use <h2 a href="/jobs/...">;
+            # /best-matches used <h3 a> or <h4 a>; keep all three for resilience.
+            title_link = await section.query_selector(
+                "h2 a[href*='/jobs/'], h3 a[href*='/jobs/'], h4 a[href*='/jobs/'], "
+                "h2 a, h3 a, h4 a"
+            )
             if not title_link:
                 continue
 
@@ -74,8 +116,20 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
             if not title or not href or "/jobs/" not in href:
                 continue
 
+            full_url = (
+                f"https://www.upwork.com{href}" if href.startswith("/") else href
+            )
+            # Canonicalize for dedup: strip query string + trailing slash
+            # so /jobs/x_~01abc and /jobs/x_~01abc/?ref=foo collapse to the
+            # same key. The full URL with query string still goes into the
+            # returned payload so callers can preserve referrer tracking.
+            dedup_key = full_url.split("?", 1)[0].rstrip("/")
+            if dedup_key in seen_urls:
+                continue
+            seen_urls.add(dedup_key)
+
             job["title"] = title.strip()
-            job["url"] = f"https://www.upwork.com{href}" if href.startswith("/") else href
+            job["url"] = full_url
 
             # Get description snippet
             desc_el = await section.query_selector("p, [data-test='job-description-text']")
@@ -95,22 +149,38 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
                 if "budget" in job:
                     break
 
-            # Get skills
+            # Get skills. Filter out Upwork's accessibility nav labels
+            # ("Skip skills" / "Previous skills. Update list") that the
+            # button/[class*=token] selectors used to capture from the
+            # skill-section navigation chrome.
             skill_els = await section.query_selector_all("button, [class*='skill'], [class*='token']")
-            skills = []
-            for el in skill_els[:8]:
+            skills: list[str] = []
+            seen_skills: set[str] = set()
+            for el in skill_els[:24]:
                 text = await el.text_content()
-                if text and len(text.strip()) > 1 and len(text.strip()) < 30:
-                    skills.append(text.strip())
+                if not text:
+                    continue
+                candidate = text.strip()
+                if not (1 < len(candidate) < 30):
+                    continue
+                if _is_nav_noise(candidate):
+                    continue
+                key = candidate.lower()
+                if key in seen_skills:
+                    continue
+                seen_skills.add(key)
+                skills.append(candidate)
             if skills:
                 job["skills"] = skills
 
-            # Get posted time
+            # Get posted time — strip the "Posted" prefix and collapse
+            # the whitespace Upwork bakes into the rendered timestamp.
+            # Raw is "Posted\n   \n   6 hours ago" → "6 hours ago".
             time_els = await section.query_selector_all("span, small")
             for el in time_els:
                 text = await el.text_content()
                 if text and ("ago" in text.lower() or "posted" in text.lower()):
-                    job["posted"] = text.strip()
+                    job["posted"] = _clean_posted(text)
                     break
 
             jobs.append(job)
@@ -201,12 +271,19 @@ async def get_job_details(params: JobDetailsParams) -> dict:
 
     job = {"url": url}
 
-    # Title — Upwork uses [data-cy="job-title"] on freelancer-facing detail pages.
-    # h1 is the safe fallback; h2 is NOT (it pulls section headings).
+    # Title — Upwork's 2026 layout uses a few different attribute hooks
+    # depending on whether the post is rendered in its modern Air3 layout
+    # or the legacy fallback. Try them in order, then h1 only as a last
+    # resort (h1 on /freelancers/settings/profile would match "Settings",
+    # but on a /jobs/~<id> page it should match the actual posting title).
     job["title"] = await _first_text(page, [
         '[data-cy="job-title"]',
         '[data-test="job-title"]',
-        "h1",
+        '[data-test="JobTitle"]',
+        '[data-qa="job-title"]',
+        '[data-test*="JobTitle"]',
+        'header h1',
+        'h1',
     ])
 
     # Description — capital-D [data-test="Description"] is the actual section.

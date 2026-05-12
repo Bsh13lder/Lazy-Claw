@@ -68,6 +68,9 @@ async def test_submit_skips_apply_click_when_form_already_open():
     browser = MagicMock()
     browser.ensure_logged_in = AsyncMock(return_value=True)
     browser.get_page = AsyncMock(return_value=page)
+    # safe_goto returns the same mocked page (added 2026-05-12 when
+    # submit_proposal migrated to safe_goto for Cloudflare resilience).
+    browser.safe_goto = AsyncMock(return_value=page)
     proposals.get_browser = lambda: browser  # type: ignore
 
     params = SubmitProposalParams(
@@ -109,6 +112,9 @@ async def test_submit_detects_already_applied():
     browser = MagicMock()
     browser.ensure_logged_in = AsyncMock(return_value=True)
     browser.get_page = AsyncMock(return_value=page)
+    # safe_goto returns the same mocked page (added 2026-05-12 when
+    # submit_proposal migrated to safe_goto for Cloudflare resilience).
+    browser.safe_goto = AsyncMock(return_value=page)
     proposals.get_browser = lambda: browser  # type: ignore
 
     params = SubmitProposalParams(
@@ -155,6 +161,9 @@ async def test_submit_error_includes_url_and_title_when_no_apply():
     browser = MagicMock()
     browser.ensure_logged_in = AsyncMock(return_value=True)
     browser.get_page = AsyncMock(return_value=page)
+    # safe_goto returns the same mocked page (added 2026-05-12 when
+    # submit_proposal migrated to safe_goto for Cloudflare resilience).
+    browser.safe_goto = AsyncMock(return_value=page)
     proposals.get_browser = lambda: browser  # type: ignore
 
     params = SubmitProposalParams(

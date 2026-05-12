@@ -31,6 +31,10 @@ _NAV_LABEL_NOISE = frozenset({
     "find work feed", "best matches", "saved jobs", "proposals",
     "contracts", "all job posts", "reports", "skip skills",
     "previous skills. update list",
+    # Row-action buttons that the search-results extractor used to pick
+    # up as if they were skill chips.
+    "job feedback", "save job", "unsave job", "hide job", "report job",
+    "apply now", "apply",
 })
 
 

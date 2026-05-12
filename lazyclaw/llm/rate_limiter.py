@@ -24,10 +24,13 @@ class ProviderLimits:
 # a rolling 5-hour window. Source:
 # https://platform.minimax.io/docs/guides/pricing-token-plan
 MINIMAX_TIER_LIMITS: dict[str, int] = {
-    "starter": 1_500,    # $10/mo
-    "plus":    4_500,    # $20/mo  (default — user is on this tier)
-    "max":     15_000,   # $50/mo
-    "ultra":   30_000,   # $150/mo
+    "starter":         1_500,    # $10/mo
+    "plus":            4_500,    # $20/mo   (default — user is on this tier)
+    "plus-highspeed":  4_500,    # $40/mo
+    "max":             15_000,   # $50/mo
+    "max-highspeed":   15_000,   # $80/mo
+    "ultra":           30_000,   # $150/mo  (alias for ultra-highspeed)
+    "ultra-highspeed": 30_000,   # $150/mo  (MiniMax's brand name)
 }
 
 

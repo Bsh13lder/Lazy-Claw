@@ -212,9 +212,11 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         role="fallback",
     ),
 
-    # ── PAID — MiniMax (Token Plan — OpenAI-compatible at api.minimax.io) ──
-    # NOTE: Only MiniMax-M2.7 and minimax-m2.5 are supported on user's Token Plan.
-    # The highspeed variants and MiniMax-Text-01 are NOT supported.
+    # ── PAID — MiniMax (Token Plan — Anthropic-compatible at api.minimax.io/anthropic) ──
+    # Token Plan request quota (5h rolling) covers MiniMax-M2.7 and minimax-m2.7-highspeed
+    # at 1:1 since 2026-03-18 (the "highspeed = 2 requests" clause was dropped).
+    # minimax-m2.5 / MiniMax-Text-01 are reachable on the same endpoint but use a
+    # separate daily quota — not part of the Token Plan request bucket.
     "MiniMax-M2.7": ModelProfile(
         name="MiniMax-M2.7",
         display_name="MiniMax M2.7",

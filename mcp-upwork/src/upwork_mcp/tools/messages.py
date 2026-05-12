@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -11,6 +12,80 @@ from pydantic import BaseModel, Field
 from ..browser.client import PROFILE_DIR, get_browser
 
 logger = logging.getLogger(__name__)
+
+
+# ── External-URL guard for outbound DMs ──────────────────────────────
+# Upwork's chat filter blocks every external URL in
+# /ab/messages/rooms/. The link either gets stripped or shown to the
+# recipient as a "blocked link" placeholder — both outcomes destroy
+# trust ("trying to move off-platform") and waste the send. Worse,
+# repeated link sends may flag the freelancer's account.
+#
+# Live incident 2026-05-12: user-dictated reply included
+# "github.com/Bsh13lder/Lazy-Claw". Upwork filtered it; client saw
+# a broken message. User's NL feedback: "fuck you cant send link on
+# upwork its bbloking" + "make rule".
+#
+# Stored in memory at:
+#   ~/.claude/projects/.../memory/feedback_upwork_dm_no_links.md
+#
+# Detection rules (any match → blocked):
+#   1. Scheme present: ``http://`` or ``https://``
+#   2. Domain.tld bare token: ``github.com``, ``bit.ly`` etc.
+#   3. ``www.<domain>`` even without scheme
+
+_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"https?://\S+", re.IGNORECASE),
+    re.compile(r"\bwww\.\S+", re.IGNORECASE),
+    re.compile(
+        r"\b[a-z0-9][a-z0-9-]*\."
+        r"(com|org|net|io|app|dev|co|ai|me|us|uk|de|fr|cn|jp|ru|in|"
+        r"info|link|page|so|xyz|tech|cloud|live|tv|ly|to|gg|sh)"
+        r"(/\S*)?\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _contains_url(text: str) -> str | None:
+    """Return the first URL-like match in ``text`` or None.
+
+    Returns the offending substring so callers can echo it back to the
+    user in the error message — much easier to spot than "rejected, no
+    URLs allowed".
+    """
+    if not text:
+        return None
+    for pat in _URL_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+# Product-pitch leak guard. Upwork is a freelance-services marketplace
+# — the client buys the freelancer's TIME, not the freelancer's tool.
+# Naming "LazyClaw" in a DM/proposal reads as bait-and-switch ("they're
+# selling me their software, not building my thing") and tanks the
+# conversation. Memory rule:
+#   feedback_upwork_no_lazyclaw_product_pitch.md
+_PRODUCT_PITCH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\blazyclaw\b", re.IGNORECASE),
+    re.compile(r"\blazy ?claw\b", re.IGNORECASE),
+)
+
+
+def _contains_product_pitch(text: str) -> str | None:
+    """Return the offending brand-name token if the message names
+    LazyClaw (the freelancer's own tool). Used to refuse messages that
+    would read as a product-sales pitch on a services marketplace."""
+    if not text:
+        return None
+    for pat in _PRODUCT_PITCH_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
 
 
 # ── Seen-rooms tracking ──────────────────────────────────────────────
@@ -146,10 +221,48 @@ async def _extract_conversation(el) -> dict | None:
     """Extract conversation data from element."""
     conv = {}
 
-    # Contact name
-    name_el = await el.query_selector('[data-test="contact-name"], .contact-name, .sender-name')
+    # Contact name. The 2026 layout dropped the legacy
+    # `[data-test="contact-name"]` hook — rooms are <div class="desktop-
+    # layout-room">, with the name inline alongside the avatar initials,
+    # last-message preview, and timestamp. Specific selectors first,
+    # then defensive row-text parsing so we never silently drop a real
+    # conversation just because Upwork moved the name tag.
+    name_el = await el.query_selector(
+        '[data-test="contact-name"], [data-test="user-name"], '
+        '[data-test="room-contact-name"], '
+        '[class*="contact-name"], [class*="contactName"], '
+        '.sender-name, .contact-name'
+    )
     if name_el:
         conv["contact_name"] = (await name_el.text_content() or "").strip()
+
+    if not conv.get("contact_name"):
+        # Row-text fallback. .desktop-layout-room renders as:
+        #   "<initials>\n<full name>\n<timestamp>\n<preview>\n..."
+        # The full name is the first non-trivial line that isn't a
+        # two-letter avatar-initials block, isn't a clock string, and
+        # isn't a "More options" / "More room options" menu label.
+        row_text = (await el.text_content() or "")
+        for line in (s.strip() for s in row_text.splitlines()):
+            if not line:
+                continue
+            low = line.lower()
+            if len(line) <= 3:  # avatar initials like "JB"
+                continue
+            if " ago" in low or "more " in low or "options" in low:
+                continue
+            # Clock string e.g. "9:20 PM" / "1:10 PM PDT"
+            if any(ch.isdigit() for ch in line) and (":" in line or "am" in low or "pm" in low):
+                continue
+            if 2 < len(line) < 60:
+                # Tiptap sometimes duplicates: "James Blue, James Blue".
+                # Collapse to the first half when both sides match.
+                if "," in line:
+                    a, _, b = line.partition(",")
+                    if a.strip().lower() == b.strip().lower():
+                        line = a.strip()
+                conv["contact_name"] = line
+                break
 
     if not conv.get("contact_name"):
         return None
@@ -280,6 +393,43 @@ async def send_message(params: SendMessageParams) -> dict:
 
     Returns send status.
     """
+    # Hard guard: refuse any outbound message containing an external
+    # URL. Upwork blocks them at the chat-filter level — sending such
+    # a message wastes the call AND the message comes through to the
+    # client as a "blocked link" placeholder that destroys trust.
+    # Caller (brain or NL skill) must rephrase before retrying.
+    offending = _contains_url(params.message)
+    if offending is not None:
+        return {
+            "status": "blocked",
+            "message": (
+                f"Refused to send — Upwork DMs block external URLs and "
+                f"the message contains {offending!r}. Rephrase without "
+                f"the URL (say 'check my portfolio' or 'happy to share "
+                f"work samples on request' — client can reach your "
+                f"portfolio from your Upwork profile, no link needed)."
+            ),
+            "offending_token": offending,
+        }
+
+    # Hard guard: refuse messages that name LazyClaw — Upwork sells
+    # services, naming the freelancer's own tool reads as product-pitch
+    # bait-and-switch. Memory rule:
+    # feedback_upwork_no_lazyclaw_product_pitch.md
+    pitch = _contains_product_pitch(params.message)
+    if pitch is not None:
+        return {
+            "status": "blocked",
+            "message": (
+                f"Refused to send — message names {pitch!r}, which "
+                f"reads as a product-sales pitch on Upwork. Describe "
+                f"the WORK (Python + Scrapy + CDP-driven browser "
+                f"automation, daily logs, human-in-loop) without "
+                f"branding it. Reframe and retry."
+            ),
+            "offending_token": pitch,
+        }
+
     browser = get_browser()
     await browser.ensure_logged_in()
 
@@ -291,32 +441,71 @@ async def send_message(params: SendMessageParams) -> dict:
 
     page = await browser.safe_goto(url)
 
-    # Find message input
-    input_el = await page.query_selector('[data-test="message-input"], textarea[name*="message"], .message-input textarea')
+    import asyncio as _aio
+    # Give the Tiptap editor a moment to mount + focus after navigation.
+    await _aio.sleep(1.5)
+
+    # Find message input. The 2026 layout swapped the legacy <textarea>
+    # for a Tiptap/ProseMirror rich-text editor — it's a contenteditable
+    # <div role="textbox"> with class "tiptap ProseMirror". The old
+    # textarea selectors return nothing on this layout, which is why
+    # send_message reported "Message input not found" for every reply
+    # attempted today. Try the rich-editor selector FIRST; keep the
+    # textarea selectors as fallback in case Upwork ships a third layout.
+    input_el = await page.query_selector(
+        '[role="textbox"][contenteditable="true"], '
+        '.tiptap[contenteditable="true"], '
+        '[contenteditable="true"][class*="ProseMirror"], '
+        '[data-test="message-input"], '
+        'textarea[name*="message"], '
+        '.message-input textarea'
+    )
     if not input_el:
         return {"status": "error", "message": "Message input not found"}
 
-    # Type message
-    await input_el.fill(params.message)
+    # contenteditable can't be .fill()'d like a textarea — fill silently
+    # no-ops on a Tiptap node. Use focus + type(): focus puts the cursor
+    # in the editor, type() emits the keystrokes Tiptap's input handler
+    # subscribes to.
+    tag = (await input_el.evaluate("e => e.tagName") or "").lower()
+    is_textarea = tag in ("textarea", "input")
+    if is_textarea:
+        await input_el.fill(params.message)
+    else:
+        await input_el.click()
+        await _aio.sleep(0.2)
+        await page.keyboard.type(params.message, delay=15)
 
-    # Find and click send button
-    send_btn = await page.query_selector('[data-test="send-button"], button[type="submit"]:has-text("Send"), button:has-text("Send")')
+    # Send button. 2026 layout: <button aria-label="Send message">.
+    # Keep the older selectors as fallback.
+    send_btn = await page.query_selector(
+        '[aria-label="Send message"], '
+        '[data-test="send-button"], '
+        'button[type="submit"]:has-text("Send"), '
+        'button:has-text("Send")'
+    )
     if not send_btn:
-        # Try pressing Enter
+        # Final fallback: press Enter (works on Tiptap with default config)
         await input_el.press("Enter")
     else:
         await send_btn.click()
 
-    # Wait for message to appear
-    import asyncio
-    await asyncio.sleep(2)
+    # Wait for the editor to clear (= message accepted + flushed).
+    await _aio.sleep(2)
 
-    # Verify message was sent by checking if input is cleared
-    input_value = await input_el.input_value()
-    if not input_value:
+    # Verify by reading the editor's text content back. For textareas
+    # use input_value; for contenteditable use text_content.
+    if is_textarea:
+        residual = await input_el.input_value()
+    else:
+        residual = (await input_el.text_content() or "").strip()
+
+    if not residual:
         return {"status": "sent", "message": "Message sent successfully"}
-
-    return {"status": "unknown", "message": "Could not confirm message was sent"}
+    return {
+        "status": "unknown",
+        "message": f"Could not confirm message was sent (editor still contains text: {residual[:80]!r})",
+    }
 
 
 async def get_unread_count() -> dict:

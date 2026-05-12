@@ -55,9 +55,13 @@ class UpworkBotBehavior:
     """Immutable Upwork client-communication settings."""
 
     # How often the heartbeat should fire the inbox check.
-    # Cron format. Default 0 9 * * * = 9am daily (single check per day).
+    # Cron format. Default */15 * * * * = every 15 minutes.
+    # Was "0 9 * * *" (daily 9am) — too rare, real client replies were
+    # missed for ~24h until the next morning's poll. Tight cadence is
+    # cheap because the inbox check is regex-first (zero LLM cost on
+    # empty/safe sweeps; the worker LLM only runs on the unknown path).
     # NL: "check upwork messages every 2 hours" → "0 */2 * * *".
-    inbox_check_cron: str = "0 9 * * *"
+    inbox_check_cron: str = "*/15 * * * *"
 
     # When True, the bot's first reply to a NEW conversation includes a
     # one-line offer: "If you'd like to speak with the founder directly,

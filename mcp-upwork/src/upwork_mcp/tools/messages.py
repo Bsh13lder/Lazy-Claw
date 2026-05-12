@@ -1,7 +1,59 @@
 """Messaging tools for Upwork MCP."""
 
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
 from pydantic import BaseModel, Field
-from ..browser.client import get_browser
+
+from ..browser.client import PROFILE_DIR, get_browser
+
+logger = logging.getLogger(__name__)
+
+
+# ── Seen-rooms tracking ──────────────────────────────────────────────
+# Persists across MCP restarts in the per-user Brave profile dir (so it
+# inherits the same user-isolation as the cookies). On first call for
+# a fresh profile the file doesn't exist; every conversation is
+# `is_new=True`. After that, only NEW room_ids get `is_new=True`.
+#
+# Why a JSON file rather than the LazyClaw DB:
+#   - mcp-upwork is a standalone subprocess and the Apache-2.0 upstream
+#     doesn't have DB access — we want to keep our patches minimal.
+#   - Per-user isolation is already provided by PROFILE_DIR.
+#   - The file is small (a list of room IDs) and writes are infrequent
+#     (once per inbox sweep) so locking isn't a concern.
+
+_SEEN_ROOMS_FILENAME = "lazyclaw_seen_rooms.json"
+
+
+def _seen_rooms_path() -> Path:
+    return PROFILE_DIR / _SEEN_ROOMS_FILENAME
+
+
+def _load_seen_rooms() -> set[str]:
+    path = _seen_rooms_path()
+    if not path.exists():
+        return set()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("seen_rooms load failed (%s) — treating as empty", exc)
+        return set()
+    if isinstance(raw, list):
+        return {str(x) for x in raw if x}
+    return set()
+
+
+def _save_seen_rooms(rooms: set[str]) -> None:
+    path = _seen_rooms_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(rooms)), encoding="utf-8")
+    except OSError as exc:
+        logger.debug("seen_rooms save failed (%s) — non-fatal", exc)
 
 
 class MessagesParams(BaseModel):
@@ -59,13 +111,30 @@ async def get_messages(params: MessagesParams) -> list[dict]:
         '.desktop-layout-room, [data-test="room-item"], .room-item, .conversation-item'
     )
 
+    seen_rooms = _load_seen_rooms()
+    newly_seen: set[str] = set()
+
     for el in room_els[:params.limit]:
         try:
             conv = await _extract_conversation(el)
-            if conv:
-                conversations.append(conv)
+            if not conv:
+                continue
+            room_id = conv.get("room_id")
+            # `is_new` is True for any room we haven't recorded before.
+            # Drives the "speak to the founder directly" first-contact
+            # offer in upwork_inbox_check. False if we've seen the room
+            # in any prior sweep, regardless of whether the latest
+            # message is new — that's an "ongoing thread" not a fresh
+            # client.
+            conv["is_new"] = bool(room_id) and room_id not in seen_rooms
+            if room_id:
+                newly_seen.add(room_id)
+            conversations.append(conv)
         except Exception:
             continue
+
+    if newly_seen:
+        _save_seen_rooms(seen_rooms | newly_seen)
 
     return conversations
 

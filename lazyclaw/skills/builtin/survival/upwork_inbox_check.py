@@ -264,16 +264,40 @@ class UpworkInboxCheckSkill(BaseSkill):
                         behavior.escalation_urgency_default
                     )
                     suggested = self._suggest_replies(category)
+
+                    # Deterministic awaited Telegram push FIRST — this
+                    # is the guarantee the user asked for. Previously
+                    # escalation was only fire-and-forget through
+                    # escalate_to_human, and if its internal push_telegram
+                    # silently failed (missing token, network blip),
+                    # the user never knew a client replied. Now we
+                    # push directly here, await the result, and on
+                    # failure surface it in the inbox-sweep report.
+                    push_ok = await self._push_escalation_alert(
+                        client=client,
+                        room_id=room_id,
+                        room_url=conv.get("room_url", ""),
+                        body=body,
+                        category=category,
+                        urgency=urgency,
+                    )
+                    if not push_ok:
+                        report_lines.append(
+                            "    ⚠️ Telegram push FAILED — check token + admin chat"
+                        )
+
+                    # Fire-and-forget escalate_to_human for the `/esc`
+                    # reply-collection UX (suggested-replies menu,
+                    # 6h pending window). The deterministic push above
+                    # already alerted the user; this task just lets them
+                    # respond inline. Yes, this means two Telegram
+                    # messages per escalation — that's intentional. The
+                    # alert is the "you must look at this NOW" ping;
+                    # the escalate push is the "and here's the UI to
+                    # reply" follow-up.
                     escalate = self._registry.get("escalate_to_human")
                     if escalate is not None:
                         try:
-                            # Fire-and-forget — we don't block the inbox
-                            # sweep waiting for the user to respond. The
-                            # escalate_to_human skill already pushes
-                            # Telegram and stores the pending reply; the
-                            # next inbox-check will see if the room is
-                            # still unread and the user has replied via
-                            # the /esc command since.
                             import asyncio as _aio
                             _aio.create_task(escalate.execute(user_id, {
                                 "context": (
@@ -288,6 +312,13 @@ class UpworkInboxCheckSkill(BaseSkill):
                             escalated += 1
                         except Exception as exc:
                             report_lines.append(f"    escalation failed: {exc}")
+                    else:
+                        # No escalate_to_human registered — the
+                        # deterministic push above is the only
+                        # notification path. Still count it as escalated
+                        # if the push succeeded.
+                        if push_ok:
+                            escalated += 1
             except Exception as exc:
                 logger.warning("Failed to process Upwork conv: %s", exc)
 
@@ -360,7 +391,73 @@ class UpworkInboxCheckSkill(BaseSkill):
                 f"Got it, received. I'll review and confirm the schema before "
                 f"I start.\n\n— {signoff}{owner_offer}"
             )
-        return ""
+        # Generic fallback — fires whenever the brain routed an
+        # unmatched category to `auto_reply` (e.g., a custom category
+        # the user added via set_upwork_bot_behavior). Previously this
+        # returned "" which silently skipped the send. The fallback is
+        # intentionally vague so it can't promise anything specific;
+        # the user can NL-tune per-category templates if they want
+        # richer replies.
+        return (
+            f"Got your message — thanks. I'll get back to you with a "
+            f"detailed reply shortly.\n\n— {signoff}{owner_offer}"
+        )
+
+    async def _push_escalation_alert(
+        self,
+        *,
+        client: str,
+        room_id: str,
+        room_url: str,
+        body: str,
+        category: str,
+        urgency: str,
+    ) -> bool:
+        """Send a deterministic awaited Telegram alert for an escalated
+        Upwork conversation.
+
+        Returns True on successful push, False otherwise (caller surfaces
+        the failure in the inbox-sweep report so it's visible).
+
+        admin_request gets the loudest prefix because that's the single
+        category where the client has explicitly asked for the human
+        owner — missing it costs a real relationship.
+        """
+        from lazyclaw.notifications.push import push_telegram
+
+        if category == "admin_request":
+            prefix = "🚨 [Upwork — client asked to talk to YOU]"
+        elif category in ("complaint", "milestone_dispute"):
+            prefix = "⚠️ [Upwork — client unhappy]"
+        elif category == "off_platform":
+            prefix = "📵 [Upwork — client wants to move off-platform]"
+        elif urgency == "immediate":
+            prefix = "🚨 [Upwork — urgent reply needed]"
+        else:
+            prefix = "📨 [Upwork — needs your decision]"
+
+        excerpt = body[:400].replace("\n", " ").strip()
+        link = room_url or (
+            f"https://www.upwork.com/ab/messages/rooms/{room_id}" if room_id else ""
+        )
+        text_lines = [
+            f"{prefix}",
+            f"From: {client}",
+            f"Category: {category}",
+            "",
+            f'"{excerpt}"',
+        ]
+        if link:
+            text_lines.extend(["", f"Open: {link}"])
+        text = "\n".join(text_lines)
+
+        try:
+            return await push_telegram(self._config, text, parse_mode=None)
+        except Exception as exc:
+            logger.warning(
+                "upwork inbox escalation push failed (%s): %s", category, exc
+            )
+            return False
 
     def _suggest_replies(self, category: str) -> tuple[str, ...]:
         """Suggested escalation replies tailored per category."""

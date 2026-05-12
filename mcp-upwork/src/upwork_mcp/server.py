@@ -157,11 +157,39 @@ async def upwork_submit_proposal(
     rate: Annotated[float | None, Field(description="Proposed hourly rate (for hourly jobs)")] = None,
     bid: Annotated[float | None, Field(description="Bid amount (for fixed-price jobs)")] = None,
     answers: Annotated[list[str] | None, Field(description="Answers to screening questions")] = None,
+    connects_to_send: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Total Connects to spend on this proposal (mandatory + "
+                "boost). Upwork auto-suggests a default per job (often 6); "
+                "pass a LOWER number to spend the minimum (saves your "
+                "balance for more proposals) or a HIGHER number to boost "
+                "visibility on competitive postings. None keeps Upwork's "
+                "auto-suggested default. Set to the user's remaining "
+                "balance to avoid overspend."
+            ),
+        ),
+    ] = None,
+    milestone_due_date: Annotated[
+        str | None,
+        Field(description="Milestone due date (MM/DD/YYYY) for fixed-price. None → +30 days."),
+    ] = None,
+    milestone_description: Annotated[
+        str | None,
+        Field(description="Single-milestone description for fixed-price jobs. None → 'Project completion'."),
+    ] = None,
+    project_duration: Annotated[
+        str | None,
+        Field(description="'Less than 1 month' | '1 to 3 months' | '3 to 6 months' | 'More than 6 months'. None → 'Less than 1 month'."),
+    ] = None,
 ) -> dict:
     """Submit a proposal to an Upwork job.
 
     IMPORTANT: This is a sensitive action that will spend Connects.
     Make sure the cover letter and rate/bid are correct before submitting.
+    Pass connects_to_send if you want to cap or boost the connect spend
+    (omit for Upwork's per-job auto-suggested default).
 
     Returns submission status and connects used.
     """
@@ -171,6 +199,10 @@ async def upwork_submit_proposal(
         rate=rate,
         bid=bid,
         answers=answers,
+        connects_to_send=connects_to_send,
+        milestone_due_date=milestone_due_date,
+        milestone_description=milestone_description,
+        project_duration=project_duration,
     )
     return await submit_proposal(params)
 

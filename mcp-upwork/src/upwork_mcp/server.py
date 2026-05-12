@@ -252,12 +252,26 @@ async def upwork_get_messages(
 async def upwork_get_conversation(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     limit: Annotated[int, Field(description="Maximum messages to return", ge=1, le=100)] = 50,
+    me_name: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Caller's own Upwork display name (e.g. 'Vato Tchipa'). "
+                "When provided, each returned message gets is_mine=True "
+                "when its sender matches this name (tolerant: first-name "
+                "prefix match handles 'Vato T.' vs 'Vato Tchipa'). "
+                "Required for the drafter to know who said what last; "
+                "None falls back to legacy class-hint detection (stale "
+                "on the 2026 layout, always returns False)."
+            ),
+        ),
+    ] = None,
 ) -> dict:
     """Get all messages in a specific conversation.
 
     Returns conversation details with full message history.
     """
-    return await get_conversation_messages(room_id, limit)
+    return await get_conversation_messages(room_id, limit, me_name=me_name)
 
 
 @mcp.tool()

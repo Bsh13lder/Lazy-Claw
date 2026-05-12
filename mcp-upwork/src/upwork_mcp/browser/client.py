@@ -35,6 +35,12 @@ _NAV_LABEL_NOISE = frozenset({
     # up as if they were skill chips.
     "job feedback", "save job", "unsave job", "hide job", "report job",
     "apply now", "apply",
+    # Conversation-page CTAs that the contact-name fallback used to
+    # capture as if they were the client's name.
+    "schedule a meeting", "schedule meeting",
+    "search for:", "search for", "filter", "filters",
+    "all messages", "all rooms", "all conversations",
+    "send", "send message", "more options",
 })
 
 

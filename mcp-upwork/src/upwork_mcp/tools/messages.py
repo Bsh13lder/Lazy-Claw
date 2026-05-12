@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from ..browser.client import PROFILE_DIR, get_browser
+from ..browser.client import PROFILE_DIR, _is_nav_noise, get_browser
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +299,11 @@ async def _extract_conversation(el) -> dict | None:
     return conv
 
 
-async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
+async def get_conversation_messages(
+    room_id: str,
+    limit: int = 50,
+    me_name: str | None = None,
+) -> dict:
     """Get all messages in a specific conversation.
 
     Args:
@@ -319,61 +323,220 @@ async def get_conversation_messages(room_id: str, limit: int = 50) -> dict:
 
     page = await browser.safe_goto(url)
 
-    conversation = {"room_id": room_id, "messages": []}
+    # Give Tiptap + the thread renderer a moment to mount after nav.
+    import asyncio as _aio
+    await _aio.sleep(2)
 
-    # Contact name
-    contact_el = await page.query_selector('[data-test="contact-name"], .contact-name, h2')
-    if contact_el:
-        conversation["contact_name"] = (await contact_el.text_content() or "").strip()
+    conversation: dict = {"room_id": room_id, "messages": []}
+
+    # Contact name. The 2026 layout dropped [data-test="contact-name"]
+    # at the conversation-page level. The header h2 used to give it but
+    # now h2 frequently captures sidebar headings ("Schedule a meeting",
+    # "Messages"). Walk all visible h2s + page <title> and pick the
+    # first non-nav-noise candidate.
+    candidate_names: list[str] = []
+    for sel in (
+        '[data-test="contact-name"], [data-test="user-name"]',
+        'main header h1, main header h2',
+        'h1', 'h2',
+    ):
+        for el in await page.query_selector_all(sel):
+            t = (await el.text_content() or "").strip()
+            if t and not _is_nav_noise(t):
+                candidate_names.append(t)
+        if candidate_names:
+            break
+    if candidate_names:
+        conversation["contact_name"] = candidate_names[0]
 
     # Related job
-    job_el = await page.query_selector('[data-test="related-job"], .job-link')
+    job_el = await page.query_selector(
+        '[data-test="related-job"], .job-link, '
+        'a[href*="/jobs/~"]'
+    )
     if job_el:
         conversation["related_job"] = (await job_el.text_content() or "").strip()
 
-    # Extract messages
-    message_els = await page.query_selector_all('[data-test="message"], .message-item, .chat-message')
+    # Extract messages. The 2026 layout renders each bubble as
+    #     <div data-test="story-container">
+    #       <div data-test="story-header">SenderName  10:39 PM</div>
+    #       <div data-test="story-message">[body text]</div>
+    #     </div>
+    # The legacy selectors ([data-test="message"], .message-item) returned
+    # 0 on this layout — that's why every get_conversation call today
+    # came back with "0 messages". Try the new selector first, fall back
+    # to the legacy ones in case Upwork ships yet another layout.
+    containers = await page.query_selector_all(
+        '[data-test="story-container"]'
+    )
+    if not containers:
+        containers = await page.query_selector_all(
+            '[data-test="message"], .message-item, .chat-message'
+        )
 
-    for el in message_els[-limit:]:  # Get last N messages
+    # Track sender across consecutive bubbles — Upwork sometimes only
+    # renders the header on the FIRST bubble of a run from the same
+    # person, leaving subsequent bubbles with body only. Carry forward
+    # the last-known sender so each emitted message has author info.
+    last_sender: str | None = None
+    last_timestamp: str | None = None
+
+    for el in containers[-limit:]:
         try:
-            msg = await _extract_message(el)
+            msg = await _extract_message(
+                el, last_sender=last_sender, last_timestamp=last_timestamp,
+            )
             if msg:
+                last_sender = msg.get("sender") or last_sender
+                last_timestamp = msg.get("timestamp") or last_timestamp
+                # is_mine override: if caller passed me_name (e.g.
+                # "Vato Tchipa" from lazyclaw's display_name), match
+                # the sender against it. This is the only reliable
+                # signal — Upwork's bubble class hints (.outgoing
+                # / [class*="self"]) are stale on the 2026 layout.
+                if me_name and msg.get("sender"):
+                    msg["is_mine"] = _sender_matches(msg["sender"], me_name)
                 conversation["messages"].append(msg)
         except Exception:
             continue
 
+    # contact_name: always prefer the FIRST non-mine sender in the
+    # actual thread. The page-header h1/h2 captures UI labels like
+    # "Conversation info" / "Schedule a meeting" / "Messages" that
+    # Upwork keeps renaming. Message-derived names are the canonical
+    # source of truth — the sender field came directly from the bubble
+    # header. Only fall back to the page header when zero counterparty
+    # messages exist (e.g. brand-new room with no incoming message
+    # yet).
+    derived_name = None
+    for m in conversation["messages"]:
+        if not m.get("is_mine") and m.get("sender"):
+            derived_name = m["sender"]
+            break
+    if derived_name:
+        conversation["contact_name"] = derived_name
+    elif conversation.get("contact_name") and _is_nav_noise(
+        conversation["contact_name"]
+    ):
+        conversation.pop("contact_name", None)
+
     return conversation
 
 
-async def _extract_message(el) -> dict | None:
-    """Extract message data from element."""
-    msg = {}
+def _sender_matches(sender: str, me_name: str) -> bool:
+    """Tolerant match between a bubble's sender label and the caller's
+    own display name. Handles common variants:
+      "Vato T." vs "Vato Tchipa"  → True (first-name prefix match)
+      "Vato Tchipa" vs "Vato Tchipa" → True (exact)
+      "James Blue" vs "Vato Tchipa"  → False
+    """
+    if not sender or not me_name:
+        return False
+    s = sender.strip().lower().rstrip(".")
+    m = me_name.strip().lower().rstrip(".")
+    if s == m:
+        return True
+    # First-name match: "vato" matches "vato tchipa"
+    s_first = s.split()[0] if s else ""
+    m_first = m.split()[0] if m else ""
+    if s_first and s_first == m_first and (len(s_first) >= 3):
+        return True
+    return False
 
-    # Sender
-    sender_el = await el.query_selector('[data-test="sender"], .sender, .author')
-    if sender_el:
-        msg["sender"] = (await sender_el.text_content() or "").strip()
 
-    # Message content
-    content_el = await el.query_selector('[data-test="content"], .content, .message-text, p')
-    if content_el:
-        msg["content"] = (await content_el.text_content() or "").strip()
+_TIMESTAMP_RE = re.compile(
+    r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\s*(?:[A-Z]{2,4})?\b"
+)
+
+
+async def _extract_message(
+    el,
+    *,
+    last_sender: str | None = None,
+    last_timestamp: str | None = None,
+) -> dict | None:
+    """Extract message data from a single bubble element.
+
+    Supports the 2026 layout where each bubble is a
+    <div data-test="story-container"> with two children:
+      [data-test="story-header"]  → "Sender Name\\n10:39 PM"
+      [data-test="story-message"] → "[body text]"
+
+    Falls through to the legacy [data-test="content"] / .message-text
+    selectors when the modern containers aren't present.
+
+    Carries `last_sender` / `last_timestamp` from the caller because
+    Upwork sometimes omits the header on consecutive bubbles from the
+    same author — without carry-forward those bubbles emit with no
+    sender, which breaks any drafter that needs to know "who said what
+    last" to construct a reply.
+    """
+    msg: dict[str, object] = {}
+
+    # 2026 layout: split header + body explicitly.
+    header_el = await el.query_selector('[data-test="story-header"]')
+    body_el = await el.query_selector('[data-test="story-message"]')
+
+    if header_el is not None or body_el is not None:
+        # Header text shape: "Vato Tchipa\n         10:39 PM"
+        header_text = ""
+        if header_el is not None:
+            header_text = (await header_el.text_content() or "").strip()
+
+        ts_match = _TIMESTAMP_RE.search(header_text)
+        if ts_match:
+            msg["timestamp"] = ts_match.group(0).strip()
+            sender_part = (header_text[: ts_match.start()] +
+                           header_text[ts_match.end():]).strip()
+            sender_part = sender_part.strip(" \n\t,")
+            if sender_part:
+                msg["sender"] = sender_part
+        elif header_text:
+            msg["sender"] = header_text
+
+        if body_el is not None:
+            msg["content"] = (await body_el.text_content() or "").strip()
+    else:
+        # Legacy fallback chain.
+        sender_el = await el.query_selector(
+            '[data-test="sender"], .sender, .author'
+        )
+        if sender_el:
+            msg["sender"] = (await sender_el.text_content() or "").strip()
+
+        content_el = await el.query_selector(
+            '[data-test="content"], .content, .message-text, p'
+        )
+        if content_el:
+            msg["content"] = (await content_el.text_content() or "").strip()
+
+        time_el = await el.query_selector(
+            '[data-test="timestamp"], time, .time'
+        )
+        if time_el:
+            msg["timestamp"] = (await time_el.text_content() or "").strip()
 
     if not msg.get("content"):
         return None
 
-    # Timestamp
-    time_el = await el.query_selector('[data-test="timestamp"], time, .time')
-    if time_el:
-        msg["timestamp"] = (await time_el.text_content() or "").strip()
+    # Carry-forward author info when this bubble omits the header.
+    if not msg.get("sender") and last_sender:
+        msg["sender"] = last_sender
+    if not msg.get("timestamp") and last_timestamp:
+        msg["timestamp"] = last_timestamp
 
-    # Check if it's from me
-    me_indicator = await el.query_selector('.my-message, [data-test="my-message"], .sent')
+    # is_mine: legacy class hint OR sender-name match.
+    me_indicator = await el.query_selector(
+        '.my-message, [data-test="my-message"], .sent, '
+        '[class*="outgoing"], [class*="self"]'
+    )
     msg["is_mine"] = me_indicator is not None
 
     # Attachments
-    attachment_els = await el.query_selector_all('[data-test="attachment"], .attachment')
-    attachments = []
+    attachment_els = await el.query_selector_all(
+        '[data-test="attachment"], .attachment'
+    )
+    attachments: list[str] = []
     for att in attachment_els:
         att_name = await att.text_content()
         if att_name:

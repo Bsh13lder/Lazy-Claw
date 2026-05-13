@@ -3496,6 +3496,22 @@ class Agent:
                                                 "specialist_timeout_s", 600,
                                             ),
                                             callback=callback,
+                                            # Fix H: source="brain" without a
+                                            # fanout_group_id makes chat_ws's
+                                            # event-bus pump filter drop the
+                                            # task_event_bus delivery (line
+                                            # ~519) while the original
+                                            # callback path still surfaces
+                                            # bg_done to chat — kills the
+                                            # duplicate "Background task
+                                            # completed" cards in web UI.
+                                            # task_runner.submit only routes
+                                            # through the brain-fanout
+                                            # consolidator when BOTH source
+                                            # and fanout_group_id are set
+                                            # (see line 340), so source
+                                            # alone is inert there.
+                                            source="brain",
                                         )
                                         if self._team_lead and _fg_task_id:
                                             self._team_lead.cancel(_fg_task_id)
@@ -3602,6 +3618,9 @@ class Agent:
                                     "specialist_timeout_s", 600,
                                 ),
                                 callback=callback,
+                                # Fix H — see hallucination-cap failsafe
+                                # above for the rationale.
+                                source="brain",
                             )
                             if self._team_lead and _fg_task_id:
                                 self._team_lead.cancel(_fg_task_id)
@@ -4750,6 +4769,8 @@ class Agent:
                             name=None,
                             timeout=_agent_settings.get("specialist_timeout_s", 600),
                             callback=callback,
+                            # Fix H — see hallucination-cap failsafe for rationale.
+                            source="brain",
                         )
                         if self._team_lead and _fg_task_id:
                             self._team_lead.cancel(_fg_task_id)

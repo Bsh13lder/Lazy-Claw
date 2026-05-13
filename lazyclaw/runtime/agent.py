@@ -1425,6 +1425,31 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Response ready", {}))
             return verify_reply
 
+        # ── Instant dispatch — single-skill 1:1 intents ───────────────
+        # Skips full context build + history compress + skill load + brain
+        # LLM iteration when the message is a known direct mapping to one
+        # skill (e.g. "show jobs", "check upwork inbox"). Conservative
+        # table in lazyclaw/runtime/instant_dispatch.py — misses fall
+        # through to the standard path silently.
+        try:
+            from lazyclaw.runtime.instant_dispatch import try_instant_dispatch
+            _id_result = await try_instant_dispatch(message, self.registry, user_id)
+        except Exception:
+            logger.debug("instant_dispatch raised at import/call; continuing", exc_info=True)
+            _id_result = None
+        if _id_result is not None:
+            await cb.on_event(AgentEvent(
+                INSTANT_COMMAND,
+                _id_result.output,
+                {
+                    "path": "instant_dispatch",
+                    "skill": _id_result.skill_name,
+                    "elapsed_ms": _id_result.elapsed_ms,
+                },
+            ))
+            await cb.on_event(AgentEvent("done", "Response ready", {}))
+            return _id_result.output
+
         # ── Plan-mode fix-task gate ──────────────────────────────────────
         # Intercepted before the compound splitter so the user gets one
         # coherent plan dialogue instead of N independent sub-task plans.
@@ -2774,12 +2799,19 @@ class Agent:
         # Lowered 5 → 2 (Round 3): prompt-side fixes (SOUL.md TRIAGE +
         # MiniMax discipline suffix) didn't move the needle. User wants
         # brain-agnostic enforcement — doesn't matter which model is the
-        # brain, big tasks must dispatch. With threshold=2 a foreground
-        # turn gets two inline tool calls to wrap up; on the third the
+        # brain, big tasks must dispatch. With threshold=1 a foreground
+        # turn gets ONE inline tool call to wrap up; on the second the
         # tool list is narrowed to run_background only and the brain
-        # physically can't keep grinding. 1- and 2-tool quick tasks
-        # ("price of X", "save this") finish before the check ever fires.
-        _PROMOTE_BG_AT_ITER = 2
+        # physically can't keep grinding. 1-tool quick tasks ("price of
+        # X", "save this") finish before the check ever fires. Live
+        # 2026-05-13 monitoring (find-jobs / show-profile / show-settings)
+        # showed brain consistently burning 3 inline tool calls on
+        # multi-step intents before threshold=2 fired — wasted ~15-25 s
+        # per turn that the runtime ended up dispatching anyway via the
+        # text-only failsafe. Lowering by one cuts that flat. The
+        # _only_readonly_so_far gate below still prevents false-positive
+        # promotion on pure-read intents like list_tasks / list_jobs.
+        _PROMOTE_BG_AT_ITER = 1
         _called_tool_names: set[str] = set()
         _promoted_to_bg = False
         # Hard-enforce AUTO-PROMOTE: when set, the next iteration's tool list
@@ -3423,6 +3455,77 @@ class Agent:
                             )
 
                             if _halluc_retries > _HALLUC_MAX_RETRIES:
+                                # AUTO-PROMOTE failsafe (hallucination-cap path):
+                                # if the runtime had narrowed the tool list to
+                                # ONLY run_background and the brain kept calling
+                                # suppressed tools (e.g. MiniMax M2.7 invoking
+                                # the now-dead `browser` 3× until the cap), we
+                                # already have everything we need to do the
+                                # dispatch ourselves: original user message,
+                                # user_id, working task_runner. Synthesize the
+                                # run_background call here instead of bailing
+                                # with an "tool doesn't exist" error. Mirrors
+                                # the text-only failsafe a few lines below.
+                                if (
+                                    _force_dispatch_only
+                                    and self._task_runner is not None
+                                    and user_id is not None
+                                    and not getattr(self, "is_background", False)
+                                ):
+                                    logger.warning(
+                                        "AUTO-PROMOTE failsafe (hallucination "
+                                        "cap): brain looped on suppressed tool "
+                                        "%r after AUTO-PROMOTE narrowed tools "
+                                        "to run_background only — runtime "
+                                        "auto-submitting original message to "
+                                        "task_runner",
+                                        _first_bad,
+                                    )
+                                    try:
+                                        from lazyclaw.runtime.agent_settings import (
+                                            get_agent_settings,
+                                        )
+                                        _agent_settings = await get_agent_settings(
+                                            self.config, user_id,
+                                        )
+                                        _bg_task_id = await self._task_runner.submit(
+                                            user_id=user_id,
+                                            instruction=message,
+                                            name=None,
+                                            timeout=_agent_settings.get(
+                                                "specialist_timeout_s", 600,
+                                            ),
+                                            callback=callback,
+                                        )
+                                        if self._team_lead and _fg_task_id:
+                                            self._team_lead.cancel(_fg_task_id)
+                                            _fg_task_id = None
+                                        await cb.on_event(AgentEvent(
+                                            FAST_DISPATCH,
+                                            "Auto-promoted to background after "
+                                            "hallucination cap",
+                                            {
+                                                "task_id": _bg_task_id,
+                                                "trigger": "hallucination_cap",
+                                                "suppressed_tool": _first_bad,
+                                            },
+                                        ))
+                                        await cb.on_event(AgentEvent(
+                                            "done", "Dispatched", {},
+                                        ))
+                                        if _delegate_registered and self.registry:
+                                            self.registry.unregister("delegate")
+                                        return (
+                                            "Continuing in background — will "
+                                            "report back when done."
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "AUTO-PROMOTE failsafe (hallucination "
+                                            "cap) failed; falling back to "
+                                            "tool-doesn't-exist bail",
+                                        )
+
                                 # Bail — LLM is stuck on non-existent tool(s).
                                 # Surface to user instead of burning more iterations.
                                 _bail_msg = (
@@ -4156,6 +4259,30 @@ class Agent:
                         _result_str = _rv.stamp_failed(_result_str, _rv_reason)
                         result = _result_str  # keep downstream paths in sync
 
+                    # ── Fix A: MCP-tool reinjection ───────────────────
+                    # When the brain calls connect_mcp_server /
+                    # install_mcp_server the MCP's tools get registered
+                    # globally but the per-turn `tools` list doesn't
+                    # know. Reinject them now so the next iter can use
+                    # the freshly-connected MCP. See mcp_tool_reinject.
+                    if (
+                        tc.name in ("connect_mcp_server", "install_mcp_server")
+                        and _rv_status != "failed"
+                    ):
+                        from lazyclaw.runtime.mcp_tool_reinject import (
+                            reinject_mcp_tools,
+                        )
+                        _injected_post_hook = reinject_mcp_tools(
+                            self.registry, tools, _suppressed_tool_names,
+                        )
+                        if _injected_post_hook:
+                            logger.info(
+                                "MCP-connect post-hook: injected %d "
+                                "tools after %s (first 3: %s)",
+                                len(_injected_post_hook), tc.name,
+                                _injected_post_hook[:3],
+                            )
+
                     tool_msg = LLMMessage(
                         role="tool",
                         content=result,
@@ -4510,17 +4637,59 @@ class Agent:
                 # the brain to package up the rest as a background task.
                 # Only fires for foreground turns that have run_background
                 # available and haven't already used it.
+                #
+                # Exemption (added 2026-05-13 after Upwork-conversation bug):
+                # if EVERY tool call this turn is a quick read-only inspection
+                # (recall_memories, search_tools, *_get_*, *_search_*,
+                # vault_get, list_*, etc.), skip auto-promote even past the
+                # iter threshold. The brain is just paging through info to
+                # reply inline; forcing run_background here strands the
+                # follow-up tool calls and the user gets the misleading
+                # "that tool doesn't exist" hallucination loop. Long-running
+                # work — submit_proposal, send_message, browser type/click,
+                # apply_*, deliver_*, schedule_job — still gates on the
+                # iteration cap as before.
                 _is_foreground = not getattr(self, "is_background", False)
                 _has_run_bg = any(
                     (t.get("function", {}) or {}).get("name") == "run_background"
                     for t in (tools or [])
                 )
+
+                def _is_readonly_inspection(name: str) -> bool:
+                    if not name:
+                        return False
+                    n = name.lower()
+                    if n.startswith("mcp_"):
+                        parts = n.split("_", 2)
+                        if len(parts) == 3:
+                            n = parts[2]
+                    if n in {
+                        "recall_memories", "search_tools", "save_memory",
+                        "list_tasks", "list_jobs", "list_watchers",
+                        "work_todos", "daily_briefing", "vault_get",
+                    }:
+                        return True
+                    return (
+                        "_get_" in n
+                        or n.startswith("get_")
+                        or n.startswith("list_")
+                        or n.startswith("search_")
+                        or n.startswith("recall_")
+                        or n.endswith("_get_messages")
+                        or n.endswith("_get_conversation")
+                    )
+
+                _only_readonly_so_far = bool(_called_tool_names) and all(
+                    _is_readonly_inspection(nm) for nm in _called_tool_names
+                )
+
                 if (
                     _is_foreground
                     and _has_run_bg
                     and not _promoted_to_bg
                     and "run_background" not in _called_tool_names
                     and iteration >= _PROMOTE_BG_AT_ITER
+                    and not _only_readonly_so_far
                 ):
                     _promoted_to_bg = True
                     _force_dispatch_only = True

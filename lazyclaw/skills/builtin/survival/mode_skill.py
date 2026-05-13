@@ -10,6 +10,18 @@ from lazyclaw.skills.base import BaseSkill
 logger = logging.getLogger(__name__)
 
 
+# Canonical instructions for survival-mode managed crons. LOCKED at the
+# source so the `instant_dispatch` fast path keeps firing on every cron
+# tick without burning an LLM round-trip. EditJobSkill refuses any
+# `new_instruction` targeting one of these names — change cadence via
+# `set_upwork_bot_behavior(...)` instead. The heartbeat daemon
+# auto-restores any drift it detects at startup. See plan
+# `~/.claude/plans/on-cana-yo-fix-shiny-tower.md` (Fix C) for context.
+SURVIVAL_CANONICAL_INSTRUCTIONS: dict[str, str] = {
+    "survival_message_check": "check my upwork inbox now",
+}
+
+
 class SurvivalModeSkill(BaseSkill):
     """Enable or disable automatic job hunting."""
 

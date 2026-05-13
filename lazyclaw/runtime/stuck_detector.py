@@ -131,8 +131,28 @@ DEFAULT_LOOP_LIMITS: dict[str, int] = {
     "run_command": 8,
     "read_file": 8,
     "write_file": 6,
+    # Lookup / memory tools — the brain pings these trying to "find the
+    # answer" when the answer doesn't exist there. Each call returns
+    # different content (so the similarity-bypass below would let it
+    # loop forever), but the BRAIN isn't getting unstuck. Hard caps so
+    # the runtime intervenes after a sensible number of pings.
+    # Today's 2026-05-13 18:16 turn looped recall_memories 13× before
+    # MAX_ITERATIONS killed it. 4 is enough for "two topics + a couple
+    # of refinements" and not enough to grind a turn.
+    "recall_memories": 4,
+    "search_tools": 4,
     "default": 3,
 }
+
+# Tools that should hit their loop cap EVEN WHEN results vary. Normal
+# tools (browser, email_get) reading different IDs return different
+# content — that's batch progress, not a loop, and the similarity check
+# correctly suppresses. Lookup/memory tools always return different
+# content (the brain varies the query string), but the brain is still
+# stuck if it pings them N times without pivoting to action.
+_LOOKUP_TOOLS_BYPASS_SIMILARITY: frozenset[str] = frozenset({
+    "recall_memories", "search_tools",
+})
 
 # MCP tools that do batch operations (email organize, bulk label, etc.)
 # These need higher limits because one "organize inbox" task = many calls.
@@ -184,7 +204,14 @@ def detect_tool_loop(
     # Same tool name N times — but if results are varying substantially,
     # this is batch progress (read 24 emails, fetch 30 notes, etc.),
     # not a stuck loop. Bypass the signal in that case.
-    if results is not None and len(results) >= limit:
+    # EXCEPTION: lookup tools (recall_memories, search_tools) loop with
+    # varying queries returning varying-but-useless content — they should
+    # hit their cap regardless of result variety. See
+    # _LOOKUP_TOOLS_BYPASS_SIMILARITY.
+    if (
+        last_tool not in _LOOKUP_TOOLS_BYPASS_SIMILARITY
+        and results is not None and len(results) >= limit
+    ):
         last_n_results = results[-limit:]
         for i in range(1, len(last_n_results)):
             if _similarity_ratio(last_n_results[i - 1], last_n_results[i]) < 0.85:

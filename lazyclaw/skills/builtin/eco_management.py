@@ -367,6 +367,65 @@ class EcoListModelsSkill(BaseSkill):
                 if not p["configured"]:
                     lines.append(f"  Get key: {p['signup_url']}")
 
+            # \u2500\u2500 MCP-provided model surfaces \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            # Fix B: free_providers only knows about API-keyed providers
+            # (Groq/OpenRouter/Google/Together/Mistral). Model-backed MCPs
+            # like claude-code expose Claude Opus via the user's
+            # subscription and would be invisible without this section.
+            # Look up each registered MCP server in BUNDLED_MCPS and
+            # render its `models` field when present.
+            try:
+                from lazyclaw.mcp.manager import BUNDLED_MCPS, list_servers
+                mcp_servers = await list_servers(self._config, user_id) \
+                    if self._config else []
+            except Exception:
+                mcp_servers = []
+            mcp_lines = _render_mcp_models_section(mcp_servers, BUNDLED_MCPS) \
+                if mcp_servers else []
+            lines.extend(mcp_lines)
+
             return "\n".join(lines)
         except Exception as exc:
             return f"Error listing models: {exc}"
+
+
+def _render_mcp_models_section(
+    mcp_servers: list[dict],
+    bundled_mcps: dict[str, dict],
+) -> list[str]:
+    """Build the 'MCP-PROVIDED MODELS' lines.
+
+    Returns an empty list when no MCP advertises a `models` field. Pure
+    function so it can be unit-tested without DB / async / config.
+    """
+    sections: list[str] = []
+    for server in mcp_servers:
+        name = server.get("name", "")
+        manifest = bundled_mcps.get(name, {}) or {}
+        models = manifest.get("models") or []
+        if not models:
+            continue
+        connected = "\u2713 connected" if server.get("connected") else "\u2717 not connected"
+        sections.append(f"\n{name} ({connected}) \u2014 MCP")
+        for m in models:
+            display = m.get("display_name") or m.get("id") or "?"
+            sections.append(f"  - {display}")
+            ctx = m.get("context_tokens")
+            cost = m.get("cost")
+            sub_parts: list[str] = []
+            if ctx:
+                # Use SI-ish suffix; 1_000_000 \u2192 "1M"
+                if ctx >= 1_000_000 and ctx % 1_000_000 == 0:
+                    ctx_label = f"{ctx // 1_000_000}M tokens"
+                elif ctx >= 1_000 and ctx % 1_000 == 0:
+                    ctx_label = f"{ctx // 1_000}K tokens"
+                else:
+                    ctx_label = f"{ctx} tokens"
+                sub_parts.append(f"Context: {ctx_label}")
+            if cost:
+                sub_parts.append(f"Cost: {cost}")
+            if sub_parts:
+                sections.append("    " + " \u00b7 ".join(sub_parts))
+    if not sections:
+        return []
+    return ["\n", "MCP-PROVIDED MODELS:", "\u2501" * 30, *sections]

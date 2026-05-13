@@ -96,6 +96,18 @@ BUNDLED_MCPS = {
             "is sufficient — use claude-code only when the task needs the "
             "agentic loop."
         ),
+        # AI surfaces this MCP exposes. Surfaced by `eco_list_models` so the
+        # user can see model-backed MCPs alongside the free-provider list.
+        # Tool-only MCPs (upwork, scraper, email, instagram, whatsapp, n8n)
+        # intentionally omit this field — they have no AI model to advertise.
+        "models": [
+            {
+                "id": "claude-opus-4-7",
+                "display_name": "Claude Opus 4.7 (via Claude Code MCP)",
+                "context_tokens": 1_000_000,
+                "cost": "$0 via Claude Code subscription",
+            },
+        ],
         # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth)
         # via mounted ~/.claude auth, not the API key
         "strip_env": ["ANTHROPIC_API_KEY"],

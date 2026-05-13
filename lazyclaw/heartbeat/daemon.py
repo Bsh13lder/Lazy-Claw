@@ -137,11 +137,83 @@ class HeartbeatDaemon:
         if self._task is not None:
             logger.warning("HeartbeatDaemon already running")
             return
+        # Fix C: scrub instruction-drift on managed survival crons before
+        # the first tick — every drift wastes ~45s per cron fire because
+        # instant_dispatch can no longer recognise the intent.
+        try:
+            await self._restore_survival_cron_drift()
+        except Exception:
+            logger.exception(
+                "survival cron drift restore failed; continuing startup"
+            )
         self._task = asyncio.create_task(self._loop())
         logger.info(
             "HeartbeatDaemon started (interval=%ds)",
             self._config.heartbeat_interval,
         )
+
+    async def _restore_survival_cron_drift(self) -> None:
+        """Restore canonical instruction text on managed survival crons.
+
+        Loads every user with a job whose name is in
+        ``SURVIVAL_CANONICAL_INSTRUCTIONS``, compares the persisted
+        instruction to the canonical text, and updates if they differ.
+        Logs one line per restore so the operator sees what happened.
+        No-ops cleanly when nothing has drifted.
+        """
+        from lazyclaw.heartbeat.orchestrator import list_jobs, update_job
+        from lazyclaw.skills.builtin.survival.mode_skill import (
+            SURVIVAL_CANONICAL_INSTRUCTIONS,
+        )
+        async with db_session(self._config) as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT user_id FROM agent_jobs WHERE name IN ("
+                + ",".join("?" * len(SURVIVAL_CANONICAL_INSTRUCTIONS))
+                + ")",
+                tuple(SURVIVAL_CANONICAL_INSTRUCTIONS.keys()),
+            )
+            user_ids = [r[0] for r in await cursor.fetchall()]
+        restored = 0
+        checked = 0
+        for user_id in user_ids:
+            try:
+                jobs = await list_jobs(self._config, user_id)
+            except Exception:
+                logger.debug(
+                    "drift restore: list_jobs failed for user %s",
+                    user_id, exc_info=True,
+                )
+                continue
+            for job in jobs:
+                name = job.get("name")
+                canonical = SURVIVAL_CANONICAL_INSTRUCTIONS.get(name)
+                if canonical is None:
+                    continue
+                checked += 1
+                current = job.get("instruction") or ""
+                if current == canonical:
+                    continue
+                try:
+                    await update_job(
+                        self._config, user_id, job["id"],
+                        instruction=canonical,
+                    )
+                    restored += 1
+                    logger.warning(
+                        "Survival cron drift detected — restored %s "
+                        "(user=%s): %r -> %r",
+                        name, user_id[:8], current[:60], canonical,
+                    )
+                except Exception:
+                    logger.exception(
+                        "drift restore failed for %s (user=%s)",
+                        name, user_id[:8],
+                    )
+        if checked:
+            logger.info(
+                "Survival cron drift scan complete: checked=%d restored=%d",
+                checked, restored,
+            )
 
     async def stop(self) -> None:
         """Cancel the heartbeat loop and wait for clean shutdown."""

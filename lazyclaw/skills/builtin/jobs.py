@@ -449,6 +449,9 @@ class EditJobSkill(BaseSkill):
     async def execute(self, user_id: str, params: dict) -> str:
         from lazyclaw.heartbeat.cron import is_valid
         from lazyclaw.heartbeat.orchestrator import list_jobs, update_job
+        from lazyclaw.skills.builtin.survival.mode_skill import (
+            SURVIVAL_CANONICAL_INSTRUCTIONS,
+        )
 
         job_name = (params.get("job_name") or "").strip().lower()
         if not job_name:
@@ -498,6 +501,23 @@ class EditJobSkill(BaseSkill):
 
         job_id = match["id"]
         display_name = match.get("name", "?")
+
+        # ── Fix C: refuse instruction/name edits on managed survival
+        # crons. Drift breaks the instant_dispatch fast-path lock-in.
+        # Cadence (cron_expression) and free-text context still editable.
+        if display_name in SURVIVAL_CANONICAL_INSTRUCTIONS and (
+            "instruction" in patch or "name" in patch
+        ):
+            forbidden = [k for k in ("instruction", "name") if k in patch]
+            return (
+                f"'{display_name}' is a managed survival-mode cron — its "
+                f"{' and '.join(forbidden)} is locked so instant_dispatch "
+                f"keeps short-circuiting it without an LLM round-trip. "
+                f"To change cadence call `set_upwork_bot_behavior(...)` or "
+                f"pass `new_cron_expression` here. To change behavior, "
+                f"edit upwork_bot config instead. "
+                f"Skipped fields: {', '.join(forbidden)}."
+            )
 
         try:
             ok = await update_job(self._config, user_id, job_id, **patch)

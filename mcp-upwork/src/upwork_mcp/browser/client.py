@@ -424,7 +424,27 @@ class UpworkBrowser:
                 except Exception as exc:
                     logger.debug("upwork warmup nav failed: %s — proceeding", exc)
 
-            await page.goto(url, wait_until=wait_until)
+            # One-shot retry on disconnect: the picked Page handle can go
+            # stale between get_page() and goto() (user closes the tab,
+            # another MCP tool's safe_goto just rotated the cached page,
+            # Brave restarted, etc.). Without this retry every transient
+            # close — common during fast-fire proposal flows — bubbles
+            # up as "Target page, context or browser has been closed" and
+            # caller-side tools surface a hard failure even though the
+            # browser itself is fine. Verified live 2026-05-13: first
+            # get_connects_balance call returned the disconnect error,
+            # second call (same MCP, same browser) returned successfully.
+            try:
+                await page.goto(url, wait_until=wait_until)
+            except Exception as exc:
+                if not _is_disconnect_error(exc):
+                    raise
+                logger.warning(
+                    "safe_goto: stale page handle (%s) — re-picking and retrying once",
+                    exc,
+                )
+                page = await self.get_page()
+                await page.goto(url, wait_until=wait_until)
 
             # Cloudflare-pass retry loop. Cheap polling — no busy wait.
             for _ in range(cloudflare_retry_s):

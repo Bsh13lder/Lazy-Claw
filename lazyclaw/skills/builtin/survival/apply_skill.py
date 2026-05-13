@@ -108,46 +108,30 @@ class ApplyJobSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.memory.personal import search_memories
         from lazyclaw.survival.gig import list_gigs, update_gig_status
         from lazyclaw.survival.platforms import BROWSER_PLATFORMS
         from lazyclaw.survival.profile import get_profile
 
         profile = await get_profile(self._config, user_id)
-        ref = params.get("job_reference", "")
+        ref = (params.get("job_reference", "") or "").strip()
         custom_note = params.get("custom_note", "")
 
-        # Find last search results from memory
-        memories = await search_memories(
-            self._config, user_id, _SEARCH_PREFIX, limit=5,
-        )
+        if not ref:
+            return "Tell me which job to apply to (number, title, or URL)."
 
-        if not memories:
-            return "No recent job search. Use 'search jobs' first."
-
-        latest = memories[0]
-        content = latest["content"]
-        json_str = content[len(_SEARCH_PREFIX):]
-        try:
-            jobs = json.loads(json_str)
-        except json.JSONDecodeError:
-            return "Could not parse last search results. Search again."
-
-        # Match by number or title
-        job = None
-        if ref.isdigit():
-            idx = int(ref) - 1
-            if 0 <= idx < len(jobs):
-                job = jobs[idx]
-        else:
-            ref_lower = ref.lower()
-            for j in jobs:
-                if ref_lower in j.get("title", "").lower():
-                    job = j
-                    break
+        # Resolve job via memory first, then fall back to direct Upwork MCP
+        # lookup. Two-step fallback lets the brain succeed whether it used the
+        # native `search_jobs` skill (writes SURVIVAL_SEARCH memory) or the
+        # raw `upwork_search_jobs` MCP tool (does not).
+        job = await self._resolve_from_memory(user_id, ref)
+        if job is None:
+            job = await self._resolve_via_upwork_mcp(user_id, ref)
 
         if job is None:
-            return f"Job '{ref}' not found in recent search results. Search again?"
+            return (
+                f"Couldn't resolve job '{ref}'. "
+                "Give me the full Upwork URL, or run 'search jobs' first."
+            )
 
         # Generate cover letter with LazyClaw branding
         letter = await self._generate_letter(user_id, job, profile, custom_note)
@@ -174,6 +158,159 @@ class ApplyJobSkill(BaseSkill):
             f"URL: {job.get('url', 'N/A')}\n\n"
             f"Open the link and submit manually, or say 'submit' to apply via browser."
         )
+
+    async def _resolve_from_memory(self, user_id: str, ref: str) -> dict | None:
+        """Look up the job in the latest SURVIVAL_SEARCH memory blob.
+
+        Returns the matched job dict (number index or title substring) or
+        None if no memory exists or no entry matches.
+        """
+        from lazyclaw.memory.personal import search_memories
+
+        memories = await search_memories(
+            self._config, user_id, _SEARCH_PREFIX, limit=5,
+        )
+        if not memories:
+            return None
+
+        content = memories[0]["content"]
+        try:
+            jobs = json.loads(content[len(_SEARCH_PREFIX):])
+        except json.JSONDecodeError:
+            return None
+
+        if ref.isdigit():
+            idx = int(ref) - 1
+            if 0 <= idx < len(jobs):
+                return jobs[idx]
+            return None
+
+        ref_lower = ref.lower()
+        for j in jobs:
+            if ref_lower in j.get("title", "").lower():
+                return j
+        return None
+
+    async def _resolve_via_upwork_mcp(
+        self, user_id: str, ref: str,
+    ) -> dict | None:
+        """Resolve a job directly through mcp-upwork when memory is empty.
+
+        Handles the common case where the brain searched via the raw
+        `upwork_search_jobs` MCP tool (which doesn't write SURVIVAL_SEARCH
+        memory) and then asked to apply by title or URL.
+
+        - URL → upwork_get_job_details
+        - title → upwork_search_jobs, pick best title-substring match
+        """
+        registry = self._registry
+        if registry is None:
+            return None
+
+        details_tool = None
+        search_tool = None
+        for tool_info in registry.list_mcp_tools():
+            tname = tool_info.get("function", {}).get("name", "")
+            tail = tname.split("_")[-1] if tname else ""
+            # Match by suffix so name-prefix shape (mcp_<id>_<tool>) is irrelevant.
+            if tname.endswith("upwork_get_job_details"):
+                details_tool = registry.get(tname)
+            elif tname.endswith("upwork_search_jobs"):
+                search_tool = registry.get(tname)
+            if details_tool and search_tool:
+                break
+
+        is_url = ref.startswith("http://") or ref.startswith("https://")
+
+        if is_url and details_tool is not None:
+            try:
+                raw = await details_tool.execute(user_id, {"job_url": ref})
+            except Exception as exc:
+                logger.warning("upwork_get_job_details failed: %s", exc)
+                return None
+            return self._coerce_to_job_dict(raw, fallback_url=ref)
+
+        if search_tool is not None:
+            try:
+                raw = await search_tool.execute(
+                    user_id, {"query": ref, "limit": 5},
+                )
+            except Exception as exc:
+                logger.warning("upwork_search_jobs failed: %s", exc)
+                return None
+
+            jobs = self._coerce_to_job_list(raw)
+            if not jobs:
+                return None
+
+            ref_lower = ref.lower()
+            for j in jobs:
+                if ref_lower in (j.get("title") or "").lower():
+                    return self._normalize_mcp_job(j)
+            return self._normalize_mcp_job(jobs[0])
+
+        return None
+
+    @staticmethod
+    def _coerce_to_job_list(raw) -> list[dict]:
+        """Best-effort unwrap of MCP tool return into list[dict]."""
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return [j for j in raw if isinstance(j, dict)]
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return []
+        else:
+            data = raw
+        if isinstance(data, dict):
+            inner = (
+                data.get("jobs")
+                or data.get("results")
+                or data.get("items")
+                or []
+            )
+            return [j for j in inner if isinstance(j, dict)]
+        if isinstance(data, list):
+            return [j for j in data if isinstance(j, dict)]
+        return []
+
+    @classmethod
+    def _coerce_to_job_dict(cls, raw, fallback_url: str = "") -> dict | None:
+        """Wrap upwork_get_job_details into apply_job's expected job shape."""
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(raw, dict):
+            return None
+        job = cls._normalize_mcp_job(raw)
+        if fallback_url and not job.get("url"):
+            job["url"] = fallback_url
+        return job
+
+    @staticmethod
+    def _normalize_mcp_job(j: dict) -> dict:
+        """Map an upwork-mcp job dict onto the keys apply_job consumes."""
+        url = j.get("url") or j.get("link") or ""
+        if url and not url.startswith("http"):
+            # Upstream uses two shapes: absolute path "/jobs/~id" or bare id.
+            if url.startswith("/"):
+                url = f"https://www.upwork.com{url}"
+            else:
+                url = f"https://www.upwork.com/jobs/{url}"
+        return {
+            "title": j.get("title") or j.get("name") or "Untitled",
+            "description": j.get("description") or j.get("snippet") or "",
+            "budget": j.get("budget") or j.get("hourly_rate") or "N/A",
+            "url": url,
+            "platform": "upwork",
+        }
 
     async def _apply_via_browser(
         self, user_id: str, job: dict, profile, letter: str,

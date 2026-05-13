@@ -47,7 +47,31 @@ mcp = FastMCP(
 
 @mcp.tool()
 async def upwork_search_jobs(
-    query: Annotated[str, Field(description="Search keywords")],
+    query: Annotated[
+        str,
+        Field(
+            description=(
+                "Keywords to search. Ignored when source='best_matches'. "
+                "Required (non-empty) when source='search'."
+            ),
+        ),
+    ] = "",
+    source: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Which Upwork surface to read from. "
+                "'best_matches' (DEFAULT) → /nx/find-work/best-matches — "
+                "Upwork's personalized recs honoring the filters the user "
+                "set on Upwork's side (fixed-price / hourly / budget "
+                "range etc.). Returns ~20-50 jobs. Use when the user says "
+                "'find me jobs' / 'any matches' / 'what's new for me'. "
+                "'search' → /nx/search/jobs/?q=... — global keyword search "
+                "across 100k+ active postings. Use only when the user "
+                "explicitly names specific tech ('find python scraping jobs')."
+            ),
+        ),
+    ] = "best_matches",
     category: Annotated[str | None, Field(description="Job category filter")] = None,
     budget_min: Annotated[int | None, Field(description="Minimum budget in USD")] = None,
     budget_max: Annotated[int | None, Field(description="Maximum budget in USD")] = None,
@@ -55,20 +79,46 @@ async def upwork_search_jobs(
         str | None, Field(description="Experience level: entry, intermediate, or expert")
     ] = None,
     job_type: Annotated[str | None, Field(description="Job type: hourly or fixed")] = None,
-    limit: Annotated[int, Field(description="Maximum number of results", ge=1, le=50)] = 20,
+    limit: Annotated[
+        int,
+        Field(
+            description=(
+                "Maximum number of results (1-50). Values above 50 are "
+                "silently clamped to 50 — Upwork's search page returns "
+                "~30-50 results per fetch anyway, so a higher request "
+                "wouldn't yield more jobs. Values below 1 are clamped to 1."
+            ),
+            ge=1,
+        ),
+    ] = 20,
 ) -> list[dict]:
-    """Search for jobs on Upwork matching the specified criteria.
+    """Search for jobs on Upwork.
+
+    Default mode is 'best_matches' (Upwork's personalized recommendations
+    that already respect the user's saved profile filters). Pass
+    source='search' with a non-empty query to run a global keyword search.
+
+    ``limit`` is silently clamped to the [1, 50] range — Upwork's search
+    page itself caps at ~50 jobs per fetch, so requesting 100 wouldn't
+    return more. We clamp instead of erroring because the brain has been
+    observed passing limit=100 and the hard rejection killed the search
+    entirely (verified live 2026-05-13).
 
     Returns a list of job summaries with title, budget, client info, and URL.
     """
+    # Clamp limit silently — JobSearchParams validates ge=1, le=50, so
+    # without this clamp any caller passing limit>50 hits a Pydantic
+    # ValidationError and the search aborts with no results.
+    safe_limit = max(1, min(int(limit), 50))
     params = JobSearchParams(
         query=query,
+        source=source,
         category=category,
         budget_min=budget_min,
         budget_max=budget_max,
         experience_level=experience_level,
         job_type=job_type,
-        limit=limit,
+        limit=safe_limit,
     )
     return await search_jobs(params)
 
@@ -129,13 +179,18 @@ async def upwork_get_proposals(
     status: Annotated[
         str, Field(description="Filter by status: active, submitted, archived, or all")
     ] = "active",
-    limit: Annotated[int, Field(description="Maximum number of results", ge=1, le=50)] = 20,
+    limit: Annotated[
+        int,
+        Field(description="Maximum number of results (clamped to 1-50)", ge=1),
+    ] = 20,
 ) -> list[dict]:
     """Get your submitted proposals on Upwork.
 
     Returns a list of proposals with job title, status, bid amount, and dates.
+    ``limit`` is silently clamped to the [1, 50] range.
     """
-    params = ProposalsParams(status=status, limit=limit)
+    safe_limit = max(1, min(int(limit), 50))
+    params = ProposalsParams(status=status, limit=safe_limit)
     return await get_proposals(params)
 
 
@@ -238,20 +293,28 @@ async def upwork_withdraw_proposal(
 async def upwork_get_messages(
     room_id: Annotated[str | None, Field(description="Specific chat room ID or URL")] = None,
     unread_only: Annotated[bool, Field(description="Only show unread messages")] = False,
-    limit: Annotated[int, Field(description="Maximum conversations to return", ge=1, le=50)] = 20,
+    limit: Annotated[
+        int,
+        Field(description="Maximum conversations to return (clamped to 1-50)", ge=1),
+    ] = 20,
 ) -> list[dict]:
     """Get messages from Upwork inbox.
 
     Returns a list of conversations with last message, sender info, and unread status.
+    ``limit`` is silently clamped to the [1, 50] range.
     """
-    params = MessagesParams(room_id=room_id, unread_only=unread_only, limit=limit)
+    safe_limit = max(1, min(int(limit), 50))
+    params = MessagesParams(room_id=room_id, unread_only=unread_only, limit=safe_limit)
     return await get_messages(params)
 
 
 @mcp.tool()
 async def upwork_get_conversation(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
-    limit: Annotated[int, Field(description="Maximum messages to return", ge=1, le=100)] = 50,
+    limit: Annotated[
+        int,
+        Field(description="Maximum messages to return (clamped to 1-100)", ge=1),
+    ] = 50,
     me_name: Annotated[
         str | None,
         Field(
@@ -270,8 +333,10 @@ async def upwork_get_conversation(
     """Get all messages in a specific conversation.
 
     Returns conversation details with full message history.
+    ``limit`` is silently clamped to the [1, 100] range.
     """
-    return await get_conversation_messages(room_id, limit, me_name=me_name)
+    safe_limit = max(1, min(int(limit), 100))
+    return await get_conversation_messages(room_id, safe_limit, me_name=me_name)
 
 
 @mcp.tool()
@@ -304,13 +369,18 @@ async def upwork_get_unread_count() -> dict:
 @mcp.tool()
 async def upwork_get_contracts(
     status: Annotated[str, Field(description="Filter by status: active, ended, or all")] = "active",
-    limit: Annotated[int, Field(description="Maximum number of results", ge=1, le=50)] = 20,
+    limit: Annotated[
+        int,
+        Field(description="Maximum number of results (clamped to 1-50)", ge=1),
+    ] = 20,
 ) -> list[dict]:
     """Get your Upwork contracts.
 
     Returns a list of contracts with client name, job title, status, and earnings.
+    ``limit`` is silently clamped to the [1, 50] range.
     """
-    params = ContractsParams(status=status, limit=limit)
+    safe_limit = max(1, min(int(limit), 50))
+    params = ContractsParams(status=status, limit=safe_limit)
     return await get_contracts(params)
 
 

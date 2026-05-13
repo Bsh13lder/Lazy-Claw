@@ -111,7 +111,14 @@ class SearchJobsSkill(BaseSkill):
         from lazyclaw.survival.profile import get_profile
 
         profile = await get_profile(self._config, user_id)
-        keywords = params.get("keywords", "") or " ".join(profile.skills[:5])
+
+        # Explicit keywords win over the profile's upwork source preference.
+        # If the user typed "find python scraping on upwork" we honor the
+        # keyword search; otherwise default to the user's profile choice
+        # (which defaults to best_matches → Upwork's personalized recs).
+        raw_keywords = (params.get("keywords") or "").strip()
+        keywords_explicit = bool(raw_keywords)
+        keywords = raw_keywords or " ".join(profile.skills[:5])
 
         # NL-controlled defaults from profile, callable arg overrides them.
         try:
@@ -157,7 +164,11 @@ class SearchJobsSkill(BaseSkill):
         # Independent of JobSpy results; small fixed-price gigs live on Upwork.
         if upwork_in_profile and "upwork" in MCP_PLATFORMS:
             await self._ensure_upwork_connected(user_id)
-            upwork_jobs = await self._try_upwork(user_id, keywords, max_results)
+            upwork_jobs = await self._try_upwork(
+                user_id, keywords, max_results,
+                keywords_explicit=keywords_explicit,
+                profile_source=getattr(profile, "upwork_search_source", "best_matches"),
+            )
             if upwork_jobs:
                 all_jobs.extend(upwork_jobs)
 
@@ -411,8 +422,16 @@ class SearchJobsSkill(BaseSkill):
 
     async def _try_upwork(
         self, user_id: str, keywords: str, max_results: int,
+        keywords_explicit: bool = False,
+        profile_source: str = "best_matches",
     ) -> list[dict]:
-        """Call upwork_search_jobs from mcp-upwork. Returns normalized job dicts."""
+        """Call upwork_search_jobs from mcp-upwork. Returns normalized job dicts.
+
+        Source resolution:
+          - explicit user keywords → ``source="search"`` with ``query=keywords``
+          - no explicit keywords → ``source=profile_source`` (default
+            ``best_matches`` → Upwork's personalized recs, query omitted)
+        """
         registry = self._registry
         if registry is None:
             return []
@@ -430,12 +449,27 @@ class SearchJobsSkill(BaseSkill):
             logger.debug("upwork_search_jobs tool not available")
             return []
 
+        # Resolve effective source: explicit keywords always force keyword
+        # search regardless of profile preference.
+        source = "search" if keywords_explicit else (profile_source or "best_matches")
+        mcp_args: dict = {
+            "limit": min(max_results, 50),
+            "source": source,
+        }
+        # Only send the query when running keyword search; best_matches
+        # ignores it (and a stray query would re-rank within the small recs
+        # set, hiding good non-keyword matches).
+        if source == "search":
+            mcp_args["query"] = keywords
+
         try:
-            logger.warning("Calling Upwork MCP search: %s (q=%r)", tool.name, keywords)
-            raw = await tool.execute(user_id, {
-                "query": keywords,
-                "limit": min(max_results, 50),
-            })
+            logger.warning(
+                "Upwork MCP search: source=%s explicit_kw=%s q=%r",
+                source,
+                keywords_explicit,
+                keywords if source == "search" else "<none>",
+            )
+            raw = await tool.execute(user_id, mcp_args)
         except Exception as exc:
             logger.warning("Upwork MCP search failed: %s", exc)
             return []

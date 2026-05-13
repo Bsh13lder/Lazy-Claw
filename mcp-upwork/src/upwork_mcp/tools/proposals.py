@@ -221,34 +221,91 @@ async def get_proposal_details(proposal_url: str) -> dict:
 
     details = {"url": proposal_url}
 
-    # Job title
-    title_el = await page.query_selector('[data-test="job-title"], h1, .job-title')
+    # Known page-heading labels on the proposal page that the legacy
+    # ``h1`` fallback used to capture and surface as the "job_title".
+    # "Proposal details" is the literal h1 on /nx/proposals/<id>; treat
+    # any of these as scraper miss and drop them.
+    _NOISE_TITLES = {
+        "proposal details", "proposal", "your proposal", "view proposal",
+        "submitted proposals", "active proposals",
+    }
+
+    def _is_noise_title(t: str) -> bool:
+        return t.strip().lower() in _NOISE_TITLES
+
+    # Job title. Try the most-specific selectors first. The bare ``h1``
+    # fallback was removed — on /nx/proposals/<id> the h1 is the literal
+    # page heading "Proposal details", which then propagated into every
+    # ``job_title`` field downstream (verified live 2026-05-13). When
+    # all structured selectors miss, also try the first job-link href
+    # text in the page (Upwork always renders a link back to the job
+    # posting on the proposal page).
+    title_el = await page.query_selector(
+        '[data-test="job-title"], [data-test="proposal-job-title"], '
+        '[data-qa="job-title"], .proposal-job-title, .job-title'
+    )
+    job_title_text = ""
     if title_el:
-        details["job_title"] = (await title_el.text_content() or "").strip()
+        job_title_text = (await title_el.text_content() or "").strip()
+
+    if not job_title_text or _is_noise_title(job_title_text):
+        # Fallback: first link pointing back at /jobs/<id> — that's the
+        # job posting link, which Upwork always renders on the proposal
+        # detail page with the job title as the link text.
+        job_link = await page.query_selector('a[href*="/jobs/"]')
+        if job_link:
+            link_text = (await job_link.text_content() or "").strip()
+            if link_text and not _is_noise_title(link_text):
+                job_title_text = link_text
+
+    if job_title_text and not _is_noise_title(job_title_text):
+        details["job_title"] = job_title_text
 
     # Cover letter
-    cover_el = await page.query_selector('[data-test="cover-letter"], .cover-letter')
+    cover_el = await page.query_selector(
+        '[data-test="cover-letter"], [data-test="proposal-cover-letter"], '
+        '[data-qa="cover-letter"], .cover-letter'
+    )
     if cover_el:
         details["cover_letter"] = (await cover_el.text_content() or "").strip()
 
     # Bid/Rate
-    bid_el = await page.query_selector('[data-test="bid-amount"], .bid-amount')
+    bid_el = await page.query_selector(
+        '[data-test="bid-amount"], [data-test="proposal-bid"], '
+        '[data-qa="proposal-amount"], .bid-amount'
+    )
     if bid_el:
         details["bid"] = (await bid_el.text_content() or "").strip()
 
     # Status
-    status_el = await page.query_selector('[data-test="proposal-status"], .status')
+    status_el = await page.query_selector(
+        '[data-test="proposal-status"], [data-qa="proposal-status"], .status'
+    )
     if status_el:
         details["status"] = (await status_el.text_content() or "").strip()
 
     # Client response/messages
     messages = []
-    message_els = await page.query_selector_all('[data-test="message"], .message-item')
+    message_els = await page.query_selector_all(
+        '[data-test="message"], [data-test="message-item"], '
+        '[data-qa="message"], .message-item, [data-test="story-container"]'
+    )
     for el in message_els:
         msg_text = await el.text_content()
         if msg_text:
             messages.append(msg_text.strip())
     details["messages"] = messages
+
+    # Signal scraper miss explicitly when ZERO fields populated beyond
+    # the URL — the brain can react ("re-fetch later" or "open Brave")
+    # instead of treating the call as success-with-no-data.
+    if len(details) == 1:
+        details["status"] = "scrape_miss"
+        details["error"] = (
+            "Proposal detail selectors all missed — Upwork may have "
+            "redesigned the page, or the URL is stale. Open this URL "
+            "in Brave to verify and capture new selectors."
+        )
 
     return details
 
@@ -268,38 +325,105 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     browser = get_browser()
     await browser.ensure_logged_in()
 
-    # Pre-submit Connects balance snapshot. The selector-based extraction
-    # this replaces (data-test="connects-required" near the legacy
-    # line 555 site) was stale on the 2026 apply form and silently
-    # shipped 0, so callers got "Connects used: 0" reports for every
-    # submit. We pay ~3-5s extra here for an honest delta.
-    #
-    # CRITICAL ORDERING: take the balance BEFORE grabbing the submit-flow
-    # page handle. get_connects_balance internally calls browser.get_page(),
-    # which can rotate/reconnect the underlying CDP session. Holding a page
-    # reference across this call leaves a stale handle and the subsequent
-    # page.goto(job_url) silently lands on whatever tab the browser
-    # auto-attaches to (typically /nx/find-work/best-matches), making the
-    # apply flow short-circuit with "Apply button not found".
-    # 8s hard cap. /nx/plans/connects/balance currently 404s in the 2026
-    # layout and the helper falls back to /nx/find-work/ with selectors
-    # that may also be stale, so an unbounded call hangs and triggers
-    # the 60s outer tool-timeout — killing an otherwise-successful submit.
+    # Pre-submit Connects balance snapshot. Restored 2026-05-13 after
+    # removing it caused submit regressions: the user reported "before
+    # it worked perfectly" — meaning the balance call was load-bearing.
+    # Even though safe_goto re-picks the page handle, the SEQUENCE
+    # matters: the original code's comment was emphatic about taking
+    # the balance BEFORE grabbing the submit-flow page handle, because
+    # get_connects_balance rotates the CDP session in a way safe_goto
+    # alone doesn't replicate reliably enough for hourly submits with
+    # a milestone/duration widget. 8s hard cap; failures fall through
+    # as pre_connects=None and we just lose the post-submit delta.
     import asyncio as _aio_balance
     pre_connects: int | None = None
     try:
-        pre_balance = await _aio_balance.wait_for(get_connects_balance(), timeout=8.0)
+        pre_balance = await _aio_balance.wait_for(
+            get_connects_balance(), timeout=8.0,
+        )
         raw_pre = pre_balance.get("available")
         if isinstance(raw_pre, int):
             pre_connects = raw_pre
     except (Exception, _aio_balance.TimeoutError):
         pre_connects = None
 
-    # NOW grab the page handle for the submit flow — fresh, not stale.
+    # Grab the page handle for the submit flow — fresh after balance call.
     # safe_goto serializes + Cloudflare-retries + prefers existing Upwork
     # tab. The local _wait_for_cloudflare_clear poll below stays as a
     # second-stage guard for the apply-form-specific challenge.
     page = await browser.safe_goto(params.job_url)
+    import asyncio as _aio
+
+    # Blank-page self-heal. Symptom: page renders white/empty (no <main>,
+    # tiny body text, or stale 0-element snapshot). The Apply button hunt
+    # would then return "needs_user / can't find Apply" silently. Verified
+    # live 2026-05-13: user reported "screen was white, just needed refresh"
+    # — happens after rapid concurrent nav, CDP tab rotation, or transient
+    # Upwork hydration failure. One reload usually fixes it.
+    async def _page_looks_blank(p) -> tuple[bool, str]:
+        # Fail OPEN: if any probe raises (e.g. mocked page in tests, page
+        # navigating mid-check, CDP momentarily flaky) assume the page
+        # is fine and let the downstream selectors run. False-positive
+        # reloads are worse than missing the white-out heuristic — the
+        # downstream apply-button miss path already surfaces a clean
+        # error to the user.
+        try:
+            html = await p.content() or ""
+        except Exception:
+            return False, "content-check-failed-skip"
+        # Real Upwork pages are 100KB+; <5KB strongly suggests blank/empty
+        # body or a hydration-failed shell.
+        if len(html) < 5000:
+            return True, f"html too small ({len(html)} chars)"
+        try:
+            main_el = await p.query_selector("main, [data-test='content'], #main")
+        except Exception:
+            return False, "main-probe-failed-skip"
+        if main_el is None:
+            return True, "no <main>/[data-test=content] element"
+        try:
+            main_text = (await main_el.text_content() or "").strip()
+        except Exception:
+            return False, "main-text-probe-failed-skip"
+        if len(main_text) < 100:
+            return True, f"<main> text too short ({len(main_text)} chars)"
+        return False, "ok"
+
+    blank, blank_reason = await _page_looks_blank(page)
+    if blank:
+        logger.warning(
+            "submit_proposal: blank-page detected (%s) at %s — reloading once",
+            blank_reason, page.url,
+        )
+        try:
+            await page.reload(wait_until="networkidle")
+            await _aio.sleep(2.0)
+        except Exception as reload_exc:
+            logger.warning(
+                "submit_proposal: reload raised %s — proceeding anyway",
+                reload_exc,
+            )
+        # Recheck after reload. If still blank, return a clear error so
+        # the brain knows to surface to the user instead of silently
+        # looping through the apply flow on an empty DOM.
+        blank2, blank_reason2 = await _page_looks_blank(page)
+        if blank2:
+            logger.warning(
+                "submit_proposal: page STILL blank after reload (%s) at %s",
+                blank_reason2, page.url,
+            )
+            return {
+                "status": "needs_user",
+                "question": (
+                    f"Upwork rendered a blank page at {page.url} "
+                    f"({blank_reason2}). Reload didn't fix it. Open Brave "
+                    f"manually, refresh the job page (Cmd+R), then say "
+                    f"'retry' and I'll re-submit."
+                ),
+                "page_url": page.url,
+                "blank_page": True,
+            }
+        logger.warning("submit_proposal: blank-page resolved after reload")
 
     # Wait for Cloudflare "Just a moment..." interstitial to clear.
     # Upwork wraps every fresh navigation in this challenge — networkidle
@@ -311,7 +435,6 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     # for ~1-2s. Without this wait the Apply button isn't yet in the
     # DOM and submit_proposal returns "Apply button not found" on
     # what's actually a healthy page. Verified 2026-05-05.
-    import asyncio as _aio
     await _aio.sleep(2.0)
     if not cf_cleared:
         try:
@@ -799,6 +922,7 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
         return {"status": "error", "message": "Submit button not found"}
 
     pre_submit_url = page.url
+    logger.warning("submit_proposal: clicking primary Submit button at %s", pre_submit_url)
     await submit_btn.click()
 
     # ── Two-step submit confirmation flow ────────────────────────────
@@ -808,53 +932,105 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
     # Submit button. Without checking + clicking through this modal
     # the proposal is never actually submitted (Upwork keeps the user
     # on /apply/ silently). Verified 2026-05-05 against the live form.
+    #
+    # 2026-05-13: added per-step INFO logging because silent modal
+    # failures were the leading cause of "Submit clicked but page
+    # didn't navigate" needs_user responses. Logs surface in
+    # lazyclaw.log via the MCP bridge and tell us exactly which step
+    # missed: modal-not-detected, checkbox-click-failed, submit-never-
+    # enabled, or modal-submit-click-failed.
     import asyncio as _aio
 
-    modal = page.locator('[role="dialog"][name="intro"], [role="dialog"]:has-text("Stay safe")').first
+    # Broader modal selector. Upwork has rotated the dialog markup at
+    # least twice; match by any of: known data-ev-label on the body,
+    # the legacy `name="intro"`, the title text in either old or new
+    # casing/wording, OR a recent "build your reputation" heading.
+    modal = page.locator(
+        '[role="dialog"][name="intro"], '
+        '[role="dialog"]:has-text("Stay safe"), '
+        '[role="dialog"]:has-text("Stay Safe"), '
+        '[role="dialog"]:has-text("build your reputation"), '
+        '[role="dialog"]:has-text("Build your reputation"), '
+        '[role="dialog"]:has([data-ev-label="disintermediation_modal_accept"])'
+    ).first
     try:
         await modal.wait_for(state="visible", timeout=8000)
         modal_present = True
+        try:
+            modal_text_preview = (await modal.text_content() or "")[:160].replace("\n", " ")
+        except Exception:
+            modal_text_preview = "?"
+        logger.info(
+            "submit_proposal: confirmation modal detected — preview=%r",
+            modal_text_preview,
+        )
     except Exception:
         modal_present = False
+        logger.info(
+            "submit_proposal: NO confirmation modal within 8s — "
+            "either Upwork dropped the policy modal for this account, "
+            "submit went through directly, OR the modal selectors are "
+            "stale (current url=%s)", page.url,
+        )
 
     if modal_present:
         # Check the policy agreement checkbox via its label (the real
         # input is .sr-only). Locator click on the label toggles the
         # underlying input through Air3's normal event flow.
+        checkbox_outcome = "not_attempted"
         try:
             checkbox_label = modal.locator('[data-test="checkbox-label"]').first
             await checkbox_label.click()
             await _aio.sleep(0.3)
-        except Exception:
+            checkbox_outcome = "checkbox-label"
+        except Exception as cb_exc1:
             # Fallback: try the fake-input visual element + native input
             try:
                 await modal.locator('[data-test="checkbox-input"]').first.click()
                 await _aio.sleep(0.3)
-            except Exception:
+                checkbox_outcome = "checkbox-input"
+            except Exception as cb_exc2:
                 try:
                     await modal.locator('input[type="checkbox"]').first.check()
                     await _aio.sleep(0.3)
-                except Exception:
-                    pass
+                    checkbox_outcome = "input-check"
+                except Exception as cb_exc3:
+                    checkbox_outcome = (
+                        f"all-failed: label={cb_exc1!s} input={cb_exc2!s} "
+                        f"native={cb_exc3!s}"
+                    )
+        logger.info(
+            "submit_proposal: policy-checkbox interaction: %s",
+            checkbox_outcome[:200],
+        )
 
         # Wait for the modal Submit button to become enabled.
         modal_submit = modal.locator(
             'button[data-ev-label="disintermediation_modal_accept"], '
             'button.air3-btn-primary:has-text("Submit")'
         ).first
-        # Poll for enabled state up to 3s.
-        for _ in range(30):
+        enabled_after_ms: int | None = None
+        for tick in range(30):
             try:
                 disabled = await modal_submit.get_attribute("disabled")
                 if not disabled:
+                    enabled_after_ms = tick * 100
                     break
             except Exception:
                 break
             await _aio.sleep(0.1)
+        logger.info(
+            "submit_proposal: modal-Submit enabled_after_ms=%s",
+            enabled_after_ms if enabled_after_ms is not None else "NEVER",
+        )
 
         try:
             await modal_submit.click()
-        except Exception:
+            logger.warning("submit_proposal: modal-Submit clicked")
+        except Exception as ms_exc:
+            logger.warning(
+                "submit_proposal: modal-Submit click raised: %s", ms_exc,
+            )
             return {
                 "status": "needs_user",
                 "question": (
@@ -868,8 +1044,12 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             }
 
     # Now poll for the actual submission outcome.
+    logger.info(
+        "submit_proposal: success-poll start, pre_submit_url=%s", pre_submit_url,
+    )
     _deadline = _aio.get_event_loop().time() + 15.0
     success_message: str | None = None
+    last_logged_url: str = pre_submit_url
     while _aio.get_event_loop().time() < _deadline:
         # 1. Explicit success element
         ok = await page.query_selector('[data-test="proposal-submitted"], .success-message')
@@ -877,28 +1057,28 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             success_message = "Proposal submitted successfully"
             break
         # 2. URL changed away from /apply/ → Upwork redirected, success.
-        if "/apply/" not in page.url and page.url != pre_submit_url:
-            success_message = f"Proposal submitted (redirected to {page.url})"
+        cur_url = page.url
+        if cur_url != last_logged_url:
+            logger.warning("submit_proposal: success-poll url change: %s", cur_url)
+            last_logged_url = cur_url
+        if "/apply/" not in cur_url and cur_url != pre_submit_url:
+            success_message = f"Proposal submitted (redirected to {cur_url})"
             break
         await _aio.sleep(0.5)
 
     if success_message:
-        # Capture the success URL BEFORE the post-balance fetch — same
-        # stale-handle reason as the pre-submit ordering above. Once
-        # get_connects_balance navigates to /nx/plans/connects/balance,
-        # this `page` handle may rotate and `page.url` would read the
-        # balance page (or raise on a closed handle).
+        logger.warning("submit_proposal: SUCCESS — %s", success_message)
+        # Post-submit balance snapshot for the connects_used delta. Same
+        # 8s hard cap; failure leaves connects_used=None rather than
+        # blocking a confirmed submit.
         success_page_url = page.url
-
-        # Post-submit balance snapshot, computed once outside the poll
-        # loop so both success branches share the same logic. Same 8s
-        # hard cap as the pre-submit fetch — we never block a confirmed
-        # submit on a flaky balance read.
         import asyncio as _aio_post_balance
         post_connects: int | None = None
         if pre_connects is not None:
             try:
-                post_balance = await _aio_post_balance.wait_for(get_connects_balance(), timeout=8.0)
+                post_balance = await _aio_post_balance.wait_for(
+                    get_connects_balance(), timeout=8.0,
+                )
                 raw_post = post_balance.get("available")
                 if isinstance(raw_post, int):
                     post_connects = raw_post
@@ -911,10 +1091,14 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
         )
         return {
             "status": "submitted",
-            "connects_used": connects_used,  # int or None — never a fabricated 0
+            "connects_used": connects_used,
             "message": success_message,
             "page_url": success_page_url,
         }
+    logger.warning(
+        "submit_proposal: 15s poll exhausted, page still on %s — checking inline validation errors",
+        page.url,
+    )
 
     # Polling exhausted — fall through to error capture.
     try:

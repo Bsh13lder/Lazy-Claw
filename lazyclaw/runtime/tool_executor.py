@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING
 
 from lazyclaw.llm.providers.base import ToolCall
 from lazyclaw.permissions.models import ALLOW, DENY
-from lazyclaw.runtime.skill_lesson_auto import record_skill_outcome
+from lazyclaw.runtime.skill_lesson_auto import (
+    outcome_from_result,
+    record_skill_outcome,
+)
 from lazyclaw.runtime.tool_result import ToolResult
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -80,6 +83,21 @@ class ToolExecutor:
             )
             logger.debug("Tool %s executed successfully", tool_call.name)
             processed = await self._process_result(result, tool_call.name, callback)
+            # Surface failed-tool results at INFO so we can debug MCP errors
+            # without having to decrypt the lesson store. The classifier
+            # already runs inside record_skill_outcome — calling it here a
+            # second time is cheap (pure string scan) and lets us log the
+            # actual payload that the brain saw before it gave up.
+            try:
+                _outcome, _err, _snippet = outcome_from_result(processed, None)
+                if _outcome == "failed":
+                    text = _snippet if _snippet is not None else str(processed)
+                    logger.info(
+                        "Tool %s FAILED result (first 800 chars): %s",
+                        tool_call.name, text[:800],
+                    )
+            except Exception:
+                logger.debug("tool-result failure logging swallowed", exc_info=True)
             await record_skill_outcome(
                 self._config, user_id, skill, tool_call.arguments, processed,
             )

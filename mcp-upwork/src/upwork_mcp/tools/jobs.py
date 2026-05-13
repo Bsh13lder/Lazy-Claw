@@ -260,6 +260,10 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
             skill_els = await section.query_selector_all("button, [class*='skill'], [class*='token']")
             skills: list[str] = []
             seen_skills: set[str] = set()
+            # Upwork truncates long skill lists with a literal "+5"/"+5 more"
+            # chip — pure UI affordance, not a real skill. Strip these
+            # before they poison downstream skill matching.
+            _MORE_CHIP_RE = re.compile(r"^\+\s*\d+(\s*more)?$", re.IGNORECASE)
             for el in skill_els[:24]:
                 text = await el.text_content()
                 if not text:
@@ -269,6 +273,8 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
                 # real CamelCase names (FastAPI, GraphQL) via allowlist.
                 for candidate in _split_merged_skill(text.strip()):
                     if not (1 < len(candidate) < 30):
+                        continue
+                    if _MORE_CHIP_RE.match(candidate.strip()):
                         continue
                     if _is_nav_noise(candidate):
                         continue
@@ -525,16 +531,21 @@ async def get_job_details(params: JobDetailsParams) -> dict:
     if posted:
         job["posted"] = posted
 
-    # Skills/tags — Upwork's actual skill-token selector
+    # Skills/tags — Upwork's actual skill-token selector. Strip the
+    # literal "+N"/"+N more" truncation chip Upwork inserts when the
+    # skill list overflows.
+    _more_chip = re.compile(r"^\+\s*\d+(\s*more)?$", re.IGNORECASE)
     skills = await _all_text(page, '[data-test="Skill"], [data-test="Tag-tag"]', max_items=15)
-    # Dedupe while preserving order
     seen: set[str] = set()
     deduped: list[str] = []
     for s in skills:
-        key = s.lower()
+        s_stripped = (s or "").strip()
+        if not s_stripped or _more_chip.match(s_stripped):
+            continue
+        key = s_stripped.lower()
         if key not in seen:
             seen.add(key)
-            deduped.append(s)
+            deduped.append(s_stripped)
     if deduped:
         job["skills"] = deduped[:10]
 

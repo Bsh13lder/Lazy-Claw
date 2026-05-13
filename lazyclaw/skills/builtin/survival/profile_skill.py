@@ -31,6 +31,7 @@ class SetSkillsProfileSkill(BaseSkill):
             "'set tiny gig cap to 75' / 'only search indeed and linkedin' / "
             "'show only jobs from last 24 hours' / "
             "'switch branding to personal' / "
+            "'match my upwork profile only' / 'set upwork search to keyword' / "
             "'show my skills profile' (no args = view). "
             "For the polished value pitch use 'set_freelance_pitch' instead "
             "(routes through the worker LLM for AI polish)."
@@ -104,6 +105,19 @@ class SetSkillsProfileSkill(BaseSkill):
                     "enum": ["lazyclaw", "personal"],
                     "description": "lazyclaw = transparent AI agent identity; personal = human freelancer. NL: 'switch branding to personal'.",
                 },
+                "upwork_search_source": {
+                    "type": "string",
+                    "enum": ["best_matches", "search"],
+                    "description": (
+                        "Upwork search default. 'best_matches' (recommended) "
+                        "returns Upwork's personalized recs honoring the "
+                        "filters you set on Upwork's side. 'search' runs a "
+                        "global keyword search instead. SearchJobsSkill "
+                        "auto-overrides to 'search' when the user passes "
+                        "explicit keywords. NL: 'match my upwork profile "
+                        "only' / 'set upwork search to keyword'."
+                    ),
+                },
                 "preferred_categories": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -168,6 +182,7 @@ class SetSkillsProfileSkill(BaseSkill):
                 f"Default sites: {', '.join(profile.default_search_sites) or 'indeed'}\n"
                 f"Default hours: last {profile.default_hours_old}h, "
                 f"{profile.default_results_per_search} results/site\n"
+                f"Upwork search: {profile.upwork_search_source}\n"
                 f"Categories: {', '.join(profile.preferred_categories) or 'None'}\n"
                 f"Excluded: {', '.join(profile.excluded_keywords) or 'None'}\n"
                 f"Work hours: {profile.work_hours}\n"

@@ -56,6 +56,15 @@ class SkillsProfile:
     default_search_sites: tuple[str, ...] = ("indeed",)
     default_results_per_search: int = 25
     default_hours_old: int = 72
+    # Upwork search surface preference. "best_matches" (default) uses
+    # Upwork's personalized recs at /nx/find-work/best-matches — respects
+    # the filters the user set on Upwork's side (fixed-price / hourly /
+    # budget range / category). "search" forces global keyword search.
+    # SearchJobsSkill auto-overrides this per-call when the user passes
+    # explicit keywords. NL-set via set_skills_profile:
+    #   "match my upwork profile only" → best_matches
+    #   "set upwork search to keyword" → search
+    upwork_search_source: str = "best_matches"
 
 
 # Python-leaning starter profile so a fresh user can run "find me jobs"

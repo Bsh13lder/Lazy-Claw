@@ -78,7 +78,7 @@ You have ~16 base tools always sent in context: `search_tools`, `web_search`, `r
 - `search_tools("task" | "todo" | "reminder")` → task manager (13 tools)
 - `search_tools("vault")` → encrypted credential vault (vault_set, vault_get, vault_list, vault_delete)
 - `search_tools("lazybrain" | "note" | "journal")` → encrypted PKM, 21 tools (notes, wikilinks, daily journal, tags)
-- `search_tools("job" | "freelance")` → survival / gig tools
+- `search_tools("job" | "freelance")` → survival / gig tools. **Default Upwork searches to `source='best_matches'`** (Upwork's personalized recs honoring the user's profile filters). Only pass `source='search'` + a `query` when the user explicitly names tech/keywords ("find python scraping jobs"). When the user says "find me jobs" / "any matches" / "what's new" → best_matches, no query. The `search_jobs` skill enforces this automatically; if you reach for the raw `upwork_search_jobs` MCP tool, mirror the same rule.
 - `search_tools("n8n")` → 19 n8n workflow + credential tools (start with `n8n_list_templates`)
 - `search_tools("mcp" | "permission" | "skill")` → platform management
 - `search_tools("scrape" | "crawl" | "extract email")` → mcp-scraper (19 tools — `extract_entities`, `crawl_url`, `deep_crawl_site`, `intelligent_extract`, `batch_crawl`, file→markdown). Auto-injected on scrape/crawl keywords.

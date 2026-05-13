@@ -177,34 +177,73 @@ async def get_profile_stats() -> dict:
     """Get profile statistics including earnings and work history.
 
     Returns stats like total earnings, hours worked, jobs completed.
+
+    Returns ``{"status": "scrape_miss", ...}`` when every selector misses
+    so the caller can distinguish "real zeros" from a stale-DOM scrape
+    failure — verified live 2026-05-13: the 2026 layout dropped every
+    legacy data-test attr on /nx/wm/contracts and this function silently
+    returned ``{}`` for months, making "Total earnings: unknown" look
+    indistinguishable from "I'm a new freelancer with nothing yet".
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    # Navigate to work diary or stats page
-    await page.goto("https://www.upwork.com/nx/wm/contracts", wait_until="networkidle")
+    # safe_goto: Cloudflare-retried + serialized + tab-picker so we don't
+    # land on a fresh tab that triggers Cloudflare while the user's real
+    # Upwork tab sits idle on another origin.
+    page = await browser.safe_goto("https://www.upwork.com/nx/wm/contracts")
 
-    stats = {}
+    stats: dict = {}
 
     # Total earnings
-    earnings_el = await page.query_selector('[data-test="total-earnings"], .earnings-total')
+    earnings_el = await page.query_selector(
+        '[data-test="total-earnings"], [data-qa="total-earnings"], '
+        '[data-test="earnings-total"], .earnings-total'
+    )
     if earnings_el:
         stats["total_earnings"] = (await earnings_el.text_content() or "").strip()
 
     # Active contracts count
-    active_el = await page.query_selector('[data-test="active-contracts"], .active-count')
+    active_el = await page.query_selector(
+        '[data-test="active-contracts"], [data-qa="active-contracts"], '
+        '[data-test="active-count"], .active-count'
+    )
     if active_el:
         stats["active_contracts"] = (await active_el.text_content() or "").strip()
 
     # Total hours
-    hours_el = await page.query_selector('[data-test="total-hours"], .hours-total')
+    hours_el = await page.query_selector(
+        '[data-test="total-hours"], [data-qa="total-hours"], '
+        '[data-test="hours-total"], .hours-total'
+    )
     if hours_el:
         stats["total_hours"] = (await hours_el.text_content() or "").strip()
 
     # Jobs completed
-    jobs_el = await page.query_selector('[data-test="jobs-completed"], .jobs-count')
+    jobs_el = await page.query_selector(
+        '[data-test="jobs-completed"], [data-qa="jobs-completed"], '
+        '[data-test="jobs-count"], .jobs-count'
+    )
     if jobs_el:
         stats["jobs_completed"] = (await jobs_el.text_content() or "").strip()
+
+    if not stats:
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = "?"
+        logger.warning(
+            "get_profile_stats: all 4 selectors missed on %s — surfacing scrape_miss",
+            current_url,
+        )
+        return {
+            "status": "scrape_miss",
+            "error": (
+                "Profile stats selectors all missed on "
+                f"{current_url}. Upwork may have redesigned /nx/wm/contracts "
+                "or the page didn't fully render. Open Brave to verify."
+            ),
+            "page_url": current_url,
+        }
 
     return stats

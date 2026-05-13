@@ -865,3 +865,32 @@ Architectural principle from the user mid-session: **survival instinct = addon v
 - Thread length > 30 messages
 
 **Live deal in flight**: James Blue / Bot Developer + real estate prospecting scope expansion. User is handling pricing/reply manually until the drafter ships. James asked for $120/1-week framework, then scope-expanded to add PropStream / Reonomy / Crexi / PropertyShark / LoopNet data extraction — user plans to double the price at contract.
+
+## Session 2026-05-13 — inbox monitor fix + watcher pivot
+
+User reported: "I asked LazyClaw to check messages so it'd be aware what job we're getting; something is broken." Brain was failing every `upwork_get_messages` call with `[MCP ERROR]` for 11+ consecutive calls. Then the brain narrative summary said James's last message was at 12:05 AM when the real last was at 2:23 AM with 7 technical questions James wanted answered. Then the cron was spamming Telegram every 15 min on empty inbox.
+
+### Committed (6201437)
+
+- [x] **Cloudflare false-positive fix** in `mcp-upwork/.../browser/client.py:is_logged_in`: skips the forced nav to `/nx/find-work/best-matches` when the picked tab is already on `upwork.com` and not on a login/CF interstitial. Previous behavior triggered a fresh Cloudflare challenge on every MCP call from an already-authenticated session — surfaced as a fixed-length 241-char `[MCP ERROR]` for 11+ consecutive calls. Fix unblocked Vato's live work with James.
+- [x] **Visible exception logging** in `mcp-upwork/.../tools/messages.py:get_messages`: `logger.exception` on `ensure_logged_in` and `safe_goto` raises so future regressions surface the real cause in `data/mcp-mcp-upwork.stderr.log` instead of a fixed-length wrapped error. Widened `wait_for_selector` matcher to include `.desktop-layout-room` + bumped timeout 10s → 20s.
+- [x] **2026 URL parser fix** in `_extract_conversation`: greps `room_<hex>` directly with regex. Old `href.split("/messages/")[-1].split("/")[0]` was returning the literal string `"rooms"` for every 2026 URL (`/ab/messages/rooms/room_<id>`), making every downstream `get_conversation_messages(room_id)` navigate to `/ab/messages/rooms/rooms` and 404. The brain only ever read James's conversation because it had a real room_id in chat history; fresh calls were silently broken.
+- [x] **Contact-name multi-space dedup**: 2026 row layout sometimes renders `"James Blue, James  Blue"` (double space). Normalize whitespace before comparing the two halves so the collapse fires regardless of inner spacing.
+- [x] **`[SILENT]` cron sentinel** in `upwork_inbox_check` skill + `telegram_notifier._format`: skill returns `[SILENT]` prefix when 0 escalations + 0 unknowns. Notifier suppresses `[SILENT]` and common no-news phrases on heartbeat pushes (`verbose=False`). Foreground replies unchanged. KEPT as legacy fallback even though the watcher pivot below makes it largely unused for Upwork.
+- [x] **`reply_mode` field on `UpworkBotBehavior`** (NL-tunable via `set_upwork_bot_behavior`): `notify_draft` (default) = Telegram alert with message + bot's draft pre-loaded as suggested reply #1; user taps Send / Edit / Skip. `auto` = bot auto-sends draft, post-hoc notify, sensitive categories (`escalate_categories`) STILL require human approval — auto mode does NOT override admin_request / identity / complaint / milestone_dispute / nda guardrails. Aliases accepted: `auto_reply`, `auto_answer`, `autonomous` → `auto`; `draft`, `notify`, `manual`, `review` → `notify_draft`. `upwork_inbox_check._decide` honors mode.
+- [x] **Cron sync** in `set_upwork_bot_behavior`: when `inbox_check_cron` is updated, also rewrites the matching `agent_jobs` row via `orchestrator.update_job` (encryption-aware path). Previously only the encrypted setting moved while the actual cron stayed on the old expression — pure foot-gun.
+
+### Architectural correction (DB swap, no commit needed)
+
+User pushback mid-session: "we have webpage js extractor why use llm to go there and check if its nothing there... look deep inside our code and structure". Correct call — the **existing** `watch_site` skill + `lazyclaw/browser/watcher.py` + heartbeat `_check_watchers` path already does exactly the right thing: background-CDP JS polling with hash-diff and Telegram-on-delta. **Zero LLM calls during polling.** Built-in for whatsapp/email; Upwork plugs in via a 10-line custom JS.
+
+- [x] **Paused** the broken LLM cron `survival_message_check` (`agent_jobs` id `479623a2`). Status flipped to `paused` — kept in DB as historical record, not deleted.
+- [x] **Created** new `watch_site` row (`agent_jobs` id `2df80fef`, job_type=`watcher`, interval 120s) pointing at `https://www.upwork.com/ab/messages/rooms/`. Custom JS returns `{unread: badge_count, rooms: [{r: room_<id>, t: time_label}, ...top 10]}`. Hash diff catches all three "new message" signals (new room, existing room timestamp change, unread count delta) without false-positives on composer typing, scroll, focus. Heartbeat's `_check_watchers` already handles the rest.
+
+**Lesson** — when the user describes a "ping me when X changes" workflow, check `lazyclaw/browser/watcher.py` and `_check_watchers` first. Don't add `[SKILL:...]` short-circuits to the daemon, don't rewire crons to call inbox-check skills, don't build new MCP-specific watchers. The framework was already there.
+
+### Still pending (carry forward)
+
+- [ ] Carve out the `runtime/agent.py` AUTO-PROMOTE read-only exemption (in working tree, not in commit `6201437` because the file also has unrelated pre-existing `instant_dispatch` + hallucination-failsafe hunks). Without this, the brain still gets force-narrowed to `run_background` after 3 inspection-tool calls — `upwork_get_messages` + `upwork_get_conversation` chains hit it. Disk copy is live in container; needs a clean follow-up commit.
+- [ ] Watch the next few heartbeat ticks to confirm `2df80fef` actually fires Telegram on a real new message (live test pending).
+- [ ] Decide whether to keep the legacy `[SILENT]` cron path for non-Upwork use cases or rip it out — the watcher pivot makes it largely redundant for the inbox-monitor flow.

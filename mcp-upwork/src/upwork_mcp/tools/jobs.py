@@ -1,10 +1,13 @@
 """Job search and details tools for Upwork MCP."""
 
+import logging
 import re
 import asyncio
 import urllib.parse
 from pydantic import BaseModel, Field
 from ..browser.client import _is_nav_noise, get_browser
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_posted(raw: str) -> str:
@@ -85,14 +88,37 @@ def _split_merged_skill(value: str) -> list[str]:
 
 class JobSearchParams(BaseModel):
     """Parameters for job search."""
-    query: str = Field(description="Search keywords")
+    query: str | None = Field(
+        default=None,
+        description=(
+            "Search keywords. Required when source='search'. "
+            "Ignored when source='best_matches' (Upwork picks the rec set; "
+            "any keyword filter on best-matches would re-rank within ~50 "
+            "personalized results, not across the global board)."
+        ),
+    )
+    source: str = Field(
+        default="search",
+        description=(
+            "Which Upwork surface to read from: "
+            "'search' (default) = /nx/search/jobs/?q=... — global keyword "
+            "search across 100k+ active postings. Use when the user names "
+            "specific tech (\"find me python scraping jobs\"). "
+            "'best_matches' = /nx/find-work/best-matches — Upwork's "
+            "personalized recommendations, already filtered by the user's "
+            "saved preferences (fixed-price / hourly / small project / "
+            "budget range etc). Use when the user says \"find me good "
+            "matches\" / \"what's new for me\" / \"any matching jobs\" — "
+            "respects the filters the user set in their Upwork profile."
+        ),
+    )
     experience_level: str | None = Field(
         default=None,
-        description="Experience level: entry, intermediate, or expert"
+        description="Experience level: entry, intermediate, or expert (only honored when source='search')",
     )
     job_type: str | None = Field(
         default=None,
-        description="Job type: hourly or fixed"
+        description="Job type: hourly or fixed (only honored when source='search')",
     )
     limit: int = Field(default=10, ge=1, le=50, description="Maximum number of results")
 
@@ -110,34 +136,51 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
     browser = get_browser()
     page = await browser.get_page()
 
-    # Build search URL.
+    # Build search URL based on source.
     #
     # /nx/find-work/best-matches is Upwork's personalized recommendations
-    # feed — ~20-50 jobs that Upwork picks for the user. Adding ?q=...
-    # filters within THAT small set, not across the open job board. That's
-    # why every search came back with the same 2 jobs regardless of
-    # keyword change.
+    # feed — ~20-50 jobs that Upwork picks for the user, respecting any
+    # filters the user set on the Upwork side (fixed-price / small
+    # project / budget range / category). Adding ?q=... here re-ranks
+    # within THAT small set, not across the open board — that's why we
+    # don't pass `query` through when source='best_matches'.
     #
-    # /nx/search/jobs/ is the global keyword search across the full board
-    # (100k+ active postings). That's what users actually want when they
-    # say "find me python upwork jobs".
-    base_url = "https://www.upwork.com/nx/search/jobs/"
-    query_params = {"q": params.query}
+    # /nx/search/jobs/ is the global keyword search across the full
+    # board (100k+ active postings). Use when the user wants a specific
+    # keyword.
+    source = (params.source or "search").strip().lower()
+    if source in ("best_matches", "best-matches", "bestmatches", "recommendations", "recs"):
+        # Personalized recs already filtered by the user's profile prefs.
+        # No query params honored — Upwork ignores filters on this URL.
+        url = "https://www.upwork.com/nx/find-work/best-matches"
+    else:
+        if not params.query:
+            # Defensive: caller asked for keyword search but passed no
+            # keyword. Fall through to best-matches rather than hitting
+            # the search page empty-handed (returns ~0 results).
+            url = "https://www.upwork.com/nx/find-work/best-matches"
+        else:
+            base_url = "https://www.upwork.com/nx/search/jobs/"
+            query_params = {"q": params.query}
 
-    if params.job_type:
-        query_params["t"] = "0" if params.job_type.lower() == "hourly" else "1"
+            if params.job_type:
+                query_params["t"] = "0" if params.job_type.lower() == "hourly" else "1"
 
-    if params.experience_level:
-        level_map = {"entry": "1", "intermediate": "2", "expert": "3"}
-        level = level_map.get(params.experience_level.lower())
-        if level:
-            query_params["contractor_tier"] = level
+            if params.experience_level:
+                level_map = {"entry": "1", "intermediate": "2", "expert": "3"}
+                level = level_map.get(params.experience_level.lower())
+                if level:
+                    query_params["contractor_tier"] = level
 
-    url = f"{base_url}?{urllib.parse.urlencode(query_params)}"
+            url = f"{base_url}?{urllib.parse.urlencode(query_params)}"
     # safe_goto picks an existing Upwork tab (cookies + warm session),
     # serializes concurrent navigations under _NAV_LOCK, and waits out
     # Cloudflare's JS challenge before returning the page.
-    page = await browser.safe_goto(url)
+    try:
+        page = await browser.safe_goto(url)
+    except Exception:
+        logger.exception("search_jobs: safe_goto to %s failed", url)
+        raise
     await asyncio.sleep(3)
 
     jobs = []
@@ -253,7 +296,26 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
                 break
 
         except Exception:
+            logger.exception("search_jobs: per-tile extraction raised")
             continue
+
+    if not jobs:
+        # Surface the empty path so future regressions are visible. Old
+        # silent behavior produced 105-char wrapped errors with no clue
+        # whether the page was Cloudflare-blocked, sent to login, or
+        # just had a fresh selector layout. Log enough to triage.
+        try:
+            current_url = page.url
+            title = await page.title()
+        except Exception:
+            current_url = "?"
+            title = "?"
+        logger.warning(
+            "search_jobs: 0 jobs matched at url=%s (title=%r) — "
+            "either selectors drifted, page loaded blank, or CF "
+            "challenge present. source=%s url=%s",
+            current_url, title[:80], source, url,
+        )
 
     return jobs
 

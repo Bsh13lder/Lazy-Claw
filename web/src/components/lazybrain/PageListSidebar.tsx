@@ -42,6 +42,7 @@ import {
   ChevronRight,
   Link2,
   Layers,
+  HelpCircle,
 } from "./icons";
 import type { LucideIcon } from "lucide-react";
 import { TaskSymbol } from "./TaskSymbol";
@@ -96,7 +97,7 @@ interface Props {
 const MAX_RECENT = 20;
 const MAX_TAGS = 30;
 
-type SectionKey = "days" | "tasks" | "topics" | "pinned" | "rollups" | "recent" | "journal" | "tags";
+type SectionKey = "days" | "undated" | "tasks" | "topics" | "pinned" | "rollups" | "recent" | "journal" | "tags";
 type SortKey = "recent" | "importance" | "alpha";
 
 const LS_OPEN = "lazybrain-sidebar-open";
@@ -117,6 +118,7 @@ const TITLE_COLLATOR = new Intl.Collator(undefined, { sensitivity: "base" });
 
 const DEFAULT_OPEN: Record<SectionKey, boolean> = {
   days: true,
+  undated: false,
   tasks: true,
   topics: true,
   pinned: true,
@@ -854,7 +856,12 @@ export function PageListSidebar({
 
     const byDay = new Map<string, LazyBrainNote[]>();
     for (const n of all) {
-      const ts = n.created_at;
+      // Some auto-mirror writes (early imports, canvas autosaves, race-
+      // condition heal-paths) can land with a null created_at — fall
+      // back to updated_at instead of silently dropping the row from
+      // the daily timeline. Notes with neither stamp surface under
+      // the dedicated "Undated" section below the timeline.
+      const ts = n.created_at || n.updated_at;
       if (!ts) continue;
       // Use UTC slice to avoid timezone double-shifts on the iso string.
       // Notes' created_at is ISO with offset; new Date() handles both.
@@ -929,6 +936,25 @@ export function PageListSidebar({
     () => dayBuckets.reduce((acc, b) => acc + b.watchers.length, 0),
     [dayBuckets],
   );
+
+  // Notes that carry neither created_at nor updated_at end up in a
+  // dedicated "Undated" bucket below the daily timeline. Before, the
+  // timeline silently skipped them (see https://… audit) which made
+  // real auto-mirrors invisible to the user. Keep this list short with
+  // the same dedup-by-id walk so closed-section flashes don't churn.
+  const undatedNotes = useMemo(() => {
+    const seen = new Set<string>();
+    const out: LazyBrainNote[] = [];
+    for (const list of [recent, journal, tasks, pinned]) {
+      for (const n of list) {
+        if (seen.has(n.id) || deletedIds.has(n.id)) continue;
+        seen.add(n.id);
+        if (!n.created_at && !n.updated_at) out.push(n);
+      }
+    }
+    return out;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recent, journal, tasks, pinned, deletedIds]);
 
   return (
     <aside className="w-60 shrink-0 h-full flex flex-col bg-bg-secondary border-r border-border">
@@ -1197,6 +1223,26 @@ export function PageListSidebar({
                     </div>
                   );
                 })}
+              </SidebarSection>
+            )}
+
+            {/* Undated — notes that carry neither created_at nor
+                updated_at. Before this section, the timeline above
+                silently dropped them; now the user can see and act
+                on them. Collapsed by default so the timeline stays
+                the visual primary. */}
+            {undatedNotes.length > 0 && (
+              <SidebarSection
+                label="Undated"
+                count={undatedNotes.length}
+                Icon={HelpCircle}
+                iconColor="#94a3b8"
+                open={openSections.undated}
+                onToggle={() => toggleSection("undated")}
+              >
+                {undatedNotes.map((n) => (
+                  <PageRow key={n.id} note={n} {...rowProps(n)} />
+                ))}
               </SidebarSection>
             )}
 

@@ -52,15 +52,60 @@ async def _already_imported(
     return len(notes) > 0
 
 
+async def _purge_imported(
+    config: Config, user_id: str, source_tag: str, *, dry_run: bool
+) -> int:
+    """Delete every note carrying ``source_tag`` for ``user_id``. Returns
+    the count touched. Used by ``--force-reimport`` so a second import
+    pass after a schema fix doesn't pile rows on top of stale ones.
+
+    Plain DELETE on the encrypted ``notes`` table — re-import will
+    re-create from the source store, so losing the encrypted body here
+    is intentional (the source is the canonical copy until the user
+    runs ``--purge-source``).
+    """
+    notes = await lb_store.list_notes(
+        config, user_id, tag=source_tag, limit=10000,
+    )
+    if not notes:
+        return 0
+    if dry_run:
+        return len(notes)
+    ids = [n["id"] for n in notes]
+    placeholders = ",".join("?" * len(ids))
+    async with db_session(config) as db:
+        await db.execute(
+            f"DELETE FROM note_links WHERE user_id = ? "
+            f"AND (from_note_id IN ({placeholders}) "
+            f"OR to_note_id IN ({placeholders}))",
+            (user_id, *ids, *ids),
+        )
+        await db.execute(
+            f"DELETE FROM notes WHERE user_id = ? AND id IN ({placeholders})",
+            (user_id, *ids),
+        )
+        await db.commit()
+    return len(ids)
+
+
 # ---------------------------------------------------------------------------
 # Migrators — each returns {source_id → new_note_id}
 # ---------------------------------------------------------------------------
 
 async def migrate_personal_memory(
-    config: Config, user_id: str, *, dry_run: bool
+    config: Config, user_id: str, *, dry_run: bool, force_reimport: bool = False,
 ) -> dict[str, str]:
     """personal_memory rows → LazyBrain notes tagged #imported/personal."""
-    if await _already_imported(config, user_id, "imported/personal"):
+    if force_reimport:
+        purged = await _purge_imported(
+            config, user_id, "imported/personal", dry_run=dry_run,
+        )
+        if purged:
+            console.print(
+                f"[yellow]--force-reimport: purged {purged} imported/personal "
+                f"notes for user {user_id}[/yellow]"
+            )
+    elif await _already_imported(config, user_id, "imported/personal"):
         return {}
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
@@ -97,10 +142,19 @@ async def migrate_personal_memory(
 
 
 async def migrate_daily_logs(
-    config: Config, user_id: str, *, dry_run: bool
+    config: Config, user_id: str, *, dry_run: bool, force_reimport: bool = False,
 ) -> dict[str, str]:
     """daily_logs rows → LazyBrain notes tagged #imported/daily and #journal/YYYY-MM-DD."""
-    if await _already_imported(config, user_id, "imported/daily"):
+    if force_reimport:
+        purged = await _purge_imported(
+            config, user_id, "imported/daily", dry_run=dry_run,
+        )
+        if purged:
+            console.print(
+                f"[yellow]--force-reimport: purged {purged} imported/daily "
+                f"notes for user {user_id}[/yellow]"
+            )
+    elif await _already_imported(config, user_id, "imported/daily"):
         return {}
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
@@ -142,10 +196,19 @@ async def migrate_daily_logs(
 
 
 async def migrate_tasks(
-    config: Config, user_id: str, *, dry_run: bool
+    config: Config, user_id: str, *, dry_run: bool, force_reimport: bool = False,
 ) -> dict[str, str]:
     """tasks rows → LazyBrain notes tagged #imported/tasks #task #owner/{owner}."""
-    if await _already_imported(config, user_id, "imported/tasks"):
+    if force_reimport:
+        purged = await _purge_imported(
+            config, user_id, "imported/tasks", dry_run=dry_run,
+        )
+        if purged:
+            console.print(
+                f"[yellow]--force-reimport: purged {purged} imported/tasks "
+                f"notes for user {user_id}[/yellow]"
+            )
+    elif await _already_imported(config, user_id, "imported/tasks"):
         return {}
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
@@ -206,10 +269,19 @@ async def migrate_tasks(
 
 
 async def migrate_site_memory(
-    config: Config, user_id: str, *, dry_run: bool
+    config: Config, user_id: str, *, dry_run: bool, force_reimport: bool = False,
 ) -> dict[str, str]:
     """site_memory rows → LazyBrain notes tagged #imported/site-memory #owner/agent."""
-    if await _already_imported(config, user_id, "imported/site-memory"):
+    if force_reimport:
+        purged = await _purge_imported(
+            config, user_id, "imported/site-memory", dry_run=dry_run,
+        )
+        if purged:
+            console.print(
+                f"[yellow]--force-reimport: purged {purged} imported/site-memory "
+                f"notes for user {user_id}[/yellow]"
+            )
+    elif await _already_imported(config, user_id, "imported/site-memory"):
         return {}
     dek = await get_user_dek(config, user_id)
     async with db_session(config) as db:
@@ -255,10 +327,19 @@ async def migrate_site_memory(
 
 
 async def migrate_markdown_layers(
-    config: Config, user_id: str, *, dry_run: bool
+    config: Config, user_id: str, *, dry_run: bool, force_reimport: bool = False,
 ) -> dict[str, str]:
     """5-layer markdown files (lazyclaw/memory/layers.py) → notes tagged #imported/layer."""
-    if await _already_imported(config, user_id, "imported/layer"):
+    if force_reimport:
+        purged = await _purge_imported(
+            config, user_id, "imported/layer", dry_run=dry_run,
+        )
+        if purged:
+            console.print(
+                f"[yellow]--force-reimport: purged {purged} imported/layer "
+                f"notes for user {user_id}[/yellow]"
+            )
+    elif await _already_imported(config, user_id, "imported/layer"):
         return {}
     mapping: dict[str, str] = {}
 
@@ -296,14 +377,24 @@ async def migrate_markdown_layers(
 # ---------------------------------------------------------------------------
 
 async def migrate_user(
-    config: Config, user_id: str, *, dry_run: bool
+    config: Config, user_id: str, *, dry_run: bool, force_reimport: bool = False,
 ) -> dict[str, dict[str, str]]:
     return {
-        "personal_memory": await migrate_personal_memory(config, user_id, dry_run=dry_run),
-        "daily_logs": await migrate_daily_logs(config, user_id, dry_run=dry_run),
-        "tasks": await migrate_tasks(config, user_id, dry_run=dry_run),
-        "site_memory": await migrate_site_memory(config, user_id, dry_run=dry_run),
-        "markdown_layers": await migrate_markdown_layers(config, user_id, dry_run=dry_run),
+        "personal_memory": await migrate_personal_memory(
+            config, user_id, dry_run=dry_run, force_reimport=force_reimport,
+        ),
+        "daily_logs": await migrate_daily_logs(
+            config, user_id, dry_run=dry_run, force_reimport=force_reimport,
+        ),
+        "tasks": await migrate_tasks(
+            config, user_id, dry_run=dry_run, force_reimport=force_reimport,
+        ),
+        "site_memory": await migrate_site_memory(
+            config, user_id, dry_run=dry_run, force_reimport=force_reimport,
+        ),
+        "markdown_layers": await migrate_markdown_layers(
+            config, user_id, dry_run=dry_run, force_reimport=force_reimport,
+        ),
     }
 
 
@@ -320,11 +411,20 @@ async def migrate_user(
     is_flag=True,
     help="After migration, delete the source rows/files. Requires confirmation.",
 )
+@click.option(
+    "--force-reimport",
+    is_flag=True,
+    help=(
+        "Delete existing #imported/<source> notes and re-import from the source "
+        "tables. Use after a schema fix or when retrying a partial import."
+    ),
+)
 def main(
     user_id: str | None,
     all_users: bool,
     dry_run: bool,
     purge_source: bool,
+    force_reimport: bool,
 ) -> None:
     """Migrate existing memory stores into LazyBrain."""
     if not user_id and not all_users:
@@ -343,7 +443,9 @@ def main(
         report: dict[str, dict[str, dict[str, str]]] = {}
         for uid in targets:
             try:
-                report[uid] = await migrate_user(config, uid, dry_run=dry_run)
+                report[uid] = await migrate_user(
+                    config, uid, dry_run=dry_run, force_reimport=force_reimport,
+                )
             except Exception as exc:
                 logger.exception("Migration failed for %s", uid)
                 report[uid] = {"error": {"message": str(exc)}}  # type: ignore[dict-item]

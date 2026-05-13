@@ -1,0 +1,235 @@
+"""One-shot cleanup migrations for the LazyBrain notes table.
+
+The duplicate consolidation pass exists because the v2 lessons migration
+updated tag schemas without rewriting note ``title_key``s — so 100+
+pre-v2 lesson notes survived under the old ``lesson (topic/outcome):
+action: param`` title format, and every replay since ``save_skill_lesson``
+shipped its title_key-keyed upsert has piled fresh rows on top instead
+of merging into the legacy ones.
+
+This module groups by ``(user_id, title_key)``, keeps the oldest row in
+each group, redirects every ``note_links`` edge to the kept id, unions
+the duplicate tags into the kept row, and deletes the rest. All inside
+a single transaction per group so a partial failure can't strand the
+edge table mid-rewrite.
+
+Run via ``lazyclaw cleanup-lazybrain-duplicates`` (see ``cli.py``).
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from lazyclaw.db.connection import db_session
+from lazyclaw.lazybrain.store import _dump_tags, _load_tags
+
+if TYPE_CHECKING:
+    from lazyclaw.config import Config
+
+logger = logging.getLogger(__name__)
+
+
+async def find_duplicate_groups(
+    config: "Config", user_id: str,
+) -> list[dict]:
+    """Return every duplicate-title group for ``user_id``.
+
+    Each group is ``{title_key, count, ids: [(id, created_at, tags_json)]}``
+    sorted with the oldest first inside ``ids`` — that's the row we keep.
+    """
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT title_key, COUNT(*) AS n FROM notes "
+            "WHERE user_id = ? AND title_key IS NOT NULL "
+            "GROUP BY title_key HAVING n > 1 ORDER BY n DESC",
+            (user_id,),
+        )
+        groups_raw = await rows.fetchall()
+
+        groups: list[dict] = []
+        for title_key, count in groups_raw:
+            id_rows = await db.execute(
+                "SELECT id, created_at, tags FROM notes "
+                "WHERE user_id = ? AND title_key = ? "
+                "ORDER BY created_at ASC, id ASC",
+                (user_id, title_key),
+            )
+            ids = await id_rows.fetchall()
+            groups.append({
+                "title_key": title_key,
+                "count": int(count),
+                "ids": [(r[0], r[1], r[2]) for r in ids],
+            })
+    return groups
+
+
+async def consolidate_group(
+    config: "Config",
+    user_id: str,
+    group: dict,
+) -> dict:
+    """Merge every duplicate in ``group`` into the oldest row.
+
+    Returns ``{title_key, kept_id, deleted_ids, redirected_edges}``.
+    Runs as a single transaction — if any step fails the whole group
+    is rolled back so the edge table never references a deleted row.
+    """
+    ids = group["ids"]
+    if len(ids) < 2:
+        return {
+            "title_key": group["title_key"],
+            "kept_id": ids[0][0] if ids else None,
+            "deleted_ids": [],
+            "redirected_edges": 0,
+        }
+
+    keep_id, _, keep_tags_json = ids[0]
+    dupe_rows = ids[1:]
+    dupe_ids = [row[0] for row in dupe_rows]
+
+    # Union the tag set across kept + duplicates so any unique
+    # outcome/intent variants on the dupes survive.
+    merged_tags: list[str] = list(_load_tags(keep_tags_json))
+    seen_tags = {t.lower() for t in merged_tags}
+    for _, _, dupe_tags_json in dupe_rows:
+        for tag in _load_tags(dupe_tags_json):
+            if tag.lower() not in seen_tags:
+                merged_tags.append(tag)
+                seen_tags.add(tag.lower())
+
+    placeholders = ",".join("?" * len(dupe_ids))
+    redirected = 0
+
+    async with db_session(config) as db:
+        try:
+            # Repoint outbound edges (where dupe was the source).
+            cur = await db.execute(
+                f"UPDATE note_links SET from_note_id = ? "
+                f"WHERE user_id = ? AND from_note_id IN ({placeholders})",
+                (keep_id, user_id, *dupe_ids),
+            )
+            redirected += cur.rowcount or 0
+
+            # Repoint inbound edges (where dupe was the target).
+            cur = await db.execute(
+                f"UPDATE note_links SET to_note_id = ? "
+                f"WHERE user_id = ? AND to_note_id IN ({placeholders})",
+                (keep_id, user_id, *dupe_ids),
+            )
+            redirected += cur.rowcount or 0
+
+            # Refresh the kept note's tag column with the unioned set.
+            await db.execute(
+                "UPDATE notes SET tags = ? WHERE id = ? AND user_id = ?",
+                (_dump_tags(merged_tags), keep_id, user_id),
+            )
+
+            # Drop the kept id from any self-edges that just appeared
+            # because of the redirect (e.g. dupe→keep edges).
+            await db.execute(
+                "DELETE FROM note_links "
+                "WHERE user_id = ? AND from_note_id = to_note_id",
+                (user_id,),
+            )
+
+            # Cascade should clean up note_links + note_embeddings,
+            # but explicit DELETE here keeps behavior deterministic
+            # if foreign keys are off on legacy SQLite installs.
+            await db.execute(
+                f"DELETE FROM note_links WHERE user_id = ? "
+                f"AND (from_note_id IN ({placeholders}) "
+                f"OR to_note_id IN ({placeholders}))",
+                (user_id, *dupe_ids, *dupe_ids),
+            )
+            await db.execute(
+                f"DELETE FROM notes WHERE user_id = ? "
+                f"AND id IN ({placeholders})",
+                (user_id, *dupe_ids),
+            )
+
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+    return {
+        "title_key": group["title_key"],
+        "kept_id": keep_id,
+        "deleted_ids": dupe_ids,
+        "redirected_edges": redirected,
+    }
+
+
+async def consolidate_user(
+    config: "Config",
+    user_id: str,
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Run the full consolidation pass for one user.
+
+    Returns a summary ``{user_id, groups, total_deleted, total_redirected}``.
+    With ``dry_run=True`` returns the groups it would touch without
+    writing anything.
+    """
+    groups = await find_duplicate_groups(config, user_id)
+    summary = {
+        "user_id": user_id,
+        "groups": len(groups),
+        "total_deleted": 0,
+        "total_redirected": 0,
+        "details": [],
+        "dry_run": dry_run,
+    }
+    if not groups:
+        return summary
+
+    if dry_run:
+        for g in groups:
+            summary["details"].append({
+                "title_key": g["title_key"],
+                "count": g["count"],
+                "would_keep": g["ids"][0][0],
+                "would_delete": [row[0] for row in g["ids"][1:]],
+            })
+            summary["total_deleted"] += g["count"] - 1
+        return summary
+
+    for g in groups:
+        try:
+            result = await consolidate_group(config, user_id, g)
+            summary["details"].append(result)
+            summary["total_deleted"] += len(result["deleted_ids"])
+            summary["total_redirected"] += result["redirected_edges"]
+        except Exception:
+            logger.exception(
+                "consolidate_group failed for user=%s title_key=%s",
+                user_id, g["title_key"],
+            )
+            summary["details"].append({
+                "title_key": g["title_key"],
+                "error": "consolidate failed; rolled back",
+            })
+
+    return summary
+
+
+async def consolidate_all_users(
+    config: "Config", *, dry_run: bool = False,
+) -> list[dict]:
+    """Run consolidation against every user. Errors per-user are
+    captured into the result dict so one bad user can't abort the run.
+    """
+    async with db_session(config) as db:
+        rows = await db.execute("SELECT id FROM users")
+        user_ids = [r[0] for r in await rows.fetchall()]
+
+    out: list[dict] = []
+    for uid in user_ids:
+        try:
+            out.append(await consolidate_user(config, uid, dry_run=dry_run))
+        except Exception as exc:
+            logger.exception("consolidate_user crashed for %s", uid)
+            out.append({"user_id": uid, "error": str(exc)})
+    return out

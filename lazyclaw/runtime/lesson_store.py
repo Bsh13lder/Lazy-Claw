@@ -64,6 +64,12 @@ async def store_lesson(
             # Also mirror into LazyBrain so the user can browse + backlink
             # the lesson in the PKM UI. Fire-and-forget; matches the
             # defensive pattern used elsewhere in this module.
+            #
+            # Dedup: a repeated user correction with the same first 60 chars
+            # of content used to create a fresh note row every time (no
+            # find-by-title check), polluting the graph. Now we upsert by
+            # title — same correction refreshes the existing card instead
+            # of stacking duplicates. Pattern mirrors auto_capture.
             try:
                 from lazyclaw.lazybrain import store as lb_store
                 from lazyclaw.lazybrain import events as lb_events
@@ -71,14 +77,28 @@ async def store_lesson(
                 tags = ["lesson", "auto", "owner/agent"]
                 if lesson.lesson_type == "site" and lesson.domain:
                     tags.append(f"site/{lesson.domain}")
-                note = await lb_store.save_note(
-                    config,
-                    user_id,
-                    content=lesson.content,
-                    title=f"Lesson: {lesson.content[:60]}",
-                    tags=tags,
-                    importance=lesson.importance,
+                canonical_title = f"Lesson: {lesson.content[:60]}"
+                existing = await lb_store.find_by_title(
+                    config, user_id, canonical_title,
                 )
+                if existing is not None:
+                    existing_tags = existing.get("tags") or []
+                    merged_tags = list({*existing_tags, *tags})
+                    note = await lb_store.update_note(
+                        config, user_id, existing["id"],
+                        content=lesson.content,
+                        tags=merged_tags,
+                        importance=lesson.importance,
+                    ) or existing
+                else:
+                    note = await lb_store.save_note(
+                        config,
+                        user_id,
+                        content=lesson.content,
+                        title=canonical_title,
+                        tags=tags,
+                        importance=lesson.importance,
+                    )
                 lb_events.publish_note_saved(
                     user_id, note["id"], note["title"], note["tags"], source="lesson",
                 )

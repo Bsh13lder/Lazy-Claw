@@ -1504,6 +1504,63 @@ def install_mcps_cmd() -> None:
     asyncio.run(_install_mcps())
 
 
+@main.command(name="cleanup-lazybrain-duplicates")
+@click.option("--user-id", default=None, help="Target a single user.")
+@click.option("--all", "all_users", is_flag=True, help="Run for every user.")
+@click.option("--dry-run", is_flag=True, help="Report only, don't write.")
+def cleanup_lazybrain_duplicates_cmd(
+    user_id: str | None,
+    all_users: bool,
+    dry_run: bool,
+) -> None:
+    """Consolidate duplicate LazyBrain notes (same title_key → one row).
+
+    Groups by ``title_key``, keeps the oldest row in each group,
+    redirects every backlink to the kept id, and deletes the rest.
+    Critical for vaults that survived the v2 lessons migration with
+    100+ pre-upsert duplicates polluting the graph.
+    """
+    if not user_id and not all_users:
+        console.print("[red]Specify --user-id <id> or --all.[/red]")
+        raise SystemExit(1)
+
+    async def _run() -> None:
+        from lazyclaw.lazybrain.cleanup import (
+            consolidate_all_users,
+            consolidate_user,
+        )
+
+        config = load_config()
+        if all_users:
+            results = await consolidate_all_users(config, dry_run=dry_run)
+        else:
+            assert user_id is not None
+            results = [
+                await consolidate_user(config, user_id, dry_run=dry_run)
+            ]
+
+        table = Table(title="LazyBrain duplicate cleanup")
+        table.add_column("User", style="cyan")
+        table.add_column("Groups", justify="right")
+        table.add_column("Deleted", justify="right")
+        table.add_column("Redirected", justify="right")
+        table.add_column("Mode")
+        for r in results:
+            if "error" in r:
+                table.add_row(r["user_id"], "—", "—", "—", f"[red]error: {r['error']}[/red]")
+                continue
+            table.add_row(
+                r["user_id"],
+                str(r.get("groups", 0)),
+                str(r.get("total_deleted", 0)),
+                str(r.get("total_redirected", 0)),
+                "[yellow]dry-run[/yellow]" if r.get("dry_run") else "[green]written[/green]",
+            )
+        console.print(table)
+
+    asyncio.run(_run())
+
+
 @main.command(name="rotate-keys")
 @click.option(
     "--scope",

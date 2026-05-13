@@ -161,6 +161,62 @@ async def consolidate_group(
     }
 
 
+async def find_journal_duplicates(
+    config: "Config", user_id: str,
+) -> list[dict]:
+    """Find days that have more than one ``journal/<YYYY-MM-DD>``-tagged
+    note. Output mirrors :func:`find_duplicate_groups` so the caller
+    can reuse :func:`consolidate_group` to merge them.
+
+    Why a separate pass: title_key dedup misses these because every
+    journal stub starts as ``Journal — YYYY-MM-DD`` but the title
+    auto-rename pass at journal._maybe_refresh_title rewrites the
+    surviving row into a descriptive phrase, leaving each stub with
+    a different title_key. The stable handle is the ``journal/<date>``
+    tag instead.
+    """
+    async with db_session(config) as db:
+        rows = await db.execute(
+            "SELECT id, tags, created_at, content "
+            "FROM notes WHERE user_id = ? AND tags LIKE '%\"journal/%'",
+            (user_id,),
+        )
+        rows = await rows.fetchall()
+
+    # Bucket by the journal/<date> tag inside the JSON-encoded tags col.
+    import re
+    JOURNAL_TAG_RE = re.compile(r'journal/(\d{4}-\d{2}-\d{2})')
+    by_date: dict[str, list[tuple[str, str, str, int]]] = {}
+    for note_id, tags_json, created_at, content in rows:
+        if not tags_json:
+            continue
+        match = JOURNAL_TAG_RE.search(tags_json)
+        if not match:
+            continue
+        iso_date = match.group(1)
+        # Score by content length — the real journal has bullets +
+        # wikilinks, the duplicate stubs are ~25 chars of header.
+        content_len = len(content or "")
+        by_date.setdefault(iso_date, []).append(
+            (note_id, created_at, tags_json, content_len)
+        )
+
+    groups: list[dict] = []
+    for iso_date, members in by_date.items():
+        if len(members) < 2:
+            continue
+        # Keep the longest-content row first so consolidate_group's
+        # "ids[0] wins" contract picks the meaningful journal, not a stub.
+        # Tiebreaker: oldest created_at — same as title_key dedup.
+        members.sort(key=lambda m: (-m[3], m[1] or ""))
+        groups.append({
+            "title_key": f"<journal/{iso_date}>",  # display only
+            "count": len(members),
+            "ids": [(nid, ts, tags) for nid, ts, tags, _ in members],
+        })
+    return groups
+
+
 async def consolidate_user(
     config: "Config",
     user_id: str,
@@ -172,8 +228,16 @@ async def consolidate_user(
     Returns a summary ``{user_id, groups, total_deleted, total_redirected}``.
     With ``dry_run=True`` returns the groups it would touch without
     writing anything.
+
+    Two passes:
+      1. Title-key dedup — covers the v2-lessons-migration duplicates.
+      2. Journal-date dedup — covers the `journal/<date>` stub race in
+         journal.py where multiple coroutines each created a fresh
+         stub for the same day.
     """
     groups = await find_duplicate_groups(config, user_id)
+    journal_groups = await find_journal_duplicates(config, user_id)
+    groups.extend(journal_groups)
     summary = {
         "user_id": user_id,
         "groups": len(groups),

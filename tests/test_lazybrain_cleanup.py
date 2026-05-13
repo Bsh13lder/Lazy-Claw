@@ -235,3 +235,81 @@ async def test_no_duplicates_no_op(tmp_config: Config) -> None:
 
     assert summary["groups"] == 0
     assert summary["total_deleted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_journal_duplicates_consolidate_by_date(
+    tmp_config: Config,
+) -> None:
+    """Two stub journals + one real journal for the same day → one
+    journal survives, and it's the one with the actual content + edges
+    (not an empty stub).
+
+    Mirrors the production race where journal.get_journal() + save_note
+    saw three coroutines each miss the existence check and each create
+    a fresh row tagged journal/<date>. Title may have been auto-renamed
+    on one of them; this means title_key dedup misses these but the
+    journal-tag dedup catches them.
+    """
+    # Stub 1 — title stayed as the default "Journal — date"
+    stub_a = await store.save_note(
+        tmp_config, "u-clean",
+        content="# Journal — 2026-05-13\n",
+        title="Journal — 2026-05-13",
+        tags=["journal/2026-05-13", "owner/user"],
+    )
+    # Real journal — has bullets + got auto-renamed by the LLM pass.
+    real = await store.save_note(
+        tmp_config, "u-clean",
+        content=(
+            "# Journal — 2026-05-13\n\n"
+            "- 09:15 UTC — [[Task: ship dedup]] — done\n"
+            "- 14:42 UTC — [[Lesson: prefer find_by_title]] — captured\n"
+        ),
+        title="2026-05-13 — shipped lazybrain dedup",
+        tags=["journal/2026-05-13", "owner/user"],
+    )
+    # Stub 2 — also created by a racing coroutine
+    stub_b = await store.save_note(
+        tmp_config, "u-clean",
+        content="# Journal — 2026-05-13\n",
+        title="Journal — 2026-05-13",
+        tags=["journal/2026-05-13", "owner/user"],
+    )
+
+    summary = await cleanup.consolidate_user(
+        tmp_config, "u-clean", dry_run=False,
+    )
+
+    # One journal-date group, two deletions.
+    journal_groups = [
+        d for d in summary["details"]
+        if d.get("title_key", "").startswith("<journal/")
+    ]
+    assert len(journal_groups) == 1
+    assert len(journal_groups[0]["deleted_ids"]) == 2
+
+    # The real journal survived; both stubs are gone.
+    async with db_session(tmp_config) as db:
+        rows = await db.execute(
+            "SELECT id FROM notes WHERE user_id = ?", ("u-clean",),
+        )
+        remaining = {r[0] for r in await rows.fetchall()}
+    assert real["id"] in remaining
+    assert stub_a["id"] not in remaining
+    assert stub_b["id"] not in remaining
+
+
+@pytest.mark.asyncio
+async def test_journal_single_day_is_no_op(tmp_config: Config) -> None:
+    """One journal per day → no consolidation runs."""
+    await store.save_note(
+        tmp_config, "u-clean",
+        content="# Journal — 2026-05-12\n\n- 09:00 UTC — solo entry",
+        title="2026-05-12 — solo",
+        tags=["journal/2026-05-12", "owner/user"],
+    )
+    summary = await cleanup.consolidate_user(
+        tmp_config, "u-clean", dry_run=False,
+    )
+    assert summary["groups"] == 0

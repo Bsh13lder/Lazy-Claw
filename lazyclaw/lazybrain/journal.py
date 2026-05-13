@@ -25,6 +25,28 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MIN_CHARS_FOR_LLM_TITLE = 120
 _MIN_BULLETS_FOR_LLM_TITLE = 2
 
+# Serialize get-then-write windows in ensure_today_journal() +
+# append_journal() so two concurrent coroutines for the same user+date
+# don't each miss the existence check and create a fresh stub. The DB
+# audit on 2026-05-13 found multiple `journal/<date>`-tagged rows per
+# day — every one a stub with 0 outgoing edges sitting next to the
+# real journal row carrying all the bullets. Within-process locks
+# close that race for the single-process default deployment. A cross-
+# process collision still needs the cleanup CLI to consolidate (the
+# UI hides duplicate stubs by surfacing the longest-content row).
+_JOURNAL_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _journal_lock(user_id: str, iso_date: str) -> asyncio.Lock:
+    """Per-(user, date) lock for journal mutations. Created lazily — the
+    dict size is bounded by the user's active days so it can't grow."""
+    key = (user_id, iso_date)
+    lock = _JOURNAL_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _JOURNAL_LOCKS[key] = lock
+    return lock
+
 
 def _today_iso(user_id: str | None = None) -> str:
     """ISO date in the user's timezone. Journal pages follow the user's calendar."""
@@ -61,21 +83,23 @@ async def ensure_today_journal(config: Config, user_id: str) -> dict:
     """Return today's journal note, creating an empty stub if absent.
 
     Idempotent: safe to call from heartbeat tick + GET handler + skill
-    without producing duplicates (each tagged ``journal/YYYY-MM-DD``,
-    looked up by tag before any insert).
+    without producing duplicates. The get-then-save window is
+    serialized by a per-(user, today) asyncio.Lock so two concurrent
+    callers can't each miss the existence check.
     """
     today = timezone_util.today_iso(user_id)
-    existing = await get_journal(config, user_id, today)
-    if existing:
-        return existing
-    tag = _journal_tag(today)
-    return await store.save_note(
-        config,
-        user_id,
-        content=f"# Journal — {today}\n",
-        title=f"Journal — {today}",
-        tags=[tag, "owner/user"],
-    )
+    async with _journal_lock(user_id, today):
+        existing = await get_journal(config, user_id, today)
+        if existing:
+            return existing
+        tag = _journal_tag(today)
+        return await store.save_note(
+            config,
+            user_id,
+            content=f"# Journal — {today}\n",
+            title=f"Journal — {today}",
+            tags=[tag, "owner/user"],
+        )
 
 
 async def append_journal(
@@ -88,28 +112,34 @@ async def append_journal(
 
     Kicks off (fire-and-forget) a worker-model call to regenerate the
     title into a descriptive phrase once the page has enough content.
+
+    Race protection: the get-then-write window is serialized by a
+    per-(user, target) asyncio.Lock so concurrent task-completion +
+    auto-capture writers can't each miss the existence check and
+    create a fresh stub.
     """
     target = resolve_date(iso_date, user_id)
     tag = _journal_tag(target)
-    existing = await get_journal(config, user_id, target)
 
     timestamp = datetime.now(timezone.utc).strftime("%H:%M UTC")
     snippet = f"- {timestamp} — {content.strip()}"
 
-    if existing:
-        merged = f"{existing['content'].rstrip()}\n{snippet}"
-        updated = await store.update_note(
-            config, user_id, existing["id"], content=merged
-        )
-        result = updated or existing
-    else:
-        result = await store.save_note(
-            config,
-            user_id,
-            content=f"# Journal — {target}\n\n{snippet}",
-            title=f"Journal — {target}",
-            tags=[tag, "owner/user"],
-        )
+    async with _journal_lock(user_id, target):
+        existing = await get_journal(config, user_id, target)
+        if existing:
+            merged = f"{existing['content'].rstrip()}\n{snippet}"
+            updated = await store.update_note(
+                config, user_id, existing["id"], content=merged
+            )
+            result = updated or existing
+        else:
+            result = await store.save_note(
+                config,
+                user_id,
+                content=f"# Journal — {target}\n\n{snippet}",
+                title=f"Journal — {target}",
+                tags=[tag, "owner/user"],
+            )
 
     # Async title refresh — doesn't block the caller. Runs on the
     # background task loop; failures are logged, never raised.

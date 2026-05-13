@@ -897,15 +897,32 @@ export function PageListSidebar({
         if ((b.importance ?? 0) !== (a.importance ?? 0)) return (b.importance ?? 0) - (a.importance ?? 0);
         return TITLE_COLLATOR.compare(a.title || "", b.title || "");
       });
+      // Pick the day's journal + rollup. When the DB has multiple
+      // `journal/<date>`-tagged stubs (a known race in journal.py
+      // get_journal → save_note), naive first-match would surface
+      // whichever empty stub happened to win the sort. Score every
+      // journal candidate by content length and keep the longest —
+      // that's the row that received the day's bullets + wikilinks.
+      // Extras still appear in `rest` so the user can see + clean
+      // them, but the section header points at the meaningful one.
       let dayJournal: LazyBrainNote | null = null;
+      let dayJournalScore = -1;
       let dayRollup: LazyBrainNote | null = null;
       let taskCount = 0;
+      const candidateJournals: LazyBrainNote[] = [];
       const rest: LazyBrainNote[] = [];
       for (const n of items) {
         const tags = lowerTags(n);
         const cats = categoryKeysFor(n.tags, n.pinned);
-        if (!dayJournal && (cats.includes("journal") || cats.includes("daily-log"))) {
-          dayJournal = n;
+        if (cats.includes("journal") || cats.includes("daily-log")) {
+          const score = (n.content?.length ?? 0);
+          if (score > dayJournalScore) {
+            if (dayJournal) candidateJournals.push(dayJournal);
+            dayJournal = n;
+            dayJournalScore = score;
+          } else {
+            candidateJournals.push(n);
+          }
           continue;
         }
         if (!dayRollup && isRollupNote(n)) {
@@ -915,6 +932,9 @@ export function PageListSidebar({
         if (cats.includes("task") || tags.includes("task")) taskCount++;
         rest.push(n);
       }
+      // Surface any duplicate journal stubs in `rest` so the user
+      // sees them (and can run the cleanup CLI).
+      for (const dup of candidateJournals) rest.push(dup);
       return {
         day,
         label: formatDayLabel(day, todayKey, yesterdayKey),

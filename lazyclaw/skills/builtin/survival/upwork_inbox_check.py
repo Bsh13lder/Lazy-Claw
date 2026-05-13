@@ -204,7 +204,13 @@ class UpworkInboxCheckSkill(BaseSkill):
         else:
             messages = messages_raw
         if not isinstance(messages, list) or not messages:
-            return "Upwork inbox swept. No unread conversations."
+            # [SILENT] prefix: heartbeat skips the Telegram push when the
+            # result starts with this token. User asked for "no news = no
+            # ping" so the every-15-min cron doesn't spam an empty inbox.
+            # Foreground manual checks ("check my upwork inbox now") drop
+            # the prefix in their final reply via the brain — only the
+            # heartbeat-path callback honours it.
+            return "[SILENT] Upwork inbox swept. No unread conversations."
 
         report_lines: list[str] = [f"Upwork inbox swept — {len(messages)} unread conversation(s):"]
         auto_replied = 0
@@ -264,6 +270,27 @@ class UpworkInboxCheckSkill(BaseSkill):
                         behavior.escalation_urgency_default
                     )
                     suggested = self._suggest_replies(category)
+                    # In notify_draft mode (default), compose a draft
+                    # and put it FIRST in the suggested_replies list so
+                    # the user sees "here's the bot's draft, Send /
+                    # Edit / Skip" instead of just generic category
+                    # templates. The draft uses the same composer as
+                    # the auto-reply path — keeps behaviour consistent
+                    # between "approve and send" and "auto-send".
+                    if getattr(behavior, "reply_mode", "notify_draft") == "notify_draft":
+                        try:
+                            draft = self._compose_auto_reply(
+                                category=category, body=body,
+                                profile=profile, behavior=behavior,
+                                is_new_conversation=conv.get("is_new", False),
+                            )
+                            if draft:
+                                suggested = (draft,) + tuple(suggested)
+                        except Exception:
+                            logger.exception(
+                                "Draft composition failed for category %s",
+                                category,
+                            )
 
                     # Deterministic awaited Telegram push FIRST — this
                     # is the guarantee the user asked for. Previously
@@ -326,7 +353,16 @@ class UpworkInboxCheckSkill(BaseSkill):
             f"\nSummary: {auto_replied} auto-replied, {escalated} escalated, "
             f"{seen_unknown} unknown."
         )
-        return "\n".join(report_lines)
+        # No-news exemption: if every conversation was auto-replied (safe
+        # categories the user approved) AND none escalated, the heartbeat
+        # caller doesn't need to bother the user — the bot already handled
+        # everything cleanly. Auto-replies always get logged inline in the
+        # report body so the manual "what did you do?" surface still works,
+        # but the Telegram push is suppressed.
+        result = "\n".join(report_lines)
+        if escalated == 0 and seen_unknown == 0:
+            return f"[SILENT] {result}"
+        return result
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -344,12 +380,28 @@ class UpworkInboxCheckSkill(BaseSkill):
         return self._registry.get(suffix)
 
     def _decide(self, category: str, behavior) -> str:
-        """Map (category, behavior) → 'auto_reply' | 'escalate' | 'skip'."""
+        """Map (category, behavior) → 'auto_reply' | 'escalate' | 'skip'.
+
+        Honors ``behavior.reply_mode``:
+          - ``notify_draft`` (default): EVERY new message routes to
+            escalate — the bot never sends without explicit user
+            approval. Draft is composed and surfaced alongside the
+            alert so the user can tap Send / Edit / Skip.
+          - ``auto``: Bot may auto-send on safe categories
+            (``auto_reply_categories``). Sensitive categories
+            (``escalate_categories``) STILL go to escalate — auto
+            mode does NOT override admin_request / identity /
+            complaint / milestone_dispute / nda guardrails.
+        """
+        mode = getattr(behavior, "reply_mode", "notify_draft") or "notify_draft"
+        if mode == "notify_draft":
+            return "escalate"
+        # auto mode: existing safe-vs-sensitive routing.
         if category in behavior.escalate_categories:
             return "escalate"
         if category in behavior.auto_reply_categories:
             return "auto_reply"
-        # Unknown / unclassified → escalate (safer default)
+        # Unknown / unclassified → escalate (safer default).
         return "escalate"
 
     def _compose_auto_reply(

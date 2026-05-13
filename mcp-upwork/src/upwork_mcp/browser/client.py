@@ -464,9 +464,34 @@ class UpworkBrowser:
         connection is gone — that's a "your bridge is broken" condition,
         not a login state, and the caller (``ensure_logged_in``) handles
         it by reconnecting + retrying once.
+
+        Cheap path: if the picked tab is ALREADY on upwork.com and not on a
+        login redirect / cloudflare interstitial, accept the existing
+        session without forcing a navigation. The previous behavior
+        navigated to ``/nx/find-work/best-matches`` on every MCP call,
+        which triggered a fresh Cloudflare check from a tab that was
+        already logged in on ``/ab/messages/rooms/<id>`` — manifesting
+        as a ``cloudflare_challenge`` raise and the brain bailing out.
         """
         page = await self.get_page()
         try:
+            # Cheap-path: trust an existing logged-in Upwork tab.
+            current_url_now = (page.url or "").lower()
+            if "upwork.com" in current_url_now:
+                try:
+                    title_now = (await page.title() or "").lower()
+                except Exception:
+                    title_now = ""
+                on_login = (
+                    "login" in current_url_now
+                    or "ab/account-security" in current_url_now
+                )
+                on_cf = "moment" in title_now or "challenges.cloudflare.com" in current_url_now
+                if not on_login and not on_cf:
+                    self._last_state_url = current_url_now
+                    self._last_state_reason = "ok_existing_tab"
+                    return True
+
             await page.goto("https://www.upwork.com/nx/find-work/best-matches", wait_until="domcontentloaded")
 
             # Wait for page to stabilize (Cloudflare or content)

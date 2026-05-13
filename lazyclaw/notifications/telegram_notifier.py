@@ -180,6 +180,24 @@ class TelegramNotifier:
                 preview = getattr(summary, "result_preview", None)
                 if preview:
                     stripped = _strip_markdown(preview)
+                    # Silent-mode suppression for cron pushes (verbose=False).
+                    # Honoured for any heartbeat-fired callback so a cron job
+                    # whose skill reports "nothing to tell the user" doesn't
+                    # spam Telegram on every tick. Two trigger paths:
+                    #   1. Explicit [SILENT] prefix from the skill result.
+                    #   2. Brain dropped the prefix but the body is a known
+                    #      no-news phrase (defensive — brain rewriting often).
+                    if not self._verbose:
+                        low = stripped.lower().lstrip()
+                        if low.startswith("[silent]"):
+                            return None, None
+                        if (
+                            "no unread conversations" in low
+                            or "no new messages" in low
+                            or "inbox is empty" in low
+                            or "no unread messages" in low
+                        ):
+                            return None, None
                     result_preview = html.escape(stripped[:3500])
                     if len(stripped) > 3500:
                         result_preview += "\n[truncated]"

@@ -119,6 +119,21 @@ class SetUpworkBotBehaviorSkill(BaseSkill):
                         "use the user's value_pitch from SkillsProfile."
                     ),
                 },
+                "reply_mode": {
+                    "type": "string",
+                    "enum": ["notify_draft", "auto"],
+                    "description": (
+                        "How the bot handles incoming DMs. "
+                        "'notify_draft' (default) = Telegram alert with "
+                        "message + suggested draft; user taps Send/Edit/"
+                        "Skip. 'auto' = bot sends draft autonomously "
+                        "then notifies user AFTER; escalate_categories "
+                        "(admin_request, identity, complaint, "
+                        "milestone_dispute, etc.) STILL require human "
+                        "approval. Aliases auto-accepted: 'auto_reply', "
+                        "'auto_answer', 'draft', 'notify'."
+                    ),
+                },
             },
         }
 
@@ -141,5 +156,38 @@ class SetUpworkBotBehaviorSkill(BaseSkill):
             await update_behavior(self._config, user_id, raw_updates)
         except ValueError as exc:
             return str(exc)
+
+        # Cron-sync: when inbox_check_cron changes, also rewrite the
+        # matching ``agent_jobs`` row so the heartbeat daemon picks
+        # up the new schedule. Without this, only the encrypted
+        # ``users.settings.survival.upwork_bot`` value updated and
+        # the actual cron kept ticking on the old expression — which
+        # is the bug the user hit the first time round.
+        if "inbox_check_cron" in raw_updates:
+            try:
+                from lazyclaw.heartbeat.cron import is_valid
+                from lazyclaw.heartbeat.orchestrator import list_jobs, update_job
+                new_cron = str(raw_updates["inbox_check_cron"]).strip()
+                if is_valid(new_cron):
+                    jobs = await list_jobs(self._config, user_id)
+                    for j in jobs:
+                        if (j.get("name") or "").lower() in (
+                            "survival_message_check", "upwork inbox check",
+                            "upwork_inbox_check", "check upwork inbox",
+                        ):
+                            await update_job(
+                                self._config, user_id, j["id"],
+                                cron_expression=new_cron,
+                            )
+                            logger.info(
+                                "Synced agent_jobs %s cron to %s",
+                                j["id"], new_cron,
+                            )
+                            break
+            except Exception:
+                logger.exception(
+                    "Failed to sync inbox_check_cron to agent_jobs row"
+                )
+
         behavior = await get_behavior(self._config, user_id)
         return f"Updated.\n\n{render_behavior(behavior)}"

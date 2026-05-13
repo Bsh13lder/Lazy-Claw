@@ -94,6 +94,21 @@ class UpworkBotBehavior:
     # Empty = use the user's value_pitch from SkillsProfile.
     tone_override: str = ""
 
+    # Reply mode controls how the bot handles incoming Upwork DMs:
+    #   "notify_draft" (default) — Telegram alert with message + a
+    #       suggested draft. User taps Send / Edit / Skip. Bot NEVER
+    #       speaks for the user without explicit approval.
+    #   "auto" — Bot sends the drafted reply autonomously, then
+    #       Telegram-notifies the user AFTER (post-hoc) so they see
+    #       what was said. Categories in ``escalate_categories``
+    #       still force human approval (admin_request, identity,
+    #       complaint, milestone_dispute, etc.) — auto mode does NOT
+    #       override those guardrails. Used when the user wants the
+    #       bot to handle the inbox unattended (price negotiation,
+    #       status replies, scope clarifications).
+    # NL: "switch upwork to auto reply" / "turn off auto reply mode".
+    reply_mode: str = "notify_draft"
+
 
 _DEFAULT_BEHAVIOR = UpworkBotBehavior()
 _BEHAVIOR_FIELDS = frozenset(UpworkBotBehavior.__dataclass_fields__.keys())
@@ -103,6 +118,9 @@ _TUPLE_FIELDS: frozenset[str] = frozenset({
 _BOOL_FIELDS: frozenset[str] = frozenset({
     "intro_offer_owner_contact", "block_on_escalation",
 })
+
+
+_VALID_REPLY_MODES: frozenset[str] = frozenset({"notify_draft", "auto"})
 
 
 def _coerce_updates(updates: dict[str, object]) -> dict[str, object] | str:
@@ -123,6 +141,24 @@ def _coerce_updates(updates: dict[str, object]) -> dict[str, object] | str:
                 result[k] = tuple(str(x).strip().lower() for x in v if str(x).strip())
             else:
                 return f"Invalid value for {k}: must be a list of category names."
+        elif k == "reply_mode":
+            # Tolerant aliases so NL maps cleanly:
+            #   "auto" / "auto_reply" / "auto_answer" → "auto"
+            #   "draft" / "notify" / "notify_draft" / "manual" → "notify_draft"
+            raw = str(v).strip().lower().replace("-", "_").replace(" ", "_")
+            if raw in {"auto", "auto_reply", "auto_answer", "autonomous"}:
+                result[k] = "auto"
+            elif raw in {
+                "notify_draft", "draft", "notify",
+                "manual", "approve", "review",
+            }:
+                result[k] = "notify_draft"
+            else:
+                return (
+                    f"Invalid reply_mode: '{v}'. Use 'notify_draft' "
+                    f"(default — bot drafts, user approves) or 'auto' "
+                    f"(bot sends, still escalates sensitive categories)."
+                )
         else:
             result[k] = str(v)
     return result
@@ -193,8 +229,13 @@ def _behavior_from_data(data: dict) -> UpworkBotBehavior:
 
 def render_behavior(behavior: UpworkBotBehavior) -> str:
     """Human-readable summary of the current behavior."""
+    mode_label = {
+        "notify_draft": "notify + draft (user approves each reply)",
+        "auto": "auto-reply (bot sends, escalations still ask first)",
+    }.get(behavior.reply_mode, behavior.reply_mode)
     return (
         f"Upwork Bot Behavior:\n"
+        f"  Reply mode: {mode_label}\n"
         f"  Inbox check: {behavior.inbox_check_cron}\n"
         f"  First-contact owner offer: "
         f"{'on' if behavior.intro_offer_owner_contact else 'off'}\n"

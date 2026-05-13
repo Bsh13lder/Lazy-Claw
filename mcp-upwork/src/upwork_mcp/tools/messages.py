@@ -155,7 +155,11 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     Returns a list of conversations with last message, sender info, and unread status.
     """
     browser = get_browser()
-    await browser.ensure_logged_in()
+    try:
+        await browser.ensure_logged_in()
+    except Exception:
+        logger.exception("get_messages: ensure_logged_in failed")
+        raise
 
     url = "https://www.upwork.com/ab/messages/rooms/"
     if params.unread_only:
@@ -165,18 +169,30 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     # Upwork tab. Fixes the contention bug where get_messages and
     # search_jobs in flight at the same time would knock each other's
     # page handle out.
-    page = await browser.safe_goto(url)
+    try:
+        page = await browser.safe_goto(url)
+    except Exception:
+        logger.exception("get_messages: safe_goto to %s failed", url)
+        raise
 
     conversations: list[dict] = []
 
     # Wait for either the rooms panel OR the explicit empty state.
+    # 2026 layout sometimes drops the `[data-test="rooms-panel"]` attribute
+    # under heavy SPA re-renders; widening the matcher and bumping the
+    # timeout keeps the success path stable without changing the empty
+    # short-circuit below.
     try:
         await page.wait_for_selector(
-            '[data-test="rooms-panel"], [data-test="empty-state"], .rooms-panel-body',
-            timeout=10000,
+            '[data-test="rooms-panel"], [data-test="empty-state"], '
+            '.rooms-panel-body, .desktop-layout-room, [data-test="room-item"]',
+            timeout=20000,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "get_messages: wait_for_selector timed out on %s — current url=%s (%s)",
+            url, getattr(page, "url", "?"), exc,
+        )
 
     # If the empty state is rendered, there are no conversations — bail early.
     empty_state = await page.query_selector('[data-test="empty-state"]')
@@ -188,6 +204,13 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     room_els = await page.query_selector_all(
         '.desktop-layout-room, [data-test="room-item"], .room-item, .conversation-item'
     )
+    if not room_els:
+        logger.warning(
+            "get_messages: 0 room elements matched at %s "
+            "(rooms-panel, .desktop-layout-room, [data-test=\"room-item\"] all empty). "
+            "Likely 2026 layout drift or CF challenge — surface upstream.",
+            getattr(page, "url", "?"),
+        )
 
     seen_rooms = _load_seen_rooms()
     newly_seen: set[str] = set()
@@ -209,6 +232,7 @@ async def get_messages(params: MessagesParams) -> list[dict]:
                 newly_seen.add(room_id)
             conversations.append(conv)
         except Exception:
+            logger.exception("get_messages: per-row extraction raised")
             continue
 
     if newly_seen:
@@ -255,27 +279,56 @@ async def _extract_conversation(el) -> dict | None:
             if any(ch.isdigit() for ch in line) and (":" in line or "am" in low or "pm" in low):
                 continue
             if 2 < len(line) < 60:
-                # Tiptap sometimes duplicates: "James Blue, James Blue".
-                # Collapse to the first half when both sides match.
-                if "," in line:
-                    a, _, b = line.partition(",")
-                    if a.strip().lower() == b.strip().lower():
-                        line = a.strip()
                 conv["contact_name"] = line
                 break
+
+    # Tiptap / 2026 row layout sometimes duplicates the name in the same
+    # node: "James Blue, James Blue" or with stray double-space
+    # "James Blue, James  Blue". Normalize whitespace before comparing
+    # so the collapse fires regardless of inner spacing.
+    cn = (conv.get("contact_name") or "").strip()
+    if "," in cn:
+        import re as _re_cn
+        a, _, b = cn.partition(",")
+        a_norm = _re_cn.sub(r"\s+", " ", a).strip().lower()
+        b_norm = _re_cn.sub(r"\s+", " ", b).strip().lower()
+        if a_norm and a_norm == b_norm:
+            conv["contact_name"] = _re_cn.sub(r"\s+", " ", a).strip()
 
     if not conv.get("contact_name"):
         return None
 
     # Room URL/ID
+    # 2026 layout URL shape:
+    #   /ab/messages/rooms/room_<hex>?companyReference=...&sidebar=true
+    # Legacy shape:
+    #   /nx/messages/<id>
+    # The old parser split on ``/messages/`` then took ``.split("/")[0]``,
+    # which returned the literal string "rooms" for every 2026 conversation
+    # — making every downstream ``get_conversation_messages(room_id)`` call
+    # navigate to /ab/messages/rooms/rooms (Upwork 404). Probe specifically
+    # for ``room_<hex>`` segments, fall back to legacy parsing only when
+    # the new pattern doesn't match.
+    import re as _re
     room_link = await el.query_selector('a[href*="/messages/"]')
     if room_link:
         href = await room_link.get_attribute("href")
         if href:
             conv["room_url"] = href if href.startswith("http") else f"https://www.upwork.com{href}"
-            # Extract room ID from URL
-            if "/messages/" in href:
-                conv["room_id"] = href.split("/messages/")[-1].split("/")[0].split("?")[0]
+            m = _re.search(r"room_[A-Za-z0-9_-]+", href)
+            if m:
+                conv["room_id"] = m.group(0)
+            elif "/messages/" in href:
+                # Legacy fallback. Skip the "rooms" path segment if we hit
+                # the new URL layout without finding a room_<hex> match.
+                tail = href.split("/messages/", 1)[-1].split("?", 1)[0]
+                first = tail.split("/", 1)[0]
+                if first in ("rooms", "room"):
+                    parts = tail.split("/")
+                    if len(parts) > 1 and parts[1]:
+                        conv["room_id"] = parts[1]
+                else:
+                    conv["room_id"] = first
 
     # Last message preview
     preview_el = await el.query_selector('[data-test="message-preview"], .preview, .last-message')

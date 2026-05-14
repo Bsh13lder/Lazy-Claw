@@ -189,15 +189,14 @@ async def generate_daily_summary(config: Config, user_id: str, date: str) -> str
         LLMMessage(role="user", content=summary_prompt),
     ]
 
-    # Use eco_router if available, fallback to direct router
-    try:
-        from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
-        eco = EcoRouter(config, LLMRouter(config))
-        response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
-    except Exception:
-        logger.warning("EcoRouter unavailable for daily summary, falling back to direct LLM", exc_info=True)
-        router = LLMRouter(config)
-        response = await router.chat(messages, model=config.worker_model, user_id=user_id)
+    # Route exclusively via EcoRouter so MODE_CLAUDE strict-sticky is
+    # honored. A direct LLMRouter fallback here would leak to the paid
+    # Anthropic API when the user has $0 credit. If EcoRouter fails,
+    # surface the error to the caller — daily summaries are best-effort
+    # and the heartbeat path already swallows exceptions.
+    from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+    eco = EcoRouter(config, LLMRouter(config))
+    response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
     summary = response.content
 
     # Extract key events (first line or bullet points)
@@ -249,14 +248,11 @@ async def generate_weekly_summary(
         LLMMessage(role="user", content=f"Week of {week_start}:\n\n{text}"),
     ]
 
-    try:
-        from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
-        eco = EcoRouter(config, LLMRouter(config))
-        response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
-    except Exception:
-        logger.warning("EcoRouter unavailable for weekly summary, falling back to direct LLM", exc_info=True)
-        router = LLMRouter(config)
-        response = await router.chat(messages, model=config.worker_model, user_id=user_id)
+    # Same MODE_CLAUDE strict-sticky reasoning as daily summary above —
+    # no direct LLMRouter fallback to avoid paid-API leakage.
+    from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+    eco = EcoRouter(config, LLMRouter(config))
+    response = await eco.chat(messages, user_id=user_id, role=ROLE_WORKER)
     summary = response.content
 
     await save_daily_log(config, user_id, f"{week_start}_week", summary, "weekly")

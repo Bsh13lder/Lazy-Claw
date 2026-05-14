@@ -1205,6 +1205,25 @@ class EcoRouter:
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
 
+        # MODE_CLAUDE strict-sticky — every streaming call goes through
+        # the CLI subprocess just like the non-streaming `chat()` path.
+        # User is in this mode precisely because they have $0 paid-API
+        # credit; without this guard the fast chat path (and any other
+        # streaming caller) falls through to the paid Anthropic API and
+        # 400s with "credit balance too low".
+        if settings.mode == MODE_CLAUDE:
+            response = await self._route_claude(
+                messages, user_id, settings=settings, role=role, **kwargs,
+            )
+            yield StreamChunk(
+                delta=response.content,
+                tool_calls=response.tool_calls,
+                usage=response.usage,
+                model=response.model,
+                done=True,
+            )
+            return
+
         if role == ROLE_BRAIN:
             # Brain: paid streaming, or CLI fallback for non-API models.
             brain_name = models["brain"]

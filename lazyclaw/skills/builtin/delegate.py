@@ -194,87 +194,156 @@ class DelegateSkill(BaseSkill):
                 task_id=task_id,
             )
 
-        try:
-            result = await run_specialist(
-                user_id=user_id,
-                specialist=spec,
-                task=enriched_instruction,
-                registry=self._registry,
-                eco_router=self._eco_router,
-                permission_checker=self._permission_checker,
-                callback=wrapped_callback,
-            )
-        except Exception as exc:
+        # ── Fix K — non-blocking delegate ─────────────────────────────
+        # Previously this awaited run_specialist inline, pinning the
+        # foreground turn to "thinking…" for the entire specialist
+        # duration (live screenshot 2026-05-14 17:23 showed 49s of dead
+        # chat input on a delegate(browser_specialist) call). The brain
+        # got the result back, sure, but the user couldn't type a new
+        # message until then.
+        #
+        # New shape: schedule run_specialist in a fire-and-forget task,
+        # return immediately. The specialist's completion fires
+        # background_done / background_failed events through the same
+        # callback that bg tasks use — chat_ws renders the result in the
+        # bg surface (live progress visible when streaming=ON,
+        # suppressed when streaming=OFF via Fix J), the brain absorbs
+        # the result as a side-note on its next turn.
+        async def _run_delegate_bg() -> None:
+            try:
+                result = await run_specialist(
+                    user_id=user_id,
+                    specialist=spec,
+                    task=enriched_instruction,
+                    registry=self._registry,
+                    eco_router=self._eco_router,
+                    permission_checker=self._permission_checker,
+                    callback=wrapped_callback,
+                )
+            except Exception as exc:
+                logger.exception("delegate bg task %s crashed", task_id)
+                if self._team_lead is not None:
+                    try:
+                        self._team_lead.fail(task_id, error=str(exc))
+                    except Exception:
+                        logger.debug("team_lead.fail crashed", exc_info=True)
+                if self._callback:
+                    try:
+                        await self._callback.on_event(AgentEvent(
+                            "specialist_done",
+                            spec.name,
+                            {
+                                "specialist": spec.name,
+                                "success": False,
+                                "error": str(exc),
+                            },
+                        ))
+                        await self._callback.on_event(AgentEvent(
+                            "background_failed",
+                            f"Specialist {spec.display_name} failed",
+                            {
+                                "task_id": task_id,
+                                "name": spec.name,
+                                "error": str(exc),
+                            },
+                        ))
+                    except Exception:
+                        logger.debug("delegate-bg done event failed", exc_info=True)
+                return
+
+            # Save browser learnings (delegate calls run_specialist
+            # directly, not through executor.py, so this is the only
+            # save path here).
+            if (
+                specialist_key == "browser"
+                and len(result.step_history) >= MIN_STEPS_FOR_LEARNING
+            ):
+                learn_task = asyncio.create_task(save_browser_learnings(
+                    config=self._config,
+                    user_id=user_id,
+                    step_history=result.step_history,
+                    task=enriched_instruction,
+                    success=result.success,
+                    error=result.error,
+                ))
+                _background_tasks.add(learn_task)
+                learn_task.add_done_callback(_background_tasks.discard)
+
+            # Mirror the SpecialistResult into team_lead so the activity
+            # feed carries the final outcome.
             if self._team_lead is not None:
                 try:
-                    self._team_lead.fail(task_id, error=str(exc))
+                    if result.success:
+                        self._team_lead.complete(
+                            task_id,
+                            result_preview=(result.result or "")[:100],
+                            result_full=result.result or "",
+                        )
+                    else:
+                        self._team_lead.fail(task_id, error=result.error or "")
                 except Exception:
-                    logger.debug("team_lead.fail crashed", exc_info=True)
-            if self._callback:
+                    logger.debug(
+                        "team_lead complete/fail crashed", exc_info=True,
+                    )
+
+            if not self._callback:
+                return
+            try:
                 await self._callback.on_event(AgentEvent(
                     "specialist_done",
                     spec.name,
                     {
                         "specialist": spec.name,
-                        "success": False,
-                        "error": str(exc),
+                        "success": result.success,
+                        "duration_ms": result.duration_ms,
+                        "tools_used": list(result.tools_used),
+                        "error": result.error,
                     },
                 ))
-            raise
-
-        # Save browser learnings (delegate calls run_specialist directly,
-        # not through executor.py, so this is the only save path here)
-        if specialist_key == "browser" and len(result.step_history) >= MIN_STEPS_FOR_LEARNING:
-            bg_task = asyncio.create_task(save_browser_learnings(
-                config=self._config,
-                user_id=user_id,
-                step_history=result.step_history,
-                task=enriched_instruction,
-                success=result.success,
-                error=result.error,
-            ))
-            _background_tasks.add(bg_task)
-            bg_task.add_done_callback(_background_tasks.discard)
-
-        # Mirror the SpecialistResult into team_lead so the activity feed
-        # carries the final outcome, then emit specialist_done so every UI
-        # closes the running card.
-        if self._team_lead is not None:
-            try:
+                # Fire bg terminal event so chat_ws routes the result
+                # through the same surface as run_background. The brain
+                # absorbs it as a side-note on its next turn.
                 if result.success:
-                    self._team_lead.complete(
-                        task_id,
-                        result_preview=(result.result or "")[:100],
-                        result_full=result.result or "",
-                    )
+                    await self._callback.on_event(AgentEvent(
+                        "background_done",
+                        f"Specialist {spec.display_name} completed",
+                        {
+                            "task_id": task_id,
+                            "name": spec.name,
+                            "result": result.result or "",
+                            "duration_ms": result.duration_ms,
+                            "tools_used": list(result.tools_used),
+                        },
+                    ))
                 else:
-                    self._team_lead.fail(task_id, error=result.error or "")
+                    await self._callback.on_event(AgentEvent(
+                        "background_failed",
+                        f"Specialist {spec.display_name} failed",
+                        {
+                            "task_id": task_id,
+                            "name": spec.name,
+                            "error": result.error or "",
+                        },
+                    ))
             except Exception:
-                logger.debug("team_lead complete/fail crashed", exc_info=True)
+                logger.debug("delegate-bg terminal event failed", exc_info=True)
 
-        if self._callback:
-            await self._callback.on_event(AgentEvent(
-                "specialist_done",
-                spec.name,
-                {
-                    "specialist": spec.name,
-                    "success": result.success,
-                    "duration_ms": result.duration_ms,
-                    "tools_used": list(result.tools_used),
-                    "error": result.error,
-                },
-            ))
+        _bg = asyncio.create_task(
+            _run_delegate_bg(),
+            name=f"delegate-bg-{task_id}",
+        )
+        _background_tasks.add(_bg)
+        _bg.add_done_callback(_background_tasks.discard)
 
-        if result.success:
-            tools_note = ""
-            if result.tools_used:
-                tools_note = f" (used: {', '.join(result.tools_used)})"
-            return (
-                f"[{spec.display_name} completed{tools_note}]\n\n"
-                f"{result.result}"
-            )
-
-        return f"[{spec.display_name} failed] {result.error}"
+        # Return immediately — foreground turn is now free for the next
+        # user message. The specialist's result lands as a side-note on
+        # the brain's next turn (via chat_ws subagent-terminal pump).
+        return (
+            f"Started {spec.display_name} in the background. The "
+            f"specialist is working on your task — I'll fold the result "
+            f"into my next reply when it completes. You can keep typing "
+            f"in the meantime."
+        )
 
     # ── Site knowledge ─────────────────────────────────────────────
 

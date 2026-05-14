@@ -258,8 +258,15 @@ async def run_agent(config: Config) -> None:
     bg_skill._task_runner = task_runner
     registry.register(bg_skill)
 
-    from lazyclaw.gateway.app import set_lane_queue
+    from lazyclaw.gateway.app import set_lane_queue, set_agent_deps
     set_lane_queue(lane_queue)
+    # Share TaskRunner + TeamLead with the gateway so the HTTP fallback
+    # Agent and the WS chat Agent can dispatch background tasks and
+    # specialists. Without this both `run_background` and
+    # `dispatch_subagents` return "not configured" on Web UI turns —
+    # observed live 2026-05-14 with a Google Workspace task that drove
+    # the brain into a 10-iteration carpet-bomb loop.
+    set_agent_deps(task_runner=task_runner, team_lead=team_lead)
 
     # Wire activity dashboard deps
     from lazyclaw.gateway.routes.activity import set_activity_deps

@@ -20,16 +20,26 @@ ws_chat_router = APIRouter()
 
 _config = load_config()
 
-# Injected by app.py (same pattern as _lane_queue / _shared_registry)
+# Injected by app.py (same pattern as _lane_queue / _shared_registry).
+# _task_runner + _team_lead are required so the Agent constructed for
+# each WS session can dispatch background tasks and specialists — without
+# them, the brain's run_background / dispatch_subagents tools both fail
+# with "not configured" even though the runtime instances exist.
 _lane_queue = None
 _shared_registry = None
+_task_runner = None
+_team_lead = None
 
 
-def set_chat_ws_deps(lane_queue, registry) -> None:
+def set_chat_ws_deps(lane_queue, registry, task_runner=None, team_lead=None) -> None:
     """Called by app.py to inject shared dependencies."""
-    global _lane_queue, _shared_registry
+    global _lane_queue, _shared_registry, _task_runner, _team_lead
     _lane_queue = lane_queue
     _shared_registry = registry
+    if task_runner is not None:
+        _task_runner = task_runner
+    if team_lead is not None:
+        _team_lead = team_lead
 
 
 # Keys excluded from forwarded metadata: bg_task_id / bg_task_name are
@@ -415,7 +425,17 @@ async def _run_agent_turn(
         registry.register_defaults(config=_config)
     router = LLMRouter(_config)
     checker = PermissionChecker(_config, registry)
-    agent = Agent(_config, router, registry, permission_checker=checker)
+    # Pull task_runner + team_lead from the shared deps so this WS
+    # Agent can dispatch background tasks and specialists. Without these
+    # the brain's run_background / dispatch_subagents tools fail with
+    # "not configured" — observed on 2026-05-14 in production when a
+    # Google Workspace task forced the brain into a 10-iteration loop.
+    agent = Agent(
+        _config, router, registry,
+        permission_checker=checker,
+        task_runner=_task_runner,
+        team_lead=_team_lead,
+    )
     agent.cancel_token = cb.cancel_token
     return await agent.process_message(
         user_id, content, callback=cb, chat_session_id=session_id,

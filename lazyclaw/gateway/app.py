@@ -46,23 +46,44 @@ logger = logging.getLogger(__name__)
 _config = load_config()
 _server_started_at = time.time()
 
-# Shared state — set by cli.py at startup
+# Shared state — set by cli.py at startup. _task_runner / _team_lead are
+# needed so the Agent built for HTTP fallback + WS chat can dispatch
+# background tasks / specialists (without them, run_background and
+# dispatch_subagents tools fail with "not configured").
 _lane_queue = None
 _shared_registry = None
+_task_runner = None
+_team_lead = None
 
 
 def set_lane_queue(queue) -> None:
     """Called by cli.py to inject the shared LaneQueue."""
     global _lane_queue
     _lane_queue = queue
-    set_chat_ws_deps(queue, _shared_registry)
+    set_chat_ws_deps(queue, _shared_registry, _task_runner, _team_lead)
 
 
 def set_registry(registry) -> None:
     """Called by cli.py to inject the shared SkillRegistry (with MCP tools)."""
     global _shared_registry
     _shared_registry = registry
-    set_chat_ws_deps(_lane_queue, registry)
+    set_chat_ws_deps(_lane_queue, registry, _task_runner, _team_lead)
+
+
+def set_agent_deps(task_runner=None, team_lead=None) -> None:
+    """Called by cli.py to inject shared TaskRunner + TeamLead.
+
+    Lets the fallback HTTP Agent (line ~199) and the WS chat Agent
+    dispatch background tasks / specialists. Without these the brain's
+    run_background and dispatch_subagents tools fail with the
+    "not configured" error observed on 2026-05-14.
+    """
+    global _task_runner, _team_lead
+    if task_runner is not None:
+        _task_runner = task_runner
+    if team_lead is not None:
+        _team_lead = team_lead
+    set_chat_ws_deps(_lane_queue, _shared_registry, _task_runner, _team_lead)
 
 
 def _shannon_entropy(s: str) -> float:
@@ -196,7 +217,15 @@ async def agent_chat(body: ChatRequest, user: User = Depends(get_current_user)):
             registry.register_defaults(config=_config)
         router = LLMRouter(_config)
         permission_checker = PermissionChecker(_config, registry)
-        agent = Agent(_config, router, registry, permission_checker=permission_checker)
+        # Pass shared TaskRunner + TeamLead so the fallback HTTP Agent
+        # can dispatch background tasks + specialists. Same fix as the
+        # WS Agent in chat_ws.py.
+        agent = Agent(
+            _config, router, registry,
+            permission_checker=permission_checker,
+            task_runner=_task_runner,
+            team_lead=_team_lead,
+        )
         result = await agent.process_message(
             user.id, body.message, chat_session_id=body.chat_session_id,
         )

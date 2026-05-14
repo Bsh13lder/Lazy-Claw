@@ -741,7 +741,7 @@ async def register_mcp_tools(
         # Note: built-in skills with same base_name are NOT skipped.
         # MCP tools get a prefixed name (mcp_{server_id}_{name}) so they
         # coexist with built-ins. Built-ins can then call the MCP tool
-        # internally (e.g. search_jobs calls mcp-jobspy's search_jobs).
+        # internally (e.g. search_jobs calls mcp-upwork's search_jobs).
         skill = MCPToolSkill(
             client=client,
             tool_name=tool["name"],

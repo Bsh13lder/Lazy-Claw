@@ -112,11 +112,6 @@ BUNDLED_MCPS = {
         # via mounted ~/.claude auth, not the API key
         "strip_env": ["ANTHROPIC_API_KEY"],
     },
-    "mcp-jobspy": {
-        "module": "mcp_jobspy",
-        "description": "Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google",
-        "optional": True,
-    },
     # Forked from vanooo/upwork-mcp (Apache-2.0). All 12 upstream tools
     # preserved. Patched to share LazyClaw's per-user Brave profile via
     # LAZYCLAW_BROWSER_PROFILE_DIR (injected by inject_user_context below)
@@ -1242,7 +1237,7 @@ async def connect_and_register_bundled_mcps(
 
         # Skip OAuth and optional servers from cold-connect:
         # - OAuth requires browser interaction to authenticate
-        # - Optional servers (stripe, jobspy) may hang downloading via npx
+        # - Optional servers (e.g. stripe) may hang downloading via npx.
         # User must /mcp fav or /mcp connect to activate these.
         if is_oauth or info.get("optional"):
             logger.debug(

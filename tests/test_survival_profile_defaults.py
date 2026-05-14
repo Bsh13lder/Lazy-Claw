@@ -18,18 +18,13 @@ def test_default_profile_seeds_python_skills():
     assert "scraping" in DEFAULT_PROFILE.skills
 
 
-def test_default_profile_includes_upwork_in_platforms():
-    assert "upwork" in DEFAULT_PROFILE.platforms
-    assert "indeed" in DEFAULT_PROFILE.platforms
+def test_default_profile_upwork_only_after_jobspy_cutout():
+    """JobSpy was removed — Upwork is the sole default platform."""
+    assert DEFAULT_PROFILE.platforms == ("upwork",)
 
 
 def test_default_profile_tiny_gig_cap_is_100():
     assert DEFAULT_PROFILE.max_tiny_gig_budget == 100.0
-
-
-def test_default_profile_default_search_sites_indeed_only():
-    """Glassdoor's API has been broken upstream — default to Indeed only."""
-    assert DEFAULT_PROFILE.default_search_sites == ("indeed",)
 
 
 def test_skills_profile_is_immutable():
@@ -61,19 +56,16 @@ def test_coerce_default_results_per_search_float_truncates():
     assert out == {"default_results_per_search": 25}
 
 
-def test_coerce_default_hours_old():
-    out = _coerce_updates({"default_hours_old": 24})
-    assert out == {"default_hours_old": 24}
-
-
-def test_coerce_default_search_sites_list():
-    out = _coerce_updates({"default_search_sites": ["indeed", "linkedin"]})
-    assert out == {"default_search_sites": ["indeed", "linkedin"]}
-
-
-def test_coerce_default_search_sites_string_wraps_to_list():
-    out = _coerce_updates({"default_search_sites": "indeed"})
-    assert out == {"default_search_sites": ["indeed"]}
+def test_coerce_jobspy_only_fields_now_dropped():
+    """default_hours_old and default_search_sites were JobSpy-only; cut out."""
+    out = _coerce_updates({
+        "default_hours_old": 24,
+        "default_search_sites": ["indeed"],
+        "skills": ["python"],
+    })
+    assert "default_hours_old" not in out
+    assert "default_search_sites" not in out
+    assert out["skills"] == ["python"]
 
 
 def test_coerce_unknown_field_dropped():

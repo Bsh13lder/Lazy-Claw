@@ -51,11 +51,9 @@ class SkillsProfile:
     # Tiny-gig matcher bonus — `score_job` adds +0.10 when 0 < budget <= cap.
     # NL-editable via set_skills_profile: "set tiny gig cap to 75".
     max_tiny_gig_budget: float = 100.0
-    # Defaults applied when SearchJobsSkill / JobSpy is invoked without
-    # explicit args. All NL-editable.
-    default_search_sites: tuple[str, ...] = ("indeed",)
+    # Default page size applied when SearchJobsSkill is invoked without
+    # explicit args. NL-editable.
     default_results_per_search: int = 25
-    default_hours_old: int = 72
     # Upwork search surface preference. "best_matches" (default) uses
     # Upwork's personalized recs at /nx/find-work/best-matches — respects
     # the filters the user set on Upwork's side (fixed-price / hourly /
@@ -78,7 +76,7 @@ DEFAULT_PROFILE = SkillsProfile(
     bio="AI-assisted developer for fast scripting, scraping, and automation gigs.",
     min_hourly_rate=20.0,
     min_fixed_rate=20.0,
-    platforms=("upwork", "indeed"),
+    platforms=("upwork",),
     max_tiny_gig_budget=100.0,
     branding_mode="lazyclaw",
     display_name="",
@@ -91,7 +89,6 @@ _PROFILE_FIELDS = frozenset(SkillsProfile.__dataclass_fields__.keys())
 # Explicit list — safer than annotation introspection
 _TUPLE_FIELDS: frozenset[str] = frozenset({
     "skills", "platforms", "preferred_categories", "excluded_keywords",
-    "default_search_sites",
 })
 
 _NUMERIC_FIELDS: frozenset[str] = frozenset({
@@ -100,7 +97,7 @@ _NUMERIC_FIELDS: frozenset[str] = frozenset({
 })
 
 _INTEGER_FIELDS: frozenset[str] = frozenset({
-    "max_concurrent_jobs", "default_results_per_search", "default_hours_old",
+    "max_concurrent_jobs", "default_results_per_search",
 })
 
 

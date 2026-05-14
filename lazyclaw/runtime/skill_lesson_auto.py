@@ -160,7 +160,7 @@ _ERROR_PREFIXES = ("Error:", "Error ", "error:", "ERROR:")
 _ERROR_SUBSTRINGS: tuple[str, ...] = (
     "[MCP ERROR]",
     "[ERROR]",
-    "[mcp-",  # mcp-scraper / mcp-jobspy / etc. headers always wrap real errors
+    "[mcp-",  # mcp-scraper / mcp-upwork / etc. headers always wrap real errors
     "Traceback (most recent call last)",
     "Exception:",
     "Failed to ",

@@ -84,21 +84,9 @@ class SetSkillsProfileSkill(BaseSkill):
                     "type": "number",
                     "description": "Tiny-gig matcher bonus cap in USD (default 100). Jobs at or below this budget get a +0.10 score boost. NL: 'set tiny gig cap to 75'.",
                 },
-                "default_search_sites": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["indeed", "linkedin", "glassdoor", "zip_recruiter", "google"],
-                    },
-                    "description": "JobSpy sites to search by default. NL: 'only search indeed and linkedin'.",
-                },
                 "default_results_per_search": {
                     "type": "integer",
                     "description": "Max results per platform per search (default 25, max 50).",
-                },
-                "default_hours_old": {
-                    "type": "integer",
-                    "description": "Only show jobs posted within this many hours (default 72). NL: 'only show jobs from last 24 hours'.",
                 },
                 "branding_mode": {
                     "type": "string",
@@ -179,9 +167,7 @@ class SetSkillsProfileSkill(BaseSkill):
                 f"Min fixed: ${profile.min_fixed_rate}\n"
                 f"Tiny-gig cap: ${profile.max_tiny_gig_budget}\n"
                 f"Platforms: {', '.join(profile.platforms) or 'None'}\n"
-                f"Default sites: {', '.join(profile.default_search_sites) or 'indeed'}\n"
-                f"Default hours: last {profile.default_hours_old}h, "
-                f"{profile.default_results_per_search} results/site\n"
+                f"Results per search: {profile.default_results_per_search}\n"
                 f"Upwork search: {profile.upwork_search_source}\n"
                 f"Categories: {', '.join(profile.preferred_categories) or 'None'}\n"
                 f"Excluded: {', '.join(profile.excluded_keywords) or 'None'}\n"

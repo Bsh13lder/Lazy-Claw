@@ -3,7 +3,7 @@
 Skills:
   - set_skills_profile: configure freelance profile (name, github, skills, etc.)
   - set_freelance_pitch: NL pitch + AI polish — opens every proposal
-  - search_jobs: find matching jobs via JobSpy MCP or browser
+  - search_jobs: find matching jobs via mcp-upwork (Upwork freelance jobs)
   - apply_job: generate cover letter + submit (user must approve)
   - apply_reddit_dm: send Reddit DM via the user's logged-in Brave (with
     approval checkpoint) for [HIRING] posts found by watch_reddit_forhire

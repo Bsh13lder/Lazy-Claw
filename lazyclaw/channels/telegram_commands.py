@@ -495,13 +495,16 @@ class TelegramCommands:
             # Show current status
             s = await get_eco_settings(self._config, user_id)
             mode = s.get("mode", "hybrid")
+            transport = s.get("claude_transport", "sdk")
             icons = {
                 MODE_HYBRID: "\u2696\ufe0f", MODE_FULL: "\U0001f680",
                 MODE_CLAUDE: "\u26a1",
             }
+            # Mode label shows the active Claude transport so admin can
+            # see at a glance which wire-protocol is firing.
             labels = {
                 MODE_HYBRID: "HYBRID", MODE_FULL: "FULL",
-                MODE_CLAUDE: "CLAUDE CLI",
+                MODE_CLAUDE: f"CLAUDE ({transport.upper()})",
             }
             _models = get_mode_models(mode)
             brain = s.get("brain_model") or _models["brain"]
@@ -526,7 +529,9 @@ class TelegramCommands:
                 "\n<b>Commands:</b>\n"
                 "<code>/mode hybrid</code> — Haiku brain + local worker\n"
                 "<code>/mode full</code> — User-configured paid models\n"
-                "<code>/mode claude</code> — All via Claude CLI (free)\n"
+                "<code>/mode claude</code> — Claude subscription (free)\n"
+                "<code>/mode claude sdk</code> — Use native Agent SDK (default)\n"
+                "<code>/mode claude cli</code> — Use legacy `claude -p`\n"
                 "<code>/mode brain MODEL</code> — Set brain model\n"
                 "<code>/mode worker MODEL</code> — Set worker model\n"
                 "<code>/mode workers N</code> — Max workers (1-20)\n"
@@ -537,18 +542,38 @@ class TelegramCommands:
 
         subcmd = args[0].lower()
 
-        # Mode change: /eco hybrid|full (reject old eco/local modes)
+        # Mode change: /eco hybrid|full|claude [sdk|cli]
+        # Optional second arg picks the Claude transport when entering
+        # CLAUDE mode. Both updates applied atomically so the next message
+        # uses the new transport without restart.
         if subcmd in ("on", "hybrid", "off", "local", "full", "eco", "eco_on", "claude"):
             if subcmd in _DISABLED_MODES:
                 await self._reply(update, f"\u26a0\ufe0f {DISABLED_MODE_MESSAGE}")
                 return
             normalized = normalize_mode(subcmd)
-            await update_eco_settings(self._config, user_id, {"mode": normalized})
+            updates: dict = {"mode": normalized}
+            transport_note = ""
+            if normalized == MODE_CLAUDE and len(args) > 1:
+                t = args[1].lower().strip()
+                if t in ("sdk", "cli"):
+                    updates["claude_transport"] = t
+                    transport_note = f" (transport: {t.upper()})"
+                else:
+                    await self._reply(update,
+                        f"\u26a0\ufe0f Unknown Claude transport "
+                        f"<code>{t}</code>. Use <code>sdk</code> or "
+                        f"<code>cli</code>."
+                    )
+                    return
+            await update_eco_settings(self._config, user_id, updates)
             labels = {
                 MODE_HYBRID: "HYBRID", MODE_FULL: "FULL",
-                MODE_CLAUDE: "CLAUDE CLI",
+                MODE_CLAUDE: "CLAUDE",
             }
-            await self._reply(update, f"\u2705 Mode: <b>{labels.get(normalized, normalized)}</b>")
+            await self._reply(update,
+                f"\u2705 Mode: <b>{labels.get(normalized, normalized)}</b>"
+                f"{transport_note}"
+            )
             return
 
         # Auto-fallback: /eco auto on|off

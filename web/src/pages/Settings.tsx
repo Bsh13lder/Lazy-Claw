@@ -221,17 +221,41 @@ const ROLE_INFO: Record<string, { label: string; description: string }> = {
   fallback: { label: "Fallback", description: "When primary model fails" },
 };
 
-// CLAUDE-mode-only model picker. Three CLI model choices, all $0 via the
-// user's Claude Code subscription. Writes ONLY to claude_brain_model so
-// HYBRID/FULL API model settings stay untouched. The CLI runs every role
-// (brain/worker/fallback) through the same binary, so one knob is enough.
+// CLAUDE-mode model + transport picker. Both transports ("sdk" via the
+// official claude-agent-sdk and "cli" via raw `claude -p`) share the same
+// 3-role model dropdowns — they consume the same subscription, only the
+// wire protocol differs. Writes to claude_transport + claude_*_model.
 const CLAUDE_CLI_MODELS: readonly { value: string; label: string }[] = [
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6 — 200K context" },
   { value: "claude-opus-4-6[1m]", label: "Opus 4.6 — 1M context" },
   { value: "claude-opus-4-7[1m]", label: "Opus 4.7 — 1M context" },
+  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 — fastest" },
 ];
 
-function ClaudeCliModelPicker({
+const CLAUDE_TRANSPORTS: readonly {
+  value: "sdk" | "cli";
+  label: string;
+  blurb: string;
+}[] = [
+  {
+    value: "sdk",
+    label: "SDK",
+    blurb: "Native tool_use protocol via the official Claude Agent SDK. Faster, recommended.",
+  },
+  {
+    value: "cli",
+    label: "CLI (legacy)",
+    blurb: "Raw `claude -p` subprocess with JSON-schema tool injection. Kept as fallback.",
+  },
+];
+
+const CLAUDE_ROLES = [
+  { key: "claude_brain_model" as const, label: "Brain", sub: "Main agent & team lead" },
+  { key: "claude_worker_model" as const, label: "Worker", sub: "Specialists & background tasks" },
+  { key: "claude_fallback_model" as const, label: "Fallback", sub: "When primary errors" },
+];
+
+function ClaudeModePanel({
   eco,
   onSettingsUpdate,
 }: {
@@ -239,40 +263,95 @@ function ClaudeCliModelPicker({
   readonly onSettingsUpdate: (updates: Partial<EcoSettings>) => Promise<void>;
 }) {
   const toast = useToast();
-  const current = eco.claude_brain_model ?? "claude-sonnet-4-6";
+  const transport = eco.claude_transport ?? "sdk";
 
-  const handleChange = async (value: string) => {
+  const handleTransport = async (value: "sdk" | "cli") => {
+    if (value === transport) return;
     try {
-      await onSettingsUpdate({ claude_brain_model: value });
-      toast.success("Claude CLI model updated");
+      await onSettingsUpdate({ claude_transport: value });
+      toast.success(
+        value === "sdk"
+          ? "Switched to SDK — native tool_use protocol"
+          : "Switched to CLI — legacy `claude -p`",
+      );
     } catch {
-      toast.error("Failed to update Claude CLI model");
+      toast.error("Failed to switch transport");
+    }
+  };
+
+  const handleModel = async (key: typeof CLAUDE_ROLES[number]["key"], value: string) => {
+    try {
+      await onSettingsUpdate({ [key]: value });
+      toast.success("Model updated");
+    } catch {
+      toast.error("Failed to update model");
     }
   };
 
   return (
     <section className="bg-bg-secondary border border-border rounded-xl p-5">
       <SectionHeading
-        title="Claude CLI Model"
-        subtitle="Which model `claude -p` uses for every call. $0 via your Max subscription."
+        title="Claude mode"
+        subtitle="$0 via your Claude subscription. Transport picks how we talk to claude; models picks which tier per role."
       />
-      <div className="flex items-center gap-4">
-        <div className="w-24 shrink-0">
-          <p className="text-sm font-medium text-text-primary">Model</p>
-          <p className="text-[10px] text-text-muted">CLI brain</p>
+
+      {/* Transport radio */}
+      <div className="mb-5">
+        <p className="text-xs font-medium text-text-secondary mb-2">Transport</p>
+        <div className="grid grid-cols-2 gap-2">
+          {CLAUDE_TRANSPORTS.map((t) => {
+            const isActive = transport === t.value;
+            return (
+              <button
+                key={t.value}
+                type="button"
+                onClick={() => handleTransport(t.value)}
+                className={`relative flex flex-col items-start gap-1 p-3 rounded-lg border text-left transition-colors ${
+                  isActive
+                    ? "border-accent bg-accent-soft"
+                    : "border-border bg-bg-tertiary hover:border-border-light"
+                }`}
+              >
+                <span
+                  className={`text-sm font-semibold ${
+                    isActive ? "text-accent" : "text-text-primary"
+                  }`}
+                >
+                  {t.label}
+                </span>
+                <span className="text-[11px] text-text-muted leading-snug">{t.blurb}</span>
+              </button>
+            );
+          })}
         </div>
-        <select
-          value={current}
-          onChange={(e) => handleChange(e.target.value)}
-          className="flex-1 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light appearance-none cursor-pointer"
-        >
-          {CLAUDE_CLI_MODELS.map((m) => (
-            <option key={m.value} value={m.value}>
-              {m.label}
-            </option>
-          ))}
-        </select>
       </div>
+
+      {/* 3-role model dropdowns */}
+      <div className="space-y-3">
+        {CLAUDE_ROLES.map((role) => {
+          const current = (eco[role.key] as string | null | undefined) ?? "claude-sonnet-4-6";
+          return (
+            <div key={role.key} className="flex items-center gap-4">
+              <div className="w-24 shrink-0">
+                <p className="text-sm font-medium text-text-primary">{role.label}</p>
+                <p className="text-[10px] text-text-muted">{role.sub}</p>
+              </div>
+              <select
+                value={current}
+                onChange={(e) => handleModel(role.key, e.target.value)}
+                className="flex-1 px-3 py-2 rounded-lg bg-bg-tertiary border border-border text-sm text-text-primary focus:outline-none focus:border-border-light appearance-none cursor-pointer"
+              >
+                {CLAUDE_CLI_MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          );
+        })}
+      </div>
+
       <p className="text-[10px] text-text-muted mt-3">
         Only affects CLAUDE mode. HYBRID and FULL API model settings are independent.
       </p>
@@ -544,11 +623,12 @@ function EcoTab({
         </div>
       </section>
 
-      {/* Model Assignment — CLAUDE mode gets its own CLI-only picker that
-          writes ONLY to claude_brain_model. HYBRID/FULL keep the existing
-          generic 3-row API matrix. No state crosses between modes. */}
+      {/* Model Assignment — CLAUDE mode gets its own panel with the
+          transport radio (SDK / CLI) + brain/worker/fallback model
+          dropdowns. HYBRID/FULL keep the existing generic 3-row API
+          matrix. No state crosses between modes. */}
       {eco && eco.mode === "claude" && (
-        <ClaudeCliModelPicker eco={eco} onSettingsUpdate={onSettingsUpdate} />
+        <ClaudeModePanel eco={eco} onSettingsUpdate={onSettingsUpdate} />
       )}
       {eco && modelsData && eco.mode !== "claude" && (
         <ModelAssignment

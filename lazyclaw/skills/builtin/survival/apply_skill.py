@@ -427,25 +427,31 @@ class ApplyJobSkill(BaseSkill):
                             logger.warning("Claude Code MCP letter gen failed, trying CLI: %s", exc)
                             break  # MCP is reachable but failed — drop to CLI, don't retry MCP
 
-        # CLI fallback — `claude -p` via LLMRouter. The model name
-        # "claude-cli" routes to ClaudeCliProvider (see router.py:21).
+        # LLM fallback — route via EcoRouter so we respect the user's
+        # active mode (MODE_CLAUDE → subscription transport, HYBRID →
+        # paid API only if they have credit, etc.). Going through the
+        # plain LLMRouter with model="claude-cli" hit the Anthropic
+        # paid API because router.py:17 dispatches by `claude-` prefix
+        # → AnthropicProvider, which 400s when the user has $0 credit.
+        # EcoRouter knows about the subscription transport.
         try:
             from lazyclaw.llm.providers.base import LLMMessage
             from lazyclaw.llm.router import LLMRouter
-            cli_router = LLMRouter(self._config)
-            cli_resp = await cli_router.chat(
+            from lazyclaw.llm.eco_router import EcoRouter, ROLE_BRAIN
+            eco_router = EcoRouter(self._config, LLMRouter(self._config))
+            resp = await eco_router.chat(
                 messages=[LLMMessage(role="user", content=letter_prompt)],
-                model="claude-cli",
                 user_id=user_id,
+                role=ROLE_BRAIN,
                 max_tokens=1100,
                 temperature=0.7,
             )
-            cli_text = (cli_resp.content or "").strip()
-            if cli_text:
-                return cli_text
-            logger.warning("Claude CLI returned empty letter, falling to template")
+            text = (resp.content or "").strip()
+            if text:
+                return text
+            logger.warning("EcoRouter returned empty letter, falling to template")
         except Exception as exc:
-            logger.warning("Claude CLI letter gen failed: %s", exc)
+            logger.warning("EcoRouter letter gen failed: %s", exc)
 
         # Fallback: template-based letter (used when LLM is unavailable).
         # Keep aligned with the structure in _LAZYCLAW_BRANDING_TEMPLATE.

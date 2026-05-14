@@ -81,6 +81,9 @@ export interface EcoSettings {
   claude_brain_model?: string | null;
   claude_worker_model?: string | null;
   claude_fallback_model?: string | null;
+  // Transport sub-mode inside CLAUDE: "sdk" = native Agent SDK (default),
+  // "cli" = legacy `claude -p`. Both consume the same subscription.
+  claude_transport?: "sdk" | "cli";
   free_providers?: string[];
   preferred_free_model?: string | null;
   [key: string]: unknown; // allow dynamic per-mode keys

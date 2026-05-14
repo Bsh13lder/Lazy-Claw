@@ -331,9 +331,6 @@ _CHANNEL_KEYWORD_ALIASES: dict[str, list[str]] = {
         # Bare words last so the more-specific phrases win regex priority
         r"\bsheets?\b", r"\bdrive\b", r"\bcalendar\b", r"\bdocs?\b",
     ],
-    "jobspy": [
-        "jobspy", "indeed", "linkedin", "glassdoor", "ziprecruiter",
-    ],
 }
 
 # Channels that should NOT be auto-routed even if their name appears (too
@@ -510,7 +507,6 @@ _MCP_MGMT_KEYWORDS = frozenset({
     "install instagram", "connect instagram", "set up instagram",
     "install whatsapp", "connect whatsapp", "set up whatsapp",
     "install email", "connect email", "set up email",
-    "install jobspy", "connect jobspy",
     "install scraper", "connect scraper",
     "install stripe", "connect stripe",
     "install canva", "connect canva",
@@ -559,7 +555,7 @@ _MESSAGING_CHANNELS: frozenset[str] = frozenset({
 # intent. Specific phrases ("find job", "find work", "apply job",
 # "freelance", "gig", "gigs") still cover the gig-economy case.
 _SURVIVAL_KEYWORDS = frozenset({
-    "jobspy", "freelance", "gig", "gigs",
+    "freelance", "gig", "gigs",
     "find work", "find job", "search job", "apply job", "apply for",
     "survival mode", "survival status", "skills profile",
     "start gig", "submit deliverable", "invoice client",
@@ -4068,6 +4064,18 @@ class Agent:
                             arguments={**tc.arguments, "_background": True},
                         )
 
+                    # Fix I — snapshot registry MCP tools BEFORE executing
+                    # connect_mcp_server / install_mcp_server, so the post-hook
+                    # below can inject ONLY the just-connected MCP's tools
+                    # (the true delta) instead of every previously-registered
+                    # MCP whose tools weren't in the per-turn curated `tools`.
+                    _mcp_pre_snapshot: set[str] | None = None
+                    if tc.name in ("connect_mcp_server", "install_mcp_server"):
+                        from lazyclaw.runtime.mcp_tool_reinject import (
+                            snapshot_mcp_tool_names,
+                        )
+                        _mcp_pre_snapshot = snapshot_mcp_tool_names(self.registry)
+
                     # Duplicate call cache — skip re-executing identical tool calls
                     _cache_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
                     if _cache_key in _tool_call_cache:
@@ -4283,7 +4291,12 @@ class Agent:
                     # install_mcp_server the MCP's tools get registered
                     # globally but the per-turn `tools` list doesn't
                     # know. Reinject them now so the next iter can use
-                    # the freshly-connected MCP. See mcp_tool_reinject.
+                    # the freshly-connected MCP. Fix I narrows this to
+                    # the DELTA (tools NEW since the pre-execute
+                    # snapshot) so connecting one MCP doesn't drag in
+                    # every other already-connected MCP's tools (seen
+                    # live 2026-05-14: a sheets connect blew tool count
+                    # from 35 → 162). See mcp_tool_reinject.
                     if (
                         tc.name in ("connect_mcp_server", "install_mcp_server")
                         and _rv_status != "failed"
@@ -4293,6 +4306,7 @@ class Agent:
                         )
                         _injected_post_hook = reinject_mcp_tools(
                             self.registry, tools, _suppressed_tool_names,
+                            pre_connect_tool_names=_mcp_pre_snapshot,
                         )
                         if _injected_post_hook:
                             logger.info(

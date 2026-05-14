@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-from lazyclaw.runtime.mcp_tool_reinject import reinject_mcp_tools
+from lazyclaw.runtime.mcp_tool_reinject import (
+    reinject_mcp_tools,
+    snapshot_mcp_tool_names,
+)
 
 
 # ── Fakes ────────────────────────────────────────────────────────────
@@ -162,3 +165,108 @@ def test_idempotent_across_two_calls() -> None:
     assert first == ["mcp_abc_claude_code"]
     assert second == []
     assert len(tools) == 1
+
+
+# ── Fix I — pre_connect_tool_names delta filter ─────────────────────
+
+
+def test_snapshot_captures_registry_state() -> None:
+    reg = FakeRegistry([
+        _tool("mcp_abc_one"),
+        _tool("mcp_abc_two"),
+        _tool("mcp_xyz_three"),
+    ])
+    snap = snapshot_mcp_tool_names(reg)
+    assert snap == {"mcp_abc_one", "mcp_abc_two", "mcp_xyz_three"}
+
+
+def test_snapshot_returns_empty_on_none_registry() -> None:
+    assert snapshot_mcp_tool_names(None) == set()
+
+
+def test_delta_filter_only_injects_newly_registered() -> None:
+    # Live bug 2026-05-14 13:48: connecting one MCP added 127 tools
+    # because the helper saw all already-registered MCPs as "missing"
+    # from the curated per-turn `tools`. Fix I: with the pre_connect
+    # snapshot, only tools NEW since the snapshot are eligible.
+    pre = {"mcp_existing_a", "mcp_existing_b", "mcp_other_z"}
+    reg = FakeRegistry([
+        _tool("mcp_existing_a"),
+        _tool("mcp_existing_b"),
+        _tool("mcp_other_z"),
+        _tool("mcp_newly_connected_x"),
+        _tool("mcp_newly_connected_y"),
+    ])
+    # Per-turn tools intentionally only has 1 of the pre-existing tools
+    # (channel-keyword router curated it).
+    tools = [_tool("mcp_existing_a")]
+    injected = reinject_mcp_tools(
+        reg, tools,
+        suppressed_tool_names=set(),
+        pre_connect_tool_names=pre,
+    )
+    # Only the two genuinely new tools should be injected — not the
+    # other pre-existing ones (mcp_existing_b, mcp_other_z) even though
+    # they're in registry but not in tools.
+    assert sorted(injected) == [
+        "mcp_newly_connected_x", "mcp_newly_connected_y",
+    ]
+
+
+def test_no_delta_filter_keeps_old_behavior() -> None:
+    # When pre_connect_tool_names is None, the helper falls back to the
+    # original "anything in registry not in tools" behavior. Backward-
+    # compatible for any caller that doesn't snapshot.
+    reg = FakeRegistry([
+        _tool("mcp_a"),
+        _tool("mcp_b"),
+    ])
+    tools: list[dict] = []
+    injected = reinject_mcp_tools(reg, tools, suppressed_tool_names=set())
+    assert sorted(injected) == ["mcp_a", "mcp_b"]
+
+
+def test_delta_filter_with_empty_snapshot_treats_all_as_new() -> None:
+    reg = FakeRegistry([
+        _tool("mcp_a"),
+        _tool("mcp_b"),
+    ])
+    tools: list[dict] = []
+    injected = reinject_mcp_tools(
+        reg, tools,
+        suppressed_tool_names=set(),
+        pre_connect_tool_names=set(),
+    )
+    assert sorted(injected) == ["mcp_a", "mcp_b"]
+
+
+def test_delta_filter_respects_suppressed_set() -> None:
+    # Suppressed names must still be skipped even if they're in the
+    # new-since-snapshot delta. AUTO-PROMOTE narrowing depends on this.
+    reg = FakeRegistry([
+        _tool("mcp_new_safe"),
+        _tool("mcp_new_blocked"),
+    ])
+    tools: list[dict] = []
+    injected = reinject_mcp_tools(
+        reg, tools,
+        suppressed_tool_names={"mcp_new_blocked"},
+        pre_connect_tool_names=set(),
+    )
+    assert injected == ["mcp_new_safe"]
+
+
+def test_delta_filter_respects_existing_tools() -> None:
+    # If a tool is already in `tools`, don't add it again even when
+    # it's flagged "new" by the delta. Existing-in-tools wins.
+    reg = FakeRegistry([
+        _tool("mcp_already_in_tools"),
+        _tool("mcp_truly_new"),
+    ])
+    tools = [_tool("mcp_already_in_tools")]
+    injected = reinject_mcp_tools(
+        reg, tools,
+        suppressed_tool_names=set(),
+        pre_connect_tool_names=set(),
+    )
+    assert injected == ["mcp_truly_new"]

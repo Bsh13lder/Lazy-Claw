@@ -28,6 +28,7 @@ instead of breaking the whole provider module at boot.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -192,6 +193,69 @@ def _build_tool_wrappers(
         sdk_tools.append(_make_wrapper(short_name, full_name))
 
     return sdk_tools, name_map
+
+
+def _dedup_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
+    """Remove duplicate (name, args) tool calls within one assistant turn.
+
+    Sonnet occasionally emits the same tool with identical args multiple
+    times in a single response — most extreme observed: 13× google_run_task
+    with the same args on 2026-05-14, after lazyclaw's dispatch primitives
+    started returning errors and the brain panicked into carpet-bomb mode.
+
+    The CLI provider's --json-schema constraint suppressed this implicitly
+    via schema validation; the SDK path passes the raw tool_use blocks
+    through untouched, so we filter here.
+
+    Strategy:
+      - Preserve order so the runtime executes tools in the brain's
+        intended sequence.
+      - Key on (name, JSON-serialised args) — exact-match only. Two
+        legitimate parallel calls like search(q="python") +
+        search(q="rust") have different args and both survive.
+      - Drop dupes silently (log the count); the dropped tool_use_ids
+        won't be referenced by any follow-up turn because the brain
+        only sees one tool_result back per unique call.
+    """
+    if len(tool_calls) <= 1:
+        return tool_calls
+
+    seen: set[tuple[str, str]] = set()
+    deduped: list[ToolCall] = []
+    for tc in tool_calls:
+        try:
+            args_key = json.dumps(tc.arguments, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            # Args contain something non-JSON-serialisable; treat as
+            # unique to avoid false-positive dedup of an exotic call.
+            args_key = repr(tc.arguments)
+        key = (tc.name, args_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tc)
+
+    dropped = len(tool_calls) - len(deduped)
+    if dropped:
+        # Sonnet duplicating itself is a signal that something upstream
+        # is degrading (broken dispatch primitive, oversized toolset).
+        # Logging at WARNING surfaces it in the dashboard without
+        # changing the agent's behaviour.
+        logger.warning(
+            "Claude SDK: dropped %d duplicate tool call(s) from one assistant "
+            "turn (Sonnet emitted %d, deduped to %d). Most-duplicated tool: %s",
+            dropped, len(tool_calls), len(deduped),
+            _most_duplicated_name(tool_calls),
+        )
+    return deduped
+
+
+def _most_duplicated_name(tool_calls: list[ToolCall]) -> str:
+    """For logging — return the name that appeared most often in a batch."""
+    from collections import Counter
+    counter = Counter(tc.name for tc in tool_calls)
+    name, count = counter.most_common(1)[0]
+    return f"{name} (×{count})"
 
 
 def _find_claude_binary() -> str | None:
@@ -401,7 +465,20 @@ class ClaudeSDKProvider(BaseLLMProvider):
         if session_id:
             usage["session_id"] = session_id
 
+        # Dedup pass — Sonnet under load (high-tool-count batches +
+        # broken dispatch paths) occasionally emits the same (name, args)
+        # tool call multiple times in one assistant turn. The CLI
+        # provider's --json-schema validation suppressed this implicitly;
+        # the SDK passes the raw tool_use blocks through, so we filter
+        # here. Observed 2026-05-14: 13× google_run_task with identical
+        # args in one batch.
+        #
+        # Dedup key = (name, JSON-serialised args). Order-preserving:
+        # keeps the FIRST instance so the tool_use_id of duplicates is
+        # dropped, which is correct because the runtime only needs to
+        # execute the call once anyway.
         if tool_calls:
+            tool_calls = _dedup_tool_calls(tool_calls)
             logger.info(
                 "Claude SDK returned %d tool calls: %s",
                 len(tool_calls), [tc.name for tc in tool_calls],

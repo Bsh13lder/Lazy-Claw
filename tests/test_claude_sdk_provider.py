@@ -17,6 +17,7 @@ from lazyclaw.llm.providers.claude_sdk_provider import (
     ClaudeSDKProvider,
     SDKUnavailable,
     _build_tool_wrappers,
+    _dedup_tool_calls,
     _serialize_messages,
     _shorten_tool_name,
 )
@@ -233,6 +234,75 @@ class TestUsageNormalization:
         assert u["prompt_tokens"] == 0
         assert u["completion_tokens"] == 0
         assert u["provider"] == "claude_sdk"
+
+
+class TestDedupToolCalls:
+    """Sonnet under load occasionally emits the same (name, args) tool call
+    multiple times. Observed 13× google_run_task with identical args in one
+    batch on 2026-05-14. The CLI provider's --json-schema suppressed this;
+    SDK path must dedup explicitly."""
+
+    def test_empty_or_single_returns_unchanged(self) -> None:
+        assert _dedup_tool_calls([]) == []
+        single = [ToolCall(id="a", name="t", arguments={})]
+        assert _dedup_tool_calls(single) == single
+
+    def test_drops_duplicates_keeps_first(self) -> None:
+        tc1 = ToolCall(id="a", name="search", arguments={"q": "python"})
+        tc2 = ToolCall(id="b", name="search", arguments={"q": "python"})
+        tc3 = ToolCall(id="c", name="search", arguments={"q": "python"})
+        out = _dedup_tool_calls([tc1, tc2, tc3])
+        assert len(out) == 1
+        assert out[0].id == "a"  # first-wins
+
+    def test_same_tool_different_args_both_survive(self) -> None:
+        """Legitimate parallel calls — must NOT collapse."""
+        tc1 = ToolCall(id="a", name="search", arguments={"q": "python"})
+        tc2 = ToolCall(id="b", name="search", arguments={"q": "rust"})
+        out = _dedup_tool_calls([tc1, tc2])
+        assert len(out) == 2
+
+    def test_args_key_is_order_insensitive(self) -> None:
+        """Two dicts with same content in different declaration order
+        are duplicates — JSON dump with sort_keys handles this."""
+        tc1 = ToolCall(id="a", name="f", arguments={"x": 1, "y": 2})
+        tc2 = ToolCall(id="b", name="f", arguments={"y": 2, "x": 1})
+        out = _dedup_tool_calls([tc1, tc2])
+        assert len(out) == 1
+
+    def test_carpet_bomb_pattern(self) -> None:
+        """Recreates the 2026-05-14 incident: 13 identical calls."""
+        tcs = [
+            ToolCall(id=f"t{i}", name="google_run_task", arguments={"task": "x"})
+            for i in range(13)
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert len(out) == 1
+        assert out[0].name == "google_run_task"
+
+    def test_preserves_intra_batch_order(self) -> None:
+        """Brain's call order matters for downstream dispatch — dedup
+        must not reshuffle survivors."""
+        tcs = [
+            ToolCall(id="1", name="a", arguments={}),
+            ToolCall(id="2", name="b", arguments={}),
+            ToolCall(id="3", name="a", arguments={}),  # dup
+            ToolCall(id="4", name="c", arguments={}),
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert [tc.name for tc in out] == ["a", "b", "c"]
+
+    def test_non_json_serialisable_args_treated_as_unique(self) -> None:
+        """Defensive — exotic args (sets, objects) shouldn't crash the
+        dedup pass. They become non-equal under repr fallback."""
+        class Exotic:
+            pass
+
+        tc1 = ToolCall(id="a", name="t", arguments={"obj": Exotic()})
+        tc2 = ToolCall(id="b", name="t", arguments={"obj": Exotic()})
+        # Two different Exotic instances → different reprs → both survive
+        out = _dedup_tool_calls([tc1, tc2])
+        assert len(out) == 2
 
 
 class TestSDKUnavailableRaisedOnMissingBinary:

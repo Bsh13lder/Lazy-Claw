@@ -1421,6 +1421,51 @@ class Agent:
             await cb.on_event(AgentEvent("done", "Response ready", {}))
             return verify_reply
 
+        # /streaming on|off|status — Fix J toggle for whether the Web UI
+        # surfaces live background-task progress frames (bg_event,
+        # bg_tool_call, bg_tool_result, bg_token). background_done /
+        # background_failed still always fire so the user sees results.
+        try:
+            from lazyclaw.runtime.streaming_setting import (
+                parse_streaming_command,
+                get_bg_streaming,
+                set_bg_streaming,
+            )
+            _stream_cmd = parse_streaming_command(message)
+        except Exception:
+            logger.debug(
+                "streaming_setting import/parse failed; continuing",
+                exc_info=True,
+            )
+            _stream_cmd = None
+        if _stream_cmd is not None:
+            _action, _flag = _stream_cmd
+            if _action == "status":
+                _current = await get_bg_streaming(self.config, user_id)
+                _reply = (
+                    f"Background streaming: "
+                    f"{'ON (verbose)' if _current else 'OFF (quiet)'}.\n"
+                    "Toggle with `/streaming on` or `/streaming off`."
+                )
+            else:
+                _new = await set_bg_streaming(
+                    self.config, user_id, bool(_flag),
+                )
+                _reply = (
+                    f"Background streaming → "
+                    f"{'ON' if _new else 'OFF'}. "
+                    + (
+                        "You'll see live tool calls and progress while "
+                        "background tasks run."
+                        if _new
+                        else "Background tasks run quietly — only the "
+                             "final result appears."
+                    )
+                )
+            await cb.on_event(AgentEvent(INSTANT_COMMAND, _reply, {}))
+            await cb.on_event(AgentEvent("done", "Response ready", {}))
+            return _reply
+
         # ── Instant dispatch — single-skill 1:1 intents ───────────────
         # Skips full context build + history compress + skill load + brain
         # LLM iteration when the message is a known direct mapping to one

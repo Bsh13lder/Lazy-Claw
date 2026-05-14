@@ -463,6 +463,21 @@ export const setPlanSettings = (opts: {
     body: JSON.stringify(opts),
   });
 
+// ── Streaming Settings (Fix J — bg progress on/off) ─────────────────────
+
+export interface StreamingSettings {
+  bg_streaming: boolean;
+}
+
+export const getStreamingSettings = () =>
+  request<StreamingSettings>("/api/agent/streaming/settings");
+
+export const setStreamingSettings = (opts: { bg_streaming: boolean }) =>
+  request<StreamingSettings>("/api/agent/streaming/settings", {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+
 // ── Browser Templates ─────────────────────────────────────────────────────
 
 export interface BrowserTemplateDraft {

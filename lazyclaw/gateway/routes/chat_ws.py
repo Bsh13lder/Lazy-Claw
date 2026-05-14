@@ -82,6 +82,14 @@ class WebSocketCallback:
 
     ws: WebSocket
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
+    # Fix J — mutable holder for the user's bg-streaming preference. The
+    # outer WS handler scope owns it (refreshed from DB at each turn
+    # start) and both cb.on_event and _task_event_pump read it via this
+    # reference. When ``streaming_state["bg_streaming"]`` is False, live
+    # bg_* frames are dropped (final ``background_done`` /
+    # ``background_failed`` always pass through so the user still sees
+    # the result).
+    streaming_state: dict = field(default_factory=lambda: {"bg_streaming": True})
     _buffer: str = field(default="", init=False)
     _closed: bool = field(default=False, init=False)
     _work_summary: dict | None = field(default=None, init=False)
@@ -130,6 +138,23 @@ class WebSocketCallback:
         # already been finalized by the brain's "done" event).
         _bg_id = (event.metadata or {}).get("bg_task_id") if isinstance(event.metadata, dict) else None
         _bg_name = (event.metadata or {}).get("bg_task_name") if isinstance(event.metadata, dict) else None
+
+        # ── Fix J — streaming OFF filter ────────────────────────────
+        # When the user has `bg_streaming` toggled OFF (via `/streaming
+        # off` chat command or the Web UI toggle), drop every live bg
+        # frame here. Final terminal events (`background_done` /
+        # `background_failed`) still fire so the user sees the result;
+        # only the noisy progress chatter is suppressed.
+        if (
+            _bg_id
+            and not self.streaming_state.get("bg_streaming", True)
+            and kind not in (
+                "background_done",
+                "background_failed",
+                "work_summary",
+            )
+        ):
+            return
 
         # ── Bg leak guard ────────────────────────────────────────────
         # If this event is tagged as background, ALL non-tool-call kinds
@@ -455,6 +480,17 @@ async def chat_websocket(ws: WebSocket):
     # Mutable holder — shared between reader task and writer tasks.
     state: dict = {"active": None}  # type: dict[str, WebSocketCallback | None]
     writer_tasks: set = set()
+
+    # Fix J — bg-streaming preference shared with every per-turn cb and
+    # with _task_event_pump. Init from DB on connect; refreshed at each
+    # turn start (so a `/streaming on|off` chat command takes effect on
+    # the very next turn / on bg events arriving after that turn).
+    streaming_state: dict = {"bg_streaming": True}
+    try:
+        from lazyclaw.runtime.streaming_setting import get_bg_streaming
+        streaming_state["bg_streaming"] = await get_bg_streaming(_config, user.id)
+    except Exception:
+        logger.debug("initial bg_streaming load failed", exc_info=True)
     # Subagent terminal events that fired while the brain was idle. The
     # task_event_bus pump can't push them into a callback that doesn't
     # exist, so we stash them here and drain into the next turn's
@@ -577,6 +613,20 @@ async def chat_websocket(ws: WebSocket):
                     # tasks would duplicate the consolidator's reply.
                     # Drop them; Activity panel still updates via the
                     # separate task_completed frame.
+                    continue
+
+                # Fix J — streaming-OFF filter for the event-bus path.
+                # Terminal events (background_done / background_failed)
+                # still surface so the user sees the result; live
+                # progress events are dropped when the user has
+                # `bg_streaming` toggled off.
+                if (
+                    not streaming_state.get("bg_streaming", True)
+                    and evt.kind not in (
+                        "background_done",
+                        "background_failed",
+                    )
+                ):
                     continue
 
                 try:
@@ -754,7 +804,16 @@ async def chat_websocket(ws: WebSocket):
         and cancels to it."""
         import time as _time
 
-        cb = WebSocketCallback(ws=ws)
+        # Fix J — refresh streaming preference from DB at turn start so a
+        # `/streaming on|off` from the prior turn takes effect immediately.
+        try:
+            from lazyclaw.runtime.streaming_setting import get_bg_streaming
+            streaming_state["bg_streaming"] = await get_bg_streaming(
+                _config, user.id,
+            )
+        except Exception:
+            logger.debug("turn-start bg_streaming refresh failed", exc_info=True)
+        cb = WebSocketCallback(ws=ws, streaming_state=streaming_state)
         # Drain background-arrived subagent notes into this turn's
         # callback BEFORE marking it active. The agent's TAOR loop
         # pop_side_notes() on each iteration → these land as system

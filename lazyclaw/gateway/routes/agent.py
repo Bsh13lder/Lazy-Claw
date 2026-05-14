@@ -170,3 +170,37 @@ async def set_plan_settings(
     if payload.get("clear_session_trust"):
         plan_checkpoint.clear_session_auto_approve(user.id)
     return await plan_settings(user=user)
+
+
+# ── Background-streaming toggle (Fix J) ─────────────────────────────────
+
+
+@router.get("/streaming/settings")
+async def streaming_settings(user: User = Depends(get_current_user)):
+    """Return the user's bg_streaming preference (live bg progress on/off)."""
+    from lazyclaw.config import load_config
+    from lazyclaw.runtime.streaming_setting import get_bg_streaming
+    config = load_config()
+    enabled = await get_bg_streaming(config, user.id)
+    return {"bg_streaming": enabled}
+
+
+@router.post("/streaming/settings")
+async def set_streaming_settings(
+    user: User = Depends(get_current_user),
+    payload: dict = Body(default={}),
+):
+    """Toggle the user's bg_streaming preference. Body: ``{bg_streaming: bool}``."""
+    payload = payload or {}
+    if "bg_streaming" in payload:
+        from lazyclaw.config import load_config
+        from lazyclaw.runtime.streaming_setting import set_bg_streaming
+        config = load_config()
+        try:
+            await set_bg_streaming(
+                config, user.id, bool(payload.get("bg_streaming")),
+            )
+        except Exception as exc:
+            logger.error("Failed to update bg_streaming: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc))
+    return await streaming_settings(user=user)

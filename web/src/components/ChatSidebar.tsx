@@ -8,6 +8,7 @@ import BrowserCanvas from "./BrowserCanvas";
 import TemplateSavedToast from "./TemplateSavedToast";
 import PlanApprovalCard from "./PlanApprovalCard";
 import PlanModeToggle from "./PlanModeToggle";
+import StreamingToggle from "./StreamingToggle";
 import BrainBadge from "./BrainBadge";
 
 interface ChatSidebarProps {
@@ -102,6 +103,9 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
 
         {/* Plan mode toggle — quick switch between Plan ↔ Auto */}
         <PlanModeToggle />
+
+        {/* Streaming toggle — show/hide live bg-task progress in chat */}
+        <StreamingToggle />
 
         {/* New chat */}
         <button

@@ -46,13 +46,23 @@ logger = logging.getLogger(__name__)
 
 
 # Built-in Claude Code tools and MCP defaults that must always be blocked.
-# Same list as the CLI provider plus `ToolSearch` (newer Claude Code feature
-# that auto-fires before MCP tools and shows up in our smoke tests).
+# `strict_mcp_config=True` locks external MCPs out, but Claude Code's
+# *native* tool list is a separate Anthropic surface — it has to be
+# enumerated here. Tools observed leaking past strict_mcp_config in live
+# logs on 2026-05-14: `Skill`, `run_command` (with `RunCommand` camel
+# variant added defensively). When Sonnet/Opus emits one of these,
+# lazyclaw's runtime drops it as a hallucinated tool — wasted slot in
+# the batch + a confused brain.
 _DISALLOWED_BUILT_INS = [
     "Bash", "Read", "Edit", "Write", "Glob", "Grep",
     "WebSearch", "WebFetch", "Task", "Agent",
     "TodoWrite", "NotebookEdit", "BashOutput", "KillShell",
     "ToolSearch",
+    # Added 2026-05-14 after live leak observations:
+    "Skill",                 # Claude Code's skill-runner — clashes with lazyclaw's `search_tools`
+    "run_command", "RunCommand",  # Claude Code's bash equivalent
+    "SlashCommand",          # Claude Code's slash-command invoker
+    "Skills",                # Plural variant occasionally emitted
 ]
 
 # MCP tool name pattern from lazyclaw's registry: `mcp_<uuid>_<tool_name>`.

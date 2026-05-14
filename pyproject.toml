@@ -18,6 +18,12 @@ dependencies = [
     "httpx>=0.27.0",
     "openai>=1.12.0",
     "anthropic>=0.18.0",
+    # Official Anthropic Claude Agent SDK — drives MODE_CLAUDE's "sdk"
+    # transport (native tool_use protocol + persistent client + cost
+    # reporting). Shells out to the local `claude` binary, same auth path
+    # as the legacy CLI transport. Base dep (default-on per
+    # feedback_optional_extras_for_core_features).
+    "claude-agent-sdk>=0.1.81",
     "python-multipart>=0.0.7",
     "click>=8.1.0",
     "rich>=13.0.0",

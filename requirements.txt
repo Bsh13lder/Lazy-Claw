@@ -26,3 +26,6 @@ pyahocorasick>=2.0.0
 # pre-fetches the wheels before the slow `pip install -e .` step.
 pywhispercpp>=1.2.0
 imageio-ffmpeg>=0.4.9
+# Claude Agent SDK — MODE_CLAUDE "sdk" transport. Mirrored from
+# pyproject.toml so Docker layer-cache picks it up before pip install -e.
+claude-agent-sdk>=0.1.81

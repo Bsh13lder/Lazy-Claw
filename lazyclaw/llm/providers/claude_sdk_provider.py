@@ -1,0 +1,606 @@
+"""Claude Agent SDK as an LLM provider.
+
+The "sdk" transport for MODE_CLAUDE. Routes LLM calls through Anthropic's
+official `claude-agent-sdk` Python package, which shells out to the local
+`claude` binary the same way our legacy `claude_cli_provider.py` does —
+so the call is still covered by the Claude Code subscription ($0
+incremental cost until the June 15 2026 budget split).
+
+Advantages over the raw CLI transport:
+  - Native `tool_use` protocol — tools register as in-process MCP via
+    `@tool` + `create_sdk_mcp_server`. No `--json-schema` text injection,
+    no 60k-char tool-list serialised into the prompt every turn, no
+    legacy `[TOOL_CALL]` regex fallback.
+  - Typed response messages (`AssistantMessage` / `ResultMessage` /
+    `ToolUseBlock`) — no stdout-JSON parsing.
+  - `ResultMessage.total_cost_usd` for accurate cost reporting.
+  - Built-in support for external MCP servers via `mcp_servers={...}`.
+
+We keep the `BaseLLMProvider` contract identical to the CLI provider so
+the rest of the codebase (agent runtime, taor, dispatcher) doesn't care
+which transport is active. The eco_router picks per user_id based on
+`users.settings.eco.claude_transport`.
+
+Module-level imports are kept light; the SDK itself is imported lazily
+inside `chat()` so a missing/broken install raises `SDKUnavailable` once
+instead of breaking the whole provider module at boot.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+from typing import Any
+
+from lazyclaw.llm.providers.base import (
+    BaseLLMProvider,
+    LLMMessage,
+    LLMResponse,
+    StreamChunk,
+    ToolCall,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# Built-in Claude Code tools and MCP defaults that must always be blocked.
+# Same list as the CLI provider plus `ToolSearch` (newer Claude Code feature
+# that auto-fires before MCP tools and shows up in our smoke tests).
+_DISALLOWED_BUILT_INS = [
+    "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+    "WebSearch", "WebFetch", "Task", "Agent",
+    "TodoWrite", "NotebookEdit", "BashOutput", "KillShell",
+    "ToolSearch",
+]
+
+# MCP tool name pattern from lazyclaw's registry: `mcp_<uuid>_<tool_name>`.
+# We strip the UUID prefix when registering with the SDK (cleaner names +
+# tighter prompts) and reverse-map when dispatching the tool call back to
+# lazyclaw's runtime.
+import re
+_MCP_UUID_RE = re.compile(
+    r"^mcp_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_",
+)
+
+# SDK auto-prefixes our in-process MCP tools with `mcp__<server_name>__`
+# when surfacing them in ToolUseBlocks. We strip it here so callers see
+# the same names lazyclaw's registry knows.
+_SDK_MCP_PREFIX = "mcp__lazyclaw__"
+
+
+class SDKUnavailable(RuntimeError):
+    """Raised when the SDK can't be reached (binary missing, auth missing,
+    package not importable). Eco-router catches this to fall back to the
+    legacy CLI transport. Tool-call errors and rate-limit / timeout errors
+    are NOT wrapped in this — those are real bugs to surface.
+    """
+
+
+def _shorten_tool_name(name: str) -> str:
+    """Strip the MCP UUID prefix for cleaner allowed_tools entries."""
+    return _MCP_UUID_RE.sub("", name)
+
+
+def _serialize_messages(messages: list[LLMMessage]) -> str:
+    """Render the conversation as a single prompt string for the SDK.
+
+    The SDK's `query()` accepts either a plain string or a streaming
+    AsyncIterable of structured message dicts. We use the string form
+    because our caller already curates the LLMMessage[] window — there's
+    no benefit to round-tripping through the streaming-input format.
+
+    Mirrors the CLI provider's `_serialize_messages` so behavior matches
+    when toggling transports mid-session.
+    """
+    parts: list[str] = []
+    for msg in messages:
+        if msg.role == "system":
+            parts.append(f"[System Context]\n{msg.content}\n")
+        elif msg.role == "user":
+            parts.append(f"[User]\n{msg.content}\n")
+        elif msg.role == "assistant":
+            if msg.tool_calls:
+                tc_lines = []
+                for tc in msg.tool_calls:
+                    tc_lines.append(
+                        f"  -> {tc.name}({tc.arguments})"
+                    )
+                tc_text = "\n".join(tc_lines)
+                if msg.content:
+                    parts.append(
+                        f"[Assistant]\n{msg.content}\n{tc_text}\n"
+                    )
+                else:
+                    parts.append(f"[Assistant]\n{tc_text}\n")
+            else:
+                parts.append(f"[Assistant]\n{msg.content}\n")
+        elif msg.role == "tool":
+            tid = msg.tool_call_id or "unknown"
+            parts.append(f"[Tool Result: {tid}]\n{msg.content}\n")
+    return "\n".join(parts)
+
+
+def _build_tool_wrappers(
+    tools: list[dict],
+    dispatch: "callable | None" = None,
+) -> tuple[list[Any], dict[str, str]]:
+    """Wrap each neutral OpenAI-format tool dict as an SDK `@tool`.
+
+    Returns (sdk_tool_list, short_to_full_name_map).
+
+    Each wrapper:
+      - Uses the SHORT name (UUID prefix stripped) so allowed_tools and
+        Claude's tool-use blocks stay readable.
+      - Calls `dispatch(short_name, args)` at runtime if a dispatcher is
+        provided; otherwise returns a sentinel result that signals the
+        caller to handle execution itself.
+
+    The dispatcher pattern matters because lazyclaw's tool execution
+    happens inside the agent runtime (taor.py), not in the SDK provider.
+    When the SDK calls our @tool wrapper, we just need to bridge the call
+    back to the agent. v1 returns a sentinel so the agent loop owns the
+    actual side effects; v2 (later) can wire in-process dispatch directly.
+    """
+    from claude_agent_sdk import tool as sdk_tool
+
+    sdk_tools: list[Any] = []
+    name_map: dict[str, str] = {}
+
+    for spec in tools:
+        func = spec.get("function") or {}
+        full_name = func.get("name") or ""
+        if not full_name:
+            continue
+        short_name = _shorten_tool_name(full_name)
+        if short_name != full_name:
+            name_map[short_name] = full_name
+
+        description = func.get("description") or ""
+        # SDK accepts dict-form JSON Schema for input. We pass the neutral
+        # `parameters` object straight through — same shape both Anthropic
+        # and OpenAI tool APIs accept.
+        input_schema = func.get("parameters") or {"type": "object", "properties": {}}
+
+        # Bind `short_name` into the closure explicitly so the loop
+        # variable doesn't leak across wrappers.
+        def _make_wrapper(_short: str, _full: str):
+            @sdk_tool(_short, description, input_schema)
+            async def _wrapper(args: dict[str, Any]) -> dict[str, Any]:
+                # v1: do NOT execute here. The SDK records the tool_use
+                # block in the AssistantMessage stream; our provider's
+                # `chat()` extracts it and returns it as `ToolCall` in
+                # the LLMResponse. The agent runtime (taor.py) then
+                # actually executes the tool via the skill registry, and
+                # feeds the result back into the NEXT turn as an LLMMessage
+                # with role="tool". That matches how the CLI provider
+                # works today, so the agent loop is unchanged.
+                #
+                # We return a sentinel string here only as a safety net
+                # in case the SDK ever invokes the wrapper directly
+                # (e.g. inside a chained turn). The agent will refresh
+                # this on the next iteration anyway.
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": "[lazyclaw runtime] tool call recorded — "
+                                "agent will execute on next iteration",
+                    }],
+                }
+            return _wrapper
+
+        sdk_tools.append(_make_wrapper(short_name, full_name))
+
+    return sdk_tools, name_map
+
+
+def _find_claude_binary() -> str | None:
+    """Search well-known paths for the `claude` binary.
+
+    The SDK can auto-locate it on most systems, but if our server runs
+    with a stripped PATH (Docker, launchd) it may not. Returning a path
+    here lets us pass `cli_path=` to ClaudeAgentOptions.
+    """
+    import shutil
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    for cand in (
+        os.path.join(home, ".local", "bin", "claude"),
+        os.path.join(home, "bin", "claude"),
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+    ):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+class ClaudeSDKProvider(BaseLLMProvider):
+    """LLM provider that talks to `claude` via the official Agent SDK.
+
+    One provider instance per user_id (matches the legacy CLI provider's
+    lifecycle in eco_router). State held here:
+      - `_model` — current `--model` choice (sonnet/opus/haiku)
+      - `_claude_bin` — resolved binary path
+      - `_tool_name_map` — last-call's short→full MCP name map for
+        reverse-mapping ToolUseBlock.name back to the registry's full
+        name. Set on every chat() call; not thread-safe for concurrent
+        calls on one provider instance, which is fine because eco_router
+        serializes per-user calls.
+    """
+
+    PROVIDER_NAME = "claude_sdk"
+
+    def __init__(
+        self,
+        model: str = "sonnet",
+        claude_bin: str | None = None,
+    ) -> None:
+        self._model = model
+        self._claude_bin = claude_bin or _find_claude_binary()
+        self._tool_name_map: dict[str, str] = {}
+
+    async def verify_key(self) -> bool:
+        """Health check — confirm SDK importable and binary findable.
+
+        We don't actually spin a query here (would consume subscription
+        for a trivial probe); just verify the prerequisites.
+        """
+        try:
+            import claude_agent_sdk  # noqa: F401
+        except ImportError:
+            return False
+        return self._claude_bin is not None
+
+    async def health_check(self) -> bool:
+        return await self.verify_key()
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        model: str = "",
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Send the conversation to Claude via the Agent SDK.
+
+        Args:
+            messages: LLMMessage[] — full conversation window (caller
+                already curated this, we don't trim).
+            model: Ignored. The provider uses `self._model` to honor the
+                role-resolved model from eco_router (`_resolve_claude_cli_model`).
+            **kwargs:
+                tools: list[dict] — neutral OpenAI-format tool specs from
+                    the skill registry. We wrap each as an SDK @tool.
+                session_id: str (optional) — derived deterministically by
+                    the caller from user_id + context_id. Currently unused
+                    in v1 — see _build_options for details.
+
+        Returns:
+            LLMResponse with `content`, `tool_calls`, and `usage` populated.
+
+        Raises:
+            SDKUnavailable: SDK package missing or `claude` binary missing.
+                Caller (eco_router) catches this and falls back to the
+                legacy CLI transport.
+            RuntimeError: API errors, billing errors, malformed responses.
+                NOT caught by the fallback — these are real bugs.
+        """
+        try:
+            from claude_agent_sdk import (
+                query as sdk_query,
+                ClaudeAgentOptions,
+                AssistantMessage,
+                ResultMessage,
+                TextBlock,
+                ToolUseBlock,
+                ThinkingBlock,
+                CLINotFoundError,
+                CLIConnectionError,
+                ProcessError,
+                ClaudeSDKError,
+            )
+            from claude_agent_sdk import create_sdk_mcp_server
+        except ImportError as exc:
+            raise SDKUnavailable(f"claude-agent-sdk not installed: {exc}") from exc
+
+        if self._claude_bin is None:
+            # Last-chance lookup — PATH may have changed since __init__.
+            self._claude_bin = _find_claude_binary()
+            if self._claude_bin is None:
+                raise SDKUnavailable(
+                    "`claude` CLI binary not found in PATH or well-known "
+                    "locations. Install Claude Code: "
+                    "https://docs.anthropic.com/en/docs/claude-code"
+                )
+
+        tools_spec: list[dict] = kwargs.get("tools") or []
+
+        # Build prompt + options
+        prompt_text = _serialize_messages(messages)
+        options = self._build_options(tools_spec, create_sdk_mcp_server)
+
+        logger.info(
+            "Claude SDK call: tools=%d, model=%s, prompt_len=%d chars",
+            len(tools_spec), self._model, len(prompt_text),
+        )
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        usage_raw: dict[str, Any] | None = None
+        api_equiv_cost: float = 0.0
+        stop_reason: str | None = None
+        session_id: str | None = None
+        api_error: str | None = None
+
+        try:
+            async for msg in sdk_query(prompt=prompt_text, options=options):
+                cls = type(msg).__name__
+
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            text_parts.append(block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            # Strip SDK MCP prefix, then reverse-map
+                            # short→full so the registry finds the skill.
+                            registry_name = self._unmap_tool_name(block.name)
+                            tool_calls.append(ToolCall(
+                                id=block.id or f"sdk_{uuid.uuid4().hex[:8]}",
+                                name=registry_name,
+                                arguments=block.input or {},
+                            ))
+                        # ThinkingBlock / ToolResultBlock / Server* blocks
+                        # are NOT promoted into our LLMResponse: they're
+                        # SDK-side bookkeeping that the agent loop doesn't
+                        # need to see again.
+
+                elif isinstance(msg, ResultMessage):
+                    usage_raw = msg.usage
+                    api_equiv_cost = float(msg.total_cost_usd or 0.0)
+                    stop_reason = msg.stop_reason
+                    session_id = msg.session_id
+                    if msg.is_error:
+                        # SDK signals an upstream error — surface it as
+                        # a clear runtime failure (NOT SDKUnavailable, so
+                        # eco_router doesn't silently fall back over a
+                        # legitimate API error).
+                        errs = msg.errors or [msg.result or "unknown"]
+                        api_error = "; ".join(str(e) for e in errs)
+
+                # SystemMessage / RateLimitEvent / HookEventMessage /
+                # StreamEvent — observability only, nothing to extract.
+
+        except CLINotFoundError as exc:
+            raise SDKUnavailable(f"`claude` binary missing: {exc}") from exc
+        except CLIConnectionError as exc:
+            raise SDKUnavailable(f"Claude CLI connection failed: {exc}") from exc
+        except ProcessError as exc:
+            # Subprocess exited non-zero. Most common cause: not logged
+            # in. Surface a clear error so the caller can prompt for
+            # `claude /login`.
+            msg_lower = str(exc).lower()
+            if "not logged in" in msg_lower or "/login" in msg_lower:
+                raise SDKUnavailable(
+                    "Claude CLI is not logged in. Run `claude /login` "
+                    "on the host (or `docker exec -it lazyclaw claude /login` "
+                    "in the container) and retry."
+                ) from exc
+            raise RuntimeError(f"Claude SDK process error: {exc}") from exc
+        except ClaudeSDKError as exc:
+            raise RuntimeError(f"Claude SDK error: {exc}") from exc
+
+        if api_error:
+            raise RuntimeError(f"Claude SDK upstream error: {api_error}")
+
+        content = "".join(text_parts).strip()
+        usage = self._normalize_usage(usage_raw, api_equiv_cost)
+        if stop_reason:
+            usage["stop_reason"] = stop_reason
+        if session_id:
+            usage["session_id"] = session_id
+
+        if tool_calls:
+            logger.info(
+                "Claude SDK returned %d tool calls: %s",
+                len(tool_calls), [tc.name for tc in tool_calls],
+            )
+
+        return LLMResponse(
+            content=content,
+            model=f"claude-sdk ({self._model})",
+            usage=usage,
+            tool_calls=tool_calls or None,
+        )
+
+    async def stream_chat(
+        self,
+        messages: list[LLMMessage],
+        model: str = "",
+        **kwargs: Any,
+    ):
+        """Streaming is not exposed in v1 — we collapse to a single chunk.
+
+        The SDK's AssistantMessage blocks already arrive as a stream, but
+        our caller (taor.py / agent.py) consumes complete LLMResponse
+        objects, not partial deltas. If we add streaming chat in the Web
+        UI later we can override this to yield per-block.
+        """
+        response = await self.chat(messages, model, **kwargs)
+        yield StreamChunk(
+            delta=response.content,
+            tool_calls=response.tool_calls,
+            usage=response.usage,
+            model=response.model,
+            done=True,
+        )
+
+    # ── internals ──────────────────────────────────────────────────────
+
+    def _unmap_tool_name(self, sdk_name: str) -> str:
+        """Reverse the two transformations done in `_build_tool_wrappers`:
+        1. SDK prefixes in-process MCP tool names with `mcp__lazyclaw__`.
+        2. We stripped the registry's `mcp_<uuid>_` prefix when registering.
+
+        Given `mcp__lazyclaw__instagram_read_profile` we want the original
+        `mcp_<uuid>_instagram_read_profile` back so the skill registry can
+        look up the right MCP tool.
+        """
+        short = sdk_name
+        if short.startswith(_SDK_MCP_PREFIX):
+            short = short[len(_SDK_MCP_PREFIX):]
+        return self._tool_name_map.get(short, short)
+
+    def _build_options(
+        self,
+        tools_spec: list[dict],
+        create_sdk_mcp_server,
+    ) -> Any:
+        """Construct ClaudeAgentOptions for one chat() call.
+
+        Builds:
+          - In-process MCP server bundling all lazyclaw skills as @tool
+          - allowed_tools list with the mcp__lazyclaw__<name> prefix
+          - disallowed_tools list with Claude Code's built-ins (so they
+            don't fire instead of our skills)
+          - env dict with ANTHROPIC_API_KEY stripped (still load-bearing
+            per upstream issue #12352 — env var preempts subscription auth)
+          - permission_mode = bypassPermissions (lazyclaw owns the
+            permission system via _DISALLOWED_BUILT_INS, _allow_*, /allow,
+            and per-skill permissions)
+        """
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        sdk_tools, name_map = _build_tool_wrappers(tools_spec)
+        self._tool_name_map = name_map
+
+        mcp_servers: dict[str, Any] = {}
+        allowed_tools: list[str] = []
+
+        if sdk_tools:
+            server_config = create_sdk_mcp_server(
+                name="lazyclaw",
+                version="1.0.0",
+                tools=sdk_tools,
+            )
+            mcp_servers["lazyclaw"] = server_config
+            allowed_tools = [
+                f"mcp__lazyclaw__{t.name}" for t in sdk_tools
+            ]
+
+        # Force OAuth subscription auth.
+        # The SDK MERGES our env dict on top of `os.environ` rather than
+        # replacing it (see claude_agent_sdk/_internal/transport/
+        # subprocess_cli.py lines 430-436). So just omitting
+        # ANTHROPIC_API_KEY from this dict is NOT enough — the value
+        # would still be inherited from the parent process (loaded by
+        # `load_dotenv()` in config.py for the Anthropic API path used
+        # by HYBRID/FULL modes). We must explicitly set the keys to
+        # empty strings so the merge overwrites the inherited values
+        # with "unset". claude's auth precedence is API_KEY > AUTH_TOKEN
+        # > OAuth subscription, so any non-empty value preempts the
+        # subscription. An empty string disables that branch and falls
+        # through to OAuth.
+        #
+        # Also wipes ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL because
+        # both can hijack auth or point at a non-Anthropic endpoint.
+        env = {
+            "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_BASE_URL": "",
+        }
+
+        kw: dict[str, Any] = {
+            "model": self._model,
+            "permission_mode": "bypassPermissions",
+            "disallowed_tools": _DISALLOWED_BUILT_INS,
+            "env": env,
+            # CRITICAL: without this the SDK inherits the host user's
+            # global Claude Code MCP config (~/.claude/mcp_servers.json)
+            # — meaning Sonnet sees and uses globally-registered MCPs
+            # (Canva, Gmail, host Upwork, etc.) that lazyclaw's runtime
+            # has NO knowledge of. Tool dispatch then crashes because
+            # the agent can't execute a tool that isn't in its registry.
+            # strict_mcp_config=True locks the surface down to ONLY the
+            # MCPs we explicitly pass in (the lazyclaw in-process server).
+            "strict_mcp_config": True,
+        }
+        if mcp_servers:
+            kw["mcp_servers"] = mcp_servers
+            kw["allowed_tools"] = allowed_tools
+        if self._claude_bin:
+            kw["cli_path"] = self._claude_bin
+
+        # System prompt: brief, similar to the CLI provider's "you are
+        # LazyClaw" preamble. System context blocks already arrive in the
+        # serialized messages, so this is just an identity marker.
+        kw["system_prompt"] = (
+            "You are LazyClaw, an AI agent. Any [System Context] blocks "
+            "in the conversation contain your project rules. Use tools "
+            "from the MCP server when the user wants action; answer "
+            "directly otherwise."
+        )
+
+        return ClaudeAgentOptions(**kw)
+
+    @staticmethod
+    def _normalize_usage(
+        usage_raw: dict | None,
+        api_equiv_cost: float,
+    ) -> dict:
+        """Translate SDK usage dict → our usage dict.
+
+        `cost_usd` reports $0 because the call is subscription-funded
+        until June 15 2026. `cost_usd_subscription` retains the
+        API-equivalent value for diagnostics ("how much would this have
+        cost?"). Cache token fields pass through so the dashboard's
+        prompt-caching panel keeps working.
+        """
+        u = usage_raw or {}
+        return {
+            "prompt_tokens": u.get("input_tokens", 0),
+            "completion_tokens": u.get("output_tokens", 0),
+            "total_tokens": (
+                u.get("input_tokens", 0) + u.get("output_tokens", 0)
+            ),
+            "cache_read_tokens": u.get("cache_read_input_tokens", 0),
+            "cache_creation_tokens": u.get("cache_creation_input_tokens", 0),
+            "cost_usd": 0.0,
+            "cost_usd_subscription": api_equiv_cost,
+            "provider": ClaudeSDKProvider.PROVIDER_NAME,
+        }
+
+
+def check_claude_sdk_auth() -> tuple[bool, str]:
+    """Boot-time readiness check — silent when OK, loud when broken.
+
+    Mirrors `check_claude_cli_auth()` so the gateway startup banner can
+    show whichever transport(s) are usable. We can't probe Keychain on
+    macOS hosts (no Foundation bindings) so we trust it; on Linux/Docker
+    we check `~/.claude/.credentials.json`.
+    """
+    try:
+        import claude_agent_sdk  # noqa: F401
+    except ImportError:
+        return False, (
+            "claude-agent-sdk is not installed. Run "
+            "`pip install claude-agent-sdk>=0.1.81` or rebuild Docker."
+        )
+
+    if _find_claude_binary() is None:
+        return True, ""  # SDK unused — silent.
+
+    import sys
+    if sys.platform == "darwin" and not os.path.exists("/.dockerenv"):
+        return True, ""
+
+    cred_path = os.path.expanduser("~/.claude/.credentials.json")
+    if not os.path.isfile(cred_path) or os.path.getsize(cred_path) == 0:
+        return False, (
+            "Claude CLI is installed but not logged in (SDK transport "
+            "won't work either). Run `docker exec -it lazyclaw claude "
+            "/login` or `claude /login` on the host."
+        )
+
+    return True, ""

@@ -155,6 +155,25 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         role="brain",
     ),
 
+    # ── SDK — FREE (user's Claude subscription, native tool_use) ───────
+    # The "sdk" transport for MODE_CLAUDE. Same subscription auth as
+    # claude-cli, but via the official `claude-agent-sdk` package —
+    # native tool_use protocol, typed messages, accurate cost reporting
+    # via ResultMessage.total_cost_usd.
+    "claude-sdk": ModelProfile(
+        name="claude-sdk",
+        display_name="Claude SDK",
+        provider="claude_sdk",
+        is_local=False,
+        ram_mb=0,
+        cost_input=0.0,
+        cost_output=0.0,
+        icon="⚡",  # ⚡
+        max_context=200000,
+        tool_calling=True,
+        role="brain",
+    ),
+
     # ── MCP — FREE (user's Claude subscription) ──────────────────────
     "claude_code": ModelProfile(
         name="claude_code",

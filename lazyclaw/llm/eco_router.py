@@ -223,6 +223,11 @@ class EcoSettings:
     claude_brain_model: str | None = None
     claude_worker_model: str | None = None
     claude_fallback_model: str | None = None
+    # Transport sub-mode inside MODE_CLAUDE: "sdk" (official Agent SDK,
+    # native tool_use protocol, default) | "cli" (legacy raw `claude -p`).
+    # Both share the same subscription auth — only the wire-protocol and
+    # message handling differ.
+    claude_transport: str = "sdk"
     minimax_brain_model: str | None = None
     minimax_worker_model: str | None = None
     minimax_fallback_model: str | None = None
@@ -278,6 +283,11 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
         claude_brain_model=eco.get("claude_brain_model"),
         claude_worker_model=eco.get("claude_worker_model"),
         claude_fallback_model=eco.get("claude_fallback_model"),
+        claude_transport=(
+            eco.get("claude_transport")
+            if eco.get("claude_transport") in ("sdk", "cli")
+            else "sdk"
+        ),
         minimax_brain_model=eco.get("minimax_brain_model"),
         minimax_worker_model=eco.get("minimax_worker_model"),
         minimax_fallback_model=eco.get("minimax_fallback_model"),
@@ -373,8 +383,14 @@ class EcoRouter:
         # Free provider keys (lazy init)
         self._free_keys: dict[str, str] | None = None
 
-        # Claude CLI provider (lazy init)
+        # Claude CLI provider (lazy init — legacy transport)
         self._claude_cli = None
+        # Claude Agent SDK provider (lazy init — primary transport for MODE_CLAUDE)
+        # Tracks the model the cached instance was built with so a runtime
+        # model change triggers a rebuild (mirrors how _claude_cli._model is
+        # re-assigned in place below).
+        self._claude_sdk = None
+        self._claude_sdk_model: str | None = None
         self._last_claude_fallback: str | None = None
 
         # Routing attribution — set after every chat() call
@@ -631,20 +647,57 @@ class EcoRouter:
         models = self._resolve_models(settings)
 
         # MODE_CLAUDE is strictly sticky: every brain/worker/escalation/
-        # explicit-model-override path goes through the CLI subprocess.
-        # The user runs CLAUDE mode precisely because they have $0 paid-
-        # API balance, so silently falling back to _route_paid would
-        # always 400. One chokepoint here captures every entry path —
-        # including agent.py's `role="escalation"` recovery path that
-        # previously bypassed routing at line 559.
+        # explicit-model-override path goes through the user's Claude
+        # subscription. The user runs CLAUDE mode precisely because they
+        # have $0 paid-API balance, so silently falling back to
+        # _route_paid would always 400. One chokepoint here captures
+        # every entry path — including agent.py's `role="escalation"`
+        # recovery path that previously bypassed routing at line 559.
+        #
+        # Inside MODE_CLAUDE the transport sub-mode selects how we talk
+        # to `claude`:
+        #   - "sdk" (default) → official claude-agent-sdk, native tool_use
+        #   - "cli"           → legacy raw `claude -p` subprocess
+        # SDK failures auto-cascade to CLI only on SDKUnavailable (binary
+        # missing, auth missing, package missing). Real upstream errors
+        # surface to the caller.
         if settings.mode == MODE_CLAUDE:
+            transport = getattr(settings, "claude_transport", "sdk") or "sdk"
+            if transport == "sdk":
+                try:
+                    return await self._route_claude_sdk(
+                        messages, user_id, settings=settings, role=role, **kwargs,
+                    )
+                except Exception as exc:
+                    # Narrow auto-fallback: only SDKUnavailable. Anything
+                    # else (auth, API, tool dispatch) should surface so
+                    # we don't mask real bugs by silently dropping to CLI.
+                    from lazyclaw.llm.providers.claude_sdk_provider import (
+                        SDKUnavailable,
+                    )
+                    if isinstance(exc, SDKUnavailable):
+                        logger.warning(
+                            "Claude SDK unavailable, falling back to CLI: %s",
+                            exc,
+                        )
+                        return await self._route_claude(
+                            messages, user_id, settings=settings, role=role,
+                            **kwargs,
+                        )
+                    raise
             return await self._route_claude(
                 messages, user_id, settings=settings, role=role, **kwargs,
             )
 
         # Explicit model override — bypass routing
         if model and role not in (ROLE_BRAIN, ROLE_WORKER):
-            # Claude CLI is not a paid API model — route through CLI provider
+            # Subscription-only model names don't go through paid API —
+            # route through the matching transport. Both names point at
+            # the same Claude binary; "sdk" gets the native protocol.
+            if model == "claude-sdk":
+                return await self._route_claude_sdk(
+                    messages, user_id, settings=settings, **kwargs,
+                )
             if model == "claude-cli":
                 return await self._route_claude(
                     messages, user_id, settings=settings, **kwargs,
@@ -835,6 +888,61 @@ class EcoRouter:
 
         self._last_claude_fallback = None
         self._record_routing_stats("claude-cli", response.usage)
+        return response
+
+    # ── Claude Agent SDK routing (MODE_CLAUDE transport=sdk) ───────────
+
+    async def _route_claude_sdk(
+        self,
+        messages: list[LLMMessage],
+        user_id: str,
+        settings: EcoSettings | None = None,
+        role: str = ROLE_BRAIN,
+        **kwargs,
+    ) -> LLMResponse:
+        """Route through the official `claude-agent-sdk` ($0 via subscription).
+
+        Native tool_use protocol, typed AssistantMessage/ResultMessage,
+        accurate cost via `ResultMessage.total_cost_usd`. Same
+        subscription auth as the legacy CLI path (both shell into the
+        same `claude` binary).
+
+        Failures policy:
+          - `SDKUnavailable` propagates up to the MODE_CLAUDE dispatcher,
+            which catches it and falls back to the CLI transport (binary
+            missing, package missing, not logged in).
+          - All other exceptions (upstream API error, tool dispatch
+            failure, timeout) propagate to the caller — they're real bugs
+            and should surface, not be masked by a silent CLI fallback.
+        """
+        # Same model resolver as the CLI path — model names are identical
+        # (`sonnet` / `opus` / `haiku` / full IDs) since both transports
+        # invoke the same `claude` binary.
+        sdk_model = _resolve_claude_cli_model(settings, role)
+
+        if self._claude_sdk is None or self._claude_sdk_model != sdk_model:
+            from lazyclaw.llm.providers.claude_sdk_provider import (
+                ClaudeSDKProvider,
+            )
+            self._claude_sdk = ClaudeSDKProvider(model=sdk_model)
+            self._claude_sdk_model = sdk_model
+        else:
+            self._claude_sdk._model = sdk_model
+
+        self._set_routing(
+            "claude-sdk", "claude_sdk", is_local=False,
+            reason=f"claude: {role} -> {sdk_model} (sdk)",
+        )
+        self._record_usage(user_id, "free")
+
+        # SDKUnavailable bubbles up to the MODE_CLAUDE dispatcher which
+        # falls back to the CLI transport. Other exceptions propagate.
+        response = await self._claude_sdk.chat(
+            messages, model="claude-sdk", **kwargs,
+        )
+
+        self._last_claude_fallback = None
+        self._record_routing_stats("claude-sdk", response.usage)
         return response
 
     # ── Worker routing ────────────────────────────────────────────────

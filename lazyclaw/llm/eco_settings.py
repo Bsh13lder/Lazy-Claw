@@ -36,6 +36,8 @@ def _get_valid_providers() -> set[str]:
     return set(_BASE_PROVIDERS)
 
 
+_VALID_CLAUDE_TRANSPORTS = frozenset({"sdk", "cli"})
+
 # Default eco settings
 DEFAULT_ECO = {
     "mode": "hybrid",
@@ -57,6 +59,10 @@ DEFAULT_ECO = {
     "claude_brain_model": None,
     "claude_worker_model": None,
     "claude_fallback_model": None,
+    # Transport sub-mode for CLAUDE: "sdk" = official Agent SDK (default),
+    # "cli" = legacy raw `claude -p` provider. Both consume the same
+    # subscription; only the wire-protocol differs.
+    "claude_transport": "sdk",
     "minimax_brain_model": None,
     "minimax_worker_model": None,
     "minimax_fallback_model": None,
@@ -114,6 +120,11 @@ async def get_eco_settings(config: Config, user_id: str) -> dict:
         if val and not _is_valid_cli_model(val):
             merged[cli_field] = None
 
+    # Defensive normalisation: claude_transport must be one of "sdk"/"cli"
+    transport = merged.get("claude_transport")
+    if transport not in _VALID_CLAUDE_TRANSPORTS:
+        merged["claude_transport"] = "sdk"
+
     return merged
 
 
@@ -167,6 +178,16 @@ async def update_eco_settings(config: Config, user_id: str, updates: dict) -> di
         if val < 0:
             raise ValueError("monthly_paid_budget must be >= 0")
         updates["monthly_paid_budget"] = val
+
+    # Validate claude_transport (sub-mode for CLAUDE: sdk | cli)
+    if "claude_transport" in updates:
+        val = (updates["claude_transport"] or "").lower().strip()
+        if val not in _VALID_CLAUDE_TRANSPORTS:
+            raise ValueError(
+                f"Invalid claude_transport: {updates['claude_transport']!r}. "
+                f"Use 'sdk' or 'cli'."
+            )
+        updates["claude_transport"] = val
 
     # Load current settings
     async with db_session(config) as db:

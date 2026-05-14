@@ -927,4 +927,40 @@ These are the issues that block the live apply flow despite today's patches. Use
 ### Architectural notes
 
 - The `pre_connects` removal experiment showed the original ordering (`get_connects_balance` → `get_page()` for submit) was load-bearing — `safe_goto` alone doesn't replicate the same page-handle rotation reliably enough for hourly forms with milestone widgets. **Keep the pre/post balance calls** even though they add ~6-10s per submit. The `connects_used` int delta also has real value for the brain reporting back to the user.
+
+## Session 2026-05-14 — MODE_CLAUDE Agent SDK migration + gateway dispatch fix
+
+Branch `feat/claude-agent-sdk`, 7 commits. Closes the "Anthropic API credits exhausted" + "Sonnet returns tool_calls=0 with 40 tools loaded" pair of pathologies observed in 2026-05-13 production logs.
+
+- [x] **Agent SDK transport for MODE_CLAUDE** — new `lazyclaw/llm/providers/claude_sdk_provider.py` (~470 LOC) wraps the official `claude-agent-sdk` (v0.1.81, Anthropic-supported). Native `tool_use` protocol replaces `--json-schema` text injection. `ResultMessage.total_cost_usd` for accurate cost reporting. Dynamic skill→`@tool` wrapping via `create_sdk_mcp_server`. `strict_mcp_config=True` locks host-global MCPs out of lazyclaw's surface. `ANTHROPIC_API_KEY` forced to empty string in subprocess env (the SDK *merges* options.env over os.environ rather than replacing — verified at `subprocess_cli.py:430`, so omitting isn't enough). Lives alongside the legacy `claude_cli_provider.py` (now branded "cli" transport). Live-verified on user's Sonnet 4.6 subscription: native `tool_use` fires reliably with 40+ tools, UUID-prefixed MCP names round-trip via short-form reverse map, `cost_usd_subscription` reported as `~$0.10/turn` against the subscription pool. Commit `d61d1b2`.
+- [x] **`claude_transport` sub-mode** — `EcoSettings.claude_transport: "sdk" | "cli"` defaults to `"sdk"`. `eco_router.chat()`'s MODE_CLAUDE sticky branch dispatches on the transport; `_route_claude_sdk` raises `SDKUnavailable` only on binary/auth/import failures so real bugs surface rather than silently falling back to CLI. Web UI Settings → CLAUDE section shows a Transport radio + brain/worker/fallback model dropdowns. Telegram `/mode claude sdk|cli` toggles transport in the same PATCH that switches mode. Active transport shown in `/mode` status line (e.g. `Mode: CLAUDE (SDK)`). Commits `d61d1b2` + `b432254`.
+- [x] **Gateway TaskRunner + TeamLead wiring** — chat_ws.py and gateway/app.py constructed fresh Agents per Web UI / WS request without passing `task_runner` or `team_lead`. Result: `agent._task_runner = None` → fresh per-turn `bg_skill._task_runner = None` → `run_background` returned `"Error: background task runner not configured"` AND `dispatch_subagents` similarly. Brain had no escape valve → forced into foreground carpet-bomb loops (live 2026-05-14: 10 iterations on a single Google Workspace task, with one 13×`google_run_task` duplicate batch). Fix: new `set_agent_deps()` setter in `gateway/app.py` mirrors `set_lane_queue` / `set_registry` pattern; threaded through to `set_chat_ws_deps`; both gateway Agent constructors pass `task_runner=_task_runner, team_lead=_team_lead`. Commit `f230841`.
+- [x] **SDK tool_use dedup** — `_dedup_tool_calls` filters duplicate `(name, JSON-args)` blocks within one assistant turn. Sonnet under load emits the same call 13× in a single batch (observed live 2026-05-14); the CLI provider's `--json-schema` suppressed this implicitly, the SDK passes raw blocks through. Order-preserving, first-wins on `tool_use_id`. Logged at WARNING with most-duplicated tool name + count so upstream degradation surfaces in the dashboard. 7 new tests including the 13× carpet-bomb pattern. Commit `0ababc7`.
+- [x] **MODE_CLAUDE strict-sticky in streaming + daily summary** — `EcoRouter.stream_chat` got the same strict-sticky guard as `chat()`. `memory/daily_log.generate_daily_summary` + `generate_weekly_summary` had a try/except that dropped to plain `LLMRouter` on EcoRouter failure — removed so daily summaries skip cleanly when EcoRouter is unhappy rather than leaking to the paid Anthropic API. Closes the "credits exhausted" 400s that were firing on EVERY heartbeat tick. Commit `2216867`.
+- [x] **Drop mcp-jobspy, consolidate freelance search on mcp-upwork** — `BUNDLED_MCPS` loses the jobspy entry. `SearchJobsSkill` removes the JobSpy-first path (~133 LOC). `survival/platforms.py` drops Indeed + Glassdoor configs + the `jobspy_supported` flag. `survival/profile.py` removes `default_search_sites`. `set_skills_profile` schema drops `default_search_sites` + `default_hours_old` args. Comments/docstrings updated across `mcp_management.py`, `bridge.py`, `skill_lesson_auto.py`, `survival/__init__.py`. 12/12 `test_survival_profile_defaults.py` green. Rationale: mcp-jobspy was disabled in cold-connect (`optional=True`, hangs on npx download); Indeed/Glassdoor never produced freelance contracts worth applying to. Commit `65ca829`.
+- [x] **DB seed cleanup** — stale `claude_worker_model='claude-cli'` (spamming a warning every turn) → `claude-sonnet-4-6`; `claude_fallback_model='MiniMax-M2.7'` (nonsense for CLAUDE mode) → `claude-haiku-4-5-20251001`; added `claude_transport='sdk'` for all users.
+- [x] **28 unit tests** — `tests/test_claude_sdk_provider.py` covers helpers, env stripping (`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` all set to empty string), `strict_mcp_config=True`, `ToolSearch` in `disallowed_tools`, `permission_mode="bypassPermissions"`, usage normalization, `SDKUnavailable` on missing binary, dedup (carpet-bomb pattern, order-preservation, JSON-arg-order insensitivity, non-serialisable args).
+
+### Cleanup follow-up (separate PR, ≥3 days after 2026-05-14)
+
+Once the SDK transport has been live in production for ≥3 days with clean logs (no `SDKUnavailable` fallback hits), delete the legacy transport in a dedicated commit:
+- [ ] Delete `lazyclaw/llm/providers/claude_cli_provider.py` (~821 LOC)
+- [ ] Delete `_route_claude` from `eco_router.py` (~80 LOC) and the SDK→CLI fallback try/except in the sticky dispatcher
+- [ ] Delete the `claude-cli` model alias from `model_registry.py`
+- [ ] Delete the Transport radio from Web UI Settings + the `cli` value from `_VALID_CLAUDE_TRANSPORTS`
+- [ ] Delete `/mode claude cli` subcommand from `telegram_commands.py`
+- [ ] Update CLAUDE.md MODE_CLAUDE bullet — drop the transport-split note, keep only the SDK description
+- [ ] Net cleanup: **≈−650 LOC**
+
+### Resolved from 2026-05-13 evening list
+
+- [x] **Anthropic API credits exhausted** — addressed by routing `apply_skill._generate_letter` via `EcoRouter` (commit `b432254`). When user is in MODE_CLAUDE, letter generation now flows through the subscription transport instead of dying with `400 credit balance too low`. The `daily_log.py` LLMRouter fallback that was also leaking has been removed too.
+
+### Still open (other-session work)
+
+- [ ] `upwork_mcp` subprocess WARNING traces don't reach `lazyclaw.log` (logger namespace mismatch).
+- [ ] Auto-classifier `outcome_from_result` treats structured `{"status":"needs_user"/"needs_answers"/"error"}` responses as `pending`.
+- [ ] Brain still calls `upwork_get_my_profile` / `upwork_get_connects_balance` redundantly in apply flow (SOUL.md nudge needed).
+- [ ] `display_name = "Buchvardi"` should be `"Vato T"` — DB cleanup or NL command.
+- [ ] `instant_dispatch` heuristic didn't catch the multi-step Google Workspace pattern (handled in a separate session per user 2026-05-14).
 - The blank-page self-heal in `submit_proposal` (reload-once when `len(html)<5000` or no `<main>` element) was added after user reported "screen was white, just needed refresh". Fails OPEN on probe errors so it never false-positive-loops on mocked pages in tests.

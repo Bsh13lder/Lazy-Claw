@@ -149,9 +149,9 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 | `tasks/` | Encrypted task store, nagging reminders, recurring tasks |
 | `notifications/` | Telegram push for background tasks |
 | `pipeline/` | CRM-style pipeline store |
-| `survival/` | Gig economy tools — JobSpy search, proposal drafter, freelance platform watchers (Upwork/Workana/PeoplePerHour/Reddit), invoices |
+| `survival/` | Gig economy tools — Upwork MCP search, proposal drafter, freelance platform watchers (Upwork/Workana/PeoplePerHour/Reddit), invoices |
 
-Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude CLI, Anthropic, OpenAI), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool).
+Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude subscription via Agent SDK + CLI, Anthropic, OpenAI, MiniMax), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool).
 
 | | |
 |---|---|
@@ -286,10 +286,10 @@ LazyClaw routes through a single `LLMRouter` that speaks five provider dialects.
 | **MiniMax** | MiniMax-M2.7, minimax-m2.5 | Subscription-priced (flat-rate), OpenAI-compatible API at `api.minimax.io/v1` | **Tested and works really well** as an alternative brain — 204K context, strong tool calling, predictable monthly cost. Auto-falls-back to Claude on rate-limit. |
 | **OpenAI** | GPT-5, GPT-5-mini | Per-token API | Legacy fallback; kept for users with existing OpenAI keys. |
 | **Ollama** (local) | Gemma 4 E2B / E4B (`lazyclaw-e2b` / `lazyclaw-e4b` custom Modelfiles with agent identity baked in) | Free (runs on your machine) | Default HYBRID worker. Great for tool-call-heavy tasks when you don't want to pay per token. |
-| **Claude CLI** | `claude -p` subprocess | Free for Anthropic Max subscribers | CLAUDE-mode fallback: run the whole agent for $0 if you already pay for Max. |
+| **Claude subscription** | `claude-agent-sdk` (default) or `claude -p` subprocess | Free for Anthropic Max subscribers (until June 15 2026; then a separate capped credit pool — $20/$100/$200/mo by tier) | CLAUDE mode. Pick **SDK** for native `tool_use` protocol + accurate cost reporting, or **CLI** as the legacy fallback. Both use the same `claude` binary you already authenticated with `claude login`. |
 
 **Which should I use?**
-LazyClaw was built and tuned against Claude Sonnet 4.6 + Haiku 4.5 — that's the recommended default and what ECO HYBRID mode ships with. **MiniMax M2.7 has been tested as a drop-in brain replacement and works well** for the same workload at a flat monthly cost. OpenAI works but isn't the focus. Ollama is the zero-cost local worker. Claude CLI lets Max subscribers run everything through the CLI at no extra cost.
+LazyClaw was built and tuned against Claude Sonnet 4.6 + Haiku 4.5 — that's the recommended default and what ECO HYBRID mode ships with. **MiniMax M2.7 has been tested as a drop-in brain replacement and works well** for the same workload at a flat monthly cost. OpenAI works but isn't the focus. Ollama is the zero-cost local worker. **CLAUDE mode** lets Max subscribers run everything against the user's subscription via the official `claude-agent-sdk` (native `tool_use`) at $0 — toggle SDK / CLI transport from Settings or Telegram (`/mode claude sdk|cli`).
 
 Set any of these in `.env`:
 
@@ -337,7 +337,7 @@ The brain calls `delegate(...)` inline; the specialist runs to completion and it
 | Specialist | Strong angles | Tool ladder | Model |
 |---|---|---|---|
 | **🌐 Browser Specialist** | PLAN → ACT → VALIDATE loop on every step; never opens the browser without research first; payment-page detection (stops + asks before entering card details); structured error recovery (`NavigationTimeout`, `SelectorMissing`, `DetachedFrame`) so it never blindly retries; site-memory hints from previous visits | `web_search` → `mcp-scraper` (`extract_entities` / `crawl_url` / `batch_crawl`) → browser as last resort | `worker` (Haiku 4.5 / Gemma 4 E2B / MiniMax) |
-| **🔧 Code Specialist** | Decoupled from brain choice — code work always rides Claude regardless of which brain you picked. Hard ladder: **Claude Code MCP (primary)** → `claude -p` CLI (fallback, warm pool of 3) → template (deep fallback). Tracks live runs grouped by `project_tag` in the new Code Specialist Web UI page. Schema-driven tool calls (no more `[TOOL_CALL]` tag parsing). | `create_skill` / `calculate` / `list_skills` / `delete_skill` + Claude Code MCP | Claude Code MCP regardless of brain ([ADR-0004](docs/adr/0004-code-tasks-route-through-claude-code.md)) |
+| **🔧 Code Specialist** | Decoupled from brain choice — code work always rides Claude regardless of which brain you picked. Hard ladder: **Claude Code MCP (primary)** → Claude via EcoRouter (fallback, respects user's mode: SDK / CLI / paid Sonnet) → template (deep fallback). Tracks live runs grouped by `project_tag` in the Code Specialist Web UI page. | `create_skill` / `calculate` / `list_skills` / `delete_skill` + Claude Code MCP | Claude Code MCP regardless of brain ([ADR-0004](docs/adr/0004-code-tasks-route-through-claude-code.md)) |
 | **🔬 Research Specialist** | Hard 5-call budget — won't loop varying queries. Never reports numbers from memory. Auto-cites sources (URLs) for every fact. Skips Instagram / Facebook / LinkedIn (anti-bot wall). Falls back to "Not found" with a one-line note instead of fabricating. | `web_search` → `mcp-scraper` → `read_file` / `list_directory` → browser only when scraper genuinely can't | `worker` |
 
 You can also save **custom specialists** (encrypted in the `specialists` table) with your own name, system prompt, and allowed-skill list — useful for niche workflows (e.g. "Reddit-DM Specialist" with a curated tool subset).
@@ -419,7 +419,6 @@ First-class MCP support — both client and server.
 | `mcp-instagram` | Instagram DMs, feed, posting via private mobile API. No browser needed. |
 | `mcp-whatsapp` | WhatsApp messaging via web protocol. QR auth, no API needed. |
 | `mcp-email` | Send/read/search email via SMTP+IMAP. Gmail, Outlook, any provider. |
-| `mcp-jobspy` | Job search across Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google. NaN/float-safe normalizer (`normalize.py`) shared with the in-tree direct path. |
 | `mcp-scraper` | crawl4ai-backed crawl + extract + search bundle. Auto-dismisses Cookiebot/OneTrust/Iubenda banners. Single persistent subprocess. **`extract_business_info`** parses schema.org JSON-LD for high-confidence addresses (no more cookie-banner-pollution false positives). Optional Scrapling-style add-ons: TLS-fingerprint impersonation (`stealth_http`), proxy rotation, adaptive selector relocation. |
 | `mcp-upwork` | Apache-2.0 fork of `vanooo/upwork-mcp` — 18 tools (search, proposals, messages, contracts, profile, work diary). CDP-driven; **shares your existing Brave profile + cookies** via `LAZYCLAW_BROWSER_PROFILE_DIR`, so one login is all the agent needs. |
 
@@ -538,9 +537,9 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 ## Roadmap
 
 - [x] Phases 1-10: Foundation through Session Replay
-- [x] 8 active bundled MCP servers (taskai, lazydoctor, instagram, whatsapp, email, jobspy, scraper, upwork) — 4 more (freeride, healthcheck, apihunter, vaultwhisper) parked pending source rebuild
+- [x] 7 active bundled MCP servers (taskai, lazydoctor, instagram, whatsapp, email, scraper, upwork) — 4 more (freeride, healthcheck, apihunter, vaultwhisper) parked pending source rebuild
 - [ ] 4 MCP servers in progress (freeride, healthcheck, apihunter, vaultwhisper — source rebuild needed)
-- [x] ECO mode — HYBRID (Sonnet brain + local Ollama worker), FULL (all-Claude), CLAUDE (Haiku API)
+- [x] ECO mode — HYBRID (Sonnet brain + local Ollama worker), FULL (configurable paid), CLAUDE (subscription via Agent SDK or CLI, $0), MINIMAX (M2.7 Token Plan)
 - [x] Multi-agent teams with inline delegation
 - [x] Browser automation (CDP + shared profiles + DOM click engine)
 - [x] ~280 skills discoverable at runtime (196 builtin + ~85 MCP-bridged)

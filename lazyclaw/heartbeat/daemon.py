@@ -19,6 +19,58 @@ from lazyclaw.heartbeat.cron import calculate_next_run, is_due
 
 logger = logging.getLogger(__name__)
 
+# Hosts that MUST be polled through the user's live (signed-in) Brave on
+# the primary CDP port. A fresh headless instance with a copied profile
+# fails Cloudflare's TLS/JS fingerprint check on these sites and silently
+# loads the login or challenge page — the watcher then hashes
+# {"unread":0,"rooms":[]} forever and no notification ever fires.
+# Subdomain match is automatic.
+#
+# Two-layer set:
+#   - ``_LIVE_BROWSER_WATCHER_HOSTS_BUILTIN`` — ships with lazyclaw, can't
+#     be removed by a user (protects upwork/linkedin from accidental
+#     opt-out via NL skill).
+#   - Per-user extras — stored in ``users.settings.browser.live_hosts``,
+#     managed by the ``add_live_browser_host`` / ``remove_live_browser_host``
+#     / ``list_live_browser_hosts`` NL skills. The contract-intake
+#     auto-setup phase appends the platform host here when it provisions
+#     a new gig watcher.
+_LIVE_BROWSER_WATCHER_HOSTS_BUILTIN: frozenset[str] = frozenset({
+    "upwork.com",
+    "linkedin.com",
+})
+
+
+def _host_matches(host: str, hosts: frozenset[str] | set[str] | list[str]) -> bool:
+    """True if ``host`` equals or is a subdomain of any entry in ``hosts``.
+
+    Case-insensitive; ``hosts`` entries are expected to be already
+    normalized (lowercase, no leading ``www.``). Empty / falsy host
+    returns False.
+    """
+    h = (host or "").lower()
+    if not h:
+        return False
+    for needle in hosts:
+        if h == needle or h.endswith("." + needle):
+            return True
+    return False
+
+
+def _needs_live_browser(
+    host: str,
+    user_extras: frozenset[str] | set[str] | list[str] = frozenset(),
+) -> bool:
+    """True when a host requires polling through the user's signed-in browser.
+
+    Checks the builtin set first (always wins), then the per-user
+    extras. Both layers use the same subdomain-match semantics.
+    """
+    if _host_matches(host, _LIVE_BROWSER_WATCHER_HOSTS_BUILTIN):
+        return True
+    return _host_matches(host, user_extras)
+
+
 # Last watcher notification per user — agent reads this for reply context
 # Format: {user_id: {"service": "whatsapp", "items": [...], "notification": "...", "timestamp": float}}
 _last_watcher_context: dict[str, dict] = {}
@@ -307,6 +359,136 @@ class HeartbeatDaemon:
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
 
+        # Tab health: reap idle tabs (default 10 min), enforce max_open_tabs
+        # cap, and refresh white-screen tabs. Runs every 5 ticks (~5 min
+        # with the default 60s heartbeat interval) — frequent enough to
+        # claw back RAM, infrequent enough not to thrash the user's Brave.
+        # Skipped on the first tick to avoid sweeping before users are even
+        # registered.
+        if self._tick_count > 1 and self._tick_count % 5 == 0:
+            try:
+                await self._check_tab_health()
+            except Exception:
+                logger.debug("tab health sweep failed", exc_info=True)
+
+    async def _check_tab_health(self) -> None:
+        """Per-user tab reap + cap + white-screen refresh.
+
+        Uses the live (primary) CDP backend — the user's signed-in Brave —
+        because that's where stray tabs accumulate. Background headless
+        instances tear down their own tabs at job end, so they don't need
+        sweeping.
+
+        Skips users who have ``persistent`` browser mode = "off" (no
+        live browser to sweep). Skips when no Brave is reachable on the
+        primary CDP port (nothing to do, no error).
+        """
+        from lazyclaw.browser.browser_settings import get_browser_settings
+        from lazyclaw.browser.cdp import find_chrome_cdp
+        from lazyclaw.browser.tab_reaper import run_tab_health_cycle
+
+        primary_port = getattr(self._config, "cdp_port", 9222)
+        ws_url = await find_chrome_cdp(primary_port)
+        if not ws_url:
+            return  # no live Brave reachable, nothing to sweep
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute("SELECT DISTINCT id FROM users")
+            user_ids = [r[0] for r in await cursor.fetchall()]
+
+        for user_id in user_ids:
+            try:
+                settings = await get_browser_settings(self._config, user_id)
+            except Exception:
+                continue
+            if settings.get("persistent") == "off":
+                continue
+
+            idle_seconds = float(
+                settings.get("idle_tab_close_seconds", 600)
+            )
+            max_tabs = int(settings.get("max_open_tabs", 8))
+            refresh_blanks = bool(
+                settings.get("auto_refresh_white_screens", True)
+            )
+
+            # Anchored hosts = URLs every active watcher targets, so
+            # the reaper doesn't close the tab a watcher needs to poll.
+            anchored_urls = await self._gather_watcher_urls(user_id)
+
+            backend = self._get_primary_cdp(user_id)
+            try:
+                summary = await run_tab_health_cycle(
+                    backend,
+                    idle_seconds=idle_seconds,
+                    max_tabs=max_tabs,
+                    anchored_urls=anchored_urls,
+                    refresh_blanks=refresh_blanks,
+                )
+                if (
+                    summary["idle_closed"]
+                    or summary["cap_closed"]
+                    or summary["blanks_refreshed"]
+                ):
+                    logger.info(
+                        "tab health user=%s scanned=%d idle_closed=%d "
+                        "cap_closed=%d blanks_refreshed=%d anchored=%s",
+                        user_id[:8],
+                        summary["tabs_scanned"],
+                        summary["idle_closed"],
+                        summary["cap_closed"],
+                        summary["blanks_refreshed"],
+                        summary["anchored_hosts"],
+                    )
+            except Exception:
+                logger.debug(
+                    "tab health cycle failed for user %s", user_id,
+                    exc_info=True,
+                )
+            finally:
+                try:
+                    await backend.close()
+                except Exception:
+                    logger.debug(
+                        "tab health backend close failed", exc_info=True,
+                    )
+
+    async def _gather_watcher_urls(self, user_id: str) -> list[str]:
+        """Return URLs of every active browser watcher (job_type='watcher')
+        for this user. Used by ``_check_tab_health`` to mark tabs the
+        watcher framework still needs open."""
+        import json as _json
+        out: list[str] = []
+        try:
+            key = await get_user_dek(self._config, user_id)
+        except Exception:
+            return out
+        try:
+            async with db_session(self._config) as db:
+                cursor = await db.execute(
+                    "SELECT context FROM agent_jobs "
+                    "WHERE user_id = ? AND status = 'active' "
+                    "AND job_type = 'watcher'",
+                    (user_id,),
+                )
+                rows = await cursor.fetchall()
+        except Exception:
+            return out
+        for (enc_ctx,) in rows:
+            try:
+                raw = (
+                    decrypt(enc_ctx, key)
+                    if enc_ctx and is_encrypted(enc_ctx)
+                    else enc_ctx or "{}"
+                )
+                ctx = _json.loads(raw) if raw else {}
+                url = ctx.get("url")
+                if url and isinstance(url, str):
+                    out.append(url)
+            except Exception:
+                continue
+        return out
+
     async def _check_due_jobs(self, user_id: str) -> None:
         """Load active jobs for a user and enqueue any that are due."""
         from lazyclaw.heartbeat import orchestrator
@@ -465,6 +647,26 @@ class HeartbeatDaemon:
                     "Error processing reminder %s for user %s", job_id, user_id,
                 )
 
+    def _get_primary_cdp(self, user_id: str):
+        """Return a CDPBackend pointing at the user's live Brave on the primary port.
+
+        Does NOT copy the profile or launch a separate browser — this
+        backend connects to the user's already-running, signed-in
+        instance. Used for Cloudflare-protected watchers (see
+        ``_LIVE_BROWSER_WATCHER_HOSTS``) where a fresh headless on a
+        copied profile gets bounced at the challenge page.
+
+        Caller MUST NOT close this backend in cleanup — closing would
+        tear down the connection but the user's Brave would keep
+        running. Just drop the reference.
+        """
+        from lazyclaw.browser.cdp_backend import CDPBackend
+        from lazyclaw.browser.profile_resolver import resolve_profile_dir
+
+        primary_port = getattr(self._config, "cdp_port", 9222)
+        profile_dir = resolve_profile_dir(self._config, user_id)
+        return CDPBackend(port=primary_port, profile_dir=str(profile_dir))
+
     async def _get_background_cdp(self, user_id: str):
         """Get a CDP backend for background jobs without touching the user's live Brave.
 
@@ -559,6 +761,7 @@ class HeartbeatDaemon:
     async def _check_watchers(self, user_id: str) -> None:
         """Check all active watchers for a user. Zero LLM calls."""
         import json
+        from urllib.parse import urlparse
 
         from lazyclaw.browser.browser_settings import touch_browser_activity
         from lazyclaw.browser.watcher import (
@@ -583,8 +786,25 @@ class HeartbeatDaemon:
         if not watchers:
             return
 
-        # Get a background-safe CDP backend (won't touch user's visible Brave)
-        backend, temp_dir = await self._get_background_cdp(user_id)
+        # Per-user extras for live-browser host routing (e.g., a gig
+        # platform the user added via add_live_browser_host). Loaded once
+        # per heartbeat tick to keep _needs_live_browser sync + cheap.
+        from lazyclaw.browser.browser_settings import get_live_hosts
+        try:
+            user_live_hosts = frozenset(await get_live_hosts(self._config, user_id))
+        except Exception:
+            logger.debug(
+                "get_live_hosts failed for user %s — defaulting to builtin-only",
+                user_id, exc_info=True,
+            )
+            user_live_hosts = frozenset()
+
+        # Lazily allocate backends so we don't spin up a separate
+        # headless instance for users whose only watchers are
+        # Cloudflare-protected (and vice versa).
+        bg_backend = None
+        bg_temp_dir = None
+        live_backend = None
 
         try:
             for row in watchers:
@@ -635,11 +855,28 @@ class HeartbeatDaemon:
                     if not is_check_due(ctx):
                         continue
 
+                    # Route per-watcher: Cloudflare-protected hosts must
+                    # poll through the user's live signed-in Brave or
+                    # they're silently blocked at the JS challenge.
+                    # Builtin set ∪ user's per-account extras.
+                    watch_host = (urlparse(ctx.get("url", "")).hostname or "").lower()
+                    use_live = _needs_live_browser(watch_host, user_live_hosts)
+                    if use_live:
+                        if live_backend is None:
+                            live_backend = self._get_primary_cdp(user_id)
+                        active_backend = live_backend
+                    else:
+                        if bg_backend is None:
+                            bg_backend, bg_temp_dir = await self._get_background_cdp(user_id)
+                        active_backend = bg_backend
+
                     # Run the check — zero LLM calls
                     touch_browser_activity()
                     check_error: str | None = None
                     try:
-                        changed, notification, new_ctx = await check_watcher(backend, ctx)
+                        changed, notification, new_ctx = await check_watcher(
+                            active_backend, ctx, passive=use_live,
+                        )
                     except Exception as exc:
                         check_error = f"{type(exc).__name__}: {exc}"
                         # Record the failure before re-raising to keep the
@@ -697,8 +934,41 @@ class HeartbeatDaemon:
                         except Exception:
                             logger.debug("Canvas alert publish failed", exc_info=True)
 
-                        # Push directly to Telegram (no agent loop — zero tokens)
-                        if self._telegram_push:
+                        # Push directly to Telegram (no agent loop — zero tokens).
+                        # When this is a contract-intake watcher (accept_template_slug
+                        # in ctx), use push_telegram with an inline keyboard so the
+                        # user gets a 1-tap ✅ Accept button alongside the alert —
+                        # the 3-second-acceptance promise from the James Blue brief.
+                        accept_slug = ctx.get("accept_template_slug")
+                        if accept_slug:
+                            try:
+                                from lazyclaw.notifications.push import push_telegram
+                                # Generate a short item-ID hint from the notification's
+                                # raw value-preview so the callback handler can pass it
+                                # to the template; if no value, the template runs with
+                                # whatever the agent's current page state is.
+                                ok = await push_telegram(
+                                    self._config,
+                                    f"🔔 {notification}",
+                                    parse_mode=None,
+                                    inline_keyboard=[[
+                                        {"text": "✅ Accept",
+                                         "callback_data": f"accept:{accept_slug}"},
+                                        {"text": "⏭ Skip",
+                                         "callback_data": f"accept:skip:{accept_slug}"},
+                                    ]],
+                                )
+                                if not ok:
+                                    logger.warning(
+                                        "Telegram keyboard push for %s returned False",
+                                        accept_slug,
+                                    )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Telegram keyboard push failed (%s): %s",
+                                    accept_slug, exc,
+                                )
+                        elif self._telegram_push:
                             try:
                                 logger.info("Pushing watcher notification to Telegram")
                                 await self._telegram_push(
@@ -721,7 +991,19 @@ class HeartbeatDaemon:
                         "Error checking watcher %s for user %s", job_id, user_id,
                     )
         finally:
-            await self._cleanup_background_cdp(backend, temp_dir)
+            # Only the background backend owns lifecycle (it spawned a
+            # separate headless + temp profile). The live backend just
+            # holds a CDP socket to the user's Brave; closing it is a
+            # no-op for the browser but we still drop the socket cleanly.
+            if bg_backend is not None:
+                await self._cleanup_background_cdp(bg_backend, bg_temp_dir)
+            if live_backend is not None:
+                try:
+                    await live_backend.close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close live CDP backend handle", exc_info=True,
+                    )
 
     async def _check_mcp_watchers(self, user_id: str) -> None:
         """Check all MCP-based watchers (WhatsApp, Email, etc.). Zero LLM calls."""

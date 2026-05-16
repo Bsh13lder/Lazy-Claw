@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # `~/.claude/plans/on-cana-yo-fix-shiny-tower.md` (Fix C) for context.
 SURVIVAL_CANONICAL_INSTRUCTIONS: dict[str, str] = {
     "survival_message_check": "check my upwork inbox now",
+    "survival_contract_intake": "poll my upwork contracts and intake any new ones",
 }
 
 
@@ -143,6 +144,21 @@ class SurvivalModeSkill(BaseSkill):
                 context=json.dumps({"survival_mode": True}),
             )
 
+            # Contract intake cron (every 6 hours) — polls
+            # upwork_get_contracts, dedups against
+            # users.settings.survival.seen_contract_urls (FIFO bounded 100),
+            # and surfaces any new contract on Telegram. PR 3 will extend
+            # the underlying skill to auto-dispatch new_contract_intake
+            # so the brain batch-asks the user the missing inputs.
+            await create_job(
+                self._config, user_id,
+                name="survival_contract_intake",
+                instruction="poll my upwork contracts and intake any new ones",
+                job_type="cron",
+                cron_expression="0 */6 * * *",
+                context=json.dumps({"survival_mode": True}),
+            )
+
             return (
                 f"Survival Mode: ON\n"
                 f"Identity: {branding}\n\n"
@@ -153,7 +169,8 @@ class SurvivalModeSkill(BaseSkill):
                 f"Job search: every 30 min\n"
                 f"Message check: {upwork_bot.inbox_check_cron} "
                 f"(NL: 'check upwork messages every Nh')\n"
-                f"Gig monitor: every hour\n\n"
+                f"Gig monitor: every hour\n"
+                f"Contract intake: every 6 hours (auto-detects new contracts)\n\n"
                 f"I'll notify you on Telegram when I find matches.\n"
                 f"You approve every application and submission."
             )

@@ -58,8 +58,16 @@ def build_watcher_context(
     expires_at: str | None = None,
     notify_template: str | None = None,
     one_shot: bool = False,
+    accept_template_slug: str | None = None,
 ) -> str:
-    """Build the JSON context blob stored encrypted in agent_jobs.context."""
+    """Build the JSON context blob stored encrypted in agent_jobs.context.
+
+    ``accept_template_slug`` (when set) tells the heartbeat watcher
+    push to attach an inline-keyboard ``✅ Accept`` button whose
+    callback fires ``run_browser_template(name=f'{slug}_accept')`` —
+    that's how contract-intake watchers deliver the
+    1-tap-under-3-seconds promise.
+    """
     page_type = _detect_page_type(url)
 
     ctx = {
@@ -70,6 +78,7 @@ def build_watcher_context(
         "expires_at": expires_at,
         "notify_template": notify_template,
         "one_shot": one_shot,
+        "accept_template_slug": accept_template_slug,
         "last_value": None,
         "last_check": None,
     }
@@ -79,10 +88,20 @@ def build_watcher_context(
 async def check_watcher(
     backend,
     context: dict,
+    *,
+    passive: bool = False,
 ) -> tuple[bool, str | None, dict]:
     """Run a single watcher check. Returns (changed, notification, updated_context).
 
     Zero LLM calls — pure JS execution via CDP.
+
+    When ``passive=True`` (used for watchers running against the user's
+    live Brave) the poller will NEVER steal focus or navigate the user's
+    current tab. If no matching tab is open the poll is skipped and the
+    context returned unchanged. This is the only safe mode against
+    Cloudflare-protected sites (upwork.com, linkedin.com) — a fresh
+    headless instance gets blocked at the JS challenge and silently
+    returns an empty extractor result forever.
     """
     url = context.get("url", "")
     page_type = context.get("page_type", "auto")
@@ -111,8 +130,21 @@ async def check_watcher(
             None,
         )
         if target_tab:
-            await backend.switch_tab(target_tab.id)
+            if passive:
+                await backend.switch_tab(target_tab.id, focus=False)
+            else:
+                await backend.switch_tab(target_tab.id)
         else:
+            if passive:
+                # No matching tab in the user's live Brave — skip this
+                # poll rather than commandeer the user's current tab.
+                # Next poll will pick up changes once the user opens the
+                # watched page. last_check stays untouched so we retry
+                # promptly when the interval expires again.
+                logger.debug(
+                    "Passive watcher skip — no tab on host %s", target_host,
+                )
+                return False, None, context
             # Tab not open — navigate current tab
             await backend.goto(url)
             # Wait for page load

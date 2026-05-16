@@ -1,0 +1,235 @@
+"""upwork_last_conversation — fetch + format the most recent Upwork chat.
+
+Zero-LLM skill that the brain doesn't need to dispatch — wired into
+``instant_dispatch`` so phrasings like "tell me what's in the last
+conversation" / "show latest upwork message" route here in <10s
+instead of through the brain's tool-search loop (which the
+2026-05-16 incident showed costs ~2m33s + 4 wasted
+``upwork_get_messages`` calls).
+
+Pipeline:
+  1. Call ``upwork_get_messages(limit=1)`` to find the most-recent
+     conversation room.
+  2. Read its ``contact_name`` for the ``me_name`` derivation hint
+     and ``room_url`` (or fall back to the bare URL — the mcp-upwork
+     bridge tolerates this and uses whichever upwork.com tab the
+     user currently has open in their signed-in Brave).
+  3. Call ``upwork_get_conversation(room_id=<url>, me_name=...)`` to
+     pull the full thread.
+  4. Format into a short Markdown summary the user can act on.
+
+Works against the user's real signed-in Brave via the host bridge
+(see ``lazyclaw/browser/host_bridge.py``) — exact same path the
+2026-05-16 trace used successfully, just deterministic + cached.
+
+Honors the user's stored ``display_name`` from ``SkillsProfile`` so
+``is_mine`` flagging works (otherwise tolerates a None me_name and
+falls back to the MCP's class-hint detection).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from lazyclaw.skills.base import BaseSkill
+
+logger = logging.getLogger(__name__)
+
+
+class UpworkLastConversationSkill(BaseSkill):
+    """Fetch + format the most recent Upwork conversation."""
+
+    def __init__(self, config=None, registry=None) -> None:
+        self._config = config
+        self._registry = registry
+
+    @property
+    def name(self) -> str:
+        return "upwork_last_conversation"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Fetch the most recent Upwork conversation and return its "
+            "messages formatted as Markdown. Use when the user asks "
+            "'what's in the last/latest upwork conversation', 'show me "
+            "what James said', etc. Zero LLM cost — calls "
+            "upwork_get_messages(limit=1) + upwork_get_conversation "
+            "deterministically. Drives the user's signed-in Brave via "
+            "the host bridge."
+        )
+
+    @property
+    def category(self) -> str:
+        return "survival"
+
+    @property
+    def permission_hint(self) -> str:
+        return "allow"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "message_limit": {
+                    "type": "integer",
+                    "description": (
+                        "Max messages to pull from the conversation. "
+                        "Default 20."
+                    ),
+                },
+            },
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        if self._registry is None:
+            return "Error: skill registry not available."
+
+        msg_limit = int(params.get("message_limit") or 20)
+
+        get_messages = self._find_tool("upwork_get_messages")
+        get_conversation = self._find_tool("upwork_get_conversation")
+        if get_messages is None or get_conversation is None:
+            return (
+                "Cannot fetch last Upwork conversation — mcp-upwork "
+                "tools not registered. Make sure the upwork MCP is "
+                "running and you're logged in to Upwork in your Brave."
+            )
+
+        # 1. Pull the inbox to find the most recent room
+        try:
+            messages_raw = await get_messages.execute(
+                user_id, {"limit": 1, "unread_only": False},
+            )
+        except Exception as exc:
+            logger.exception("upwork_get_messages call raised")
+            return f"Failed to fetch Upwork inbox: {exc}"
+
+        messages = _normalize_inbox(messages_raw)
+        if not messages:
+            return (
+                "No Upwork conversations found. Make sure you're logged "
+                "in and have at least one chat thread."
+            )
+
+        latest = messages[0]
+        # The 2026 URL parser may return the bare /rooms URL when the
+        # room_id couldn't be extracted — that's fine, the MCP falls
+        # back to the currently-open tab.
+        room_id = (
+            latest.get("room_url")
+            or latest.get("room_id")
+            or "https://www.upwork.com/ab/messages/rooms"
+        )
+        contact = latest.get("contact_name") or "(unknown contact)"
+
+        # Pull the user's display_name for is_mine tagging — best effort
+        me_name = await self._resolve_me_name(user_id)
+
+        # 2. Fetch the full conversation
+        try:
+            conv_raw = await get_conversation.execute(user_id, {
+                "room_id": room_id,
+                "limit": msg_limit,
+                "me_name": me_name,
+            })
+        except Exception as exc:
+            logger.exception("upwork_get_conversation call raised")
+            return (
+                f"Could fetch inbox but failed on conversation with "
+                f"{contact}: {exc}"
+            )
+
+        conv = _normalize_conversation(conv_raw)
+        if not conv or not conv.get("messages"):
+            return (
+                f"Conversation with {contact} returned empty. The MCP may "
+                "have lost the tab — open a chat in your Brave and retry."
+            )
+
+        return self._format_conversation(conv, fallback_contact=contact)
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    def _find_tool(self, suffix: str):
+        """Locate an MCP-bridged tool by suffix match."""
+        if self._registry is None:
+            return None
+        for tool_info in self._registry.list_mcp_tools():
+            func = tool_info.get("function", {})
+            tname = (func.get("name") or "").lower()
+            if tname.endswith(suffix.lower()) or suffix.lower() in tname:
+                tool = self._registry.get(func.get("name", ""))
+                if tool is not None:
+                    return tool
+        return self._registry.get(suffix)
+
+    async def _resolve_me_name(self, user_id: str) -> str | None:
+        """Pull display_name from the user's SkillsProfile. Best effort."""
+        try:
+            from lazyclaw.survival.profile import get_profile
+            profile = await get_profile(self._config, user_id)
+            return getattr(profile, "display_name", None) or None
+        except Exception:
+            logger.debug("display_name lookup failed", exc_info=True)
+            return None
+
+    @staticmethod
+    def _format_conversation(conv: dict, *, fallback_contact: str) -> str:
+        """Render the conversation as a compact Markdown card."""
+        contact = conv.get("contact_name") or fallback_contact
+        msgs = conv.get("messages") or []
+        if not msgs:
+            return f"Conversation with **{contact}**: (no messages)"
+
+        lines = [f"💬 **Last Upwork conversation — {contact}**", ""]
+        for m in msgs[-30:]:  # cap rendered messages
+            sender = m.get("sender") or ("(me)" if m.get("is_mine") else "(them)")
+            ts = m.get("timestamp") or ""
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            arrow = "→" if m.get("is_mine") else "←"
+            lines.append(f"`{ts}` {arrow} **{sender}**:")
+            for ln in content.splitlines():
+                lines.append(f"  {ln}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+
+# ── Module-level normalizers (pure functions, easy to test) ─────────
+
+
+def _normalize_inbox(raw) -> list[dict]:
+    """Coerce upwork_get_messages output into list[dict]."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("inbox response unparseable: %r", raw[:200])
+            return []
+    if isinstance(raw, dict):
+        raw = raw.get("result") or raw.get("messages") or []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _normalize_conversation(raw) -> dict:
+    """Coerce upwork_get_conversation output into a dict.
+
+    The MCP returns either ``{room_id, contact_name, messages: [...]}``
+    or a JSON string of same. Defensive against both shapes + None.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(raw, dict) and "result" in raw and isinstance(raw["result"], dict):
+        raw = raw["result"]
+    if not isinstance(raw, dict):
+        return {}
+    return raw

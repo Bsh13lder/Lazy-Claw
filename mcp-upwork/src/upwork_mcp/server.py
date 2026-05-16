@@ -19,8 +19,10 @@ from .tools.proposals import (
     withdraw_proposal,
 )
 from .tools.messages import (
+    EditMessageParams,
     MessagesParams,
     SendMessageParams,
+    edit_message,
     get_messages,
     get_conversation_messages,
     send_message,
@@ -110,9 +112,17 @@ async def upwork_search_jobs(
     # without this clamp any caller passing limit>50 hits a Pydantic
     # ValidationError and the search aborts with no results.
     safe_limit = max(1, min(int(limit), 50))
+    # Coerce explicit None → wrapper default. Pydantic applies defaults
+    # only when a field is OMITTED, not when it's explicitly null —
+    # so when Sonnet calls upwork_search_jobs without `source`, the
+    # SDK still passes source=None into this wrapper, which then
+    # forwards None into JobSearchParams.source (typed `str`, not
+    # optional) → ValidationError "Input should be a valid string,
+    # input_value=None". Observed twice on 2026-05-13.
+    safe_source = source if isinstance(source, str) and source else "best_matches"
     params = JobSearchParams(
         query=query,
-        source=source,
+        source=safe_source,
         category=category,
         budget_min=budget_min,
         budget_max=budget_max,
@@ -343,13 +353,78 @@ async def upwork_get_conversation(
 async def upwork_send_message(
     room_id: Annotated[str, Field(description="Chat room ID or URL")],
     message: Annotated[str, Field(description="Message content to send")],
+    draft_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, type the message into the Upwork compose "
+                "box but DO NOT click Send. Use for human-in-loop "
+                "review — caller drafts, user inspects in their live "
+                "Brave tab, then sends manually. Returns status='drafted'."
+            ),
+        ),
+    ] = False,
 ) -> dict:
     """Send a message in an Upwork conversation.
 
-    Returns send status.
+    Multi-line messages use Shift+Enter between lines (Tiptap-safe) —
+    one Upwork bubble per call, never per line.
+
+    Returns send status. With draft_only=True, returns status='drafted'
+    without clicking Send.
     """
-    params = SendMessageParams(room_id=room_id, message=message)
+    params = SendMessageParams(
+        room_id=room_id, message=message, draft_only=draft_only,
+    )
     return await send_message(params)
+
+
+@mcp.tool()
+async def upwork_edit_message(
+    room_id: Annotated[str, Field(description="Chat room ID or URL")],
+    message_index: Annotated[
+        int,
+        Field(
+            description=(
+                "Which of YOUR (is_mine=True) messages to edit, counting "
+                "from most recent backwards. 0 = your last message."
+            ),
+            ge=0,
+        ),
+    ],
+    new_content: Annotated[
+        str,
+        Field(description="Replacement text. Multi-line is Shift+Enter-safe."),
+    ],
+    draft_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, open the edit modal + type replacement but "
+                "DO NOT save. User confirms manually. Returns "
+                "status='drafted_edit'."
+            ),
+        ),
+    ] = False,
+) -> dict:
+    """Edit one of your already-sent Upwork messages.
+
+    Upwork's 2026 UI allows editing within ~60 minutes of sending.
+    Past the window, returns status='expired' — caller should
+    send a correction message instead.
+
+    Same Tiptap-safe typing path as send_message — multi-line edits
+    use Shift+Enter between lines, never accidentally trigger save
+    mid-edit. URL and product-pitch guards fire BEFORE any browser
+    nav.
+    """
+    params = EditMessageParams(
+        room_id=room_id,
+        message_index=message_index,
+        new_content=new_content,
+        draft_only=draft_only,
+    )
+    return await edit_message(params)
 
 
 @mcp.tool()

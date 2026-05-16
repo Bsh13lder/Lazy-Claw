@@ -157,6 +157,12 @@ class Goal:
     risks: tuple[str, ...] = ()
     confidence: str = "medium"
     summary: str = ""
+    # Structured classifier output set by the caller (e.g.
+    # ``new_contract_intake`` stores ``web_monitoring`` /
+    # ``data_scraping`` here). Read by dispatch executors that need
+    # the type as a string — never inferred from ``summary`` because
+    # the brain LLM's prose is not guaranteed to echo back the token.
+    work_type: str | None = None
     blocked_on: str | None = None
     last_action: str = ""
     last_progress_at: float | None = None
@@ -189,6 +195,7 @@ def _plan_envelope(goal: Goal) -> str:
         "answers": dict(goal.answers),
         "risks": list(goal.risks),
         "confidence": goal.confidence,
+        "work_type": goal.work_type,
         "blocked_on": goal.blocked_on,
         "last_action": goal.last_action,
     })
@@ -255,6 +262,14 @@ class GoalRepository:
         risks = tuple(plan_data.get("risks") or [])
         confidence = str(plan_data.get("confidence") or "medium")
         summary = str(plan_data.get("summary") or "")
+        # ``work_type`` may be absent on rows written before Phase 21 —
+        # treat missing as None, never raise. Empty-string normalises
+        # to None so downstream consumers can do a single ``is None``
+        # check instead of distinguishing two falsy forms.
+        wt_raw = plan_data.get("work_type")
+        work_type = str(wt_raw).strip() if wt_raw else None
+        if work_type == "":
+            work_type = None
 
         try:
             status = GoalStatus(status_str)
@@ -266,6 +281,7 @@ class GoalRepository:
             id=id_, user_id=user_id, title=title, status=status,
             plan=steps, questions_pending=questions, answers=answers,
             risks=risks, confidence=confidence, summary=summary,
+            work_type=work_type,
             blocked_on=blocked_on, last_action=last_action or "",
             last_progress_at=_iso_to_epoch(last_progress_at),
             account_slug=account_slug, task_id=task_id,
@@ -385,6 +401,39 @@ class GoalRepository:
 DispatchCallable = Callable[[Goal], Awaitable[None]]
 
 
+# Per-account_slug default dispatch callbacks. Registered at import
+# time by the relevant executor module (e.g.
+# ``lazyclaw.runtime.contract_intake_executor`` registers itself for
+# ``account_slug == "upwork"``). When a GoalExecutor is built WITHOUT
+# an explicit ``dispatch_callback``, ``_dispatch`` falls back to the
+# slug-specific entry from this registry. Lets goals reach EXECUTING
+# and do real work even when the calling skill didn't pass a callback
+# of its own.
+_DEFAULT_DISPATCH_BY_SLUG: dict[str, DispatchCallable] = {}
+
+
+def register_default_dispatch(
+    account_slug: str, callback: DispatchCallable,
+) -> None:
+    """Register a default dispatch callback for goals with this slug.
+
+    Called by executor modules at import time. Idempotent — re-
+    registering replaces the previous entry. The slug is matched
+    case-insensitively against ``Goal.account_slug``.
+    """
+    if not account_slug:
+        raise ValueError("account_slug is required")
+    _DEFAULT_DISPATCH_BY_SLUG[account_slug.strip().lower()] = callback
+
+
+def _resolve_default_dispatch(
+    account_slug: str | None,
+) -> DispatchCallable | None:
+    if not account_slug:
+        return None
+    return _DEFAULT_DISPATCH_BY_SLUG.get(account_slug.strip().lower())
+
+
 class GoalExecutor:
     """Thin orchestrator on top of plan_research / fix_plan / dispatcher.
 
@@ -414,6 +463,7 @@ class GoalExecutor:
         *,
         hints: dict[str, str] | None = None,
         account_slug: str | None = None,
+        work_type: str | None = None,
     ) -> Goal:
         """Draft a plan and persist a new Goal.
 
@@ -489,6 +539,7 @@ class GoalExecutor:
             risks=risks,
             confidence=confidence,
             summary=summary,
+            work_type=(work_type.strip() or None) if work_type else None,
             account_slug=account_slug,
             last_action="drafted plan" if plan else "draft failed — LLM unavailable",
             last_progress_at=time.time(),
@@ -557,8 +608,19 @@ class GoalExecutor:
         return updated
 
     async def _dispatch(self, goal: Goal) -> None:
-        """Hand off to the configured dispatch callback (real or test)."""
-        if self._dispatch_callback is None:
+        """Hand off to a dispatch callback.
+
+        Resolution order:
+          1. Per-instance ``self._dispatch_callback`` (test injection or
+             a skill that builds an executor with a custom callback).
+          2. Per-slug default from ``_DEFAULT_DISPATCH_BY_SLUG`` —
+             registered at import time by executor modules.
+          3. None — log and pause at EXECUTING.
+        """
+        callback = self._dispatch_callback or _resolve_default_dispatch(
+            goal.account_slug,
+        )
+        if callback is None:
             logger.info(
                 "goal_executor.dispatch user=%s id=%s — no dispatch_callback "
                 "configured (state machine paused at EXECUTING)",
@@ -566,9 +628,12 @@ class GoalExecutor:
             )
             return
         try:
-            await self._dispatch_callback(goal)
+            await callback(goal)
         except Exception as exc:
-            logger.exception("goal_executor.dispatch failed user=%s id=%s", goal.user_id, goal.id)
+            logger.exception(
+                "goal_executor.dispatch failed user=%s id=%s",
+                goal.user_id, goal.id,
+            )
             await self._fail(goal, f"dispatch error: {exc!s}")
 
     # ── Outcome handlers (called by dispatch wrappers) ─────────────

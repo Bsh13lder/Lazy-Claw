@@ -1031,7 +1031,7 @@ class CDPBackend:
             for t in chrome_tabs
         ]
 
-    async def switch_tab(self, tab_id: str) -> None:
+    async def switch_tab(self, tab_id: str, *, focus: bool = True) -> None:
         chrome_tabs = await list_chrome_tabs(self._port)
         target = next((t for t in chrome_tabs if t.id == tab_id), None)
         if not target:
@@ -1051,10 +1051,17 @@ class CDPBackend:
         # the inspector ring buffer silently stops after any tab switch.
         await self._subscribe_network_events()
 
-        # Bring tab to front
-        await self._conn.send("Page.bringToFront")
+        # Bring tab to front only when caller wants visible focus. Watcher
+        # polls pass focus=False so the user's active tab isn't stolen
+        # every 2 minutes.
+        if focus:
+            await self._conn.send("Page.bringToFront")
 
-        logger.info("Switched to tab: %s (%s)", target.title, target.url)
+        logger.info(
+            "%s to tab: %s (%s)",
+            "Switched" if focus else "Attached",
+            target.title, target.url,
+        )
 
     async def _subscribe_network_events(self) -> None:
         """Enable CDP Network domain and wire handlers into the inspector.

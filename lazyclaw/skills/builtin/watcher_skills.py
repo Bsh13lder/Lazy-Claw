@@ -68,6 +68,15 @@ class WatchSiteSkill(BaseSkill):
                         "Only provide if you know the exact JS needed."
                     ),
                 },
+                "accept_template_slug": {
+                    "type": "string",
+                    "description": (
+                        "Optional. When set, the Telegram alert on change "
+                        "includes a ✅ Accept inline button that fires "
+                        "`run_browser_template(name='{slug}_accept')`. Used "
+                        "by the contract-intake auto-setup flow."
+                    ),
+                },
             },
             "required": ["url", "what_to_watch"],
         }
@@ -81,6 +90,12 @@ class WatchSiteSkill(BaseSkill):
         interval = params.get("check_interval_minutes", 5) * 60
         duration = params.get("duration_hours", 2)
         custom_js = params.get("custom_js")
+        # Optional: when set, the watcher push gets an inline-keyboard
+        # ✅ Accept button whose callback fires
+        # ``run_browser_template(name=f'{slug}_accept')``. Used by the
+        # contract-intake auto-setup flow to deliver 1-tap acceptance
+        # from the Telegram alert itself.
+        accept_template_slug = params.get("accept_template_slug")
 
         # Block MCP channels — use watch_messages skill instead
         if url.lower() in ("whatsapp", "wa"):
@@ -117,6 +132,7 @@ class WatchSiteSkill(BaseSkill):
             expires_at=expires_at,
             notify_template=None,
             one_shot=one_shot,
+            accept_template_slug=accept_template_slug,
         )
 
         # Create job

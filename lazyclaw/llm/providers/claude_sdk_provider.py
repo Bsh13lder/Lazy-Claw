@@ -74,6 +74,16 @@ _MCP_UUID_RE = re.compile(
     r"^mcp_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_",
 )
 
+# Hallucinated hybrid form Sonnet occasionally emits when it confuses the
+# registry's single-underscore convention with the SDK's double-underscore
+# wrapping: `mcp__<uuid>__<tool>`. Observed 2026-05-14 on upwork_search_jobs
+# — the call got dropped as "hallucinated" and the brain fell through to a
+# clarification question, breaking the Upwork flow. We normalize it here so
+# the short name still resolves via name_map.
+_MCP_UUID_HALLUCINATED_RE = re.compile(
+    r"^mcp__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__",
+)
+
 # SDK auto-prefixes our in-process MCP tools with `mcp__<server_name>__`
 # when surfacing them in ToolUseBlocks. We strip it here so callers see
 # the same names lazyclaw's registry knows.
@@ -91,6 +101,32 @@ class SDKUnavailable(RuntimeError):
 def _shorten_tool_name(name: str) -> str:
     """Strip the MCP UUID prefix for cleaner allowed_tools entries."""
     return _MCP_UUID_RE.sub("", name)
+
+
+def _rewrite_tool_name_for_sdk(name: str) -> str:
+    """Map a lazyclaw-registry tool name to the form the SDK exposes to Claude.
+
+    The SDK wraps every lazyclaw skill as an in-process MCP tool under
+    `mcp__lazyclaw__<short>`, where `<short>` is the registry name with
+    the `mcp_<uuid>_` prefix stripped. When we serialize conversation
+    history for the next turn we MUST use that exposed form — otherwise
+    Sonnet sees `mcp_<uuid>_upwork_search_jobs` in its own prior
+    [Assistant] tool calls, copies it on the next turn, and the SDK
+    rejects the name because it's not in `allowed_tools`. The runtime
+    then logs it as a hallucinated call. Observed ~50× / day on
+    2026-05-14 before this rewrite was in place.
+
+    Rules:
+      - `mcp_<uuid>_<tool>` → `mcp__lazyclaw__<tool>`
+      - everything else (built-in lazyclaw skills like `browser`,
+        `search_tools`, `delegate`) is passed through untouched —
+        those names ARE the names the SDK exposes (no UUID prefix to
+        strip, no MCP wrapping above lazyclaw's own in-process server).
+    """
+    if _MCP_UUID_RE.match(name):
+        short = _MCP_UUID_RE.sub("", name)
+        return f"{_SDK_MCP_PREFIX}{short}"
+    return name
 
 
 def _serialize_messages(messages: list[LLMMessage]) -> str:
@@ -114,8 +150,12 @@ def _serialize_messages(messages: list[LLMMessage]) -> str:
             if msg.tool_calls:
                 tc_lines = []
                 for tc in msg.tool_calls:
+                    # Rewrite MCP tool names to the SDK-exposed form so
+                    # the brain copies a name the SDK actually accepts.
+                    # See `_rewrite_tool_name_for_sdk` for the rationale.
+                    sdk_name = _rewrite_tool_name_for_sdk(tc.name)
                     tc_lines.append(
-                        f"  -> {tc.name}({tc.arguments})"
+                        f"  -> {sdk_name}({tc.arguments})"
                     )
                 tc_text = "\n".join(tc_lines)
                 if msg.content:
@@ -205,34 +245,122 @@ def _build_tool_wrappers(
     return sdk_tools, name_map
 
 
+# Read-only listing tools that should NEVER be called more than once per
+# assistant turn. Sonnet has a habit of "exploring" by re-issuing the same
+# listing call with slightly-varied args (limit=5 vs limit=10 vs unread_only
+# toggled) — the result set is functionally the same, but the (name, args)
+# dedup misses them because the args differ. For these specific tools we
+# collapse to the FIRST call regardless of args. Match is by tool name
+# SUFFIX so the MCP-bridge prefix (mcp_<uuid>_<tool>) doesn't matter.
+#
+# DO NOT add tools that are legitimately called multiple times per turn
+# with different args (search_tools, recall_memories, web_search, etc).
+# Adding one here is a one-call-per-turn promise.
+_READ_ONLY_LIST_SUFFIXES: frozenset[str] = frozenset({
+    # Upwork MCP listings
+    "upwork_get_messages",
+    "upwork_get_contracts",
+    "upwork_get_proposals",
+    "upwork_get_unread_count",
+    "upwork_get_my_profile",
+    "upwork_get_profile_stats",
+    "upwork_get_connects_balance",
+    "upwork_check_session",
+    "upwork_get_work_diary",
+    # Lazyclaw native listings
+    "list_jobs",
+    "list_tasks",
+    "list_contacts",
+    "list_browser_templates",
+    "list_browser_accounts",
+    "list_live_browser_hosts",
+    "list_watchers",
+    "list_mcp_servers",
+    "vault_list",
+    "survival_status",
+    "list_goals",
+    "goal_status",
+})
+
+
+def _is_read_only_list_tool(name: str) -> bool:
+    """True when ``name`` matches an entry in :data:`_READ_ONLY_LIST_SUFFIXES`.
+
+    Two legal forms map to the dedup set:
+
+      * The exact registry name (native skills like ``list_jobs``).
+      * The MCP-bridged form ``mcp_<uuid>_<tool>`` — we strip the
+        UUID-bearing prefix via :data:`_MCP_UUID_RE` and exact-match
+        the remainder.
+
+    Suffix-based ``endswith`` matching (the original 2026-05-14
+    implementation) was forward-fragile: a hypothetical future tool
+    named ``acme_list_jobs`` or ``foo_upwork_get_messages`` would have
+    been silently deduped, dropping the brain's second call even
+    though it's a genuinely different tool. Prefix-strip + exact match
+    keeps the bridge support without that footgun.
+    """
+    name = (name or "").lower()
+    if not name:
+        return False
+    if name in _READ_ONLY_LIST_SUFFIXES:
+        return True
+    # MCP-bridged tools are wrapped as ``mcp_<uuid>_<tool>`` in the
+    # registry. Strip the wrapper and exact-match the remainder.
+    if _MCP_UUID_RE.match(name):
+        short = _MCP_UUID_RE.sub("", name)
+        return short in _READ_ONLY_LIST_SUFFIXES
+    return False
+
+
 def _dedup_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
-    """Remove duplicate (name, args) tool calls within one assistant turn.
+    """Remove duplicate tool calls within one assistant turn.
 
-    Sonnet occasionally emits the same tool with identical args multiple
-    times in a single response — most extreme observed: 13× google_run_task
-    with the same args on 2026-05-14, after lazyclaw's dispatch primitives
-    started returning errors and the brain panicked into carpet-bomb mode.
+    Two-pass dedup:
 
-    The CLI provider's --json-schema constraint suppressed this implicitly
-    via schema validation; the SDK path passes the raw tool_use blocks
-    through untouched, so we filter here.
+    1. Read-only listing tools (``_READ_ONLY_LIST_SUFFIXES``) are
+       collapsed to their FIRST occurrence regardless of args. This
+       catches the Sonnet "exploration loop" pattern where the brain
+       re-issues ``upwork_get_messages`` with varied limit/filter args
+       expecting a different answer (it always gets the same one, just
+       slower). Saw this on 2026-05-16: 7× ``upwork_get_messages`` in
+       one turn, only 2 caught by the (name,args) dedup, 4 wasted
+       Cloudflare round-trips before the brain finally moved on.
 
-    Strategy:
-      - Preserve order so the runtime executes tools in the brain's
-        intended sequence.
-      - Key on (name, JSON-serialised args) — exact-match only. Two
-        legitimate parallel calls like search(q="python") +
-        search(q="rust") have different args and both survive.
-      - Drop dupes silently (log the count); the dropped tool_use_ids
-        won't be referenced by any follow-up turn because the brain
-        only sees one tool_result back per unique call.
+    2. Everything else is keyed on (name, JSON-serialised args) —
+       exact-match only. Legitimate parallel calls like
+       search(q="python") + search(q="rust") survive.
+
+    Sonnet occasionally emits the same tool with identical args 13×
+    in a single response — most extreme observed 2026-05-14 after
+    lazyclaw's dispatch primitives started returning errors and the
+    brain panicked into carpet-bomb mode.
+
+    The CLI provider's --json-schema constraint suppressed this
+    implicitly via schema validation; the SDK path passes the raw
+    tool_use blocks through untouched, so we filter here.
+
+    Order is preserved so the runtime executes tools in the brain's
+    intended sequence. Dropped tool_use_ids won't be referenced by any
+    follow-up turn because the brain only sees one tool_result back
+    per unique call.
     """
     if len(tool_calls) <= 1:
         return tool_calls
 
-    seen: set[tuple[str, str]] = set()
+    seen_args: set[tuple[str, str]] = set()
+    seen_listing_names: set[str] = set()
     deduped: list[ToolCall] = []
     for tc in tool_calls:
+        # Pass 1: read-only listing — collapse by name regardless of args
+        if _is_read_only_list_tool(tc.name):
+            if tc.name in seen_listing_names:
+                continue
+            seen_listing_names.add(tc.name)
+            deduped.append(tc)
+            continue
+
+        # Pass 2: exact (name, args) dedup
         try:
             args_key = json.dumps(tc.arguments, sort_keys=True, default=str)
         except (TypeError, ValueError):
@@ -240,9 +368,9 @@ def _dedup_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
             # unique to avoid false-positive dedup of an exotic call.
             args_key = repr(tc.arguments)
         key = (tc.name, args_key)
-        if key in seen:
+        if key in seen_args:
             continue
-        seen.add(key)
+        seen_args.add(key)
         deduped.append(tc)
 
     dropped = len(tool_calls) - len(deduped)
@@ -420,6 +548,27 @@ class ClaudeSDKProvider(BaseLLMProvider):
                             # Strip SDK MCP prefix, then reverse-map
                             # short→full so the registry finds the skill.
                             registry_name = self._unmap_tool_name(block.name)
+                            # Drop Claude Code built-ins (Skill,
+                            # run_command, SlashCommand, …) that leak
+                            # past `disallowed_tools`. The SDK's
+                            # disallowed_tools blocks execution but
+                            # NOT emission — Sonnet still produces
+                            # tool_use blocks for them from training
+                            # recall, polluting our history rendering
+                            # and wasting tool slots in the batch.
+                            # See _DISALLOWED_BUILT_INS for the full
+                            # list and commit 96c1181 for the original
+                            # block attempt (which only fixed exec).
+                            if (
+                                block.name in _DISALLOWED_BUILT_INS
+                                or registry_name in _DISALLOWED_BUILT_INS
+                            ):
+                                logger.warning(
+                                    "Claude SDK: dropped built-in tool_use block %r "
+                                    "(Claude Code surface — not a lazyclaw skill)",
+                                    block.name,
+                                )
+                                continue
                             tool_calls.append(ToolCall(
                                 id=block.id or f"sdk_{uuid.uuid4().hex[:8]}",
                                 name=registry_name,
@@ -464,6 +613,41 @@ class ClaudeSDKProvider(BaseLLMProvider):
             raise RuntimeError(f"Claude SDK process error: {exc}") from exc
         except ClaudeSDKError as exc:
             raise RuntimeError(f"Claude SDK error: {exc}") from exc
+        except Exception as exc:
+            # SDK upstream quirk: when the CLI emits a ResultMessage with
+            # is_error=True AND errors=[] AND subtype="success", the SDK's
+            # internal reader (query.py:306-308) falls back to using the
+            # subtype string as the error text, then catches the trailing
+            # ProcessError and re-wraps it as the literal message
+            # "Claude Code returned an error result: success". The SDK
+            # surfaces that as a bare `Exception` via its message channel
+            # (query.py:851-852), which doesn't match any of the typed
+            # except clauses above. Result: a turn that actually
+            # SUCCEEDED — assistant text + tool calls already collected —
+            # gets reported as a chat failure to the agent runtime.
+            # Observed twice on 2026-05-14.
+            #
+            # If we have a usable response in hand (content or tool_calls,
+            # no upstream api_error), absorb the trailing exception and
+            # return normally. Otherwise re-wrap and re-raise so genuine
+            # iterator errors still surface.
+            err_str = str(exc)
+            looks_like_success_tail = (
+                "returned an error result: success" in err_str
+            )
+            have_usable_response = bool(
+                (text_parts or tool_calls) and not api_error
+            )
+            if looks_like_success_tail and have_usable_response:
+                logger.warning(
+                    "Claude SDK: swallowed trailing 'error result: success' "
+                    "(turn succeeded — %d text chars + %d tool call(s))",
+                    sum(len(t) for t in text_parts), len(tool_calls),
+                )
+            else:
+                raise RuntimeError(
+                    f"Claude SDK iterator error: {exc}"
+                ) from exc
 
         if api_error:
             raise RuntimeError(f"Claude SDK upstream error: {api_error}")
@@ -533,10 +717,31 @@ class ClaudeSDKProvider(BaseLLMProvider):
         Given `mcp__lazyclaw__instagram_read_profile` we want the original
         `mcp_<uuid>_instagram_read_profile` back so the skill registry can
         look up the right MCP tool.
+
+        Also normalizes two hallucinated forms Sonnet emits when it crosses
+        the wires between the registry's single-underscore convention and
+        the SDK's double-underscore wrapping:
+          - `mcp__<uuid>__<tool>` (hybrid; observed on Upwork flow 2026-05-14)
+          - `mcp_<uuid>_<tool>`   (raw registry form copied from prior turn)
+        Both map to `<tool>` and resolve via name_map exactly like the
+        canonical SDK form.
         """
         short = sdk_name
         if short.startswith(_SDK_MCP_PREFIX):
             short = short[len(_SDK_MCP_PREFIX):]
+        elif _MCP_UUID_HALLUCINATED_RE.match(short):
+            short = _MCP_UUID_HALLUCINATED_RE.sub("", short)
+            logger.warning(
+                "Claude SDK: rescued hallucinated MCP tool name %r "
+                "(hybrid uuid/sdk form) → %r",
+                sdk_name, short,
+            )
+        elif _MCP_UUID_RE.match(short):
+            short = _MCP_UUID_RE.sub("", short)
+            logger.warning(
+                "Claude SDK: rescued raw registry MCP tool name %r → %r",
+                sdk_name, short,
+            )
         return self._tool_name_map.get(short, short)
 
     def _build_options(

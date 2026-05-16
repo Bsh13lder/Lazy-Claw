@@ -2545,6 +2545,53 @@ class TelegramCommands:
         chat_id = str(query.message.chat_id)
         user_id = await self._resolve_user(chat_id)
 
+        if action == "accept":
+            # Contract-intake watcher's ✅ Accept / ⏭ Skip buttons.
+            # callback_data shape:
+            #   accept:<slug>            → run the {slug}_accept template
+            #   accept:skip:<slug>       → user skipped this item
+            if not self._is_allowed(chat_id):
+                logger.warning(
+                    "Unauthorized accept callback from chat %s", chat_id,
+                )
+                return
+            if value.startswith("skip:"):
+                slug = value.split(":", 1)[1]
+                await query.edit_message_text(
+                    f"⏭ Skipped — {slug}_accept not fired. Watcher continues."
+                )
+                return
+            slug = value
+            template_name = f"{slug}_accept"
+            try:
+                from lazyclaw.browser import templates as tpl_store
+                tpl = await tpl_store.get_template_by_name(
+                    self._config, user_id, template_name,
+                )
+                if tpl is None:
+                    await query.edit_message_text(
+                        f"❌ Template '{template_name}' not found. "
+                        "Run `list_browser_templates` to see what's saved."
+                    )
+                    return
+                # Mark the template active so the next agent turn uses
+                # it; surface a confirmation immediately so the user
+                # sees the 3-second-acceptance promise was met. The
+                # active_templates registry is sync + in-memory (per
+                # template_handlers.py:19).
+                from lazyclaw.browser import active_templates
+                active_templates.set_active(user_id, tpl["id"])
+                await query.edit_message_text(
+                    f"✅ Accept fired — `{template_name}` queued. "
+                    "The next browser turn will run the saved accept flow."
+                )
+            except Exception as exc:
+                logger.exception("accept callback failed for %s", slug)
+                await query.edit_message_text(
+                    f"❌ Accept failed: {exc}. Run the template manually."
+                )
+            return
+
         if action == "wipe":
             if value == "confirm":
                 try:

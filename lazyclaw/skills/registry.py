@@ -606,7 +606,11 @@ class SkillRegistry:
             SurvivalModeSkill,
             SurvivalStatusSkill,
             SyncUpworkProfileSkill,
+            ExecuteContractIntakeSetupSkill,
+            NewContractIntakeSkill,
+            UpworkContractPollSkill,
             UpworkInboxCheckSkill,
+            UpworkLastConversationSkill,
             WatchRedditForHireSkill,
         )
 
@@ -625,6 +629,25 @@ class SkillRegistry:
         self.register(InvoiceClientSkill(config=config, registry=self))
         self.register(DraftFreelanceProposalSkill(config=config, registry=self))
         self.register(UpworkInboxCheckSkill(config=config, registry=self))
+        self.register(UpworkContractPollSkill(config=config, registry=self))
+        self.register(UpworkLastConversationSkill(config=config, registry=self))
+        self.register(NewContractIntakeSkill(config=config, registry=self))
+        self.register(ExecuteContractIntakeSetupSkill(config=config, registry=self))
+
+        # Wire the contract-intake auto-setup executor's default
+        # dispatch callback to the just-built registry + config. The
+        # module registers itself with goal_executor at import time;
+        # this call gives it the runtime references it needs to
+        # resolve config + skills when fired by GoalExecutor._dispatch.
+        try:
+            from lazyclaw.runtime import contract_intake_executor
+            contract_intake_executor.register_runtime(config, self)
+        except Exception as exc:  # pragma: no cover — import-time only
+            import logging
+            logging.getLogger(__name__).warning(
+                "contract_intake_executor.register_runtime failed: %s",
+                exc, exc_info=True,
+            )
         self.register(WatchRedditForHireSkill(config=config))
 
         # Generic escalation channel (used by Upwork inbox bot + any
@@ -679,8 +702,11 @@ class SkillRegistry:
 
         # Multi-account browser identity skills (Phase A — Goal Executor).
         from lazyclaw.skills.builtin.browser_account import (
+            AddLiveBrowserHostSkill,
             ListBrowserAccountsSkill,
+            ListLiveBrowserHostsSkill,
             RegisterBrowserAccountSkill,
+            RemoveLiveBrowserHostSkill,
             SwitchBrowserAccountSkill,
             TuneBrowserCadenceSkill,
         )
@@ -688,6 +714,9 @@ class SkillRegistry:
         self.register(ListBrowserAccountsSkill(config=config))
         self.register(SwitchBrowserAccountSkill(config=config))
         self.register(TuneBrowserCadenceSkill(config=config))
+        self.register(AddLiveBrowserHostSkill(config=config))
+        self.register(RemoveLiveBrowserHostSkill(config=config))
+        self.register(ListLiveBrowserHostsSkill(config=config))
 
     def get_skill(self, name: str) -> "BaseSkill | None":
         """Get a registered skill instance by name."""

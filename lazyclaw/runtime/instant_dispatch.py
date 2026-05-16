@@ -66,6 +66,62 @@ INSTANT_ROUTES: tuple[InstantRoute, ...] = (
         params_builder=_no_params,
         description="check upwork inbox",
     ),
+    # ── Upwork contract poll ──────────────────────────────────────────
+    # Matches the canonical cron instruction ("poll my upwork contracts
+    # and intake any new ones") AND user-typed variants ("check my upwork
+    # contracts", "any new contracts on upwork"). Skill output is itself
+    # a complete Telegram-ready message, so brain round-trip is wasted.
+    InstantRoute(
+        pattern=re.compile(
+            r"^(?:please\s+|can\s+you\s+)?"
+            r"(?:poll|check|scan|sync|fetch|list|show|see)\s+"
+            r"(?:me\s+)?(?:my\s+|the\s+|any\s+)?"
+            r"(?:new\s+)?upwork\s+contracts?"
+            r"(?:\s+and\s+intake\s+(?:any\s+)?new\s+ones)?"
+            r"(?:\s+now)?[\s.!?]*$",
+        ),
+        skill_name="upwork_contract_poll",
+        params_builder=_no_params,
+        description="poll upwork contracts",
+    ),
+    # ── Upwork last conversation ──────────────────────────────────────
+    # Catches "tell me what's in the last conversation" / "show latest
+    # upwork message" / "what did <name> say". The brain-routed path
+    # for this on 2026-05-16 cost 2m33s + 4 wasted upwork_get_messages
+    # calls; the dedicated skill runs in <10s deterministically.
+    # Conservative: requires the "upwork" anchor OR a "conversation/
+    # message" anchor with no competing inbox-sweep verb.
+    InstantRoute(
+        pattern=re.compile(
+            r"^(?:please\s+|can\s+you\s+|tell\s+me\s+|show\s+(?:me\s+)?)?"
+            r"(?:what['s\s]+(?:in|the)\s+)?"
+            r"(?:the\s+|my\s+|that\s+)?"
+            r"(?:last|latest|recent|most\s+recent)\s+"
+            r"(?:upwork\s+)?"
+            r"(?:conversation|message|chat|thread|convo|dm)s?"
+            r"(?:\s+on\s+upwork)?"
+            r"[\s.!?]*$",
+        ),
+        skill_name="upwork_last_conversation",
+        params_builder=_no_params,
+        description="upwork last conversation",
+    ),
+    # ── Manual contract intake by URL ─────────────────────────────────
+    # ``intake contract <url>`` or ``intake upwork contract <url>`` —
+    # bypasses the poll/dedup path so the user can re-onboard a contract
+    # that was previously marked seen (e.g. after fixing a bad answer).
+    InstantRoute(
+        pattern=re.compile(
+            r"^(?:please\s+|can\s+you\s+)?"
+            r"intake\s+(?:the\s+|my\s+|this\s+|upwork\s+)?"
+            r"contract\s+"
+            r"(?P<url>https?://\S+?)"
+            r"[\s.!?]*$",
+        ),
+        skill_name="new_contract_intake",
+        params_builder=lambda m: {"contract_url": m.group("url")},
+        description="manual contract intake by URL",
+    ),
     # ── Cron jobs / reminders listing ──────────────────────────────────
     # ListJobsSkill takes no params and emits a complete formatted table.
     InstantRoute(

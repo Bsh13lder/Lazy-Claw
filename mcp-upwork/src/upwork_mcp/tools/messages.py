@@ -142,6 +142,50 @@ class SendMessageParams(BaseModel):
     """Parameters for sending a message."""
     room_id: str = Field(description="Chat room ID or URL")
     message: str = Field(description="Message content to send")
+    draft_only: bool = Field(
+        default=False,
+        description=(
+            "When true, type the message into the Upwork compose box "
+            "but DO NOT click Send. Use for human-in-loop review: the "
+            "caller types the draft, the user inspects it in their "
+            "live Brave tab, then sends manually. Returns status='drafted'."
+        ),
+    )
+
+
+class EditMessageParams(BaseModel):
+    """Parameters for editing an already-sent Upwork message.
+
+    Upwork allows editing your own messages within ~1 hour of sending.
+    Past that window the edit option disappears from the message hover-
+    menu. We detect that case and return ``status='expired'`` so the
+    caller can fall back to sending a correction.
+    """
+    room_id: str = Field(description="Chat room ID or URL")
+    message_index: int = Field(
+        description=(
+            "Which of YOUR (is_mine=True) recent messages to edit, "
+            "counting from the most recent backwards. 0 = your last "
+            "message, 1 = your second-to-last, etc. Clamped to the "
+            "Upwork-side edit-window (~1h)."
+        ),
+        ge=0,
+    )
+    new_content: str = Field(
+        description=(
+            "Replacement text for the message. Multi-line content is "
+            "typed with Shift+Enter between lines (same Tiptap-safe "
+            "path as send_message — never triggers an accidental save)."
+        ),
+    )
+    draft_only: bool = Field(
+        default=False,
+        description=(
+            "When true, open the edit modal + type the replacement "
+            "text but DO NOT click Save. User confirms manually. "
+            "Returns status='drafted_edit'."
+        ),
+    )
 
 
 async def get_messages(params: MessagesParams) -> list[dict]:
@@ -600,6 +644,43 @@ async def _extract_message(
     return msg
 
 
+async def _type_with_soft_breaks(page, text: str) -> None:
+    """Type ``text`` into the currently-focused element using ``Shift+Enter``
+    for newlines instead of raw ``Enter``.
+
+    Workaround for the 2026-05-16 chunking bug: Upwork's Tiptap rich-text
+    editor binds raw ``Enter`` to "Send message". When we typed a
+    multi-line draft via ``page.keyboard.type(text)``, every ``\\n`` in
+    the text emitted a literal Enter keystroke → the editor sent the
+    accumulated buffer as ONE message and started a new line in the now-
+    empty editor, repeating per newline. An 11-line draft produced 10
+    sends.
+
+    ``Shift+Enter`` is the Tiptap StarterKit hard-break shortcut and
+    inserts a ``<br>`` without triggering the submit handler — exactly
+    what we want for multi-line freelance messages.
+
+    Empty leading/trailing lines are preserved (the user may intend a
+    blank line). Carriage returns (``\\r``) are stripped first so
+    Windows-style ``\\r\\n`` doesn't double-break.
+    """
+    import asyncio as _aio
+    # Normalize line endings — Windows / paste-from-Word can carry \r\n.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    for i, line in enumerate(lines):
+        if i > 0:
+            # Soft line-break — NOT a submit.
+            await page.keyboard.press("Shift+Enter")
+            # Tiny pause so Tiptap's input handler commits the <br>
+            # before we start typing the next line. Without this, some
+            # builds of ProseMirror occasionally swallow the first char
+            # of the new line.
+            await _aio.sleep(0.03)
+        if line:
+            await page.keyboard.type(line, delay=15)
+
+
 async def send_message(params: SendMessageParams) -> dict:
     """Send a message in a conversation.
 
@@ -690,7 +771,31 @@ async def send_message(params: SendMessageParams) -> dict:
     else:
         await input_el.click()
         await _aio.sleep(0.2)
-        await page.keyboard.type(params.message, delay=15)
+        # CRITICAL: Upwork's Tiptap editor treats raw Enter as "Send
+        # message" — a multi-line message passed through ``keyboard.type``
+        # would fire one send per ``\n``, producing the 11-message spam
+        # incident observed 2026-05-16 (one Upwork bubble per bullet).
+        # We split on newlines and use Shift+Enter between lines, which
+        # Tiptap interprets as a soft line-break instead of a submit.
+        # Source: Tiptap's StarterKit hard-break extension binds
+        # ``Shift+Enter`` to ``setHardBreak`` while ``Enter`` runs the
+        # configured submit handler.
+        await _type_with_soft_breaks(page, params.message)
+
+    # Human-in-loop review mode: leave the text in the compose box and
+    # return without clicking Send. The user inspects + sends manually
+    # from their live Brave tab. We do NOT verify a clear editor in
+    # this branch — the message is supposed to remain there.
+    if params.draft_only:
+        return {
+            "status": "drafted",
+            "message": (
+                "Message typed into Upwork compose box. Review in your "
+                "Brave tab, then click Send manually. Nothing was sent."
+            ),
+            "room_id": params.room_id,
+            "char_count": len(params.message),
+        }
 
     # Send button. 2026 layout: <button aria-label="Send message">.
     # Keep the older selectors as fallback.
@@ -721,6 +826,259 @@ async def send_message(params: SendMessageParams) -> dict:
     return {
         "status": "unknown",
         "message": f"Could not confirm message was sent (editor still contains text: {residual[:80]!r})",
+    }
+
+
+async def edit_message(params: EditMessageParams) -> dict:
+    """Edit one of your already-sent Upwork messages.
+
+    Upwork's 2026 layout allows editing your own messages for ~60
+    minutes after send. The UI flow:
+
+      1. Hover over the message bubble → action icons appear on the right
+      2. Click the "..." (more) icon → context menu opens
+      3. Click "Edit" → inline editor replaces the bubble with the
+         message text pre-filled in a Tiptap contenteditable
+      4. Modify text → press Enter (Tiptap binds Enter to save in
+         edit-mode, NOT to send-new-message) OR click the inline Save
+         button if rendered
+
+    Past the 60-min window the "Edit" option is absent from the menu
+    — we detect that case and return ``status='expired'`` so the
+    caller can fall back to sending a correction message.
+
+    Same Tiptap-safe typing path as :func:`send_message`: the
+    replacement text is typed with ``Shift+Enter`` between newlines
+    via :func:`_type_with_soft_breaks` (raw Enter would save mid-line).
+
+    URL + product-pitch guards fire BEFORE any browser nav — same as
+    send_message. An edit that introduces a URL gets rejected without
+    touching the page.
+    """
+    # Hard guard #1: URLs forbidden (same rationale as send_message)
+    offending = _contains_url(params.new_content)
+    if offending is not None:
+        return {
+            "status": "blocked",
+            "message": (
+                f"Refused to edit — Upwork DMs block external URLs and "
+                f"the replacement text contains {offending!r}. Rephrase "
+                "without the URL."
+            ),
+            "offending_token": offending,
+        }
+    # Hard guard #2: no product-pitch (LazyClaw branding)
+    pitch = _contains_product_pitch(params.new_content)
+    if pitch is not None:
+        return {
+            "status": "blocked",
+            "message": (
+                f"Refused to edit — replacement text names {pitch!r}, "
+                "which reads as a product-sales pitch. Describe the "
+                "WORK instead."
+            ),
+            "offending_token": pitch,
+        }
+
+    browser = get_browser()
+    await browser.ensure_logged_in()
+
+    if params.room_id.startswith("http"):
+        url = params.room_id
+    else:
+        url = f"https://www.upwork.com/ab/messages/rooms/{params.room_id}"
+
+    page = await browser.safe_goto(url)
+
+    import asyncio as _aio
+    await _aio.sleep(1.5)
+
+    # Locate my own message bubbles (newest first). Upwork's message
+    # list renders mine on the right with a distinguishing class /
+    # data-attr — keep selectors permissive to survive layout drift.
+    my_bubbles = await page.query_selector_all(
+        '[data-test="story-container"][data-mine="true"], '
+        '[data-test="story-container"].story-mine, '
+        '[data-test="own-message"], '
+        '.message-row.is-own, '
+        '[data-test="message-bubble-self"]'
+    )
+
+    # Fallback when no positive selector for self-side hits: read every
+    # bubble and assume the most recent N visually-right-aligned ones
+    # are mine. Skip this for now — better to fail explicitly than to
+    # edit someone else's message by accident. The brain re-tries with
+    # a corrected selector if needed.
+    if not my_bubbles:
+        return {
+            "status": "error",
+            "message": (
+                "Could not locate any of your own message bubbles in "
+                "this room. Upwork layout may have changed — verify "
+                "with get_conversation_messages first to confirm "
+                "is_mine flags are correct."
+            ),
+        }
+
+    if params.message_index >= len(my_bubbles):
+        return {
+            "status": "error",
+            "message": (
+                f"message_index={params.message_index} but only "
+                f"{len(my_bubbles)} of your messages are visible. "
+                "Lower the index or load more history."
+            ),
+        }
+
+    # Newest-first ordering: my_bubbles[0] is the BOTTOM bubble (oldest
+    # in DOM, but the last sent). Upwork conventionally orders top→bottom
+    # = oldest→newest, so we reverse to get newest first.
+    target_bubble = list(reversed(my_bubbles))[params.message_index]
+
+    # Hover to reveal action icons. CDP `hover` triggers the same
+    # mouseover events Upwork's UI listens for.
+    try:
+        await target_bubble.hover()
+        await _aio.sleep(0.3)
+    except Exception as exc:
+        logger.warning("hover on target bubble failed: %s", exc)
+
+    # Find the "more actions" / kebab icon. Upwork has used several
+    # data-test values for this — try the most common patterns first.
+    more_btn = await target_bubble.query_selector(
+        '[data-test="message-actions-menu"], '
+        '[aria-label*="More" i], '
+        '[aria-label*="actions" i], '
+        'button[class*="kebab" i], '
+        'button[class*="more" i]'
+    )
+    if not more_btn:
+        return {
+            "status": "error",
+            "message": (
+                "Could not find the message actions menu on the target "
+                "bubble. Upwork may have rearranged hover-icons. "
+                "Inspect the DOM and add the new selector to "
+                "edit_message's more_btn query."
+            ),
+        }
+    await more_btn.click()
+    await _aio.sleep(0.4)
+
+    # Find the Edit menu item. If absent → past the 60-min edit window.
+    edit_item = await page.query_selector(
+        '[role="menuitem"]:has-text("Edit"), '
+        '[data-test="menu-item-edit"], '
+        'button:has-text("Edit"):not(:has-text("Editor"))'
+    )
+    if not edit_item:
+        return {
+            "status": "expired",
+            "message": (
+                "Edit option not in the menu — your 60-minute edit "
+                "window has likely passed. Send a new correction "
+                "message via send_message instead."
+            ),
+        }
+    await edit_item.click()
+    await _aio.sleep(0.5)
+
+    # The bubble now becomes an inline contenteditable Tiptap editor
+    # with the original text pre-filled. Selector pattern mirrors the
+    # compose-box one in send_message.
+    edit_el = await page.query_selector(
+        '[role="textbox"][contenteditable="true"][data-test*="edit" i], '
+        '[role="textbox"][contenteditable="true"]:focus, '
+        '.tiptap[contenteditable="true"][data-edit-message], '
+        '.tiptap[contenteditable="true"]:focus'
+    )
+    if not edit_el:
+        # Fall back to any focused contenteditable on the page
+        edit_el = await page.query_selector(
+            '[contenteditable="true"]:focus'
+        )
+    if not edit_el:
+        return {
+            "status": "error",
+            "message": (
+                "Edit modal opened but couldn't locate the inline editor "
+                "element. Aborting before typing to avoid leaking text "
+                "into the wrong field."
+            ),
+        }
+
+    # Clear existing text — select all + delete is safer than
+    # programmatic .fill() on contenteditable.
+    await edit_el.click()
+    await _aio.sleep(0.15)
+    await page.keyboard.press("Control+A")
+    await _aio.sleep(0.1)
+    await page.keyboard.press("Delete")
+    await _aio.sleep(0.15)
+
+    # Type replacement via the same Tiptap-safe helper — Shift+Enter
+    # between newlines, never a raw Enter.
+    await _type_with_soft_breaks(page, params.new_content)
+
+    if params.draft_only:
+        return {
+            "status": "drafted_edit",
+            "message": (
+                "Edit pane open with replacement text typed. Review in "
+                "your Brave tab, then click Save manually."
+            ),
+            "room_id": params.room_id,
+            "message_index": params.message_index,
+            "char_count": len(params.new_content),
+        }
+
+    # Save: Tiptap in edit-mode usually binds Enter to save (the inverse
+    # of compose-mode's send-on-Enter). Try the explicit Save button
+    # first; fall back to a single Enter press if absent.
+    save_btn = await page.query_selector(
+        '[data-test="save-edit"], '
+        '[aria-label="Save edit"], '
+        'button:has-text("Save"):not(:has-text("Saved"))'
+    )
+    if save_btn:
+        await save_btn.click()
+    else:
+        await page.keyboard.press("Enter")
+
+    await _aio.sleep(1.5)
+
+    # Verify by re-querying the bubble and reading its text content.
+    # Stale-reference resilient — re-fetch instead of reusing target_bubble.
+    refreshed = await page.query_selector_all(
+        '[data-test="story-container"][data-mine="true"], '
+        '[data-test="story-container"].story-mine, '
+        '[data-test="own-message"]'
+    )
+    if not refreshed or params.message_index >= len(refreshed):
+        return {
+            "status": "unknown",
+            "message": (
+                "Edit submitted but could not re-verify the bubble. "
+                "Check Upwork manually to confirm the change landed."
+            ),
+        }
+    new_text = (await list(reversed(refreshed))[params.message_index].text_content() or "").strip()
+    # Compare normalized — collapse whitespace, ignore trailing chrome
+    expected = params.new_content.strip()
+    if expected and expected.split() == new_text.split()[:len(expected.split())]:
+        return {
+            "status": "edited",
+            "message": "Message edited successfully.",
+            "room_id": params.room_id,
+            "message_index": params.message_index,
+            "new_content_preview": expected[:120],
+        }
+    return {
+        "status": "unknown",
+        "message": (
+            f"Edit submitted but bubble text doesn't match expected. "
+            f"Bubble shows: {new_text[:120]!r}. Verify manually."
+        ),
     }
 
 

@@ -28,6 +28,14 @@ from lazyclaw.skills.builtin.survival.profile_skill import SetSkillsProfileSkill
 from lazyclaw.skills.builtin.survival.sync_upwork_skill import SyncUpworkProfileSkill
 from lazyclaw.skills.builtin.survival.upwork_bot_skill import SetUpworkBotBehaviorSkill
 from lazyclaw.skills.builtin.survival.upwork_inbox_check import UpworkInboxCheckSkill
+from lazyclaw.skills.builtin.survival.upwork_contract_poll import UpworkContractPollSkill
+from lazyclaw.skills.builtin.survival.upwork_last_conversation import (
+    UpworkLastConversationSkill,
+)
+from lazyclaw.skills.builtin.survival.new_contract_intake import NewContractIntakeSkill
+from lazyclaw.skills.builtin.survival.execute_contract_intake_setup import (
+    ExecuteContractIntakeSetupSkill,
+)
 from lazyclaw.skills.builtin.survival.reddit_apply_skill import ApplyRedditDmSkill
 from lazyclaw.skills.builtin.survival.reddit_watch_skill import WatchRedditForHireSkill
 from lazyclaw.skills.builtin.survival.review_skill import ReviewDeliverableSkill
@@ -48,6 +56,10 @@ __all__ = [
     "SurvivalModeSkill",
     "SurvivalStatusSkill",
     "SyncUpworkProfileSkill",
+    "ExecuteContractIntakeSetupSkill",
+    "NewContractIntakeSkill",
+    "UpworkContractPollSkill",
     "UpworkInboxCheckSkill",
+    "UpworkLastConversationSkill",
     "WatchRedditForHireSkill",
 ]

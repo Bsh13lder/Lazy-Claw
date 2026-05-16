@@ -305,6 +305,150 @@ class TestDedupToolCalls:
         assert len(out) == 2
 
 
+class TestReadOnlyListDedup:
+    """Read-only listing tools collapse to FIRST occurrence regardless of
+    args. Reproduces the 2026-05-16 incident: 7× upwork_get_messages with
+    varied limit/filter args wasted ~20s of Cloudflare round-trips before
+    the brain moved on."""
+
+    def test_is_read_only_list_tool_recognizes_native_names(self) -> None:
+        from lazyclaw.llm.providers.claude_sdk_provider import (
+            _is_read_only_list_tool,
+        )
+        assert _is_read_only_list_tool("upwork_get_messages")
+        assert _is_read_only_list_tool("list_jobs")
+        assert _is_read_only_list_tool("list_tasks")
+        assert _is_read_only_list_tool("vault_list")
+        assert _is_read_only_list_tool("survival_status")
+
+    def test_is_read_only_list_tool_recognizes_mcp_prefixed(self) -> None:
+        from lazyclaw.llm.providers.claude_sdk_provider import (
+            _is_read_only_list_tool,
+        )
+        # MCP-bridged form. The wrapper is ``mcp_<uuid>_<tool>``; in
+        # production the bridge always uses uuid4, so the dedup helper
+        # strips a strict UUID-shaped prefix and exact-matches the
+        # remainder against ``_READ_ONLY_LIST_SUFFIXES``.
+        assert _is_read_only_list_tool(
+            "mcp_489c8963-cdc0-4937-8470-15e6ba9b6e4c_upwork_get_messages"
+        )
+        assert _is_read_only_list_tool(
+            "mcp_11111111-2222-3333-4444-555555555555_upwork_get_contracts"
+        )
+
+    def test_is_read_only_list_tool_rejects_non_uuid_prefix(self) -> None:
+        """Forward-fragility regression: a hypothetical future tool
+        named ``acme_list_jobs`` or ``foo_upwork_get_messages`` must
+        NOT be matched. The MCP bridge always uses uuid4, so a non-
+        UUID prefix is either a hand-crafted lookalike or a brand-new
+        tool — either way, suppressing its second call would lose
+        legitimate brain output."""
+        from lazyclaw.llm.providers.claude_sdk_provider import (
+            _is_read_only_list_tool,
+        )
+        assert not _is_read_only_list_tool("mcp_xyz_upwork_get_contracts")
+        assert not _is_read_only_list_tool("acme_list_jobs")
+        assert not _is_read_only_list_tool("foo_upwork_get_messages")
+
+    def test_is_read_only_list_tool_rejects_unrelated(self) -> None:
+        from lazyclaw.llm.providers.claude_sdk_provider import (
+            _is_read_only_list_tool,
+        )
+        # Tools that legitimately differ per call must NOT be collapsed
+        assert not _is_read_only_list_tool("search_tools")
+        assert not _is_read_only_list_tool("recall_memories")
+        assert not _is_read_only_list_tool("web_search")
+        assert not _is_read_only_list_tool("upwork_get_conversation")
+        assert not _is_read_only_list_tool("upwork_send_message")
+        assert not _is_read_only_list_tool("upwork_get_job_details")
+        assert not _is_read_only_list_tool("save_note")
+        assert not _is_read_only_list_tool("")
+
+    def test_collapses_listing_calls_with_varied_args(self) -> None:
+        """The 2026-05-16 pattern: same listing tool, different args."""
+        tcs = [
+            ToolCall(id="a", name="upwork_get_messages", arguments={"limit": 5}),
+            ToolCall(id="b", name="upwork_get_messages", arguments={"limit": 10}),
+            ToolCall(
+                id="c", name="upwork_get_messages",
+                arguments={"unread_only": True},
+            ),
+            ToolCall(
+                id="d", name="upwork_get_messages",
+                arguments={"limit": 20, "unread_only": False},
+            ),
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert len(out) == 1
+        assert out[0].id == "a"  # FIRST wins
+
+    def test_collapses_mcp_prefixed_listing_calls(self) -> None:
+        """Real-world: each call carries the mcp_<uuid>_ prefix."""
+        n = "mcp_489c8963-cdc0-4937-8470-15e6ba9b6e4c_upwork_get_messages"
+        tcs = [
+            ToolCall(id=f"t{i}", name=n, arguments={"limit": 5 + i})
+            for i in range(7)  # exact 2026-05-16 count
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert len(out) == 1
+        assert out[0].id == "t0"
+
+    def test_listing_collapse_does_not_swallow_other_tools(self) -> None:
+        """Mixed batch: 4× listing + 1× get_conversation must collapse to
+        1× listing + 1× get_conversation (the conversation call is NOT
+        in the read-only-list set)."""
+        tcs = [
+            ToolCall(id="a", name="upwork_get_messages", arguments={"limit": 5}),
+            ToolCall(id="b", name="upwork_get_messages", arguments={"limit": 10}),
+            ToolCall(id="c", name="upwork_get_messages", arguments={"limit": 15}),
+            ToolCall(id="d", name="upwork_get_messages", arguments={"limit": 20}),
+            ToolCall(
+                id="e", name="upwork_get_conversation",
+                arguments={"room_id": "room_xyz"},
+            ),
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert len(out) == 2
+        assert out[0].id == "a"
+        assert out[1].id == "e"
+
+    def test_listing_collapse_preserves_order_with_other_tools(self) -> None:
+        """Order: tool_a, listing, tool_b, listing-dup, tool_c → tool_a,
+        listing, tool_b, tool_c."""
+        tcs = [
+            ToolCall(id="1", name="search_tools", arguments={"q": "a"}),
+            ToolCall(id="2", name="upwork_get_messages", arguments={"limit": 5}),
+            ToolCall(id="3", name="search_tools", arguments={"q": "b"}),
+            ToolCall(id="4", name="upwork_get_messages", arguments={"limit": 10}),
+            ToolCall(id="5", name="recall_memories", arguments={"q": "c"}),
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert [tc.id for tc in out] == ["1", "2", "3", "5"]
+
+    def test_different_listing_tools_both_survive(self) -> None:
+        """One call to upwork_get_messages and one to upwork_get_contracts
+        are different listings — both should survive."""
+        tcs = [
+            ToolCall(id="a", name="upwork_get_messages", arguments={}),
+            ToolCall(id="b", name="upwork_get_contracts", arguments={}),
+            ToolCall(id="c", name="list_jobs", arguments={}),
+        ]
+        out = _dedup_tool_calls(tcs)
+        assert len(out) == 3
+
+    def test_listing_dedup_logged_at_warning(self, caplog) -> None:
+        """Dedup-drop count surfaces in WARNING logs for ops dashboards."""
+        import logging
+        tcs = [
+            ToolCall(id=f"t{i}", name="upwork_get_messages",
+                     arguments={"limit": 5 + i})
+            for i in range(7)
+        ]
+        with caplog.at_level(logging.WARNING):
+            _dedup_tool_calls(tcs)
+        assert any("dropped" in rec.message for rec in caplog.records)
+
+
 class TestSDKUnavailableRaisedOnMissingBinary:
     @pytest.mark.asyncio
     async def test_no_binary_raises_sdk_unavailable(self) -> None:

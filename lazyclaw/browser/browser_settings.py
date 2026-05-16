@@ -51,6 +51,23 @@ DEFAULT_BROWSER = {
     # Per-domain cadence tweaks: domain → {field_name: float_factor}.
     # Read by lazyclaw.browser.cadence.get_cadence(). Empty = use defaults.
     "cadence_overrides": {},
+    # Extra hosts the watcher framework must poll through the user's live
+    # signed-in Brave (instead of the background headless that gets
+    # Cloudflare-blocked). Merged with the daemon's built-in set
+    # ``_LIVE_BROWSER_WATCHER_HOSTS_BUILTIN``. Normalized domains only —
+    # no protocol, no path, no port. See
+    # ``lazyclaw/heartbeat/daemon.py::_needs_live_browser``.
+    "live_hosts": [],
+    # Heartbeat-driven tab health (lazyclaw/browser/tab_reaper.py).
+    # ``idle_tab_close_seconds`` — tabs unfocused longer than this get
+    # closed (active tab + anchored watcher tabs always preserved).
+    # 600s = 10 minutes; reduce to 300s for aggressive RAM clawback.
+    "idle_tab_close_seconds": 600,
+    # When True, the heartbeat scans tabs for white-screen state
+    # (blank body, no interactive elements, readyState=complete) and
+    # auto-reloads. Set False if you have an SPA that legitimately
+    # renders a blank shell while hydrating.
+    "auto_refresh_white_screens": True,
 }
 
 
@@ -406,3 +423,64 @@ def _utc_now_iso() -> str:
     """Stable UTC ISO timestamp for serialized fields."""
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ── Live-browser watcher hosts (per-user extras) ─────────────────────
+
+
+async def get_live_hosts(config: Config, user_id: str) -> list[str]:
+    """Return the user's extra live-browser watcher hosts (normalized).
+
+    Merged with the daemon's built-in set
+    ``_LIVE_BROWSER_WATCHER_HOSTS_BUILTIN`` at routing time. The two
+    sets are kept separate so users can't accidentally remove a builtin.
+    """
+    settings = await get_browser_settings(config, user_id)
+    raw = settings.get("live_hosts") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for v in raw:
+        norm = normalize_domain(str(v))
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+async def add_live_host(config: Config, user_id: str, host: str) -> list[str]:
+    """Append a host to the user's live-browser watcher list. Returns the
+    full merged user list (idempotent — duplicates ignored)."""
+    norm = normalize_domain(host)
+    if not norm:
+        raise ValueError("host is required and must be a valid domain")
+    current = await get_live_hosts(config, user_id)
+    if norm in current:
+        return current
+    current.append(norm)
+    await update_browser_settings(config, user_id, {"live_hosts": current})
+    logger.info(
+        "browser_settings.add_live_host user=%s host=%s",
+        user_id, norm,
+    )
+    return current
+
+
+async def remove_live_host(
+    config: Config, user_id: str, host: str,
+) -> list[str]:
+    """Remove a host from the user's live-browser watcher list. Builtins
+    are NOT removable from here (they're enforced in the daemon's
+    frozenset). Returns the post-removal user list."""
+    norm = normalize_domain(host)
+    if not norm:
+        raise ValueError("host is required and must be a valid domain")
+    current = await get_live_hosts(config, user_id)
+    if norm not in current:
+        return current
+    new_list = [h for h in current if h != norm]
+    await update_browser_settings(config, user_id, {"live_hosts": new_list})
+    logger.info(
+        "browser_settings.remove_live_host user=%s host=%s",
+        user_id, norm,
+    )
+    return new_list

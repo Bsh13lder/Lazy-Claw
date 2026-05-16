@@ -550,8 +550,16 @@ class HeartbeatDaemon:
                 run_failed = False
                 run_error: str | None = None
                 try:
+                    # Route through ``{user_id}:heartbeat`` so the cron's
+                    # brain turn runs in parallel with the user's
+                    # foreground chat lane (LaneQueue keys per string;
+                    # different keys = independent FIFO processors).
+                    # Without this, a cron tick blocks the user's next
+                    # message for 30–120s under MODE_CLAUDE.
                     result_text = await self._lane_queue.enqueue(
-                        user_id, f"[JOB:{job_name}] {instruction}", **cb_kwargs,
+                        f"{user_id}:heartbeat",
+                        f"[JOB:{job_name}] {instruction}",
+                        **cb_kwargs,
                     )
                 except Exception as exc:
                     run_failed = True
@@ -633,8 +641,9 @@ class HeartbeatDaemon:
                     if self._notifier_factory else None
                 )
                 cb_kwargs = {"callback": cb} if cb is not None else {}
+                # Heartbeat lane — see note at _check_due_jobs above.
                 await self._lane_queue.enqueue(
-                    user_id,
+                    f"{user_id}:heartbeat",
                     f"[REMINDER] {message}",
                     **cb_kwargs,
                 )
@@ -844,8 +853,9 @@ class HeartbeatDaemon:
                             if self._notifier_factory else None
                         )
                         cb_kwargs = {"callback": cb} if cb is not None else {}
+                        # Heartbeat lane — see note at _check_due_jobs above.
                         await self._lane_queue.enqueue(
-                            user_id,
+                            f"{user_id}:heartbeat",
                             f"[WATCHER] '{job_name}' has expired and stopped.",
                             **cb_kwargs,
                         )
@@ -1003,9 +1013,11 @@ class HeartbeatDaemon:
                             try:
                                 instr = on_change_instr.strip()
                                 if instr:
+                                    # Heartbeat lane — see note at
+                                    # _check_due_jobs above.
                                     asyncio.create_task(
                                         self._lane_queue.enqueue(
-                                            user_id,
+                                            f"{user_id}:heartbeat",
                                             f"[WATCHER:{job_name}] {instr}",
                                         ),
                                         name=f"watcher-brain-{job_id[:8]}",
@@ -1181,8 +1193,9 @@ class HeartbeatDaemon:
                             if self._notifier_factory else None
                         )
                         cb_kwargs = {"callback": cb} if cb is not None else {}
+                        # Heartbeat lane — see note at _check_due_jobs above.
                         await self._lane_queue.enqueue(
-                            user_id,
+                            f"{user_id}:heartbeat",
                             f"[MCP_WATCHER] New {_svc} messages. {auto_reply}\n\n{notification}",
                             **cb_kwargs,
                         )

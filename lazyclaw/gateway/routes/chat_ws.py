@@ -139,22 +139,54 @@ class WebSocketCallback:
         _bg_id = (event.metadata or {}).get("bg_task_id") if isinstance(event.metadata, dict) else None
         _bg_name = (event.metadata or {}).get("bg_task_name") if isinstance(event.metadata, dict) else None
 
-        # ── Fix J — streaming OFF filter ────────────────────────────
+        # ── Fix J + L + M — streaming OFF filter ───────────────────
         # When the user has `bg_streaming` toggled OFF (via `/streaming
-        # off` chat command or the Web UI toggle), drop every live bg
-        # frame here. Final terminal events (`background_done` /
-        # `background_failed`) still fire so the user sees the result;
-        # only the noisy progress chatter is suppressed.
-        if (
-            _bg_id
-            and not self.streaming_state.get("bg_streaming", True)
-            and kind not in (
-                "background_done",
-                "background_failed",
-                "work_summary",
+        # off` chat command or the Web UI toggle), drop every non-text
+        # frame here. Quiet mode = team lead's voice only — the brain's
+        # tokens + the final consolidated reply, nothing else.
+        #
+        # Frames killed in quiet mode:
+        #   - bg_* anything tagged with bg_task_id (live run_background
+        #     progress, tokens, tool calls)
+        #   - specialist_* (delegate-spawned specialist progress + done)
+        #   - team_delegate (the "delegating to X" announcement)
+        #   - tool_call / tool_result for the brain's OWN foreground
+        #     tools (search_tools, MCP calls, recall_memories, etc. —
+        #     these are the "ACTING 36s step 1" tool cards that made
+        #     the chat look stuck in the 2026-05-14 screenshot)
+        #   - phase (ACTING/THINKING header chips)
+        #
+        # ALWAYS allowed through, even in quiet mode:
+        #   - token (the brain's text — this IS the team lead speaking)
+        #   - thinking_delta / thinking_done (collapsible panel, opt-in)
+        #   - background_done / background_failed (terminal events —
+        #     either painted directly when streaming ON, or absorbed via
+        #     side-note + brain consolidation when streaming OFF, per
+        #     task_runner._consolidate's quiet-mode branch)
+        #   - plan_pending / plan_question / plan_approved (gates the
+        #     user must answer — never silently dropped)
+        #   - approval_request (gates a skill run — never silently
+        #     dropped or auto-denied)
+        #   - cancelled / done / work_summary (control frames)
+        _streaming_off = not self.streaming_state.get("bg_streaming", True)
+        if _streaming_off:
+            _is_worker_noise = (
+                (_bg_id and kind not in (
+                    "background_done", "background_failed", "work_summary",
+                ))
+                or kind in (
+                    "specialist_start",
+                    "specialist_thinking",
+                    "specialist_tool",
+                    "specialist_done",
+                    "team_delegate",
+                    "tool_call",
+                    "tool_result",
+                    "phase",
+                )
             )
-        ):
-            return
+            if _is_worker_noise:
+                return
 
         # ── Bg leak guard ────────────────────────────────────────────
         # If this event is tagged as background, ALL non-tool-call kinds
@@ -562,7 +594,7 @@ async def chat_websocket(ws: WebSocket):
 
                 _is_subagent_terminal = (
                     evt.kind in ("background_done", "background_failed")
-                    and (evt.task_id or "").startswith("subagent-")
+                    and (evt.task_id or "").startswith(("subagent-", "specialist-"))
                 )
                 # Brain-spawned run_background tasks share the same
                 # "consolidate, don't paint per-task" rule. TaskRunner
@@ -581,12 +613,12 @@ async def chat_websocket(ws: WebSocket):
                 if _is_subagent_terminal:
                     if evt.kind == "background_done":
                         note = (
-                            f"[subagent {evt.task_id} done] "
+                            f"[bg {evt.task_id} done] "
                             f"{evt.name}: {(evt.result or '')[:600]}"
                         )
                     else:
                         note = (
-                            f"[subagent {evt.task_id} failed] "
+                            f"[bg {evt.task_id} failed] "
                             f"{evt.name}: {evt.error or 'unknown error'}"
                         )
                     active_cb = state.get("active")

@@ -196,6 +196,10 @@ class TelegramNotifier:
                             or "no new messages" in low
                             or "inbox is empty" in low
                             or "no unread messages" in low
+                            or low.startswith("operation cancelled")
+                            or low.startswith(
+                                "i wasn't able to generate a response"
+                            )
                         ):
                             return None, None
                     result_preview = html.escape(stripped[:3500])
@@ -231,6 +235,23 @@ class TelegramNotifier:
                 return None, None
             name = html.escape(meta.get("name", ""))
             result = _strip_markdown(meta.get("result", ""))
+            # Quiet mode (cron / reminder / watcher pushes via
+            # PrefixedTelegramNotifier with verbose=False): drop
+            # results that explicitly opt out ([SILENT] prefix), known
+            # no-news phrases from inbox sweeps, or cancelled bg tasks
+            # — those are background-only noise the user shouldn't see.
+            if not self._verbose:
+                low = result.lower().lstrip()
+                if low.startswith("[silent]"):
+                    return None, None
+                if (
+                    "no unread conversations" in low
+                    or "no new messages" in low
+                    or "inbox is empty" in low
+                    or "no unread messages" in low
+                    or low.startswith("operation cancelled")
+                ):
+                    return None, None
             preview = html.escape(result[:500])
             if len(result) > 500:
                 preview += "\n[truncated]"
@@ -309,8 +330,27 @@ class PrefixedTelegramNotifier(TelegramNotifier):
 
     def _format(self, event: Any) -> tuple[str | None, str | None]:
         text, parse_mode = super()._format(event)
-        if text and event.kind == "done" and self._prefix:
+        if not text:
+            return None, None
+        if event.kind == "done" and self._prefix:
+            # Drop bare-header pushes: when the cron / consolidator turn
+            # produced no user-facing body, the base notifier returns
+            # just "[done] Task complete" — rewriting line[0] would leave
+            # a lone "⏰ survival_message_check" / "🧠 Consolidated"
+            # bubble in chat, which is pure spam. A real reply has the
+            # body appended after a blank line (≥3 lines).
             lines = text.split("\n")
+            if len([ln for ln in lines if ln.strip()]) <= 1:
+                return None, None
             lines[0] = f"{self._icon} <b>{html.escape(self._prefix)}</b>"
             text = "\n".join(lines)
+        elif event.kind == "background_done":
+            # Quiet-mode suppression already ran in the base notifier
+            # (verbose=False is set in __init__), so `text` here means
+            # the bg result is worth showing. If it ever falls through
+            # with only the "[done] Background … done" header (no body
+            # line), drop it — same reasoning as the `done` branch.
+            lines = text.split("\n")
+            if len([ln for ln in lines if ln.strip()]) <= 1:
+                return None, None
         return text, parse_mode

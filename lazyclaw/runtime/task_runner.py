@@ -175,6 +175,16 @@ MAX_GLOBAL_TASKS = 10
 MAX_PER_USER_TASKS = 10
 DEFAULT_TIMEOUT = 300  # 5 minutes
 
+# Maximum sub-agent nesting depth. Mirrors Claude Code's per-AgentDefinition
+# `maxTurns` bound: the parent agent (depth=0) may spawn background sub-agents
+# (depth=1), and those subs MAY themselves fan out one more level (depth=2)
+# for legitimate cases like "research finds N matches → apply to each in
+# parallel". Beyond that, `submit()` raises RuntimeError so the brain sees a
+# clean tool_result instead of looping into a 3-strike failure. Observed
+# 2026-05-16: a background `upwork_refresh_check` task spawned an inner
+# `run_background` recursively before this guard existed.
+MAX_TASK_DEPTH = 2
+
 
 # Maximum chars per task result included in the synthetic consolidation
 # message. Aggressive truncation keeps the synthetic LLM call cheap.
@@ -263,6 +273,12 @@ class TaskRunner:
         # task_id → (source, fanout_group_id) so _execute knows whether
         # to suppress the per-task push and route into a fan-out group.
         self._task_provenance: dict[str, tuple[str, str | None]] = {}
+        # task_id → caller depth. _execute reads this and constructs the
+        # inner Agent with depth=caller_depth+1, so nested submit() calls
+        # from inside a background task can be bounded at MAX_TASK_DEPTH.
+        # Without this map the inner Agent had depth=0 and could spawn
+        # forever before falling back to the three-strikes handoff.
+        self._task_caller_depth: dict[str, int] = {}
         # group_id → _BrainFanoutGroup. Cleaned up after _consolidate runs.
         self._brain_groups: dict[str, _BrainFanoutGroup] = {}
 
@@ -278,6 +294,7 @@ class TaskRunner:
         fanout_group_id: str | None = None,
         chat_session_id: str | None = None,
         project_tag: str = "",
+        caller_depth: int = 0,
     ) -> str:
         """Submit a task for background execution. Returns task_id immediately.
 
@@ -295,6 +312,13 @@ class TaskRunner:
           per-task push behaviour.
         """
         # Validate limits
+        if caller_depth >= MAX_TASK_DEPTH:
+            raise RuntimeError(
+                f"Max background nesting depth ({MAX_TASK_DEPTH}) reached. "
+                f"This task is already running inside another background task "
+                f"at depth {caller_depth} — do the work inline instead of "
+                f"spawning a third level."
+            )
         if len(self._running) >= MAX_GLOBAL_TASKS:
             raise RuntimeError(
                 f"Maximum {MAX_GLOBAL_TASKS} background tasks running globally. "
@@ -333,6 +357,7 @@ class TaskRunner:
         self._task_names[task_id] = task_name
         self._task_starts[task_id] = time.monotonic()
         self._task_provenance[task_id] = (source, fanout_group_id)
+        self._task_caller_depth[task_id] = caller_depth
 
         # Brain fan-out: bucket sibling tasks under a shared group so we
         # can fire ONE consolidation turn when the last one settles,
@@ -480,13 +505,27 @@ class TaskRunner:
         callback = _BgEventTap()
 
         try:
-            # Create FRESH Agent instance (isolated state, no race conditions)
+            # Create FRESH Agent instance (isolated state, no race conditions).
+            #
+            # Thread `task_runner`, `team_lead`, and incremented `depth` into
+            # the sub-agent so legitimate nested fan-out works (e.g. research
+            # bg → apply-to-each parallel bgs). Mirrors Claude Code's
+            # AgentDefinition pattern where a sub-agent's `tools` list may
+            # include `Task` and recursion is bounded by per-agent `maxTurns`.
+            # Without this wiring the inner Agent had _task_runner=None and
+            # any nested run_background call returned "background task runner
+            # not configured" three times in a row before the three-strikes
+            # handoff fired — clean error semantics now via MAX_TASK_DEPTH.
+            _caller_depth = self._task_caller_depth.get(task_id, 0)
             agent = Agent(
                 config=self._config,
                 router=self._router,
                 registry=self._registry,
                 eco_router=self._eco_router,
                 permission_checker=self._permission_checker,
+                task_runner=self,
+                team_lead=self._team_lead,
+                depth=_caller_depth + 1,
             )
             agent.is_background = True  # Browser uses headless in background
 
@@ -762,6 +801,7 @@ class TaskRunner:
             self._task_names.pop(task_id, None)
             self._task_starts.pop(task_id, None)
             self._task_provenance.pop(task_id, None)
+            self._task_caller_depth.pop(task_id, None)
 
             # Notify originator (e.g., team lead state cleanup)
             if on_complete:
@@ -813,10 +853,21 @@ class TaskRunner:
         if group is None:
             return
 
-        # 1-result groups aren't fan-outs — fall back to the legacy per-
-        # task push path so single run_background calls keep their
-        # immediate "✅ done" UX.
-        if len(group.results) == 1:
+        # 1-result groups: behavior depends on the user's bg_streaming
+        # toggle. With streaming ON (default), fall back to the legacy
+        # per-task push so single run_background calls keep their
+        # immediate "✅ done" UX. With streaming OFF (quiet mode), route
+        # through the same synthesizing brain turn as multi-result fan-
+        # outs — the user explicitly asked for brain-only voice, so a
+        # raw result card would break the contract.
+        _quiet = False
+        try:
+            from lazyclaw.runtime.streaming_setting import get_bg_streaming
+            _quiet = not await get_bg_streaming(self._config, group.user_id)
+        except Exception:
+            logger.debug("bg_streaming lookup failed in _consolidate", exc_info=True)
+
+        if len(group.results) == 1 and not _quiet:
             r = group.results[0]
             cb = group.consolidator_cb
             if cb is None:

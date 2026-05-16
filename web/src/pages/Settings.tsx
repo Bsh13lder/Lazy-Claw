@@ -227,6 +227,7 @@ const ROLE_INFO: Record<string, { label: string; description: string }> = {
 // wire protocol differs. Writes to claude_transport + claude_*_model.
 const CLAUDE_CLI_MODELS: readonly { value: string; label: string }[] = [
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6 — 200K context" },
+  { value: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 — 1M context (beta)" },
   { value: "claude-opus-4-6[1m]", label: "Opus 4.6 — 1M context" },
   { value: "claude-opus-4-7[1m]", label: "Opus 4.7 — 1M context" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 — fastest" },

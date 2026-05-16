@@ -15,10 +15,12 @@ notion of a fan-out group. These tests pin the fix.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from lazyclaw.config import Config
 from lazyclaw.runtime.callbacks import AgentEvent
 from lazyclaw.runtime.task_runner import (
     TaskRunner,
@@ -30,10 +32,25 @@ from lazyclaw.runtime.task_runner import (
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _make_runner(*, lane_queue=None, consolidator_factory=None) -> TaskRunner:
-    """Build a TaskRunner skeleton with the heavy deps mocked."""
+def _make_runner(
+    tmp_path: Path,
+    *,
+    lane_queue=None,
+    consolidator_factory=None,
+) -> TaskRunner:
+    """Build a TaskRunner skeleton with the heavy deps mocked.
+
+    ``tmp_path`` is required: the runtime's ``_consolidate`` quiet-mode
+    branch calls ``get_bg_streaming(self._config, ...)`` which opens
+    ``db_session(config)`` and resolves ``config.database_dir /
+    "lazyclaw.db"``. A ``MagicMock`` config produces a stringifiable mock
+    whose repr ("<MagicMock name='mock.database_dir.__truediv__()' …>")
+    becomes a real on-disk filename — see the cleanup of 18 such files
+    on 2026-05-16. Using a pytest tmp_path-backed ``Config`` keeps the
+    DB write contained to the per-test temp dir.
+    """
     runner = TaskRunner.__new__(TaskRunner)
-    runner._config = MagicMock()
+    runner._config = Config(database_dir=tmp_path)
     runner._router = MagicMock()
     runner._registry = MagicMock()
     runner._eco_router = MagicMock()
@@ -47,6 +64,7 @@ def _make_runner(*, lane_queue=None, consolidator_factory=None) -> TaskRunner:
     runner._task_names = {}
     runner._task_starts = {}
     runner._task_provenance = {}
+    runner._task_caller_depth = {}
     runner._brain_groups = {}
     return runner
 
@@ -75,11 +93,11 @@ def _seed_group(
 
 
 @pytest.mark.asyncio
-async def test_consolidate_single_task_falls_back_to_per_task_push():
+async def test_consolidate_single_task_falls_back_to_per_task_push(tmp_path):
     """1 task in the group must NOT trigger a synthetic consolidation
     enqueue — it falls back to firing background_done on the original
     callback so single run_background calls keep their existing UX."""
-    runner = _make_runner()
+    runner = _make_runner(tmp_path)
     cb = MagicMock()
     cb.on_event = AsyncMock()
     _seed_group(runner, "g1", "u1", ["t1"], cb=cb)
@@ -107,10 +125,10 @@ async def test_consolidate_single_task_falls_back_to_per_task_push():
 
 
 @pytest.mark.asyncio
-async def test_consolidate_multi_task_enqueues_one_synthetic_turn():
+async def test_consolidate_multi_task_enqueues_one_synthetic_turn(tmp_path):
     lane_queue = MagicMock()
     lane_queue.enqueue = AsyncMock(return_value="ok")
-    runner = _make_runner(lane_queue=lane_queue)
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
 
     _seed_group(runner, "g2", "u1", [], chat_session_id="sess-1")
     g = runner._brain_groups["g2"]
@@ -143,12 +161,12 @@ async def test_consolidate_multi_task_enqueues_one_synthetic_turn():
 
 
 @pytest.mark.asyncio
-async def test_consolidate_includes_failed_tasks():
+async def test_consolidate_includes_failed_tasks(tmp_path):
     """Mixed success + failure: synthetic message must surface the
     failure with its error string so the brain can report it."""
     lane_queue = MagicMock()
     lane_queue.enqueue = AsyncMock(return_value="ok")
-    runner = _make_runner(lane_queue=lane_queue)
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
 
     _seed_group(runner, "g3", "u1", [])
     runner._brain_groups["g3"].results.extend([
@@ -169,7 +187,7 @@ async def test_consolidate_includes_failed_tasks():
 
 
 @pytest.mark.asyncio
-async def test_consolidator_factory_is_used_for_callback():
+async def test_consolidator_factory_is_used_for_callback(tmp_path):
     """When a factory is wired, the consolidation enqueue receives the
     factory-built callback (Telegram with prefix) — NOT the original
     turn's callback."""
@@ -177,7 +195,9 @@ async def test_consolidator_factory_is_used_for_callback():
     lane_queue.enqueue = AsyncMock(return_value="ok")
     consolidator_cb_built = MagicMock(name="consolidator_cb")
     factory = MagicMock(return_value=consolidator_cb_built)
-    runner = _make_runner(lane_queue=lane_queue, consolidator_factory=factory)
+    runner = _make_runner(
+        tmp_path, lane_queue=lane_queue, consolidator_factory=factory,
+    )
 
     original_cb = MagicMock(name="original_cb")
     _seed_group(runner, "g4", "u1", [], cb=original_cb)
@@ -193,10 +213,10 @@ async def test_consolidator_factory_is_used_for_callback():
 
 
 @pytest.mark.asyncio
-async def test_consolidate_without_lane_queue_does_not_crash():
+async def test_consolidate_without_lane_queue_does_not_crash(tmp_path):
     """Without lane_queue wired, consolidation must degrade gracefully —
     no exception, group still pruned."""
-    runner = _make_runner(lane_queue=None)
+    runner = _make_runner(tmp_path, lane_queue=None)
     _seed_group(runner, "g5", "u1", [])
     runner._brain_groups["g5"].results.extend([
         _FanoutResult(task_id="t1", name="A", success=True, result="r1"),
@@ -210,10 +230,10 @@ async def test_consolidate_without_lane_queue_does_not_crash():
 
 
 @pytest.mark.asyncio
-async def test_record_brain_result_triggers_consolidate_on_last():
+async def test_record_brain_result_triggers_consolidate_on_last(tmp_path):
     lane_queue = MagicMock()
     lane_queue.enqueue = AsyncMock(return_value="ok")
-    runner = _make_runner(lane_queue=lane_queue)
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
 
     g = _seed_group(runner, "g6", "u1", ["t1", "t2"])
 

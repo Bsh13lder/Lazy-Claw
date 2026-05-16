@@ -1163,6 +1163,7 @@ class Agent:
         permission_checker=None,
         task_runner=None,
         team_lead: TeamLead | None = None,
+        depth: int = 0,
     ) -> None:
         self.config = config
         self.router = router
@@ -1180,6 +1181,12 @@ class Agent:
         )
         self._task_runner = task_runner
         self._team_lead = team_lead
+        # Sub-agent nesting depth. 0 = main/foreground agent. 1 = direct
+        # background sub-agent. task_runner._execute bumps this when
+        # constructing a child Agent. submit() refuses spawn at depth
+        # >= MAX_TASK_DEPTH so the brain sees a clean error instead of
+        # the legacy "not configured" 3-strike loop.
+        self._depth = depth
         # Wire TeamLead into the read-only background_status skill so the
         # brain can query live task progress on demand. Best-effort —
         # missing skill (older builds) silently no-ops.
@@ -1578,6 +1585,7 @@ class Agent:
                                 instruction=st.instruction,
                                 name=st.name,
                                 callback=callback,
+                                caller_depth=self._depth,
                             )
                             dispatched.append(f"{st.name} ({st.lane})")
 
@@ -1808,6 +1816,7 @@ class Agent:
                 chat_session_id=chat_session_id,
             )
             bg_skill._task_runner = self._task_runner
+            bg_skill._caller_depth = self._depth
             self.registry.register(bg_skill)
 
         # Initialize channel state (used by tool nudge later, must exist for all paths)
@@ -3553,6 +3562,7 @@ class Agent:
                                             # (see line 340), so source
                                             # alone is inert there.
                                             source="brain",
+                                            caller_depth=self._depth,
                                         )
                                         if self._team_lead and _fg_task_id:
                                             self._team_lead.cancel(_fg_task_id)
@@ -3662,6 +3672,7 @@ class Agent:
                                 # Fix H — see hallucination-cap failsafe
                                 # above for the rationale.
                                 source="brain",
+                                caller_depth=self._depth,
                             )
                             if self._team_lead and _fg_task_id:
                                 self._team_lead.cancel(_fg_task_id)
@@ -3957,6 +3968,7 @@ class Agent:
                             name=None,  # auto-generates readable name from instruction
                             timeout=_agent_settings.get("specialist_timeout_s", 120),
                             callback=callback,
+                            caller_depth=self._depth,
                         )
 
                         # Foreground task was re-routed to background
@@ -4830,6 +4842,7 @@ class Agent:
                             callback=callback,
                             # Fix H — see hallucination-cap failsafe for rationale.
                             source="brain",
+                            caller_depth=self._depth,
                         )
                         if self._team_lead and _fg_task_id:
                             self._team_lead.cancel(_fg_task_id)
@@ -5478,7 +5491,16 @@ class Agent:
         if content:
             try:
                 from lazyclaw.runtime.wikilink_injector import inject as _lb_inject
-                content = await _lb_inject(self.config, user_id, content)
+                # Hard cap so a cold cache (post-save invalidate ⇒ DB
+                # roundtrip) never holds up the reply. Warm-cache path
+                # is microseconds; first call after a write does the
+                # fetch and the next reply benefits from the warmed cache.
+                content = await asyncio.wait_for(
+                    _lb_inject(self.config, user_id, content),
+                    timeout=0.5,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("wikilink_injector skipped (slow cache miss)")
             except Exception:
                 logger.debug("wikilink_injector failed", exc_info=True)
 

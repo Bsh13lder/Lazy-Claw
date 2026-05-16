@@ -977,9 +977,48 @@ class HeartbeatDaemon:
                             except Exception as exc:
                                 logger.warning("Telegram push failed: %s", exc)
 
-                        # Note: NOT enqueuing to lane_queue — Telegram push
-                        # is sufficient. Enqueuing triggers a full agent loop
-                        # that wastes tokens and causes tool call loops.
+                        # Default behavior: when the JS hash-diff flagged a
+                        # real change, fire ONE brain turn so the agent can
+                        # read+route the delta. This is the zero-LLM-on-no-
+                        # news contract — cheap polling decides if anything
+                        # happened, brain only runs when there's actual work
+                        # to interpret. Per-watcher override available via
+                        # ``on_change_instruction``; opt out explicitly by
+                        # setting it to an empty string or False.
+                        on_change_instr = (
+                            ctx.get("on_change_instruction")
+                            if "on_change_instruction" in ctx
+                            else new_ctx.get("on_change_instruction")
+                            if "on_change_instruction" in new_ctx
+                            else (
+                                f"Watcher '{job_name}' detected new content "
+                                f"at {ctx.get('url', '')}. Read the page, "
+                                f"summarize what changed, and route per "
+                                f"normal rules (auto-reply where safe, "
+                                f"escalate sensitive items, draft for "
+                                f"active deals). Stay terse."
+                            )
+                        )
+                        if on_change_instr and self._lane_queue and self._lane_queue._running:
+                            try:
+                                instr = on_change_instr.strip()
+                                if instr:
+                                    asyncio.create_task(
+                                        self._lane_queue.enqueue(
+                                            user_id,
+                                            f"[WATCHER:{job_name}] {instr}",
+                                        ),
+                                        name=f"watcher-brain-{job_id[:8]}",
+                                    )
+                                    logger.info(
+                                        "Watcher '%s' enqueued brain turn on change",
+                                        job_name,
+                                    )
+                            except Exception:
+                                logger.warning(
+                                    "Watcher '%s' brain enqueue failed",
+                                    job_name, exc_info=True,
+                                )
 
                         # One-shot watcher — auto-delete after first trigger
                         if new_ctx.get("one_shot"):

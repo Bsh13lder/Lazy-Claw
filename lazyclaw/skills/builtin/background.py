@@ -44,6 +44,12 @@ class RunBackgroundSkill(BaseSkill):
         self._callback = callback
         self._fanout_group_id = fanout_group_id
         self._chat_session_id = chat_session_id
+        # Nesting depth of the agent that owns this skill instance. The
+        # agent runtime injects this alongside `_task_runner` on every
+        # turn (see runtime.agent ~line 1810). Forwarded to
+        # task_runner.submit so MAX_TASK_DEPTH bounds nested fan-out
+        # cleanly instead of relying on the 3-strikes failsafe.
+        self._caller_depth: int = 0
 
     @property
     def name(self) -> str:
@@ -135,6 +141,7 @@ class RunBackgroundSkill(BaseSkill):
                 fanout_group_id=self._fanout_group_id,
                 chat_session_id=self._chat_session_id,
                 project_tag=project_tag,
+                caller_depth=self._caller_depth,
             )
         except RuntimeError as exc:
             return f"Cannot start background task: {exc}"

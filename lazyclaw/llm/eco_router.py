@@ -265,6 +265,22 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
     if mode in _DISABLED_MODES:
         mode = MODE_HYBRID
 
+    # Strip junk claude_*_model values written by the old ModelAssignment
+    # dropdown (legacy registry aliases like "claude-cli" / "claude_code"
+    # are NOT valid `--model` arguments for the claude binary). Without
+    # this coerce, every CLAUDE-mode turn logs a WARNING from
+    # `_resolve_claude_cli_model` even though we fall back to a safe
+    # default. Strip at parse time so the stored junk is invisible to
+    # the rest of the router. Fixed-set tokens we know are not CLI models:
+    _CLAUDE_JUNK_MODEL_NAMES = {"claude-cli", "claude-sdk", "claude_code", "claude"}
+
+    def _clean_claude_model(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        if value in _CLAUDE_JUNK_MODEL_NAMES:
+            return None
+        return value or None
+
     return EcoSettings(
         mode=mode,
         show_badges=eco.get("show_badges", True),
@@ -280,9 +296,9 @@ def _parse_eco_settings(raw: str | None) -> EcoSettings:
         full_brain_model=eco.get("full_brain_model"),
         full_worker_model=eco.get("full_worker_model"),
         full_fallback_model=eco.get("full_fallback_model"),
-        claude_brain_model=eco.get("claude_brain_model"),
-        claude_worker_model=eco.get("claude_worker_model"),
-        claude_fallback_model=eco.get("claude_fallback_model"),
+        claude_brain_model=_clean_claude_model(eco.get("claude_brain_model")),
+        claude_worker_model=_clean_claude_model(eco.get("claude_worker_model")),
+        claude_fallback_model=_clean_claude_model(eco.get("claude_fallback_model")),
         claude_transport=(
             eco.get("claude_transport")
             if eco.get("claude_transport") in ("sdk", "cli")

@@ -964,3 +964,48 @@ Once the SDK transport has been live in production for ≥3 days with clean logs
 - [ ] `display_name = "Buchvardi"` should be `"Vato T"` — DB cleanup or NL command.
 - [ ] `instant_dispatch` heuristic didn't catch the multi-step Google Workspace pattern (handled in a separate session per user 2026-05-14).
 - The blank-page self-heal in `submit_proposal` (reload-once when `len(html)<5000` or no `<main>` element) was added after user reported "screen was white, just needed refresh". Fails OPEN on probe errors so it never false-positive-loops on mocked pages in tests.
+
+## Session 2026-05-16 — contract intake pipeline + tab reaper + mcp-upwork hardening
+
+**Context**: User won James Blue Upwork contract ($120 / 1-week / 24/7 monitor + 1-tap accept). During the chat session, a parallel cron-fired `survival_message_check` + the user's "ok ask him" approval collided — the agent sent the multi-line draft as 11 separate Upwork bubbles (one per line) with garbage characters mixed in from parallel typing into the same compose box. User deleted 8 of them. The chunking bug was: `keyboard.type(multi_line_text)` on Upwork's Tiptap editor — Tiptap binds Enter to Send → every `\n` triggered a separate send.
+
+### Committed (6aac606) — single big feature commit
+
+**Contract intake pipeline (5 PRs wired end-to-end):**
+- [x] **PR 1 — Live-browser host routing**. `_LIVE_BROWSER_WATCHER_HOSTS_BUILTIN = {upwork.com, linkedin.com}` + per-user `users.settings.browser.live_hosts`. Cloudflare-protected watchers route through user's signed-in Brave (passive mode, never focus-steal). `add_live_browser_host` / `remove_live_browser_host` / `list_live_browser_hosts` skills.
+- [x] **PR 2 — Contract poller cron + dedup**. `survival_contract_intake` cron (6h) → `upwork_contract_poll` skill → `users.settings.survival.seen_contract_urls` FIFO 100. `lazyclaw/survival/contracts.py` helpers.
+- [x] **PR 3 — `new_contract_intake` skill**. Worker LLM classifies work_type (6 buckets: web_monitoring=9 questions / data_scraping=7 / content_creation=5 / code_dev=5 / customer_support=5 / other=1) + extracts known facts. Wraps `GoalExecutor.start()` with batched-questions hints.
+- [x] **PR 4 — `contract_intake_executor`**. `runtime/contract_intake_executor.py` — 8-step provisioning (vault → live_host → account → watcher → template → setup-doc note → escalate-login → mark DONE). `goal_executor._DEFAULT_DISPATCH_BY_SLUG` per-slug fallback registry. `execute_contract_intake_setup` manual-retry skill for BLOCKED goals.
+- [x] **PR 5 — Telegram 1-tap-accept callback**. `push_telegram(inline_keyboard=...)`. `build_watcher_context(accept_template_slug=...)`. Daemon watcher push includes ✅ Accept / ⏭ Skip buttons. `telegram_commands accept:` branch sets template active.
+
+**Hardening fixes:**
+- [x] **Sonnet read-only-list dedup** in `claude_sdk_provider.py`. 22 listing tools collapse to FIRST call regardless of args. Catches 7× `upwork_get_messages` exploration-loop pattern (observed 2026-05-16).
+- [x] **`upwork_last_conversation` skill + instant_dispatch route** for "tell me what's in last conversation" — replaces 2m33s brain loop with <10s deterministic skill call.
+
+**mcp-upwork fixes:**
+- [x] **Tiptap-safe typing** (the chunking bug). `_type_with_soft_breaks` helper splits on `\n`, uses `Shift+Enter` between lines. Audited all typing paths in mcp-upwork — `send_message` was the only vulnerable one; cover-letter/rate/bid/answers use `.fill()` on textarea/input (newline-safe today).
+- [x] **`draft_only=True`** mode for `send_message` — types into compose, never clicks Send, returns `status="drafted"`. For human-in-loop review.
+- [x] **`edit_message` tool** — edits your own message within Upwork's ~60min edit window. Same Tiptap-safe typing. `status="expired"` when window passed.
+
+**Tab reaper (RAM management):**
+- [x] `lazyclaw/browser/tab_reaper.py` + heartbeat `_check_tab_health()` every 5 ticks.
+- [x] `sweep_stale_tabs(idle_seconds=600)` closes unfocused tabs; active + anchored watcher tabs + system tabs always preserved.
+- [x] `enforce_tab_cap(max_tabs)` respects cap from heartbeat (not just on goto); anchored tabs preserved EVEN if over cap.
+- [x] `refresh_white_screens()` — auto-reload blank pages (`text<10` + `children<3` + `interactive<1` + `readyState=complete`); per-tick dedup; `focus=False` so user's tab focus never stolen.
+- [x] New settings: `idle_tab_close_seconds=600`, `auto_refresh_white_screens=True`.
+
+**Test totals**: 286 new tests across 8 new test files + 1 extended. All green.
+
+### Operator actions needed AFTER restart
+
+- [ ] Restart lazyclaw (or just the mcp-upwork subprocess) so the chunking fix + `draft_only` + `edit_message` activate.
+- [ ] First-use smoke test: type "draft test message to James with 'TEST\\nLINE\\nB' using draft_only mode" — verify in Brave that ONE multi-line bubble appears in compose, no Send clicked. Clear manually.
+- [ ] Survival cron `survival_message_check` is **paused** (was unpaused mid-session, then re-paused after the James spam). Decide if you want it back on once the chunking + draft_only fixes are activated. Watcher 2df80fef stays active throughout.
+- [ ] Send James the manual apology draft (single message, ALREADY pasted manually 2026-05-16). Wait for his reply.
+
+### Still open / next session
+
+- [ ] Wire `init_contract_workspace` + `push_contract_milestone` (the simpler alternative to the rejected GitHub-per-contract plan): augment existing setup-doc LazyBrain note with timestamped progress lines on every `mark_step` / `watcher.alert` / `template.run` / `gig.status_change`. ~1-2 hours.
+- [ ] Optional: 4 cherry-picks from `browser-use` (smart wait helpers, auto-retry decorator on stale handles, action-history-as-context for brain, visible-element-only DOM compression). ~2 days.
+- [ ] Optional: cron-strip-write-tools — when agent turn comes from `[JOB:survival_*]` heartbeat prefix, strip all write-mode tools (`upwork_send_message`, `send_email`, etc.) from the brain's tool list so the cron physically cannot send. Belt-and-suspenders for the 2026-05-16 incident pattern. Lower priority now that chunking is fixed.
+- [ ] Cover-letter typing path in `mcp-upwork/.../proposals.py` is currently safe (uses `.fill()` on a real `<textarea>`) but vulnerable if Upwork migrates the cover-letter field to Tiptap. Add defense-in-depth: detect element tag, route to `_type_with_soft_breaks` for contenteditable.

@@ -426,11 +426,13 @@ class ClaudeSDKProvider(BaseLLMProvider):
     lifecycle in eco_router). State held here:
       - `_model` — current `--model` choice (sonnet/opus/haiku)
       - `_claude_bin` — resolved binary path
-      - `_tool_name_map` — last-call's short→full MCP name map for
-        reverse-mapping ToolUseBlock.name back to the registry's full
-        name. Set on every chat() call; not thread-safe for concurrent
-        calls on one provider instance, which is fine because eco_router
-        serializes per-user calls.
+      - `_tool_name_map` — kept for back-compat / introspection only.
+        Reflects the LAST completed chat() call. Concurrent chat()
+        callers MUST NOT rely on it — each call now binds its own local
+        name_map via _build_options return value and threads it through
+        _unmap_tool_name. The provider is shared per-process (one cached
+        on EcoRouter), so a serializing lock would re-create the
+        foreground-blocking bug background sub-agents already fight.
     """
 
     PROVIDER_NAME = "claude_sdk"
@@ -519,9 +521,12 @@ class ClaudeSDKProvider(BaseLLMProvider):
 
         tools_spec: list[dict] = kwargs.get("tools") or []
 
-        # Build prompt + options
+        # Build prompt + options. ``name_map`` is bound LOCALLY here so
+        # concurrent chat() callers on the same provider instance don't
+        # clobber each other's short→full tool-name resolution. See the
+        # class docstring for the race window history.
         prompt_text = _serialize_messages(messages)
-        options = self._build_options(tools_spec, create_sdk_mcp_server)
+        options, name_map = self._build_options(tools_spec, create_sdk_mcp_server)
 
         logger.info(
             "Claude SDK call: tools=%d, model=%s, prompt_len=%d chars",
@@ -547,7 +552,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
                         elif isinstance(block, ToolUseBlock):
                             # Strip SDK MCP prefix, then reverse-map
                             # short→full so the registry finds the skill.
-                            registry_name = self._unmap_tool_name(block.name)
+                            registry_name = self._unmap_tool_name(block.name, name_map)
                             # Drop Claude Code built-ins (Skill,
                             # run_command, SlashCommand, …) that leak
                             # past `disallowed_tools`. The SDK's
@@ -709,7 +714,11 @@ class ClaudeSDKProvider(BaseLLMProvider):
 
     # ── internals ──────────────────────────────────────────────────────
 
-    def _unmap_tool_name(self, sdk_name: str) -> str:
+    def _unmap_tool_name(
+        self,
+        sdk_name: str,
+        name_map: dict[str, str] | None = None,
+    ) -> str:
         """Reverse the two transformations done in `_build_tool_wrappers`:
         1. SDK prefixes in-process MCP tool names with `mcp__lazyclaw__`.
         2. We stripped the registry's `mcp_<uuid>_` prefix when registering.
@@ -742,13 +751,16 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 "Claude SDK: rescued raw registry MCP tool name %r → %r",
                 sdk_name, short,
             )
-        return self._tool_name_map.get(short, short)
+        # Prefer caller-supplied per-call map (concurrent-safe); fall
+        # back to self for legacy single-call usage.
+        map_to_use = name_map if name_map is not None else self._tool_name_map
+        return map_to_use.get(short, short)
 
     def _build_options(
         self,
         tools_spec: list[dict],
         create_sdk_mcp_server,
-    ) -> Any:
+    ) -> tuple[Any, dict[str, str]]:
         """Construct ClaudeAgentOptions for one chat() call.
 
         Builds:
@@ -765,6 +777,9 @@ class ClaudeSDKProvider(BaseLLMProvider):
         from claude_agent_sdk import ClaudeAgentOptions
 
         sdk_tools, name_map = _build_tool_wrappers(tools_spec)
+        # Mirror onto self for back-compat / introspection only. Concurrent
+        # callers must use the returned ``name_map`` for correctness — see
+        # class docstring.
         self._tool_name_map = name_map
 
         mcp_servers: dict[str, Any] = {}
@@ -834,7 +849,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
             "directly otherwise."
         )
 
-        return ClaudeAgentOptions(**kw)
+        return ClaudeAgentOptions(**kw), name_map
 
     @staticmethod
     def _normalize_usage(

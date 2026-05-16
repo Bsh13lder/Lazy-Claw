@@ -168,7 +168,7 @@ class TestEnvHandling:
         with patch.dict(
             os.environ, {"ANTHROPIC_API_KEY": "sk-leaked", "OTHER": "x"}, clear=False
         ):
-            options = p._build_options(tools_spec=[], create_sdk_mcp_server=mock_server_factory)
+            options, _name_map = p._build_options(tools_spec=[], create_sdk_mcp_server=mock_server_factory)
 
         assert options.env["ANTHROPIC_API_KEY"] == ""
         assert options.env["ANTHROPIC_AUTH_TOKEN"] == ""
@@ -179,7 +179,7 @@ class TestEnvHandling:
         user's global MCP config, leaking MCPs that lazyclaw's runtime
         doesn't know about."""
         p = ClaudeSDKProvider(model="sonnet")
-        options = p._build_options(
+        options, _name_map = p._build_options(
             tools_spec=[], create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
         )
         assert options.strict_mcp_config is True
@@ -188,7 +188,7 @@ class TestEnvHandling:
         """Newer Claude Code versions auto-fire ToolSearch before MCP
         tools — must be in the deny-list."""
         p = ClaudeSDKProvider(model="sonnet")
-        options = p._build_options(
+        options, _name_map = p._build_options(
             tools_spec=[], create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
         )
         assert "ToolSearch" in options.disallowed_tools
@@ -198,7 +198,7 @@ class TestEnvHandling:
     def test_permission_mode_bypass(self) -> None:
         """lazyclaw owns the permission system. SDK must not prompt."""
         p = ClaudeSDKProvider(model="sonnet")
-        options = p._build_options(
+        options, _name_map = p._build_options(
             tools_spec=[], create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
         )
         assert options.permission_mode == "bypassPermissions"

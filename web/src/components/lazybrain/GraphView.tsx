@@ -1553,6 +1553,7 @@ export function GraphView({
           color: ringForKey(key),
         };
       });
+      const simCenter = sim.center();
       drawGraph(ctx, {
         width: size.width,
         height: size.height,
@@ -1561,6 +1562,11 @@ export function GraphView({
         nodes: drawNodesPoolRef.current,
         edges: drawEdgesPoolRef.current,
         hubs,
+        boundary: {
+          cx: simCenter.cx,
+          cy: simCenter.cy,
+          radius: sim.boundaryRadius(),
+        },
         glyphZoomThreshold: 0.6,
       } satisfies DrawState);
       needsRedrawRef.current = false;

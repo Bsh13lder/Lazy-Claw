@@ -108,6 +108,10 @@ export interface DrawState {
    *  4..60). Painted between zone blooms and edges so rings frame
    *  their members without occluding them. */
   hubs?: DrawHub[];
+  /** Circular boundary the force pass clamps nodes to. Painted as a
+   *  faint outline so the user sees the disc — without it, sparse
+   *  graphs read as "floating everywhere with no shape". Omit to skip. */
+  boundary?: { cx: number; cy: number; radius: number };
   /** Global gate: skip glyph rendering below this zoom (text is illegible
    *  + costs the most per-frame). 0.6 is the readable threshold. */
   glyphZoomThreshold: number;
@@ -132,6 +136,24 @@ export function drawGraph(
   ctx.scale(view.k, view.k);
 
   const k = view.k;
+
+  // ── Circular boundary outline ───────────────────────────────────────
+  // Painted FIRST so it sits behind every node/edge. Two-pass: a soft
+  // filled disc (very low alpha) gives the inner "stage" a hint of
+  // depth, then a thin stroked ring marks the actual clamp radius.
+  // World-space — scales with zoom alongside the layout it bounds.
+  const boundary = state.boundary;
+  if (boundary && boundary.radius > 0) {
+    ctx.fillStyle = "rgba(140, 160, 220, 0.025)";
+    ctx.beginPath();
+    ctx.arc(boundary.cx, boundary.cy, boundary.radius, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(180, 200, 240, 0.18)";
+    ctx.lineWidth = 1.2 / k;
+    ctx.beginPath();
+    ctx.arc(boundary.cx, boundary.cy, boundary.radius, 0, TAU);
+    ctx.stroke();
+  }
 
   // ── Zone blooms + constellation titles ──────────────────────────────
   // Painted UNDER edges + nodes so the dots float over a soft nebula in

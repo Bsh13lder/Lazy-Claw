@@ -76,16 +76,28 @@ def get_automaton(user_id: str, titles: list[str]) -> Any | None:
                 return cached
         # (Re)build. Tiny — < 5 MB for 10 k titles.
         a = ahocorasick.Automaton()  # type: ignore[union-attr]
+        # pyahocorasick.add_word(key, value) OVERWRITES on duplicate key.
+        # Two titles that case-fold to the same key ("Upwork" + "upwork",
+        # or the legacy "API" + new "Api") would silently collapse to
+        # whichever appears LAST in iteration order. list_titles() returns
+        # rows in updated_at DESC order, so we skip on second-and-later
+        # sight to preserve the "most recent wins" rule used everywhere
+        # else in the codebase (find_by_title, _reindex_links, etc.).
+        seen_keys: set[str] = set()
         for title in titles:
             t = (title or "").strip()
             if not t or len(t) < 4:
                 # Sub-4-char titles produce far too many false positives
                 # ("API", "log", "id"); same threshold as the substring path.
                 continue
+            key = t.lower()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             # Store canonical title as the value; key is lowercase for the
             # scan itself. The scanner returns (end_idx, value) — value is
             # the canonical title we want to suggest.
-            a.add_word(t.lower(), t)
+            a.add_word(key, t)
         try:
             a.make_automaton()
         except Exception:  # pragma: no cover — corrupted state

@@ -105,12 +105,33 @@ async def init_db(config: Config) -> None:
             ("notes", "archived", "ALTER TABLE notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"),
             ("notes", "aliases", "ALTER TABLE notes ADD COLUMN aliases TEXT"),
             ("background_tasks", "lazybrain_note_id", "ALTER TABLE background_tasks ADD COLUMN lazybrain_note_id TEXT"),
+            # Code Specialist visibility — captured per bg task that ran via
+            # claude-code MCP. All five are encrypted-at-rest text columns so
+            # users can inspect on the Code Specialist Web UI page what was
+            # sent, what claude-code did, and where the files landed.
+            #   mcp_prompt: the full instruction sent to the specialist
+            #   mcp_transcript: encrypted JSON list of {tool, args, result, ms}
+            #   workspace_dir: /workspace/<tag>/<goal>/<task_id>/
+            #   files_touched: encrypted JSON list of relative file paths
+            #   short_description: 1-line summary derived from instruction
+            #   goal_id: Goal Executor goal id when dispatched by a goal
+            ("background_tasks", "mcp_prompt", "ALTER TABLE background_tasks ADD COLUMN mcp_prompt TEXT"),
+            ("background_tasks", "mcp_transcript", "ALTER TABLE background_tasks ADD COLUMN mcp_transcript TEXT"),
+            ("background_tasks", "workspace_dir", "ALTER TABLE background_tasks ADD COLUMN workspace_dir TEXT"),
+            ("background_tasks", "files_touched", "ALTER TABLE background_tasks ADD COLUMN files_touched TEXT"),
+            ("background_tasks", "short_description", "ALTER TABLE background_tasks ADD COLUMN short_description TEXT"),
+            ("background_tasks", "goal_id", "ALTER TABLE background_tasks ADD COLUMN goal_id TEXT"),
             ("note_links", "edge_type", "ALTER TABLE note_links ADD COLUMN edge_type TEXT NOT NULL DEFAULT 'wikilink'"),
             ("note_links", "source", "ALTER TABLE note_links ADD COLUMN source TEXT"),
             # LazyBrain Phase B: pipe-alias display text on resolved wikilinks.
             ("note_links", "display_text", "ALTER TABLE note_links ADD COLUMN display_text TEXT"),
             # LazyBrain Phase G: chunked embeddings dirty flag (mirrors embedding_dirty).
             ("notes", "chunks_dirty", "ALTER TABLE notes ADD COLUMN chunks_dirty INTEGER NOT NULL DEFAULT 1"),
+            # LazyBrain Phase G+: per-chunk SHA1 of chunk_text. Lets
+            # upsert_embedding skip the Ollama embed call when a chunk's
+            # text is unchanged — 5-10x faster save on edits that touch
+            # only one chunk in a multi-chunk note.
+            ("note_chunks", "chunk_hash", "ALTER TABLE note_chunks ADD COLUMN chunk_hash TEXT"),
             # Bounty hunting — encrypted per-program session cookies for authenticated probes.
             ("bounty_programs", "cookies_jar", "ALTER TABLE bounty_programs ADD COLUMN cookies_jar TEXT"),
             ("bounty_programs", "cookies_saved_at", "ALTER TABLE bounty_programs ADD COLUMN cookies_saved_at TEXT"),
@@ -187,6 +208,7 @@ async def init_db(config: Config) -> None:
                 "dim         INTEGER NOT NULL, "
                 "vector      TEXT NOT NULL, "
                 "chunk_text  TEXT, "
+                "chunk_hash  TEXT, "
                 "updated_at  TEXT DEFAULT (datetime('now')), "
                 "PRIMARY KEY (note_id, chunk_idx), "
                 "FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE"

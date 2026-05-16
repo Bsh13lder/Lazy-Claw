@@ -217,6 +217,84 @@ async def find_journal_duplicates(
     return groups
 
 
+async def sweep_orphan_links(
+    config: "Config", user_id: str, *, dry_run: bool = False,
+) -> dict:
+    """Delete ``note_links`` rows that no longer connect to anything.
+
+    Three categories of dangling edge are swept:
+
+    1. **Targets a deleted note** — ``to_note_id`` references a row that
+       isn't in ``notes`` anymore. FOREIGN KEY CASCADE handles this on
+       modern installs; older DBs with FK off accumulated these.
+    2. **Source is a deleted note** — same idea, opposite direction.
+    3. **Stale pending wikilinks** — ``to_note_id IS NULL`` and the
+       ``to_page_name`` doesn't resolve to any current ``title_key``.
+       These are leftover from a [[Foo]] reference whose target was
+       renamed or deleted long ago. Kept for 30 days in case the target
+       comes back; older ones are dropped so the graph stops showing
+       phantom connections.
+
+    Returns ``{user_id, orphans_deleted, stale_pending_deleted}``.
+    """
+    summary: dict = {
+        "user_id": user_id,
+        "orphans_deleted": 0,
+        "stale_pending_deleted": 0,
+        "dry_run": dry_run,
+    }
+    async with db_session(config) as db:
+        # 1+2: edges referencing non-existent notes.
+        orphan_q = (
+            "SELECT id FROM note_links WHERE user_id = ? AND ("
+            "  (to_note_id IS NOT NULL AND to_note_id NOT IN "
+            "    (SELECT id FROM notes WHERE user_id = ?))"
+            "  OR (from_note_id NOT IN "
+            "    (SELECT id FROM notes WHERE user_id = ?))"
+            ")"
+        )
+        rows = await db.execute(orphan_q, (user_id, user_id, user_id))
+        orphan_ids = [r[0] for r in await rows.fetchall()]
+        summary["orphans_deleted"] = len(orphan_ids)
+
+        # 3: stale pending wikilinks (>30 days, target never resolved).
+        stale_q = (
+            "SELECT nl.id FROM note_links nl "
+            "WHERE nl.user_id = ? AND nl.to_note_id IS NULL "
+            "AND nl.to_page_name IS NOT NULL "
+            "AND nl.to_page_name NOT IN "
+            "  (SELECT title_key FROM notes "
+            "   WHERE user_id = ? AND title_key IS NOT NULL) "
+            "AND COALESCE(nl.created_at, '') < datetime('now', '-30 days')"
+        )
+        try:
+            rows = await db.execute(stale_q, (user_id, user_id))
+            stale_ids = [r[0] for r in await rows.fetchall()]
+        except Exception:
+            # Older schemas may not have nl.created_at — skip silently.
+            logger.debug("stale-pending sweep skipped (older schema?)", exc_info=True)
+            stale_ids = []
+        summary["stale_pending_deleted"] = len(stale_ids)
+
+        if dry_run:
+            return summary
+
+        if orphan_ids:
+            placeholders = ",".join("?" * len(orphan_ids))
+            await db.execute(
+                f"DELETE FROM note_links WHERE id IN ({placeholders})",
+                tuple(orphan_ids),
+            )
+        if stale_ids:
+            placeholders = ",".join("?" * len(stale_ids))
+            await db.execute(
+                f"DELETE FROM note_links WHERE id IN ({placeholders})",
+                tuple(stale_ids),
+            )
+        await db.commit()
+    return summary
+
+
 async def consolidate_user(
     config: "Config",
     user_id: str,
@@ -225,15 +303,20 @@ async def consolidate_user(
 ) -> dict:
     """Run the full consolidation pass for one user.
 
-    Returns a summary ``{user_id, groups, total_deleted, total_redirected}``.
+    Returns a summary ``{user_id, groups, total_deleted, total_redirected,
+    orphans_deleted, stale_pending_deleted}``.
     With ``dry_run=True`` returns the groups it would touch without
     writing anything.
 
-    Two passes:
+    Three passes:
       1. Title-key dedup — covers the v2-lessons-migration duplicates.
       2. Journal-date dedup — covers the `journal/<date>` stub race in
          journal.py where multiple coroutines each created a fresh
          stub for the same day.
+      3. Orphan-link sweep — drops note_links whose source or target
+         note no longer exists, plus pending wikilinks older than 30
+         days whose target never materialised. Eliminates the "floating
+         around with no connections" residue from rename / delete cycles.
     """
     groups = await find_duplicate_groups(config, user_id)
     journal_groups = await find_journal_duplicates(config, user_id)
@@ -243,11 +326,11 @@ async def consolidate_user(
         "groups": len(groups),
         "total_deleted": 0,
         "total_redirected": 0,
+        "orphans_deleted": 0,
+        "stale_pending_deleted": 0,
         "details": [],
         "dry_run": dry_run,
     }
-    if not groups:
-        return summary
 
     if dry_run:
         for g in groups:
@@ -258,23 +341,33 @@ async def consolidate_user(
                 "would_delete": [row[0] for row in g["ids"][1:]],
             })
             summary["total_deleted"] += g["count"] - 1
-        return summary
+    else:
+        for g in groups:
+            try:
+                result = await consolidate_group(config, user_id, g)
+                summary["details"].append(result)
+                summary["total_deleted"] += len(result["deleted_ids"])
+                summary["total_redirected"] += result["redirected_edges"]
+            except Exception:
+                logger.exception(
+                    "consolidate_group failed for user=%s title_key=%s",
+                    user_id, g["title_key"],
+                )
+                summary["details"].append({
+                    "title_key": g["title_key"],
+                    "error": "consolidate failed; rolled back",
+                })
 
-    for g in groups:
-        try:
-            result = await consolidate_group(config, user_id, g)
-            summary["details"].append(result)
-            summary["total_deleted"] += len(result["deleted_ids"])
-            summary["total_redirected"] += result["redirected_edges"]
-        except Exception:
-            logger.exception(
-                "consolidate_group failed for user=%s title_key=%s",
-                user_id, g["title_key"],
-            )
-            summary["details"].append({
-                "title_key": g["title_key"],
-                "error": "consolidate failed; rolled back",
-            })
+    # Always run the orphan-link sweep — it has no overlap with dedup
+    # and is a safe-to-rerun idempotent pass.
+    try:
+        orphan_summary = await sweep_orphan_links(
+            config, user_id, dry_run=dry_run,
+        )
+        summary["orphans_deleted"] = orphan_summary["orphans_deleted"]
+        summary["stale_pending_deleted"] = orphan_summary["stale_pending_deleted"]
+    except Exception:
+        logger.exception("sweep_orphan_links failed for user=%s", user_id)
 
     return summary
 

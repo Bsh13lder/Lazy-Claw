@@ -14,6 +14,7 @@ needed. When the vault grows past 10k we can swap in sqlite-vec.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -243,8 +244,42 @@ async def upsert_embedding(
     from lazyclaw.lazybrain import fts as _fts
     chunks = _chunker.chunk_note(text)
     chunk_vectors: list[list[float]] = []
+    chunk_hashes: list[str] = []
     if len(chunks) > 1:  # only multi-chunk notes need separate rows
+        # Fast-path: if a chunk's SHA1(text) matches the row already on
+        # disk, reuse the stored encrypted vector instead of re-embedding.
+        # Edits that touch one chunk in a 5-chunk note used to fire 5
+        # Ollama calls; now they fire 1.
+        existing: dict[int, tuple[str, str]] = {}
+        try:
+            async with db_session(config) as db:
+                rows = await db.execute(
+                    "SELECT chunk_idx, chunk_hash, vector FROM note_chunks "
+                    "WHERE note_id = ? AND user_id = ? "
+                    "AND model = ? AND dim = ?",
+                    (note_id, user_id, EMBED_MODEL, EMBED_DIM),
+                )
+                for chunk_idx, prev_hash, prev_enc in await rows.fetchall():
+                    if prev_hash and prev_enc:
+                        existing[int(chunk_idx)] = (prev_hash, prev_enc)
+        except Exception:
+            logger.debug("chunk-hash lookup failed; falling back to full re-embed", exc_info=True)
+            existing = {}
+
         for c in chunks:
+            h = hashlib.sha1(c.text.encode("utf-8")).hexdigest()
+            chunk_hashes.append(h)
+            prev = existing.get(c.idx)
+            if prev and prev[0] == h:
+                # Hash matches → reuse the stored vector. Decrypt once so
+                # the centroid math + cache writethrough below still work.
+                try:
+                    cleartext_hex = decrypt_field(prev[1], dek, _emb_aad(user_id))
+                    cvec = _unpack(bytes.fromhex(cleartext_hex), EMBED_DIM)
+                    chunk_vectors.append(cvec)
+                    continue
+                except Exception:
+                    logger.debug("reuse decrypt failed; re-embedding chunk", exc_info=True)
             cvec = await _ollama_embed(c.text)
             if cvec is None:
                 # If Ollama died mid-chunking, fall back to the whole-note
@@ -277,16 +312,16 @@ async def upsert_embedding(
             await db.execute(
                 "DELETE FROM note_chunks WHERE note_id = ?", (note_id,),
             )
-            for c, cvec in zip(chunks, chunk_vectors):
+            for c, cvec, chash in zip(chunks, chunk_vectors, chunk_hashes):
                 cenc = encrypt_field(_pack(cvec).hex(), dek, _emb_aad(user_id))
                 await db.execute(
                     "INSERT INTO note_chunks "
                     "(note_id, user_id, chunk_idx, model, dim, vector, "
-                    "chunk_text, updated_at) VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                    "chunk_text, chunk_hash, updated_at) VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                     (
                         note_id, user_id, c.idx, EMBED_MODEL, EMBED_DIM,
-                        cenc, c.text,
+                        cenc, c.text, chash,
                     ),
                 )
         else:

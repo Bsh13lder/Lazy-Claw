@@ -1551,16 +1551,20 @@ def cleanup_lazybrain_duplicates_cmd(
         table.add_column("Groups", justify="right")
         table.add_column("Deleted", justify="right")
         table.add_column("Redirected", justify="right")
+        table.add_column("OrphanLinks", justify="right")
+        table.add_column("StalePending", justify="right")
         table.add_column("Mode")
         for r in results:
             if "error" in r:
-                table.add_row(r["user_id"], "—", "—", "—", f"[red]error: {r['error']}[/red]")
+                table.add_row(r["user_id"], "—", "—", "—", "—", "—", f"[red]error: {r['error']}[/red]")
                 continue
             table.add_row(
                 r["user_id"],
                 str(r.get("groups", 0)),
                 str(r.get("total_deleted", 0)),
                 str(r.get("total_redirected", 0)),
+                str(r.get("orphans_deleted", 0)),
+                str(r.get("stale_pending_deleted", 0)),
                 "[yellow]dry-run[/yellow]" if r.get("dry_run") else "[green]written[/green]",
             )
         console.print(table)

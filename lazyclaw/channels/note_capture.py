@@ -106,13 +106,19 @@ async def save_quick_note(
     first_line = content.splitlines()[0].strip()
     title = first_line[:80] if first_line else content.strip()[:80] or "Quick note"
 
-    note = await lb_store.save_note(
-        config,
-        user_id,
-        content=content,
-        title=title,
-        tags=tags,
-    )
+    try:
+        note = await lb_store.save_note(
+            config,
+            user_id,
+            content=content,
+            title=title,
+            tags=tags,
+        )
+    except Exception:
+        # Channel callers (Telegram /note, trigger phrases) treat this as
+        # fire-and-forget — never crash the inbound handler on a PKM error.
+        logger.warning("save_quick_note failed", exc_info=True)
+        return {"id": None, "title": title, "tags": tags, "error": "save_failed"}
     try:
         lb_events.publish_note_saved(
             user_id, note["id"], note.get("title"), note.get("tags"),

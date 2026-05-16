@@ -1003,6 +1003,34 @@ export class ForceSimulation {
         settled[i] = 0;
       }
     }
+    // ── Circular boundary clamp ─────────────────────────────────────────
+    // Constrain the layout to a visible disc. Without this, large/sparse
+    // graphs leak past the visible canvas — the "floating everywhere"
+    // shape the user wanted to lose. We clamp position to a disc of
+    // radius BOUNDARY_R (≈92% of half the shorter canvas side, same
+    // budget the outer halo uses) and zero the outward radial velocity
+    // so the node parks at the edge instead of bouncing off it.
+    const BOUNDARY_R = Math.min(this.w, this.h) * 0.46;
+    const BOUNDARY_R2 = BOUNDARY_R * BOUNDARY_R;
+    for (let i = 0; i < N; i++) {
+      const n = this.nodes[i];
+      if (n.pinned) continue;
+      const dx = n.x - this.cx;
+      const dy = n.y - this.cy;
+      const r2 = dx * dx + dy * dy;
+      if (r2 <= BOUNDARY_R2) continue;
+      const r = Math.sqrt(r2);
+      // Snap back onto the disc edge.
+      const scale = BOUNDARY_R / r;
+      n.x = this.cx + dx * scale;
+      n.y = this.cy + dy * scale;
+      // Zero the outward velocity component so we don't bounce next tick.
+      const vRad = (n.vx * dx + n.vy * dy) / r;
+      if (vRad > 0) {
+        n.vx -= (dx / r) * vRad;
+        n.vy -= (dy / r) * vRad;
+      }
+    }
     // Hard collision pass — d3-force-style position correction with
     // a uniform spatial grid so the inner loop only checks neighbours
     // within a 3×3 cell window instead of every other node. The math
@@ -1555,6 +1583,13 @@ export class ForceSimulation {
 
   center(): { cx: number; cy: number } {
     return { cx: this.cx, cy: this.cy };
+  }
+
+  /** Radius of the circular boundary the force pass clamps nodes to.
+   *  Renderers can draw this as a faint outline so the user can see the
+   *  disc the layout is constrained to (matches stepForce's clamp). */
+  boundaryRadius(): number {
+    return Math.min(this.w, this.h) * 0.46;
   }
 
   /** Top-k node ids by degree (precomputed). Zero-cost at call time. */

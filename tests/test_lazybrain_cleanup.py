@@ -313,3 +313,125 @@ async def test_journal_single_day_is_no_op(tmp_config: Config) -> None:
         tmp_config, "u-clean", dry_run=False,
     )
     assert summary["groups"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sweep_orphan_links_removes_dangling_edges(
+    tmp_config: Config,
+) -> None:
+    """note_links referencing a deleted note are pruned.
+
+    Three edges seeded:
+      1. (real → ghost)  — to_note_id points at a non-existent note
+      2. (ghost → real)  — from_note_id points at a non-existent note
+      3. (real → real)   — both endpoints exist; must survive
+    Plus one fresh pending wikilink (created today, unresolved) — must
+    survive too because of the 30-day grace period.
+    """
+    real_a = await store.save_note(
+        tmp_config, "u-clean", content="A", title="A",
+        tags=["owner/user"],
+    )
+    real_b = await store.save_note(
+        tmp_config, "u-clean", content="B", title="B",
+        tags=["owner/user"],
+    )
+    async with db_session(tmp_config) as db:
+        # 1. Edge to a ghost note id
+        await db.execute(
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_note_id, to_page_name) "
+            "VALUES (?, ?, ?, ?)",
+            ("u-clean", real_a["id"], "ghost-target-id", "ghost target"),
+        )
+        # 2. Edge from a ghost source id
+        await db.execute(
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_note_id, to_page_name) "
+            "VALUES (?, ?, ?, ?)",
+            ("u-clean", "ghost-source-id", real_b["id"], "b"),
+        )
+        # 3. Healthy edge — must survive
+        await db.execute(
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_note_id, to_page_name) "
+            "VALUES (?, ?, ?, ?)",
+            ("u-clean", real_a["id"], real_b["id"], "b"),
+        )
+        # 4. Fresh pending wikilink — unresolved but within 30-day grace.
+        await db.execute(
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_note_id, to_page_name) "
+            "VALUES (?, ?, NULL, ?)",
+            ("u-clean", real_a["id"], "not-yet-created"),
+        )
+        await db.commit()
+
+    summary = await cleanup.sweep_orphan_links(
+        tmp_config, "u-clean", dry_run=False,
+    )
+    # Two orphan edges deleted (1 + 2); 0 stale-pending (the fresh one
+    # is inside the 30-day grace window).
+    assert summary["orphans_deleted"] == 2
+    assert summary["stale_pending_deleted"] == 0
+
+    # The healthy edge + fresh pending edge are the only survivors.
+    async with db_session(tmp_config) as db:
+        rows = await db.execute(
+            "SELECT from_note_id, to_note_id FROM note_links "
+            "WHERE user_id = ?",
+            ("u-clean",),
+        )
+        edges = await rows.fetchall()
+    assert len(edges) == 2
+    edge_pairs = {(f, t) for f, t in edges}
+    assert (real_a["id"], real_b["id"]) in edge_pairs
+    assert (real_a["id"], None) in edge_pairs
+
+
+@pytest.mark.asyncio
+async def test_sweep_orphan_links_dry_run(tmp_config: Config) -> None:
+    """dry_run reports the counts without writing anything."""
+    real = await store.save_note(
+        tmp_config, "u-clean", content="x", title="x",
+        tags=["owner/user"],
+    )
+    async with db_session(tmp_config) as db:
+        await db.execute(
+            "INSERT INTO note_links "
+            "(user_id, from_note_id, to_note_id, to_page_name) "
+            "VALUES (?, ?, ?, ?)",
+            ("u-clean", real["id"], "ghost", "ghost"),
+        )
+        await db.commit()
+
+    summary = await cleanup.sweep_orphan_links(
+        tmp_config, "u-clean", dry_run=True,
+    )
+    assert summary["orphans_deleted"] == 1
+    assert summary["dry_run"] is True
+    # Edge is still there.
+    async with db_session(tmp_config) as db:
+        rows = await db.execute(
+            "SELECT COUNT(*) FROM note_links WHERE user_id = ?",
+            ("u-clean",),
+        )
+        (n,) = await (await db.execute(
+            "SELECT COUNT(*) FROM note_links WHERE user_id = ?",
+            ("u-clean",),
+        )).fetchone()
+    assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_consolidate_user_includes_sweep_summary(
+    tmp_config: Config,
+) -> None:
+    """The unified consolidate_user pass reports orphan + stale counters."""
+    summary = await cleanup.consolidate_user(
+        tmp_config, "u-clean", dry_run=False,
+    )
+    assert "orphans_deleted" in summary
+    assert "stale_pending_deleted" in summary
+    assert summary["orphans_deleted"] == 0
+    assert summary["stale_pending_deleted"] == 0

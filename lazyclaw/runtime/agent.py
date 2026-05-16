@@ -485,7 +485,7 @@ _CRON_KEYWORDS = frozenset({
 })
 
 _CRON_TOOL_NAMES = frozenset({
-    "schedule_job", "list_jobs", "manage_job",
+    "schedule_job", "list_jobs", "manage_job", "set_reminder",
 })
 
 # MCP management keywords → inject install_mcp_server + connect/list/etc.

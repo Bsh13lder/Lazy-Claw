@@ -1,9 +1,11 @@
 """Auto-linkifier: rewrite agent responses so existing LazyBrain page names
 become ``[[wikilinks]]`` — the graph grows itself just by the agent talking.
 
-Two guardrails keep this from hallucinating links:
+Guardrails:
 
-- **Exact case match only** — "redis" matches a note titled "redis", not "Redis".
+- **Case-insensitive match** — a note titled "Redis" gets wrapped whether
+  the agent writes "Redis", "redis" or "REDIS". The wikilink resolver
+  normalises the target on read, so all three resolve to the same note.
 - **Skip code fences + existing `[[...]]`** — we never rewrite inside code
   blocks or already-linked text.
 
@@ -107,18 +109,22 @@ async def inject(
             break
         if len(title) < 3:
             continue
-        pattern = re.compile(r"\b" + re.escape(title) + r"\b")
+        # Case-insensitive: store.list_titles returns lowercased title_keys
+        # and the resolver normalises wikilink targets on read. Matching
+        # case-insensitively lets a note titled "Redis" be linked whether
+        # the agent writes "Redis", "redis" or "REDIS".
+        pattern = re.compile(r"\b" + re.escape(title) + r"\b", re.IGNORECASE)
         new_parts: list[str] = []
         cursor = 0
         found_any = False
         for m in pattern.finditer(out):
             if _in_protected(m.start(), protected):
                 continue
-            # Exact case match only (strict guardrail)
-            if m.group(0) != title and m.group(0).lower() != title:
-                continue
             found_any = True
             new_parts.append(out[cursor : m.start()])
+            # Preserve the original casing the agent used inside [[...]] —
+            # the resolver case-folds on read, so this still routes to the
+            # correct note while keeping the rendered text natural.
             new_parts.append(f"[[{m.group(0)}]]")
             cursor = m.end()
             rewrites += 1

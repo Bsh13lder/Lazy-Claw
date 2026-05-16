@@ -100,16 +100,17 @@ class MemoryRecallSkill(BaseSkill):
             return "Error: `query` is required."
         scope = (params or {}).get("scope") or "default"
 
-        # Fan out to all three sources in parallel — one bad source never
-        # blocks the others. Each helper is wrapped to never raise.
+        # Fan out the legacy personal store + ONE LazyBrain semantic_search
+        # in parallel. The single semantic call feeds BOTH the note stream
+        # and the lesson stream — duplicating it doubled Ollama embeds +
+        # vault decrypts on every recall.
         personal_task = _safe_personal_search(self._config, user_id, query)
-        notes_task = _safe_lazybrain_search(self._config, user_id, query)
-        lessons_task = _safe_lessons_search(
+        lb_task = _safe_lazybrain_combined_search(
             self._config, user_id, query, scope=scope,
         )
 
-        personal, notes, lessons = await asyncio.gather(
-            personal_task, notes_task, lessons_task,
+        personal, (notes, lessons) = await asyncio.gather(
+            personal_task, lb_task,
         )
 
         merged = _merge_and_dedupe(personal, notes, lessons)
@@ -166,31 +167,37 @@ async def _safe_personal_search(config, user_id: str, query: str) -> list[dict]:
     return out
 
 
-async def _safe_lazybrain_search(config, user_id: str, query: str) -> list[dict]:
-    """Semantic + substring over LazyBrain notes. Filters out tag mirrors
-    of stores already represented in the personal pool, plus kind/shape
-    cards (those go through the lesson path)."""
+async def _safe_lazybrain_combined_search(
+    config, user_id: str, query: str, *, scope: str = "default",
+) -> tuple[list[dict], list[dict]]:
+    """Fetch notes + lesson shapes from LazyBrain in ONE pair of calls.
+
+    Returns ``(notes, lessons)``. We issue two ``semantic_search`` calls:
+    one general (post-filtered to user-facing notes) and one tag-prefiltered
+    to ``kind/shape`` so the verified-shape pool actually returns hits
+    instead of post-filtering top-8 generic results to empty.
+    """
     try:
         from lazyclaw.lazybrain import embeddings as lb_embeddings
         from lazyclaw.lazybrain.store import is_user_facing_memory_note
     except Exception:
         logger.debug("LazyBrain import failed", exc_info=True)
-        return []
-    try:
-        result = await lb_embeddings.semantic_search(
-            config, user_id, query, k=8,
-        )
-    except Exception:
-        logger.debug("semantic_search raised", exc_info=True)
-        return []
-    raw = result.get("results") if isinstance(result, dict) else None
-    if not raw:
-        return []
-    out: list[dict] = []
-    for n in raw:
+        return [], []
+
+    # Run both retrievals concurrently — same query, different tag scope.
+    general_task = _semantic_safe(
+        lb_embeddings, config, user_id, query, k=8, tag_prefix=None,
+    )
+    shape_task = _semantic_safe(
+        lb_embeddings, config, user_id, query, k=16, tag_prefix="kind/shape",
+    )
+    general_raw, shape_raw = await asyncio.gather(general_task, shape_task)
+
+    notes: list[dict] = []
+    for n in general_raw:
         if not is_user_facing_memory_note(n):
             continue
-        out.append({
+        notes.append({
             "source": SRC_NOTE,
             "id": f"lb:{n['id']}",
             "title": n.get("title") or "(untitled)",
@@ -200,34 +207,6 @@ async def _safe_lazybrain_search(config, user_id: str, query: str) -> list[dict]
             "tags": list(n.get("tags") or []),
             "_score": n.get("_score"),
         })
-    return out
-
-
-async def _safe_lessons_search(
-    config, user_id: str, query: str, *, scope: str = "default",
-) -> list[dict]:
-    """Semantic search restricted to kind/shape cards.
-
-    ``scope='default'`` keeps only outcome ∈ {verified, pending}.
-    ``scope='skills_vault'`` adds archived/superseded for explicit recall.
-    ``scope='all'`` returns every shape match. Always excludes
-    ``kind/known-bad`` from positive recall — those go through the
-    dedicated negative-example path.
-    """
-    try:
-        from lazyclaw.lazybrain import embeddings as lb_embeddings
-    except Exception:
-        return []
-    try:
-        result = await lb_embeddings.semantic_search(
-            config, user_id, query, k=8,
-        )
-    except Exception:
-        logger.debug("lessons search raised", exc_info=True)
-        return []
-    raw = result.get("results") if isinstance(result, dict) else None
-    if not raw:
-        return []
 
     if scope == "default":
         wanted_outcomes = {"verified", "pending"}
@@ -236,9 +215,11 @@ async def _safe_lessons_search(
     else:  # "all"
         wanted_outcomes = {"verified", "pending", "superseded", "failed"}
 
-    out: list[dict] = []
-    for n in raw:
+    lessons: list[dict] = []
+    for n in shape_raw:
         tags = [str(t) for t in (n.get("tags") or [])]
+        # tag_prefix prefilter is JSON-substring LIKE — re-check exact match
+        # here so kind/shape-failed (if it ever shows up) can't slip in.
         if "kind/shape" not in tags:
             continue
         if "kind/known-bad" in tags:
@@ -249,7 +230,7 @@ async def _safe_lessons_search(
         )
         if outcome not in wanted_outcomes:
             continue
-        out.append({
+        lessons.append({
             "source": SRC_LESSON,
             "id": f"lb:{n['id']}",
             "title": n.get("title") or "(untitled lesson)",
@@ -260,7 +241,35 @@ async def _safe_lessons_search(
             "outcome": outcome,
             "_score": n.get("_score"),
         })
-    return out
+    return notes, lessons
+
+
+async def _semantic_safe(
+    lb_embeddings, config, user_id: str, query: str, *, k: int,
+    tag_prefix: str | None,
+) -> list[dict]:
+    """Wrap semantic_search so a single failure doesn't poison the gather."""
+    try:
+        kwargs: dict = {"k": k}
+        if tag_prefix:
+            kwargs["tag_prefix"] = tag_prefix
+        result = await lb_embeddings.semantic_search(
+            config, user_id, query, **kwargs,
+        )
+    except TypeError:
+        # Older signature without tag_prefix kwarg → retry without it.
+        try:
+            result = await lb_embeddings.semantic_search(
+                config, user_id, query, k=k,
+            )
+        except Exception:
+            logger.debug("semantic_search raised on retry", exc_info=True)
+            return []
+    except Exception:
+        logger.debug("semantic_search raised", exc_info=True)
+        return []
+    raw = result.get("results") if isinstance(result, dict) else None
+    return list(raw or [])
 
 
 async def _safe_recent_lb_notes(config, user_id: str, limit: int) -> list[dict]:
@@ -324,12 +333,14 @@ def _merge_and_dedupe(
             if h:
                 seen.add(h)
             merged.append(row)
-    # Soft re-rank: confidence DESC, but keep semantic-score ordering
-    # within each confidence band.
+    # Combined rank: cosine similarity carries more weight than the
+    # importance integer so a high-relevance note (score 0.9) outranks a
+    # mid-importance substring hit (importance 6, no score). Without the
+    # *2 multiplier importance dominated and recall quality regressed.
     merged.sort(
-        key=lambda r: (
-            -int(r.get("conf") or 5),
-            -float(r.get("_score") or 0.0),
+        key=lambda r: -(
+            int(r.get("conf") or 5)
+            + float(r.get("_score") or 0.0) * 2.0
         )
     )
     return merged[:20]

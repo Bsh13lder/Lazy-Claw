@@ -1222,12 +1222,62 @@ class EcoRouter:
         models = self._resolve_models(settings)
 
         # MODE_CLAUDE strict-sticky — every streaming call goes through
-        # the CLI subprocess just like the non-streaming `chat()` path.
-        # User is in this mode precisely because they have $0 paid-API
-        # credit; without this guard the fast chat path (and any other
-        # streaming caller) falls through to the paid Anthropic API and
-        # 400s with "credit balance too low".
+        # the SDK (default) or CLI subprocess. NEVER falls through to
+        # the paid Anthropic API: user is in this mode precisely because
+        # they have $0 paid-API credit and a fall-through would 400 with
+        # "credit balance too low".
+        #
+        # SDK transport now does REAL token streaming via
+        # ClaudeSDKProvider.stream_chat — each AssistantMessage TextBlock
+        # surfaces as its own chunk so the Web UI sees text incrementally
+        # instead of waiting 60–120s for the whole turn (legacy v1
+        # behavior). CLI transport stays non-streaming (CLI provider
+        # doesn't expose chunk-by-chunk output today).
         if settings.mode == MODE_CLAUDE:
+            transport = getattr(settings, "claude_transport", "sdk") or "sdk"
+            if transport == "sdk":
+                # Lazy provider construction mirrors _route_claude_sdk.
+                sdk_model = _resolve_claude_cli_model(settings, role)
+                if (
+                    self._claude_sdk is None
+                    or self._claude_sdk_model != sdk_model
+                ):
+                    from lazyclaw.llm.providers.claude_sdk_provider import (
+                        ClaudeSDKProvider,
+                    )
+                    self._claude_sdk = ClaudeSDKProvider(model=sdk_model)
+                    self._claude_sdk_model = sdk_model
+                else:
+                    self._claude_sdk._model = sdk_model
+
+                self._set_routing(
+                    "claude-sdk", "claude_sdk", is_local=False,
+                    reason=f"claude_stream: {role} -> {sdk_model} (sdk)",
+                )
+                self._record_usage(user_id, "free")
+
+                try:
+                    async for chunk in self._claude_sdk.stream_chat(
+                        messages, model="claude-sdk", **kwargs,
+                    ):
+                        yield chunk
+                    return
+                except Exception as exc:
+                    # Narrow auto-fallback to CLI: only SDKUnavailable.
+                    # Anything else surfaces so we don't mask real bugs.
+                    from lazyclaw.llm.providers.claude_sdk_provider import (
+                        SDKUnavailable,
+                    )
+                    if not isinstance(exc, SDKUnavailable):
+                        raise
+                    logger.warning(
+                        "Claude SDK stream unavailable, CLI fallback: %s",
+                        exc,
+                    )
+                    # Fall through to CLI path below.
+
+            # CLI transport (or SDK fallback) — collapse to one chunk
+            # because the CLI provider doesn't expose token streaming.
             response = await self._route_claude(
                 messages, user_id, settings=settings, role=role, **kwargs,
             )

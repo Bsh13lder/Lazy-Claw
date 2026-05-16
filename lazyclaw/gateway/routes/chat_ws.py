@@ -213,7 +213,19 @@ class WebSocketCallback:
             return
 
         if kind == "token":
+            # Always accumulate — the terminal "done" frame uses
+            # ``cb._buffer`` as fallback content so the user still sees
+            # the full reply even when live streaming is suppressed.
             self._buffer += event.detail
+            # Quiet mode (bg_streaming=False) — DO NOT forward the live
+            # token frame to the WS. Client gets the complete reply in
+            # one shot via the terminal "done" payload below. Matches
+            # the 8e378e2 commit-message intent ("token frames dropped
+            # when streaming is off") that the original code only
+            # honored for bg-tagged tokens, leaking foreground brain
+            # tokens through.
+            if not self.streaming_state.get("bg_streaming", True):
+                return
             await self._send({"type": "token", "content": event.detail})
 
         elif kind == "tool_call":
@@ -602,9 +614,18 @@ async def chat_websocket(ws: WebSocket):
                 # will, when the last sibling settles), and that turn's
                 # reply lands in chat normally. Per-task cards would
                 # duplicate.
+                #
+                # User-source tasks (compound-split sub-tasks, manual
+                # run_background calls) also paint via the direct
+                # `on_event` callback at chat_ws.py:373 — forwarding the
+                # bus copy too produced visible duplicate completion
+                # cards (2026-05-16 Gerardo case: send_whatsapp +
+                # save_contact each rendered twice). Cron-source events
+                # have NO WS callback, so the bus is their only path —
+                # those keep flowing through.
                 _is_brain_bg_terminal = (
                     evt.kind in ("background_done", "background_failed")
-                    and getattr(evt, "source", None) == "brain"
+                    and getattr(evt, "source", None) in ("brain", "user")
                 )
 
                 # Build the side-note payload the brain will see on its

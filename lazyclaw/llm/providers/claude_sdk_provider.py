@@ -696,19 +696,156 @@ class ClaudeSDKProvider(BaseLLMProvider):
         model: str = "",
         **kwargs: Any,
     ):
-        """Streaming is not exposed in v1 — we collapse to a single chunk.
+        """Real streaming — yields one ``StreamChunk`` per ``TextBlock``
+        as the SDK emits them, plus a terminal ``done=True`` chunk
+        carrying the accumulated tool calls + usage.
 
-        The SDK's AssistantMessage blocks already arrive as a stream, but
-        our caller (taor.py / agent.py) consumes complete LLMResponse
-        objects, not partial deltas. If we add streaming chat in the Web
-        UI later we can override this to yield per-block.
+        Mirrors ``chat()``'s SDK-iteration logic but emits incrementally
+        so the Web UI sees text tokens land in real time instead of
+        waiting for the whole turn to complete (legacy v1 collapsed to
+        ONE final chunk — Web UI looked frozen for 60–120s under
+        MODE_CLAUDE).
+
+        Tool calls are NOT streamed mid-turn: they're accumulated and
+        attached to the terminal chunk so taor.py dispatches them in
+        one batch on the next turn (same contract as ``chat()``).
+
+        Raises ``SDKUnavailable`` / ``RuntimeError`` identically to
+        ``chat()`` so the eco_router fallback semantics stay the same.
         """
-        response = await self.chat(messages, model, **kwargs)
+        try:
+            from claude_agent_sdk import (
+                query as sdk_query,
+                ClaudeAgentOptions,
+                AssistantMessage,
+                ResultMessage,
+                TextBlock,
+                ToolUseBlock,
+                CLINotFoundError,
+                CLIConnectionError,
+                ProcessError,
+                ClaudeSDKError,
+            )
+            from claude_agent_sdk import create_sdk_mcp_server
+        except ImportError as exc:
+            raise SDKUnavailable(f"claude-agent-sdk not installed: {exc}") from exc
+
+        if self._claude_bin is None:
+            self._claude_bin = _find_claude_binary()
+            if self._claude_bin is None:
+                raise SDKUnavailable(
+                    "`claude` CLI binary not found in PATH or well-known "
+                    "locations."
+                )
+
+        tools_spec: list[dict] = kwargs.get("tools") or []
+        prompt_text = _serialize_messages(messages)
+        options, name_map = self._build_options(tools_spec, create_sdk_mcp_server)
+
+        logger.info(
+            "Claude SDK stream: tools=%d, model=%s, prompt_len=%d chars",
+            len(tools_spec), self._model, len(prompt_text),
+        )
+
+        tool_calls: list[ToolCall] = []
+        text_parts: list[str] = []  # for the success-tail absorption guard
+        usage_raw: dict[str, Any] | None = None
+        api_equiv_cost: float = 0.0
+        stop_reason: str | None = None
+        session_id: str | None = None
+        api_error: str | None = None
+        model_label = f"claude-sdk ({self._model})"
+
+        try:
+            async for msg in sdk_query(prompt=prompt_text, options=options):
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            text_parts.append(block.text)
+                            yield StreamChunk(
+                                delta=block.text,
+                                model=model_label,
+                                done=False,
+                            )
+                        elif isinstance(block, ToolUseBlock):
+                            registry_name = self._unmap_tool_name(
+                                block.name, name_map,
+                            )
+                            if (
+                                block.name in _DISALLOWED_BUILT_INS
+                                or registry_name in _DISALLOWED_BUILT_INS
+                            ):
+                                logger.warning(
+                                    "Claude SDK stream: dropped built-in tool "
+                                    "%r (not a lazyclaw skill)",
+                                    block.name,
+                                )
+                                continue
+                            tool_calls.append(ToolCall(
+                                id=block.id or f"sdk_{uuid.uuid4().hex[:8]}",
+                                name=registry_name,
+                                arguments=block.input or {},
+                            ))
+                elif isinstance(msg, ResultMessage):
+                    usage_raw = msg.usage
+                    api_equiv_cost = float(msg.total_cost_usd or 0.0)
+                    stop_reason = msg.stop_reason
+                    session_id = msg.session_id
+                    if msg.is_error:
+                        errs = msg.errors or [msg.result or "unknown"]
+                        api_error = "; ".join(str(e) for e in errs)
+        except CLINotFoundError as exc:
+            raise SDKUnavailable(f"`claude` binary missing: {exc}") from exc
+        except CLIConnectionError as exc:
+            raise SDKUnavailable(f"Claude CLI connection failed: {exc}") from exc
+        except ProcessError as exc:
+            msg_lower = str(exc).lower()
+            if "not logged in" in msg_lower or "/login" in msg_lower:
+                raise SDKUnavailable(
+                    "Claude CLI is not logged in. Run `claude /login` "
+                    "and retry."
+                ) from exc
+            raise RuntimeError(f"Claude SDK stream process error: {exc}") from exc
+        except ClaudeSDKError as exc:
+            raise RuntimeError(f"Claude SDK stream error: {exc}") from exc
+        except Exception as exc:
+            # Same "error result: success" absorption guard as chat().
+            err_str = str(exc)
+            looks_like_success_tail = (
+                "returned an error result: success" in err_str
+            )
+            have_usable_response = bool(
+                (text_parts or tool_calls) and not api_error
+            )
+            if looks_like_success_tail and have_usable_response:
+                logger.warning(
+                    "Claude SDK stream: swallowed trailing 'error result: "
+                    "success' (turn succeeded)",
+                )
+            else:
+                raise RuntimeError(
+                    f"Claude SDK stream iterator error: {exc}"
+                ) from exc
+
+        if api_error:
+            raise RuntimeError(f"Claude SDK upstream error: {api_error}")
+
+        # Dedup tool calls (same logic as chat()).
+        if tool_calls:
+            tool_calls = _dedup_tool_calls(tool_calls)
+
+        usage = self._normalize_usage(usage_raw, api_equiv_cost)
+        if stop_reason:
+            usage["stop_reason"] = stop_reason
+        if session_id:
+            usage["session_id"] = session_id
+
+        # Terminal chunk: empty delta, tool calls + usage attached.
         yield StreamChunk(
-            delta=response.content,
-            tool_calls=response.tool_calls,
-            usage=response.usage,
-            model=response.model,
+            delta="",
+            tool_calls=tool_calls or None,
+            usage=usage,
+            model=model_label,
             done=True,
         )
 

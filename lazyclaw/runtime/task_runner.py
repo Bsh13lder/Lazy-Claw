@@ -31,6 +31,7 @@ push behaviour — they're not part of a brain fan-out.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -279,6 +280,10 @@ class TaskRunner:
         # Without this map the inner Agent had depth=0 and could spawn
         # forever before falling back to the three-strikes handoff.
         self._task_caller_depth: dict[str, int] = {}
+        # task_id → per-task workspace directory. submit() creates the
+        # dir before spawning _execute; _execute reads it back for the
+        # post-run file glob. Cleaned up alongside other task maps.
+        self._task_workspace_dirs: dict[str, str] = {}
         # group_id → _BrainFanoutGroup. Cleaned up after _consolidate runs.
         self._brain_groups: dict[str, _BrainFanoutGroup] = {}
 
@@ -295,6 +300,7 @@ class TaskRunner:
         chat_session_id: str | None = None,
         project_tag: str = "",
         caller_depth: int = 0,
+        goal_id: str = "",
     ) -> str:
         """Submit a task for background execution. Returns task_id immediately.
 
@@ -338,12 +344,46 @@ class TaskRunner:
         key = await get_user_dek(self._config, user_id)
         encrypted_instruction = encrypt(instruction, key)
 
+        # Pre-compute short_description for the Code Specialist Web UI.
+        # First line of the instruction (≤120 chars). Pre-stored so the
+        # Web UI has it even while the task is still running, before any
+        # capture path fires. Plain text — derived from already-encrypted
+        # instruction so no encryption needed.
+        _short_desc = (instruction.strip().splitlines()[0][:120]
+                       if instruction else task_name)
+
+        # Per-task workspace dir. claude-code MCP runs with cwd=/workspace
+        # (mcp/manager.py), so even bg tasks that invoke claude-code via
+        # the brain's run_background path land their files under a
+        # per-task subdir — letting the Code Specialist Web UI surface a
+        # clickable folder path. Best-effort mkdir; failure (e.g. RO host
+        # mount) is logged and we record an empty path so the UI degrades
+        # gracefully.
+        from lazyclaw.teams.specialist import code_workspace_dir
+        _workspace_dir = code_workspace_dir(
+            task_id=task_id,
+            project_tag=project_tag,
+            goal_id=goal_id,
+        )
+        try:
+            import os as _os
+            _os.makedirs(_workspace_dir, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "bg task workspace mkdir failed for %s: %s — "
+                "task will run without per-task workspace isolation",
+                _workspace_dir, exc,
+            )
+            _workspace_dir = ""
+
         async with db_session(self._config) as db:
             await db.execute(
                 "INSERT INTO background_tasks "
-                "(id, user_id, name, instruction, status, timeout) "
-                "VALUES (?, ?, ?, ?, 'running', ?)",
-                (task_id, user_id, task_name, encrypted_instruction, timeout),
+                "(id, user_id, name, instruction, status, timeout, "
+                "short_description, goal_id, workspace_dir) "
+                "VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)",
+                (task_id, user_id, task_name, encrypted_instruction, timeout,
+                 _short_desc, goal_id or None, _workspace_dir or None),
             )
             await db.commit()
 
@@ -355,6 +395,7 @@ class TaskRunner:
         self._running[task_id] = bg_task
         self._task_users[task_id] = user_id
         self._task_names[task_id] = task_name
+        self._task_workspace_dirs[task_id] = _workspace_dir or ""
         self._task_starts[task_id] = time.monotonic()
         self._task_provenance[task_id] = (source, fanout_group_id)
         self._task_caller_depth[task_id] = caller_depth
@@ -389,6 +430,7 @@ class TaskRunner:
                 instruction_full=instruction,
                 user_id=user_id,
                 project_tag=project_tag,
+                goal_id=goal_id,
             )
 
         # Announce on the per-user task event bus so a connected web chat
@@ -448,6 +490,17 @@ class TaskRunner:
         # to the live progress card.
         _bg_task_display_name = task_name
 
+        # Per-step transcript accumulator. The CodeSpecialist Web UI
+        # renders this as a step-by-step timeline so the user can see
+        # every claude-code MCP call (and any other tool) the bg agent
+        # made. We capture tool_call → start (name + args), tool_result
+        # → finish (result preview + duration). Capped at _TS_CAP rows so
+        # a runaway loop can't bloat the DB row. Each entry is a small
+        # dict — encoded to JSON before encrypting on completion.
+        _TS_CAP = 200
+        _ts_steps: list[dict] = []
+        _ts_inflight: dict[str, dict] = {}  # tool_call_id -> partial step
+
         class _BgEventTap:
             """Transparent wrapper around the user's original callback.
 
@@ -473,19 +526,73 @@ class TaskRunner:
                 nonlocal _captured_summary
                 if event.kind == "work_summary":
                     _captured_summary = event.metadata.get("summary")
-                elif event.kind == "tool_call" and _team_lead_ref is not None:
+                elif event.kind == "tool_call":
+                    md = event.metadata or {}
                     tool_name = (
-                        (event.metadata or {}).get("display_name")
-                        or (event.metadata or {}).get("tool")
+                        md.get("display_name")
+                        or md.get("tool")
                         or event.detail
                     )
-                    try:
-                        _team_lead_ref.update_step(_bound_task_id, str(tool_name))
-                    except Exception:
-                        logger.debug(
-                            "team_lead.update_step failed for bg task %s",
-                            _bound_task_id, exc_info=True,
+                    if _team_lead_ref is not None:
+                        try:
+                            _team_lead_ref.update_step(_bound_task_id, str(tool_name))
+                        except Exception:
+                            logger.debug(
+                                "team_lead.update_step failed for bg task %s",
+                                _bound_task_id, exc_info=True,
+                            )
+                    # Begin transcript step row. CodeSpecialist.tsx
+                    # renders this as the step timeline. Cap arg preview
+                    # at 120 chars to keep payload tight.
+                    if len(_ts_steps) < _TS_CAP:
+                        tc_id = md.get("tool_call_id") or md.get("id") or ""
+                        args = md.get("arguments") or md.get("args") or {}
+                        try:
+                            args_text = (
+                                args if isinstance(args, str)
+                                else json.dumps(args, default=str)
+                            )
+                        except Exception:
+                            args_text = str(args)
+                        partial = {
+                            "kind": "tool",
+                            "name": str(tool_name),
+                            "args_summary": " ".join(args_text.split())[:120],
+                            "result_summary": "",
+                            "duration_ms": 0,
+                            "success": True,
+                            "error": "",
+                            "_started_at": time.monotonic(),
+                        }
+                        _ts_steps.append(partial)
+                        if tc_id:
+                            _ts_inflight[tc_id] = partial
+                elif event.kind == "tool_result":
+                    md = event.metadata or {}
+                    tc_id = md.get("tool_call_id") or md.get("id") or ""
+                    target = _ts_inflight.pop(tc_id, None)
+                    if target is None and _ts_steps:
+                        # Fallback: pair to most-recent inflight when
+                        # provider didn't carry tool_call_id. Reasonable
+                        # because tool calls are sequential per turn.
+                        target = _ts_steps[-1]
+                    if target is not None:
+                        result_text = (
+                            md.get("preview") or md.get("result") or event.detail or ""
                         )
+                        try:
+                            result_text = (
+                                result_text if isinstance(result_text, str)
+                                else json.dumps(result_text, default=str)
+                            )
+                        except Exception:
+                            result_text = str(result_text)
+                        target["result_summary"] = " ".join(result_text.split())[:200]
+                        started = target.pop("_started_at", time.monotonic())
+                        target["duration_ms"] = int((time.monotonic() - started) * 1000)
+                        if isinstance(result_text, str) and result_text.startswith("Error"):
+                            target["success"] = False
+                            target["error"] = result_text[:200]
 
                 # Tag the event with bg-task identity so chat WS demuxes
                 # bg streams from the active foreground turn. Mutating
@@ -566,12 +673,65 @@ class TaskRunner:
             _cost = _captured_summary.total_cost if _captured_summary else 0.0
             _tokens = _captured_summary.total_tokens if _captured_summary else 0
             _calls = _captured_summary.llm_calls if _captured_summary else 0
+
+            # ── Code Specialist visibility (bg task path) ──────────
+            # Strip transient bookkeeping fields before persisting; only
+            # the public-shape rows (kind/name/args/result/duration/etc.)
+            # ride into the encrypted column.
+            _public_steps = [
+                {k: v for k, v in s.items() if not k.startswith("_")}
+                for s in _ts_steps
+            ]
+            _ts_blob = (
+                encrypt(json.dumps(_public_steps, default=str), key)
+                if _public_steps else None
+            )
+            _prompt_blob = encrypt(instruction, key) if instruction else None
+            # Glob the workspace dir post-run so users get a clickable
+            # file list. Skip-list mirrors teams/runner.py to keep the
+            # bg task path and the specialist path consistent.
+            _files_touched: list[str] = []
+            # _workspace_dir was created in submit() and stashed on
+            # self._task_workspace_dirs — fetch it here. Defaults to ""
+            # (no glob) when submit's mkdir failed or the entry was
+            # already cleaned up.
+            _workspace_dir = self._task_workspace_dirs.get(task_id, "")
+            if _workspace_dir:
+                try:
+                    import os as _os
+                    _skip = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+                    for _root, _dirs, _fs in _os.walk(_workspace_dir):
+                        _dirs[:] = [
+                            d for d in _dirs
+                            if d not in _skip and not d.startswith(".")
+                        ]
+                        for _f in _fs:
+                            if _f.startswith("."):
+                                continue
+                            _files_touched.append(
+                                _os.path.relpath(_os.path.join(_root, _f),
+                                                 _workspace_dir)
+                            )
+                            if len(_files_touched) >= 64:
+                                break
+                        if len(_files_touched) >= 64:
+                            break
+                    _files_touched.sort()
+                except OSError:
+                    logger.debug("workspace glob failed", exc_info=True)
+            _files_blob = (
+                encrypt(json.dumps(_files_touched), key)
+                if _files_touched else None
+            )
+
             async with db_session(self._config) as db:
                 await db.execute(
                     "UPDATE background_tasks SET status = 'done', result = ?, "
                     "cost_usd = ?, tokens_used = ?, llm_calls = ?, "
+                    "mcp_prompt = ?, mcp_transcript = ?, files_touched = ?, "
                     "completed_at = datetime('now') WHERE id = ?",
-                    (encrypted_result, _cost, _tokens, _calls, task_id),
+                    (encrypted_result, _cost, _tokens, _calls,
+                     _prompt_blob, _ts_blob, _files_blob, task_id),
                 )
                 await db.commit()
 
@@ -802,6 +962,7 @@ class TaskRunner:
             self._task_starts.pop(task_id, None)
             self._task_provenance.pop(task_id, None)
             self._task_caller_depth.pop(task_id, None)
+            self._task_workspace_dirs.pop(task_id, None)
 
             # Notify originator (e.g., team lead state cleanup)
             if on_complete:
@@ -990,33 +1151,60 @@ class TaskRunner:
         """List all tasks from DB (running + completed + failed).
 
         Includes the decrypted ``result`` body for completed tasks so the
-        UI can render outcomes without a separate detail fetch.
+        UI can render outcomes without a separate detail fetch. Also
+        returns the Code Specialist visibility columns (mcp_prompt,
+        mcp_transcript, workspace_dir, files_touched, short_description,
+        goal_id) for the CodeSpecialist Web UI page; transcript and
+        files_touched are decoded from JSON, prompt is decrypted.
         """
+        import json as _json
         key = await get_user_dek(self._config, user_id)
 
         async with db_session(self._config) as db:
             rows = await db.execute(
                 "SELECT id, name, status, error, result, created_at, "
-                "completed_at, cost_usd, tokens_used, llm_calls "
+                "completed_at, cost_usd, tokens_used, llm_calls, "
+                "mcp_prompt, mcp_transcript, workspace_dir, "
+                "files_touched, short_description, goal_id "
                 "FROM background_tasks WHERE user_id = ? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (user_id, limit),
             )
             results = await rows.fetchall()
 
+        def _maybe_decrypt(value):
+            if not value:
+                return None
+            try:
+                return decrypt(value, key) if is_encrypted(value) else value
+            except Exception:
+                logger.debug("list_all: decrypt failed", exc_info=True)
+                return None
+
         tasks = []
         for row in results:
             raw_result = row[4]
-            decrypted_result: str | None = None
-            if raw_result:
+            decrypted_result = _maybe_decrypt(raw_result)
+
+            # mcp_prompt is encrypted-at-rest. mcp_transcript +
+            # files_touched are JSON strings (encrypted envelope so each
+            # decrypts cleanly via _maybe_decrypt before JSON parse).
+            mcp_prompt = _maybe_decrypt(row[10])
+            transcript_raw = _maybe_decrypt(row[11])
+            files_raw = _maybe_decrypt(row[13])
+            mcp_transcript: list = []
+            files_touched: list = []
+            if transcript_raw:
                 try:
-                    decrypted_result = (
-                        decrypt(raw_result, key)
-                        if is_encrypted(raw_result) else raw_result
-                    )
+                    mcp_transcript = _json.loads(transcript_raw) or []
                 except Exception:
-                    logger.debug("list_all: result decrypt failed", exc_info=True)
-                    decrypted_result = None
+                    logger.debug("list_all: transcript JSON parse failed", exc_info=True)
+            if files_raw:
+                try:
+                    files_touched = _json.loads(files_raw) or []
+                except Exception:
+                    logger.debug("list_all: files JSON parse failed", exc_info=True)
+
             tasks.append({
                 "id": row[0],
                 "name": row[1],
@@ -1028,6 +1216,12 @@ class TaskRunner:
                 "cost_usd": row[7] or 0.0,
                 "tokens_used": row[8] or 0,
                 "llm_calls": row[9] or 0,
+                "mcp_prompt": mcp_prompt,
+                "mcp_transcript": mcp_transcript,
+                "workspace_dir": row[12] or "",
+                "files_touched": files_touched,
+                "short_description": row[14] or "",
+                "goal_id": row[15] or "",
             })
         return tasks
 

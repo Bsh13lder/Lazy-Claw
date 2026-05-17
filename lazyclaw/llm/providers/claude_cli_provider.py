@@ -690,6 +690,28 @@ class ClaudeCLIProvider(BaseLLMProvider):
         if data is None:
             # Fallback: treat as plain text
             logger.warning("Claude CLI returned non-JSON, treating as text")
+            # Don't try to parse error messages / tracebacks as legacy
+            # [TOOL_CALL] blocks — the regex is forgiving enough to
+            # misinterpret stack traces and produce phantom calls.
+            # The markers are deliberately specific: bare "error" is too
+            # broad (appears in valid tool args like {"on_error":"retry"});
+            # "error:" / "failed:" / "fatal:" are formatted-error patterns,
+            # and "traceback"/"exception" are unambiguous Python error
+            # surfaces.
+            raw_lower = raw.lower()
+            _ERROR_MARKERS = (
+                "traceback", "exception", "error:", "failed:", "fatal:",
+            )
+            if any(m in raw_lower for m in _ERROR_MARKERS):
+                logger.warning(
+                    "Claude CLI non-JSON output looks like an error "
+                    "message — skipping legacy [TOOL_CALL] parse",
+                )
+                return LLMResponse(
+                    content=raw,
+                    model=f"claude-cli ({self._model})",
+                    tool_calls=None,
+                )
             remaining, tool_calls = _parse_tool_calls(raw)
             # Reverse-map short MCP names
             _nmap = getattr(self, "_tool_name_map", {})

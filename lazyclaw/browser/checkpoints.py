@@ -73,7 +73,35 @@ async def request_checkpoint(
     if has_approved(user_id, name):
         return {"approved": True, "reason": "auto-approved (previously confirmed)"}
 
-    # Replace any older pending checkpoint for this user (only one at a time).
+    # Same checkpoint already pending — reuse the existing future instead
+    # of replacing it. Replacing would mark the user's still-visible
+    # approval prompt as `superseded` (approved=False) and lose the
+    # decision the user is about to make. Brain re-calls of the same
+    # checkpoint name should converge on one decision, not race.
+    existing = _pending.get(user_id)
+    if (
+        existing is not None
+        and not existing.event.is_set()
+        and existing.name == name
+    ):
+        logger.debug(
+            "Checkpoint %r already pending for %s — reusing future",
+            name, user_id,
+        )
+        try:
+            await asyncio.wait_for(existing.event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            if existing.decision is None:
+                existing.decision = {
+                    "approved": False,
+                    "reason": "timed out waiting for user",
+                }
+        decision = existing.decision or {"approved": False, "reason": "unknown"}
+        if decision.get("approved"):
+            remember_approved(user_id, name)
+        return decision
+
+    # Different name pending — supersede it (only one slot per user).
     existing = _pending.pop(user_id, None)
     if existing and not existing.event.is_set():
         existing.decision = {"approved": False, "reason": "superseded"}

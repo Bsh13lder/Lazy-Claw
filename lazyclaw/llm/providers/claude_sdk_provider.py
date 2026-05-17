@@ -90,6 +90,31 @@ _MCP_UUID_HALLUCINATED_RE = re.compile(
 _SDK_MCP_PREFIX = "mcp__lazyclaw__"
 
 
+def _is_known_registry_tool(
+    name: str,
+    name_map: dict[str, str] | None,
+) -> bool:
+    """True if `name` resolves to a registered lazyclaw skill.
+
+    The brain occasionally invents tool names that aren't in
+    `_DISALLOWED_BUILT_INS` AND aren't in the skill registry — usually
+    a mis-spelled skill or a Claude Code built-in we haven't blocked
+    yet. Surfacing them at WARNING means new leaks show up in logs the
+    day they happen instead of whenever a user notices a flow stalled.
+
+    `name_map` maps short → registry name. After `_unmap_tool_name`
+    runs, a known tool will either be a value in the map (resolved) or
+    a key (passthrough — short==registry).
+    """
+    if not name_map:
+        return False
+    if name in name_map.values():
+        return True
+    if name in name_map:
+        return True
+    return False
+
+
 class SDKUnavailable(RuntimeError):
     """Raised when the SDK can't be reached (binary missing, auth missing,
     package not importable). Eco-router catches this to fall back to the
@@ -445,6 +470,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         self._model = model
         self._claude_bin = claude_bin or _find_claude_binary()
         self._tool_name_map: dict[str, str] = {}
+        self._hallucinated_rescue_count: int = 0
 
     async def verify_key(self) -> bool:
         """Health check — confirm SDK importable and binary findable.
@@ -540,6 +566,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         stop_reason: str | None = None
         session_id: str | None = None
         api_error: str | None = None
+        self._hallucinated_rescue_count = 0
 
         try:
             async for msg in sdk_query(prompt=prompt_text, options=options):
@@ -574,6 +601,20 @@ class ClaudeSDKProvider(BaseLLMProvider):
                                     block.name,
                                 )
                                 continue
+                            if not _is_known_registry_tool(registry_name, name_map):
+                                # Not blocked, not registered — usually a
+                                # mis-spelled skill or a fresh Claude Code
+                                # built-in. Surface at WARNING so new leaks
+                                # are visible the day they happen.
+                                logger.warning(
+                                    "Claude SDK: unknown tool name %r "
+                                    "(resolved %r) — not in blocklist, not "
+                                    "a registered skill. Dropping. Add to "
+                                    "_DISALLOWED_BUILT_INS if this is a "
+                                    "Claude Code built-in.",
+                                    block.name, registry_name,
+                                )
+                                continue
                             tool_calls.append(ToolCall(
                                 id=block.id or f"sdk_{uuid.uuid4().hex[:8]}",
                                 name=registry_name,
@@ -586,6 +627,12 @@ class ClaudeSDKProvider(BaseLLMProvider):
 
                 elif isinstance(msg, ResultMessage):
                     usage_raw = msg.usage
+                    if msg.total_cost_usd is None:
+                        logger.debug(
+                            "Claude SDK: cost telemetry missing from "
+                            "ResultMessage (session=%s) — cost reported as $0",
+                            getattr(msg, "session_id", "?"),
+                        )
                     api_equiv_cost = float(msg.total_cost_usd or 0.0)
                     stop_reason = msg.stop_reason
                     session_id = msg.session_id
@@ -663,6 +710,18 @@ class ClaudeSDKProvider(BaseLLMProvider):
             usage["stop_reason"] = stop_reason
         if session_id:
             usage["session_id"] = session_id
+        if self._hallucinated_rescue_count >= 3:
+            # Three or more rescues in one turn = the brain is in a
+            # broken pattern. Surface via usage so taor can inject a
+            # nudge ("use the exact tool names provided") on the next
+            # turn. The provider doesn't mutate the conversation
+            # directly — that's the agent's job.
+            logger.warning(
+                "Claude SDK: %d hallucinated tool-name rescues this turn — "
+                "next-turn nudge requested",
+                self._hallucinated_rescue_count,
+            )
+            usage["hallucinated_rescues"] = self._hallucinated_rescue_count
 
         # Dedup pass — Sonnet under load (high-tool-count batches +
         # broken dispatch paths) occasionally emits the same (name, args)
@@ -755,6 +814,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         session_id: str | None = None
         api_error: str | None = None
         model_label = f"claude-sdk ({self._model})"
+        self._hallucinated_rescue_count = 0
 
         try:
             async for msg in sdk_query(prompt=prompt_text, options=options):
@@ -781,6 +841,16 @@ class ClaudeSDKProvider(BaseLLMProvider):
                                     block.name,
                                 )
                                 continue
+                            if not _is_known_registry_tool(registry_name, name_map):
+                                logger.warning(
+                                    "Claude SDK stream: unknown tool name "
+                                    "%r (resolved %r) — not in blocklist, "
+                                    "not a registered skill. Dropping. Add "
+                                    "to _DISALLOWED_BUILT_INS if this is a "
+                                    "Claude Code built-in.",
+                                    block.name, registry_name,
+                                )
+                                continue
                             tool_calls.append(ToolCall(
                                 id=block.id or f"sdk_{uuid.uuid4().hex[:8]}",
                                 name=registry_name,
@@ -788,6 +858,12 @@ class ClaudeSDKProvider(BaseLLMProvider):
                             ))
                 elif isinstance(msg, ResultMessage):
                     usage_raw = msg.usage
+                    if msg.total_cost_usd is None:
+                        logger.debug(
+                            "Claude SDK stream: cost telemetry missing from "
+                            "ResultMessage (session=%s) — cost reported as $0",
+                            getattr(msg, "session_id", "?"),
+                        )
                     api_equiv_cost = float(msg.total_cost_usd or 0.0)
                     stop_reason = msg.stop_reason
                     session_id = msg.session_id
@@ -839,6 +915,13 @@ class ClaudeSDKProvider(BaseLLMProvider):
             usage["stop_reason"] = stop_reason
         if session_id:
             usage["session_id"] = session_id
+        if self._hallucinated_rescue_count >= 3:
+            logger.warning(
+                "Claude SDK stream: %d hallucinated tool-name rescues this "
+                "turn — next-turn nudge requested",
+                self._hallucinated_rescue_count,
+            )
+            usage["hallucinated_rescues"] = self._hallucinated_rescue_count
 
         # Terminal chunk: empty delta, tool calls + usage attached.
         yield StreamChunk(
@@ -877,16 +960,19 @@ class ClaudeSDKProvider(BaseLLMProvider):
             short = short[len(_SDK_MCP_PREFIX):]
         elif _MCP_UUID_HALLUCINATED_RE.match(short):
             short = _MCP_UUID_HALLUCINATED_RE.sub("", short)
+            self._hallucinated_rescue_count += 1
             logger.warning(
                 "Claude SDK: rescued hallucinated MCP tool name %r "
-                "(hybrid uuid/sdk form) → %r",
-                sdk_name, short,
+                "(hybrid uuid/sdk form) → %r (#%d this call)",
+                sdk_name, short, self._hallucinated_rescue_count,
             )
         elif _MCP_UUID_RE.match(short):
             short = _MCP_UUID_RE.sub("", short)
+            self._hallucinated_rescue_count += 1
             logger.warning(
-                "Claude SDK: rescued raw registry MCP tool name %r → %r",
-                sdk_name, short,
+                "Claude SDK: rescued raw registry MCP tool name %r → %r "
+                "(#%d this call)",
+                sdk_name, short, self._hallucinated_rescue_count,
             )
         # Prefer caller-supplied per-call map (concurrent-safe); fall
         # back to self for legacy single-call usage.

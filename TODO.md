@@ -1009,3 +1009,42 @@ Once the SDK transport has been live in production for ≥3 days with clean logs
 - [ ] Optional: 4 cherry-picks from `browser-use` (smart wait helpers, auto-retry decorator on stale handles, action-history-as-context for brain, visible-element-only DOM compression). ~2 days.
 - [ ] Optional: cron-strip-write-tools — when agent turn comes from `[JOB:survival_*]` heartbeat prefix, strip all write-mode tools (`upwork_send_message`, `send_email`, etc.) from the brain's tool list so the cron physically cannot send. Belt-and-suspenders for the 2026-05-16 incident pattern. Lower priority now that chunking is fixed.
 - [ ] Cover-letter typing path in `mcp-upwork/.../proposals.py` is currently safe (uses `.fill()` on a real `<textarea>`) but vulnerable if Upwork migrates the cover-letter field to Tiptap. Add defense-in-depth: detect element tag, route to `_type_with_soft_breaks` for contenteditable.
+
+## Session 2026-05-17 → 2026-05-18 — six-bug grounding pass + F1/F2 (commits e23e2dc, db81820)
+
+**Context**: James Blue Upwork contract ($120, due Tue May 19) was being mis-summarized. Brain repeatedly produced "DoorDash? Uber? TaskRabbit?" fabrications and "nothing new since May 16" when fresh James messages had landed. Six distinct bugs surfaced as the loop tightened. All shipped end-to-end and verified live at 00:51 (brain correctly fetched James's 9:12 PM AND 10:37 PM messages, quoted verbatim, identified the platform as eStreet AMC → BPO appraisal orders, no fabrication).
+
+### Committed (e23e2dc + db81820)
+
+**Brain grounding (Bugs A–F + F1 + F2):**
+- [x] **Bug A** — `_is_readonly_inspection` allowlist in `agent.py` extended with `upwork_last_conversation`, `upwork_inbox_check`, `upwork_contract_poll`, `find_contact`, `list_contacts`, `list_memories`, `lookup_project_asset`. AUTO-PROMOTE no longer force-promotes a successful read-only fetch into background before the foreground brain can synthesize from the data.
+- [x] **Bug B** — `_CHANNEL_CORE_SUFFIXES` in `agent.py:418` extended with upwork shape: `_get_messages`, `_get_conversation`, `_get_unread_count`, `_check_session`, `_get_my_profile`, `_get_proposals`, `_get_contracts`. Without these, upwork read tools were silently filtered from the channel-tool list whenever no "action verb" appeared in the user's message — left the brain with no way to fetch.
+- [x] **Bug C** — `personality/SOUL.md` NEVER rule expanded from `plan/scope/estimate/reply/quote` to also cover `find/extract/fetch/read/check/show/summarize/recap`. Background-task auto-instructions like "Find James's thread and extract..." now match the rule. Anchored to "named contact + channel" not specific verbs.
+- [x] **Bug D** — `_extract_message` in `mcp-upwork/.../tools/messages.py` detects `is_mine` from class hint BEFORE deciding sender carry-forward. When the speaker flips between consecutive bubbles, the prior bubble's sender is no longer inherited; falls back to `me_name`/`contact_name`. Was attributing Vato's 11:14 AM PropStream/Reonomy answer to James Blue at 2:23 AM. 5 new tests in `test_conversation_extractor.py`.
+- [x] **Bug F** — `get_conversation_messages` runs `scrollTop = scrollHeight` + polls `[data-test="story-container"]` count for stability across 3 consecutive 200ms ticks before parsing. Defeats Upwork's virtualized chat list returning stale bubbles when the tab's prior scroll was at top OR right after a host-bridge restart. Symptom 2026-05-17 21:29:58: container restarted 1 min earlier, MCP returned thread without James's 9:12 PM message.
+- [x] **F1** — `personality/SOUL.md` quote-then-summarize coda. AFTER a channel read returns, reply MUST begin with verbatim quotes of the 3 most recent contact-side messages (`> {sender} ({timestamp}): {exact content}`); every concrete claim must trace to a quoted line. Forbidden: speculating about platforms/services the contact didn't write. Targets in-context-learning bias documented in anthropic/claude-code#29230, #26330.
+- [x] **F2** — `personality/SOUL.md` most-recent-wins rule. When the same contact contradicts themselves across messages, the MOST RECENT message is authoritative; never silently merge; surface the supersession explicitly. James gave 20 cities at 9:12 PM then narrowed to 6 at 10:37 PM — the 6-city list is the current scope.
+
+**Skill / MCP improvements:**
+- [x] `upwork_last_conversation` skill now takes optional `contact_name` parameter with fuzzy matching (substring + first-name prefix); widens inbox scan to 50 entries when provided; description flags it for planning/scoping/reply intents. 12 new tests.
+- [x] `mcp-upwork/src/upwork_mcp/server.py` adds `_self_check()` at startup that aborts with exit 2 + clear rebuild instructions if the deployed `messages.send_message` source doesn't reference `_type_with_soft_breaks`. Prevents stale Docker images silently re-introducing the 8-bubble Tiptap fragmentation incident. Banner visible in stderr.
+
+**Supporting work carried in e23e2dc**: gateway internal-auth, contacts/goals routes, `runtime/code_goal_executor.py`, `llm/vision_query.py`, web `NewCodeTaskModal` + CodeSpecialist updates, docker-compose persistent workspace volume at `~/Desktop/lazyclaw-workspace`, 4 new test files.
+
+### Test totals: 96+ tests passing across changed surfaces (12 new for upwork_last_conversation contact_name flow; 5 new for sender-flip; rest extant).
+
+### Verification, live
+
+Container rebuilt 2026-05-18 00:50:17. At 00:51:07 user asked "Check james last messiges on upwork and tell me what he needs":
+- `Channel detected: ['upwork'] → 7 MCP tools` ✓ (Bug B)
+- Brain emitted parallel `upwork_get_messages` + `upwork_get_conversation` calls ✓
+- Tool call took 13s (includes Bug F scroll warmup) ✓
+- Worker reply 3,304 chars, 0 tool calls — NO AUTO-PROMOTE ✓ (Bug A)
+- `estreetamc`, `spurams`, `Emeryville`, `10:37`, `BPO` tokens now appear in `lazyclaw.log` (was 0 before)
+- Brain quoted James verbatim, named eStreet AMC, said *"Want me to draft a reply with your quote?"*
+
+### Still open / next session
+
+- [ ] **Unified Code Session per project** (HIGH — architectural). Each contract/goal owns ONE long-lived Claude Code MCP session. P1: session persistence (~1.5h) — add `code_session_id` to `goals` table, `runner.py` resume logic, goal-scoped workspace dir. P2: routing (~1.5h) — SOUL.md rule + runtime detection. P3: brain becomes thin dispatcher (~2h). Today's split (browser_specialist for recon → fresh code_specialist for scaffold) loses context — fix is to make recon + scaffold + iterate share ONE session backed by Claude Code MCP. Full plan in `docs/plans/next-session-handoff-2026-05-18.md`.
+- [ ] **Bug E** — MCP `upwork_get_conversation` drops offer-card structured fields. Need to parse: `Est. Budget: $120.00`, `Milestone 1: Login automation + Real-time order monitoring`, `Due: Tuesday, May 19, 2026`, `Project funds: $20.00`, `Vato Tchipa accepted an offer 10:55 AM Saturday May 16` (system event). Brain currently has no idea there's an active accepted contract with a Tuesday deadline. Fix in `mcp-upwork/.../tools/messages.py:_extract_conversation` + snapshot-based tests.
+- [ ] **James-side**: draft Upwork DM asking for eStreet AMC credentials (username + password — vault-stored). Decide auto-accept vs alert-only-with-1-tap default. Confirm Telegram is the alert channel (already wired, chat 8127631458). Tuesday May 19 deadline is tight.

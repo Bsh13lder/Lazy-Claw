@@ -330,6 +330,7 @@ async def refresh_white_screens(
     backend,
     *,
     max_checks: int = 8,
+    anchored_hosts: frozenset[str] | set[str] | None = None,
 ) -> int:
     """Scan up to ``max_checks`` tabs for white-screen state and reload
     any that match. Returns the number reloaded.
@@ -341,12 +342,18 @@ async def refresh_white_screens(
 
     The currently-active tab is checked LAST so we don't switch focus
     in the middle of a user action.
+
+    Tabs whose URL host is in ``anchored_hosts`` are NEVER refreshed —
+    Cloudflare-protected watcher tabs (upwork.com, linkedin.com) would
+    lose their signed-in DOM state to a reload-triggered JS challenge.
     """
     try:
         tabs = await backend.tabs()
     except Exception:
         logger.debug("refresh_white_screens: tabs() failed", exc_info=True)
         return 0
+
+    anchored = anchored_hosts or frozenset()
 
     # Active tab last; system tabs skipped entirely
     ordered = sorted(
@@ -357,6 +364,8 @@ async def refresh_white_screens(
     refreshed = 0
     for tab in ordered:
         if tab.id in _refreshed_this_tick:
+            continue
+        if _normalize_host(getattr(tab, "url", "")) in anchored:
             continue
         try:
             await backend.switch_tab(tab.id, focus=False)
@@ -460,7 +469,9 @@ async def run_tab_health_cycle(
     )
     blanks_refreshed = 0
     if refresh_blanks:
-        blanks_refreshed = await refresh_white_screens(backend)
+        blanks_refreshed = await refresh_white_screens(
+            backend, anchored_hosts=anchored_hosts,
+        )
 
     return {
         "tabs_scanned": tabs_scanned,

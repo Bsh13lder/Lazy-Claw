@@ -360,7 +360,7 @@ def _is_quota_error(exc_str: str) -> bool:
 # ── EcoRouter ─────────────────────────────────────────────────────────
 
 class EcoRouter:
-    """Routes requests between local (MLX/Ollama) and paid (Claude) providers.
+    """Routes requests between local (Ollama) and paid (Claude) providers.
 
     Core principle: Brain never gets tools. Workers always get tools.
     Brain decides WHAT to do. Workers execute HOW.
@@ -389,12 +389,9 @@ class EcoRouter:
         self._usage: dict[str, dict] = {}  # user_id → {local, free, paid}
 
         # Local providers (lazy init)
-        self._mlx_brain = None      # MLXProvider for brain
-        self._mlx_worker = None     # MLXProvider for worker
-        self._ollama = None         # OllamaProvider fallback
+        self._ollama = None         # OllamaProvider (primary local worker)
         self._local_checked = False
         self._local_lock = asyncio.Lock()
-        self._mlx_manager: Any | None = None  # MLXManager for on-demand
 
         # Free provider keys (lazy init)
         self._free_keys: dict[str, str] | None = None
@@ -421,11 +418,10 @@ class EcoRouter:
         """Lazy-init local providers. Returns (brain_provider, worker_provider).
 
         HYBRID mode uses Ollama as the primary local worker (gemma4:e2b).
-        Ollama delegates model management to its own server — no manual process
-        lifecycle needed. MLX is checked as a secondary option for any users
-        still running the legacy mlx_lm.server setup.
+        Ollama delegates model management to its own server — no manual
+        process lifecycle needed.
 
-        Returns (None, None) if no local provider available.
+        Returns (None, None) if Ollama is not reachable.
         """
         # Fast path: already checked and Ollama is up
         if self._local_checked and self._ollama:
@@ -435,11 +431,6 @@ class EcoRouter:
             if self._local_checked and self._ollama:
                 return None, self._ollama
 
-            # Reset stale state
-            self._mlx_brain = None
-            self._mlx_worker = None
-
-            # Primary: Ollama (handles Gemma 4 E2B via Metal backend)
             try:
                 from lazyclaw.llm.providers.ollama_provider import OllamaProvider
                 ollama = OllamaProvider()
@@ -449,39 +440,10 @@ class EcoRouter:
             except Exception as exc:
                 logger.debug("Ollama not available: %s", exc)
 
-            # Secondary: legacy MLX direct servers (deprecated, for backward compat)
-            if not self._ollama:
-                try:
-                    from lazyclaw.llm.providers.mlx_provider import MLXProvider  # noqa: deprecated
-
-                    _eco_models = get_mode_models("hybrid")
-                    _worker_model = _eco_models["worker"]
-                    _brain_model = _eco_models["brain"]
-
-                    worker = MLXProvider("http://127.0.0.1:8081")
-                    if await worker.health_check():
-                        worker._loaded_model = _worker_model
-                        self._mlx_worker = worker
-                        logger.info("MLX (legacy) on :8081 → %s", _worker_model)
-
-                    brain = MLXProvider("http://127.0.0.1:8080")
-                    if await brain.health_check():
-                        brain._loaded_model = _brain_model
-                        self._mlx_brain = brain
-                        logger.info("MLX (legacy) on :8080 → %s", _brain_model)
-
-                    if self._mlx_worker and not self._mlx_brain:
-                        self._mlx_brain = self._mlx_worker
-                    elif self._mlx_brain and not self._mlx_worker:
-                        self._mlx_worker = self._mlx_brain
-                except Exception as exc:
-                    logger.debug("MLX not available: %s", exc)
-
             self._local_checked = True
-            # Return: (brain, worker) — Ollama serves worker role
             if self._ollama:
                 return None, self._ollama
-            return self._mlx_brain, self._mlx_worker
+            return None, None
 
     async def _ensure_ollama(self):
         """Return the Ollama provider if available, else None.
@@ -518,8 +480,6 @@ class EcoRouter:
 
     def reset_local_check(self) -> None:
         """Reset local provider detection (after user installs/restarts)."""
-        self._mlx_brain = None
-        self._mlx_worker = None
         self._ollama = None
         self._ollama_checked = False
         self._local_checked = False
@@ -1083,7 +1043,7 @@ class EcoRouter:
         reason: str = "local",
         **kwargs,
     ) -> LLMResponse:
-        """Call a local provider (MLX or Ollama).
+        """Call the local Ollama provider.
 
         On failure, resets local cache and raises so caller can fallback.
         """
@@ -1091,8 +1051,6 @@ class EcoRouter:
         provider_class = type(provider).__name__
         if provider_class == "OllamaProvider":
             provider_name = "ollama"
-        elif provider_class == "MLXProvider":
-            provider_name = "mlx"
         else:
             provider_name = "local"
 
@@ -1423,7 +1381,7 @@ class EcoRouter:
                     yield chunk
                 self._record_usage(user_id, "local")
                 self._set_routing(
-                    worker_name, "mlx", is_local=True,
+                    worker_name, "ollama", is_local=True,
                     reason=f"{settings.mode}_stream: worker",
                 )
                 return
@@ -1515,8 +1473,7 @@ class EcoRouter:
         settings = await _load_eco_settings(self._config, user_id)
         models = self._resolve_models(settings)
 
-        brain_provider, worker_provider = await self._ensure_local()
-        mlx_available = brain_provider is not None
+        await self._ensure_local()
         ollama_available = self._ollama is not None
 
         mode_labels = {
@@ -1533,7 +1490,6 @@ class EcoRouter:
             "fallback_model": models["fallback"],
             "max_workers": settings.max_workers,
             "auto_fallback": self._is_auto_fallback(settings),
-            "mlx_available": mlx_available,
             "ollama_available": ollama_available,
             "free_providers": list(self._get_free_keys().keys()),
             "usage": self.get_usage(user_id),

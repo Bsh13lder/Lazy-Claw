@@ -83,6 +83,30 @@ _SLIM_HEARTBEAT_PREFIX_RE = re.compile(
 )
 
 
+# Matches messages that are clearly meta/reflection questions about the
+# agent's own behaviour ("why did you …?", "what tools do you have?",
+# "how come the code agent ran?"). Used to skip the text-only
+# AUTO-PROMOTE failsafe — those questions deserve a conversational
+# reply, not a forced ``run_background`` dispatch that re-invokes the
+# very tool the user is asking about. Conservative: requires both a
+# leading wh-word AND a '?' so plain commands aren't mistaken for
+# questions. ``can`` / ``could`` are intentionally excluded — those
+# are usually polite-form commands ("can you scan upwork?").
+_META_QUESTION_RE = re.compile(
+    r"^\s*(why|what|how|when|where|who)\b.*\?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_meta_question(text: str | None) -> bool:
+    """Return True when ``text`` reads like a meta/reflection question
+    about the agent itself. See ``_META_QUESTION_RE`` for the pattern.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    return _META_QUESTION_RE.match(text) is not None
+
+
 # ── Meta-Tool Pattern ─────────────────────────────────────────────────
 # Instead of regex-guessing which tools the LLM needs (brittle, 5K tokens),
 # send only 3-4 base tools. LLM discovers others via search_tools on demand.
@@ -1924,9 +1948,26 @@ class Agent:
                 _continuation_signals = {
                     "reply", "tell", "say", "send", "forward", "yes", "no",
                     "read", "check", "show", "next", "more",
+                    # Data-correction follow-ups: when the user is replacing
+                    # a value the prior turn used (phone number, email,
+                    # address, name). Added 2026-05-16 after the Gerardo
+                    # case — "ohh my bad number is 34 684 24 22 60" had no
+                    # signal word and the brain ended up delegating to
+                    # code_specialist instead of retrying whatsapp_send.
+                    "wrong", "bad", "actually", "sorry", "correct", "fix",
+                    "instead", "rather", "mistake", "typo",
                 }
                 _words = set(_msg_lower.split())
-                _looks_like_continuation = bool(_words & _continuation_signals) and len(_msg_lower) < 40
+                # Phone-number-ish: a run of 8+ digits possibly broken by
+                # spaces / dashes / dots (with optional leading +). Catches
+                # "+34 684 24 22 60", "34-684-242-260", "684 242 260".
+                _looks_like_phone = bool(
+                    re.search(r"(?:\+?\d[\d \-\.]{7,}\d)", _msg_lower)
+                )
+                _looks_like_continuation = (
+                    (bool(_words & _continuation_signals) or _looks_like_phone)
+                    and len(_msg_lower) < 60
+                )
                 if _looks_like_continuation:
                     for msg in history[-2:]:  # Only last 2 messages (immediate context)
                         if msg.role == "assistant" and msg.tool_calls:
@@ -3640,12 +3681,23 @@ class Agent:
                     # the brain's summary instead of the background dispatch.
                     # Fixes the 16:04:24 turn-1 case (MiniMax wrote a job
                     # listing markdown table instead of run_background).
+                    #
+                    # Meta-question guard: SKIP the failsafe when the user's
+                    # original message reads like a reflection question
+                    # ("why did you …?", "what tools do you have?"). Those
+                    # deserve a conversational reply, not a forced bg
+                    # dispatch that re-invokes the very tool the user is
+                    # asking about. 2026-05-16 loop incident: "why u usde
+                    # code ahent ???" got auto-promoted → bg agent re-fired
+                    # claude-code MCP on the meta question. See
+                    # ``_is_meta_question`` + tests/test_auto_promote_meta_question_guard.py.
                     if (
                         _force_dispatch_only
                         and _promote_iter is not None
                         and "run_background" not in _called_tool_names
                         and self._task_runner is not None
                         and user_id is not None
+                        and not _is_meta_question(message)
                     ):
                         logger.warning(
                             "AUTO-PROMOTE failsafe (text-only path): brain "
@@ -4425,6 +4477,41 @@ class Agent:
                                 "parameter schema for post-loop recovery",
                                 tc.name,
                             )
+
+                    # ── Hard stop: AUTO-PROMOTE done — run_background fired ──
+                    # When the runtime narrowed tools to run_background only
+                    # (`_force_dispatch_only`) and the brain just called it,
+                    # the foreground turn is DONE. Continuing the loop lets
+                    # the action-claim hallucination retry re-widen the tool
+                    # list, after which the brain dispatches run_background
+                    # AGAIN (observed 2026-05-16: tasks 84b4f487 + ae358d06
+                    # 'fix_gerardo_number_memory' + '_v2' fired 27s apart from
+                    # one foreground turn). Mirrors the FAST_DISPATCH return
+                    # used by the delegate fast-path (line ~4006). Only the
+                    # initial foreground turn exits — background sub-turns
+                    # keep iterating normally.
+                    if (
+                        tc.name == "run_background"
+                        and _force_dispatch_only
+                        and not getattr(self, "is_background", False)
+                    ):
+                        logger.info(
+                            "AUTO-PROMOTE: run_background dispatched — "
+                            "exiting foreground turn (was iter=%d)",
+                            iteration,
+                        )
+                        await cb.on_event(AgentEvent(
+                            FAST_DISPATCH,
+                            "Auto-promoted — running in background",
+                            {"trigger": "auto_promote_dispatch"},
+                        ))
+                        await cb.on_event(AgentEvent("done", "Dispatched", {}))
+                        if _delegate_registered and self.registry:
+                            self.registry.unregister("delegate")
+                        return (
+                            "Continuing in background — will report back "
+                            "when done."
+                        )
 
                     # ── Hard stop: OAuth credential not authorized ────
                     # n8n_management surfaces this with a STOP_OAUTH_CREDENTIAL

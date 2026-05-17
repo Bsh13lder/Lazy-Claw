@@ -40,10 +40,15 @@ _URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b[a-z0-9][a-z0-9-]*\."
         r"(com|org|net|io|app|dev|co|ai|me|us|uk|de|fr|cn|jp|ru|in|"
-        r"info|link|page|so|xyz|tech|cloud|live|tv|ly|to|gg|sh)"
+        r"info|link|page|so|xyz|tech|cloud|live|tv|ly|to|gg|sh|"
+        r"fyi|run|studio)"
         r"(/\S*)?\b",
         re.IGNORECASE,
     ),
+    # Bare IPv4 with optional :port — catches links to demo/staging servers
+    # some freelancers spin up (e.g. "check 10.0.0.1:8080"). Upwork's filter
+    # treats these as off-platform links too.
+    re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b"),
 )
 
 
@@ -494,7 +499,10 @@ async def get_conversation_messages(
                 if me_name and msg.get("sender"):
                     msg["is_mine"] = _sender_matches(msg["sender"], me_name)
                 conversation["messages"].append(msg)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_extract_conversation: failed to parse message bubble: %s", exc
+            )
             continue
 
     # contact_name: always prefer the FIRST non-mine sender in the

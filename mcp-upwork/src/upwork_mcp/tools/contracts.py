@@ -1,7 +1,11 @@
 """Contract tools for Upwork MCP."""
 
+import logging
+
 from pydantic import BaseModel, Field
 from ..browser.client import get_browser
+
+logger = logging.getLogger(__name__)
 
 
 class ContractsParams(BaseModel):
@@ -13,17 +17,19 @@ class ContractsParams(BaseModel):
     limit: int = Field(default=20, ge=1, le=50, description="Maximum number of results")
 
 
-async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
+async def get_contracts(params: ContractsParams | None = None) -> list[dict] | dict:
     """Get your Upwork contracts.
 
     Returns a list of contracts with client name, job title, status, and earnings.
+    On a total selector miss (likely 2026 layout drift or unrendered page),
+    returns ``{"status": "scrape_miss", "contracts": [], ...}`` instead of a
+    bare ``[]`` so callers can distinguish "broken scrape" from "zero contracts".
     """
     if params is None:
         params = ContractsParams()
 
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Navigate to contracts page
     url = "https://www.upwork.com/nx/wm/contracts"
@@ -32,7 +38,9 @@ async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
     elif params.status == "ended":
         url += "?status=closed"
 
-    await page.goto(url, wait_until="networkidle")
+    # safe_goto: serialized via _NAV_LOCK + Cloudflare-resilient + prefers
+    # an existing on-upwork.com tab so cookies pass the JS challenge.
+    page = await browser.safe_goto(url)
 
     contracts = []
 
@@ -52,6 +60,30 @@ async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
                 contracts.append(contract)
         except Exception:
             continue
+
+    # All selectors missed AND no contracts extracted → likely layout drift,
+    # not "zero contracts". Surface a structured miss so the brain LLM can
+    # respond accordingly instead of confidently asserting "you have no
+    # active contracts". Pattern mirrors profile.py:230-247.
+    if not contract_els and not contracts:
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = "?"
+        logger.warning(
+            "get_contracts: all 3 selectors missed on %s — surfacing scrape_miss",
+            current_url,
+        )
+        return {
+            "status": "scrape_miss",
+            "contracts": [],
+            "error": (
+                "Contract list selectors all missed on "
+                f"{current_url}. Upwork may have redesigned /nx/wm/contracts "
+                "or the page didn't fully render. Open Brave to verify."
+            ),
+            "page_url": current_url,
+        }
 
     return contracts
 
@@ -119,9 +151,9 @@ async def get_contract_details(contract_url: str) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
-    await page.goto(contract_url, wait_until="networkidle")
+    # safe_goto: serialized via _NAV_LOCK + Cloudflare-resilient.
+    page = await browser.safe_goto(contract_url)
 
     details = {"url": contract_url}
 
@@ -225,12 +257,12 @@ async def get_work_diary(contract_url: str, week_offset: int = 0) -> dict:
     """
     browser = get_browser()
     await browser.ensure_logged_in()
-    page = await browser.get_page()
 
     # Navigate to work diary
     # The exact URL structure may vary
     diary_url = contract_url.replace("/contracts/", "/work-diary/")
-    await page.goto(diary_url, wait_until="networkidle")
+    # safe_goto: serialized via _NAV_LOCK + Cloudflare-resilient.
+    page = await browser.safe_goto(diary_url)
 
     diary = {"contract_url": contract_url, "days": []}
 

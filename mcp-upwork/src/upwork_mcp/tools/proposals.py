@@ -984,17 +984,26 @@ async def submit_proposal(params: SubmitProposalParams) -> dict:
             await _aio.sleep(0.3)
             checkbox_outcome = "checkbox-label"
         except Exception as cb_exc1:
+            logger.exception(
+                "submit_proposal: policy-checkbox via checkbox-label failed, falling through"
+            )
             # Fallback: try the fake-input visual element + native input
             try:
                 await modal.locator('[data-test="checkbox-input"]').first.click()
                 await _aio.sleep(0.3)
                 checkbox_outcome = "checkbox-input"
             except Exception as cb_exc2:
+                logger.exception(
+                    "submit_proposal: policy-checkbox via checkbox-input failed, falling through"
+                )
                 try:
                     await modal.locator('input[type="checkbox"]').first.check()
                     await _aio.sleep(0.3)
                     checkbox_outcome = "input-check"
                 except Exception as cb_exc3:
+                    logger.exception(
+                        "submit_proposal: policy-checkbox via native input failed — all selectors exhausted"
+                    )
                     checkbox_outcome = (
                         f"all-failed: label={cb_exc1!s} input={cb_exc2!s} "
                         f"native={cb_exc3!s}"

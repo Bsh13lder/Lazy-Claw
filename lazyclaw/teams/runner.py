@@ -7,7 +7,9 @@ system prompt.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 
@@ -20,14 +22,86 @@ from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.skills.registry import SkillRegistry
 from lazyclaw.teams.learning import StepEntry
-from lazyclaw.teams.specialist import SpecialistConfig
+from lazyclaw.teams.specialist import (
+    CODE_SPECIALIST,
+    SpecialistConfig,
+    code_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
+
+# Code Specialist transcript caps. Keep step rows small so 50 of them
+# can ride a single /api/agents/status response without bloating the
+# payload — Web UI re-fetches every 3s.
+_TS_ARGS_CAP = 120
+_TS_RESULT_CAP = 200
+_FILES_TOUCHED_CAP = 64  # absolute file count cap to keep payload tight
+
+
+def _summarize(value: object, cap: int) -> str:
+    """Shrink an args dict / tool result to a single-line preview."""
+    try:
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+    except Exception:
+        text = str(value)
+    text = " ".join(text.split())  # collapse whitespace + newlines
+    return text[:cap]
+
+
+def _scan_workspace_files(workspace_dir: str) -> tuple[str, ...]:
+    """Return relative paths of files claude-code wrote (deterministic order).
+
+    Walks ``workspace_dir`` and returns at most ``_FILES_TOUCHED_CAP``
+    paths relative to the dir. Hidden files / dirs (``.git``,
+    ``__pycache__``, ``node_modules``) are skipped — they're noise that
+    obscures the real deliverables. Best-effort: any FS error returns
+    an empty tuple rather than propagating, so capture is non-fatal.
+    """
+    if not workspace_dir or not os.path.isdir(workspace_dir):
+        return ()
+    out: list[str] = []
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+    try:
+        for root, dirs, files in os.walk(workspace_dir):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+            for f in files:
+                if f.startswith("."):
+                    continue
+                rel = os.path.relpath(os.path.join(root, f), workspace_dir)
+                out.append(rel)
+                if len(out) >= _FILES_TOUCHED_CAP:
+                    break
+            if len(out) >= _FILES_TOUCHED_CAP:
+                break
+    except OSError as exc:
+        logger.debug("workspace scan failed for %s: %s", workspace_dir, exc)
+        return ()
+    out.sort()
+    return tuple(out)
 
 # No hardcoded iteration cap — stuck_detector handles loop/error detection.
 # Safety cap only prevents truly runaway loops (should never be hit).
 MAX_ITERATIONS = 200
 _NUDGE_AT = 30  # Nudge after 30 iterations to wrap up
+
+
+@dataclass(frozen=True)
+class TranscriptStep:
+    """One row in the per-turn transcript surfaced on CodeSpecialist.tsx.
+
+    Built incrementally from the specialist's own AgentEvent stream so
+    the Web UI can render a step timeline (tool name + arg summary +
+    result preview + duration) instead of just `recent_tools` chips.
+    Frozen so consumers can't mutate captured history.
+    """
+
+    kind: str            # "tool" | "thinking" | "phase"
+    name: str            # tool name, phase name, etc.
+    args_summary: str    # JSON-ish single-line preview (≤120 chars)
+    result_summary: str  # tool output preview (≤200 chars)
+    duration_ms: int     # wall-clock ms this step took
+    success: bool = True
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,6 +117,19 @@ class SpecialistResult:
     step_history: tuple[StepEntry, ...] = ()
     success: bool = True
     error: str | None = None
+    # ── Code Specialist visibility (Code Specialist page) ──────────
+    # Populated only when the run was a Code Specialist (other
+    # specialists leave these empty; the Web UI hides panels gracefully
+    # when fields are missing). The four together let the user see:
+    #   - exactly what was sent to claude-code MCP (prompt_sent)
+    #   - what claude-code did, step by step (transcript)
+    #   - where the generated files landed (workspace_dir)
+    #   - a clickable list of touched files (files_touched)
+    prompt_sent: str = ""
+    transcript: tuple[TranscriptStep, ...] = ()
+    workspace_dir: str = ""
+    files_touched: tuple[str, ...] = ()
+    short_description: str = ""
 
 
 def _filter_tools(
@@ -89,6 +176,10 @@ async def run_specialist(
     callback=None,
     cancel_token=None,
     tab_context=None,
+    *,
+    project_tag: str | None = None,
+    goal_id: str | None = None,
+    task_id: str | None = None,
 ) -> SpecialistResult:
     """Run a specialist agent loop for a single task.
 
@@ -97,10 +188,38 @@ async def run_specialist(
     - Filtered tool set (only specialist.allowed_skills)
     - No conversation history (fresh context per task)
     - No message persistence (team lead handles storage)
+
+    For the Code Specialist only: ``project_tag``, ``goal_id``, and
+    ``task_id`` resolve a persistent workspace folder under
+    /workspace/<tag>/<goal>/<task_id>/ that's auto-created and
+    prepended to the prompt so claude-code lands its files there.
+    The captured prompt, per-step transcript, and final files_touched
+    list ride on ``SpecialistResult`` for the CodeSpecialist Web UI.
     """
     start_time = time.monotonic()
     tools_used: list[str] = []
     step_history: list[StepEntry] = []
+    transcript: list[TranscriptStep] = []
+    is_code = specialist.name == CODE_SPECIALIST.name
+
+    # Resolve + create the per-task workspace dir (Code Specialist only).
+    # Best-effort — if /workspace isn't writable for some reason, log and
+    # carry on without enrichment so the task still runs.
+    workspace_dir = ""
+    if is_code:
+        workspace_dir = code_workspace_dir(
+            task_id=task_id or "task",
+            project_tag=project_tag,
+            goal_id=goal_id,
+        )
+        try:
+            os.makedirs(workspace_dir, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "code workspace mkdir failed for %s: %s — running without "
+                "workspace enrichment", workspace_dir, exc,
+            )
+            workspace_dir = ""
 
     # Build filtered tools — when the specialist opts into scraper, every
     # connected mcp-scraper tool is unioned in so the worker can reach
@@ -119,14 +238,37 @@ async def run_specialist(
         registry, permission_checker=permission_checker, config=_config,
     )
 
-    # System prompt = specialist prompt + task
+    # Workspace hint — only the Code Specialist gets one. claude-code's
+    # Bash/Read/Write tools run with cwd=/workspace (set in mcp/manager.py),
+    # so prefixing the prompt with the per-task subdir makes the very
+    # first action a `cd` into it — generated files land in the right
+    # bucket without any host-side cleanup. We also call this out in the
+    # response prose so the brain can echo the path back to the user.
+    _workspace_hint = ""
+    if is_code and workspace_dir:
+        _workspace_hint = (
+            f"\n\nWORKSPACE: {workspace_dir}\n"
+            f"All code, configs, and notes you generate MUST be written under "
+            f"this directory. As your first action when calling claude-code, "
+            f"`cd {workspace_dir}` so every subsequent Bash/Read/Write tool is "
+            f"rooted there. Mention the path in your summary so the user can "
+            f"find the files on disk.\n"
+        )
+
+    # System prompt = specialist prompt + workspace hint + task
     system_prompt = (
-        f"{specialist.system_prompt}\n\n"
+        f"{specialist.system_prompt}"
+        f"{_workspace_hint}\n\n"
         f"---\n\n"
         f"Your task:\n{task}\n\n"
         f"Complete this task using your available tools. "
         f"When done, provide a clear summary of your findings or results."
     )
+
+    # Captured exactly once so the Web UI can display "the prompt sent"
+    # without us having to re-derive it. Includes the workspace hint so
+    # the user sees the full instruction claude-code received.
+    prompt_sent_full = f"{system_prompt}\n\nUSER: {task}"
 
     messages: list[LLMMessage] = [
         LLMMessage(role="system", content=system_prompt),
@@ -143,20 +285,45 @@ async def run_specialist(
     # at one rescue per task to prevent infinite cycles.
     _rescue_used: bool = False
 
+    # Single point of SpecialistResult construction so every return path
+    # carries the Code Specialist visibility fields. The bare ``run_specialist``
+    # body (5+ return points across cancel/done/stuck/timeout/error) used
+    # to drift — passing 8 extra kwargs per return is bug-prone. The
+    # builder snapshots the live transcript + scans the workspace dir
+    # for files_touched at the moment of return.
+    def _build_result(
+        *,
+        result: str,
+        success: bool = True,
+        error: str | None = None,
+    ) -> SpecialistResult:
+        duration = int((time.monotonic() - start_time) * 1000)
+        files = _scan_workspace_files(workspace_dir) if is_code else ()
+        short_desc = (
+            task.strip().splitlines()[0][:120] if task else specialist.display_name
+        )
+        return SpecialistResult(
+            agent_name=specialist.name,
+            task=task,
+            result=result,
+            tools_used=tuple(tools_used),
+            model_used=model_used,
+            duration_ms=duration,
+            step_history=tuple(step_history),
+            success=success,
+            error=error,
+            prompt_sent=prompt_sent_full if is_code else "",
+            transcript=tuple(transcript) if is_code else (),
+            workspace_dir=workspace_dir if is_code else "",
+            files_touched=files,
+            short_description=short_desc if is_code else "",
+        )
+
     try:
         for _iteration in range(MAX_ITERATIONS):
             if cancel_token and cancel_token.is_cancelled:
-                duration = int((time.monotonic() - start_time) * 1000)
-                return SpecialistResult(
-                    agent_name=specialist.name,
-                    task=task,
-                    result="",
-                    tools_used=tuple(tools_used),
-                    model_used=model_used,
-                    duration_ms=duration,
-                    step_history=tuple(step_history),
-                    success=False,
-                    error="Cancelled by user",
+                return _build_result(
+                    result="", success=False, error="Cancelled by user",
                 )
 
             # Running-long nudge at 80% of cap
@@ -201,16 +368,7 @@ async def run_specialist(
 
             if not response.tool_calls:
                 # Final response — specialist is done
-                duration = int((time.monotonic() - start_time) * 1000)
-                return SpecialistResult(
-                    agent_name=specialist.name,
-                    task=task,
-                    result=response.content or "",
-                    tools_used=tuple(tools_used),
-                    model_used=model_used,
-                    duration_ms=duration,
-                    step_history=tuple(step_history),
-                )
+                return _build_result(result=response.content or "")
 
             # Process tool calls
             assistant_msg = LLMMessage(
@@ -243,6 +401,7 @@ async def run_specialist(
                         for t in filtered_tools
                     )
                 )
+                _step_started = time.monotonic()
                 if tc.name not in specialist.allowed_skills and not _is_scraper_tool:
                     tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
                 else:
@@ -299,6 +458,25 @@ async def run_specialist(
                     tool_result if isinstance(tool_result, str) else str(tool_result)
                 )
 
+                # Per-step transcript row — Code Specialist only. Captures
+                # every tool execution (allowed + denied) so the user can
+                # see the full sequence on CodeSpecialist.tsx, including
+                # ones we blocked. Cheap: 4 strings + 1 int per call.
+                if is_code:
+                    _is_step_error = (
+                        isinstance(tool_result, str)
+                        and tool_result.startswith("Error")
+                    )
+                    transcript.append(TranscriptStep(
+                        kind="tool",
+                        name=tc.name,
+                        args_summary=_summarize(tc.arguments or {}, _TS_ARGS_CAP),
+                        result_summary=_summarize(tool_result, _TS_RESULT_CAP),
+                        duration_ms=int((time.monotonic() - _step_started) * 1000),
+                        success=not _is_step_error,
+                        error=tool_result[:200] if _is_step_error else "",
+                    ))
+
             # ── Stuck detection after processing all tool calls ──
             stuck = detect_stuck(_tool_history, _tool_results, _tool_results[-1] if _tool_results else None)
             if stuck:
@@ -335,50 +513,23 @@ async def run_specialist(
                     _rescue_used = True
                     continue  # let the worker loop run one more iteration with the hint
 
-                duration = int((time.monotonic() - start_time) * 1000)
                 logger.warning(
                     "Specialist %s stuck: %s (%s)",
                     specialist.name, stuck.reason, stuck.context,
                 )
-                return SpecialistResult(
-                    agent_name=specialist.name,
-                    task=task,
+                return _build_result(
                     result=(
                         f"[Stuck: {stuck.reason}] {stuck.context}\n\n"
                         f"Completed {len(tools_used)} tool calls before getting stuck."
                     ),
-                    tools_used=tuple(tools_used),
-                    model_used=model_used,
-                    duration_ms=duration,
-                    step_history=tuple(step_history),
                     success=False,
                     error=stuck.context,
                 )
 
         # Max iterations reached
-        duration = int((time.monotonic() - start_time) * 1000)
         last_content = messages[-1].content if messages else "Max iterations reached."
-        return SpecialistResult(
-            agent_name=specialist.name,
-            task=task,
-            result=f"[Reached max iterations] {last_content}",
-            tools_used=tuple(tools_used),
-            model_used=model_used,
-            duration_ms=duration,
-            step_history=tuple(step_history),
-        )
+        return _build_result(result=f"[Reached max iterations] {last_content}")
 
     except Exception as exc:
-        duration = int((time.monotonic() - start_time) * 1000)
         logger.error("Specialist %s failed: %s", specialist.name, exc)
-        return SpecialistResult(
-            agent_name=specialist.name,
-            task=task,
-            result="",
-            tools_used=tuple(tools_used),
-            model_used=model_used,
-            duration_ms=duration,
-            step_history=tuple(step_history),
-            success=False,
-            error=str(exc),
-        )
+        return _build_result(result="", success=False, error=str(exc))

@@ -2,9 +2,13 @@
 
 import argparse
 import asyncio
+import inspect
+import sys
 from typing import Annotated
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
+
+from . import __version__
 
 from .browser.client import get_browser, close_browser, UpworkBrowser
 from .browser.auth import login_interactive, check_session, logout
@@ -520,8 +524,62 @@ async def upwork_close_session() -> dict:
 # ============================================================================
 
 
+def _self_check() -> None:
+    """Verify the deployed mcp-upwork has critical fixes before serving.
+
+    History — 2026-05-17 14:01: a multi-line Upwork draft fragmented into
+    8 separate bubbles because the running Docker image predated commit
+    6aac606 (which added :func:`_type_with_soft_breaks` — Shift+Enter for
+    Tiptap soft-breaks instead of raw Enter, which Upwork's editor treats
+    as Send). The container hadn't been rebuilt; the source-tree fix was
+    on disk but pip-installed code in the image was stale. No alarm
+    fired — fragmentation looked identical to a brain glitch.
+
+    This guard makes that class of stale-image regression LOUD:
+      1. Log version + helper presence to stderr on every startup so a
+         stale image is visible in the user's MCP logs.
+      2. If :func:`_type_with_soft_breaks` is missing OR ``send_message``
+         doesn't reference it, abort startup. A no-op MCP is annoying;
+         a silent message-spam MCP is reputation damage.
+
+    stdout is reserved for the MCP stdio protocol — all output goes to
+    stderr so it doesn't corrupt MCP framing.
+    """
+    from .tools import messages as _msgs
+
+    helper_present = hasattr(_msgs, "_type_with_soft_breaks")
+    send_uses_helper = False
+    if helper_present:
+        try:
+            send_uses_helper = (
+                "_type_with_soft_breaks" in inspect.getsource(_msgs.send_message)
+            )
+        except (OSError, TypeError):
+            send_uses_helper = False  # source unavailable → treat as drift
+
+    print(
+        f"[upwork-mcp] startup self-check: version={__version__} "
+        f"_type_with_soft_breaks={'YES' if helper_present else 'MISSING'} "
+        f"send_message_uses_helper={'YES' if send_uses_helper else 'NO'}",
+        file=sys.stderr,
+    )
+
+    if not (helper_present and send_uses_helper):
+        print(
+            "[upwork-mcp] FATAL: deployed code is missing the Tiptap "
+            "soft-break fix (commit 6aac606). Multi-line message sends "
+            "would fragment into one bubble per newline. Rebuild the "
+            "Docker image with the current source tree: "
+            "`docker compose build lazyclaw && docker compose up -d`. "
+            "Refusing to serve.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def main():
     """Main entry point for CLI."""
+    _self_check()
     parser = argparse.ArgumentParser(
         description="Upwork MCP Server - Browser automation for Upwork",
         formatter_class=argparse.RawDescriptionHelpFormatter,

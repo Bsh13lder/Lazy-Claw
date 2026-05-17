@@ -2,7 +2,9 @@
 
 const path = require("path");
 const fs = require("fs");
+const http = require("http");
 const https = require("https");
+const { URL } = require("url");
 const QRCode = require("qrcode");
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const {
@@ -37,6 +39,103 @@ const log = (msg) => {
   process.stderr.write(line);
   try { fs.appendFileSync(LOG_PATH, line); } catch (_) {}
 };
+
+// ---------------------------------------------------------------------------
+// Unified contact store bridge (gateway → encrypted person store)
+// ---------------------------------------------------------------------------
+// Set by lazyclaw.mcp.manager when spawning this MCP. When absent (e.g. running
+// standalone for local debug) the bridge silently no-ops and we fall back to
+// the Baileys-synced cache only.
+
+const BRIDGE_URL = process.env.LAZYCLAW_GATEWAY_URL || "";
+const BRIDGE_TOKEN = process.env.LAZYCLAW_INTERNAL_TOKEN || "";
+const BRIDGE_USER = process.env.LAZYCLAW_USER_ID || "";
+const BRIDGE_ENABLED = !!(BRIDGE_URL && BRIDGE_TOKEN && BRIDGE_USER);
+
+if (BRIDGE_ENABLED) {
+  log(`Unified-contact bridge: ${BRIDGE_URL} (user ${BRIDGE_USER})`);
+} else {
+  log("Unified-contact bridge disabled (missing LAZYCLAW_GATEWAY_URL / LAZYCLAW_INTERNAL_TOKEN / LAZYCLAW_USER_ID)");
+}
+
+/** Call /api/internal/contacts/search on the gateway. Returns [] on any error. */
+function fetchUnifiedContacts(query, limit) {
+  return new Promise((resolve) => {
+    if (!BRIDGE_ENABLED || !query) return resolve([]);
+    let parsed;
+    try {
+      parsed = new URL(BRIDGE_URL);
+    } catch (_) {
+      return resolve([]);
+    }
+    const params = new URLSearchParams({
+      user_id: BRIDGE_USER,
+      query: String(query),
+      limit: String(limit || 5),
+    });
+    const opts = {
+      method: "GET",
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+      path: `/api/internal/contacts/search?${params.toString()}`,
+      headers: {
+        "X-Internal-Token": BRIDGE_TOKEN,
+        "Accept": "application/json",
+      },
+      timeout: 1500,
+    };
+    const lib = parsed.protocol === "https:" ? https : http;
+    const req = lib.request(opts, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk.toString(); });
+      res.on("end", () => {
+        if (res.statusCode !== 200) {
+          log(`bridge contacts/search → HTTP ${res.statusCode}`);
+          return resolve([]);
+        }
+        try {
+          const data = JSON.parse(body);
+          resolve(Array.isArray(data.matches) ? data.matches : []);
+        } catch (e) {
+          log(`bridge contacts/search → parse error: ${e.message}`);
+          resolve([]);
+        }
+      });
+    });
+    req.on("timeout", () => { req.destroy(new Error("timeout")); });
+    req.on("error", (e) => {
+      log(`bridge contacts/search → ${e.message}`);
+      resolve([]);
+    });
+    req.end();
+  });
+}
+
+/**
+ * Reduce unified-store matches to a single (jid, name) for whatsapp_send.
+ * Picks the first match with a `whatsapp_jid` or `phone` handle. Returns null
+ * if zero matches OR if 2+ matches share the same name (ambiguous → caller
+ * should ask the user; we don't guess here either).
+ */
+function _pickJidFromUnified(matches) {
+  if (!Array.isArray(matches) || matches.length === 0) return null;
+  // If multiple distinct people, refuse — caller surfaces an ambiguity error.
+  const distinctNames = new Set(matches.map((m) => (m.name || "").trim().toLowerCase()));
+  if (distinctNames.size > 1) return null;
+
+  for (const m of matches) {
+    const handles = m.handles || {};
+    if (handles.whatsapp_jid) {
+      return { jid: handles.whatsapp_jid, name: m.name };
+    }
+    const phones = handles.phone || [];
+    const phone = Array.isArray(phones) ? phones[0] : phones;
+    if (phone) {
+      return { jid: formatJid(phone), name: m.name };
+    }
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -894,49 +993,128 @@ function normalizeJid(jid) {
   return jid;
 }
 
-/** Resolve name or phone to JID. Returns { jid, name } or null. */
-function resolveContact(query) {
-  const q = query.toLowerCase().trim();
+/** Look up a display name for a JID, walking @lid ↔ @s.whatsapp.net variants. */
+function _displayNameForJid(jid) {
+  if (!jid) return "";
+  for (const variant of _allJids(jid)) {
+    const c = contacts.get(variant);
+    if (c && (c.name || c.notify)) return c.name || c.notify;
+  }
+  // Last resort: try normalized form
+  const norm = normalizeJid(jid);
+  if (norm !== jid) {
+    const c = contacts.get(norm);
+    if (c && (c.name || c.notify)) return c.name || c.notify;
+  }
+  return "";
+}
 
-  // Direct phone number — always use @s.whatsapp.net format
+/**
+ * Tier-based resolver. Returns one of:
+ *   { jid, name, source }                           — confident single match
+ *   { ambiguous: true, candidates: [{jid,name}], reason: "..." }
+ *   null                                            — no match anywhere
+ *
+ * Tiers (highest to lowest priority):
+ *   1. Direct phone digits        → @s.whatsapp.net JID
+ *   2. Exact name / notify match  → unique winner; @s.whatsapp.net preferred
+ *   3. Starts-with name match     → unique winner only (else AMBIGUOUS)
+ *   4. Substring name/notify      → unique winner only (else AMBIGUOUS)
+ *
+ * Critical invariant: NEVER pick the "first plausible partial" the way the old
+ * scoring did. If 3+ contacts contain the substring, the brain MUST ask the
+ * user — guessing silently is how the wrong-number bug used to ship.
+ */
+function resolveContact(query) {
+  if (!query) return null;
+  const q = String(query).toLowerCase().trim();
+  if (!q) return null;
+
+  // Tier 1 — phone-looking input
   if (/^\+?\d{7,}$/.test(q.replace(/[^0-9+]/g, ""))) {
-    return { jid: formatJid(q), name: q };
+    const jid = formatJid(q);
+    const name = _displayNameForJid(jid) || q;
+    return { jid, name, source: "phone-input" };
   }
 
-  // Search by name, notify, or phone in contacts
-  // Prefer @s.whatsapp.net JIDs over @lid for sending (more reliable)
-  let best = null;
-  let bestScore = 0;
+  // Iterate cache once, classify by tier
+  const exact = [];        // name === q (highest)
+  const startsWith = [];   // name starts with q
+  const substring = [];    // name contains q
+  const phoneSubstr = [];  // phone digits contain q (only fires when q has digits)
+  const seenJids = new Set();
+
+  const qDigits = q.replace(/[^0-9]/g, "");
+
   for (const [jid, c] of contacts) {
     const name = (c.name || "").toLowerCase();
     const notify = (c.notify || "").toLowerCase();
     const phone = (c.phone || "").toLowerCase();
-    const isPhoneJid = jid.endsWith("@s.whatsapp.net");
+    if (!name && !notify && !phone) continue;
 
-    // Exact match on name or notify
+    // Prefer the phone-JID twin for sending.
+    let canonical = jid;
+    if (jid.endsWith("@lid") && lidToPhone.has(jid)) {
+      canonical = lidToPhone.get(jid);
+    }
+    canonical = normalizeJid(canonical);
+    if (seenJids.has(canonical)) continue;
+    // We don't dedupe yet — keep classifying — but record one canonical per tier hit.
+
+    const display = c.name || c.notify || phone || "";
+    const entry = { jid: canonical, name: display };
+
     if (name === q || notify === q) {
-      const result = { jid: normalizeJid(jid), name: c.name || c.notify };
-      if (isPhoneJid) return result; // Best possible — phone JID + exact name
-      // Keep @lid match but keep looking for phone JID equivalent
-      if (!best || bestScore < 999 || !best.jid.endsWith("@s.whatsapp.net")) {
-        best = result;
-        bestScore = 999;
-      }
+      exact.push(entry);
+      seenJids.add(canonical);
       continue;
     }
-    // Exact match on phone
-    if (phone && phone === q) return { jid: normalizeJid(jid), name: c.name || c.notify || c.phone || "Unknown" };
-    // Partial match scoring — bonus for phone JIDs
-    const score = (name.includes(q) ? 2 : 0)
-      + (notify.includes(q) ? 2 : 0)
-      + (phone && phone.includes(q) ? 1 : 0)
-      + (isPhoneJid ? 1 : 0);
-    if (score > bestScore) {
-      best = { jid: normalizeJid(jid), name: c.name || c.notify || c.phone || "Unknown" };
-      bestScore = score;
+    if ((name && name.startsWith(q)) || (notify && notify.startsWith(q))) {
+      startsWith.push(entry);
+      continue;
+    }
+    if ((name && name.includes(q)) || (notify && notify.includes(q))) {
+      substring.push(entry);
+      continue;
+    }
+    if (qDigits && qDigits.length >= 4 && phone && phone.replace(/[^0-9]/g, "").includes(qDigits)) {
+      phoneSubstr.push(entry);
     }
   }
-  return best;
+
+  const pickUnique = (pool, reasonLabel) => {
+    if (pool.length === 0) return null;
+    // De-dupe by canonical JID
+    const seen = new Map();
+    for (const e of pool) {
+      if (!seen.has(e.jid)) seen.set(e.jid, e);
+    }
+    const unique = [...seen.values()];
+    if (unique.length === 1) return { ...unique[0], source: reasonLabel };
+    return { ambiguous: true, candidates: unique.slice(0, 5), reason: reasonLabel };
+  };
+
+  // Exact wins regardless of count — multiple exact hits = legitimate ambiguity
+  if (exact.length > 0) {
+    const seen = new Map();
+    for (const e of exact) {
+      if (!seen.has(e.jid)) seen.set(e.jid, e);
+    }
+    const unique = [...seen.values()];
+    if (unique.length === 1) return { ...unique[0], source: "exact" };
+    return { ambiguous: true, candidates: unique.slice(0, 5), reason: "exact-multi" };
+  }
+
+  const sw = pickUnique(startsWith, "starts-with");
+  if (sw) return sw;
+
+  const sub = pickUnique(substring, "substring");
+  if (sub) return sub;
+
+  const ps = pickUnique(phoneSubstr, "phone-substring");
+  if (ps) return ps;
+
+  return null;
 }
 
 function ok(data) {
@@ -965,7 +1143,7 @@ function _formatMsg(msg) {
 
   const jid = msg.key.remoteJid || "";
   const isGroup = jid.endsWith("@g.us");
-  let chatName = contacts.get(jid)?.name
+  let chatName = (!isGroup ? _displayNameForJid(jid) : contacts.get(jid)?.name || "")
     || (isGroup ? `Group ${jid.split("@")[0].slice(-6)}` : null)
     || extractPhone(jid)
     || jid.split("@")[0];
@@ -1164,9 +1342,26 @@ async function handleSend(args) {
   if (!to || !message) return err("Both 'to' and 'message' are required.");
 
   const inputLooksLikePhone = /^\+?\d{7,}$/.test(String(to).replace(/[^0-9+]/g, ""));
-  const resolved = resolveContact(to);
+  let resolved = resolveContact(to);
+
+  // Local-cache miss → try unified contact store before giving up.
+  // Brain may also call find_contact first (see agent.py force-injection), but
+  // surfacing the lookup here makes whatsapp_send self-sufficient.
+  if (!resolved) {
+    const remote = await fetchUnifiedContacts(to, 3);
+    const remoteJid = _pickJidFromUnified(remote);
+    if (remoteJid) {
+      resolved = { jid: remoteJid.jid, name: remoteJid.name, source: "unified-store" };
+    }
+  }
   if (!resolved) {
     return err(`Contact '${to}' not found. STOP and ASK the user for the correct name or full international phone number (with country code, e.g. +34XXXXXXXXX). Do NOT guess a number — silent delivery failures look identical to success.`);
+  }
+  if (resolved.ambiguous) {
+    const candidateList = resolved.candidates
+      .map((c) => `${c.name} (${extractPhone(c.jid) || c.jid})`)
+      .join(", ");
+    return err(`Contact '${to}' is AMBIGUOUS — matched ${resolved.candidates.length} contacts: ${candidateList}. ASK the user which one — do NOT pick blindly.`);
   }
 
   // Verify recipient is a real WhatsApp user when we routed via a bare phone number
@@ -1400,53 +1595,125 @@ async function handleListChats(args) {
 }
 
 async function handleSearch(args) {
-  // FIX: Search works even when disconnected for cached contacts.
+  // Search works even when disconnected for cached contacts.
   const { query } = args;
   if (!query) return err("query is required.");
 
   const q = query.toLowerCase().trim();
+  const isPhoneQuery = /^\+?\d{7,}$/.test(q.replace(/[^0-9+]/g, ""));
 
-  // Check if query looks like a phone number — needs live connection for onWhatsApp()
-  if (/^\+?\d{7,}$/.test(q.replace(/[^0-9+]/g, ""))) {
+  // Fire the unified-store lookup in parallel — these are the macOS-synced
+  // contacts the brain saved in the phonebook. Without this, a saved number
+  // returns "not found" until WhatsApp itself syncs the chat.
+  const bridgePromise = fetchUnifiedContacts(query, 10);
+
+  // ---- Phone-number path ----
+  if (isPhoneQuery) {
+    const out = [];
     if (isReady && sock) {
       try {
         const jid = formatJid(q);
         const [result] = await sock.onWhatsApp(jid);
         if (result && result.exists) {
-          const c = contacts.get(result.jid);
-          return ok([{ jid: result.jid, exists: true, phone: q, name: c?.name || "" }]);
+          out.push({
+            jid: result.jid,
+            exists: true,
+            phone: q,
+            // Use the JID-variant-aware lookup so an @lid-stored name surfaces
+            // even when onWhatsApp returns the @s.whatsapp.net JID.
+            name: _displayNameForJid(result.jid) || _displayNameForJid(jid) || "",
+            source: "onWhatsApp",
+          });
+        } else {
+          out.push({ phone: q, exists: false, source: "onWhatsApp" });
         }
-        return ok([{ phone: q, exists: false }]);
       } catch (e) {
-        return err(`Failed to search: ${e.message}`);
+        log(`whatsapp_search onWhatsApp failed: ${e.message}`);
+      }
+    } else {
+      // Offline — search cached contacts by phone
+      for (const [jid, c] of contacts) {
+        const phoneDigits = (c.phone || "").replace(/[^0-9]/g, "");
+        const qDigits = q.replace(/[^0-9]/g, "");
+        if (phoneDigits && qDigits && phoneDigits.includes(qDigits)) {
+          out.push({ name: c.name || c.notify || "", phone: c.phone, jid, source: "cache" });
+        }
       }
     }
-    // Offline — search cached contacts by phone
-    const matches = [];
-    for (const [jid, c] of contacts) {
-      if (c.phone && c.phone.includes(q)) {
-        matches.push({ name: c.name || c.notify, phone: c.phone, jid });
-      }
-    }
-    if (matches.length > 0) return ok(matches);
-    return ok({ message: `Can't verify phone online (disconnected). No cached match for '${q}'.` });
+    const fromBridge = await bridgePromise;
+    return ok(_mergeContactMatches(out, fromBridge, q));
   }
 
-  // Name search in synced contacts
+  // ---- Name path ----
   const matches = [];
   for (const [jid, c] of contacts) {
     const name = (c.name || "").toLowerCase();
     const notify = (c.notify || "").toLowerCase();
-    if (name.includes(q) || notify.includes(q) || (c.phone && c.phone.includes(q))) {
-      matches.push({ name: c.name || c.notify, phone: c.phone, jid });
+    const phoneDigits = (c.phone || "").replace(/[^0-9]/g, "");
+    if (name.includes(q) || notify.includes(q) || (phoneDigits && q.replace(/[^0-9]/g, "") && phoneDigits.includes(q.replace(/[^0-9]/g, "")))) {
+      matches.push({ name: c.name || c.notify || "", phone: c.phone, jid, source: "cache" });
     }
-    if (matches.length >= 10) break;
+    if (matches.length >= 20) break;
   }
 
-  if (matches.length === 0) {
-    return ok({ message: `No contacts matching '${query}'. Contacts sync over time as messages arrive. Try a phone number.` });
+  const fromBridge = await bridgePromise;
+  const merged = _mergeContactMatches(matches, fromBridge, q);
+
+  if (merged.length === 0) {
+    return ok({
+      matches: [],
+      note: `No contacts matching '${query}'. Contacts sync over time as messages arrive. If the person is saved in macOS Contacts, run sync_macos_contacts first.`,
+    });
   }
-  return ok(matches);
+  return ok(merged.slice(0, 10));
+}
+
+/**
+ * Merge cached WhatsApp matches with unified-store matches.
+ * Dedup by phone digits (most reliable cross-cache identity).
+ * Unified-store rows surface as additional rows with source="unified-store".
+ */
+function _mergeContactMatches(cacheRows, unifiedRows, query) {
+  const out = [];
+  const seenPhones = new Set();
+  const seenJids = new Set();
+
+  const phoneOf = (row) => {
+    if (row.phone) return row.phone.replace(/[^0-9]/g, "");
+    if (row.jid && row.jid.endsWith("@s.whatsapp.net")) return row.jid.split("@")[0].split(":")[0];
+    return "";
+  };
+
+  for (const r of cacheRows) {
+    const p = phoneOf(r);
+    if (p) seenPhones.add(p);
+    if (r.jid) seenJids.add(normalizeJid(r.jid));
+    out.push(r);
+  }
+
+  for (const u of (unifiedRows || [])) {
+    const handles = u.handles || {};
+    const phones = handles.phone || [];
+    const phoneList = Array.isArray(phones) ? phones : [phones];
+    const firstPhone = phoneList.find((p) => p);
+    const phoneDigits = (firstPhone || "").replace(/[^0-9]/g, "");
+    if (phoneDigits && seenPhones.has(phoneDigits)) continue;
+
+    const jid = handles.whatsapp_jid || (phoneDigits ? `${phoneDigits}@s.whatsapp.net` : "");
+    if (jid && seenJids.has(normalizeJid(jid))) continue;
+
+    out.push({
+      name: u.name,
+      phone: firstPhone || "",
+      jid,
+      aliases: u.aliases || [],
+      handles: u.handles || {},
+      source: "unified-store",
+    });
+    if (phoneDigits) seenPhones.add(phoneDigits);
+    if (jid) seenJids.add(normalizeJid(jid));
+  }
+  return out;
 }
 
 async function handleSendImage(args) {
@@ -1456,8 +1723,17 @@ async function handleSendImage(args) {
   if (!to || !image_path) return err("Both 'to' and 'image_path' are required.");
   if (!fs.existsSync(image_path)) return err(`File not found: ${image_path}`);
 
-  const resolved = resolveContact(to);
+  let resolved = resolveContact(to);
+  if (!resolved) {
+    const remote = await fetchUnifiedContacts(to, 3);
+    const remoteJid = _pickJidFromUnified(remote);
+    if (remoteJid) resolved = { jid: remoteJid.jid, name: remoteJid.name, source: "unified-store" };
+  }
   if (!resolved) return err(`Contact '${to}' not found.`);
+  if (resolved.ambiguous) {
+    const candidateList = resolved.candidates.map((c) => `${c.name} (${extractPhone(c.jid) || c.jid})`).join(", ");
+    return err(`Contact '${to}' is AMBIGUOUS — matched ${resolved.candidates.length}: ${candidateList}. Ask the user which one.`);
+  }
 
   try {
     const imageBuffer = fs.readFileSync(image_path);
@@ -1503,9 +1779,13 @@ async function handleMute(args) {
     }
   }
 
-  // Third pass: fall back to resolveContact (persons + all contacts)
+  // Third pass: fall back to resolveContact (persons + all contacts).
+  // For mute we don't want ambiguous-error UX (mute should be tolerant), so
+  // drop ambiguous shapes here — the broad partial-search fallback below
+  // will still pick the first textual hit, which is correct for mute intent.
   if (!resolved) {
-    resolved = resolveContact(chatQuery);
+    const r = resolveContact(chatQuery);
+    if (r && !r.ambiguous) resolved = r;
   }
 
   // Last resort: broad partial search

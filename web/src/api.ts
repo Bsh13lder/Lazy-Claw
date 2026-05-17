@@ -961,6 +961,19 @@ export const denyRequest = (id: string) =>
 
 // ── Activity ──────────────────────────────────────────────────────────────
 
+// One row in the per-task transcript surfaced on CodeSpecialist.tsx.
+// Mirrors lazyclaw/teams/runner.py:TranscriptStep + the
+// task_runner._BgEventTap rows persisted to background_tasks.mcp_transcript.
+export interface CodeSpecialistStep {
+  kind: string;            // "tool" | "thinking" | "phase"
+  name: string;            // tool name (e.g. "mcp_claude_code_Bash")
+  args_summary: string;    // ≤120 chars
+  result_summary: string;  // ≤200 chars
+  duration_ms: number;
+  success?: boolean;
+  error?: string;
+}
+
 export interface AgentTask {
   task_id: string;
   name: string;
@@ -984,6 +997,17 @@ export interface AgentTask {
   tokens_used?: number;
   llm_calls?: number;
   project_tag?: string;    // "upwork:job-XXX", "reddit:dm", "user_request", etc.
+  // ── Code Specialist visibility ─────────────────────────────────
+  // Populated only when this task ran via claude-code MCP through
+  // the Code Specialist OR the brain's run_background path. Other
+  // tasks leave these undefined/empty; CodeSpecialist.tsx hides empty
+  // panels gracefully.
+  goal_id?: string;                       // Goal Executor goal id
+  mcp_prompt?: string;                    // exact instruction sent to claude-code
+  mcp_transcript?: CodeSpecialistStep[];  // step-by-step timeline
+  workspace_dir?: string;                 // /workspace/<tag>/<goal>/<task_id>/
+  files_touched?: string[];               // relative file paths under workspace_dir
+  short_description?: string;             // 1-line summary derived from instruction
 }
 
 export interface AgentStatus {
@@ -995,6 +1019,70 @@ export interface AgentStatus {
 
 export const getAgentStatus = () =>
   request<AgentStatus>("/api/agents/status");
+
+// ── Goals (Code Specialist intake) ───────────────────────────────────
+
+// Mirrors lazyclaw/runtime/goal_executor.py:GoalStatus.
+export type GoalStatus =
+  | "drafting"
+  | "awaiting_user_info"
+  | "executing"
+  | "blocked"
+  | "done"
+  | "failed"
+  | "aborted";
+
+export interface GoalPlanStep {
+  idx: number;
+  description: string;
+  status: string;
+  error?: string | null;
+  result?: string | null;
+}
+
+export interface Goal {
+  id: string;
+  status: GoalStatus;
+  title: string;
+  summary: string;
+  work_type?: string | null;
+  account_slug?: string | null;
+  confidence: string;
+  questions_pending: string[];
+  answers: Record<string, string>;
+  risks: string[];
+  plan: GoalPlanStep[];
+  blocked_on?: string | null;
+  last_action: string;
+  is_terminal: boolean;
+}
+
+export const startCodeTask = (
+  title: string,
+  project_tag?: string,
+  hints?: Record<string, string>,
+) =>
+  request<Goal>("/api/goals/code-task", {
+    method: "POST",
+    body: JSON.stringify({ title, project_tag, hints }),
+  });
+
+export const submitGoalAnswers = (
+  goalId: string,
+  answers: Record<string, string>,
+) =>
+  request<Goal>(`/api/goals/${encodeURIComponent(goalId)}/answer`, {
+    method: "POST",
+    body: JSON.stringify({ answers }),
+  });
+
+export const getGoal = (goalId: string) =>
+  request<Goal>(`/api/goals/${encodeURIComponent(goalId)}`);
+
+export const abortGoal = (goalId: string) =>
+  request<Goal>(`/api/goals/${encodeURIComponent(goalId)}/abort`, {
+    method: "POST",
+  });
 
 // ── Activity Feed + Metrics ──────────────────────────────────────────────
 

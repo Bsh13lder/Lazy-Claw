@@ -51,11 +51,14 @@ class UpworkLastConversationSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Fetch the most recent Upwork conversation and return its "
-            "messages formatted as Markdown. Use when the user asks "
-            "'what's in the last/latest upwork conversation', 'show me "
-            "what James said', etc. Zero LLM cost — calls "
-            "upwork_get_messages(limit=1) + upwork_get_conversation "
+            "Fetch a specific Upwork conversation thread and return its "
+            "messages formatted as Markdown so you can read what the "
+            "client actually said. **Call this FIRST before planning, "
+            "scoping, estimating, or replying to any Upwork client** — "
+            "never plan from memory of past turns. Pass `contact_name` "
+            "to target a specific person ('James', 'James Blue'); omit "
+            "to fetch the most recent thread. Zero LLM cost — calls "
+            "upwork_get_messages + upwork_get_conversation "
             "deterministically. Drives the user's signed-in Brave via "
             "the host bridge."
         )
@@ -73,11 +76,22 @@ class UpworkLastConversationSkill(BaseSkill):
         return {
             "type": "object",
             "properties": {
+                "contact_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Match a specific client by display "
+                        "name (case-insensitive substring + first-name "
+                        "prefix). Examples: 'James', 'James Blue', "
+                        "'sarah'. Omit to fetch the most recent thread "
+                        "regardless of who it's with."
+                    ),
+                },
                 "message_limit": {
                     "type": "integer",
                     "description": (
                         "Max messages to pull from the conversation. "
-                        "Default 20."
+                        "Default 20. For planning a contract, pass 100 "
+                        "to capture the full negotiation."
                     ),
                 },
             },
@@ -88,6 +102,7 @@ class UpworkLastConversationSkill(BaseSkill):
             return "Error: skill registry not available."
 
         msg_limit = int(params.get("message_limit") or 20)
+        contact_query = (params.get("contact_name") or "").strip() or None
 
         get_messages = self._find_tool("upwork_get_messages")
         get_conversation = self._find_tool("upwork_get_conversation")
@@ -98,10 +113,13 @@ class UpworkLastConversationSkill(BaseSkill):
                 "running and you're logged in to Upwork in your Brave."
             )
 
-        # 1. Pull the inbox to find the most recent room
+        # 1. Pull the inbox. limit=1 is fine when we just want "most
+        # recent"; when matching a named contact we need a wider scan
+        # since the target thread may not be at the top of the inbox.
+        inbox_limit = 1 if contact_query is None else 50
         try:
             messages_raw = await get_messages.execute(
-                user_id, {"limit": 1, "unread_only": False},
+                user_id, {"limit": inbox_limit, "unread_only": False},
             )
         except Exception as exc:
             logger.exception("upwork_get_messages call raised")
@@ -114,7 +132,21 @@ class UpworkLastConversationSkill(BaseSkill):
                 "in and have at least one chat thread."
             )
 
-        latest = messages[0]
+        if contact_query is not None:
+            latest = _match_contact(messages, contact_query)
+            if latest is None:
+                preview = ", ".join(
+                    (m.get("contact_name") or "(unknown)")
+                    for m in messages[:8]
+                )
+                return (
+                    f"No Upwork thread matches contact `{contact_query}`. "
+                    f"Inbox top: {preview}. Try a different spelling, the "
+                    "full name, or omit `contact_name` to see the most "
+                    "recent thread."
+                )
+        else:
+            latest = messages[0]
         # The 2026 URL parser may return the bare /rooms URL when the
         # room_id couldn't be extracted — that's fine, the MCP falls
         # back to the currently-open tab.
@@ -200,6 +232,37 @@ class UpworkLastConversationSkill(BaseSkill):
 
 
 # ── Module-level normalizers (pure functions, easy to test) ─────────
+
+
+def _match_contact(inbox: list[dict], query: str) -> dict | None:
+    """Find the inbox entry whose `contact_name` best matches `query`.
+
+    Tolerant lookup so the brain can pass either a first name ("James")
+    or a full display name ("James Blue") and still hit the right
+    thread. Two-pass match:
+
+      1. Case-insensitive substring against the full `contact_name`.
+      2. First-name prefix — "james" matches "James Blue" even if the
+         brain dropped the surname.
+
+    Returns the first hit (inboxes are newest-first, so the freshest
+    matching thread wins). Returns None if no entry matches.
+    """
+    q = query.strip().lower()
+    if not q:
+        return None
+    # Pass 1: substring anywhere in the display name.
+    for item in inbox:
+        name = (item.get("contact_name") or "").lower()
+        if q in name:
+            return item
+    # Pass 2: first-token prefix match — "james" → "james blue"
+    for item in inbox:
+        name = (item.get("contact_name") or "").lower()
+        first = name.split(maxsplit=1)[0] if name else ""
+        if first.startswith(q):
+            return item
+    return None
 
 
 def _normalize_inbox(raw) -> list[dict]:

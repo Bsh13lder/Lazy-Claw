@@ -67,6 +67,23 @@ class TrackedTask:
     # to group tasks ("what did the agent last work on for Upwork?").
     # Empty string = no project context (untagged user-driven request).
     project_tag: str = ""
+    # Optional goal_id when this task was dispatched by the Goal Executor.
+    # Surfaced on the Code Specialist page so the user can see which goal
+    # is driving the code work (header on the project group, link to
+    # /goals/<id>). Empty string for ad-hoc tasks not bound to a goal.
+    goal_id: str = ""
+    # ── Code Specialist visibility ────────────────────────────────
+    # Populated by delegate.py when the task is a Code Specialist run.
+    # Mirrors SpecialistResult.{prompt_sent,transcript,workspace_dir,
+    # files_touched,short_description} into the in-memory TrackedTask so
+    # /api/agents/status can render the prompt + step transcript + file
+    # list on the CodeSpecialist Web UI page without a separate fetch.
+    # Stays empty on non-code specialists — UI hides empty panels.
+    mcp_prompt: str = ""
+    mcp_transcript: tuple = ()       # tuple of dicts (kind/name/args_summary/result_summary/duration_ms/success/error)
+    workspace_dir: str = ""
+    files_touched: tuple = ()        # tuple of relative path strings
+    short_description: str = ""
 
 
 # ── Team Lead ─────────────────────────────────────────────────────────
@@ -116,6 +133,7 @@ class TeamLead:
         cancel_token: object | None = None,
         user_id: str = "",
         project_tag: str = "",
+        goal_id: str = "",
     ) -> TrackedTask:
         """Register a new running task. Returns the created snapshot."""
         full = instruction_full or description
@@ -128,6 +146,7 @@ class TeamLead:
             started_at=time.monotonic(),
             instruction_full=full,
             project_tag=project_tag,
+            goal_id=goal_id,
         )
         self._active[task_id] = task
         if cancel_token is not None:
@@ -184,8 +203,21 @@ class TeamLead:
         result_preview: str = "",
         *,
         result_full: str = "",
+        mcp_prompt: str = "",
+        mcp_transcript: tuple = (),
+        workspace_dir: str = "",
+        files_touched: tuple = (),
+        short_description: str = "",
     ) -> None:
-        """Mark task as done and move to history."""
+        """Mark task as done and move to history.
+
+        Optional ``mcp_*`` / ``workspace_dir`` / ``files_touched`` /
+        ``short_description`` fields capture Code Specialist visibility
+        data so the CodeSpecialist Web UI can render the full prompt,
+        per-step transcript, generated files, and project description
+        for completed tasks. Other specialists leave them empty — the
+        UI hides empty panels.
+        """
         task = self._active.pop(task_id, None)
         uid = self._task_users.pop(task_id, "")
         self._cancel_tokens.pop(task_id, None)
@@ -200,6 +232,11 @@ class TeamLead:
                 current_step="",
                 current_tool="",
                 phase="",
+                mcp_prompt=mcp_prompt or task.mcp_prompt,
+                mcp_transcript=mcp_transcript or task.mcp_transcript,
+                workspace_dir=workspace_dir or task.workspace_dir,
+                files_touched=files_touched or task.files_touched,
+                short_description=short_description or task.short_description,
             ))
             self._publish(uid, {
                 "type": "task_completed",

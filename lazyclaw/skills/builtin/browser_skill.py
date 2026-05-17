@@ -187,10 +187,13 @@ class BrowserSkill(BaseSkill):
                         "  scroll: scroll up or down.\n"
                         "  chain: execute multiple steps in one call.\n"
                         "ESCALATE — when nothing else works:\n"
-                        "  ask_vision: delegate a visual question to a local vision model "
-                        "(gemma4:e2b). Use ONLY when snapshot/read/ocr can't answer — layout "
-                        "bugs, visual-only elements, CAPTCHAs, unexpected popups, disabled "
-                        "buttons, image content. Requires 'question' param. Free, ~3-5s.\n\n"
+                        "  ask_vision: two-tier visual Q&A. Tier 1 = Apple Vision OCR "
+                        "(macOS native, ~200ms, free). Tier 2 = Sonnet vision via Claude "
+                        "subscription, fires automatically when OCR is empty OR the "
+                        "question is about appearance/state (color, disabled, layout, "
+                        "captcha, icon). Use ONLY when snapshot/read/ocr can't answer. "
+                        "Always supply 'question'. Optional 'mode' = auto|ocr|llm "
+                        "(default auto).\n\n"
                         "All errors start with a `[code]` prefix (e.g. [not_found], [timeout], "
                         "[stale_snapshot], [dependency_missing]) plus a Retry hint. Branch retry "
                         "strategy on the code — don't retry [not_found], re-snapshot on "
@@ -252,6 +255,16 @@ class BrowserSkill(BaseSkill):
                         "For ask_vision: the specific visual question to answer "
                         "(e.g. 'is the submit button enabled?', 'what error does "
                         "the modal show?'). Be specific — avoid 'describe this'."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "ocr", "llm"],
+                    "description": (
+                        "For ask_vision: auto (default — OCR first, Sonnet escalation "
+                        "on empty OCR or visual-judgement keywords), ocr (OCR only, "
+                        "never calls Sonnet), llm (skip OCR, ask Sonnet directly — "
+                        "use when the question is about pixels, not text)."
                     ),
                 },
                 "region": {

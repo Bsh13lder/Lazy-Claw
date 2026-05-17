@@ -353,19 +353,17 @@ class UpdateContactSkill(BaseSkill):
         h_key = (params.get("set_handle_key") or "").strip()
         h_val = (params.get("set_handle_value") or "").strip()
         if h_key and h_val:
-            # Phone handle stored as a list to support multiples.
+            # SET semantics: replace the existing value. The API verb is
+            # "set_handle" — appending makes corrections impossible (2026-05-16
+            # Gerardo case: "ohh my bad number is X" left BOTH the wrong and
+            # the right number on the contact). Adding additional handles
+            # belongs in a separate add_handle tool, not this one.
             if h_key == "phone":
                 if not h_val.startswith("+"):
                     return f"Refusing to save bare number '{h_val}' — country code required."
-                phones = list(target.handles.get("phone") or [])
-                if h_val not in phones:
-                    phones.append(h_val)
-                kwargs["set_handle"] = ("phone", phones)
+                kwargs["set_handle"] = ("phone", [h_val])
             elif h_key == "email":
-                emails = list(target.handles.get("email") or [])
-                if h_val not in emails:
-                    emails.append(h_val)
-                kwargs["set_handle"] = ("email", emails)
+                kwargs["set_handle"] = ("email", [h_val])
             elif h_key in {"instagram", "telegram"}:
                 v = h_val if h_val.startswith("@") else f"@{h_val}"
                 kwargs["set_handle"] = (h_key, v)

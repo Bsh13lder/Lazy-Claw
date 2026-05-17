@@ -109,6 +109,24 @@ class DelegateSkill(BaseSkill):
                     "type": "string",
                     "description": "Clear, specific instruction for the specialist",
                 },
+                "project_tag": {
+                    "type": "string",
+                    "description": (
+                        "Optional project group tag (e.g. 'upwork:job-XXX', "
+                        "'gig:abc123', 'reddit:dm'). Routes the task into a "
+                        "named bucket on the Code Specialist Web UI page; "
+                        "for code specialist, also picks the workspace "
+                        "subfolder (/workspace/<project_tag>/...)."
+                    ),
+                },
+                "goal_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional Goal Executor goal id. Surfaces a goal "
+                        "header above the task on the Code Specialist page "
+                        "so the user can see which goal drives the work."
+                    ),
+                },
             },
             "required": ["specialist", "instruction"],
         }
@@ -118,6 +136,8 @@ class DelegateSkill(BaseSkill):
 
         specialist_key = params.get("specialist", "")
         instruction = params.get("instruction", "")
+        project_tag = params.get("project_tag", "") or ""
+        goal_id = params.get("goal_id", "") or ""
 
         if not instruction:
             return "Error: instruction is required"
@@ -159,6 +179,8 @@ class DelegateSkill(BaseSkill):
                     lane="specialist",
                     instruction_full=enriched_instruction,
                     user_id=user_id,
+                    project_tag=project_tag,
+                    goal_id=goal_id,
                 )
             except Exception:
                 logger.debug("team_lead.register failed for %s", task_id, exc_info=True)
@@ -219,6 +241,9 @@ class DelegateSkill(BaseSkill):
                     eco_router=self._eco_router,
                     permission_checker=self._permission_checker,
                     callback=wrapped_callback,
+                    project_tag=project_tag,
+                    goal_id=goal_id,
+                    task_id=task_id,
                 )
             except Exception as exc:
                 logger.exception("delegate bg task %s crashed", task_id)
@@ -271,6 +296,25 @@ class DelegateSkill(BaseSkill):
 
             # Mirror the SpecialistResult into team_lead so the activity
             # feed carries the final outcome.
+            #
+            # For the Code Specialist, also forward the captured prompt
+            # / transcript / workspace_dir / files_touched so the
+            # CodeSpecialist Web UI can render the per-task drawer with
+            # every step claude-code took plus a clickable file list.
+            # `replace()` semantics in team_lead.complete() preserve any
+            # earlier-set fields when these are empty (non-code paths).
+            _ts_dicts = tuple(
+                {
+                    "kind": s.kind,
+                    "name": s.name,
+                    "args_summary": s.args_summary,
+                    "result_summary": s.result_summary,
+                    "duration_ms": s.duration_ms,
+                    "success": s.success,
+                    "error": s.error,
+                }
+                for s in (result.transcript or ())
+            )
             if self._team_lead is not None:
                 try:
                     if result.success:
@@ -278,6 +322,11 @@ class DelegateSkill(BaseSkill):
                             task_id,
                             result_preview=(result.result or "")[:100],
                             result_full=result.result or "",
+                            mcp_prompt=result.prompt_sent,
+                            mcp_transcript=_ts_dicts,
+                            workspace_dir=result.workspace_dir,
+                            files_touched=tuple(result.files_touched or ()),
+                            short_description=result.short_description,
                         )
                     else:
                         self._team_lead.fail(task_id, error=result.error or "")

@@ -122,3 +122,125 @@ async def test_extract_message_skips_empty_body():
     )
     msg = await _extract_message(bubble)
     assert msg is None
+
+
+# ── Sender-flip carry-forward (2026-05-17 regression) ───────────────
+
+
+@pytest.mark.asyncio
+async def test_extract_does_not_inherit_sender_across_speaker_flip():
+    """When the previous bubble was James and the current bubble has
+    NO visible header but its is_mine class hint indicates a different
+    speaker, the parser MUST NOT carry James's name forward. Verified
+    via CDP scroll on 2026-05-17: Vato's PropStream answer got tagged
+    as 'James Blue' because the flip wasn't detected."""
+    bubble = _mock_bubble(
+        header_text="",       # No header rendered on the new sender's bubble
+        body_text="API vs scraping — mixed. PropStream and Reonomy have APIs...",
+        me_indicator=True,    # but is_mine class hint says it's the user
+    )
+    msg = await _extract_message(
+        bubble,
+        last_sender="James Blue",   # last bubble was James
+        last_timestamp="2:23 AM",
+        last_is_mine=False,         # last bubble was NOT mine
+        me_name="Vato Tchipa",
+        contact_name="James Blue",
+    )
+    # The new sender should NOT be James — it's the user.
+    assert msg["sender"] != "James Blue"
+    assert msg["sender"] == "Vato Tchipa"
+    # And the timestamp should NOT carry James's 2:23 AM forward.
+    assert msg.get("timestamp") != "2:23 AM"
+    assert msg["is_mine"] is True
+
+
+@pytest.mark.asyncio
+async def test_extract_uses_contact_name_when_flip_to_contact():
+    """Mirror case: previous bubble was the user, current bubble has no
+    header and is_mine=False (a new contact message). Should use
+    contact_name, not carry-forward the user's name."""
+    bubble = _mock_bubble(
+        header_text="",
+        body_text="Ok, sounds good so far.",
+        me_indicator=False,
+    )
+    msg = await _extract_message(
+        bubble,
+        last_sender="Vato Tchipa",
+        last_timestamp="11:14 AM",
+        last_is_mine=True,
+        me_name="Vato Tchipa",
+        contact_name="James Blue",
+    )
+    assert msg["sender"] == "James Blue"
+    assert msg["is_mine"] is False
+
+
+@pytest.mark.asyncio
+async def test_extract_still_carries_when_speaker_stays_the_same():
+    """Carry-forward must still work for genuine continuation bubbles
+    where the speaker didn't change — this is the original use case
+    and must not regress."""
+    bubble = _mock_bubble(
+        header_text="",
+        body_text="Please answer these questions:",
+        me_indicator=False,
+    )
+    msg = await _extract_message(
+        bubble,
+        last_sender="James Blue",
+        last_timestamp="2:23 AM",
+        last_is_mine=False,        # same speaker as before
+        me_name="Vato Tchipa",
+        contact_name="James Blue",
+    )
+    assert msg["sender"] == "James Blue"
+    assert msg["timestamp"] == "2:23 AM"
+
+
+@pytest.mark.asyncio
+async def test_extract_explicit_header_overrides_carry_forward():
+    """When the bubble HAS its own header, that wins over any
+    carry-forward state — defensive against the flip logic
+    accidentally clobbering a correctly-extracted sender."""
+    bubble = _mock_bubble(
+        header_text="Vato Tchipa\n   11:14 AM",
+        body_text="API vs scraping — mixed.",
+        me_indicator=True,
+    )
+    msg = await _extract_message(
+        bubble,
+        last_sender="James Blue",
+        last_timestamp="2:23 AM",
+        last_is_mine=False,
+        me_name="Vato Tchipa",
+        contact_name="James Blue",
+    )
+    assert msg["sender"] == "Vato Tchipa"
+    assert msg["timestamp"] == "11:14 AM"
+    assert msg["is_mine"] is True
+
+
+@pytest.mark.asyncio
+async def test_extract_flip_without_me_name_leaves_sender_unset():
+    """If the caller didn't pass me_name and the flip is to the user's
+    side, we can't guess the user's name — leave sender unset rather
+    than carry the wrong name forward. Caller's downstream logic
+    handles the resolution."""
+    bubble = _mock_bubble(
+        header_text="",
+        body_text="some text",
+        me_indicator=True,
+    )
+    msg = await _extract_message(
+        bubble,
+        last_sender="James Blue",
+        last_timestamp="2:23 AM",
+        last_is_mine=False,
+        me_name=None,          # caller didn't pass it
+        contact_name="James Blue",
+    )
+    # Better to have NO sender than the wrong one.
+    assert msg.get("sender") != "James Blue"
+    assert msg["is_mine"] is True

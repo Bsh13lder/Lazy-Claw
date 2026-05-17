@@ -111,6 +111,13 @@ BUNDLED_MCPS = {
         # Strip ANTHROPIC_API_KEY so claude CLI uses Max subscription (OAuth)
         # via mounted ~/.claude auth, not the API key
         "strip_env": ["ANTHROPIC_API_KEY"],
+        # Persistent code workspace. claude-code's Bash/Read/Write tools
+        # default to this dir, so generated files land under the bind
+        # mount and survive `docker compose down`. The Code Specialist
+        # invocation in `teams/runner.py` further `cd`s into a per-task
+        # subdir (/workspace/<project_tag>/<goal>/<task_id>/) before each
+        # run so parallel jobs don't trample each other.
+        "cwd": "/workspace",
     },
     # Forked from vanooo/upwork-mcp (Apache-2.0). All 12 upstream tools
     # preserved. Patched to share LazyClaw's per-user Brave profile via
@@ -160,6 +167,10 @@ BUNDLED_MCPS = {
         "description": "WhatsApp messaging — no browser (QR auth, web protocol)",
         "optional": True,
         "persistent": True,  # Never idle-disconnect — WhatsApp needs continuous WS
+        # Inject LAZYCLAW_USER_ID + LAZYCLAW_GATEWAY_URL + LAZYCLAW_INTERNAL_TOKEN
+        # so whatsapp_search / whatsapp_send can consult the unified contact
+        # store (find_contact) instead of only the Baileys-synced cache.
+        "inject_contact_bridge": True,
     },
     "mcp-email": {
         "module": "mcp_email",
@@ -236,6 +247,34 @@ def _resolve_mcp_name(name: str) -> str | None:
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _build_bundled_env_overlay(
+    config, user_id: str, mcp_name: str, *, existing_env: dict[str, str],
+) -> dict[str, str]:
+    """Compute the env dict to pass to a bundled MCP subprocess.
+
+    Re-runs the same opt-in checks as ``connect_and_register_bundled_mcps``
+    so that env values (especially the per-process internal token) stay
+    fresh across gateway restarts and don't need a DB migration.
+    """
+    info = BUNDLED_MCPS.get(mcp_name)
+    if not info:
+        return dict(existing_env)
+
+    overlay: dict[str, str] = dict(existing_env)
+
+    if info.get("inject_contact_bridge"):
+        from lazyclaw.gateway.internal_auth import get_internal_token
+        overlay["LAZYCLAW_USER_ID"] = user_id
+        gateway_url = (
+            os.environ.get("LAZYCLAW_GATEWAY_URL")
+            or f"http://127.0.0.1:{getattr(config, 'port', 18789)}"
+        )
+        overlay["LAZYCLAW_GATEWAY_URL"] = gateway_url
+        overlay["LAZYCLAW_INTERNAL_TOKEN"] = get_internal_token()
+
+    return overlay
 
 
 async def install_bundled_mcp(name: str) -> tuple[bool, str]:
@@ -676,11 +715,19 @@ async def connect_server(
     if server_id in _active_clients:
         await disconnect_server(user_id, server_id)
 
+    # Apply bundled-MCP env overlays at CONNECT time, not register time.
+    # The internal-bridge token is per-process (rotates on restart) so we
+    # don't persist it in the encrypted config row; we re-derive it here.
+    server_cfg = dict(server["config"])
+    server_cfg["env"] = _build_bundled_env_overlay(
+        config, user_id, server["name"], existing_env=server_cfg.get("env") or {},
+    )
+
     client = MCPClient(
         server_id=server_id,
         name=server["name"],
         transport=server["transport"],
-        config=server["config"],
+        config=server_cfg,
     )
     await client.connect()
     _active_clients[server_id] = client
@@ -980,6 +1027,12 @@ async def auto_register_bundled_mcps(
             except ImportError:
                 pass
 
+        # NOTE: ``inject_contact_bridge`` is applied at CONNECT time via
+        # ``_build_bundled_env_overlay`` — see ``connect_server``. We don't
+        # persist the token here because it's per-process and rotates on
+        # restart, which would otherwise leave a stale token encrypted in
+        # the mcp_connections row.
+
         # Determine transport type: Python module, CLI binary, npx, or remote URL
         if "module" in info:
             # Python module — check if importable
@@ -1024,6 +1077,8 @@ async def auto_register_bundled_mcps(
                 "command": "node",
                 "args": [node_script],
             }
+            if per_user_env:
+                server_config["env"] = per_user_env
         elif "npx" in info:
             # npm package — check if npx is available
             import shutil

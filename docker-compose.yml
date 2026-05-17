@@ -49,6 +49,14 @@ services:
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
+      # Persistent workspace for the Code Specialist (claude-code MCP).
+      # All code claude-code writes lands here under
+      # /workspace/<project_tag>/<goal_id>/<task_id>/. Mounted directly
+      # at ~/Desktop/lazyclaw-workspace so generated files appear right
+      # on the user's Desktop — no need to dig into the repo. Browsable
+      # from Finder, Docker Desktop's Files tab, and any IDE. Survives
+      # `docker compose down` so generated code is never lost.
+      - ${HOME}/Desktop/lazyclaw-workspace:/workspace
       # Host ~/.claude is mounted read-only at a side path so the
       # container can read settings/plugins/history WITHOUT being able
       # to write back to the host (also: macOS Keychain holds the host

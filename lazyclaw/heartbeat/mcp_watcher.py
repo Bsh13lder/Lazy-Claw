@@ -11,9 +11,15 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+
+# Optional async resolver(jid) -> display name | None. When passed into
+# _format_notification it lets the WhatsApp formatter swap raw JIDs like
+# ``34611234567@s.whatsapp.net`` for the saved contact name ("Maria").
+JidResolver = Callable[[str], Awaitable[str | None]]
 
 
 def build_mcp_watcher_context(
@@ -64,7 +70,27 @@ def is_mcp_watcher(ctx: dict) -> bool:
 
 
 def is_mcp_check_due(ctx: dict) -> bool:
-    """Check if enough time has passed since last MCP check."""
+    """Check if enough time has passed since last MCP check.
+
+    Honours ``snoozed_until`` (ISO timestamp) so the ⏰ inline buttons
+    on a watcher push can silence polls for a window without deleting
+    the job. Malformed timestamps fall through — they never become a
+    "snooze forever" silently.
+    """
+    snoozed_until = ctx.get("snoozed_until")
+    if snoozed_until:
+        try:
+            snooze = datetime.fromisoformat(snoozed_until)
+            if snooze.tzinfo is None:
+                snooze = snooze.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < snooze:
+                return False
+        except (ValueError, TypeError):
+            logger.debug(
+                "Corrupted snoozed_until on MCP watcher — treating as unset",
+                exc_info=True,
+            )
+
     try:
         interval = float(ctx.get("check_interval", 120))
         last = float(ctx.get("last_check", 0))
@@ -85,6 +111,63 @@ def is_mcp_watcher_expired(ctx: dict) -> bool:
     except (ValueError, TypeError):
         logger.debug("Failed to parse MCP watcher expires_at timestamp", exc_info=True)
         return False
+
+
+async def _build_whatsapp_jid_resolver(
+    config: Any, user_id: str,
+) -> JidResolver | None:
+    """Build a JID→display-name lookup against the encrypted contact store.
+
+    Loaded once per check (≤200 contacts typical), returns a closure that
+    matches phone digits in either direction so e.g.
+    ``34611234567@s.whatsapp.net`` resolves to a contact saved as
+    ``+34 611 23 45 67``. Returns ``None`` if the store is unavailable —
+    formatter will fall back to pushName / formatted phone.
+    """
+    if not config or not user_id:
+        return None
+    try:
+        from lazyclaw.contacts.store import list_contacts
+        contacts = await list_contacts(config, user_id)
+    except Exception:
+        logger.debug("contact store lookup failed for watcher resolver", exc_info=True)
+        return None
+
+    # Pre-compute (digits, name) tuples so the closure stays cheap.
+    table: list[tuple[str, str]] = []
+    for c in contacts:
+        name = (c.name_canonical or "").strip()
+        if not name:
+            continue
+        wa = (c.handles.get("whatsapp_jid") or "") if isinstance(c.handles, dict) else ""
+        if wa:
+            digits = "".join(ch for ch in wa if ch.isdigit())
+            if digits:
+                table.append((digits, name))
+        for phone in (c.handles.get("phone") or []) if isinstance(c.handles, dict) else []:
+            digits = "".join(ch for ch in str(phone) if ch.isdigit())
+            if digits:
+                table.append((digits, name))
+
+    async def _resolve(jid: str) -> str | None:
+        if not jid:
+            return None
+        jid_digits = "".join(ch for ch in jid if ch.isdigit())
+        if not jid_digits:
+            return None
+        # Prefer exact match, then "jid endswith contact digits" so a
+        # stored "611234567" still matches "34611234567@s.whatsapp.net".
+        for digits, name in table:
+            if digits == jid_digits:
+                return name
+        for digits, name in table:
+            if len(digits) >= 6 and (
+                jid_digits.endswith(digits) or digits.endswith(jid_digits)
+            ):
+                return name
+        return None
+
+    return _resolve
 
 
 async def check_mcp_watcher(
@@ -149,6 +232,27 @@ async def check_mcp_watcher(
         new_ctx["last_check"] = time.time()
         return False, None, new_ctx
 
+    # ── First-poll baseline (silent seeding) ────────────────────────
+    # When a watcher is first created, last_check == 0 and last_seen_ids
+    # is empty. Without this guard, _extract_new_items returns EVERY
+    # message in the MCP read window as "new" → Telegram floods with
+    # the user's existing unread backlog the moment they start watching.
+    # Instead, take a baseline of the current ids, store, and stay quiet.
+    # The next real "new" message after this baseline fires normally.
+    is_first_poll = float(ctx.get("last_check", 0) or 0) == 0
+    if is_first_poll:
+        baseline_items = _extract_new_items(data, set(), service)
+        baseline_ids = [item["id"] for item in baseline_items if item.get("id")]
+        new_ctx = dict(ctx)
+        new_ctx["last_check"] = time.time()
+        new_ctx["last_seen_ids"] = baseline_ids[-200:]
+        new_ctx["_baseline_count"] = len(baseline_ids)
+        logger.info(
+            "MCP watcher %s: first-poll baseline — seeded %d ids, no notification",
+            service, len(baseline_ids),
+        )
+        return False, None, new_ctx
+
     # Extract messages/items and detect new ones
     new_items = _extract_new_items(data, last_seen, service)
 
@@ -172,6 +276,11 @@ async def check_mcp_watcher(
     new_ctx = dict(ctx)
     new_ctx["last_check"] = time.time()
 
+    # Build JID resolver once per check — cheap, contact list is small.
+    jid_resolver: JidResolver | None = None
+    if service == "whatsapp":
+        jid_resolver = await _build_whatsapp_jid_resolver(config, user_id)
+
     if not new_items:
         # No new items — but check if pending batch should flush
         batch_window = int(ctx.get("batch_window", 0))
@@ -183,8 +292,9 @@ async def check_mcp_watcher(
                 # Flush the accumulated batch
                 new_ctx["pending_batch"] = []
                 new_ctx["batch_started"] = 0
-                notification = _format_notification(
+                notification = await _format_notification(
                     pending, service, ctx.get("instruction", ""),
+                    resolver=jid_resolver,
                 )
                 logger.info(
                     "MCP watcher %s: flushing batch of %d items (window elapsed)",
@@ -212,8 +322,9 @@ async def check_mcp_watcher(
             # Window elapsed — flush everything
             new_ctx["pending_batch"] = []
             new_ctx["batch_started"] = 0
-            notification = _format_notification(
+            notification = await _format_notification(
                 pending, service, ctx.get("instruction", ""),
+                resolver=jid_resolver,
             )
             logger.info(
                 "MCP watcher %s: flushing batch of %d items",
@@ -232,7 +343,10 @@ async def check_mcp_watcher(
             return False, None, new_ctx
 
     # No batching — notify immediately
-    notification = _format_notification(new_items, service, ctx.get("instruction", ""))
+    notification = await _format_notification(
+        new_items, service, ctx.get("instruction", ""),
+        resolver=jid_resolver,
+    )
     new_ctx["_notified_items"] = new_items
     return True, notification, new_ctx
 
@@ -261,21 +375,35 @@ def _extract_new_items(
         for msg in messages:
             if msg.get("fromMe", False):
                 continue
+            # Require a real upstream id (Baileys / MCP shaped). Without
+            # one, dedup falls back to "{time}_{body[:30]}" — but the
+            # upstream sometimes flips between relative ("2 min ago")
+            # and absolute timestamps, and trims emoji from body in
+            # different ways, so the same message can hash differently
+            # across polls and re-fire. Skipping these is safer than
+            # surfacing duplicates; the next poll will pick the message
+            # up once it has a stable id assigned by Baileys.
+            msg_id = msg.get("id")
+            if not msg_id:
+                logger.debug(
+                    "WhatsApp message without id — skipping (dedup-safe)",
+                )
+                continue
+            if msg_id in last_seen:
+                continue
             msg_time = msg.get("time") or msg.get("timestamp") or "0"
-            msg_body = str(msg.get("body", ""))[:30]
-            msg_id = msg.get("id") or f"{msg_time}_{msg_body}"
-            if msg_id not in last_seen:
-                new_msgs.append({
-                    "id": msg_id,
-                    "from": msg.get("from", "unknown"),
-                    "body": msg.get("body", ""),
-                    "timestamp": msg_time,
-                    "type": msg.get("type", "direct"),
-                    "groupName": msg.get("groupName", ""),
-                    "chatName": msg.get("chatName", ""),
-                    "participantName": msg.get("participantName", ""),
-                    "muted": msg.get("muted", False),
-                })
+            new_msgs.append({
+                "id": msg_id,
+                "from": msg.get("from", "unknown"),
+                "body": msg.get("body", ""),
+                "timestamp": msg_time,
+                "type": msg.get("type", "direct"),
+                "groupName": msg.get("groupName", ""),
+                "chatName": msg.get("chatName", ""),
+                "participantName": msg.get("participantName", ""),
+                "pushName": msg.get("pushName", ""),
+                "muted": msg.get("muted", False),
+            })
 
         return new_msgs
 
@@ -312,52 +440,68 @@ def _extract_new_items(
     ]
 
 
-def _whatsapp_display_sender(msg: dict) -> str:
-    """Format sender for display: 'Alice' for direct, 'Alice (Family Group)' for groups."""
-    is_group = msg.get("type") == "group"
-    sender = msg.get("from", "?")
-    if is_group:
-        group_name = msg.get("groupName") or msg.get("chatName") or "Group"
-        participant = msg.get("participantName") or sender
-        return f"{participant} ({group_name})"
-    return sender
+def _pretty_phone(jid: str) -> str:
+    """Render a WhatsApp JID as a readable +country phone string."""
+    if not jid:
+        return "?"
+    phone = jid.split("@")[0] if "@" in jid else jid
+    digits = "".join(c for c in phone if c.isdigit())
+    if not digits:
+        return phone or "?"
+    if len(digits) <= 8:
+        return f"+{digits}"
+    # Light spacing: "+34 611 234 567"
+    if len(digits) == 11:
+        return f"+{digits[:2]} {digits[2:5]} {digits[5:8]} {digits[8:]}"
+    if len(digits) == 12:
+        return f"+{digits[:2]} {digits[2:5]} {digits[5:8]} {digits[8:]}"
+    return f"+{digits}"
 
 
-def _whatsapp_sender_name(msg: dict) -> str:
-    """Extract a human-readable sender name from a WhatsApp message.
+async def _whatsapp_sender(msg: dict, resolver: JidResolver | None) -> str:
+    """Human display name for the message sender.
 
-    Priority: pushName > name > participant name > cleaned JID.
-    Group JIDs (xxxxx@g.us) show as 'Group' with participant name if available.
+    Priority chain:
+      1. Saved contact (resolver) keyed on the sender JID — handles both
+         direct chats and per-participant lookup in groups.
+      2. pushName from Baileys (often the user's chosen WhatsApp name).
+      3. Pre-stored participantName / chatName.
+      4. Pretty-printed phone.
     """
     jid = msg.get("from", "")
-    is_group = jid.endswith("@g.us")
+    is_group = (msg.get("type") == "group") or jid.endswith("@g.us")
 
-    # Try human names first
-    name = msg.get("pushName") or msg.get("name") or msg.get("senderName") or ""
-    if name:
-        if is_group:
-            group_name = msg.get("groupName") or msg.get("subject") or "Group"
-            return f"{name} ({group_name})"
-        return name
+    # Group participant lookup — the saved contact is the SENDER inside
+    # the group, not the group itself.
+    participant_jid = msg.get("participant") or jid
+    if resolver:
+        try:
+            resolved = await resolver(participant_jid if is_group else jid)
+            if resolved:
+                return resolved
+        except Exception:
+            logger.debug("jid resolver failed for %s", jid, exc_info=True)
 
-    # For groups, try participant field
+    push = (msg.get("pushName") or msg.get("name") or "").strip()
+    if push:
+        return push
+
     if is_group:
-        participant = msg.get("participant", "")
-        part_name = msg.get("participantName") or msg.get("participantPushName") or ""
-        if part_name:
-            group_name = msg.get("groupName") or msg.get("subject") or "Group"
-            return f"{part_name} ({group_name})"
-        group_name = msg.get("groupName") or msg.get("subject") or ""
-        if group_name:
-            return group_name
-        # Last resort: shorten the JID
-        return f"Group {jid.split('@')[0][-6:]}"
+        part = (msg.get("participantName") or "").strip()
+        if part:
+            return part
+        return _pretty_phone(participant_jid) if participant_jid else "Member"
 
-    # Individual: extract phone number from JID
-    phone = jid.split("@")[0] if "@" in jid else jid
-    if len(phone) > 8:
-        return f"+{phone}"
-    return phone or "?"
+    return _pretty_phone(jid)
+
+
+def _whatsapp_chat_label(msg: dict) -> str:
+    """Display label for the CHAT — group name for groups, sender for direct."""
+    is_group = msg.get("type") == "group" or msg.get("from", "").endswith("@g.us")
+    if is_group:
+        return (msg.get("groupName") or msg.get("chatName") or "Group").strip()
+    # For direct chats, the "chat" *is* the sender; caller already has it.
+    return (msg.get("chatName") or "").strip()
 
 
 def _compact_time(raw: str) -> str:
@@ -379,7 +523,9 @@ def _whatsapp_body_preview(msg: dict) -> str:
     """
     body = msg.get("body", "")
     if body and body != "[media]":
-        return body[:120]
+        if len(body) > 120:
+            return body[:117].rstrip() + "…"
+        return body
 
     # Check media type
     msg_type = msg.get("type") or msg.get("messageType") or ""
@@ -408,68 +554,32 @@ def _whatsapp_body_preview(msg: dict) -> str:
     return body[:120] if body else "[Empty message]"
 
 
-def _format_notification(
+async def _format_notification(
     items: list[dict],
     service: str,
     instruction: str,
+    *,
+    resolver: JidResolver | None = None,
 ) -> str:
     """Format new items into a clean Telegram notification.
 
-    Design: show the LATEST message prominently, then a compact summary
-    of other chats. Not a dump of all unread messages.
+    Design goals (UX):
+      * **One-glance read** - sender + time on the title row, body
+        underneath. No JID gibberish ever leaks to the user.
+      * **Saved-contact names win** - when the resolver knows the JID
+        we show the name the user picked, even for group senders.
+      * **Group context** - group chats render as `[Group] Group .. Sender`
+        so the user knows who sent and where.
+      * **Truncation never mid-emoji** - body capped at ~120 chars with
+        a clean ellipsis so message bubbles don't blow up.
     """
     if service == "whatsapp":
-        # Group by chat (chatName for groups, sender for direct)
-        by_chat: dict[str, list[dict]] = {}
-        for msg in items:
-            is_group = msg.get("type") == "group"
-            chat_key = msg.get("chatName") or msg.get("groupName") or msg.get("from", "?")
-            if not is_group:
-                chat_key = msg.get("from", "?")
-            by_chat.setdefault(chat_key, []).append(msg)
-
-        total = len(items)
-        chat_count = len(by_chat)
-        lines: list[str] = []
-
-        if total == 1:
-            # -- Single message: clean and simple --
-            msg = items[0]
-            sender = _whatsapp_display_sender(msg)
-            body = _whatsapp_body_preview(msg)
-            t = _compact_time(msg.get("timestamp", ""))
-            time_tag = f"  \u00b7  {t}" if t else ""
-            lines.append(f"\U0001f4ac  {sender}{time_tag}")
-            lines.append(f"\u2514 {body}")
-        else:
-            # -- Multiple messages: show each chat with latest msg --
-            lines.append(f"\U0001f4ac  WhatsApp  \u00b7  {total} new")
-            lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-            for chat_name, msgs in list(by_chat.items())[:5]:
-                last = msgs[-1]
-                body = _whatsapp_body_preview(last)
-                t = _compact_time(last.get("timestamp", ""))
-                count_tag = f" ({len(msgs)})" if len(msgs) > 1 else ""
-                time_tag = f"  {t}" if t else ""
-                is_group = last.get("type") == "group"
-                if is_group:
-                    # Show who sent in the group
-                    sender = last.get("participantName") or last.get("from", "?")
-                    label = f"\U0001f465 {chat_name}{count_tag}{time_tag}"
-                    lines.append(f"\n\u25B8 {label}")
-                    lines.append(f"  {sender}: {body[:90]}")
-                else:
-                    lines.append(f"\n\u25B8 {chat_name}{count_tag}{time_tag}")
-                    lines.append(f"  {body[:100]}")
-            if chat_count > 5:
-                lines.append(f"\n  +{chat_count - 5} more chats")
-
-        return "\n".join(lines)
+        return await _format_whatsapp(items, resolver)
 
     if service == "email":
         latest = items[-1]
-        sender = latest.get("from", "?")
-        subj = latest.get("subject", "no subject")[:80]
+        sender = (latest.get("from") or "?").strip()
+        subj = (latest.get("subject") or "no subject")[:80]
         lines = [f"\U0001f4e7  {sender}", f"\u2514 {subj}"]
         if len(items) > 1:
             lines.append(f"\n+{len(items) - 1} more")
@@ -477,12 +587,95 @@ def _format_notification(
 
     if service == "instagram":
         latest = items[-1]
-        user = latest.get("user", "?")
-        text = latest.get("text", "")[:100]
-        ntype = latest.get("type", "notification")
+        user = (latest.get("user") or "?").strip()
+        text = (latest.get("text") or "")[:100]
+        ntype = (latest.get("type") or "notification").strip()
         lines = [f"\U0001f4f7  {user} ({ntype})", f"\u2514 {text}"]
         if len(items) > 1:
             lines.append(f"\n+{len(items) - 1} more")
         return "\n".join(lines)
 
     return f"{service} \u2014 {len(items)} new"
+
+
+async def _format_whatsapp(
+    items: list[dict],
+    resolver: JidResolver | None,
+) -> str:
+    """Render a beautiful WhatsApp notification \u2014 single or digest layout."""
+    # Group messages by chat (group name for groups, sender JID for direct).
+    by_chat: dict[str, list[dict]] = {}
+    for msg in items:
+        is_group = (
+            msg.get("type") == "group"
+            or msg.get("from", "").endswith("@g.us")
+        )
+        if is_group:
+            chat_key = msg.get("groupName") or msg.get("chatName") or msg.get("from", "?")
+        else:
+            chat_key = msg.get("from", "?")
+        by_chat.setdefault(chat_key, []).append(msg)
+
+    total = len(items)
+
+    # \u2500\u2500 Single-message layout \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    if total == 1:
+        msg = items[0]
+        is_group = (
+            msg.get("type") == "group" or msg.get("from", "").endswith("@g.us")
+        )
+        sender = await _whatsapp_sender(msg, resolver)
+        body = _whatsapp_body_preview(msg)
+        t = _compact_time(msg.get("timestamp", ""))
+        time_tag = f"  \u00b7  {t}" if t else ""
+
+        if is_group:
+            group = _whatsapp_chat_label(msg) or "Group"
+            return (
+                f"\U0001f4ac  \U0001f465 {group}{time_tag}\n"
+                f"  {sender}:  {body}"
+            )
+        return (
+            f"\U0001f4ac  {sender}{time_tag}\n"
+            f"  {body}"
+        )
+
+    # \u2500\u2500 Digest layout (multiple messages / multiple chats) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    chat_count = len(by_chat)
+    header = (
+        f"\U0001f4ac  WhatsApp  \u00b7  {total} new "
+        f"in {chat_count} chat{'s' if chat_count != 1 else ''}"
+    )
+    lines: list[str] = [header, "\u2500" * 22]
+
+    # Sort chats by most-recent message first so the freshest reads at the top.
+    def _last_time(chat_msgs: list[dict]) -> str:
+        return str(chat_msgs[-1].get("timestamp", ""))
+
+    sorted_chats = sorted(by_chat.items(), key=lambda kv: _last_time(kv[1]), reverse=True)
+
+    for chat_key, msgs in sorted_chats[:5]:
+        last = msgs[-1]
+        is_group = (
+            last.get("type") == "group" or last.get("from", "").endswith("@g.us")
+        )
+        sender = await _whatsapp_sender(last, resolver)
+        body = _whatsapp_body_preview(last)
+        t = _compact_time(last.get("timestamp", ""))
+        count_tag = f"  \u00b7  {len(msgs)} msgs" if len(msgs) > 1 else ""
+        time_tag = f"  \u00b7  {t}" if t else ""
+
+        lines.append("")
+        if is_group:
+            group = _whatsapp_chat_label(last) or "Group"
+            lines.append(f"\u25B8 \U0001f465 {group}{count_tag}{time_tag}")
+            lines.append(f"   {sender}:  {body[:110]}")
+        else:
+            lines.append(f"\u25B8 {sender}{count_tag}{time_tag}")
+            lines.append(f"   {body[:120]}")
+
+    if chat_count > 5:
+        lines.append("")
+        lines.append(f"   +{chat_count - 5} more chat{'s' if chat_count - 5 != 1 else ''}")
+
+    return "\n".join(lines)

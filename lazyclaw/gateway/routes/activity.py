@@ -78,6 +78,19 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                 "result_preview": t.result_preview,
                 "result": t.result_full or t.result_preview,
                 "error": t.error or None,
+                # ── Code Specialist visibility (in-memory snapshot) ──
+                # Populated by delegate.py when the task ran via
+                # claude-code MCP through the Code Specialist; empty
+                # tuple/string on other lanes so the UI hides panels
+                # gracefully. mcp_transcript is a list of dicts already
+                # JSON-safe.
+                "project_tag": getattr(t, "project_tag", "") or "",
+                "goal_id": getattr(t, "goal_id", "") or "",
+                "mcp_prompt": getattr(t, "mcp_prompt", "") or "",
+                "mcp_transcript": list(getattr(t, "mcp_transcript", ()) or ()),
+                "workspace_dir": getattr(t, "workspace_dir", "") or "",
+                "files_touched": list(getattr(t, "files_touched", ()) or ()),
+                "short_description": getattr(t, "short_description", "") or "",
             })
 
     # Merge background tasks from TaskRunner (if available). Enrich with
@@ -113,6 +126,17 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                     row["phase"] = getattr(tl, "phase", "") or ""
                     row["step_count"] = getattr(tl, "step_count", 0) or 0
                     row["project_tag"] = getattr(tl, "project_tag", "") or ""
+                    # Mid-run Code Specialist visibility: the brain is
+                    # currently invoking claude-code MCP. TrackedTask's
+                    # in-memory snapshot already has workspace_dir +
+                    # goal_id from submit(); transcript builds as
+                    # tool_call events fire. Forward whatever's settled
+                    # so the Web UI updates live.
+                    row["goal_id"] = getattr(tl, "goal_id", "") or ""
+                    row["workspace_dir"] = getattr(tl, "workspace_dir", "") or ""
+                    row["short_description"] = (
+                        getattr(tl, "short_description", "") or ""
+                    )
                 bg_running.append(row)
             # Pull historical (completed/failed) so the UI can render the
             # decrypted result body. Excluding rows still in ``running``
@@ -137,6 +161,15 @@ async def get_agent_status(user: User = Depends(get_current_user)):
                     "cost_usd": task.get("cost_usd", 0.0),
                     "tokens_used": task.get("tokens_used", 0),
                     "llm_calls": task.get("llm_calls", 0),
+                    # ── Code Specialist visibility (DB-persisted) ───
+                    # task_runner.list_all already decrypts + parses
+                    # these from the new background_tasks columns.
+                    "mcp_prompt": task.get("mcp_prompt") or "",
+                    "mcp_transcript": task.get("mcp_transcript") or [],
+                    "workspace_dir": task.get("workspace_dir") or "",
+                    "files_touched": task.get("files_touched") or [],
+                    "short_description": task.get("short_description") or "",
+                    "goal_id": task.get("goal_id") or "",
                 })
         except Exception:
             logger.warning("Failed to list background tasks", exc_info=True)

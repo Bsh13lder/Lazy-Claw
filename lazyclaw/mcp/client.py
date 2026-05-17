@@ -561,10 +561,30 @@ class MCPClient:
                             args[i] = resolved
                         break
 
+        # Per-server working directory. Used by claude-code so the agentic
+        # write→run→test loop writes files into the persistent
+        # /workspace bind mount instead of /app (which would vanish on
+        # container rebuild). Optional — when unset the subprocess
+        # inherits LazyClaw's cwd, matching the historical default.
+        # Auto-create the dir on first connect so the bind mount works
+        # cleanly on a fresh host machine.
+        cwd = self._config.get("cwd")
+        if cwd:
+            try:
+                os.makedirs(cwd, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "MCP %s: failed to ensure cwd=%s exists (%s) — "
+                    "falling back to inherited cwd",
+                    self._name, cwd, exc,
+                )
+                cwd = None
+
         params = StdioServerParameters(
             command=command,
             args=args,
             env=child_env,
+            cwd=cwd,
         )
         # Log MCP stderr to file. Pre-rotate when the file gets large so a
         # chatty child (crawl4ai etc.) can't fill the disk between restarts;

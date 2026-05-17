@@ -2754,6 +2754,153 @@ class TelegramCommands:
                 logger.warning("Task callback failed: %s", exc, exc_info=True)
                 await query.edit_message_text(f"\u274c Error: {exc}")
 
+        elif action == "wmute":
+            # \ud83d\udd07 Mute chat \u2014 fired from a WhatsApp watcher push.
+            # callback_data shape: wmute:<short_job_id>:<chat_slug>
+            # We use the in-memory _last_watcher_context (set by the
+            # daemon's _store_watcher_context call) to recover the real
+            # chat name, since the 24-char slug is lossy.
+            if not self._is_allowed(chat_id):
+                logger.warning(
+                    "Unauthorized wmute callback from chat %s", chat_id,
+                )
+                return
+            try:
+                _short_job, slug = value.split(":", 1)
+            except ValueError:
+                await query.edit_message_text("\u274c Bad mute callback.")
+                return
+            try:
+                from lazyclaw.heartbeat.daemon import get_last_watcher_context
+                wctx = get_last_watcher_context(user_id) or {}
+                chat_names = wctx.get("chat_names") or []
+                # Prefer the first stored chat name \u2014 it matches the chat
+                # whose buttons the user just tapped (notifications are
+                # 1:1 with surfaced chats in single-message layout).
+                chat_name = chat_names[0] if chat_names else slug.replace("_", " ")
+            except Exception:
+                chat_name = slug.replace("_", " ")
+            try:
+                from lazyclaw.mcp.manager import _active_clients
+                mcp_client = None
+                for sid, c in _active_clients.items():
+                    cn = getattr(c, "name", "") or ""
+                    if "whatsapp" in cn.lower():
+                        mcp_client = c
+                        break
+                if mcp_client is None:
+                    await query.edit_message_text(
+                        "\u274c WhatsApp not connected \u2014 can't mute."
+                    )
+                    return
+                import json as _json
+                raw = await mcp_client.call_tool(
+                    "whatsapp_mute", {"chat": chat_name, "action": "mute"},
+                )
+                data = _json.loads(raw) if raw.strip().startswith("{") else {}
+                final_name = data.get("chat") or chat_name
+                await query.edit_message_text(
+                    f"\U0001f507 Muted on WhatsApp: <b>{final_name}</b>",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                logger.warning("wmute callback failed: %s", exc, exc_info=True)
+                await query.edit_message_text(f"\u274c Mute failed: {exc}")
+
+        elif action == "wsnooze":
+            # \u23f0 Snooze watcher \u2014 pauses checks for N minutes without
+            # deleting the job. callback_data: wsnooze:<short_job>:<mins>
+            if not self._is_allowed(chat_id):
+                logger.warning(
+                    "Unauthorized wsnooze callback from chat %s", chat_id,
+                )
+                return
+            try:
+                short_job, mins_str = value.split(":", 1)
+                mins = int(mins_str)
+            except (ValueError, TypeError):
+                await query.edit_message_text("\u274c Bad snooze callback.")
+                return
+            if mins <= 0 or mins > 24 * 60:
+                await query.edit_message_text("\u274c Snooze out of range.")
+                return
+            try:
+                import json as _json
+                from datetime import timedelta as _td
+                from lazyclaw.crypto.encryption import (
+                    decrypt as _dec,
+                    encrypt as _enc,
+                    is_encrypted as _is_enc,
+                )
+                from lazyclaw.crypto.keys import get_user_dek
+                from lazyclaw.db.connection import db_session
+
+                key = await get_user_dek(self._config, user_id)
+                async with db_session(self._config) as db:
+                    cursor = await db.execute(
+                        "SELECT id, name, context FROM agent_jobs "
+                        "WHERE user_id = ? AND job_type = 'watcher' "
+                        "AND status = 'active'",
+                        (user_id,),
+                    )
+                    rows = await cursor.fetchall()
+
+                target_id: str | None = None
+                target_name = ""
+                target_ctx: dict = {}
+                for jid, enc_name, enc_ctx in rows:
+                    if not jid.startswith(short_job):
+                        continue
+                    try:
+                        raw = (
+                            _dec(enc_ctx, key) if enc_ctx and _is_enc(enc_ctx)
+                            else enc_ctx or "{}"
+                        )
+                        target_ctx = _json.loads(raw)
+                        target_name = (
+                            _dec(enc_name, key) if enc_name and _is_enc(enc_name)
+                            else enc_name or "watcher"
+                        )
+                        target_id = jid
+                        break
+                    except Exception:
+                        logger.debug("ctx decrypt failed during snooze", exc_info=True)
+                        continue
+
+                if not target_id:
+                    await query.edit_message_text(
+                        "\u274c Watcher not found (already removed?)."
+                    )
+                    return
+
+                until = (
+                    datetime.now(timezone.utc) + _td(minutes=mins)
+                ).isoformat()
+                target_ctx["snoozed_until"] = until
+                # Re-encrypt and persist.
+                async with db_session(self._config) as db:
+                    new_blob = _enc(_json.dumps(target_ctx), key)
+                    await db.execute(
+                        "UPDATE agent_jobs SET context = ? WHERE id = ?",
+                        (new_blob, target_id),
+                    )
+                    await db.commit()
+
+                hrs, mns = divmod(mins, 60)
+                if hrs and mns:
+                    span = f"{hrs}h {mns}m"
+                elif hrs:
+                    span = f"{hrs}h"
+                else:
+                    span = f"{mns}m"
+                await query.edit_message_text(
+                    f"\u23f0 Snoozed <b>{target_name}</b> for {span}",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                logger.warning("wsnooze callback failed: %s", exc, exc_info=True)
+                await query.edit_message_text(f"\u274c Snooze failed: {exc}")
+
     # -- Pinned status (auto-refresh) --------------------------------------
 
     async def _pinned_refresh_loop(self) -> None:

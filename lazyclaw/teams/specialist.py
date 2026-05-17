@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -18,6 +20,65 @@ from lazyclaw.crypto.encryption import decrypt_field, encrypt
 from lazyclaw.db.connection import db_session
 
 logger = logging.getLogger(__name__)
+
+
+# ── Code Specialist workspace ─────────────────────────────────────────
+#
+# Every Code Specialist run claims its own folder under WORKSPACE_ROOT so
+# the user can find the generated code on disk and the Web UI can link
+# to it. Layout:
+#
+#   /workspace/<project_tag-or-untagged>/<goal_id-or-adhoc>/<task_id>/
+#
+# Bind-mounted from `~/Desktop/lazyclaw-workspace` on the host (see
+# docker-compose.yml), so generated files appear directly on the user's
+# Desktop and survive `docker compose down`. Per-task isolation means
+# parallel Code Specialist runs never trample each other.
+WORKSPACE_ROOT = os.environ.get("LAZYCLAW_WORKSPACE_ROOT", "/workspace")
+
+# Path components are user-derivable (project_tag in particular). Sanitize
+# aggressively so a malicious tag can't escape the mount or land on hidden
+# files. Keep slugs short — long tags break `ls` output but don't break
+# functionality; truncating prevents path-length errors on exFAT-mounted
+# Windows hosts.
+_SLUG_MAX = 64
+_SLUG_SUB = re.compile(r"[^a-z0-9_-]+")
+_LEADING_DOT_DASH = re.compile(r"^[._-]+")
+
+
+def _slugify_for_path(value: str | None, fallback: str) -> str:
+    """Lowercase + ASCII-safe slug for use as a path component.
+
+    Strips path-traversal characters (``..``, leading ``/``), collapses
+    runs of unsafe chars to ``_``, truncates to ``_SLUG_MAX``. Empty
+    input yields ``fallback`` so callers always get a non-empty segment.
+    """
+    if not value:
+        return fallback
+    s = value.strip().lower().replace(":", "_").replace("/", "_")
+    s = _SLUG_SUB.sub("_", s)
+    s = _LEADING_DOT_DASH.sub("", s)
+    s = s.strip("_-") or fallback
+    return s[:_SLUG_MAX]
+
+
+def code_workspace_dir(
+    *,
+    task_id: str,
+    project_tag: str | None = None,
+    goal_id: str | None = None,
+    root: str = WORKSPACE_ROOT,
+) -> str:
+    """Resolve the persistent workspace path for a Code Specialist run.
+
+    Pure function — does NOT create the directory; callers do that
+    explicitly via ``os.makedirs(..., exist_ok=True)`` so tests can
+    exercise resolution without filesystem side effects.
+    """
+    tag = _slugify_for_path(project_tag, "untagged")
+    goal = _slugify_for_path(goal_id, "adhoc")
+    tid = _slugify_for_path(task_id, "task")
+    return os.path.join(root, tag, goal, tid)
 
 
 @dataclass(frozen=True)

@@ -419,6 +419,15 @@ _CHANNEL_CORE_SUFFIXES = frozenset({
     "_status", "_setup", "_read", "_read_dms", "_read_profile",
     "_read_feed", "_list_chats", "_search", "_send", "_send_dm",
     "_reply_dm",
+    # Upwork MCP uses get_* / check_* naming — without these, "find what
+    # James said on upwork" / "Find James Blue's Upwork conversation"
+    # silently filtered every upwork read tool out of the channel-tool
+    # set (no _wants_action → core-only filter → zero matches), and the
+    # background worker hallucinated 12,280 chars from prior context
+    # instead of fetching. Observed 2026-05-17 19:18:03.
+    "_get_messages", "_get_conversation", "_get_unread_count",
+    "_check_session", "_get_my_profile", "_get_proposals",
+    "_get_contracts",
 })
 
 # Keywords that indicate the user wants to DO something (not just check status).
@@ -2805,6 +2814,9 @@ class Agent:
                 await cb.on_event(AgentEvent(
                     "done", "Plan rejected", {"reason": pr.reason or ""}
                 ))
+                if self._team_lead and _fg_task_id:
+                    self._team_lead.fail(_fg_task_id, pr.reason or "plan rejected")
+                    _fg_task_id = None
                 return (
                     f"Plan rejected: {pr.reason or 'no reason given'}. "
                     "Tell me how you'd like to proceed."
@@ -3653,6 +3665,12 @@ class Agent:
                                      "retries": _halluc_retries},
                                 ))
                                 await cb.on_event(AgentEvent("done", _bail_msg, {}))
+                                if self._team_lead and _fg_task_id:
+                                    self._team_lead.fail(
+                                        _fg_task_id,
+                                        f"hallucination cap on {_first_bad!r}",
+                                    )
+                                    _fg_task_id = None
                                 return _bail_msg
 
                             messages.append(LLMMessage(role="assistant", content=response.content or ""))
@@ -4508,6 +4526,17 @@ class Agent:
                         await cb.on_event(AgentEvent("done", "Dispatched", {}))
                         if _delegate_registered and self.registry:
                             self.registry.unregister("delegate")
+                        # Foreground turn handed off cleanly — release TeamLead
+                        # slot so the UI's "in flight" indicator clears. Without
+                        # this, the chat card lingers in _active forever (lane
+                        # queue empties via `Job completed`, but observability
+                        # state leaks).
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.complete(
+                                _fg_task_id,
+                                "Continuing in background — will report back when done.",
+                            )
+                            _fg_task_id = None
                         return (
                             "Continuing in background — will report back "
                             "when done."
@@ -4531,6 +4560,11 @@ class Agent:
                         _user_msg = _result_str.replace(
                             "Error: STOP_OAUTH_CREDENTIAL: ", "",
                         )
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.fail(
+                                _fg_task_id, "OAuth credential not authorized",
+                            )
+                            _fg_task_id = None
                         return _user_msg
 
                     # ── Browser action planner: evaluate result ────────
@@ -4805,6 +4839,11 @@ class Agent:
                         "Three-strikes graceful handoff returned to user (tool=%s, reauth=%s)",
                         _failed_tool, _reauth_url or "(none)",
                     )
+                    if self._team_lead and _fg_task_id:
+                        self._team_lead.fail(
+                            _fg_task_id, f"3 strikes on {_failed_tool}",
+                        )
+                        _fg_task_id = None
                     return _handoff
 
                 # ── Auto-promote-to-background nudge ──
@@ -4844,6 +4883,23 @@ class Agent:
                         "recall_memories", "search_tools", "save_memory",
                         "list_tasks", "list_jobs", "list_watchers",
                         "work_todos", "daily_briefing", "vault_get",
+                        # Deterministic read-only NL skills whose names
+                        # don't fit the get_*/list_*/search_* shape but
+                        # which are pure fetches that should NOT trigger
+                        # AUTO-PROMOTE. Without this, asking
+                        # "find out what James wants on Upwork" called
+                        # `upwork_last_conversation` (correct!) and the
+                        # brain was IMMEDIATELY force-promoted to
+                        # run_background before it could synthesize a
+                        # reply from the fetched data. Observed
+                        # 2026-05-17 19:17:41.
+                        "upwork_last_conversation",
+                        "upwork_inbox_check",
+                        "upwork_contract_poll",
+                        "find_contact",
+                        "list_contacts",
+                        "list_memories",
+                        "lookup_project_asset",
                     }:
                         return True
                     return (

@@ -45,6 +45,26 @@ _FALSE_COMPOUND = re.compile(
     re.IGNORECASE,
 )
 
+# "Save X's contact: <phone/email>" is always ONE task UNLESS the user also
+# explicitly asks to message/send something. The number / email is contact
+# data — not a "send to that number" intent. Catches the 2026-05-16 Gerardo
+# false split, but stays out of the way when the user says "...also send X".
+# Matches: "save gerardo's contact ...", "remember this contact ...", etc.
+_SAVE_CONTACT_RE = re.compile(
+    r"\b(save|store|remember|add|keep)\b[^\n]{0,40}\bcontacts?\b",
+    re.IGNORECASE,
+)
+# Explicit messaging verbs that mean "also do a send" — if any of these
+# appear, we let the splitter LLM decide. Tight list to avoid false hits.
+_EXPLICIT_SEND_RE = re.compile(
+    r"\b("
+    r"send|message|text|dm|whatsapp\s+(?:him|her|them)|"
+    r"email\s+(?:him|her|them)|ping|forward|notify|tell\s+(?:him|her|them)|"
+    r"share\s+with\s+(?:him|her|them)|let\s+(?:him|her|them)\s+know"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Messages that OPEN with a single-intent verb ("scrape …", "find …",
 # "list …", "search …") are almost never multi-task — even if they happen
 # to contain "and". Skips a 2-3 s LLM round-trip on a common class of
@@ -105,6 +125,14 @@ def _looks_compound(message: str) -> bool:
     # Exclude "verb X and tell me" — that's a single task with reporting suffix
     if _FALSE_COMPOUND.search(message) is not None:
         return False
+    # "Save contact: <data>" with NO explicit send verb — always a single
+    # save task. The phone/email is contact data, not a send target.
+    # If the user did add "also send / message him", let the LLM split.
+    if (
+        _SAVE_CONTACT_RE.search(message) is not None
+        and _EXPLICIT_SEND_RE.search(message) is None
+    ):
+        return False
     # Single-intent openers ("scrape X", "find all Y", "search for Z") —
     # these are always a single task even when the object contains "and"
     # ("scrape restaurants and cafes"). Saves a 2-3 s LLM round-trip on
@@ -132,6 +160,11 @@ Rules:
 - "clean my gmail and check bitcoin price" = 2 tasks (different goals)
 - "send email to John then check my calendar" = 2 tasks
 - Single tasks = return as-is
+- "Save X's contact: <phone/email>" or "remember this contact: ..." is ALWAYS 1 task.
+  A phone number or email on its own line right after that intent is CONTACT DATA
+  being saved — never a separate "send" instruction. Only split if the user
+  ALSO writes an explicit send/message/text verb directed at the contact
+  (e.g. "...also message him", "...and email her", "...send him my address").
 
 Classify each sub-task lane:
 - "foreground": needs browser, user interaction, or visual output

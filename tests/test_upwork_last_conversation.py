@@ -26,6 +26,7 @@ from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.runtime.instant_dispatch import INSTANT_ROUTES, _CRON_PREFIX_RE
 from lazyclaw.skills.builtin.survival.upwork_last_conversation import (
     UpworkLastConversationSkill,
+    _match_contact,
     _normalize_conversation,
     _normalize_inbox,
 )
@@ -356,3 +357,158 @@ def test_instant_dispatch_does_not_overmatch(phrase):
                 f"phrase {phrase!r} wrongly matched last_conversation route"
             )
             return
+
+
+# ── Contact-name matching ──────────────────────────────────────────
+
+
+def test_match_contact_substring():
+    inbox = [
+        {"contact_name": "Sarah Chen"},
+        {"contact_name": "James Blue"},
+    ]
+    hit = _match_contact(inbox, "blue")
+    assert hit is not None
+    assert hit["contact_name"] == "James Blue"
+
+
+def test_match_contact_first_name_only():
+    inbox = [
+        {"contact_name": "Sarah Chen"},
+        {"contact_name": "James Blue"},
+    ]
+    hit = _match_contact(inbox, "James")
+    assert hit is not None
+    assert hit["contact_name"] == "James Blue"
+
+
+def test_match_contact_case_insensitive():
+    inbox = [{"contact_name": "James Blue"}]
+    hit = _match_contact(inbox, "JAMES")
+    assert hit is not None
+    assert hit["contact_name"] == "James Blue"
+
+
+def test_match_contact_returns_first_match_for_freshness():
+    """Inboxes are newest-first; for multiple matches the freshest wins."""
+    inbox = [
+        {"contact_name": "James Wong", "ts": "now"},
+        {"contact_name": "James Blue", "ts": "old"},
+    ]
+    hit = _match_contact(inbox, "james")
+    assert hit is not None
+    assert hit["contact_name"] == "James Wong"
+
+
+def test_match_contact_no_match():
+    inbox = [{"contact_name": "James Blue"}]
+    assert _match_contact(inbox, "Sarah") is None
+
+
+def test_match_contact_empty_query():
+    inbox = [{"contact_name": "James Blue"}]
+    assert _match_contact(inbox, "") is None
+    assert _match_contact(inbox, "   ") is None
+
+
+def test_match_contact_handles_missing_name_key():
+    inbox = [{"room_url": "x"}, {"contact_name": "James"}]
+    hit = _match_contact(inbox, "james")
+    assert hit is not None
+    assert hit["contact_name"] == "James"
+
+
+# ── Skill: contact_name parameter (planning path) ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_skill_finds_specific_contact(tmp_config):
+    """When contact_name is given, the skill returns THAT thread, not the
+    newest. This is the planning path — brain says 'what does James want',
+    NOT 'what's in the most recent inbox slot'."""
+    inbox = [
+        {"contact_name": "Sarah Chen",
+         "room_url": "https://www.upwork.com/ab/messages/rooms/room_sarah"},
+        {"contact_name": "James Blue",
+         "room_url": "https://www.upwork.com/ab/messages/rooms/room_james"},
+    ]
+    conv = {
+        "contact_name": "James Blue",
+        "messages": [
+            {"sender": "James Blue", "content": "scope is real estate",
+             "is_mine": False},
+        ],
+    }
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        get_conversation_response={"result": conv},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    result = await skill.execute("u1", {"contact_name": "James"})
+
+    # Header names the right person — NOT Sarah Chen (newest)
+    assert "James Blue" in result
+    assert "Sarah Chen" not in result
+    # get_conversation was passed James's room, not Sarah's
+    cv_call = registry._get_conversation.calls[0]
+    assert cv_call["room_id"].endswith("/room_james")
+
+
+@pytest.mark.asyncio
+async def test_skill_contact_name_widens_inbox_scan(tmp_config):
+    """When matching by contact, we need a wider inbox scan than limit=1
+    so the target thread isn't missed if it's not the freshest."""
+    inbox = [{"contact_name": "James", "room_url": "https://x"}]
+    conv = {"messages": [{"sender": "James", "content": "hi", "is_mine": False}]}
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        get_conversation_response={"result": conv},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    await skill.execute("u1", {"contact_name": "James"})
+    # Without contact_name the inbox call uses limit=1.
+    # With contact_name the inbox limit must widen so a non-top thread
+    # is still findable.
+    assert registry._get_messages.calls[0]["limit"] >= 20
+
+
+@pytest.mark.asyncio
+async def test_skill_contact_not_found_returns_helpful_hint(tmp_config):
+    """When the named contact isn't in the inbox top, the error message
+    must surface what IS available so the user/brain can correct."""
+    inbox = [{"contact_name": "Sarah Chen", "room_url": "https://x"}]
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        # get_conversation should NOT be called when match fails
+        get_conversation_response={"result": {"messages": []}},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    result = await skill.execute("u1", {"contact_name": "James"})
+    assert "James" in result
+    assert "no" in result.lower() or "match" in result.lower()
+    # Inbox preview shown so the brain can pick the right name on retry
+    assert "Sarah Chen" in result
+    # Did NOT proceed to fetch a wrong conversation
+    assert len(registry._get_conversation.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_skill_no_contact_name_keeps_legacy_behavior(tmp_config):
+    """Omitting contact_name preserves the 'most recent' behavior so
+    existing 'show me the last conversation' callers don't regress."""
+    inbox = [
+        {"contact_name": "Sarah Chen", "room_url": "https://x/sarah"},
+        {"contact_name": "James Blue", "room_url": "https://x/james"},
+    ]
+    conv = {"messages": [{"sender": "Sarah", "content": "hi", "is_mine": False}]}
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        get_conversation_response={"result": conv},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    await skill.execute("u1", {})  # no contact_name
+    cv_call = registry._get_conversation.calls[0]
+    # Newest (Sarah) thread fetched — NOT James
+    assert cv_call["room_id"] == "https://x/sarah"
+    # Legacy inbox scan is still limit=1 to minimize cost
+    assert registry._get_messages.calls[0]["limit"] == 1

@@ -383,7 +383,16 @@ CREATE TABLE IF NOT EXISTS background_tasks (
     tokens_used INTEGER DEFAULT 0,
     llm_calls INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
-    completed_at TEXT
+    completed_at TEXT,
+    -- Code Specialist visibility (added 2026-05-16). Populated when
+    -- the task ran via claude-code MCP; NULL otherwise. See
+    -- lazyclaw/db/connection.py migrations for rationale.
+    mcp_prompt TEXT,
+    mcp_transcript TEXT,
+    workspace_dir TEXT,
+    files_touched TEXT,
+    short_description TEXT,
+    goal_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_bg_tasks_user_status

@@ -424,6 +424,84 @@ async def get_conversation_messages(
     import asyncio as _aio
     await _aio.sleep(2)
 
+    # Force the virtualized message list to render the NEWEST bubbles.
+    # Upwork's chat is a virtualized list — it mounts ~10-30 bubbles
+    # around the current scroll position, leaving everything else
+    # un-rendered. Two failure modes hit us before the explicit-scroll
+    # path was added:
+    #   1. Upwork restores the previous scroll position on navigation,
+    #      so if the tab was last scrolled to the TOP (e.g. by a prior
+    #      "scroll to load history" pass), `safe_goto` lands you at the
+    #      top and the newest bubble at the bottom is NOT mounted.
+    #   2. Right after a container/host-bridge restart the renderer
+    #      lags — the 2s sleep above is enough for Tiptap but not for
+    #      the message list to settle.
+    # Verified live 2026-05-17 21:29:58: brain called this 1 min after
+    # container restart; MCP returned a snapshot ending at the 10:09 PM
+    # offer; James's 9:12 PM reply (sent ~12 min earlier) was not in
+    # the DOM at all. Manual MCP call 4 min later (warm browser) DID
+    # return it — same code path, just a settled DOM.
+    #
+    # Fix: scroll the chat container to bottom and wait for the
+    # rendered bubble count to stabilize before extraction. We poll
+    # because Upwork doesn't expose a "list-rendered" event — count
+    # stability across 3 consecutive ticks (~600 ms) is the cheapest
+    # signal that virtualization has finished.
+    try:
+        prev_count = -1
+        stable_ticks = 0
+        for _i in range(15):  # max ~3 s budget
+            tick = await page.evaluate(r"""
+                (() => {
+                    const sels = [
+                        '[data-test*="message-list"]',
+                        '[data-test*="thread"] [class*="scroll"]',
+                        'main [class*="scroll"]',
+                        'div[class*="virtual"]',
+                        'div[class*="MessageList"]',
+                    ];
+                    let scroller = null;
+                    for (const s of sels) {
+                        const el = document.querySelector(s);
+                        if (el && el.scrollHeight > el.clientHeight) {
+                            scroller = el; break;
+                        }
+                    }
+                    if (!scroller) {
+                        let best = null, bestH = 0;
+                        document.querySelectorAll('*').forEach(el => {
+                            const st = getComputedStyle(el);
+                            if ((st.overflowY === 'auto' || st.overflowY === 'scroll') &&
+                                el.scrollHeight > el.clientHeight &&
+                                el.scrollHeight > bestH) {
+                                best = el; bestH = el.scrollHeight;
+                            }
+                        });
+                        scroller = best;
+                    }
+                    if (scroller) {
+                        scroller.scrollTop = scroller.scrollHeight;
+                    }
+                    const count = document.querySelectorAll(
+                        '[data-test="story-container"]'
+                    ).length;
+                    return {scrolled: !!scroller, count};
+                })()
+            """)
+            count = (tick or {}).get("count", 0)
+            if count == prev_count and count > 0:
+                stable_ticks += 1
+                if stable_ticks >= 3:
+                    break
+            else:
+                stable_ticks = 0
+            prev_count = count
+            await _aio.sleep(0.2)
+    except Exception:
+        # Non-fatal — fall through to the legacy extraction. Worst case
+        # we extract whatever's mounted, same as the pre-fix behavior.
+        logger.debug("scroll-to-bottom warmup failed", exc_info=True)
+
     conversation: dict = {"room_id": room_id, "messages": []}
 
     # Contact name. The 2026 layout dropped [data-test="contact-name"]
@@ -475,24 +553,41 @@ async def get_conversation_messages(
     # renders the header on the FIRST bubble of a run from the same
     # person, leaving subsequent bubbles with body only. Carry forward
     # the last-known sender so each emitted message has author info.
+    # ALSO track last_is_mine so the extractor can detect a speaker
+    # flip and refuse to inherit the wrong sender across it (see
+    # _extract_message docstring for the 2026-05-17 incident that
+    # motivated this).
     last_sender: str | None = None
     last_timestamp: str | None = None
+    last_is_mine: bool | None = None
+    _ctx_contact = conversation.get("contact_name")
+    if isinstance(_ctx_contact, str) and _is_nav_noise(_ctx_contact):
+        _ctx_contact = None
 
     for el in containers[-limit:]:
         try:
             msg = await _extract_message(
-                el, last_sender=last_sender, last_timestamp=last_timestamp,
+                el,
+                last_sender=last_sender,
+                last_timestamp=last_timestamp,
+                last_is_mine=last_is_mine,
+                me_name=me_name,
+                contact_name=_ctx_contact,
             )
             if msg:
                 last_sender = msg.get("sender") or last_sender
                 last_timestamp = msg.get("timestamp") or last_timestamp
+                last_is_mine = msg.get("is_mine")
                 # is_mine override: if caller passed me_name (e.g.
                 # "Vato Tchipa" from lazyclaw's display_name), match
                 # the sender against it. This is the only reliable
                 # signal — Upwork's bubble class hints (.outgoing
-                # / [class*="self"]) are stale on the 2026 layout.
+                # / [class*="self"]) are stale on the 2026 layout,
+                # but combined with the flip-aware carry-forward
+                # above they now stay self-consistent.
                 if me_name and msg.get("sender"):
                     msg["is_mine"] = _sender_matches(msg["sender"], me_name)
+                    last_is_mine = msg["is_mine"]
                 conversation["messages"].append(msg)
         except Exception:
             continue
@@ -551,6 +646,9 @@ async def _extract_message(
     *,
     last_sender: str | None = None,
     last_timestamp: str | None = None,
+    last_is_mine: bool | None = None,
+    me_name: str | None = None,
+    contact_name: str | None = None,
 ) -> dict | None:
     """Extract message data from a single bubble element.
 
@@ -567,6 +665,17 @@ async def _extract_message(
     same author — without carry-forward those bubbles emit with no
     sender, which breaks any drafter that needs to know "who said what
     last" to construct a reply.
+
+    Carry-forward is SENDER-SCOPED — when ``last_is_mine`` is provided
+    and the current bubble's ``is_mine`` class hint differs from it,
+    the previous sender is the WRONG person to carry forward (this
+    fired 2026-05-17 19:18: Upwork rendered Vato's reply without a
+    visible story-header, so the parser inherited James's sender +
+    timestamp from the prior bubble, and the brain ingested
+    PropStream/Reonomy/Crexi as "James said this" — contaminating
+    every downstream plan). When the flip is detected we DON'T carry
+    forward the sender; instead we use `me_name` / `contact_name` as
+    the contextual default for that side of the conversation.
     """
     msg: dict[str, object] = {}
 
@@ -616,18 +725,36 @@ async def _extract_message(
     if not msg.get("content"):
         return None
 
-    # Carry-forward author info when this bubble omits the header.
-    if not msg.get("sender") and last_sender:
-        msg["sender"] = last_sender
-    if not msg.get("timestamp") and last_timestamp:
-        msg["timestamp"] = last_timestamp
-
-    # is_mine: legacy class hint OR sender-name match.
+    # is_mine via DOM class hint — needs to come BEFORE the carry-
+    # forward decision so we can detect a sender flip and refuse to
+    # carry the wrong author across.
     me_indicator = await el.query_selector(
         '.my-message, [data-test="my-message"], .sent, '
         '[class*="outgoing"], [class*="self"]'
     )
-    msg["is_mine"] = me_indicator is not None
+    current_is_mine = me_indicator is not None
+    msg["is_mine"] = current_is_mine
+
+    sender_flipped = (
+        last_is_mine is not None and current_is_mine != last_is_mine
+    )
+
+    # Carry-forward author info when this bubble omits the header —
+    # BUT only if the speaker hasn't flipped. On a flip, the previous
+    # sender is by definition the WRONG person; fall back to me_name
+    # (when this bubble is mine) or contact_name (when it isn't), and
+    # leave timestamp blank rather than inheriting the prior block's.
+    if not msg.get("sender"):
+        if sender_flipped:
+            if current_is_mine and me_name:
+                msg["sender"] = me_name
+            elif (not current_is_mine) and contact_name:
+                msg["sender"] = contact_name
+            # else: leave unset; caller may resolve via page heuristics
+        elif last_sender:
+            msg["sender"] = last_sender
+    if not msg.get("timestamp") and last_timestamp and not sender_flipped:
+        msg["timestamp"] = last_timestamp
 
     # Attachments
     attachment_els = await el.query_selector_all(

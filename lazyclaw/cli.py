@@ -272,6 +272,21 @@ async def run_agent(config: Config) -> None:
     from lazyclaw.gateway.routes.activity import set_activity_deps
     set_activity_deps(team_lead, task_runner)
 
+    # Wire the Code Specialist goal dispatch. The import registers
+    # ``register_default_dispatch("code", dispatch_code_goal)`` at module
+    # load; ``register_runtime`` injects the per-process singletons the
+    # dispatch needs (eco_router, registry, team_lead, permission
+    # checker). Without this, a goal answered via the Web UI intake
+    # modal stays in EXECUTING with no specialist firing.
+    from lazyclaw.runtime import code_goal_executor as _code_goal_executor
+    _code_goal_executor.register_runtime(
+        config=config,
+        registry=registry,
+        eco_router=agent.eco_router,
+        permission_checker=permission_checker,
+        team_lead=team_lead,
+    )
+
     # Bridge TeamLead lifecycle events → per-user task_event_bus so the
     # web chat WebSocket pumps live `task_started` / `task_step` /
     # `task_phase` / `task_completed` frames straight to Activity/Overview

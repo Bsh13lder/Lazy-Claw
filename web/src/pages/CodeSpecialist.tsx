@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useAgentStatus } from "../context/AgentStatusContext";
-import type { AgentTask } from "../api";
+import type { AgentTask, CodeSpecialistStep } from "../api";
+import NewCodeTaskModal from "../components/NewCodeTaskModal";
 
 /**
  * Code Specialist — live view of every Claude Code MCP background run,
@@ -72,6 +73,98 @@ function isCodeSpecialistTask(t: AgentTask): boolean {
   return hay.includes("claude-code") || hay.includes("claude_code") || hay.includes("code_specialist");
 }
 
+interface CollapsibleProps {
+  label: string;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}
+
+// Pure CSS collapsible — mirrors ThinkingPanel from ThinkingPanel.tsx
+// without pulling that component in (lives in chat-only contexts).
+// `count` adds a small pill next to the label so users can see size at
+// a glance ("Transcript · 12").
+function Collapsible({ label, count, defaultOpen = false, children }: CollapsibleProps) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border-t border-bg-border first:border-t-0 pt-2 first:pt-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 text-left text-text-muted uppercase tracking-wide text-[10px] hover:text-text-secondary"
+      >
+        <span
+          className={`transition-transform inline-block ${open ? "rotate-90" : ""}`}
+        >
+          ▶
+        </span>
+        <span>{label}</span>
+        {count != null && (
+          <span className="ml-auto px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary text-[10px] font-mono">
+            {count}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-2 text-xs text-text-secondary">{children}</div>
+      )}
+    </div>
+  );
+}
+
+function copyToClipboard(text: string) {
+  // navigator.clipboard requires HTTPS or localhost — Vite dev is fine.
+  // Best-effort: silently no-op if the API isn't available.
+  try {
+    navigator.clipboard?.writeText(text);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Format a single TranscriptStep row for the timeline. Reuses the
+// status palette from AgentConsole's LaneRow so the page reads
+// consistently with the chat-side activity strip.
+function StepRow({ step }: { step: CodeSpecialistStep }) {
+  const isErr = step.success === false || !!step.error;
+  const dot = isErr
+    ? "bg-rose-500"
+    : step.duration_ms > 0
+    ? "bg-emerald-500"
+    : "bg-amber-500";
+  return (
+    <div className="flex items-start gap-2 py-1 border-t border-bg-border/40 first:border-t-0">
+      <span className={`mt-1.5 h-1.5 w-1.5 rounded-full shrink-0 ${dot}`} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2">
+          <span className="font-mono text-text-primary text-[11px] truncate">
+            {step.name}
+          </span>
+          {step.duration_ms > 0 && (
+            <span className="text-text-muted text-[10px]">
+              {step.duration_ms}ms
+            </span>
+          )}
+        </div>
+        {step.args_summary && (
+          <div className="text-text-muted font-mono text-[11px] truncate">
+            {step.args_summary}
+          </div>
+        )}
+        {step.result_summary && (
+          <div
+            className={`font-mono text-[11px] truncate ${
+              isErr ? "text-rose-300" : "text-text-secondary"
+            }`}
+          >
+            → {step.result_summary}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface TaskCardProps {
   task: AgentTask;
   expanded: boolean;
@@ -82,6 +175,16 @@ function TaskCard({ task, expanded, onToggle }: TaskCardProps) {
   const elapsed = task.elapsed_s != null
     ? fmtElapsed(task.elapsed_s)
     : task.duration_s != null ? fmtElapsed(task.duration_s) : "—";
+  // Short description pill is always visible (collapsed AND expanded) so
+  // the user can scan a tall list of tasks and see what each one is
+  // *for* without expanding. Falls back to the existing description /
+  // truncated instruction so non-code-specialist rows still get a
+  // meaningful subtitle.
+  const subtitle =
+    task.short_description ||
+    task.description ||
+    (task.instruction ? task.instruction.split("\n")[0].slice(0, 120) : "");
+
   return (
     <div
       className={`rounded-lg border ${expanded ? "border-accent/50" : "border-bg-border"} bg-bg-secondary transition-colors`}
@@ -89,25 +192,71 @@ function TaskCard({ task, expanded, onToggle }: TaskCardProps) {
       <button
         type="button"
         onClick={onToggle}
-        className="w-full text-left px-3 py-2 flex items-center gap-3 hover:bg-bg-hover rounded-lg"
+        className="w-full text-left px-3 py-2 flex flex-col gap-1 hover:bg-bg-hover rounded-lg"
       >
-        <span className={`px-2 py-0.5 rounded-full text-xs border ${statusColor(task.status)}`}>
-          {task.status}
-        </span>
-        <span className="font-medium text-text-primary truncate flex-1">
-          {task.name}
-        </span>
-        <span className="text-xs text-text-muted whitespace-nowrap">
-          {elapsed}
-        </span>
-        {task.step_count != null && task.step_count > 0 && (
-          <span className="text-xs text-text-muted whitespace-nowrap">
-            · {task.step_count} steps
+        <div className="flex items-center gap-3">
+          <span className={`px-2 py-0.5 rounded-full text-xs border ${statusColor(task.status)}`}>
+            {task.status}
           </span>
+          <span className="font-medium text-text-primary truncate flex-1">
+            {task.name}
+          </span>
+          <span className="text-xs text-text-muted whitespace-nowrap">
+            {elapsed}
+          </span>
+          {task.step_count != null && task.step_count > 0 && (
+            <span className="text-xs text-text-muted whitespace-nowrap">
+              · {task.step_count} steps
+            </span>
+          )}
+        </div>
+        {subtitle && (
+          <div className="text-[11px] text-text-secondary truncate pl-1">
+            {subtitle}
+          </div>
         )}
       </button>
       {expanded && (
         <div className="px-3 pb-3 space-y-2 text-xs">
+          {/* Workspace folder + files. Clickable path copies to
+              clipboard so the user can paste it into a terminal.
+              Files are chip-list — truncated at 8 with overflow count. */}
+          {task.workspace_dir && (
+            <div className="rounded border border-bg-border bg-bg-tertiary/40 p-2 space-y-1.5">
+              <div className="text-text-muted uppercase tracking-wide text-[10px]">
+                Workspace
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  copyToClipboard(task.workspace_dir || "");
+                }}
+                title="Click to copy path"
+                className="font-mono text-[11px] text-accent hover:underline break-all text-left w-full"
+              >
+                📁 {task.workspace_dir}
+              </button>
+              {task.files_touched && task.files_touched.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {task.files_touched.slice(0, 8).map((f) => (
+                    <span
+                      key={f}
+                      className="px-1.5 py-0.5 rounded bg-bg-secondary text-text-secondary font-mono text-[10px]"
+                    >
+                      {f}
+                    </span>
+                  ))}
+                  {task.files_touched.length > 8 && (
+                    <span className="px-1.5 py-0.5 rounded bg-bg-secondary text-text-muted font-mono text-[10px]">
+                      +{task.files_touched.length - 8} more
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {task.instruction && (
             <div>
               <div className="text-text-muted uppercase tracking-wide text-[10px] mb-0.5">
@@ -118,6 +267,38 @@ function TaskCard({ task, expanded, onToggle }: TaskCardProps) {
               </div>
             </div>
           )}
+
+          {/* Full prompt sent to claude-code MCP. Collapsible because
+              system prompt + workspace hint + user task often runs to
+              several hundred lines. Hidden when empty (e.g. browser
+              specialist tasks). */}
+          {task.mcp_prompt && (
+            <Collapsible label="Prompt sent">
+              <div className="rounded bg-bg-tertiary/40 p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
+                {task.mcp_prompt}
+              </div>
+            </Collapsible>
+          )}
+
+          {/* Per-step transcript — the visibility win the user asked
+              for. Each row shows tool + args + result + duration.
+              Defaults open for running tasks so live progress is
+              visible; closed for completed tasks to keep the page
+              scrollable. */}
+          {task.mcp_transcript && task.mcp_transcript.length > 0 && (
+            <Collapsible
+              label="Transcript"
+              count={task.mcp_transcript.length}
+              defaultOpen={task.status === "running"}
+            >
+              <div className="rounded bg-bg-tertiary/40 p-2 max-h-72 overflow-auto">
+                {task.mcp_transcript.map((s, i) => (
+                  <StepRow key={`${s.name}-${i}`} step={s} />
+                ))}
+              </div>
+            </Collapsible>
+          )}
+
           {task.current_tool && task.status === "running" && (
             <div>
               <div className="text-text-muted uppercase tracking-wide text-[10px] mb-0.5">
@@ -178,6 +359,7 @@ export default function CodeSpecialist() {
   const { agentStatus } = useAgentStatus();
   const [filter, setFilter] = useState<string>("all");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
 
   const groups = useMemo<ProjectGroup[]>(() => {
     const active = (agentStatus?.background || []).filter(isCodeSpecialistTask);
@@ -231,7 +413,20 @@ export default function CodeSpecialist() {
             Live Claude Code MCP background runs — grouped by project. {totalActive} running, {totalRecent} recent.
           </p>
         </div>
+        <button
+          type="button"
+          onClick={() => setModalOpen(true)}
+          className="px-4 py-2 rounded-lg bg-accent text-bg-primary text-sm font-medium hover:bg-accent/90 transition-colors flex items-center gap-2 shrink-0"
+        >
+          <span className="text-lg leading-none">+</span>
+          New Code Task
+        </button>
       </header>
+      <NewCodeTaskModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+      />
+
 
       <div className="flex flex-wrap gap-1.5">
         {allBadges.map((b) => (
@@ -256,7 +451,18 @@ export default function CodeSpecialist() {
         </div>
       )}
 
-      {visibleGroups.map((g) => (
+      {visibleGroups.map((g) => {
+        // Collect distinct Goal Executor goal_ids in this group so
+        // users can see "Goal X is driving N code tasks here" at the
+        // group header level without expanding individual cards.
+        const goalIds = Array.from(
+          new Set(
+            [...g.active, ...g.recent]
+              .map((t) => t.goal_id)
+              .filter((id): id is string => !!id),
+          ),
+        );
+        return (
         <section
           key={g.key || "_untagged"}
           className="rounded-xl border border-bg-border bg-bg-primary/40 p-4 space-y-3"
@@ -272,6 +478,22 @@ export default function CodeSpecialist() {
               {g.active.length} running · {g.recent.length} recent
             </span>
           </div>
+          {goalIds.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 text-[10px] text-text-muted">
+              <span className="uppercase tracking-wide">
+                Driven by goal{goalIds.length > 1 ? "s" : ""}:
+              </span>
+              {goalIds.map((id) => (
+                <span
+                  key={id}
+                  className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300 font-mono"
+                  title={id}
+                >
+                  {id.slice(0, 12)}
+                </span>
+              ))}
+            </div>
+          )}
 
           {g.active.length > 0 && (
             <div className="space-y-1.5">
@@ -305,7 +527,8 @@ export default function CodeSpecialist() {
             </div>
           )}
         </section>
-      ))}
+        );
+      })}
     </div>
   );
 }

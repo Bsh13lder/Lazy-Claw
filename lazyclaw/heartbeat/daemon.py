@@ -453,6 +453,54 @@ class HeartbeatDaemon:
                         "tab health backend close failed", exc_info=True,
                     )
 
+    @staticmethod
+    def _build_watcher_keyboard(
+        job_id: str,
+        service: str,
+        notified_items: list[dict],
+    ) -> list[list[dict]]:
+        """Build the inline keyboard attached to every MCP watcher push.
+
+        Layout:
+            [ 🔇 Mute chat ]               (whatsapp only — kills source noise)
+            [ ⏰ 1h ] [ ⏰ 4h ] [ ⏰ 8h ]   (universal snooze controls)
+
+        callback_data format (≤64B Telegram cap):
+            wmute:<short_job>:<short_chat>   — mute the surfaced chat
+            wsnooze:<short_job>:<minutes>    — pause this watcher
+
+        ``short_job`` is the first 12 chars of the job id; combined with
+        the chat slug it stays inside Telegram's hard limit while staying
+        unique enough across active watchers per user.
+        """
+        short_job = job_id[:12]
+        rows: list[list[dict]] = []
+
+        # WhatsApp gets a one-tap mute that calls whatsapp_mute on the
+        # MCP side — the chat goes silent on the user's phone too, not
+        # just in lazyclaw, so noise is killed at the source.
+        if service == "whatsapp" and notified_items:
+            first = notified_items[0]
+            chat_label = (
+                first.get("groupName")
+                or first.get("chatName")
+                or first.get("from", "")
+            ) or ""
+            # Slug to ASCII-ish, max 24 chars so callback_data fits.
+            slug = "".join(
+                c if c.isalnum() else "_" for c in chat_label
+            )[:24] or "chat"
+            rows.append([
+                {"text": "\U0001f507 Mute chat", "callback_data": f"wmute:{short_job}:{slug}"},
+            ])
+
+        rows.append([
+            {"text": "⏰ 1h", "callback_data": f"wsnooze:{short_job}:60"},
+            {"text": "⏰ 4h", "callback_data": f"wsnooze:{short_job}:240"},
+            {"text": "⏰ 8h", "callback_data": f"wsnooze:{short_job}:480"},
+        ])
+        return rows
+
     async def _gather_watcher_urls(self, user_id: str) -> list[str]:
         """Return URLs of every active browser watcher (job_type='watcher')
         for this user. Used by ``_check_tab_health`` to mark tabs the
@@ -944,19 +992,44 @@ class HeartbeatDaemon:
                         except Exception:
                             logger.debug("Canvas alert publish failed", exc_info=True)
 
-                        # Push directly to Telegram (no agent loop — zero tokens).
-                        # When this is a contract-intake watcher (accept_template_slug
-                        # in ctx), use push_telegram with an inline keyboard so the
-                        # user gets a 1-tap ✅ Accept button alongside the alert —
-                        # the 3-second-acceptance promise from the James Blue brief.
+                        # Resolve the on_change_instruction up-front so we
+                        # can make the push/brain decision atomically.
+                        # Watchers double-fired in the past — once with the
+                        # raw 🔔 push, once with the brain's "done" reply —
+                        # which read as duplicate spam in Telegram. Now the
+                        # contract is exactly ONE Telegram message per
+                        # detected change:
+                        #   * accept_slug present → 🔔 + Accept/Skip buttons
+                        #     (no brain turn — buttons drive the next step)
+                        #   * brain turn will fire → SKIP raw push, the
+                        #     brain's reply IS the message
+                        #   * otherwise → 🔔 raw push (no brain turn)
                         accept_slug = ctx.get("accept_template_slug")
+                        on_change_instr = (
+                            ctx.get("on_change_instruction")
+                            if "on_change_instruction" in ctx
+                            else new_ctx.get("on_change_instruction")
+                            if "on_change_instruction" in new_ctx
+                            else (
+                                f"Watcher '{job_name}' detected new content "
+                                f"at {ctx.get('url', '')}. Read the page, "
+                                f"summarize what changed, and route per "
+                                f"normal rules (auto-reply where safe, "
+                                f"escalate sensitive items, draft for "
+                                f"active deals). Stay terse."
+                            )
+                        )
+                        will_fire_brain = bool(
+                            on_change_instr
+                            and on_change_instr.strip()
+                            and self._lane_queue
+                            and self._lane_queue._running
+                            and not accept_slug
+                        )
+
                         if accept_slug:
                             try:
                                 from lazyclaw.notifications.push import push_telegram
-                                # Generate a short item-ID hint from the notification's
-                                # raw value-preview so the callback handler can pass it
-                                # to the template; if no value, the template runs with
-                                # whatever the agent's current page state is.
                                 ok = await push_telegram(
                                     self._config,
                                     f"🔔 {notification}",
@@ -978,38 +1051,25 @@ class HeartbeatDaemon:
                                     "Telegram keyboard push failed (%s): %s",
                                     accept_slug, exc,
                                 )
-                        elif self._telegram_push:
+                        elif not will_fire_brain and self._telegram_push:
+                            # No brain turn will run — surface the raw alert
+                            # ourselves with snooze buttons so the user can
+                            # quiet the watcher without losing it.
                             try:
-                                logger.info("Pushing watcher notification to Telegram")
-                                await self._telegram_push(
-                                    f"🔔 {notification}"
+                                from lazyclaw.notifications.push import push_telegram
+                                logger.info("Pushing watcher notification to Telegram (no brain)")
+                                await push_telegram(
+                                    self._config,
+                                    f"🔔 {notification}",
+                                    parse_mode=None,
+                                    inline_keyboard=self._build_watcher_keyboard(
+                                        job_id, "browser", [],
+                                    ),
                                 )
                             except Exception as exc:
                                 logger.warning("Telegram push failed: %s", exc)
 
-                        # Default behavior: when the JS hash-diff flagged a
-                        # real change, fire ONE brain turn so the agent can
-                        # read+route the delta. This is the zero-LLM-on-no-
-                        # news contract — cheap polling decides if anything
-                        # happened, brain only runs when there's actual work
-                        # to interpret. Per-watcher override available via
-                        # ``on_change_instruction``; opt out explicitly by
-                        # setting it to an empty string or False.
-                        on_change_instr = (
-                            ctx.get("on_change_instruction")
-                            if "on_change_instruction" in ctx
-                            else new_ctx.get("on_change_instruction")
-                            if "on_change_instruction" in new_ctx
-                            else (
-                                f"Watcher '{job_name}' detected new content "
-                                f"at {ctx.get('url', '')}. Read the page, "
-                                f"summarize what changed, and route per "
-                                f"normal rules (auto-reply where safe, "
-                                f"escalate sensitive items, draft for "
-                                f"active deals). Stay terse."
-                            )
-                        )
-                        if on_change_instr and self._lane_queue and self._lane_queue._running:
+                        if will_fire_brain:
                             try:
                                 instr = on_change_instr.strip()
                                 if instr:
@@ -1145,6 +1205,30 @@ class HeartbeatDaemon:
                     context=json.dumps(new_ctx),
                 )
 
+                # ── First-poll baseline push (one-time, friendly) ──
+                # mcp_watcher.check_mcp_watcher returns changed=False with a
+                # _baseline_count key on the very first poll. Surface it
+                # ONCE so the user sees the watcher is alive without being
+                # flooded by their existing backlog.
+                if not changed and "_baseline_count" in new_ctx:
+                    baseline = int(new_ctx.get("_baseline_count", 0))
+                    svc = ctx.get("service", "watcher")
+                    if self._telegram_push:
+                        try:
+                            await self._telegram_push(
+                                f"\U0001f441️ Watching <b>{svc}</b> · baseline "
+                                f"{baseline} message{'s' if baseline != 1 else ''} "
+                                f"recorded. Only <i>new</i> messages will notify."
+                            )
+                        except Exception:
+                            logger.debug("baseline push failed", exc_info=True)
+                    # Strip the marker so it doesn't persist on disk.
+                    new_ctx.pop("_baseline_count", None)
+                    await update_job(
+                        self._config, user_id, job_id,
+                        context=json.dumps(new_ctx),
+                    )
+
                 # Record this MCP check in the watcher history ring.
                 try:
                     from lazyclaw.watchers import history as _hist
@@ -1161,17 +1245,30 @@ class HeartbeatDaemon:
                 if changed and notification:
                     logger.info("MCP watcher '%s' detected change", job_name)
 
-                    # Push to Telegram with reply hint
-                    if self._telegram_push:
+                    # Push to Telegram with inline buttons for one-tap control.
+                    # The "🔇 Mute chat" button mutes the specific chat on
+                    # WhatsApp's side (via whatsapp_mute MCP tool) — kills
+                    # the noise at the source, not just in this notifier.
+                    # The "⏰ 1h / 4h" buttons set ctx.snoozed_until so the
+                    # watcher itself stays alive but stops polling for a
+                    # window — perfect for "I'm in a meeting, hush".
+                    _notified = new_ctx.get("_notified_items", [])
+                    _service = ctx.get("service", "")
+                    keyboard = self._build_watcher_keyboard(job_id, _service, _notified)
+                    if self._config and (self._telegram_push or True):
                         try:
-                            hint = "\n\nReply to respond, or reply \"mute\" to silence this chat"
-                            await self._telegram_push(f"\U0001f514 {notification}{hint}")
+                            from lazyclaw.notifications.push import push_telegram
+                            await push_telegram(
+                                self._config,
+                                f"\U0001f514 {notification}",
+                                parse_mode=None,
+                                inline_keyboard=keyboard,
+                            )
                         except Exception as exc:
-                            logger.warning("Telegram push failed: %s", exc)
+                            logger.warning("Telegram watcher push failed: %s", exc)
 
                     # Store last notification so agent has context for user replies
                     # Extract chat names from notified items for instant mute
-                    _notified = new_ctx.get("_notified_items", [])
                     _chat_names = list({
                         item.get("chatName") or item.get("groupName") or item.get("from", "")
                         for item in _notified

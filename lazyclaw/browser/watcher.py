@@ -45,6 +45,51 @@ _JS_GENERIC_HASH = """
 })()
 """
 
+# Universal sidecar — runs alongside the site-specific extractor.
+# Captures global UI signals available on any logged-in upwork-style page
+# (top-nav Messages badge + Notifications bell + page path). When the user
+# has a same-host tab open but it isn't the exact target path, the
+# site-specific extractor returns empty (its selectors don't exist), so
+# this sidecar gives us a coarse "something changed" signal even then.
+# Falls back gracefully — every field is null when its selector is absent.
+#
+# document.title is INTENTIONALLY excluded — titles like "WhatsApp (3)" /
+# "(5) Inbox · Gmail" flip on every unread badge update and were the main
+# source of false-positive watcher fires.
+_JS_NAV_SIDECAR = """
+(() => {
+    const pickBadge = (selectors) => {
+        for (const s of selectors) {
+            const el = document.querySelector(s);
+            if (el) {
+                const t = (el.textContent || '').trim();
+                if (t) return t;
+            }
+        }
+        return null;
+    };
+    const messages = pickBadge([
+        '[data-test="messages"] [data-test="badge"]',
+        '[aria-label*="message" i] .nav-badge',
+        '[data-cy="messages"] .nav-badge',
+        'a[href*="/messages"] [class*="badge" i]',
+        'a[href*="/messages"] sup',
+    ]);
+    const notifications = pickBadge([
+        '[data-test="notifications"] [data-test="badge"]',
+        '[aria-label*="notif" i] .nav-badge',
+        '[data-cy="notifications"] .nav-badge',
+        'button[aria-label*="notif" i] [class*="badge" i]',
+        'button[aria-label*="notif" i] sup',
+    ]);
+    return {
+        m: messages,
+        n: notifications,
+        p: location.pathname,
+    };
+})()
+"""
+
 
 def _content_hash(text: str) -> str:
     """SHA-256 hash of text for change detection."""
@@ -165,11 +210,37 @@ async def check_watcher(
     # Execute JS extractor
     result = await backend.evaluate(js_code)
 
+    # Sidecar — always run a cheap universal nav-badge / page-id check on
+    # top of the site-specific extractor. If the picked tab is on the same
+    # host but a different path (e.g. /nx/proposals/ instead of the watched
+    # /ab/messages/rooms/), the site-specific JS returns empty AND the user
+    # never finds out something changed. The sidecar captures the global
+    # Messages/Notifications badges plus the path/title so a real change
+    # still flips the hash. Add-on only — does NOT replace ``result`` for
+    # downstream callers; just augments the comparison value.
+    sidecar: dict | None = None
+    try:
+        raw_sidecar = await backend.evaluate(_JS_NAV_SIDECAR)
+        if isinstance(raw_sidecar, dict):
+            sidecar = raw_sidecar
+    except Exception:
+        logger.debug("nav-sidecar evaluate failed", exc_info=True)
+
     # Normalize result for comparison
     if isinstance(result, dict):
         current_value = json.dumps(result, sort_keys=True)
     else:
         current_value = str(result) if result else ""
+
+    if sidecar is not None:
+        # Fold sidecar into the comparison value so a change in nav badges
+        # or page identity also bumps the hash. Sorted-keys keeps the
+        # serialization stable across polls.
+        current_value = (
+            current_value
+            + "|nav="
+            + json.dumps(sidecar, sort_keys=True)
+        )
 
     # Update context (immutable — new dict)
     new_context = dict(context)
@@ -280,7 +351,29 @@ def is_watcher_expired(context: dict) -> bool:
 
 
 def is_check_due(context: dict) -> bool:
-    """Check if enough time has passed since last check."""
+    """Check if enough time has passed since last check.
+
+    Honours ``snoozed_until`` (ISO timestamp) — when the user taps
+    ⏰ on a watcher push, the callback writes a future timestamp here
+    and we silently skip polls until it elapses. Stale or malformed
+    ``snoozed_until`` values are treated as unset, never as "snooze
+    forever", so a corrupted ctx can't permanently mute a watcher.
+    """
+    snoozed_until = context.get("snoozed_until")
+    if snoozed_until:
+        try:
+            snooze = datetime.fromisoformat(snoozed_until)
+            if snooze.tzinfo is None:
+                from datetime import timezone as tz
+                snooze = snooze.replace(tzinfo=tz.utc)
+            if datetime.now(timezone.utc) < snooze:
+                return False
+        except (ValueError, TypeError):
+            logger.debug(
+                "Failed to parse snoozed_until — treating as unset",
+                exc_info=True,
+            )
+
     interval = context.get("check_interval", 300)
     last_check = context.get("last_check")
     if not last_check:

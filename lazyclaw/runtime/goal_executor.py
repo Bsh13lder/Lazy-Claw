@@ -168,6 +168,11 @@ class Goal:
     last_progress_at: float | None = None
     account_slug: str | None = None
     task_id: str | None = None
+    # P1: Unified Code Session per project. Set by the runner on the FIRST
+    # worker turn of a code-tagged goal; passed back via `--resume` on every
+    # subsequent dispatch so recon → scaffold → iterate share context. None
+    # for non-code goals and for code goals that haven't dispatched yet.
+    code_session_id: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -218,6 +223,7 @@ _GOAL_COLUMNS = (
     "id", "user_id", "title", "status", "plan_json",
     "steps_total", "steps_done", "blocked_on", "last_action",
     "last_progress_at", "account_slug", "task_id",
+    "code_session_id",
     "created_at", "updated_at",
 )
 
@@ -246,6 +252,7 @@ class GoalRepository:
             id_, _uid, enc_title, status_str, enc_plan,
             steps_total, steps_done, blocked_on, last_action,
             last_progress_at, account_slug, task_id,
+            code_session_id,
             created_at, updated_at,
         ) = row
 
@@ -285,6 +292,7 @@ class GoalRepository:
             blocked_on=blocked_on, last_action=last_action or "",
             last_progress_at=_iso_to_epoch(last_progress_at),
             account_slug=account_slug, task_id=task_id,
+            code_session_id=code_session_id,
             created_at=created_at, updated_at=updated_at,
         )
 
@@ -306,7 +314,9 @@ class GoalRepository:
                     goal.id, goal.user_id, enc_title, goal.status.value, enc_plan,
                     goal.steps_total, goal.steps_done, goal.blocked_on,
                     goal.last_action, last_progress_iso,
-                    goal.account_slug, goal.task_id, now, now,
+                    goal.account_slug, goal.task_id,
+                    goal.code_session_id,
+                    now, now,
                 ),
             )
             await db.commit()
@@ -330,13 +340,15 @@ class GoalRepository:
             await db.execute(
                 "UPDATE goals SET title=?, status=?, plan_json=?, "
                 "steps_total=?, steps_done=?, blocked_on=?, last_action=?, "
-                "last_progress_at=?, account_slug=?, task_id=?, updated_at=? "
+                "last_progress_at=?, account_slug=?, task_id=?, "
+                "code_session_id=?, updated_at=? "
                 "WHERE id=? AND user_id=?",
                 (
                     enc_title, goal.status.value, enc_plan,
                     goal.steps_total, goal.steps_done, goal.blocked_on,
                     goal.last_action, last_progress_iso,
-                    goal.account_slug, goal.task_id, now,
+                    goal.account_slug, goal.task_id,
+                    goal.code_session_id, now,
                     goal.id, goal.user_id,
                 ),
             )
@@ -410,6 +422,24 @@ DispatchCallable = Callable[[Goal], Awaitable[None]]
 # and do real work even when the calling skill didn't pass a callback
 # of its own.
 _DEFAULT_DISPATCH_BY_SLUG: dict[str, DispatchCallable] = {}
+
+# P1: per-goal continuation instructions stashed by ``continue_code`` and
+# popped by ``code_goal_executor.dispatch_code_goal``. Side-channel so we
+# don't have to mutate the frozen+encrypted Goal for turn-scoped data.
+# Bounded growth: every continue_code call writes one entry and the
+# dispatcher pops it; abandoned entries persist only across a single
+# crash window and amount to one short string per goal id.
+_CONTINUATION_INSTRUCTIONS: dict[str, str] = {}
+
+
+def pop_continuation_instruction(goal_id: str) -> str | None:
+    """Pop the pending continuation instruction for a goal, if any.
+
+    Called by ``code_goal_executor.dispatch_code_goal`` at the top of
+    each dispatch — returns None on a first/fresh dispatch and the
+    instruction on a re-entry from ``GoalExecutor.continue_code``.
+    """
+    return _CONTINUATION_INSTRUCTIONS.pop(goal_id, None)
 
 
 def register_default_dispatch(
@@ -708,6 +738,114 @@ class GoalExecutor:
             last_action=f"failed: {reason}",
             last_progress_at=time.time(),
         ))
+
+    # ── P1: Unified Code Session helpers ───────────────────────────
+
+    # Code work_type tags routed through code_goal_executor. Source of
+    # truth so the routing rule + continue_code surface stays in sync.
+    CODE_WORK_TYPES: frozenset[str] = frozenset({
+        "code", "code_project", "code_task", "build_app",
+    })
+
+    async def set_code_session_id(
+        self, user_id: str, goal_id: str, sid: str,
+    ) -> Goal:
+        """Persist the worker-brain session id on a code goal.
+
+        Called by the runner on the FIRST `eco_router.chat` response that
+        carries a `usage.session_id`. Idempotent: writing the same id back
+        is a no-op aside from `updated_at`. Tolerates concurrent writes by
+        latching on the caller side (runner.on_session_id fires at most
+        once per dispatch).
+        """
+        goal = await self._repo.get(user_id, goal_id)
+        if goal is None:
+            raise LookupError(f"goal not found: {goal_id}")
+        if goal.code_session_id == sid:
+            return goal
+        return await self._repo.update(replace(goal, code_session_id=sid))
+
+    async def continue_code(
+        self,
+        user_id: str,
+        goal_id: str,
+        instruction: str,
+    ) -> Goal:
+        """Append a turn to an EXECUTING code goal — same worker session.
+
+        Re-dispatches via the registered ``code`` slug, passing the new
+        instruction as an additional brief layered ON TOP of the existing
+        worker brain's prior context. The dispatcher reads
+        ``goal.code_session_id`` and threads ``--resume`` through to the
+        provider so the worker doesn't lose what it learned on the
+        previous turn.
+
+        Refuses to run on terminal goals or non-code goals. BLOCKED goals
+        re-enter EXECUTING — same behavior as the user submitting a fresh
+        answer that unblocks them.
+        """
+        if not instruction.strip():
+            raise ValueError("instruction is required")
+        goal = await self._repo.get(user_id, goal_id)
+        if goal is None:
+            raise LookupError(f"goal not found: {goal_id}")
+        if goal.is_terminal():
+            raise InvalidGoalTransition(
+                f"cannot continue terminal goal {goal_id} "
+                f"(status={goal.status.value})"
+            )
+        wt = (goal.work_type or "").strip().lower()
+        if wt not in self.CODE_WORK_TYPES:
+            raise InvalidGoalTransition(
+                f"continue_code rejected: work_type={wt!r} not in "
+                f"{sorted(self.CODE_WORK_TYPES)}"
+            )
+
+        if goal.status == GoalStatus.BLOCKED:
+            _assert_transition(goal.status, GoalStatus.EXECUTING)
+            goal = await self._repo.update(replace(
+                goal,
+                status=GoalStatus.EXECUTING,
+                last_action=f"continued: {instruction[:80]}",
+                last_progress_at=time.time(),
+                blocked_on=None,
+            ))
+        else:
+            goal = await self._repo.update(replace(
+                goal,
+                last_action=f"continued: {instruction[:80]}",
+                last_progress_at=time.time(),
+            ))
+
+        # Dispatch the continuation through the standard ``code`` slug
+        # handler. ``code_goal_executor.dispatch_code_goal`` honors the
+        # ``_continuation_instruction`` field (set below) when composing
+        # the worker brief, so the worker sees ONLY the new turn — not
+        # the original full plan re-sent.
+        callback = self._dispatch_callback or _resolve_default_dispatch(
+            "code",
+        )
+        if callback is None:
+            logger.warning(
+                "continue_code user=%s id=%s — no 'code' dispatch registered",
+                user_id, goal_id,
+            )
+            return goal
+        try:
+            # Stash the continuation instruction in a module-scoped map
+            # keyed by goal_id. The dispatch_code_goal handler pops it on
+            # entry. We pass via side-channel rather than mutating Goal
+            # because Goal is frozen + persisted and the instruction is
+            # turn-scoped (no need to encrypt + commit to DB).
+            _CONTINUATION_INSTRUCTIONS[goal_id] = instruction
+            await callback(goal)
+        except Exception as exc:
+            _CONTINUATION_INSTRUCTIONS.pop(goal_id, None)
+            logger.exception(
+                "continue_code dispatch failed user=%s id=%s", user_id, goal_id,
+            )
+            await self._fail(goal, f"continue_code error: {exc!s}")
+        return goal
 
     async def abort(self, user_id: str, goal_id: str) -> Goal:
         """User-triggered abort. Terminal."""

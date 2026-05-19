@@ -39,6 +39,7 @@ from lazyclaw.runtime.goal_executor import (
     Goal,
     GoalExecutor,
     GoalRepository,
+    pop_continuation_instruction,
     register_default_dispatch,
 )
 
@@ -78,15 +79,35 @@ def register_runtime(
 _background_tasks: set[asyncio.Task] = set()
 
 
-def _compose_code_instruction(goal: Goal) -> str:
-    """Build the one-shot instruction sent to the code specialist.
+def _compose_code_instruction(
+    goal: Goal,
+    *,
+    additional_instruction: str | None = None,
+) -> str:
+    """Build the instruction sent to the code specialist.
 
-    Combines the user's original ask (``title``), the AI-drafted summary,
-    the structured plan steps the goal already carries, and the verbatim
-    Q/A pairs so claude-code has the full context in a single message.
-    Keeps the brain from re-asking the same questions inside the
-    specialist's loop.
+    Two modes:
+
+    1. **Fresh dispatch** (``additional_instruction`` is None) — combines
+       the user's original ask, AI-drafted summary, plan steps, and
+       Q/A pairs into a single brief. Sent on the FIRST turn so the
+       worker has all the context it needs upfront.
+    2. **Continuation** (``additional_instruction`` is set) — the worker
+       brain is being resumed with ``--resume <session_id>``, so it
+       already remembers the original brief and what it did last turn.
+       Sending the whole plan again would burn tokens AND confuse it.
+       We send ONLY the new turn's instruction plus a one-line reminder
+       that this is a continuation of the same goal.
     """
+    if additional_instruction is not None:
+        return (
+            f"# Continuing goal — same project\n"
+            f"_Goal id `{goal.id[:12]}` — your prior session has been "
+            f"resumed. The WORKSPACE path in your system prompt is the "
+            f"same as last turn._\n\n"
+            f"## New instruction\n{additional_instruction.strip()}"
+        )
+
     parts: list[str] = [f"# Build request\n{goal.title.strip()}"]
 
     if goal.summary and goal.summary.strip() != goal.title.strip():
@@ -151,7 +172,14 @@ async def dispatch_code_goal(goal: Goal) -> None:
     from lazyclaw.teams.runner import run_specialist
     from lazyclaw.teams.specialist import CODE_SPECIALIST
 
-    instruction = _compose_code_instruction(goal)
+    # P1: Continuation re-entry from GoalExecutor.continue_code stashes
+    # the turn-scoped instruction in goal_executor._CONTINUATION_INSTRUCTIONS.
+    # Pop here so the side-channel doesn't leak past one dispatch. None
+    # means this is a fresh dispatch from intake/answers.
+    continuation = pop_continuation_instruction(goal.id)
+    instruction = _compose_code_instruction(
+        goal, additional_instruction=continuation,
+    )
 
     # Use the goal_id itself as the task_id for trivial cross-reference:
     # CodeSpecialist.tsx already groups by project_tag and shows the
@@ -159,6 +187,19 @@ async def dispatch_code_goal(goal: Goal) -> None:
     # stable + searchable.
     task_id = f"goal-{goal.id[:12]}"
     project_tag = goal.work_type or "code-goal"
+
+    # P1: persistent worker session — pass the prior session id (None on
+    # first dispatch) and a latching callback that writes the FIRST id
+    # returned back to the Goal so the next dispatch can --resume it.
+    async def _on_session_id(sid: str) -> None:
+        try:
+            executor = GoalExecutor(cfg, GoalRepository(cfg))
+            await executor.set_code_session_id(goal.user_id, goal.id, sid)
+        except Exception:
+            logger.exception(
+                "code_goal_executor: set_code_session_id failed for goal %s",
+                goal.id,
+            )
 
     async def _run_and_finalize() -> None:
         try:
@@ -173,6 +214,8 @@ async def dispatch_code_goal(goal: Goal) -> None:
                 project_tag=project_tag,
                 goal_id=goal.id,
                 task_id=task_id,
+                code_session_id=goal.code_session_id,
+                on_session_id=_on_session_id,
             )
         except Exception as exc:
             logger.exception("code_goal_executor: specialist crashed for goal %s", goal.id)
@@ -214,9 +257,18 @@ async def dispatch_code_goal(goal: Goal) -> None:
                     exc_info=True,
                 )
 
-        # Mark goal terminal so it leaves EXECUTING.
+        # P1: Code goals are multi-turn. A successful turn does NOT
+        # auto-terminate the goal — the user (or a downstream signal) marks
+        # it DONE explicitly when the project is fully delivered. Until
+        # then the goal stays EXECUTING so the next "now add tests" /
+        # "deploy it" message can continue_code into the SAME session.
+        # Failures still go to BLOCKED so the user can unblock + continue
+        # (mark_blocked is the existing retry-friendly transition).
         if result.success:
-            await _safe_mark_done(cfg, goal, result.result or "")
+            await _safe_touch_progress(
+                cfg, goal,
+                f"turn complete — files: {len(result.files_touched or ())}",
+            )
         else:
             await _safe_mark_failed(cfg, goal, result.error or "specialist failed")
 
@@ -251,12 +303,40 @@ async def dispatch_code_goal(goal: Goal) -> None:
 
 async def _safe_mark_done(config: Config, goal: Goal, result: str) -> None:
     """Move the goal to DONE. ``result`` is captured on the bg task
-    record; ``mark_done`` itself just transitions state — no payload."""
+    record; ``mark_done`` itself just transitions state — no payload.
+
+    Reserved for explicit user-driven completion (``/goal done <id>``);
+    NOT called automatically anymore — see ``_run_and_finalize`` above.
+    """
     try:
         executor = GoalExecutor(config, GoalRepository(config))
         await executor.mark_done(goal.user_id, goal.id)
     except Exception:
         logger.exception("code_goal_executor: mark_done failed for goal %s", goal.id)
+
+
+async def _safe_touch_progress(config: Config, goal: Goal, note: str) -> None:
+    """Bump last_progress_at + last_action without changing status.
+
+    Used after a successful continuation turn to record activity so the
+    Goals UI shows fresh progress without auto-terminating the goal.
+    """
+    try:
+        from dataclasses import replace
+        import time as _time
+        repo = GoalRepository(config)
+        current = await repo.get(goal.user_id, goal.id)
+        if current is None:
+            return
+        await repo.update(replace(
+            current,
+            last_action=note[:200],
+            last_progress_at=_time.time(),
+        ))
+    except Exception:
+        logger.exception(
+            "code_goal_executor: touch_progress failed for goal %s", goal.id,
+        )
 
 
 async def _safe_mark_failed(config: Config, goal: Goal, reason: str) -> None:

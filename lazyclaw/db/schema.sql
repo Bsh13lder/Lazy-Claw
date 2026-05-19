@@ -703,6 +703,7 @@ CREATE TABLE IF NOT EXISTS goals (
     last_progress_at  TEXT,
     account_slug      TEXT,                     -- which browser identity (multi-account)
     task_id           TEXT,                     -- live tracked-task FK (in-mem only)
+    code_session_id   TEXT,                     -- persistent worker session for code goals (--resume across turns)
     created_at        TEXT DEFAULT (datetime('now')),
     updated_at        TEXT DEFAULT (datetime('now'))
 );

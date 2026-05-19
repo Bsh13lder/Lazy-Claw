@@ -135,6 +135,10 @@ async def init_db(config: Config) -> None:
             # Bounty hunting — encrypted per-program session cookies for authenticated probes.
             ("bounty_programs", "cookies_jar", "ALTER TABLE bounty_programs ADD COLUMN cookies_jar TEXT"),
             ("bounty_programs", "cookies_saved_at", "ALTER TABLE bounty_programs ADD COLUMN cookies_saved_at TEXT"),
+            # P1: Unified Code Session — each code-tagged goal owns ONE long-lived
+            # worker session so recon → scaffold → iterate share context. Plaintext:
+            # session IDs are random UUIDs assigned by Claude CLI, not user content.
+            ("goals", "code_session_id", "ALTER TABLE goals ADD COLUMN code_session_id TEXT"),
         ]
         for table, column, sql in migrations:
             try:

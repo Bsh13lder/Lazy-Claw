@@ -688,6 +688,7 @@ class SkillRegistry:
         from lazyclaw.skills.builtin.goal import (
             AbortGoalSkill,
             AnswerGoalQuestionsSkill,
+            ContinueCodeGoalSkill,
             GoalProgressReportSkill,
             GoalStatusSkill,
             ListGoalsSkill,
@@ -699,6 +700,7 @@ class SkillRegistry:
         self.register(ListGoalsSkill(config=config))
         self.register(AbortGoalSkill(config=config))
         self.register(GoalProgressReportSkill(config=config))
+        self.register(ContinueCodeGoalSkill(config=config))
 
         # Multi-account browser identity skills (Phase A — Goal Executor).
         from lazyclaw.skills.builtin.browser_account import (

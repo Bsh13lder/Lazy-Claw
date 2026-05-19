@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 from lazyclaw.config import load_config
 from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
@@ -180,6 +181,8 @@ async def run_specialist(
     project_tag: str | None = None,
     goal_id: str | None = None,
     task_id: str | None = None,
+    code_session_id: str | None = None,
+    on_session_id: Callable[[str], Awaitable[None]] | None = None,
 ) -> SpecialistResult:
     """Run a specialist agent loop for a single task.
 
@@ -285,6 +288,19 @@ async def run_specialist(
     # at one rescue per task to prevent infinite cycles.
     _rescue_used: bool = False
 
+    # P1 session-id state. ``_active_session_id`` carries through into
+    # eco_router.chat kwargs every iteration so the worker's session stays
+    # stable across THIS dispatch (and resumes if a prior dispatch passed
+    # in code_session_id). ``_session_notified`` latches on_session_id so we
+    # fire the callback AT MOST ONCE per run (no overwrite churn on the DB
+    # if the provider returns the same id every call).
+    _active_session_id: str | None = code_session_id if is_code else None
+    _session_notified: bool = False
+    # Defensive retry guard for stale-resume: if the provider returns a
+    # session-not-found error AND we were trying to --resume, we retry the
+    # SAME iteration once with a fresh session.
+    _stale_session_retry_used: bool = False
+
     # Single point of SpecialistResult construction so every return path
     # carries the Code Specialist visibility fields. The bare ``run_specialist``
     # body (5+ return points across cancel/done/stuck/timeout/error) used
@@ -357,14 +373,74 @@ async def run_specialist(
             kwargs: dict = {}
             if filtered_tools:
                 kwargs["tools"] = filtered_tools
+            # P1: Pass the worker session id through eco_router → provider so
+            # claude_cli/sdk providers can use --session-id (first call) or
+            # --resume (subsequent). Only injected on the Code Specialist
+            # since other specialists treat each run as standalone.
+            if is_code and _active_session_id:
+                kwargs["session_id"] = _active_session_id
 
             # Workers use ROLE_WORKER — eco_router picks the right model
             # (Gemma 4 local in HYBRID, Haiku in FULL, etc.)
             logger.info("Worker %s iteration %d", specialist.name, _iteration + 1)
-            response = await eco_router.chat(
-                messages, user_id=user_id, role=ROLE_WORKER, **kwargs
-            )
+            try:
+                response = await eco_router.chat(
+                    messages, user_id=user_id, role=ROLE_WORKER, **kwargs
+                )
+            except Exception as exc:
+                # Stale-resume defense: if --resume failed with a session-
+                # not-found-style error, retry ONCE with a fresh session.
+                # Bounded to one retry to avoid masking real provider errors.
+                _err = str(exc).lower()
+                _looks_stale = (
+                    is_code
+                    and _active_session_id
+                    and not _stale_session_retry_used
+                    and ("session" in _err and ("not found" in _err or "expired" in _err or "unknown" in _err))
+                )
+                if not _looks_stale:
+                    raise
+                logger.warning(
+                    "Specialist %s: resume session %s appears stale (%s) — "
+                    "retrying with fresh session",
+                    specialist.name, _active_session_id, exc,
+                )
+                _stale_session_retry_used = True
+                _active_session_id = None
+                kwargs.pop("session_id", None)
+                response = await eco_router.chat(
+                    messages, user_id=user_id, role=ROLE_WORKER, **kwargs
+                )
+
             model_used = response.model or model_used
+
+            # P1: Capture the (new or existing) session id from the provider's
+            # usage dict and notify the caller exactly once per dispatch.
+            # Subsequent iterations within the same dispatch reuse the id
+            # via _active_session_id above.
+            if is_code:
+                _resp_sid = None
+                try:
+                    _resp_sid = (response.usage or {}).get("session_id")
+                except Exception:
+                    _resp_sid = None
+                if _resp_sid:
+                    if not _active_session_id:
+                        _active_session_id = str(_resp_sid)
+                    elif _active_session_id != str(_resp_sid):
+                        # Provider rotated the id (e.g. after stale-resume retry).
+                        # Switch over so the next iteration uses the new id.
+                        _active_session_id = str(_resp_sid)
+                        _session_notified = False  # force re-notify on the new id
+                    if on_session_id and not _session_notified:
+                        try:
+                            await on_session_id(_active_session_id)
+                            _session_notified = True
+                        except Exception:
+                            logger.debug(
+                                "on_session_id callback raised — ignoring",
+                                exc_info=True,
+                            )
 
             if not response.tool_calls:
                 # Final response — specialist is done

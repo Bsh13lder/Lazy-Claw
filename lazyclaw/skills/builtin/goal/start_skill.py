@@ -72,6 +72,24 @@ class StartGoalSkill(BaseSkill):
                         "this goal. Leave blank for the default profile."
                     ),
                 },
+                "work_type": {
+                    "type": "string",
+                    "description": (
+                        "Classify the kind of work. Use 'code' (or "
+                        "'code_project' / 'code_task' / 'build_app') for "
+                        "anything that writes/edits source files — that "
+                        "routes execution through the Code Specialist + "
+                        "claude-code MCP with a PERSISTENT worker session, "
+                        "so 'now add tests' / 'fix the bug' on follow-ups "
+                        "resume the same context. Leave blank for non-code "
+                        "goals (browser automation, research, content)."
+                    ),
+                    "enum": [
+                        "code", "code_project", "code_task", "build_app",
+                        "browser_task", "web_monitoring", "data_scraping",
+                        "research", "content", "mixed",
+                    ],
+                },
             },
             "required": ["title"],
         }
@@ -86,11 +104,20 @@ class StartGoalSkill(BaseSkill):
             if isinstance(hints_raw, dict) else {}
 
         account_slug = (params.get("account_slug") or "").strip() or None
+        work_type = (params.get("work_type") or "").strip() or None
+        # If brain tagged a code goal, default the account_slug to "code" so
+        # GoalExecutor._dispatch falls through to the registered
+        # ``code_goal_executor.dispatch_code_goal`` handler. Brain can still
+        # override by passing both work_type AND a custom account_slug.
+        _CODE_WT = {"code", "code_project", "code_task", "build_app"}
+        if work_type in _CODE_WT and not account_slug:
+            account_slug = "code"
 
         from lazyclaw.runtime.goal_executor import GoalExecutor, GoalStatus
         executor = GoalExecutor(self._config)
         goal = await executor.start(
-            user_id, title, hints=hints, account_slug=account_slug,
+            user_id, title,
+            hints=hints, account_slug=account_slug, work_type=work_type,
         )
 
         from lazyclaw.runtime.goal_executor import _format_one

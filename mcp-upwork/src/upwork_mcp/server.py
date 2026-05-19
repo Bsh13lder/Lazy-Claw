@@ -34,9 +34,19 @@ from .tools.messages import (
 )
 from .tools.contracts import (
     ContractsParams,
+    SubmitMilestoneParams,
     get_contracts,
     get_contract_details,
     get_work_diary,
+    submit_milestone,
+)
+from .tools.offers import (
+    AcceptOfferParams,
+    DeclineOfferParams,
+    OffersParams,
+    accept_offer,
+    decline_offer,
+    get_offers,
 )
 
 # Initialize FastMCP server
@@ -484,6 +494,210 @@ async def upwork_get_work_diary(
     Returns work diary with daily hours and earnings.
     """
     return await get_work_diary(contract_url, week_offset)
+
+
+# ============================================================================
+# Offer Tools  (added 2026-05-19 — core gig-pipeline flow)
+# ============================================================================
+#
+# Offers are sent by clients to specific freelancers ("here's $120 to do X")
+# and live in their own page until accepted/declined. Accepting creates a
+# contract; declining notifies the client. Both writes are sensitive and
+# support draft_only for human-in-loop staging.
+
+
+@mcp.tool()
+async def upwork_get_offers(
+    status: Annotated[
+        str,
+        Field(
+            description=(
+                "Filter by offer status. 'pending' (DEFAULT) = offers "
+                "awaiting your response — the actionable bucket. "
+                "'accepted' = already contracts (use upwork_get_contracts "
+                "for details). 'declined' = turned down. 'all' = everything."
+            ),
+        ),
+    ] = "pending",
+    limit: Annotated[
+        int,
+        Field(description="Maximum number of offers (clamped 1-50)", ge=1),
+    ] = 20,
+) -> list[dict]:
+    """List Upwork offers (client → freelancer).
+
+    Probes the known offer-list URLs in order and returns the first
+    non-empty result. Status filter applied client-side because Upwork's
+    ``?status=`` query is flaky across layout migrations.
+
+    Use this before upwork_accept_offer / upwork_decline_offer — the
+    'url' field in each returned offer is what you pass to those tools.
+    """
+    safe_limit = max(1, min(int(limit), 50))
+    safe_status = status if status in ("pending", "accepted", "declined", "all") else "pending"
+    params = OffersParams(status=safe_status, limit=safe_limit)
+    return await get_offers(params)
+
+
+@mcp.tool()
+async def upwork_accept_offer(
+    offer_url: Annotated[
+        str,
+        Field(
+            description=(
+                "Full Upwork offer URL (from upwork_get_offers). Must "
+                "be on upwork.com — non-Upwork URLs are refused."
+            ),
+        ),
+    ],
+    draft_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, navigate + open the Accept confirm modal "
+                "but DO NOT click the final Accept button. User "
+                "confirms manually in their live Brave tab. Returns "
+                "status='drafted_accept'."
+            ),
+        ),
+    ] = False,
+) -> dict:
+    """Accept an Upwork offer (CREATES a binding fixed-price/hourly contract).
+
+    IMPORTANT: This is a sensitive write action. Once accepted the
+    contract exists, the freelancer is committed to scope/budget, and
+    declining requires going through Upwork dispute resolution.
+
+    Returns ``{status, contract_url?, message}``. Statuses:
+      - ``"accepted"`` — final click went through
+      - ``"drafted_accept"`` — modal staged
+      - ``"already_accepted"`` — offer was already a contract
+      - ``"not_found"`` — Accept button missing
+      - ``"error"`` — navigation or selector failure
+    """
+    params = AcceptOfferParams(offer_url=offer_url, draft_only=draft_only)
+    return await accept_offer(params)
+
+
+@mcp.tool()
+async def upwork_decline_offer(
+    offer_url: Annotated[
+        str, Field(description="Full Upwork offer URL (from upwork_get_offers)."),
+    ],
+    reason: Annotated[
+        str,
+        Field(
+            description=(
+                "Short, neutral reason shown in the client's notification. "
+                "Default 'Not the right fit'. URL/product-pitch guards "
+                "apply — external URLs and 'lazyclaw' are refused."
+            ),
+        ),
+    ] = "Not the right fit",
+    draft_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, open the decline modal + fill the reason "
+                "but DO NOT click the final Decline button."
+            ),
+        ),
+    ] = False,
+) -> dict:
+    """Decline an Upwork offer.
+
+    Returns ``{status, message}``. Statuses:
+      - ``"declined"`` — final click went through
+      - ``"drafted_decline"`` — modal staged
+      - ``"blocked"`` — reason contained a URL or product-pitch token
+      - ``"not_found"`` — Decline button missing
+      - ``"error"`` — exception during the flow
+    """
+    params = DeclineOfferParams(
+        offer_url=offer_url, reason=reason, draft_only=draft_only,
+    )
+    return await decline_offer(params)
+
+
+# ============================================================================
+# Milestone Submission  (added 2026-05-19 — completes payment pipeline)
+# ============================================================================
+
+
+@mcp.tool()
+async def upwork_submit_milestone(
+    contract_url: Annotated[
+        str,
+        Field(
+            description=(
+                "Full Upwork contract URL. Must be on upwork.com. The "
+                "tool targets the first active/funded milestone unless "
+                "milestone_id is specified."
+            ),
+        ),
+    ],
+    message: Annotated[
+        str,
+        Field(
+            description=(
+                "Description for the client when the milestone lands "
+                "in their review queue. Be brief — what was delivered "
+                "and how to verify. URL + product-pitch guards apply."
+            ),
+        ),
+    ] = "",
+    milestone_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional milestone identifier when the contract has "
+                "multiple milestones. None targets the first active row."
+            ),
+        ),
+    ] = None,
+    attachments: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional list of local file paths (max ~5 per Upwork "
+                "policy). Each is verified to exist before opening "
+                "the modal. None submits message-only."
+            ),
+        ),
+    ] = None,
+    draft_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, open the submit modal + type description + "
+                "attach files but DO NOT click final Submit. User "
+                "finalizes manually. Returns status='drafted_submit'."
+            ),
+        ),
+    ] = False,
+) -> dict:
+    """Submit a funded milestone for client review and payment release.
+
+    IMPORTANT: This is a sensitive write action — clicking Submit starts
+    Upwork's 14-day review timer. Client either approves (funds release)
+    or disputes. If they don't act, funds auto-release on day 14.
+
+    Returns ``{status, message, attached_count?}``. Statuses:
+      - ``"submitted"`` — final click went through
+      - ``"drafted_submit"`` — modal staged with description + files
+      - ``"blocked"`` — message contained a URL or product-pitch token
+      - ``"not_found"`` — Request Payment button or milestone row missing
+      - ``"missing_attachment"`` — a path in attachments doesn't exist
+      - ``"error"`` — selector drift or navigation failure
+    """
+    params = SubmitMilestoneParams(
+        contract_url=contract_url,
+        message=message,
+        milestone_id=milestone_id,
+        attachments=attachments,
+        draft_only=draft_only,
+    )
+    return await submit_milestone(params)
 
 
 # ============================================================================

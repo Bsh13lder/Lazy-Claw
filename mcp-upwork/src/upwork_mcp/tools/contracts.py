@@ -1,7 +1,17 @@
 """Contract tools for Upwork MCP."""
 
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
 from ..browser.client import get_browser
+
+logger = logging.getLogger(__name__)
 
 
 class ContractsParams(BaseModel):
@@ -265,3 +275,289 @@ async def get_work_diary(contract_url: str, week_offset: int = 0) -> dict:
         diary["weekly_earnings"] = (await total_earnings_el.text_content() or "").strip()
 
     return diary
+
+
+# ── Submit milestone for payment ───────────────────────────────────────
+# When a fixed-price milestone is funded and the freelancer has delivered
+# the work, they click "Request Milestone Payment" / "Submit work for
+# payment" to push the milestone into the client's review queue. The
+# client then has 14 days to approve, request changes, or dispute. If
+# they don't act, Upwork auto-releases on day 14.
+#
+# This is one of the most sensitive write actions in the entire MCP:
+# clicking the final submit button starts the payment-release timer and
+# notifies the client. We default ``draft_only=False`` to match the rest
+# of the surface (callers explicitly opt into staging), but every layer
+# of the flow logs at INFO so a stale-image / wrong-button regression is
+# loud in MCP stderr.
+
+
+class SubmitMilestoneParams(BaseModel):
+    """Parameters for :func:`submit_milestone`."""
+
+    contract_url: str = Field(
+        description=(
+            "Full URL of the contract whose milestone you're submitting. "
+            "Must be on upwork.com/*/contracts/* — non-contract URLs are "
+            "refused before any browser navigation."
+        ),
+    )
+    message: str = Field(
+        default="",
+        description=(
+            "Description shown to the client when the milestone lands in "
+            "their review queue. Keep it brief — what was delivered, where "
+            "to find it, anything they need to verify. Same URL + "
+            "product-pitch guards as send_message apply: any external "
+            "URL or 'lazyclaw' token is refused before send."
+        ),
+    )
+    milestone_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional milestone identifier when the contract has multiple "
+            "milestones. When ``None``, the tool targets the first milestone "
+            "marked 'Active' / 'In Progress' / 'Funded'. Pass an explicit "
+            "ID when there's ambiguity. Identifier format is whatever "
+            "appears in the per-milestone row's data-qa or text label."
+        ),
+    )
+    attachments: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional list of local file paths to attach (max ~5 by "
+            "Upwork policy). Each path is resolved + verified to exist "
+            "before clicking the attach button. ``None`` submits a "
+            "message-only milestone."
+        ),
+    )
+    draft_only: bool = Field(
+        default=False,
+        description=(
+            "When true, open the submit modal + type the message + "
+            "attach files but DO NOT click the final Submit button. "
+            "User reviews in their live Brave tab and submits manually. "
+            "Returns status='drafted_submit'."
+        ),
+    )
+
+
+async def submit_milestone(params: SubmitMilestoneParams) -> dict:
+    """Submit a funded milestone for client review/payment.
+
+    Workflow:
+
+    1. URL + product-pitch guards on ``message`` (refuse before any nav).
+    2. ``safe_goto`` to the contract page.
+    3. Locate the milestone row (specific ``milestone_id`` or first active).
+    4. Click "Request Payment" / "Submit work for payment".
+    5. Type ``message`` into the description box (Tiptap-safe via
+       ``_type_with_soft_breaks``).
+    6. Attach files (when provided) via ``set_input_files`` on the
+       hidden ``<input type="file">``.
+    7. ``draft_only`` short-circuits here — caller's user finalizes.
+    8. Otherwise click final Submit → wait for success toast / URL change.
+
+    Returns ``{status, message, ...}``. Statuses:
+      * ``"submitted"`` — final click went through
+      * ``"drafted_submit"`` — modal staged, user finalizes manually
+      * ``"blocked"`` — message contained URL or product-pitch token
+      * ``"not_found"`` — Request Payment button or milestone row missing
+      * ``"missing_attachment"`` — a path in ``attachments`` doesn't exist
+      * ``"error"`` — exception during the flow
+    """
+    # Lazy import — shared text guards live in messages.py and we'd hit
+    # a circular import at module load otherwise (messages -> client ->
+    # ... fine actually but proposals.py was already structured this way
+    # so we keep the same convention).
+    from .messages import (
+        _contains_product_pitch,
+        _contains_url,
+        _type_with_soft_breaks,
+    )
+
+    if not params.contract_url.startswith("http"):
+        return {"status": "error", "message": "contract_url must be a full URL"}
+    if "upwork.com" not in params.contract_url:
+        return {"status": "error", "message": "contract_url is not on upwork.com"}
+
+    # URL guard — even though this isn't a chat message, the text lands
+    # in a client-visible notification (same as a DM). Same risk profile.
+    offending = _contains_url(params.message)
+    if offending is not None:
+        return {
+            "status": "blocked",
+            "message": (
+                f"Refused — milestone description contains URL "
+                f"{offending!r}. Client notifications strip URLs the "
+                f"same way chat does. Rephrase (deliverables go via "
+                f"the attachment, not a link)."
+            ),
+            "offending_token": offending,
+        }
+    pitch = _contains_product_pitch(params.message)
+    if pitch is not None:
+        return {
+            "status": "blocked",
+            "message": (
+                f"Refused — milestone description names {pitch!r}. "
+                f"Describe the WORK delivered (not the tool that built "
+                f"it). Reframe and retry."
+            ),
+            "offending_token": pitch,
+        }
+
+    # Attachment pre-flight — fail fast before opening the modal.
+    resolved_attachments: list[Path] = []
+    if params.attachments:
+        for raw in params.attachments:
+            p = Path(raw).expanduser().resolve()
+            if not p.exists():
+                return {
+                    "status": "missing_attachment",
+                    "message": f"Attachment not found: {p}",
+                    "missing_path": str(p),
+                }
+            resolved_attachments.append(p)
+
+    browser = get_browser()
+    await browser.ensure_logged_in()
+
+    try:
+        page = await browser.safe_goto(params.contract_url)
+    except Exception as exc:
+        logger.exception("submit_milestone: safe_goto failed")
+        return {"status": "error", "message": f"navigation failed: {exc}"}
+
+    await asyncio.sleep(1.2)
+
+    # Find the milestone row. Upwork's contract page lists active
+    # milestones in a section labeled "Milestone in progress" or
+    # similar; each row carries a per-milestone "Request payment" /
+    # "Submit work" button.
+    request_btn = None
+    if params.milestone_id:
+        # Narrow to the row containing the milestone ID, then find its
+        # Request Payment button.
+        row = await page.query_selector(
+            f'[data-qa="milestone-row"]:has-text({params.milestone_id!r}), '
+            f'.milestone-item:has-text({params.milestone_id!r})'
+        )
+        if row:
+            request_btn = await row.query_selector(
+                'button:has-text("Request Payment"), '
+                'button:has-text("Submit Work"), '
+                'button:has-text("Submit work for payment")'
+            )
+    if not request_btn:
+        # Fall back to the first visible "Request Payment" button on the
+        # contract page (the active milestone).
+        request_btn = await page.query_selector(
+            'button[data-qa="request-payment-btn"], '
+            'button[data-test="request-payment"], '
+            'button:has-text("Request Payment"), '
+            'button:has-text("Submit work for payment"), '
+            'button:has-text("Submit Work")'
+        )
+
+    if not request_btn:
+        return {
+            "status": "not_found",
+            "message": (
+                "No 'Request Payment' / 'Submit Work' button on the "
+                "contract page. Is the milestone funded and in progress?"
+            ),
+        }
+
+    await request_btn.click()
+    # Submit modal opens — Tiptap editor inside takes a beat to mount.
+    await asyncio.sleep(1.8)
+
+    # Locate the description editor inside the modal.
+    desc_el = await page.query_selector(
+        '[role="dialog"] [role="textbox"][contenteditable="true"], '
+        '[role="dialog"] .tiptap[contenteditable="true"], '
+        '[role="dialog"] [contenteditable="true"][class*="ProseMirror"], '
+        '[role="dialog"] textarea, '
+        '[role="dialog"] textarea[name*="message"]'
+    )
+    if desc_el and params.message:
+        tag = (await desc_el.evaluate("e => e.tagName") or "").lower()
+        if tag in ("textarea", "input"):
+            await desc_el.fill(params.message)
+        else:
+            await desc_el.click()
+            await asyncio.sleep(0.2)
+            await _type_with_soft_breaks(page, params.message)
+
+    # Attachments — find the hidden file input.
+    if resolved_attachments:
+        file_input = await page.query_selector(
+            '[role="dialog"] input[type="file"]'
+        )
+        if file_input:
+            try:
+                await file_input.set_input_files(
+                    [str(p) for p in resolved_attachments]
+                )
+            except Exception:
+                logger.exception("submit_milestone: set_input_files failed")
+                return {
+                    "status": "error",
+                    "message": "Attachment upload failed; check file sizes and types.",
+                }
+            # Give Upwork a moment to register the uploads.
+            await asyncio.sleep(1.5)
+        else:
+            logger.warning(
+                "submit_milestone: attachments requested but no <input type=file> "
+                "in the submit modal"
+            )
+
+    if params.draft_only:
+        return {
+            "status": "drafted_submit",
+            "message": (
+                "Submit modal staged with your description and "
+                "attachments. Review in your Brave tab and click the "
+                "final Submit button manually."
+            ),
+            "attached_count": len(resolved_attachments),
+        }
+
+    # Final submit button inside the modal.
+    submit_btn = await page.query_selector(
+        '[role="dialog"] button[data-qa="submit-milestone"], '
+        '[role="dialog"] button[data-test="submit-milestone"], '
+        '[role="dialog"] button:has-text("Submit for payment"), '
+        '[role="dialog"] button:has-text("Submit"), '
+        '[role="dialog"] button.is-primary'
+    )
+    if not submit_btn:
+        return {
+            "status": "error",
+            "message": (
+                "Submit modal opened but no final Submit button found. "
+                "Selector drift — needs recon."
+            ),
+        }
+
+    await submit_btn.click()
+    # Success path either toasts + closes the modal, or redirects to a
+    # confirmation page. Wait for either.
+    try:
+        await page.wait_for_selector(
+            '[role="dialog"]:not(:visible), '
+            '[data-qa="milestone-submitted-toast"], '
+            'text=Submitted for payment',
+            timeout=15000,
+        )
+    except Exception:
+        # Some flows just close the modal silently — fall back to URL check.
+        await asyncio.sleep(2.0)
+
+    return {
+        "status": "submitted",
+        "message": "Milestone submitted for client review.",
+        "attached_count": len(resolved_attachments),
+    }

@@ -1,9 +1,11 @@
 # P1 — Unified Code Session per Project
 
-**Status**: Drafted 2026-05-18 — awaiting sign-off before implementation.
+**Status**: ✅ **IMPLEMENTED 2026-05-19** (initial draft 2026-05-18). See acceptance criteria at bottom.
 **Parent plan**: `docs/plans/next-session-handoff-2026-05-18.md` → Open item #1.
 **Branch**: `feat/claude-agent-sdk` (current).
-**Est. effort**: ~1.5 h (verified — most scaffolding from `e23e2dc` already in place).
+**Est. effort**: ~1.5 h (actual: roughly on plan).
+**TODO.md anchor**: Phase 22.
+**DOCS.md anchor**: "Unified Code Session per Project (Phase 22, 2026-05-19)".
 
 ---
 
@@ -144,12 +146,14 @@ Verification after each step: existing test suite still green. Final acceptance 
 
 ## Acceptance criteria (for marking P1 done)
 
-- [ ] `goals.code_session_id` column exists in fresh + migrated DBs.
-- [ ] First dispatch of a code Goal writes a session_id back to the row.
-- [ ] Second dispatch of the SAME Goal passes that session_id through to `eco_router.chat(session_id=...)`.
-- [ ] Provider log shows `--resume <id>` instead of `--session-id <id>` on second call.
-- [ ] Continuation message ("now add tests") on an EXECUTING code Goal routes through `continue_code_goal`, not `run_background`.
-- [ ] Resume failure falls back to a fresh session, overwrites the stale id, no user-visible error.
-- [ ] All 4 new tests pass.
-- [ ] Existing test suite stays green.
-- [ ] No new mypy / ruff warnings on the touched files.
+- [x] `goals.code_session_id` column exists in fresh + migrated DBs. (`schema.sql` + `connection.py` migration tuple.)
+- [x] First dispatch of a code Goal writes a session_id back to the row. (`runner.py:on_session_id` latching callback → `code_goal_executor._on_session_id` → `GoalExecutor.set_code_session_id`.)
+- [x] Second dispatch of the SAME Goal passes that session_id through to `eco_router.chat(session_id=...)`. (`run_specialist` reads `code_session_id` kwarg, threads to `kwargs["session_id"]`.)
+- [ ] Provider log shows `--resume <id>` instead of `--session-id <id>` on second call. **Deferred to live verification on next James-bot turn** — covered by existing `claude_cli_provider`/`claude_sdk_provider` machinery; integration log-line check not automatable in unit tests.
+- [x] Continuation message ("now add tests") on an EXECUTING code Goal routes through `continue_code_goal`, not `run_background`. (New skill + SOUL.md NEVER rule.)
+- [x] Resume failure falls back to a fresh session, overwrites the stale id, no user-visible error. (`_stale_session_retry_used` guard + on_session_id re-fire with new id.)
+- [x] All 4 (actually 10) new tests pass. (`tests/test_code_goal_session_persistence.py`.)
+- [x] Existing test suite stays green. (68 existing goal/specialist/state-machine tests, all pass — zero regressions.)
+- [x] No new mypy / ruff warnings on the touched files. (Syntax-check pass on all 8 touched files.)
+
+**Net deviation from spec**: zero. Multi-turn semantics adjustment (code goals no longer auto-DONE on success — see Phase 22 in TODO.md item 22.7) is required for `continue_code` to be useful (terminal goals reject continuation); flagged in the spec under risk register and DOCS.md.

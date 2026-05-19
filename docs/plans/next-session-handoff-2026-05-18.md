@@ -38,9 +38,14 @@ End-to-end verified: at 00:51 the brain correctly fetched James's 9:12 PM AND 10
 
 ## Open items — ranked
 
-### 1. Unified Code Session per project (HIGH — architectural)
+### 1. Unified Code Session per project (HIGH — architectural) — P1 ✅ SHIPPED 2026-05-19
 
-**What**: Each contract/goal owns ONE long-lived Claude Code MCP session. Recon + scaffold + iterate share context. Brain becomes a thin dispatcher that appends turns to the project's session instead of choosing between `browser`/`research`/`code` specialists.
+**Status**: P1 (session persistence + multi-turn continuation) landed. See **TODO.md → Phase 22** for the per-item checklist, **DOCS.md → "Unified Code Session per Project (Phase 22, 2026-05-19)"** for the implementation deep-dive, and **`docs/plans/p1-unified-code-session.md`** for the executed spec.
+
+P2 (per-message classifier routing) and P3 (thin dispatcher + UI timeline) remain open — see TODO.md still-open list.
+
+**What** (preserved for context):
+Each contract/goal owns ONE long-lived Claude Code MCP session. Recon + scaffold + iterate share context. Brain becomes a thin dispatcher that appends turns to the project's session instead of choosing between `browser`/`research`/`code` specialists.
 
 **Why it matters**: today's recon work for James (estreetamc.spurams.com login page) ran in `browser_specialist` — ephemeral, no workspace, no memory. When we move to scaffolding, the Code Specialist will start fresh with no recon context. Wasted tokens, lost continuity.
 

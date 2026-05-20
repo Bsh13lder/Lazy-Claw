@@ -517,9 +517,13 @@ CREATE TABLE IF NOT EXISTS notes (
     pinned INTEGER DEFAULT 0,
     trace_session_id TEXT,             -- plaintext pointer to replay
     title_key TEXT,                    -- lowercased plaintext title for wikilink resolve
+    memory_type TEXT,                  -- plaintext: user|feedback|project|reference|fact|session-log|other (see lazyclaw/lazybrain/memory_types.py)
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_notes_user_memory_type
+ON notes(user_id, memory_type);
 
 CREATE INDEX IF NOT EXISTS idx_notes_user_created
 ON notes(user_id, created_at DESC);

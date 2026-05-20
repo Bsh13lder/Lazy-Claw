@@ -139,6 +139,18 @@ async def init_db(config: Config) -> None:
             # worker session so recon → scaffold → iterate share context. Plaintext:
             # session IDs are random UUIDs assigned by Claude CLI, not user content.
             ("goals", "code_session_id", "ALTER TABLE goals ADD COLUMN code_session_id TEXT"),
+            # Typed memory taxonomy (2026-05-20) — knowledge scope per note.
+            # Mirrors Claude Code's auto-memory types: user|feedback|project|
+            # reference|fact|session-log|other. Orthogonal to Capture.kind
+            # (the auto_capture pattern tag). Auto-injection picks via
+            # ``memory_type IN ('user','feedback','project','reference')``;
+            # ``session-log`` becomes query-only, killing the daily_log
+            # paraphrase contamination class that produced the 2026-05-19
+            # 16:19 hallucination. Plaintext: scope label, not user content.
+            # Default NULL so pre-migration rows are visible to a backfill
+            # pass; ``is_auto_inject_type(None)`` fails closed to keep them
+            # out of the cached system prompt until classified.
+            ("notes", "memory_type", "ALTER TABLE notes ADD COLUMN memory_type TEXT"),
         ]
         for table, column, sql in migrations:
             try:

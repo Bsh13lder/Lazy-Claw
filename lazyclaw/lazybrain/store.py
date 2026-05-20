@@ -472,6 +472,7 @@ async def save_note(
     trace_session_id: str | None = None,
     frontmatter: dict[str, FmValue] | None = None,
     aliases: list[str] | None = None,
+    memory_type: str | None = None,
 ) -> dict:
     """Create a new note and index its wikilinks. Returns the note dict.
 
@@ -531,8 +532,24 @@ async def save_note(
     title_key = _title_key(resolved_title)
     enc_title = encrypt_field(resolved_title, dek, _title_aad(user_id))
     enc_content = encrypt_field(content, dek, _content_aad(user_id))
-    tags_json = _dump_tags(_merge_tags(tags, content))
+    merged_tags = _merge_tags(tags, content)
+    tags_json = _dump_tags(merged_tags)
     aliases_json = _dump_aliases(aliases)
+
+    # Typed-memory classification. Explicit ``memory_type`` arg always
+    # wins; otherwise the deterministic classifier (memory_types.py) maps
+    # tags / title / first-line content to one of MEMORY_TYPES. See
+    # MEMORY/feedback-claude-cache-amplifies-stale-context for why this
+    # column exists.
+    from lazyclaw.lazybrain.memory_types import (
+        infer_memory_type, normalize_memory_type,
+    )
+    if memory_type is not None:
+        resolved_memory_type = normalize_memory_type(memory_type)
+    else:
+        resolved_memory_type = infer_memory_type(
+            content, tags=merged_tags, title=resolved_title,
+        )
 
     async with db_session(config) as db:
         # embedding_dirty=1 from the start: the post-save hook below tries to
@@ -542,9 +559,9 @@ async def save_note(
         # to semantic_search forever.
         await db.execute(
             "INSERT INTO notes (id, user_id, title, content, tags, importance, "
-            "pinned, trace_session_id, title_key, aliases, embedding_dirty, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "pinned, trace_session_id, title_key, aliases, memory_type, "
+            "embedding_dirty, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 note_id,
                 user_id,
@@ -556,6 +573,7 @@ async def save_note(
                 trace_session_id,
                 title_key,
                 aliases_json,
+                resolved_memory_type,
                 1,
                 now,
                 now,
@@ -582,6 +600,7 @@ async def save_note(
         "pinned": bool(pinned),
         "trace_session_id": trace_session_id,
         "title_key": title_key,
+        "memory_type": resolved_memory_type,
         "created_at": now,
         "updated_at": now,
     }

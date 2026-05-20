@@ -15,6 +15,9 @@ from lazyclaw.skills.builtin.lazybrain.recall import (
     GetNoteSkill,
     SearchNotesSkill,
 )
+from lazyclaw.skills.builtin.lazybrain.recall_typed_memory import (
+    RecallTypedMemorySkill,
+)
 from lazyclaw.skills.builtin.lazybrain.graph_skill import (
     FindLinkedSkill,
     GraphNeighborsSkill,
@@ -61,6 +64,7 @@ __all__ = [
     "MergeNotesSkill",
     "GetNoteSkill",
     "SearchNotesSkill",
+    "RecallTypedMemorySkill",
     "FindLinkedSkill",
     "GraphNeighborsSkill",
     "AppendJournalSkill",

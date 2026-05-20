@@ -220,7 +220,7 @@ class SkillRegistry:
             SemanticSearchSkill, SuggestLinksSkill, SuggestMetadataSkill,
             TopicRollupSkill,
             SaveNoteSkill, UpdateNoteSkill, DeleteNoteSkill,
-            GetNoteSkill, SearchNotesSkill,
+            GetNoteSkill, SearchNotesSkill, RecallTypedMemorySkill,
             FindLinkedSkill, GraphNeighborsSkill,
             AppendJournalSkill, ListJournalSkill,
             GetJournalSkill, DeleteJournalSkill,
@@ -237,6 +237,7 @@ class SkillRegistry:
         self.register(DeleteNoteSkill(config=config))
         self.register(GetNoteSkill(config=config))
         self.register(SearchNotesSkill(config=config))
+        self.register(RecallTypedMemorySkill(config=config))
         self.register(FindLinkedSkill(config=config))
         self.register(GraphNeighborsSkill(config=config))
         self.register(AppendJournalSkill(config=config))

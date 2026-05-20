@@ -522,8 +522,14 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_notes_user_memory_type
-ON notes(user_id, memory_type);
+-- NOTE: idx_notes_user_memory_type is created inside the migrations
+-- pass in connection.py AFTER the ALTER TABLE that adds memory_type on
+-- pre-2026-05-20 databases. Putting the CREATE INDEX here would crash
+-- init_db on existing installs because executescript(schema_sql) runs
+-- BEFORE the ALTER TABLE — the table exists but the column doesn't yet,
+-- so CREATE INDEX ON notes(user_id, memory_type) fails with
+-- ``no such column: memory_type``. Observed 2026-05-20 in Docker
+-- after rebuild: container restart-looped until the index was moved.
 
 CREATE INDEX IF NOT EXISTS idx_notes_user_created
 ON notes(user_id, created_at DESC);

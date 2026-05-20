@@ -262,6 +262,24 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("idx_chat_sessions_primary creation skipped", exc_info=True)
 
+        # Typed-memory index — created here, not in schema.sql, because on
+        # upgrading installs the ``notes`` table already exists (so the
+        # CREATE TABLE IF NOT EXISTS in schema.sql is a no-op and skips
+        # the ``memory_type`` column) but the ALTER TABLE that adds it
+        # only runs above. Putting CREATE INDEX in schema.sql crashed
+        # init_db on 2026-05-20 — Docker rebuild looped because the
+        # index referenced a column that didn't yet exist on the on-disk
+        # schema. Same rationale as idx_chat_sessions_primary above.
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notes_user_memory_type "
+                "ON notes(user_id, memory_type)"
+            )
+        except Exception:
+            logger.debug(
+                "idx_notes_user_memory_type creation skipped", exc_info=True,
+            )
+
         await db.commit()
 
 

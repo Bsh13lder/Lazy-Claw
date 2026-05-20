@@ -3017,6 +3017,18 @@ class Agent:
         # with a log warning. See module-level _check_f1_violation.
         _f1_retries: int = 0
 
+        # F1 confabulation raw-data injection guard. The confabulation
+        # detector (lazyclaw/runtime/f1_confabulation_detector.py) catches
+        # two escape-hatch patterns Opus 4.6/4.7 falls into under F1 retry
+        # pressure: (a) confabulating a tool failure ("No conversations
+        # found, make sure you're logged in") when the tool returned real
+        # data, and (b) emitting `> sender (ts): …` quotes whose content
+        # doesn't appear in any tool result this turn. When either fires
+        # OR F1 retries exhaust, we spoon-feed the raw tool output into
+        # ONE final attempt. This flag ensures the injection happens at
+        # most once per turn — repeated injection thrashes context.
+        _confab_injected: bool = False
+
         # Auto-promote-to-background nudge: when a foreground turn drags
         # past N tool-using iterations and the brain hasn't yet called
         # run_background, inject a system message that strongly suggests
@@ -4085,6 +4097,25 @@ class Agent:
                             for n in _tool_call_history
                         )
                     ):
+                        # F1 phase-2 lite (observation-only) — verify each
+                        # `> sender (ts): content` line in the draft actually
+                        # appears in the fresh tool_results from this turn.
+                        # Catches "quote-from-garbage" (e.g. today's 13:34
+                        # incident: bad room_id arg made the MCP scrape
+                        # unrelated DOM, brain quoted it faithfully).
+                        # F1_PHASE2_ENFORCE is False — logs WARN only, no
+                        # block / no re-prompt. Telemetry first.
+                        try:
+                            from lazyclaw.runtime.f1_content_verifier import (
+                                observe_or_enforce as _f1p2_observe,
+                            )
+                            _f1p2_observe(_final_content, _tool_results)
+                        except Exception:
+                            logger.debug(
+                                "F1 phase-2 observer raised (non-fatal)",
+                                exc_info=True,
+                            )
+
                         _violation = _check_f1_violation(
                             _final_content, _tool_results,
                         )
@@ -4127,6 +4158,111 @@ class Agent:
                         # F1 passed — capped retries are also a pass: we ship
                         # the draft with a log warning rather than burn more
                         # iterations on a wedged brain.
+
+                    # F1 confabulation backstop — runs when (a) F1 phase-1
+                    # passed but the draft still confabulates, or (b) F1
+                    # retries exhausted and the violating draft is about to
+                    # ship. Catches the 2026-05-20 14:23 incident: brain
+                    # called upwork_last_conversation, got real James Blue
+                    # data, F1 rejected paraphrasing twice, then panicked
+                    # and emitted "No Upwork conversations found, make sure
+                    # you're logged in" — a confabulated tool failure.
+                    # Injects the raw tool output verbatim for ONE final
+                    # rewrite attempt. See f1_confabulation_detector.py.
+                    if (
+                        _final_content
+                        and not _confab_injected
+                        and any(
+                            _is_channel_read_tool(n)
+                            for n in _tool_call_history
+                        )
+                    ):
+                        try:
+                            from lazyclaw.runtime.f1_confabulation_detector import (
+                                detect_confabulation as _detect_confab,
+                                build_raw_data_injection as _build_raw_inj,
+                            )
+                            _confab_verdict = _detect_confab(
+                                _final_content,
+                                _tool_call_history,
+                                _tool_results,
+                            )
+                            _f1_exhausted_with_violation = (
+                                _f1_retries >= _F1_MAX_RETRIES
+                                and _check_f1_violation(
+                                    _final_content, _tool_results,
+                                ) is not None
+                            )
+                            if (
+                                _confab_verdict.is_confabulation
+                                or _f1_exhausted_with_violation
+                            ):
+                                if _confab_verdict.is_confabulation:
+                                    logger.warning(
+                                        "[F1-confabulation] reply claims tool "
+                                        "failure but tool succeeded with "
+                                        "%d-byte payload. tool_name=%s "
+                                        "kind=%s phrase=%r. Triggering raw-"
+                                        "data injection retry.",
+                                        _confab_verdict.payload_bytes,
+                                        _confab_verdict.tool_name,
+                                        _confab_verdict.kind,
+                                        _confab_verdict.offending_phrase,
+                                    )
+                                    _inj_reason = "confabulation"
+                                else:
+                                    logger.warning(
+                                        "[F1-retry-exhausted] %d attempts "
+                                        "exhausted; falling through to raw-"
+                                        "data injection. last_violation=%s",
+                                        _F1_MAX_RETRIES,
+                                        _check_f1_violation(
+                                            _final_content, _tool_results,
+                                        ),
+                                    )
+                                    _inj_reason = "retry_exhausted"
+                                _raw_inj = _build_raw_inj(
+                                    _confab_verdict,
+                                    _tool_call_history,
+                                    _tool_results,
+                                    reason=_inj_reason,
+                                )
+                                messages.append(LLMMessage(
+                                    role="assistant", content=_final_content,
+                                ))
+                                messages.append(LLMMessage(
+                                    role="user", content=_raw_inj,
+                                ))
+                                _confab_injected = True
+                                streamed_content = ""
+                                continue
+                        except Exception:
+                            logger.debug(
+                                "F1 confabulation detector raised "
+                                "(non-fatal)", exc_info=True,
+                            )
+                    # Degraded-accept: raw-data injection was already used
+                    # this turn AND F1 still fails. Ship the draft anyway —
+                    # better a slightly imperfect quote than another retry
+                    # loop. See [F1-accepted-degraded] in postmortem notes.
+                    elif (
+                        _final_content
+                        and _confab_injected
+                        and _f1_retries >= _F1_MAX_RETRIES
+                        and any(
+                            _is_channel_read_tool(n)
+                            for n in _tool_call_history
+                        )
+                        and _check_f1_violation(
+                            _final_content, _tool_results,
+                        ) is not None
+                    ):
+                        logger.warning(
+                            "[F1-accepted-degraded] shipping draft after "
+                            "raw-data injection + F1 retry exhaustion. "
+                            "draft_head=%r",
+                            (_final_content or "")[:160],
+                        )
 
                     # Knowledge-gap self-recall — re-prompt brain with LazyBrain
                     # + personal_memory injection BEFORE this answer ships, when

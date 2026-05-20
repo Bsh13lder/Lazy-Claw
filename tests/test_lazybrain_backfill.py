@@ -267,3 +267,78 @@ async def test_backfill_all_users_iterates_every_user(
 
     assert await _fetch_memory_type(tmp_config, "note-a") == "feedback"
     assert await _fetch_memory_type(tmp_config, "note-b") == "project"
+
+
+# ─── Batch-drain loop ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_backfill_drains_past_single_batch_limit(
+    tmp_config: Config,
+) -> None:
+    """Seed 600 NULL-typed rows (above the 500-per-batch cap) and
+    confirm a single :func:`backfill_memory_types` call drains them all.
+
+    Before the drain-loop change this test failed: the function
+    classified the first 500 and left 100 rows NULL until the next
+    process start. With the loop in place, one call must leave zero
+    NULL rows behind.
+    """
+    seeded = 600
+    # Batch the seed INSERTs into one transaction — 600 individual
+    # ``async with db_session`` blocks would dominate test runtime.
+    dek = await get_user_dek(tmp_config, _USER_ID)
+    enc_title = encrypt_field("rule entry", dek, _title_aad(_USER_ID))
+    enc_content = encrypt_field(
+        "rule: always answer in Georgian.", dek, _content_aad(_USER_ID),
+    )
+    async with db_session(tmp_config) as db:
+        for i in range(seeded):
+            await db.execute(
+                "INSERT INTO notes (id, user_id, title, content, tags, "
+                "importance, pinned, title_key, memory_type, "
+                "embedding_dirty, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, "
+                "datetime('now'), datetime('now'))",
+                (
+                    f"note-bulk-{i:04d}", _USER_ID, enc_title, enc_content,
+                    '["feedback"]', 5, 0, "rule entry",
+                ),
+            )
+        await db.commit()
+
+    # Sanity check: all 600 rows are NULL before the run.
+    async with db_session(tmp_config) as db:
+        rows = await db.execute(
+            "SELECT COUNT(*) FROM notes "
+            "WHERE user_id = ? AND memory_type IS NULL",
+            (_USER_ID,),
+        )
+        pre_null = (await rows.fetchone())[0]
+    assert pre_null == seeded
+
+    summary = await migrations_mod.backfill_memory_types(
+        tmp_config, _USER_ID,
+    )
+
+    # Whole population must land typed in one call — that's the
+    # contract the drain loop adds.
+    assert summary["updated"] == seeded
+    assert summary["errors"] == 0
+    assert summary["skipped"] == 0
+
+    async with db_session(tmp_config) as db:
+        rows = await db.execute(
+            "SELECT COUNT(*) FROM notes "
+            "WHERE user_id = ? AND memory_type IS NULL",
+            (_USER_ID,),
+        )
+        post_null = (await rows.fetchone())[0]
+    assert post_null == 0
+
+    # Spot-check a row from the second batch (i >= 500) — these are
+    # the rows the old single-batch implementation would have left NULL.
+    assert (
+        await _fetch_memory_type(tmp_config, "note-bulk-0550")
+        == "feedback"
+    )

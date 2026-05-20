@@ -92,7 +92,21 @@ _SESSION_LOG_TAGS: frozenset[str] = frozenset({
     "session-end", "daily-log", "weekly-summary", "session-log",
     "channel-thread", "conversation-recap", "thread-recap",
     "background_done", "background_failed", "background_started",
+    # Daily journal pages — ``lazyclaw.lazybrain.journal`` stamps notes
+    # with ``journal`` + ``journal/YYYY-MM-DD``. They're append-only
+    # diaries full of paraphrased prior-turn content, so they belong
+    # in the session-log scope (NOT auto-inject; queryable on-demand).
+    "journal",
 })
+
+
+# ``journal/YYYY-MM-DD`` is a dynamic tag — every day produces a new
+# value, so the static allowlist above can't enumerate it. This regex
+# catches the dated form so the tag pass still classifies the page
+# correctly on the first try.
+_SESSION_LOG_TAG_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^journal/\d{4}-\d{2}-\d{2}$"),
+)
 
 
 # Phrase signals — first-line heuristics. Conservative (each phrase is
@@ -120,7 +134,13 @@ _SESSION_LOG_PHRASES: re.Pattern[str] = re.compile(
     r"^\s*(?:##\s*last\s+(?:upwork|whatsapp|instagram|email|telegram)\b|"
     r"##\s*session (?:end|summary|recap)|"
     r"weekly summary|daily summary|"
-    r"background (?:task|run) (?:done|failed|started))",
+    r"background (?:task|run) (?:done|failed|started)|"
+    # Daily-journal title shapes: ``Journal — 2026-05-20`` (stub) and
+    # ``2026-05-20 — Shipped F1 grounding`` (worker-LLM refreshed).
+    # Caught here so that even if the journal tag is missing, the
+    # title alone is enough to bucket the row as session-log.
+    r"(?:#\s*)?Journal\s+—\s+\d{4}-\d{2}-\d{2}\b|"
+    r"\d{4}-\d{2}-\d{2}\s+—\s+.+)",
     re.IGNORECASE,
 )
 
@@ -160,6 +180,15 @@ def infer_memory_type(
     if tag_set & _REFERENCE_TAGS:
         return "reference"
     if tag_set & _SESSION_LOG_TAGS:
+        return "session-log"
+    # Dynamic ``journal/YYYY-MM-DD`` tag — checked alongside the static
+    # allowlist so the journal-page write path classifies on its first
+    # save (no backfill round trip needed).
+    if any(
+        pat.match(tag)
+        for tag in tag_set
+        for pat in _SESSION_LOG_TAG_PATTERNS
+    ):
         return "session-log"
 
     # Phrase signals — check the title first (richest), then the first

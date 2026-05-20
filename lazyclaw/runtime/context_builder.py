@@ -407,14 +407,42 @@ async def build_context(
 
     # 2b. LazyBrain pinned notes + today's journal (Phase 18 — shared PKM)
     #     Runs in parallel isolation: failures never block prompt build.
+    #
+    #     Cache-boundary discipline (see MEMORY/feedback-claude-cache-
+    #     amplifies-stale-context): this section lives ON THE SAME SIDE
+    #     of the Anthropic prompt cache as the personal-memory pool —
+    #     it gets cached for the turn. Anything injected here competes
+    #     with fresh tool results for the model's attention until the
+    #     cache invalidates. Two gates close that contamination class:
+    #       (1) Pinned notes route through ``filter_pinned_for_cache``,
+    #           which fails closed on session-log + NULL memory_type
+    #           rows. Mirrors the policy applied to the merged memory
+    #           pool below (lines ~451–490) so the two layers can't
+    #           disagree on what's safe to pre-cache.
+    #       (2) Today's journal (``Journal — YYYY-MM-DD``) is a rolling
+    #           append-only log full of paraphrased prior-turn content;
+    #           pre-caching it is the documented 2026-05-19 16:19
+    #           hallucination path. The journal stays queryable on
+    #           demand via ``lazybrain_recall_typed_memory`` (memory_
+    #           type='session-log') but is excluded from the cached
+    #           layer by ``should_inject_journal``.
     lazybrain_section = ""
     try:
         from lazyclaw.lazybrain import journal as lb_journal
         from lazyclaw.lazybrain import store as lb_store
+        from lazyclaw.runtime.context_journal_filter import (
+            filter_pinned_for_cache, should_inject_journal,
+        )
 
-        pinned = await lb_store.list_notes(
+        pinned_raw = await lb_store.list_notes(
             config, user_id, pinned_only=True, limit=5,
         )
+        pinned, excluded_pinned = filter_pinned_for_cache(pinned_raw)
+        if excluded_pinned:
+            logger.debug(
+                "lazybrain pinned cache filter excluded %d notes: %s",
+                len(excluded_pinned), excluded_pinned,
+            )
         today = await lb_journal.get_journal(config, user_id)
         parts: list[str] = []
         if pinned:
@@ -423,9 +451,15 @@ async def build_context(
                 title = n.get("title") or "(untitled)"
                 snippet = (n.get("content") or "").strip().splitlines()[0][:160]
                 parts.append(f"- **{title}** — {snippet}")
-        if today and today.get("content"):
+        if should_inject_journal(today):
             parts.append("### 📓 Today's journal")
             parts.append(today["content"][:600])
+        elif today:
+            logger.debug(
+                "lazybrain journal cache filter excluded today's "
+                "journal title=%r — fetch on-demand via recall skill",
+                today.get("title"),
+            )
         if parts:
             lazybrain_section = "## Second Brain (LazyBrain)\n" + "\n".join(parts)
     except Exception:

@@ -430,6 +430,130 @@ _CHANNEL_CORE_SUFFIXES = frozenset({
     "_get_contracts",
 })
 
+
+# ─── F1 grounding helpers ─────────────────────────────────────────────────
+# F1 enforcement is mechanical, not prompt-based — Opus 4.6/4.7 reads SOUL.md
+# line 14 and still confabulates (2026-05-19 16:19 incident: brain called
+# upwork tools 3x, got real data, then emitted 8534 chars of "Vato agreed
+# $150 / Windows laptop / May 16" from training-data pattern-match). Three
+# mechanical layers fix this:
+#   1. Wrap channel-read tool_results with a freshness sentinel so the brain
+#      has an explicit precedence marker against stale paraphrases.
+#   2. Gate self_recall on no-channel-read-this-turn — injecting paraphrased
+#      semantic-search snippets AFTER fresh tool results buries them.
+#   3. Post-reply F1 enforcer: when channel-read tool was called this turn,
+#      reject drafts containing banned 'from memory' phrases or lacking a
+#      verbatim `> sender (ts): …` quote block, and re-prompt.
+# Tools whose results are AUTHORITATIVE LIVE READS — when one is called,
+# the brain's reply MUST quote it verbatim, not paraphrase from memory.
+_CHANNEL_READ_TOOL_SUFFIXES: frozenset[str] = frozenset({
+    "_get_messages",
+    "_get_conversation",
+    "_get_unread_count",
+    "_read",
+    "_read_dms",
+    "_read_feed",
+    "_read_profile",
+    "_list_chats",
+})
+
+_CHANNEL_READ_TOOL_EXACT: frozenset[str] = frozenset({
+    "upwork_last_conversation",
+    "upwork_inbox_check",
+    "upwork_contract_poll",
+})
+
+
+def _is_channel_read_tool(name: str) -> bool:
+    """True if ``name`` is a tool whose result is a live channel read.
+
+    Strips an ``mcp_<uuid>_`` prefix before matching so MCP-bridged tools
+    like ``mcp_489c8963-…_upwork_get_messages`` match the same way as the
+    bare NL skill names.
+    """
+    if not name:
+        return False
+    n = name.lower()
+    if n.startswith("mcp_"):
+        parts = n.split("_", 2)
+        if len(parts) == 3:
+            n = parts[2]
+    if n in _CHANNEL_READ_TOOL_EXACT:
+        return True
+    return any(n.endswith(suf) for suf in _CHANNEL_READ_TOOL_SUFFIXES)
+
+
+# Banned 'from memory' phrases — when a channel-read tool was called this
+# turn but the draft contains any of these, the brain is paraphrasing from
+# context (daily_log header, self_recall block, prior summary) instead of
+# the just-returned tool result. Matched case-insensitively as substrings.
+_F1_BANNED_PHRASES: re.Pattern[str] = re.compile(
+    r"(?:"
+    r"already pulled"
+    r"|already (?:have|got|know)(?:\s+the)?\s+(?:thread|messages?|conversation|ask|requirements?|details?)"
+    r"|from (?:our|the) (?:chat|conversation|thread|discussion)\s+(?:earlier|yesterday|before|above)"
+    r"|based on what (?:he|she|they) (?:said|wrote|told)"
+    r"|from memory"
+    r"|i (?:recall|remember)(?:\s+(?:from|that))?"
+    r"|as (?:i|we) (?:discussed|saw|noted)\s+(?:earlier|before)"
+    r"|per (?:our|the) earlier"
+    r")",
+    re.IGNORECASE,
+)
+
+# Quote block detector — a line that begins with `> ` followed by a
+# non-whitespace character. The F1 rule (SOUL.md line 14) requires the
+# reply to BEGIN with a verbatim quote block of the 3 most recent
+# contact-side messages. We don't enforce "begins with"; we only require
+# ≥1 quote line exists, because the brain may legitimately prepend a one-
+# liner like "Pulled the thread — here's what James wrote:" before the
+# quotes (still grounded, still useful).
+_F1_QUOTE_LINE_RE: re.Pattern[str] = re.compile(r"^>\s+\S", re.MULTILINE)
+
+# Drafts shorter than this are exempt from the quote-block requirement —
+# short acknowledgments like "Let me re-read the thread first" make no
+# factual claims yet so there's nothing to ground. Bumped from 200 → 280
+# so the brain has room for "I checked your DMs — James asked about X,
+# pulling the full thread now" (no quotes yet, but no fabrication either).
+_F1_DRAFT_QUOTE_THRESHOLD_CHARS: int = 280
+
+
+def _check_f1_violation(
+    draft: str, tool_results: list[str],
+) -> str | None:
+    """Validate ``draft`` is grounded on fresh channel-read tool results.
+
+    Returns a short violation reason, or ``None`` if the draft passes.
+
+    Caller is responsible for confirming a channel-read tool was actually
+    called this turn — this function does NOT inspect tool history.
+
+    Checks:
+    1. Banned 'from memory' phrases — instant fail (catches "Already
+       pulled the thread above").
+    2. If the draft is substantive (≥ ``_F1_DRAFT_QUOTE_THRESHOLD_CHARS``)
+       AND the tool returned non-empty content, the draft must contain
+       at least one ``> sender (ts): …`` quote line. Short
+       acknowledgments are exempt because they make no claims.
+    """
+    if not draft:
+        return None
+    m = _F1_BANNED_PHRASES.search(draft)
+    if m:
+        return f"banned phrase {m.group(0)!r}"
+    if (
+        len(draft) >= _F1_DRAFT_QUOTE_THRESHOLD_CHARS
+        and not _F1_QUOTE_LINE_RE.search(draft)
+        and any((tr or "").strip() for tr in tool_results)
+    ):
+        return "substantive reply without a `> sender (ts): …` quote block"
+    return None
+
+
+# Cap F1 corrections at 2 retries — beyond that, ship the draft with a log
+# warning rather than burning iterations on a wedged brain.
+_F1_MAX_RETRIES: int = 2
+
 # Keywords that indicate the user wants to DO something (not just check status).
 # When absent, only core channel tools are injected to reduce tool count.
 # Matched with word boundaries to prevent "followers" matching "follow".
@@ -2885,6 +3009,14 @@ class Agent:
         _HALLUC_MAX_RETRIES = 2
         _halluc_retries = 0
 
+        # F1 grounding retry counter — each time the brain emits a draft
+        # that violates F1 (banned 'from memory' phrase OR substantive
+        # reply with no `> sender (ts): …` quote block) AFTER a channel-
+        # read tool was called this turn, we inject a correction and
+        # re-roll. Capped at _F1_MAX_RETRIES; further violations ship
+        # with a log warning. See module-level _check_f1_violation.
+        _f1_retries: int = 0
+
         # Auto-promote-to-background nudge: when a foreground turn drags
         # past N tool-using iterations and the brain hasn't yet called
         # run_background, inject a system message that strongly suggests
@@ -3936,13 +4068,85 @@ class Agent:
                         streamed_content = ""
                         continue  # Retry with a different provider
 
+                    # F1 grounding enforcement — when a channel-read tool was
+                    # called this turn, the reply MUST quote the tool result,
+                    # not paraphrase from memory. SOUL.md line 14 is prompt-
+                    # only; this is mechanical. Catches the 2026-05-19 16:19
+                    # pattern: brain calls upwork_get_messages × 2 +
+                    # upwork_last_conversation × 1, then emits 8534 chars of
+                    # "Already pulled the thread — Vato agreed $150" with NO
+                    # quote block and FAKE numbers from training-data bias.
+                    # See module-level _check_f1_violation for the rules.
+                    if (
+                        _final_content
+                        and _f1_retries < _F1_MAX_RETRIES
+                        and any(
+                            _is_channel_read_tool(n)
+                            for n in _tool_call_history
+                        )
+                    ):
+                        _violation = _check_f1_violation(
+                            _final_content, _tool_results,
+                        )
+                        if _violation:
+                            _f1_retries += 1
+                            _f1_correction = (
+                                f"[SYSTEM: F1 grounding violation — {_violation}. "
+                                "You called a channel-read tool this turn — its "
+                                "result is the most recent tool message above and "
+                                "is wrapped in [LIVE READ @ … — AUTHORITATIVE] / "
+                                "[END LIVE READ] markers. Your reply MUST: "
+                                "(1) begin with a verbatim quote block of the 3 "
+                                "most recent contact-side messages, formatted "
+                                "`> {sender} ({timestamp}): {exact content}` "
+                                "copied character-for-character from the tool "
+                                "result, (2) contain no 'from memory' / "
+                                "'already pulled' phrases, (3) trace every "
+                                "concrete claim (dollar amount, date, scope "
+                                "item, deliverable, device, platform) to a "
+                                "quoted line. Rewrite using ONLY the LIVE READ "
+                                "content. If a fact is not in the LIVE READ, "
+                                "write 'not specified — needs to be asked' "
+                                "instead of guessing from prior context.]"
+                            )
+                            messages.append(LLMMessage(
+                                role="assistant", content=_final_content,
+                            ))
+                            messages.append(LLMMessage(
+                                role="user", content=_f1_correction,
+                            ))
+                            logger.warning(
+                                "F1 grounding violation (retry %d/%d): %s | "
+                                "tools_called=%s | draft_head=%r",
+                                _f1_retries, _F1_MAX_RETRIES, _violation,
+                                _tool_call_history[-5:],
+                                (_final_content or "")[:160],
+                            )
+                            streamed_content = ""
+                            continue
+                        # F1 passed — capped retries are also a pass: we ship
+                        # the draft with a log warning rather than burn more
+                        # iterations on a wedged brain.
+
                     # Knowledge-gap self-recall — re-prompt brain with LazyBrain
                     # + personal_memory injection BEFORE this answer ships, when
                     # the brain just emitted a confusion phrase or the user is
                     # repeating themselves. One shot per turn (_self_recalled).
+                    #
+                    # Gated on no-channel-read-this-turn: if a channel-read
+                    # tool already ran, the brain just got authoritative live
+                    # data — injecting stale semantic-search snippets AFTER
+                    # the tool_result buries it and primes cross-contamination
+                    # (the 2026-05-19 16:19 incident: self_recall fired AFTER
+                    # 3 upwork reads, bumped prompt 67K → 77K chars, then the
+                    # re-prompted brain regurgitated the stale paraphrases).
                     if (
                         not _self_recalled
                         and _final_content
+                        and not any(
+                            _is_channel_read_tool(n)
+                            for n in _tool_call_history
+                        )
                     ):
                         try:
                             from lazyclaw.runtime.self_recall import (
@@ -4442,6 +4646,30 @@ class Agent:
                                 len(_injected_post_hook), tc.name,
                                 _injected_post_hook[:3],
                             )
+
+                    # F1 grounding aid — wrap channel-read tool results with
+                    # a freshness sentinel so the brain has an explicit
+                    # precedence marker against any stale paraphrases sitting
+                    # in the system prompt (daily_logs, lazybrain journal,
+                    # semantic-search recall). Without this, Opus 4.6 cannot
+                    # distinguish "fact I just read from MCP" from "fact
+                    # summarized in last week's daily_log header" — see
+                    # 2026-05-19 16:19 incident in MEMORY.
+                    if _is_channel_read_tool(tc.name) and isinstance(result, str):
+                        from datetime import datetime, timezone
+                        _live_ts = datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%d %H:%M:%S UTC",
+                        )
+                        result = (
+                            f"[LIVE READ @ {_live_ts} — AUTHORITATIVE; "
+                            "supersedes any daily_log, journal, or memory "
+                            "paraphrase of the same conversation. Quote the "
+                            "messages below verbatim in your reply — do NOT "
+                            "merge with prior context. If a fact is not "
+                            "below, say 'not specified — needs to be asked'.]"
+                            f"\n{result}\n"
+                            "[END LIVE READ]"
+                        )
 
                     tool_msg = LLMMessage(
                         role="tool",

@@ -29,6 +29,37 @@ _ERROR_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# F1 grounding — markers that flag a daily-log entry as a paraphrased dump
+# of a channel conversation (e.g. "## Last Upwork Conversation\n**Contact:**
+# James Blue\n**Vato (you):** $120, 1 week" — the 2026-05-16 daily_log).
+# Re-injecting these as "Recent Activity" plants competing facts that win
+# the attention war against fresh tool_result data for the same thread.
+# Authoritative content for any channel question belongs to the live MCP
+# read tool, not the diary. Drop them from the prompt entirely.
+_CHANNEL_THREAD_PARAPHRASE_MARKERS: tuple[str, ...] = (
+    "## last upwork conversation",
+    "## last whatsapp conversation",
+    "## last instagram conversation",
+    "## last email thread",
+    "## last telegram conversation",
+    "**contact:**",
+    "**thread time:**",
+    "### messages:",
+)
+
+
+def _is_channel_thread_paraphrase(summary: str) -> bool:
+    """True if summary is a paraphrased dump of channel messages.
+
+    Checks the first 400 chars (where conversation-dump headers live) so a
+    daily_log that merely mentions a contact name in passing is NOT
+    suppressed — only logs that lead with a channel-thread structure.
+    """
+    if not summary:
+        return False
+    head = summary[:400].lower()
+    return any(marker in head for marker in _CHANNEL_THREAD_PARAPHRASE_MARKERS)
+
 # Technical implementation details that confuse the LLM when injected
 # into context. The agent parrots "PBKDF2 cache" etc. when user asks
 # "how is going" because these look like relevant recent events.
@@ -459,6 +490,12 @@ async def build_context(
             for log in reversed(recent_logs):  # oldest first
                 summary = _sanitize_activity_summary(log.get("summary", ""))
                 if not summary:
+                    continue
+                # F1 grounding: drop channel-thread paraphrase dumps. They
+                # contaminated the 2026-05-19 16:19 reply — the daily_log
+                # header "## Last Upwork Conversation … **Vato (you):**
+                # $120, 1 week" outweighed fresh upwork_get_messages data.
+                if _is_channel_thread_paraphrase(summary):
                     continue
                 if log["date"].endswith("_week"):
                     log_lines.append(f"**Week of {log['date'][:10]}:** {summary[:250]}")

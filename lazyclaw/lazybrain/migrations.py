@@ -103,6 +103,12 @@ async def backfill_memory_types(
     skipped = 0
     errors = 0
 
+    # Classify first, then write all UPDATEs in one transaction. Per-row
+    # ``async with db_session`` + commit was a perf hot-spot on the
+    # startup pass — for a user with 500 pre-migration notes that's
+    # 500 commits, blocking the lifespan handler and returning 502 from
+    # nginx until done. One batched transaction is ~100× faster.
+    classified: list[tuple[str, str]] = []  # (note_id, mtype)
     for row in candidates:
         note_id, enc_title, enc_content, tags_json = row
         try:
@@ -134,21 +140,26 @@ async def backfill_memory_types(
             errors += 1
             continue
 
+        classified.append((note_id, mtype))
+
+    if classified:
         try:
             async with db_session(config) as db:
-                await db.execute(
-                    "UPDATE notes SET memory_type = ? "
-                    "WHERE id = ? AND user_id = ? AND memory_type IS NULL",
-                    (mtype, note_id, user_id),
-                )
+                for note_id, mtype in classified:
+                    await db.execute(
+                        "UPDATE notes SET memory_type = ? "
+                        "WHERE id = ? AND user_id = ? AND memory_type IS NULL",
+                        (mtype, note_id, user_id),
+                    )
                 await db.commit()
-            updated += 1
+            updated = len(classified)
         except Exception:
-            logger.debug(
-                "backfill_memory_types: UPDATE failed for note=%s",
-                note_id, exc_info=True,
+            logger.exception(
+                "backfill_memory_types: batched UPDATE failed user=%s "
+                "(%d rows lost this pass — next startup retries)",
+                user_id, len(classified),
             )
-            errors += 1
+            errors += len(classified)
 
     if scanned:
         logger.info(

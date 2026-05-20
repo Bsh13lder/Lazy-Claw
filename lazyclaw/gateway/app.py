@@ -134,17 +134,38 @@ async def lifespan(application: FastAPI):
 
     # Typed-memory backfill — classify any pre-migration notes whose
     # ``memory_type`` column is still NULL. Idempotent; subsequent
-    # startups no-op for already-classified users. Errors are logged
-    # per-user, never raised — startup must not block on a corrupt row.
-    # See lazyclaw/lazybrain/migrations.py for the per-user worker.
+    # startups no-op for already-classified users.
+    #
+    # Fire-and-forget via asyncio.create_task so the server starts
+    # accepting requests IMMEDIATELY. Running it inline with `await`
+    # blocked startup for users with hundreds of pre-migration notes
+    # (each row pays decrypt + classify + a per-row commit), which
+    # returned 502 from the nginx front while the lifespan was still
+    # crunching. The backfill is happy to run in the background — the
+    # auto-inject filter fails closed on NULL so unclassified rows stay
+    # safely out of the cached system prompt until they get labelled.
     try:
         from lazyclaw.lazybrain.migrations import (
             backfill_memory_types_all_users,
         )
-        await backfill_memory_types_all_users(_config)
+        import asyncio as _asyncio
+
+        async def _backfill_in_background() -> None:
+            try:
+                await backfill_memory_types_all_users(_config)
+            except Exception:
+                logger.exception(
+                    "typed-memory backfill failed in background (non-fatal)",
+                )
+
+        # Hold a reference so the task isn't GC'd mid-run. Stored on the
+        # FastAPI app state so it lives as long as the server does.
+        application.state.backfill_task = _asyncio.create_task(
+            _backfill_in_background(),
+        )
     except Exception:
         logger.exception(
-            "typed-memory backfill failed at startup (non-fatal)",
+            "typed-memory backfill scheduling failed at startup (non-fatal)",
         )
 
     yield

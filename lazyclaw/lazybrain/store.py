@@ -833,7 +833,8 @@ async def list_notes(
     async with db_session(config) as db:
         rows = await db.execute(
             f"SELECT id, title, content, tags, importance, pinned, "
-            f"trace_session_id, title_key, created_at, updated_at "
+            f"trace_session_id, title_key, memory_type, "
+            f"created_at, updated_at "
             f"FROM notes WHERE {where} "
             f"ORDER BY pinned DESC, created_at DESC LIMIT ? OFFSET ?",
             (*params, max(1, min(500, limit)), max(0, offset)),
@@ -852,8 +853,13 @@ async def list_notes(
                 "pinned": bool(row[5]),
                 "trace_session_id": row[6],
                 "title_key": row[7],
-                "created_at": row[8],
-                "updated_at": row[9],
+                # Typed-memory scope (see lazyclaw/lazybrain/memory_types.py).
+                # NULL for pre-migration rows until backfill_memory_types
+                # runs; the auto-inject filter fails closed on None so
+                # they don't leak into the cached system prompt.
+                "memory_type": row[8],
+                "created_at": row[9],
+                "updated_at": row[10],
             }
         )
     return out

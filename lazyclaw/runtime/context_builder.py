@@ -448,11 +448,23 @@ async def build_context(
     pool = await get_memories(config, user_id, limit=40)
     try:
         from lazyclaw.lazybrain import store as _lb_store
+        from lazyclaw.lazybrain.memory_types import is_auto_inject_type
         from lazyclaw.lazybrain.store import is_user_facing_memory_note
 
         lb_notes = await _lb_store.list_notes(config, user_id, limit=40)
+        # Typed-memory auto-inject filter: only `user | feedback | project |
+        # reference` notes are safe to pre-inject into the cached system
+        # prompt. ``session-log`` paraphrases (and unclassified rows where
+        # memory_type IS NULL) are queryable on-demand via the recall
+        # skill but never pre-injected, closing the contamination class
+        # that produced the 2026-05-19 16:19 hallucination. See
+        # MEMORY/feedback-claude-cache-amplifies-stale-context.
+        _lb_total = len(lb_notes)
+        _lb_kept = 0
         for n in lb_notes:
             if not is_user_facing_memory_note(n):
+                continue
+            if not is_auto_inject_type(n.get("memory_type")):
                 continue
             content = (n.get("content") or "").strip()
             if not content:
@@ -469,6 +481,13 @@ async def build_context(
                 "content": content[:500],
                 "importance": imp,
             })
+            _lb_kept += 1
+        if _lb_total:
+            logger.info(
+                "LazyBrain auto-inject filter: %d / %d notes passed "
+                "memory_type gate (excluded: session-log + NULL + fact + other)",
+                _lb_kept, _lb_total,
+            )
         # Re-sort merged pool by importance DESC so _pick_hybrid_memories
         # still sees a properly-ordered list.
         pool.sort(key=lambda m: int(m.get("importance") or 0), reverse=True)

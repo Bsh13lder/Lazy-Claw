@@ -132,6 +132,21 @@ async def lifespan(application: FastAPI):
     if not ready:
         logger.warning("[claude-cli] %s", msg)
 
+    # Typed-memory backfill — classify any pre-migration notes whose
+    # ``memory_type`` column is still NULL. Idempotent; subsequent
+    # startups no-op for already-classified users. Errors are logged
+    # per-user, never raised — startup must not block on a corrupt row.
+    # See lazyclaw/lazybrain/migrations.py for the per-user worker.
+    try:
+        from lazyclaw.lazybrain.migrations import (
+            backfill_memory_types_all_users,
+        )
+        await backfill_memory_types_all_users(_config)
+    except Exception:
+        logger.exception(
+            "typed-memory backfill failed at startup (non-fatal)",
+        )
+
     yield
 
 

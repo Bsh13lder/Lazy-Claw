@@ -409,6 +409,12 @@ async def get_conversation_messages(
 
     Returns conversation details with full message history.
     """
+    # P0a — reject the bare inbox URL BEFORE we touch the browser.
+    # Without this, ``startswith("http")`` would navigate verbatim and
+    # the bubble extractor would scrape whatever happened to be open
+    # in the shared Brave profile (2026-05-20 incident).
+    _validate_room_id(room_id)
+
     browser = get_browser()
     await browser.ensure_logged_in()
 
@@ -588,6 +594,26 @@ async def get_conversation_messages(
                 if me_name and msg.get("sender"):
                     msg["is_mine"] = _sender_matches(msg["sender"], me_name)
                     last_is_mine = msg["is_mine"]
+                # P0b — drop bubbles whose timestamps are in the future
+                # (relative to local clock + small skew buffer). A
+                # future timestamp means the extractor latched onto
+                # unrelated DOM (a "Last seen 2:11 PM" tag, a status
+                # badge, a notification banner). Real chat bubbles
+                # never carry a future clock. We log the drop with the
+                # class hint + raw timestamp so post-mortem diagnosis
+                # can tell extraction-error from a real Upwork bug.
+                raw_ts = msg.get("timestamp")
+                if isinstance(raw_ts, str) and _bubble_timestamp_in_future(raw_ts):
+                    try:
+                        class_hint = await el.get_attribute("class") or ""
+                    except Exception:
+                        class_hint = "<unavailable>"
+                    logger.warning(
+                        "get_conversation_messages: dropping bubble with "
+                        "future timestamp raw=%r class=%r sender=%r",
+                        raw_ts, class_hint, msg.get("sender"),
+                    )
+                    continue
                 conversation["messages"].append(msg)
         except Exception:
             continue
@@ -639,6 +665,169 @@ def _sender_matches(sender: str, me_name: str) -> bool:
 _TIMESTAMP_RE = re.compile(
     r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\s*(?:[A-Z]{2,4})?\b"
 )
+
+
+# ── room_id guard (P0a) ──────────────────────────────────────────────
+# Live incident 2026-05-20 13:34–13:35: the brain called
+# ``upwork_get_conversation(room_id="https://www.upwork.com/ab/messages/rooms",
+# ...)`` — i.e. the bare inbox URL with no specific room ID appended.
+# Because ``get_conversation_messages`` accepts URL-shaped ``room_id``s
+# (``startswith("http")`` → navigate verbatim), the browser landed on
+# the inbox page and the bubble extractor scraped whatever conversation
+# happened to be open in the shared Brave profile, producing 4 KB of
+# garbage with a (fake-looking) "2:11 PM" timestamp. The brain then
+# quoted the garbage as if it were the requested thread. Closes the
+# fetch-layer half of the most recent stale-Upwork-DM confabulation —
+# the grounding-layer half (quote-then-summarize, most-recent-wins)
+# was hardened in commit c83e39c.
+#
+# Reject:
+#   * empty / whitespace-only
+#   * the bare inbox URL with or without trailing ``/`` / ``?`` / ``#``
+#   * any URL under ``/ab/messages/rooms`` that lacks a ``/<id>``
+#     segment after ``rooms`` (e.g. ``/ab/messages/rooms?filter=unread``)
+#
+# Accept:
+#   * legacy bare IDs (e.g. ``room_12345abc``)
+#   * full conversation URLs (``.../rooms/room_12345abc?companyReference=...``)
+
+_INBOX_PATH = "/ab/messages/rooms"
+
+
+def _validate_room_id(room_id: str | None) -> None:
+    """Validate ``room_id`` before any browser navigation.
+
+    Raises :class:`ValueError` with an actionable message if the input
+    is missing, empty, or points at the inbox instead of a specific
+    conversation. The error string explicitly tells the caller (brain
+    or NL skill) how to recover: fetch the inbox via
+    :func:`get_messages` first, then pass the returned ``room_id``.
+    """
+    if room_id is None:
+        raise ValueError(
+            "room_id is required — call `upwork_get_messages` first, "
+            "pass the returned `room_id` to `upwork_get_conversation` "
+            "— never the inbox URL"
+        )
+    if not isinstance(room_id, str) or not room_id.strip():
+        raise ValueError(
+            "room_id must be a non-empty string — call "
+            "`upwork_get_messages` first, pass the returned `room_id` "
+            "to `upwork_get_conversation` — never the inbox URL"
+        )
+
+    cleaned = room_id.strip()
+
+    # Strip trailing fragment / query so e.g. ``.../rooms?filter=unread``
+    # and ``.../rooms#top`` collapse to the inbox shape before the
+    # equality check.
+    no_fragment = cleaned.split("#", 1)[0]
+    no_query = no_fragment.split("?", 1)[0]
+    no_trailing_slash = no_query.rstrip("/")
+
+    inbox_url_https = "https://www.upwork.com" + _INBOX_PATH
+    inbox_url_http = "http://www.upwork.com" + _INBOX_PATH
+    if no_trailing_slash in (inbox_url_https, inbox_url_http):
+        raise ValueError(
+            f"room_id={room_id!r} is the inbox URL, not a specific "
+            "conversation — call `upwork_get_messages` first, pass the "
+            "returned `room_id` to `upwork_get_conversation` — never "
+            "the inbox URL"
+        )
+
+    # Any URL touching /ab/messages/rooms MUST have a /<id> segment
+    # after the literal "rooms". Catches relative paths and stripped
+    # variants (e.g. user passes "/ab/messages/rooms/").
+    if _INBOX_PATH in cleaned:
+        tail = cleaned.split(_INBOX_PATH, 1)[1]
+        # Tail must start with "/" followed by a non-empty, non-query,
+        # non-fragment segment — i.e. an actual room id.
+        tail_no_query = tail.split("?", 1)[0].split("#", 1)[0]
+        segments = [s for s in tail_no_query.split("/") if s]
+        if not segments:
+            raise ValueError(
+                f"room_id={room_id!r} points at the inbox path with no "
+                "specific room — call `upwork_get_messages` first, "
+                "pass the returned `room_id` to `upwork_get_conversation` "
+                "— never the inbox URL"
+            )
+
+
+# Parses 12-hour clock strings like "10:39 PM" / "2:11 PM" / "9:20 PM PDT"
+# back into (hour, minute) tuples so we can compare bubble timestamps
+# against ``now()`` and drop bubbles whose clocks lie in the future. We
+# DON'T introduce a dateparser dependency for this — Upwork only emits
+# the time-of-day, and a 30-line regex parser covers every shape the
+# extractor has produced over the 2026 layout. Returns None on any
+# unparseable input — callers treat None as "keep" so a parser failure
+# never silently drops a real message.
+_TIME_OF_DAY_RE = re.compile(
+    r"^\s*(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?\s*(?:[A-Z]{2,4})?\s*$"
+)
+
+
+def _parse_time_of_day(raw: str | None) -> tuple[int, int] | None:
+    """Best-effort parse of a bubble timestamp string into 24h
+    ``(hour, minute)``. Returns None when the input doesn't look like
+    Upwork's time-of-day format — caller treats None as "don't drop".
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    m = _TIME_OF_DAY_RE.match(raw)
+    if not m:
+        return None
+    try:
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+    except (TypeError, ValueError):
+        return None
+    if not (0 <= minute <= 59):
+        return None
+    suffix = (m.group(3) or "").upper()
+    if suffix == "AM":
+        if not (1 <= hour <= 12):
+            return None
+        if hour == 12:
+            hour = 0
+    elif suffix == "PM":
+        if not (1 <= hour <= 12):
+            return None
+        if hour != 12:
+            hour += 12
+    else:
+        # 24-hour clock fallback (Upwork's regional layouts sometimes
+        # render without AM/PM)
+        if not (0 <= hour <= 23):
+            return None
+    return hour, minute
+
+
+def _bubble_timestamp_in_future(
+    raw_timestamp: str | None, *, now=None, skew_seconds: int = 60
+) -> bool:
+    """Return True iff ``raw_timestamp`` parses to a time-of-day that
+    lies more than ``skew_seconds`` after ``now``. Unparseable inputs
+    return False (= "keep"). A bubble with a future timestamp is a
+    strong signal that the extractor latched onto unrelated DOM (a
+    "Last seen 2:11 PM" tag, a notification badge, etc.).
+
+    Only compares HH:MM within the local day. If the parsed time is
+    earlier than now, we assume it's a real earlier-today message and
+    keep it — we never drop on a backward delta (Upwork doesn't render
+    tomorrow's clock for today's bubbles, so a "future" delta is the
+    only red flag).
+    """
+    import datetime as _dt
+
+    parsed = _parse_time_of_day(raw_timestamp)
+    if parsed is None:
+        return False
+    if now is None:
+        now = _dt.datetime.now()
+    hour, minute = parsed
+    bubble_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delta_seconds = (bubble_dt - now).total_seconds()
+    return delta_seconds > skew_seconds
 
 
 async def _extract_message(
@@ -854,6 +1043,11 @@ async def send_message(params: SendMessageParams) -> dict:
             "offending_token": pitch,
         }
 
+    # P0a — same inbox-URL guard as get_conversation_messages. Refuse
+    # to navigate when room_id is the bare inbox URL (would land on a
+    # random open chat in the shared Brave profile).
+    _validate_room_id(params.room_id)
+
     browser = get_browser()
     await browser.ensure_logged_in()
 
@@ -1006,6 +1200,11 @@ async def edit_message(params: EditMessageParams) -> dict:
             ),
             "offending_token": pitch,
         }
+
+    # P0a — same inbox-URL guard. Editing is even more sensitive than
+    # sending: an inbox-URL nav would land on a random open chat and
+    # the edit flow would target the wrong person's bubble entirely.
+    _validate_room_id(params.room_id)
 
     browser = get_browser()
     await browser.ensure_logged_in()

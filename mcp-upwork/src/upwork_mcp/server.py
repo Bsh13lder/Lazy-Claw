@@ -771,10 +771,37 @@ def _self_check() -> None:
         except (OSError, TypeError):
             send_uses_helper = False  # source unavailable → treat as drift
 
+    # Inbox-URL guard (commit added 2026-05-20 after the
+    # https://www.upwork.com/ab/messages/rooms confabulation incident).
+    # We check three things, all symptoms of a stale deployment:
+    #   1. The validator helper exists at all.
+    #   2. get_conversation_messages references it (i.e. the read path
+    #      is actually guarded — the helper isn't dead code).
+    #   3. send_message references it (the write path is guarded too).
+    inbox_guard_present = hasattr(_msgs, "_validate_room_id")
+    get_conv_uses_guard = False
+    send_uses_guard = False
+    if inbox_guard_present:
+        try:
+            get_conv_uses_guard = (
+                "_validate_room_id"
+                in inspect.getsource(_msgs.get_conversation_messages)
+            )
+            send_uses_guard = (
+                "_validate_room_id"
+                in inspect.getsource(_msgs.send_message)
+            )
+        except (OSError, TypeError):
+            get_conv_uses_guard = False
+            send_uses_guard = False
+
     print(
         f"[upwork-mcp] startup self-check: version={__version__} "
         f"_type_with_soft_breaks={'YES' if helper_present else 'MISSING'} "
-        f"send_message_uses_helper={'YES' if send_uses_helper else 'NO'}",
+        f"send_message_uses_helper={'YES' if send_uses_helper else 'NO'} "
+        f"_validate_room_id={'YES' if inbox_guard_present else 'MISSING'} "
+        f"get_conv_uses_guard={'YES' if get_conv_uses_guard else 'NO'} "
+        f"send_uses_guard={'YES' if send_uses_guard else 'NO'}",
         file=sys.stderr,
     )
 
@@ -784,6 +811,21 @@ def _self_check() -> None:
             "soft-break fix (commit 6aac606). Multi-line message sends "
             "would fragment into one bubble per newline. Rebuild the "
             "Docker image with the current source tree: "
+            "`docker compose build lazyclaw && docker compose up -d`. "
+            "Refusing to serve.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if not (inbox_guard_present and get_conv_uses_guard and send_uses_guard):
+        print(
+            "[upwork-mcp] FATAL: deployed code is missing the inbox-URL "
+            "room_id guard (added 2026-05-20 after the "
+            "https://www.upwork.com/ab/messages/rooms confabulation "
+            "incident). Without it, passing the bare inbox URL as "
+            "room_id navigates the shared Brave profile to whatever "
+            "chat happens to be open and the extractor scrapes garbage. "
+            "Rebuild the Docker image with the current source tree: "
             "`docker compose build lazyclaw && docker compose up -d`. "
             "Refusing to serve.",
             file=sys.stderr,

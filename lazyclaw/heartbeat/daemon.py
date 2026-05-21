@@ -177,9 +177,6 @@ class HeartbeatDaemon:
         # at sensible cadences (every tick / once an hour) without blocking
         # the cron + watcher passes that need to fire promptly.
         self._tick_count: int = 0
-        # Last hour we ingested Claude plans per user. Plans don't change
-        # often — every ~60min is plenty.
-        self._last_plan_ingest_hour: dict[str, str] = {}
         # Last day we fired the end-of-day progress summary per user.
         # Same pattern as _last_journal_seed_iso — bounds tick cost.
         self._last_eod_summary_iso: dict[str, str] = {}
@@ -330,10 +327,11 @@ class HeartbeatDaemon:
         # Run LazyBrain topic-rollup sweep once per day per user.
         await self._sweep_topic_rollups()
 
-        # Second-Brain Substrate (Phase 2): drain dirty embeddings + ingest
-        # CLAUDE plan files. Both are cheap NOOPs when there's nothing to do.
+        # Second-Brain Substrate (Phase 2): drain dirty embeddings.
+        # Removed 2026-05-21: hourly mirror of ~/.claude/plans/*.md into
+        # LazyBrain (cross-project session leak — Claude Code plans from
+        # ANY project were being ingested as user notes here).
         await self._reindex_dirty_embeddings()
-        await self._ingest_claude_plans()
 
         # Retry tasks whose initial LazyBrain mirror failed (Ollama down,
         # encryption hiccup, etc.). Cheap NOOP when there's nothing to retry.
@@ -2124,46 +2122,6 @@ class HeartbeatDaemon:
             except Exception:
                 logger.debug(
                     "embedding reindex failed for user %s",
-                    user_id, exc_info=True,
-                )
-
-    async def _ingest_claude_plans(self) -> None:
-        """Mirror ``~/.claude/plans/*.md`` into LazyBrain once per hour per user.
-
-        Plans rarely change between ticks; the per-plan mtime guard inside
-        ``ingest_claude_plans`` makes the whole call near-free when nothing
-        moved. Hour-bucketed throttle keeps the disk-glob off the hot path.
-        """
-        try:
-            from lazyclaw.lazybrain import plan_ingest
-        except Exception:
-            logger.debug("plan_ingest import failed", exc_info=True)
-            return
-        try:
-            async with db_session(self._config) as db:
-                cursor = await db.execute("SELECT id FROM users")
-                users = [r[0] for r in await cursor.fetchall()]
-        except Exception:
-            return
-        now_hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
-        for user_id in users:
-            if self._last_plan_ingest_hour.get(user_id) == now_hour:
-                continue
-            try:
-                summary = await plan_ingest.ingest_claude_plans(
-                    self._config, user_id,
-                )
-                self._last_plan_ingest_hour[user_id] = now_hour
-                if summary.get("ingested"):
-                    logger.info(
-                        "claude plan ingest: user=%s ingested=%d skipped=%d "
-                        "(of %d)",
-                        user_id, summary["ingested"], summary["skipped"],
-                        summary["checked"],
-                    )
-            except Exception:
-                logger.debug(
-                    "plan ingest failed for user %s",
                     user_id, exc_info=True,
                 )
 

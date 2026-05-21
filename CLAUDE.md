@@ -6,7 +6,8 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 - **[DOCS.md](DOCS.md)** — Complete function & class reference + detailed implementation patterns. Keep updated when adding new modules.
 - **[TODO.md](TODO.md)** — Phase plan with checkable items. All roadmap/status tracking lives here.
-- **[MEMORY.md](/.claude/projects/.../memory/MEMORY.md)** — Persistent memory index (user prefs, feedback, project status, references).
+
+> **Memory isolation (2026-05-21):** Claude Code's auto-memory at `~/.claude/projects/.../memory/` is DELIBERATELY NOT referenced as a lazyclaw data source — cross-project session content was leaking into lazybrain via the (now-removed) `plan_ingest` hourly mirror. Lazyclaw's own knowledge lives in lazybrain (encrypted, MCP-exposed). Do NOT re-introduce any bridge that pulls `~/.claude/plans/*` or `~/.claude/projects/*` into lazybrain.
 
 ## File Size Rules
 

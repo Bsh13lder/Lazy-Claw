@@ -125,6 +125,21 @@ async def init_db(config: Config) -> None:
             ("note_links", "source", "ALTER TABLE note_links ADD COLUMN source TEXT"),
             # LazyBrain Phase B: pipe-alias display text on resolved wikilinks.
             ("note_links", "display_text", "ALTER TABLE note_links ADD COLUMN display_text TEXT"),
+            # LazyBrain PPR substrate (2026-05-21) — three additive columns
+            # that let the link graph distinguish syntactic shape (wikilink
+            # vs embed vs block_ref) AND preserve link counts so a note that
+            # references [[X]] three times outranks one that references it
+            # once. Orthogonal to ``edge_type`` (semantic relation: wikilink
+            # | supersedes | contradicts | references | derives_from).
+            #   anchor:     section / block id after ``#`` (nullable; raw case).
+            #   link_kind:  syntactic shape — 'wikilink' | 'embed' | 'block_ref'.
+            #   occurrence: how many times the same (from, to, anchor, kind)
+            #               tuple appears in the note body. Obsidian counts
+            #               multiple [[X]] mentions; the PPR random walk
+            #               weights edges by occurrence.
+            ("note_links", "anchor", "ALTER TABLE note_links ADD COLUMN anchor TEXT"),
+            ("note_links", "link_kind", "ALTER TABLE note_links ADD COLUMN link_kind TEXT NOT NULL DEFAULT 'wikilink'"),
+            ("note_links", "occurrence", "ALTER TABLE note_links ADD COLUMN occurrence INTEGER NOT NULL DEFAULT 1"),
             # LazyBrain Phase G: chunked embeddings dirty flag (mirrors embedding_dirty).
             ("notes", "chunks_dirty", "ALTER TABLE notes ADD COLUMN chunks_dirty INTEGER NOT NULL DEFAULT 1"),
             # LazyBrain Phase G+: per-chunk SHA1 of chunk_text. Lets
@@ -151,6 +166,18 @@ async def init_db(config: Config) -> None:
             # pass; ``is_auto_inject_type(None)`` fails closed to keep them
             # out of the cached system prompt until classified.
             ("notes", "memory_type", "ALTER TABLE notes ADD COLUMN memory_type TEXT"),
+            # Reindex starvation fix (2026-05-20) — per-row cooldown timestamp.
+            # Updated on EVERY reindex attempt (success or skip) so the
+            # dirty-batch picker can order by ``last_reindex_attempt_at ASC
+            # NULLS FIRST``. Without this, the picker's ``ORDER BY updated_at
+            # DESC`` repeatedly served the same 3 most-recent dirty rows; if
+            # they failed (Ollama 500 / decrypt-broken / tokenizer-busted)
+            # the 3-consecutive-skip bailout fired and the other 451 dirty
+            # rows starved forever. NULLS FIRST gives brand-new dirty rows
+            # immediate priority (they have no attempt yet); failed rows fall
+            # to the back of the queue, fair-share next cycle. Plaintext:
+            # operational timestamp, no user content.
+            ("notes", "last_reindex_attempt_at", "ALTER TABLE notes ADD COLUMN last_reindex_attempt_at TEXT"),
         ]
         for table, column, sql in migrations:
             try:
@@ -278,6 +305,57 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug(
                 "idx_notes_user_memory_type creation skipped", exc_info=True,
+            )
+
+        # Reindex queue index — accelerates the dirty-batch picker's
+        # ``WHERE user_id=? AND (embedding_dirty=1 OR chunks_dirty=1)
+        # ORDER BY last_reindex_attempt_at ASC NULLS FIRST`` lookup.
+        # Created post-migration for the same reason as the typed-memory
+        # index above: on upgrading installs the column is added by the
+        # ALTER TABLE pass, so the index must come after. Docker-restart-
+        # safe via IF NOT EXISTS.
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_notes_user_reindex_attempt "
+                "ON notes(user_id, last_reindex_attempt_at)"
+            )
+        except Exception:
+            logger.debug(
+                "idx_notes_user_reindex_attempt creation skipped",
+                exc_info=True,
+            )
+
+        # Backlink-by-id index (2026-05-21) — "backlinks of resolved note N"
+        # is the hot path for the upcoming PPR random walk and the existing
+        # backlinks panel. Without this index ``WHERE user_id=? AND
+        # to_note_id=?`` falls back to a text scan on to_page_name (which
+        # only covers UNresolved links). Created post-migration because
+        # to_note_id has been on the table from day one but the index
+        # never existed; idempotent IF NOT EXISTS keeps repeated init_db
+        # restarts a no-op.
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_note_links_to_note "
+                "ON note_links(user_id, to_note_id)"
+            )
+        except Exception:
+            logger.debug(
+                "idx_note_links_to_note creation skipped", exc_info=True,
+            )
+
+        # Edge-type filter index — accelerates ``WHERE user_id=? AND
+        # edge_type=?`` lookups (e.g. "all supersedes edges for user X").
+        # Same post-migration placement as above: ``edge_type`` is added
+        # by the ALTER TABLE pass on upgrade.
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_note_links_user_kind "
+                "ON note_links(user_id, edge_type)"
+            )
+        except Exception:
+            logger.debug(
+                "idx_note_links_user_kind creation skipped", exc_info=True,
             )
 
         await db.commit()

@@ -39,6 +39,7 @@ from lazyclaw.lazybrain.wikilinks import (
     extract_tags,
     extract_wikilinks,
     extract_wikilinks_full,
+    extract_wikilinks_with_counts,
     normalize_page,
 )
 
@@ -253,9 +254,16 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
     newest), but the user gets a trail and can rename/alias to disambiguate.
     Edge_type defaults to ``'wikilink'`` and source to ``'auto'`` so the
     semantic-edge column added in Phase 4 carries provenance for free.
+
+    Persists per Obsidian semantics:
+      * ``link_kind``  — syntactic shape (``wikilink`` | ``embed`` | ``block_ref``).
+      * ``anchor``     — section name or block id (preserves case).
+      * ``occurrence`` — count of duplicate ``(from, to, anchor, link_kind)``
+        tuples in the body. PPR weights edges by occurrence; backlink
+        panels show the count to the user.
     """
-    parsed = extract_wikilinks_full(markdown)
-    targets = [w.target for w in parsed]
+    parsed_with_counts = extract_wikilinks_with_counts(markdown)
+    targets = [w.target for w, _ in parsed_with_counts]
     # Only delete the wikilink-type rows we own — don't blow away typed
     # edges (supersedes/contradicts/etc.) the agent or user wrote via
     # add_relation. Without this filter every save_note would wipe the
@@ -308,20 +316,26 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
             resolved[target] = row[0]
 
     now = _now()
-    for w in parsed:
+    for w, occurrence in parsed_with_counts:
         # Persist `display` so backlink panels can show the surface text the
         # author chose (e.g. ``[[Page|nice label]]``). Empty when not given.
+        # Persist `anchor`, `link_kind`, `occurrence` so the graph carries
+        # Obsidian-grade fidelity (section/block targeting + link counts).
         await db.execute(
             "INSERT INTO note_links "
             "(user_id, from_note_id, to_page_name, to_note_id, "
-            "edge_type, source, display_text, created_at) "
-            "VALUES (?, ?, ?, ?, 'wikilink', 'auto', ?, ?)",
+            "edge_type, source, display_text, anchor, link_kind, "
+            "occurrence, created_at) "
+            "VALUES (?, ?, ?, ?, 'wikilink', 'auto', ?, ?, ?, ?, ?)",
             (
                 user_id,
                 note_id,
                 w.target,
                 resolved.get(w.target),
                 w.display or None,
+                w.anchor or None,
+                w.link_kind,
+                occurrence,
                 now,
             ),
         )

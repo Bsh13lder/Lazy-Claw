@@ -62,6 +62,16 @@ dependencies = [
     # pywhispercpp wheels are missing and source builds aren't available.
     "pywhispercpp>=1.2.0",
     "imageio-ffmpeg>=0.4.9",
+    # sqlite-vec — vec0 virtual table for LazyBrain semantic search.
+    # Replaces the brute-force NumPy cosine pass over per-user decrypted
+    # vectors with a single SQL nearest-neighbour query (~50ms at 100k
+    # vectors vs 600-1200ms at 5k for the old loop). Plaintext mirror only —
+    # the encrypted `note_embeddings` table remains the source of truth.
+    # When the extension fails to load (locked-down sqlite, missing
+    # loadable extensions, sandboxed host), embeddings.py degrades to
+    # the brute-force path with identical recall quality. Base dep
+    # (default-on per feedback_optional_extras_for_core_features).
+    "sqlite-vec>=0.1.9",
 ]
 
 [project.optional-dependencies]

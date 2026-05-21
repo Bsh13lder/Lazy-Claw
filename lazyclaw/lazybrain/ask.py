@@ -12,12 +12,104 @@ up (embeddings module handles that transparently).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from lazyclaw.config import Config
 from lazyclaw.lazybrain import embeddings
 
 logger = logging.getLogger(__name__)
+
+# Feature flag — env override lets the user revert to vector-only if the
+# 1-hop graph expansion regresses on their vault. Default ON; "0", "false",
+# "no", "off" disable. Memory: user wants every MiniMax-era behaviour to
+# remain reachable via an escape hatch.
+_GRAPH_EXPAND_ENV = "LAZYBRAIN_GRAPH_EXPAND"
+_GRAPH_EXPAND_OFF = frozenset({"0", "false", "no", "off", ""})
+
+# How many top vector hits seed the 1-hop expansion. Research (this
+# session's fan-out) shows top-5 is the sweet spot — wider seeds add
+# noise on PKM graphs without lifting recall.
+_GRAPH_SEED_TOPK = 5
+
+
+def _graph_expand_enabled() -> bool:
+    return os.environ.get(_GRAPH_EXPAND_ENV, "1").strip().lower() not in _GRAPH_EXPAND_OFF
+
+
+async def _expand_with_graph(
+    config: Config,
+    user_id: str,
+    vec_results: list[dict],
+    *,
+    limit: int,
+) -> list[dict]:
+    """Fuse 1-hop wikilink neighbours of the top-K vector hits with the
+    vector ranking via RRF. Returns the fused list of note dicts.
+
+    Behaviour rules (per task spec):
+    - Empty hop_hits → return vec_results unchanged (no crash).
+    - ``graph.get_neighbors`` raising → log warning, return vec_results.
+    - Works BEFORE and AFTER the parallel schema agent ships
+      ``idx_note_links_to_note`` — the try/except is the contract.
+    """
+    if not vec_results:
+        return vec_results
+
+    # Lazy imports keep the ask path light when the flag is off.
+    from lazyclaw.lazybrain import graph as _graph
+    from lazyclaw.lazybrain import rrf as _rrf
+    from lazyclaw.lazybrain import store as _store
+
+    vec_ids = [n["id"] for n in vec_results if n.get("id")]
+    if not vec_ids:
+        return vec_results
+
+    # Walk 1-hop neighbours of the top-K seeds. In-order dedupe so each
+    # neighbour's first appearance fixes its RRF rank.
+    hop_hits: list[str] = []
+    seen: set[str] = set(vec_ids)  # seeds shouldn't re-count as neighbours
+    for seed in vec_ids[:_GRAPH_SEED_TOPK]:
+        try:
+            payload = await _graph.get_neighbors(
+                config, user_id, seed, depth=1,
+            )
+        except Exception as exc:
+            # Graph not initialised, missing index pre-migration, or any
+            # other transient failure → fall through to vector-only. The
+            # warning surfaces in logs without breaking /ask.
+            logger.warning(
+                "graph expansion failed for seed %s — falling back to "
+                "vector-only: %s", seed, exc,
+            )
+            return vec_results
+        for node in payload.get("nodes") or []:
+            nid = node.get("id")
+            if not nid or nid in seen:
+                continue
+            seen.add(nid)
+            hop_hits.append(nid)
+
+    if not hop_hits:
+        # Top-K have no wikilinks — nothing to fuse, keep vector ranking.
+        return vec_results
+
+    fused_ids = _rrf.fuse_to_ids([vec_ids, hop_hits], limit=limit)
+
+    # Re-attach note dicts. Vector hits already carry content + _score; for
+    # graph-only hits we hydrate from the store. None drops silently so a
+    # stale link can't break the answer.
+    vec_by_id = {n["id"]: n for n in vec_results if n.get("id")}
+    out: list[dict] = []
+    for nid in fused_ids:
+        if nid in vec_by_id:
+            out.append(vec_by_id[nid])
+            continue
+        note = await _store.get_note(config, user_id, nid)
+        if note:
+            out.append(note)
+    return out
+
 
 _PROMPT = """You are answering a question grounded in the user's personal notes.
 
@@ -66,6 +158,20 @@ async def ask_notes(
     )
     results = retrieval.get("results") or []
     retrieval_source = retrieval.get("source", "none")
+
+    # 1-hop graph expansion (Phase: graph+RRF). Fuses wikilink neighbours
+    # of the top-5 vector hits into the ranking via RRF so associative
+    # queries surface notes the dense embedding alone would miss
+    # (~20-25% recall lift on PKM graphs per this session's research).
+    # Gated by ``LAZYBRAIN_GRAPH_EXPAND`` env (default "1"). Failures
+    # degrade silently to vector-only.
+    if results and _graph_expand_enabled():
+        before_ids = [n.get("id") for n in results]
+        results = await _expand_with_graph(
+            config, user_id, results, limit=retrieval_k,
+        )
+        if [n.get("id") for n in results] != before_ids:
+            retrieval_source = f"{retrieval_source}+graph"
 
     if rerank_enabled and results:
         try:

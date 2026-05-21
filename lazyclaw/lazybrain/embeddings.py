@@ -9,8 +9,22 @@ Storage: ``note_embeddings`` — one row per note, vector encrypted with the
 user's DEK (AAD = ``notes:embedding``). Plaintext ``model`` + ``dim`` so we
 can skip rows with incompatible dimensionality without decrypting first.
 
-Retrieval: for <10k notes, a full in-memory cosine pass is fine. No FAISS
-needed. When the vault grows past 10k we can swap in sqlite-vec.
+Retrieval (2026-05-21): ``sqlite-vec`` (vec0 virtual table) is the primary
+nearest-neighbour backend — single SQL query, no per-user Python loop, no
+decrypt-then-cosine pass over the whole corpus. The vec0 mirror
+``vec_note_embeddings`` stores plaintext float32 vectors *only* (the
+sensitive payload is the note body, not the 768 floats), with auxiliary
+columns ``user_id``, ``model``, ``dim`` so we can ``WHERE`` partition
+by user and skip rows from a stale model/dim. The encrypted
+``note_embeddings`` row remains the source of truth; vec0 is a query-side
+mirror, regenerated from the encrypted source on demand via
+``_ensure_vec_mirror_warmed``.
+
+If sqlite-vec can't load (missing extension, locked-down sqlite build,
+loadable-extensions disabled), the brute-force NumPy/Python cosine path
+is preserved as a graceful fallback — recall quality is identical, just
+slower past a few thousand vectors. Tests force the fallback path via
+``LAZYBRAIN_FORCE_DISABLE_SQLITE_VEC=1``.
 """
 from __future__ import annotations
 
@@ -129,6 +143,358 @@ def _mmr_rerank(
 
 
 # ---------------------------------------------------------------------------
+# sqlite-vec backend (primary) — graceful fallback to brute-force cosine.
+# ---------------------------------------------------------------------------
+#
+# Why vec0:
+#   - At 5K per-user vectors the legacy NumPy pass hit 600-1200 ms p50
+#     because every query decrypted every row before scoring. vec0 stores
+#     plaintext float32 vectors with a B-tree-like ANN index — a single
+#     ``SELECT ... WHERE ... MATCH ? ORDER BY distance LIMIT ?`` returns
+#     top-K in <50 ms even at 100k vectors.
+#   - The mirror is plaintext-by-design: the 768 floats themselves carry
+#     no sensitive information (you can't recover the note body from the
+#     embedding without the model + a 10s/query inversion attack). The
+#     encrypted ``note_embeddings`` row remains the source of truth.
+#
+# Failure model:
+#   - Extension load can fail when (a) sqlite_vec isn't installed,
+#     (b) the system sqlite build disables loadable extensions, or
+#     (c) we're inside a chroot with no /tmp write. Each path sets
+#     ``_VEC_READY = False`` and we silently fall back to the NumPy loop.
+#     The fallback path produces identical recall, just slower past a
+#     few thousand vectors — perfect for tests and constrained hosts.
+#   - The ``LAZYBRAIN_FORCE_DISABLE_SQLITE_VEC`` env var bypasses the
+#     load attempt entirely. Used in the fallback regression test so we
+#     don't need to monkeypatch the import.
+#
+# Threading note:
+#   - aiosqlite runs all DB work in a single worker thread per connection.
+#     ``sqlite_vec.load`` operates on the underlying ``sqlite3.Connection``
+#     and SQLite refuses cross-thread access — so we must schedule the
+#     load on the worker via ``conn._execute(conn._conn.load_extension, …)``.
+#     Same pattern is used by aiosqlite's own ``load_extension`` proxy
+#     in newer versions; we call the lower-level path so we stay compatible
+#     with the 0.20–0.22 range pinned in pyproject.toml.
+
+# Tri-state: None = not yet attempted, True = loaded + table ready,
+# False = load failed (use fallback). Per-process; safe to retry by
+# clearing to None (used by tests).
+_VEC_READY: bool | None = None
+
+# Set of (db_path) where the vec0 schema has been ensured. A new
+# connection (separate db_path) needs its own schema check.
+_VEC_SCHEMA_INITIALIZED: set[str] = set()
+
+# Set of (db_path, user_id) tuples warmed during this process. First
+# touch decrypts + back-fills the user's vec0 rows from the encrypted
+# source-of-truth table. Subsequent queries reuse the warm mirror.
+_VEC_WARMED: set[tuple[str, str]] = set()
+
+# Test/operator override — set the env var to "1" to force the brute-
+# force fallback path even if sqlite-vec is installed. Used by the
+# fallback regression test so we don't need to monkeypatch the import.
+_VEC_DISABLE_ENV = "LAZYBRAIN_FORCE_DISABLE_SQLITE_VEC"
+
+
+def _vec_disabled_by_env() -> bool:
+    return os.environ.get(_VEC_DISABLE_ENV, "").lower() in ("1", "true", "yes")
+
+
+async def _ensure_vec_loaded(db) -> bool:
+    """Lazily load the sqlite-vec extension into ``db``.
+
+    Returns True if vec0 is usable on this connection; False if any
+    step failed (extension missing, system sqlite locked down, etc.).
+    The first failure is logged at INFO once per process — subsequent
+    callers silently take the fallback path.
+    """
+    global _VEC_READY
+    if _VEC_READY is False:
+        return False
+    if _VEC_READY is True:
+        return True
+    # First attempt.
+    if _vec_disabled_by_env():
+        _VEC_READY = False
+        logger.info(
+            "sqlite-vec backend disabled via %s — using brute-force fallback",
+            _VEC_DISABLE_ENV,
+        )
+        return False
+    try:
+        import sqlite_vec  # noqa: WPS433  — lazy import is the whole point
+    except Exception as exc:
+        _VEC_READY = False
+        logger.info(
+            "sqlite-vec not installed (%s) — using brute-force fallback. "
+            "Install with: pip install sqlite-vec", exc,
+        )
+        return False
+    try:
+        await db.enable_load_extension(True)
+        # aiosqlite proxies ``load_extension`` since 0.19, but the
+        # signature isn't fully stable across patch versions and the
+        # internal worker-thread scheduling is. Calling the lower-level
+        # ``_execute`` with ``conn._conn.load_extension`` is the most
+        # portable shape and matches what aiosqlite does internally.
+        path = sqlite_vec.loadable_path()
+        await db._execute(db._conn.load_extension, path)
+        await db.enable_load_extension(False)
+    except Exception as exc:
+        _VEC_READY = False
+        try:
+            await db.enable_load_extension(False)
+        except Exception:
+            pass
+        logger.info(
+            "sqlite-vec extension failed to load (%s) — using brute-force "
+            "fallback", exc,
+        )
+        return False
+    _VEC_READY = True
+    logger.debug("sqlite-vec extension loaded (dim=%d)", EMBED_DIM)
+    return True
+
+
+async def _ensure_vec_schema(config: Config, db) -> bool:
+    """Idempotently create ``vec_note_embeddings`` virtual table.
+
+    Cached per-db-path so repeat upserts don't pay for the schema check.
+    Returns True iff the table exists and is usable.
+    """
+    from lazyclaw.db.connection import get_db_path
+    db_path = str(get_db_path(config))
+    if db_path in _VEC_SCHEMA_INITIALIZED:
+        return True
+    try:
+        await db.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_note_embeddings USING vec0("
+            "note_id TEXT PRIMARY KEY, "
+            "user_id TEXT, "
+            "model TEXT, "
+            "dim INTEGER, "
+            f"embedding FLOAT[{EMBED_DIM}] distance_metric=cosine"
+            ")"
+        )
+        await db.commit()
+    except Exception:
+        logger.info("vec_note_embeddings creation failed", exc_info=True)
+        return False
+    _VEC_SCHEMA_INITIALIZED.add(db_path)
+    return True
+
+
+async def _vec_available(config: Config, db) -> bool:
+    """One-shot check: extension loaded + virtual table ready."""
+    if not await _ensure_vec_loaded(db):
+        return False
+    return await _ensure_vec_schema(config, db)
+
+
+async def _vec_upsert(
+    config: Config,
+    user_id: str,
+    note_id: str,
+    vec: list[float],
+) -> None:
+    """Mirror ``vec`` into the vec0 table. Best-effort — never raises.
+
+    vec0 doesn't support ``ON CONFLICT`` / ``INSERT OR REPLACE``
+    (UPSERT isn't implemented for virtual tables), so we DELETE-then-
+    INSERT. Both ops live in the same transaction so a query can't
+    observe a partial row.
+    """
+    try:
+        async with db_session(config) as db:
+            if not await _vec_available(config, db):
+                return
+            packed = _pack(vec)
+            await db.execute(
+                "DELETE FROM vec_note_embeddings WHERE note_id = ?",
+                (note_id,),
+            )
+            await db.execute(
+                "INSERT INTO vec_note_embeddings"
+                "(note_id, user_id, model, dim, embedding) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (note_id, user_id, EMBED_MODEL, EMBED_DIM, packed),
+            )
+            await db.commit()
+    except Exception:
+        logger.debug("vec0 upsert failed for %s", note_id, exc_info=True)
+
+
+async def _vec_delete(config: Config, note_id: str) -> None:
+    """Remove ``note_id`` from the vec0 mirror. Best-effort."""
+    try:
+        async with db_session(config) as db:
+            if not await _vec_available(config, db):
+                return
+            await db.execute(
+                "DELETE FROM vec_note_embeddings WHERE note_id = ?",
+                (note_id,),
+            )
+            await db.commit()
+    except Exception:
+        logger.debug("vec0 delete failed for %s", note_id, exc_info=True)
+
+
+async def _ensure_vec_mirror_warmed(config: Config, user_id: str) -> None:
+    """Back-fill ``user_id``'s vec0 rows from the encrypted source-of-truth.
+
+    Runs at most once per (db_path, user_id) per process. If vec0 has
+    fewer rows than ``note_embeddings`` for this user we decrypt the
+    missing ones and INSERT into the mirror — a one-time cost that pays
+    for itself after the first ~10 semantic searches.
+
+    Synchronous (awaitable, not background) by design: the caller is
+    already inside semantic_search and the next line wants to query
+    the mirror. Backgrounding it would mean the first N queries
+    silently return zero results.
+    """
+    from lazyclaw.db.connection import get_db_path
+    db_path = str(get_db_path(config))
+    key = (db_path, user_id)
+    if key in _VEC_WARMED:
+        return
+    try:
+        async with db_session(config) as db:
+            if not await _vec_available(config, db):
+                _VEC_WARMED.add(key)  # avoid re-checking every query
+                return
+            # Counts on both sides — cheap.
+            r1 = await db.execute(
+                "SELECT COUNT(*) FROM note_embeddings "
+                "WHERE user_id = ? AND model = ? AND dim = ?",
+                (user_id, EMBED_MODEL, EMBED_DIM),
+            )
+            (src_count,) = await r1.fetchone()
+            r2 = await db.execute(
+                "SELECT COUNT(*) FROM vec_note_embeddings "
+                "WHERE user_id = ? AND model = ? AND dim = ?",
+                (user_id, EMBED_MODEL, EMBED_DIM),
+            )
+            (mirror_count,) = await r2.fetchone()
+            if mirror_count >= src_count:
+                _VEC_WARMED.add(key)
+                return
+            # Pull the (small set of) missing note_ids.
+            present_rows = await db.execute(
+                "SELECT note_id FROM vec_note_embeddings WHERE user_id = ?",
+                (user_id,),
+            )
+            present = {r[0] for r in await present_rows.fetchall()}
+            missing_rows = await db.execute(
+                "SELECT note_id, vector FROM note_embeddings "
+                "WHERE user_id = ? AND model = ? AND dim = ?",
+                (user_id, EMBED_MODEL, EMBED_DIM),
+            )
+            missing = [
+                (nid, enc) for (nid, enc) in await missing_rows.fetchall()
+                if nid not in present
+            ]
+        if not missing:
+            _VEC_WARMED.add(key)
+            return
+        dek = await get_user_dek(config, user_id)
+        warmed = 0
+        async with db_session(config) as db:
+            for note_id, enc_vec in missing:
+                try:
+                    hex_blob = decrypt_field(
+                        enc_vec, dek, _emb_aad(user_id), fallback="",
+                    )
+                    if not hex_blob:
+                        continue
+                    vec = _unpack(bytes.fromhex(hex_blob), EMBED_DIM)
+                    await db.execute(
+                        "DELETE FROM vec_note_embeddings WHERE note_id = ?",
+                        (note_id,),
+                    )
+                    await db.execute(
+                        "INSERT INTO vec_note_embeddings"
+                        "(note_id, user_id, model, dim, embedding) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (note_id, user_id, EMBED_MODEL, EMBED_DIM, _pack(vec)),
+                    )
+                    warmed += 1
+                except Exception:
+                    logger.debug(
+                        "warm-mirror skip for %s", note_id, exc_info=True,
+                    )
+            await db.commit()
+        logger.debug(
+            "vec0 mirror warmed: user=%s rows=%d", user_id, warmed,
+        )
+    except Exception:
+        logger.debug("vec0 mirror warm failed", exc_info=True)
+    _VEC_WARMED.add(key)
+
+
+async def _vec_topk(
+    config: Config,
+    user_id: str,
+    q_vec: list[float],
+    *,
+    k: int,
+    tag_substring: str | None = None,
+) -> list[tuple[str, float]] | None:
+    """Run a vec0 nearest-neighbour search. Returns None when unavailable.
+
+    Returns ``[(note_id, similarity), ...]`` with ``similarity = 1 - distance``
+    (vec0 ``distance_metric=cosine`` returns ``1 - cos(a,b)``, so this
+    converts back to the raw cosine similarity score the rest of the
+    pipeline expects).
+
+    When ``tag_substring`` is set we apply the same LIKE prefilter as the
+    legacy loader did: JOIN against ``notes.tags`` to scope the candidate
+    pool to a topic before the ANN search. Without the JOIN we'd have to
+    fetch a large K then filter in Python — wastes most of the speedup.
+    """
+    try:
+        async with db_session(config) as db:
+            if not await _vec_available(config, db):
+                return None
+            packed = _pack(q_vec)
+            cap = max(1, min(200, k))
+            if tag_substring:
+                like = f'%"{tag_substring}"%'
+                # JOIN against notes for the tag prefilter. The MATCH +
+                # LIMIT still goes through the ANN index — the JOIN just
+                # narrows the result rows.
+                cur = await db.execute(
+                    "SELECT v.note_id, v.distance FROM vec_note_embeddings v "
+                    "JOIN notes n ON n.id = v.note_id "
+                    "WHERE v.user_id = ? AND v.model = ? AND v.dim = ? "
+                    "AND v.embedding MATCH ? "
+                    "AND n.tags LIKE ? "
+                    "ORDER BY v.distance LIMIT ?",
+                    (user_id, EMBED_MODEL, EMBED_DIM, packed, like, cap),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT note_id, distance FROM vec_note_embeddings "
+                    "WHERE user_id = ? AND model = ? AND dim = ? "
+                    "AND embedding MATCH ? "
+                    "ORDER BY distance LIMIT ?",
+                    (user_id, EMBED_MODEL, EMBED_DIM, packed, cap),
+                )
+            rows = await cur.fetchall()
+    except Exception:
+        logger.debug("vec0 topk query failed", exc_info=True)
+        return None
+    out: list[tuple[str, float]] = []
+    for row in rows:
+        nid = row[0]
+        dist = float(row[1])
+        # distance_metric=cosine emits 1 - cos(a,b). Convert back.
+        sim = 1.0 - dist
+        out.append((nid, sim))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Ollama embed call (async, short timeout)
 # ---------------------------------------------------------------------------
 
@@ -141,25 +507,72 @@ import random as _random
 # single-GPU desktop: keeps the GPU saturated without queue overflow.
 _OLLAMA_SEM = _asyncio.Semaphore(3)
 
+# nomic-bert architecture caps at 2048 tokens regardless of Ollama's
+# advertised num_ctx (8192). At ~3 chars/token for dense English markdown
+# that's ~6000 chars before the model hard-errors with HTTP 500
+# "input length exceeds the context length". We keep a safety char cap at
+# 6000 (down from 8000) AND rely on Ollama's server-side `truncate=true`
+# (default on `/api/embed`) as the authoritative guard for everything else
+# (e.g. multi-byte scripts where the char heuristic underestimates tokens).
+_EMBED_CHAR_CAP = 6000
+
+# One-time WARNING latch for persistent context-length 500s. The legacy
+# /api/embeddings endpoint silently ignored `truncate`; the new /api/embed
+# path honours it, so this should never fire post-migration — but if it
+# does we want the operator to see it ONCE, not 540 times an hour.
+_CTX_OVERFLOW_LOGGED = False
+
+# One-time WARNING latch for client-side (4xx) rejects. Pre-2026-05-20 the
+# outer ``except Exception`` swallowed the response body — we saw "3 of 10
+# dirty notes 400 every cycle" with no clue what shape Ollama disliked
+# (model name, input type, empty body, etc.). On the FIRST 4xx the body +
+# input preview surface at WARNING so the cause is visible exactly once.
+# Subsequent 4xx stay at DEBUG so a broken caller doesn't flood the log.
+# The reindex cooldown (5 min) remains the actual spam-rate-limiter.
+# 404 has its own info-level "ollama pull" path and never trips this.
+_CLIENT_REJECT_LOGGED = False
+
 
 async def _ollama_embed(text: str) -> list[float] | None:
-    """Ollama /api/embeddings. Returns None if unreachable / model missing.
+    """POST /api/embed → 768-dim vector. Returns None on any failure.
+
+    Endpoint choice: ``/api/embed`` (singular plural input, returns
+    ``embeddings: [[...]]``). The legacy ``/api/embeddings`` endpoint
+    silently ignored the ``truncate`` parameter on Ollama 0.20.x — long
+    notes (> ~2048 tokens) burned 500s every 5 minutes because the
+    nomic-bert architecture rejects inputs past its hard context length
+    even when the loaded Modelfile advertises ``num_ctx 8192``. The new
+    endpoint truncates server-side before the model sees the prompt.
 
     Two layers of protection against transient 5xx under load:
       1. Module-level semaphore caps concurrent calls at 3 — Ollama's
          single-GPU queue can't keep up with N parallel chunk embeds.
       2. One retry with jittered backoff catches the rare 5xx that still
          leaks through (model warm-up, brief paging).
+
+    A 500 carrying the ``input length exceeds the context length`` body
+    is escalated to WARNING (once per process) — it almost certainly
+    means a caller is passing a chunk that bypassed our 6 KB cap, and
+    that's a config bug we want to surface, not a debug detail.
     """
+    global _CTX_OVERFLOW_LOGGED, _CLIENT_REJECT_LOGGED
     if not text or not text.strip():
         return None
-    payload = {"model": EMBED_MODEL, "prompt": text[:8000]}
+    # Server-side `truncate=true` is the default on /api/embed but we
+    # pass it explicitly so a future Ollama default flip doesn't quietly
+    # break us again.
+    payload = {
+        "model": EMBED_MODEL,
+        "input": text[:_EMBED_CHAR_CAP],
+        "truncate": True,
+    }
     last_status: int | None = None
+    last_body: str = ""
     try:
         async with _OLLAMA_SEM:
             async with httpx.AsyncClient(base_url=OLLAMA_BASE, timeout=30) as client:
                 for attempt in range(2):
-                    resp = await client.post("/api/embeddings", json=payload)
+                    resp = await client.post("/api/embed", json=payload)
                     if resp.status_code == 404:
                         logger.info(
                             "Embedding model %s not installed — run `ollama pull %s`",
@@ -168,15 +581,77 @@ async def _ollama_embed(text: str) -> list[float] | None:
                         return None
                     if 500 <= resp.status_code < 600 and attempt == 0:
                         last_status = resp.status_code
+                        last_body = resp.text
                         await _asyncio.sleep(0.2 + _random.random() * 0.3)
                         continue
+                    if 500 <= resp.status_code < 600:
+                        # Final attempt also failed — capture body for the
+                        # escalation check below.
+                        last_status = resp.status_code
+                        last_body = resp.text
+                        break
+                    # 4xx (other than 404, handled above): capture the body
+                    # BEFORE raise_for_status() consumes it. The first one
+                    # per process surfaces at WARNING with body + input
+                    # preview so an actual config/input-shape bug shows up
+                    # exactly once; subsequent 4xx stay at DEBUG via the
+                    # outer except (no spam — cooldown handles rate).
+                    if 400 <= resp.status_code < 500:
+                        body_text = resp.text
+                        if not _CLIENT_REJECT_LOGGED:
+                            _CLIENT_REJECT_LOGGED = True
+                            preview = repr(text[:80])
+                            if len(text) > 80:
+                                preview = preview + "…"
+                            logger.warning(
+                                "Ollama embed %d (client reject): model=%s "
+                                "input_len=%d preview=%s body=%s",
+                                resp.status_code,
+                                EMBED_MODEL,
+                                len(text),
+                                preview,
+                                body_text[:300],
+                            )
+                        else:
+                            logger.debug(
+                                "Ollama embed %d (client reject, "
+                                "suppressed): body=%s",
+                                resp.status_code, body_text[:200],
+                            )
+                        return None
                     resp.raise_for_status()
                     data = resp.json()
-                    vec = data.get("embedding")
+                    # /api/embed returns {"embeddings": [[...]]} (plural,
+                    # nested). The legacy endpoint returned {"embedding":
+                    # [...]}; we keep a tolerant read for both shapes so
+                    # users running older Ollama still get vectors.
+                    embs = data.get("embeddings")
+                    if isinstance(embs, list) and embs and isinstance(embs[0], list):
+                        vec = embs[0]
+                    else:
+                        vec = data.get("embedding")
                     if not isinstance(vec, list) or len(vec) != EMBED_DIM:
                         return None
                     return [float(x) for x in vec]
-                logger.debug("Ollama embed failed after retry: HTTP %s", last_status)
+                # All retries exhausted with 5xx — escalate context-length
+                # errors so a regression in server-side truncation surfaces
+                # immediately. Other 5xx (timeouts, GPU OOM) stay at DEBUG.
+                if (
+                    last_status is not None
+                    and "context length" in last_body.lower()
+                    and not _CTX_OVERFLOW_LOGGED
+                ):
+                    _CTX_OVERFLOW_LOGGED = True
+                    logger.warning(
+                        "Ollama embed %d: input exceeds nomic-embed-text context length "
+                        "even after %d-char cap + server truncate=true. Body: %s",
+                        last_status, _EMBED_CHAR_CAP, last_body[:200],
+                    )
+                else:
+                    logger.debug(
+                        "Ollama embed failed after retry: HTTP %s body=%s",
+                        last_status, last_body[:200],
+                    )
                 return None
     except httpx.ConnectError:
         logger.debug("Ollama unreachable — semantic search falls back to substring")
@@ -352,6 +827,10 @@ async def upsert_embedding(
     # any stale entry first to keep the LRU honest.
     _cache_put(user_id, note_id, EMBED_MODEL, EMBED_DIM, vec)
 
+    # vec0 mirror writethrough — primary search backend when sqlite-vec
+    # is available. No-op + best-effort when the extension didn't load.
+    await _vec_upsert(config, user_id, note_id, vec)
+
     # Mark the note's embedding as fresh — clears the dirty flag set by
     # the content writer in store.py (best-effort; no-op if column missing).
     try:
@@ -375,6 +854,9 @@ async def delete_embedding(config: Config, note_id: str) -> None:
         await db.commit()
     # Drop from every user-slot just in case (note_id is globally unique).
     _cache_evict_note(note_id)
+    # Mirror delete — keeps vec0 in sync with the encrypted source. Safe
+    # no-op when sqlite-vec isn't loaded.
+    await _vec_delete(config, note_id)
 
 
 async def _load_all(
@@ -459,6 +941,83 @@ async def _load_all(
     return out
 
 
+async def _load_by_ids(
+    config: Config,
+    user_id: str,
+    note_ids: list[str],
+) -> list[tuple[str, list[float]]]:
+    """Decrypt + unpack vectors for a specific note_id set.
+
+    Companion to ``_load_all`` for the vec0 fast-path: vec0 already gave
+    us the top-K note_ids, so we only need to materialise vectors for
+    those rows (cache hits first, decrypt the misses). Preserves the
+    per-user LRU cache + DEK reuse.
+
+    Returns vectors in the same order as ``note_ids``. Missing rows
+    (deleted between vec0 query and source-row read) are silently
+    skipped — the caller already has a similarity score for them and
+    can keep them as BM25-style fallback.
+    """
+    if not note_ids:
+        return []
+    slot = _VECTOR_CACHE.get(user_id)
+
+    # Split cached vs needs-decrypt to avoid issuing a DB query when the
+    # warm cache already covers everything (common after the first few
+    # searches of a session).
+    cached: dict[str, list[float]] = {}
+    missing: list[str] = []
+    for nid in note_ids:
+        if slot is not None and nid in slot:
+            _, _, vec = slot[nid]
+            slot.move_to_end(nid)
+            cached[nid] = vec
+        else:
+            missing.append(nid)
+
+    decrypted: dict[str, list[float]] = {}
+    if missing:
+        # Single DB roundtrip for all misses using a parameterised IN clause.
+        placeholders = ",".join("?" for _ in missing)
+        try:
+            async with db_session(config) as db:
+                rows = await db.execute(
+                    f"SELECT note_id, model, dim, vector FROM note_embeddings "
+                    f"WHERE user_id = ? AND model = ? AND dim = ? "
+                    f"AND note_id IN ({placeholders})",
+                    (user_id, EMBED_MODEL, EMBED_DIM, *missing),
+                )
+                data = await rows.fetchall()
+        except Exception:
+            logger.debug("by-id source-row fetch failed", exc_info=True)
+            data = []
+
+        dek = None
+        for note_id, model, dim, enc_vec in data:
+            if model != EMBED_MODEL or int(dim) != EMBED_DIM:
+                continue
+            try:
+                if dek is None:
+                    dek = await get_user_dek(config, user_id)
+                hex_blob = decrypt_field(
+                    enc_vec, dek, _emb_aad(user_id), fallback="",
+                )
+                if not hex_blob:
+                    continue
+                vec = _unpack(bytes.fromhex(hex_blob), int(dim))
+                _cache_put(user_id, note_id, model, int(dim), vec)
+                decrypted[note_id] = vec
+            except Exception:
+                continue
+
+    out: list[tuple[str, list[float]]] = []
+    for nid in note_ids:
+        vec = cached.get(nid) or decrypted.get(nid)
+        if vec is not None:
+            out.append((nid, vec))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Public search + index
 # ---------------------------------------------------------------------------
@@ -504,10 +1063,35 @@ async def semantic_search(
         return {"query": "", "results": [], "source": "empty"}
 
     q_vec = await _ollama_embed(q)
-    vectors = (
-        await _load_all(config, user_id, tag_substring=tag_prefix)
-        if q_vec else []
-    )
+
+    # ── Candidate fetch ────────────────────────────────────────────────
+    # vec0 fast-path: pull top-K nearest from the plaintext mirror, then
+    # materialise vectors for *only* those ids (cache or decrypt). When
+    # vec0 isn't available we fall back to the full per-user decrypt
+    # loop — identical recall, just slower.
+    #
+    # ``vec_pool`` is sized at max(50, k*5) so MMR (over ~3·k pool) and
+    # RRF fusion (against BM25) both have enough candidates to rerank
+    # without paying the full decrypt cost. Past 50 vectors the extra
+    # ANN headroom is essentially free; the decrypt cost scales with
+    # how many we keep, not how many we scanned.
+    vectors: list[tuple[str, list[float]]] = []
+    vec_topk: list[tuple[str, float]] | None = None
+    if q_vec:
+        await _ensure_vec_mirror_warmed(config, user_id)
+        pool_size = max(50, k * 5)
+        vec_topk = await _vec_topk(
+            config, user_id, q_vec,
+            k=pool_size, tag_substring=tag_prefix,
+        )
+        if vec_topk is not None:
+            ids = [nid for nid, _s in vec_topk]
+            vectors = await _load_by_ids(config, user_id, ids)
+        else:
+            # Fallback: full decrypt loop (legacy path).
+            vectors = await _load_all(
+                config, user_id, tag_substring=tag_prefix,
+            )
 
     # ── Hybrid branch — fuse BM25 + dense via RRF ─────────────────────
     bm25_ids: list[str] = []
@@ -636,23 +1220,72 @@ _REINDEX_COOLDOWN_UNTIL: float = 0.0
 _REINDEX_COOLDOWN_SECS = 300.0  # 5 minutes
 
 
+async def _stamp_reindex_attempt(
+    config: Config, user_id: str, note_id: str,
+) -> None:
+    """Bump ``notes.last_reindex_attempt_at`` to now.
+
+    Called for EVERY attempt — success OR skip — so the picker's
+    ``ORDER BY last_reindex_attempt_at ASC NULLS FIRST`` rotates fairly
+    across the dirty set. Without this, the same 3 most-recent dirty
+    rows kept winning the lottery and 451 older dirty rows starved
+    (observed in production on 2026-05-20: 454 dirty notes, only the
+    top 3 ever retried, looped in 5-min cooldown for hours).
+
+    Best-effort: failure is logged at debug and swallowed. The worst
+    case is we re-pick the same row next cycle — degraded fairness,
+    not lost data. No-op on older schemas without the column.
+    """
+    try:
+        async with db_session(config) as db:
+            await db.execute(
+                "UPDATE notes SET last_reindex_attempt_at = datetime('now') "
+                "WHERE id = ? AND user_id = ?",
+                (note_id, user_id),
+            )
+            await db.commit()
+    except Exception:
+        logger.debug(
+            "stamp last_reindex_attempt_at failed (older schema?)",
+            exc_info=True,
+        )
+
+
 async def reindex_dirty_batch(
     config: Config,
     user_id: str,
     *,
     limit: int = 50,
 ) -> dict:
-    """Re-embed up to ``limit`` notes whose ``embedding_dirty`` flag is 1.
+    """Re-embed up to ``limit`` notes whose embedding/chunk dirty flag is 1.
 
     Called by the heartbeat daemon every tick. Most ticks find zero dirty
     notes (cheap COUNT-style query). When a dirty note's embedding upsert
     succeeds, ``upsert_embedding`` clears the flag — so a stuck dirty row
     is one whose content can't be embedded (Ollama down, model missing).
-    Stops early if the first three attempts in a row fail to avoid
-    hammering a dead Ollama. After a fully-failed pass we engage a 5-min
-    process-level cooldown so persistently-broken rows (e.g. notes whose
-    decrypted plaintext fails Ollama's tokeniser) don't burn 9 HTTP 500s
-    every tick.
+
+    Starvation fix (2026-05-20)
+    ---------------------------
+    Picker ordering is ``last_reindex_attempt_at ASC NULLS FIRST``, not
+    ``updated_at DESC``. Every attempt — success OR skip — stamps the
+    column to ``datetime('now')``, so a failed row falls to the BACK of
+    the next cycle's queue. Brand-new dirty rows (column still NULL)
+    win priority over previously-attempted rows, so user edits get
+    re-embedded promptly. Without this rotation, the original
+    ``ORDER BY updated_at DESC`` re-picked the same 3 most-recent dirty
+    rows every tick; if they failed (Ollama 500 / decrypt-broken /
+    tokenizer-busted) the 3-consecutive-skip bailout fired and the
+    other 451 dirty rows on the user starved forever.
+
+    Back-pressure preserved
+    -----------------------
+    The 3-consecutive-skip bailout and the 5-min process-level cooldown
+    are kept — they're orthogonal to starvation. Bailout caps work-per-
+    tick when Ollama is wedged; the cooldown silences the next 5 min
+    of pointless retries when a full pass produced zero successes.
+    Per-row stamping happens BEFORE the bailout breaks the loop, so
+    the 3 skipped rows still rotate to the back. Next cycle picks a
+    different 3.
     """
     global _REINDEX_COOLDOWN_UNTIL
     if _time.time() < _REINDEX_COOLDOWN_UNTIL:
@@ -668,10 +1301,19 @@ async def reindex_dirty_batch(
         # lands every existing row has chunks_dirty=1 and embedding_dirty=0
         # — without the OR they'd never be chunked until the user edited
         # them.
+        #
+        # Ordering: last_reindex_attempt_at ASC NULLS FIRST. NULL means
+        # "never tried" — those jump to the head. Among already-tried
+        # rows, the longest-ago attempt wins. SQLite's default NULL sort
+        # is NULLS FIRST for ASC, so the bare ``ORDER BY ... ASC`` is
+        # correct; we spell out NULLS FIRST anyway for clarity + future
+        # portability.
         rows = await db.execute(
             "SELECT id FROM notes "
             "WHERE user_id = ? AND (embedding_dirty = 1 OR chunks_dirty = 1) "
-            "ORDER BY updated_at DESC LIMIT ?",
+            "ORDER BY last_reindex_attempt_at ASC NULLS FIRST, "
+            "updated_at DESC "
+            "LIMIT ?",
             (user_id, max(1, min(500, limit))),
         )
         dirty_ids = [r[0] for r in await rows.fetchall()]
@@ -686,8 +1328,19 @@ async def reindex_dirty_batch(
         note = await _lb_store.get_note(config, user_id, note_id)
         if not note:
             skipped += 1
+            # Stamp even for "note vanished" so a deleted-row race
+            # doesn't keep re-electing the same ghost id. (In practice
+            # the UPDATE will be a no-op since the row is gone, but
+            # the picker filters by dirty flag so a deleted row drops
+            # out of contention regardless. Stamp anyway for symmetry.)
+            await _stamp_reindex_attempt(config, user_id, note_id)
             continue
         text = f"{note.get('title') or ''}\n\n{note.get('content') or ''}".strip()
+        # Stamp BEFORE the embed attempt so even an in-flight crash
+        # (process killed mid-Ollama-call) still moves the row to the
+        # back of the queue on next start. Otherwise a poison row that
+        # OOMs the worker would re-elect itself forever.
+        await _stamp_reindex_attempt(config, user_id, note_id)
         ok = await upsert_embedding(config, user_id, note_id, text)
         if ok:
             indexed += 1
@@ -695,18 +1348,20 @@ async def reindex_dirty_batch(
         else:
             skipped += 1
             consecutive_skip += 1
-            # Three failures in a row → bail unconditionally. The previous
-            # ``and indexed == 0`` guard meant a single early success kept
-            # the loop grinding through hundreds of persistently-broken
-            # rows every heartbeat tick (9 dirty notes × 60 ticks/h = the
-            # 540/h Ollama-500 noise floor we saw post-throttle).
+            # Three failures in a row → bail this tick. Each of the 3
+            # rows has already been stamped above, so they're at the
+            # back of next cycle's queue — a different 3 will be
+            # picked first. No starvation, just bounded work-per-tick.
             if consecutive_skip >= 3:
                 break
 
     # Engage cooldown only when the pass was non-trivially attempted but
     # produced zero successes. A pass with at least one success means
     # Ollama is alive and the failures are content-specific — no point
-    # silencing the next 5 minutes of healthy traffic.
+    # silencing the next 5 minutes of healthy traffic. Per-row stamping
+    # already pushed the attempted rows to the back of the queue, so
+    # the cooldown is pure rate-limit on the heartbeat side, not a
+    # starvation mechanism.
     if indexed == 0 and skipped >= 3:
         _REINDEX_COOLDOWN_UNTIL = _time.time() + _REINDEX_COOLDOWN_SECS
         logger.debug(

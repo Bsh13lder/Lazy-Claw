@@ -14,10 +14,9 @@ import json
 import logging
 import re
 
-import os
-
 import httpx
 
+from lazyclaw.llm.ollama_client import get_ollama_base_url
 from lazyclaw.llm.providers.base import (
     BaseLLMProvider,
     LLMMessage,
@@ -27,7 +26,7 @@ from lazyclaw.llm.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_DEFAULT_BASE_URL = get_ollama_base_url()
 _CHAT_TIMEOUT = 300  # seconds (first model load can be slow on 8GB RAM)
 _HEALTH_TIMEOUT = 5  # seconds
 

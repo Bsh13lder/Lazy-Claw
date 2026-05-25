@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-import os
 
+from lazyclaw.llm.ollama_client import get_ollama_base_url
 from lazyclaw.skills.base import BaseSkill
 
-_OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_OLLAMA_BASE = get_ollama_base_url()
 
 logger = logging.getLogger(__name__)
 

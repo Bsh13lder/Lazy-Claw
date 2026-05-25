@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import subprocess
 import os
 from pathlib import Path
@@ -9,6 +10,99 @@ from typing import Any
 from patchright.async_api import async_playwright, Browser, BrowserContext, Page
 
 logger = logging.getLogger(__name__)
+
+
+# ── Room-id post-nav check ───────────────────────────────────────────
+# Live incident 2026-05-20 16:48:45–16:49:18: brain navigated to
+#   /ab/messages/rooms/9992d280-e432-470c-9c31-798aa07fcb1e
+# and Upwork's SPA silently redirected it to /ab/messages (the 404
+# "Looking for something?" page). cdp_backend logged
+#   "SPA navigation detected: .../rooms/9992d280-... → /ab/messages"
+# but ``safe_goto`` returned the page as if nav had succeeded; the
+# bubble extractor then scraped the inbox as if it were the requested
+# thread.
+#
+# Defense: after the CF-pass loop completes, if the INPUT url named a
+# specific room, verify ``page.url`` still contains that id. If not,
+# raise ``UpworkRoomNotFound`` so the caller can return a structured
+# error instead of silently scraping the wrong page.
+#
+# Pattern matches both shapes the extractor produces:
+#   * ``room_<hex>``      e.g. room_abc123
+#   * UUID                e.g. 9992d280-e432-470c-9c31-798aa07fcb1e
+#   * legacy numeric id   e.g. /nx/messages/12345
+_ROOM_ID_RE = re.compile(
+    r"/messages/("
+    r"rooms/(room_[A-Za-z0-9_-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"|(\d+)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Loose fallback: ANY value that appears after ``/ab/messages/rooms/``
+# (up to the next ``/``, ``?``, ``#``, or end-of-string). Used when the
+# strict pattern above doesn't match — Upwork sometimes serves
+# non-standard ids, and the brain occasionally confabulates a contact
+# name into the room-id slot (e.g. ``/ab/messages/rooms/James%20Blue``).
+# Without this fallback the post-nav check would be SKIPPED for those
+# inputs and a silent 404-redirect would slip through to the bubble
+# extractor. The strict pattern is kept as the primary because it
+# produces a cleaner log message; the loose form is the safety net.
+_ROOM_ID_LOOSE_RE = re.compile(
+    r"/ab/messages/rooms/([^/?#]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_expected_room_id(url: str) -> str | None:
+    """Return the room-id substring inside ``url`` if the URL targets a
+    specific conversation, else None.
+
+    None means "this URL is not a per-room nav" (e.g. inbox, profile,
+    find-work) — callers skip the post-nav check entirely for those.
+
+    Strict match (``_ROOM_ID_RE``) is preferred for clean log messages.
+    Falls back to the loose ``_ROOM_ID_LOOSE_RE`` so the post-nav check
+    NEVER silently skips when the input URL targets ``/rooms/<anything>``
+    — even if ``<anything>`` is a non-standard id shape or (the
+    real-world failure case) a contact name the brain confused for an
+    id. Loose-form expected ids include any URL-encoded whitespace or
+    punctuation in the slug.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    m = _ROOM_ID_RE.search(url)
+    if m:
+        # group(2) = room_<hex> or UUID; group(3) = legacy numeric id
+        return m.group(2) or m.group(3)
+    m = _ROOM_ID_LOOSE_RE.search(url)
+    if m:
+        return m.group(1)
+    return None
+
+
+class UpworkRoomNotFound(RuntimeError):
+    """Raised by ``safe_goto`` when the requested room URL silently
+    redirected to a non-room page (typically ``/ab/messages``).
+
+    Carries the requested URL + the URL the SPA landed on so the caller
+    can log a precise diagnostic AND return a structured error to the
+    brain ("the room you asked for doesn't exist anymore") instead of
+    bubbling a 500 up to MCP.
+
+    Live incident: 2026-05-20 16:48:47 — see ``_ROOM_ID_RE`` docstring.
+    """
+
+    def __init__(self, requested_url: str, final_url: str) -> None:
+        self.requested_url = requested_url
+        self.final_url = final_url
+        super().__init__(
+            f"Upwork room not found: requested {requested_url!r} but "
+            f"page landed on {final_url!r}. The SPA likely redirected "
+            f"because the room id is invalid, deleted, or you don't "
+            f"have access. Call `upwork_get_messages` to list current "
+            f"rooms and retry with a valid `room_id`."
+        )
 
 
 # ── Module-level navigation lock ─────────────────────────────────────
@@ -275,23 +369,90 @@ class UpworkBrowser:
         self._last_state_reason: str = ""
 
     async def start(self) -> Page:
-        """Connect to Chrome via CDP."""
+        """Connect to Chrome via CDP.
+
+        Self-heal path: if the CDP port is unreachable inside a container,
+        ping the host launchd watcher's ``/heal`` endpoint at
+        ``host.docker.internal:9224/heal`` and retry the port check ONCE
+        before raising. The watcher is owned by a sibling agent and is
+        installed alongside ``scripts/install-host-brave-bridge.sh``.
+
+        Heal attempt is PER-CALL (local flag, not module-level) — every
+        fresh ``start()`` invocation gets exactly one shot, and two
+        consecutive port checks in the same call cannot trigger two heal
+        POSTs.
+        """
         if self._started and self._page:
             return self._page
 
-        # Ensure Chrome is running with debug port at CDP_HOST:CDP_PORT.
-        if not is_chrome_running_with_debug():
+        # PER-CALL flag (NOT module-level) so each fresh start() invocation
+        # gets exactly one self-heal shot at the host watcher. Module-level
+        # would mean a brain that bounces between MCP tools after the bridge
+        # dies in the morning would only ever get ONE heal attempt for the
+        # life of the process — useless if the user restarts Brave manually.
+        _heal_attempted = False
+
+        # Two-check retry loop: first check decides whether to heal; if a
+        # heal POST returns 200 we re-check the port. Loop runs at most
+        # twice (one pre-heal, one post-heal) by construction.
+        while not is_chrome_running_with_debug():
             if _running_in_container():
-                # No Chrome inside the LazyClaw Docker image — surface a
-                # crisp instruction instead of the cryptic "Could not start
-                # Chrome" the host-launch path produces.
+                # Self-heal: tell the host watcher to kickstart the bridge
+                # plist and retry ONCE. Sibling launchd watcher exposes
+                # /heal on localhost:9224 (host.docker.internal from the
+                # container side). If healing succeeds, the port should
+                # be listening within a few seconds.
+                if not _heal_attempted:
+                    _heal_attempted = True
+                    try:
+                        import httpx
+                        async with httpx.AsyncClient(timeout=8.0) as c:
+                            r = await c.post(
+                                "http://host.docker.internal:9224/heal"
+                            )
+                        if r.status_code == 200:
+                            logger.warning(
+                                "Brave bridge was down; host watcher "
+                                "kicked. Retrying connection..."
+                            )
+                            await asyncio.sleep(3)
+                            # Loop will re-check is_chrome_running_with_debug()
+                            # on the next iteration. If it's now up, we exit
+                            # the loop. If still down, _heal_attempted blocks
+                            # a second heal POST and we raise below.
+                            continue
+                        logger.warning(
+                            "Host heal endpoint returned %s — bridge "
+                            "kickstart failed", r.status_code,
+                        )
+                    except (httpx.ConnectError, httpx.TimeoutException) as he:
+                        logger.warning(
+                            "Host heal endpoint unreachable: %s — bridge "
+                            "likely off entirely", he,
+                        )
+                    except Exception as he:
+                        logger.warning(
+                            "Self-heal attempt failed: %s", he, exc_info=True,
+                        )
+                    # Heal didn't succeed — raise extended error.
+                    raise RuntimeError(
+                        f"Cannot reach Brave at {CDP_HOST}:{CDP_PORT} "
+                        f"after self-heal attempt. Host bridge may not "
+                        f"be installed. Run "
+                        f"`./scripts/install-host-brave-bridge.sh` and "
+                        f"ensure your host Brave is closed once so the "
+                        f"bridge can take ownership."
+                    )
+                # Heal already attempted in this start() call AND the port
+                # still isn't listening. Surface the extended error rather
+                # than the legacy "Cannot reach Brave/Chrome..." text so
+                # the brain sees a single consistent diagnostic.
                 raise RuntimeError(
-                    f"Cannot reach a Brave/Chrome with --remote-debugging-port "
-                    f"at {CDP_HOST}:{CDP_PORT}. Start Brave on your host with:\n"
-                    f"  /Applications/Brave\\ Browser.app/Contents/MacOS/Brave\\ Browser "
-                    f"--remote-debugging-port={CDP_PORT} "
-                    f"--user-data-dir=$HOME/Library/Application\\ Support/BraveSoftware/Brave-Browser-Lazy\n"
-                    f"(or use scripts/install-host-brave-bridge.sh for a launchd-managed copy)."
+                    f"Cannot reach Brave at {CDP_HOST}:{CDP_PORT} after "
+                    f"self-heal attempt. Host bridge may not be installed. "
+                    f"Run `./scripts/install-host-brave-bridge.sh` and "
+                    f"ensure your host Brave is closed once so the bridge "
+                    f"can take ownership."
                 )
             print("Starting Chrome with debug port...")
             if not start_chrome_with_debug():
@@ -300,6 +461,7 @@ class UpworkBrowser:
                     f'"{find_chrome()}" --remote-debugging-port={CDP_PORT}'
                 )
             await asyncio.sleep(2)
+            break
 
         self._playwright = await async_playwright().start()
 
@@ -393,10 +555,11 @@ class UpworkBrowser:
         wait_until: str = "networkidle",
         warm: bool = True,
         cloudflare_retry_s: int = 15,
+        force_reload: bool = False,
     ) -> Page:
         """Navigate to a URL with Cloudflare-resilient semantics.
 
-        Three things this does that a bare ``page.goto`` does not:
+        Four things this does that a bare ``page.goto`` does not:
 
         1. Serialize concurrent navigations via the module-level
            ``_NAV_LOCK`` so two MCP tools in flight don't race and
@@ -410,6 +573,17 @@ class UpworkBrowser:
            "just a moment", poll for clearance up to
            ``cloudflare_retry_s`` seconds. Real users wait this out;
            we should too.
+        4. ``force_reload=True`` (opt-in) issues ``page.reload`` after
+           the goto + CF pass. Required for any read where DOM freshness
+           matters — Upwork's SPA detects same-URL navigation, skips the
+           data re-fetch, and the Service Worker at /ab/messages/sw.js
+           serves the page entry-point from cache. Without this flag,
+           the message extractor returns stale bubbles forever when the
+           tab was already on the target room URL (verified live
+           2026-05-24: identical content returned 1 hour apart with
+           "10:37 PM" timestamps days old). Defaults to False so all
+           non-message nav (browse, search, profile) stays fast and
+           doesn't re-trigger CF unnecessarily.
         """
         async with _NAV_LOCK:
             page = await self.get_page()
@@ -461,6 +635,69 @@ class UpworkBrowser:
                 if not cf_url and not cf_body:
                     break
                 await asyncio.sleep(1)
+
+            # force_reload: defeat the SPA same-URL short-circuit + the
+            # /ab/messages/sw.js Service Worker cache. ``page.reload`` is
+            # a distinct browser-level operation from ``page.goto`` — it
+            # bypasses React's "URL didn't change, skip remount" branch
+            # AND signals the SW that this is a fresh fetch. Without it,
+            # a goto to a URL the tab is ALREADY on returns instantly
+            # and the DOM stays frozen at original tab-load time. Bug
+            # caught 2026-05-24: identical message bubbles returned 1h
+            # apart on the James Blue thread, "10:37 PM" timestamps days
+            # old because they're rendered session-relative on a DOM
+            # that never refreshed.
+            if force_reload:
+                try:
+                    await page.reload(wait_until=wait_until)
+                except Exception as exc:
+                    if not _is_disconnect_error(exc):
+                        raise
+                    logger.warning(
+                        "safe_goto: stale page handle on reload (%s) — "
+                        "re-picking and retrying once",
+                        exc,
+                    )
+                    page = await self.get_page()
+                    await page.reload(wait_until=wait_until)
+                # Re-run CF pass: reload can re-trigger Cloudflare just
+                # as easily as goto can.
+                for _ in range(cloudflare_retry_s):
+                    try:
+                        current = (page.url or "").lower()
+                        body_lower = (
+                            (await page.content()) or ""
+                        ).lower()[:2000]
+                    except Exception:
+                        break
+                    cf_url = "challenges.cloudflare.com" in current
+                    cf_body = (
+                        "just a moment" in body_lower
+                        or "cf-browser-verification" in body_lower
+                    )
+                    if not cf_url and not cf_body:
+                        break
+                    await asyncio.sleep(1)
+
+            # Post-nav room-id check. Upwork's SPA silently redirects
+            # invalid / deleted / inaccessible room URLs to /ab/messages
+            # without surfacing an error to the caller. Without this
+            # check, the bubble extractor downstream scrapes the inbox
+            # as if it were the requested thread (2026-05-20 incident).
+            #
+            # Only fires when the INPUT url contained a room id — inbox
+            # nav, profile pages, find-work, etc. are exempt.
+            expected_room_id = _extract_expected_room_id(url)
+            if expected_room_id is not None:
+                try:
+                    final_url = page.url or ""
+                except Exception:
+                    final_url = ""
+                if expected_room_id.lower() not in final_url.lower():
+                    raise UpworkRoomNotFound(
+                        requested_url=url,
+                        final_url=final_url,
+                    )
 
             return page
 

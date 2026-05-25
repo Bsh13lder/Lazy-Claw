@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 from lazyclaw.lazybrain import store
+from lazyclaw.lazybrain.paraphrase_sanitizer import sanitize_recall_content
 from lazyclaw.skills.base import BaseSkill
 
 
 def _snippet(note: dict, width: int = 200) -> str:
-    body = (note.get("content") or "").strip()
+    body = sanitize_recall_content(
+        note.get("content"),
+        note.get("memory_type"),
+        title=note.get("title"),
+    ).strip()
     if len(body) <= width:
         return body
     return body[: width - 1] + "…"

@@ -189,12 +189,23 @@ async def ask_notes(
             "retrieval_source": retrieval_source,
         }
 
+    # Sanitize paraphrase-class hits before they enter the synthesis
+    # prompt. Without this, the synthesizer LLM happily pulls
+    # `**James Blue (10:37 PM):**` shapes verbatim into the answer
+    # body, and the caller renders the answer as if those were live
+    # contact quotes. See lazybrain/paraphrase_sanitizer.py.
+    from lazyclaw.lazybrain.paraphrase_sanitizer import (
+        sanitize_recall_content,
+    )
+
     excerpts: list[str] = []
     titles: list[str] = []
     for n in results:
         title = n.get("title") or "(untitled)"
         titles.append(title)
-        body = (n.get("content") or "").strip()
+        body = sanitize_recall_content(
+            n.get("content"), n.get("memory_type"), title=title,
+        ).strip()
         if len(body) > 600:
             body = body[:600] + "…"
         excerpts.append(f"### [[{title}]]\n{body}")

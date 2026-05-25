@@ -173,6 +173,125 @@ def _find_failure_claim(reply: str) -> str | None:
     return None
 
 
+# Wikilink-in-quote: hard memory-leak signal. Real humans on Upwork /
+# WhatsApp / Telegram never send `[[wikilink]]` syntax — that's lazybrain
+# / Obsidian notation. If it appears inside ANY of the brain's three
+# contact-quote formats, the brain copy-pasted content from a lazybrain
+# memory note and presented it as the live conversation. The 2026-05-21
+# 22:13 incident: brain quoted `Mac [[computer]] iPad` for James Blue —
+# the [[computer]] proves the content came from
+# `reference_james_blue_contract.md`, not Upwork.
+#
+# The brain has been observed emitting quotes in THREE shapes:
+#   1. Markdown blockquote:  `> James (9:12 PM): I have a Mac [[X]]`
+#   2. Bold-sender:          `**James (9:12 PM):** I have a Mac [[X]]`
+#   3. Plain sender prefix:  `James Blue (9:12 PM): I have a Mac [[X]]`
+# Yesterday's detector only caught (1). 2026-05-22 10:09 incident leaked
+# `[[computer]]` through (2). The detector below catches all three.
+_WIKILINK_IN_TEXT_RE: re.Pattern[str] = re.compile(r"\[\[([^\]\n]+)\]\]")
+
+# Bold-sender shape: `**Sender Name (HH:MM[ AM/PM]?):**` at line start.
+# Captures the content portion after the closing `**:**` for wikilink scan.
+_BOLD_SENDER_LINE_RE: re.Pattern[str] = re.compile(
+    r"^\*\*[^*\n]{1,80}\([^)\n]{1,40}\)\s*:\*\*\s*(?P<content>.*)$",
+)
+
+# Plain-sender shape: `Sender Name (HH:MM[ AM/PM]?):` at line start. The
+# sender token must start with a capital letter and look name-shaped — this
+# is intentionally tight so we don't flag headers like `Note (2026-05-22):`.
+_PLAIN_SENDER_LINE_RE: re.Pattern[str] = re.compile(
+    r"^[A-Z][\w \-\.']{0,60}\s*\([^)\n]{1,40}\)\s*:\s*(?P<content>.*)$",
+)
+
+
+def _find_wikilink_in_quote_block(reply: str) -> str | None:
+    """Scan ``reply`` for wikilink syntax inside any contact-quote line.
+
+    Recognises THREE quote formats:
+      1. Markdown blockquote — line starts with ``>`` (every continuation
+         line of a multi-paragraph quote also starts with ``>``, so the
+         per-line scan catches them all).
+      2. Bold-sender         — ``**Sender (timestamp):**`` line prefix.
+         The brain often emits the body on subsequent NAKED continuation
+         lines (no ``>``, no ``**``). The detector tracks
+         "inside-bold-quote" state and scans continuation lines until a
+         blank line, a ``---`` horizontal rule, or the next sender line.
+      3. Plain-sender        — ``Sender Name (timestamp):`` line prefix
+         with the same continuation-line treatment as shape 2.
+
+    Returns the first wikilink token found (e.g. ``"[[computer]]"``) or
+    None. Wikilinks in headers / free prose / inline markdown links
+    (``[text](url)``) are NOT flagged — only quote lines and their
+    continuations.
+
+    Multi-line continuation bug fixed 2026-05-23: previously the bold
+    and plain shapes only scanned the sender-prefix line itself. When
+    the brain split a long quote across lines like
+
+        **James (9:12 PM):** Which platform...
+        Mac [[computer]] Once I have these...
+
+    the second line matched no sender pattern and the wikilink was
+    missed. Today's incident: ``Mac [[computer]]`` survived the
+    detector because of this gap. See ``project_self_perpetuating_
+    hallucination`` memory note.
+    """
+    if not reply:
+        return None
+
+    # Track "inside an open bold/plain quote" state across lines so we
+    # can scan continuation lines for wikilinks even when they don't
+    # start with a sender prefix.
+    in_open_quote: bool = False
+
+    for raw_line in reply.splitlines():
+        stripped = raw_line.lstrip()
+
+        # Blank line or horizontal rule → end the open quote span.
+        if not stripped or stripped.startswith("---"):
+            in_open_quote = False
+            continue
+
+        # Shape 1: Markdown blockquote. Each `>` line is its own quote
+        # body — no continuation-state needed; the per-line scan handles
+        # multi-paragraph quotes naturally.
+        if stripped.startswith(">"):
+            in_open_quote = False  # `>` lines are self-contained
+            m = _WIKILINK_IN_TEXT_RE.search(stripped)
+            if m:
+                return m.group(0)
+            continue
+
+        # Shape 2: Bold-sender prefix opens a quote span.
+        bold_match = _BOLD_SENDER_LINE_RE.match(stripped)
+        if bold_match:
+            content = bold_match.group("content")
+            wl = _WIKILINK_IN_TEXT_RE.search(content)
+            if wl:
+                return wl.group(0)
+            in_open_quote = True
+            continue
+
+        # Shape 3: Plain-sender prefix opens a quote span.
+        plain_match = _PLAIN_SENDER_LINE_RE.match(stripped)
+        if plain_match:
+            content = plain_match.group("content")
+            wl = _WIKILINK_IN_TEXT_RE.search(content)
+            if wl:
+                return wl.group(0)
+            in_open_quote = True
+            continue
+
+        # Continuation line of an open bold/plain quote — scan for
+        # wikilinks. This is the fix for today's bug.
+        if in_open_quote:
+            wl = _WIKILINK_IN_TEXT_RE.search(stripped)
+            if wl:
+                return wl.group(0)
+
+    return None
+
+
 @dataclass(frozen=True)
 class ConfabulationVerdict:
     """Outcome of running the detector on one draft.
@@ -194,7 +313,7 @@ class ConfabulationVerdict:
     """
 
     is_confabulation: bool
-    kind: str
+    kind: str  # "" | "failure_claim" | "made_up_quote" | "wikilink_in_quote"
     offending_phrase: str
     unverified_quote_count: int
     tool_name: str
@@ -229,6 +348,42 @@ def detect_confabulation(
     """
     if not reply:
         return _CLEAN_VERDICT
+
+    # ── Check 0: wikilink inside a quote block (hardest signal) ──
+    # No real contact sends [[wikilink]] syntax — if it appears inside a
+    # `> sender (ts): ...` line OR on a continuation line of an open
+    # bold/plain-sender quote, the brain copied the content from a
+    # lazybrain memory note. Check this FIRST because it's deterministic
+    # and the most damning evidence of memory-leak hallucination.
+    #
+    # Wikilinks in headers, free prose, or paragraphs separated from a
+    # quote by a blank line are LEGITIMATE references (e.g. "I'll save
+    # this to [[contact_James]]") and must NOT trip the detector. The
+    # state machine in `_find_wikilink_in_quote_block` enforces that.
+    #
+    # Continuation-line state machine added 2026-05-23 after the bold
+    # multi-line shape leaked `Mac [[computer]]` past the detector.
+    try:
+        wl = _find_wikilink_in_quote_block(reply)
+        if wl:
+            last_read = ""
+            last_bytes = 0
+            for i in range(len(tool_call_history) - 1, -1, -1):
+                if _is_read_tool(tool_call_history[i]):
+                    last_read = tool_call_history[i]
+                    if i < len(tool_results):
+                        last_bytes = len(tool_results[i] or "")
+                    break
+            return ConfabulationVerdict(
+                is_confabulation=True,
+                kind="wikilink_in_quote",
+                offending_phrase=wl,
+                unverified_quote_count=0,
+                tool_name=last_read,
+                payload_bytes=last_bytes,
+            )
+    except Exception:
+        pass
 
     # ── Check 1: failure-claim against successful read payload ──
     try:
@@ -363,30 +518,52 @@ def build_raw_data_injection(
 
     if reason == "confabulation" and verdict.kind == "failure_claim":
         opening = (
-            f"CONFABULATION DETECTED. The tool {tool_name or '(unknown)'} "
-            "returned successful data on this turn (see RAW DATA below). "
-            "You wrote that the tool failed. That was false. Re-draft "
-            "using the REAL data."
+            f"MANDATORY REWRITE — CONFABULATION DETECTED. The tool "
+            f"{tool_name or '(unknown)'} returned successful data this turn "
+            "(see RAW DATA below). You wrote that the tool failed. That was "
+            "false."
         )
     elif reason == "confabulation" and verdict.kind == "made_up_quote":
         opening = (
-            f"CONFABULATION DETECTED. The tool {tool_name or '(unknown)'} "
-            "returned data on this turn (see RAW DATA below). Your reply "
-            "contained quote lines whose content does NOT appear in that "
-            f"data ({verdict.unverified_quote_count} unverified quotes). "
-            "Re-draft using ONLY the real content."
+            f"MANDATORY REWRITE — CONFABULATION DETECTED. The tool "
+            f"{tool_name or '(unknown)'} returned data this turn (see RAW "
+            "DATA below). Your previous reply contained quote lines whose "
+            f"content does NOT appear in that data "
+            f"({verdict.unverified_quote_count} unverified quotes)."
+        )
+    elif reason == "confabulation" and verdict.kind == "wikilink_in_quote":
+        opening = (
+            f"MANDATORY REWRITE — MEMORY LEAK DETECTED. Your previous reply "
+            f"contained the wikilink `{verdict.offending_phrase}` inside a "
+            "quote block. Real contacts never send wikilink syntax — this "
+            "proves the content was copied from a lazybrain memory note, "
+            "not from the live tool result. The RAW DATA below is the "
+            "ONLY source you may quote from."
         )
     else:
         # retry_exhausted path
         opening = (
-            "F1 retries exhausted. Use the raw data below. Format as "
-            "quote-then-summarize."
+            "MANDATORY REWRITE — F1 retries exhausted. Use the raw data "
+            "below as the ONLY source of truth."
         )
 
     directive = (
-        " Format the 3 most recent contact-side entries as "
-        "`> {sender} ({timestamp if available}): {verbatim content}`. "
-        "Then summarize. Do NOT claim the tool failed."
+        "\n\nRules — non-negotiable:\n"
+        "1. Every line inside a `> sender (ts): ...` quote block MUST appear "
+        "character-for-character in the RAW DATA below. If it doesn't, do "
+        "not write it.\n"
+        "2. Wikilink syntax `[[X]]` is FORBIDDEN in quote blocks. Wikilinks "
+        "come from your memory store, not from real contacts.\n"
+        "3. If the RAW DATA lacks what the user asked about, say so "
+        "explicitly: \"The tool returned N messages but the specific info "
+        "you asked about is not present.\" Do NOT fill gaps from prior "
+        "conversation or memory.\n"
+        "4. Do not invent timestamps or sender names. If a bubble has no "
+        "timestamp, write `(no timestamp)`.\n"
+        "5. Do NOT claim the tool failed.\n\n"
+        "Format the 3 most recent contact-side entries as "
+        "`> {sender} ({timestamp if available}): {verbatim content}`, then "
+        "summarize using only quoted content."
     )
 
     if not payload:

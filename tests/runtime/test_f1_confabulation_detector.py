@@ -27,6 +27,7 @@ import pytest
 
 from lazyclaw.runtime.f1_confabulation_detector import (
     ConfabulationVerdict,
+    _find_wikilink_in_quote_block,
     build_raw_data_injection,
     detect_confabulation,
 )
@@ -188,11 +189,14 @@ def test_raw_data_injection_includes_payload_and_directive() -> None:
         reason="confabulation",
     )
 
+    assert "MANDATORY REWRITE" in msg
     assert "CONFABULATION DETECTED" in msg
     assert "upwork_last_conversation" in msg
     assert "Narrowed the city list to 6" in msg, "raw payload missing"
     assert "> {sender}" in msg, "quote directive missing"
     assert "Do NOT claim the tool failed" in msg
+    assert "character-for-character" in msg, "raw-data fidelity rule missing"
+    assert "FORBIDDEN" in msg, "wikilink prohibition missing"
 
 
 def test_raw_data_injection_truncates_huge_payload() -> None:
@@ -234,7 +238,7 @@ def test_raw_data_injection_retry_exhausted_reason() -> None:
         reason="retry_exhausted",
     )
     assert "F1 retries exhausted" in msg
-    assert "quote-then-summarize" in msg
+    assert "MANDATORY REWRITE" in msg
     assert "Narrowed the city list to 6" in msg
 
 
@@ -395,3 +399,321 @@ def test_confabulation_detector_logs_warning(
         if "f1_confabulation_detector" in r.name
     ]
     assert detector_logs == []
+
+
+# ─── wikilink-in-quote confabulation (memory leak from lazybrain) ────────
+
+
+def test_wikilink_in_quote_detected() -> None:
+    """`[[X]]` inside a `> sender (ts): ...` block is a hard memory-leak signal.
+
+    The 2026-05-21 22:13 incident: brain quoted James Blue's "Mac
+    [[computer]] iPad" message — the [[computer]] proves the content came
+    from `reference_james_blue_contract.md`, not the live Upwork chat.
+    Real contacts never send wikilink syntax.
+    """
+    reply = (
+        "Here's the latest from James Blue:\n\n"
+        "> James Blue (9:12 PM): I have a Mac [[computer]] and iPad for "
+        "the auto-accept bot project.\n\n"
+        "He wants alerts on those devices."
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    assert verdict.is_confabulation is True
+    assert verdict.kind == "wikilink_in_quote"
+    assert verdict.offending_phrase == "[[computer]]"
+    assert verdict.tool_name == "upwork_last_conversation"
+
+
+def test_wikilink_in_non_quote_section_ignored() -> None:
+    """Wikilinks in headers / free prose are fine — only quote-block matters."""
+    reply = (
+        "## See note: [[james_blue_contract]]\n\n"
+        "The thread covers: project scope, [[computer]] devices, deadline.\n\n"
+        "> James (10:30 PM): Narrowed the city list to 6 — Oakland, Hayward, "
+        "San Leandro, Newark, San Jose, Cupertino"
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    # The wikilinks are in headers / free prose, NOT in the quote block.
+    # The quote block content IS in the payload. → clean verdict.
+    assert verdict.is_confabulation is False
+    assert verdict.kind == ""
+
+
+def test_retry_prompt_includes_mandatory_rewrite_directive() -> None:
+    """The new retry prompt must be imperative + character-anchored."""
+    verdict = ConfabulationVerdict(
+        is_confabulation=True,
+        kind="wikilink_in_quote",
+        offending_phrase="[[computer]]",
+        unverified_quote_count=0,
+        tool_name="upwork_last_conversation",
+        payload_bytes=len(_JAMES_BLUE_PAYLOAD),
+    )
+    msg = build_raw_data_injection(
+        verdict,
+        ["upwork_last_conversation"],
+        [_JAMES_BLUE_PAYLOAD],
+        reason="confabulation",
+    )
+
+    assert "MANDATORY REWRITE" in msg
+    assert "MEMORY LEAK DETECTED" in msg
+    assert "[[computer]]" in msg, "offending wikilink must be cited"
+    assert "character-for-character" in msg
+    assert "FORBIDDEN" in msg
+    assert "RAW DATA" in msg
+    assert "Narrowed the city list to 6" in msg, "raw payload missing"
+
+
+# ─── widened wikilink detector: bold + plain sender shapes (2026-05-22) ──
+
+
+def test_wikilink_in_bold_sender_format_detected() -> None:
+    """`**Sender (ts):** ... [[X]] ...` is the 2026-05-22 10:09 incident shape.
+
+    The brain switched from Markdown blockquotes (`> Sender (ts):`) to
+    bold-sender prefix (`**Sender (ts):**`). Yesterday's detector only
+    scanned `>`-prefixed lines, so `[[computer]]` slipped through and
+    only the slower content-mismatch verifier caught it. The widened
+    detector must flag this shape directly.
+    """
+    reply = (
+        "Here's what James said:\n\n"
+        "**James Blue (9:12 PM):** Mac [[computer]] iPad for the bot.\n\n"
+        "He wants alerts on those devices."
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    assert verdict.is_confabulation is True
+    assert verdict.kind == "wikilink_in_quote"
+    assert verdict.offending_phrase == "[[computer]]"
+    assert verdict.tool_name == "upwork_last_conversation"
+
+
+def test_wikilink_in_plain_sender_format_detected() -> None:
+    """`Sender Name (HH:MM): ... [[X]] ...` — third quote shape.
+
+    Plain-text sender prefix with no Markdown decoration. Common when
+    the brain forgets formatting entirely but still attributes the line.
+    """
+    reply = (
+        "Latest from the thread:\n\n"
+        "James Blue (9:12 PM): I have a Mac [[computer]] and iPad for "
+        "the auto-accept bot project.\n\n"
+        "He wants alerts on those devices."
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    assert verdict.is_confabulation is True
+    assert verdict.kind == "wikilink_in_quote"
+    assert verdict.offending_phrase == "[[computer]]"
+
+
+def test_wikilink_in_blockquote_still_detected() -> None:
+    """Regression guard: the original `>` blockquote shape must still trip."""
+    reply = (
+        "From James:\n\n"
+        "> James Blue (9:12 PM): I have a Mac [[computer]] and iPad.\n\n"
+        "Alerts requested."
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    assert verdict.is_confabulation is True
+    assert verdict.kind == "wikilink_in_quote"
+    assert verdict.offending_phrase == "[[computer]]"
+
+
+def test_wikilink_in_free_prose_not_flagged() -> None:
+    """Wikilinks in headers / free prose / non-sender lines must NOT trip.
+
+    Three subtleties matter:
+      - Header line with wikilink (`## See [[X]]`) is fine.
+      - Free prose with wikilink and no sender prefix is fine.
+      - Quote block whose content matches tool data should pass cleanly.
+    """
+    reply = (
+        "## See note: [[james_blue_contract]] for full context\n\n"
+        "The thread discusses the [[computer]] devices the user owns. "
+        "Notes also reference [[upwork_contracts]] in passing.\n\n"
+        "> James (10:30 PM): Narrowed the city list to 6 — Oakland, "
+        "Hayward, San Leandro, Newark, San Jose, Cupertino"
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    assert verdict.is_confabulation is False, (
+        f"Free-prose wikilinks flagged as confab: {verdict}"
+    )
+    assert verdict.kind == ""
+
+
+def test_wikilink_in_inline_markdown_link_not_flagged() -> None:
+    """`[text](url)` is markdown link syntax — single brackets, not `[[X]]`.
+
+    Defensive: ensure the detector doesn't confuse inline links with
+    wikilinks. Single-bracket inline links must pass cleanly even when
+    they sit next to sender-prefixed lines.
+    """
+    reply = (
+        "Reference doc: [contract spec](https://example.com/spec)\n\n"
+        "**James Blue (9:12 PM):** Narrowed the city list to 6 — Oakland, "
+        "Hayward, San Leandro, Newark, San Jose, Cupertino\n\n"
+        "See [the brief](https://x.com/brief) for next steps."
+    )
+    history = ["upwork_last_conversation"]
+    results = [_JAMES_BLUE_PAYLOAD]
+
+    verdict = detect_confabulation(reply, history, results)
+
+    # No `[[X]]` syntax anywhere → wikilink detector must not trip. The
+    # bold-sender line's content IS in the payload, so the made-up-quote
+    # check also passes. Verdict should be clean.
+    assert verdict.is_confabulation is False, (
+        f"Inline markdown link confused with wikilink: {verdict}"
+    )
+
+
+# ─── Continuation-line wikilink scan (2026-05-23 fix) ────────────────────
+
+
+def test_find_wikilink_catches_multiline_blockquote_continuation() -> None:
+    """Multi-line `>` blockquote where wikilink is on a continuation line.
+
+    The brain often splits a long quote across multiple `>` lines. The
+    per-line scan already iterates them; this test pins the existing
+    behavior so a future refactor can't regress it.
+    """
+    reply = (
+        "Quoting James verbatim:\n"
+        "> James Blue (9:12 PM): Which platform am I monitoring?\n"
+        "> Mac [[computer]] Once I have these I can start the same day.\n"
+    )
+    assert _find_wikilink_in_quote_block(reply) == "[[computer]]"
+
+
+def test_find_wikilink_catches_bold_sender_with_naked_continuation() -> None:
+    """Bold-sender + naked continuation line — the bug fixed today.
+
+    Before the fix, only the sender-prefix line itself was scanned for
+    wikilinks. The brain emits multi-paragraph quotes where the bold
+    `**Sender:**` opens the span and subsequent paragraphs are NAKED
+    continuation lines (no `>`, no `**`). `[[computer]]` survived the
+    detector here.
+    """
+    reply = (
+        "**James Blue (9:12 PM):** Which platform am I monitoring?\n"
+        "Property scraper question?\n"
+        "Mac [[computer]] Once I have these I can start the same day.\n"
+    )
+    assert _find_wikilink_in_quote_block(reply) == "[[computer]]"
+
+
+def test_find_wikilink_catches_plain_sender_with_naked_continuation() -> None:
+    reply = (
+        "James Blue (9:12 PM): Which platform am I monitoring?\n"
+        "Mac [[computer]] Once I have these I can start the same day.\n"
+    )
+    assert _find_wikilink_in_quote_block(reply) == "[[computer]]"
+
+
+def test_find_wikilink_resets_on_blank_line() -> None:
+    """Blank line between sender and wikilink → wikilink is in fresh prose.
+
+    Distinguishes "wikilink inside a contact's multi-paragraph quote"
+    (bad — memory leak) from "wikilink in the brain's own commentary
+    after the quote ends" (legitimate — user-facing note reference).
+    """
+    reply = (
+        "**James Blue (9:12 PM):** Which platform am I monitoring?\n"
+        "\n"  # blank line ends the quote span
+        "I'll save this to [[contact_James]] for follow-up.\n"
+    )
+    assert _find_wikilink_in_quote_block(reply) is None
+
+
+def test_find_wikilink_resets_on_horizontal_rule() -> None:
+    """`---` horizontal rule also terminates the open quote span."""
+    reply = (
+        "**James (9:12 PM):** First message\n"
+        "---\n"
+        "Saved to [[contact_James]].\n"
+    )
+    assert _find_wikilink_in_quote_block(reply) is None
+
+
+# ─── Phase-2 enforcement helper ──────────────────────────────────────────
+
+
+def test_phase2_enforcement_blocks_on_channel_read_turn_with_unverified() -> None:
+    from lazyclaw.runtime.f1_content_verifier import phase2_enforcement_verdict
+
+    reply = (
+        "> James Blue (9:12 PM): I want a totally fabricated thing "
+        "that doesn't appear in the tool data at all.\n"
+    )
+    history = ["upwork_get_conversation"]
+    results = ['{"messages":[{"sender":"James","content":"Different content."}]}']
+
+    should_block, reason = phase2_enforcement_verdict(reply, history, results)
+
+    assert should_block is True
+    assert "unverified" in reason
+
+
+def test_phase2_enforcement_passes_clean_quotes() -> None:
+    from lazyclaw.runtime.f1_content_verifier import phase2_enforcement_verdict
+
+    quoted = "I want X."
+    reply = f"> James Blue (9:12 PM): {quoted}\n"
+    history = ["upwork_get_conversation"]
+    results = [f'{{"messages":[{{"sender":"James","content":"{quoted}"}}]}}']
+
+    should_block, reason = phase2_enforcement_verdict(reply, history, results)
+
+    assert should_block is False, reason
+
+
+def test_phase2_enforcement_skips_non_channel_turn() -> None:
+    """Even with unverified quotes, non-channel turns stay observation-only.
+
+    Phase-2 is too noisy on internal chat / planning replies where
+    "quotes" are paraphrases of earlier conversation, not lifts from
+    a fresh channel-read tool result.
+    """
+    from lazyclaw.runtime.f1_content_verifier import phase2_enforcement_verdict
+
+    reply = "> James Blue (9:12 PM): garbage content\n"
+    history = ["lazybrain_recall"]  # not a channel-read tool
+    results = ["no match"]
+
+    should_block, _ = phase2_enforcement_verdict(reply, history, results)
+    assert should_block is False
+
+
+def test_phase2_enforcement_handles_empty_inputs() -> None:
+    from lazyclaw.runtime.f1_content_verifier import phase2_enforcement_verdict
+
+    should_block, _ = phase2_enforcement_verdict("", [], [])
+    assert should_block is False
+    should_block, _ = phase2_enforcement_verdict("no quotes here", ["upwork_get_conversation"], [])
+    assert should_block is False

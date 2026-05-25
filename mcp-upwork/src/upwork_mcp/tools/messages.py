@@ -9,9 +9,83 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from ..browser.client import PROFILE_DIR, _is_nav_noise, get_browser
+from ..browser.client import (
+    PROFILE_DIR,
+    UpworkRoomNotFound,
+    _is_nav_noise,
+    get_browser,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# JS snippet that finds the chat scroll container on Upwork's 2026 DOM.
+# Three strategies, tried in order:
+#
+# 1. Class-based selectors (cheap fast path). Updated 2026-05-24 to
+#    include ``.scroll-wrapper.custom-scrollbar`` — the actual container
+#    Upwork ships today. Without this, every selector below was NULL
+#    and scroll-to-bottom became a silent no-op: chat stayed at
+#    scrollTop=0 (oldest messages mounted), the bubble extractor only
+#    saw stale bubbles, and the brain reported "no new messages" when
+#    James had actually replied hours ago. Verified live via CDP probe.
+#
+# 2. Content-based: walk up from a ``[data-test="story-container"]``
+#    bubble until we find an ancestor with scrollHeight > clientHeight.
+#    Layout-agnostic, survives future Upwork class renames as long as
+#    the bubble selector keeps existing (which is the only invariant
+#    the rest of the extractor depends on too).
+#
+# 3. Overflow-based (legacy fallback): scan all elements for
+#    ``overflow-y: auto/scroll``. Fails on custom-scrollbar wrappers
+#    (which use ``overflow: hidden`` + faked scrollbar), which is why
+#    we need the content-based pass first.
+#
+# Returns the scroller element (or null) — caller decides what to do
+# with it (scroll up by fraction, jump to bottom, etc.).
+_FIND_CHAT_SCROLLER_JS = r"""
+    (() => {
+        const sels = [
+            // 2026 layout — the actual class Upwork ships
+            '.scroll-wrapper.custom-scrollbar',
+            '.scroll-wrapper',
+            // Legacy patterns (older Upwork redesigns)
+            '[data-test*="message-list"]',
+            '[data-test*="thread"] [class*="scroll"]',
+            'main [class*="scroll"]',
+            'div[class*="virtual"]',
+            'div[class*="MessageList"]',
+        ];
+        for (const s of sels) {
+            const el = document.querySelector(s);
+            if (el && el.scrollHeight > el.clientHeight + 50) {
+                return el;
+            }
+        }
+        // Content-based: walk up from a bubble. Survives DOM renames.
+        const bubble = document.querySelector(
+            '[data-test="story-container"]'
+        );
+        if (bubble) {
+            let el = bubble.parentElement;
+            while (el && el !== document.body) {
+                if (el.scrollHeight > el.clientHeight + 50) return el;
+                el = el.parentElement;
+            }
+        }
+        // Overflow-based legacy fallback (broken on custom scrollbars).
+        let best = null, bestH = 0;
+        document.querySelectorAll('*').forEach(el => {
+            const st = getComputedStyle(el);
+            if ((st.overflowY === 'auto' || st.overflowY === 'scroll') &&
+                el.scrollHeight > el.clientHeight + 50 &&
+                el.scrollHeight > bestH) {
+                best = el; bestH = el.scrollHeight;
+            }
+        });
+        return best;
+    })()
+"""
 
 
 # ── External-URL guard for outbound DMs ──────────────────────────────
@@ -226,10 +300,20 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     # under heavy SPA re-renders; widening the matcher and bumping the
     # timeout keeps the success path stable without changing the empty
     # short-circuit below.
+    #
+    # `.desktop-layout-room` is intentionally NOT in this list — it
+    # matches Upwork's whole-page chrome wrapper (the `desktop-layout-*`
+    # convention denotes layout containers, not per-row elements), so
+    # prepending it would let the wait succeed before any actual room
+    # mounts. Confirmed 2026-05-20 via live diagnostic (5 inner hrefs:
+    # 1 nav + 4 attachments) and reverted to the upstream-original
+    # `[data-test="room-item"]` row selector. Prior history: prepended
+    # in 12d3593, fork-original (3009e69) used `[data-test="room-item"]`
+    # only and worked fine on MiniMax.
     try:
         await page.wait_for_selector(
             '[data-test="rooms-panel"], [data-test="empty-state"], '
-            '.rooms-panel-body, .desktop-layout-room, [data-test="room-item"]',
+            '.rooms-panel-body, [data-test="room-item"]',
             timeout=20000,
         )
     except Exception as exc:
@@ -243,15 +327,51 @@ async def get_messages(params: MessagesParams) -> list[dict]:
     if empty_state:
         return []
 
-    # Extract conversation items. The 2026 layout uses .desktop-layout-room as
-    # the row class; older / mobile fallbacks kept for resilience.
-    room_els = await page.query_selector_all(
-        '.desktop-layout-room, [data-test="room-item"], .room-item, .conversation-item'
-    )
+    # The room-row selector. `.desktop-layout-room` was removed (2026-05-20):
+    # it matches Upwork's whole-page chrome wrapper, not individual rows.
+    # This is the upstream-original (fork commit 3009e69) chain that worked
+    # reliably on MiniMax before the regression introduced in 12d3593.
+    _room_selector = '[data-test="room-item"], .room-item, .conversation-item'
+
+    # SPA-route stability gate. `safe_goto` can land on a /rooms/<id> tab
+    # that React then re-routes to /ab/messages/rooms/ — the doctype
+    # doesn't reload, so an immediate `query_selector_all` runs before
+    # the rooms tree finishes mounting and yields 0 rows. Same fix
+    # pattern as `get_conversation_messages` lines 609-658: wait for
+    # networkidle (best-effort), then poll until the row count is stable
+    # for 3 consecutive ticks (~600 ms) before extracting.
+    import asyncio as _aio
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        # Upwork's SPA frequently never hits networkidle (long-poll WS,
+        # analytics beacons). Non-fatal — the count-stability poll below
+        # is the authoritative signal.
+        logger.debug("get_messages: networkidle never settled — continuing")
+    try:
+        prev_count = -1
+        stable_ticks = 0
+        for _i in range(15):  # max ~3 s budget
+            count = len(await page.query_selector_all(_room_selector))
+            if count == prev_count and count > 0:
+                stable_ticks += 1
+                if stable_ticks >= 3:
+                    break
+            else:
+                stable_ticks = 0
+            prev_count = count
+            await _aio.sleep(0.2)
+    except Exception:
+        # Non-fatal — fall through to extraction with whatever's mounted.
+        logger.debug("get_messages: stability poll failed", exc_info=True)
+
+    # Extract conversation items. Selector matches upstream-original
+    # (vanooo/upwork-mcp 3009e69) — no .desktop-layout-room wrapper.
+    room_els = await page.query_selector_all(_room_selector)
     if not room_els:
         logger.warning(
             "get_messages: 0 room elements matched at %s "
-            "(rooms-panel, .desktop-layout-room, [data-test=\"room-item\"] all empty). "
+            "(rooms-panel + [data-test=\"room-item\"] both empty). "
             "Likely 2026 layout drift or CF challenge — surface upstream.",
             getattr(page, "url", "?"),
         )
@@ -265,15 +385,28 @@ async def get_messages(params: MessagesParams) -> list[dict]:
             if not conv:
                 continue
             room_id = conv.get("room_id")
+            # Drop rows where the extractor couldn't resolve a room id.
+            # Without this, the brain receives `{contact_name: "James
+            # Blue"}` with no room_id and confabulates "James Blue" as
+            # the room_id itself — calling `upwork_get_conversation(
+            # room_id="James Blue")` which navigates to the 404 page
+            # (2026-05-20 21:21 incident). A clean "no rooms found"
+            # is a much better signal than an unusable partial row.
+            if not room_id:
+                logger.info(
+                    "get_messages: dropped row for contact_name=%r "
+                    "(no resolvable room_id)",
+                    conv.get("contact_name"),
+                )
+                continue
             # `is_new` is True for any room we haven't recorded before.
             # Drives the "speak to the founder directly" first-contact
             # offer in upwork_inbox_check. False if we've seen the room
             # in any prior sweep, regardless of whether the latest
             # message is new — that's an "ongoing thread" not a fresh
             # client.
-            conv["is_new"] = bool(room_id) and room_id not in seen_rooms
-            if room_id:
-                newly_seen.add(room_id)
+            conv["is_new"] = room_id not in seen_rooms
+            newly_seen.add(room_id)
             conversations.append(conv)
         except Exception:
             logger.exception("get_messages: per-row extraction raised")
@@ -281,6 +414,61 @@ async def get_messages(params: MessagesParams) -> list[dict]:
 
     if newly_seen:
         _save_seen_rooms(seen_rooms | newly_seen)
+
+    # ── URL-fallback for open-conversation view ───────────────────────
+    # Live incident 2026-05-21 12:58:33: the host Brave tab was sitting
+    # on James Blue's open conversation view. `safe_goto` navigated to
+    # /ab/messages/rooms/ but Upwork's SPA re-opens the last conversation
+    # — so the rooms-list sidebar never rendered, and both
+    # `[data-test="rooms-panel"]` and `[data-test="room-item"]` returned
+    # 0 (matching the "0 room elements matched" WARNING above). But the
+    # real `room_<hex>` was sitting right there in `page.url`.
+    #
+    # Recover by mining the URL when no rows mounted. This is strictly
+    # additive — the original "0 rows" WARNING still fires for the
+    # genuine empty-inbox / layout-drift case (URL won't match the regex
+    # because the inbox URL is `/ab/messages/rooms/` with no id segment).
+    if not conversations:
+        cur_url = getattr(page, "url", "") or ""
+        # Same id shapes that _validate_room_id accepts as bare ids:
+        # room_<hex>, strict UUID (8-4-4-4-12 lowercase hex), or numeric.
+        m = re.search(
+            r"/ab/messages/rooms/(room_[A-Za-z0-9_-]+|"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+            r"\d+)(?:[/?#]|$)",
+            cur_url,
+        )
+        if m:
+            room_id = m.group(1)
+            # `page.title()` typically returns the contact's name when
+            # the conversation view is open. Reject Upwork's generic
+            # inbox-default titles — they aren't contact names.
+            try:
+                title = (await page.title()) or ""
+            except Exception:
+                title = ""
+            title = title.strip()
+            contact_name = (
+                title
+                if title
+                and title.lower() not in {"messages", "upwork", "messages | upwork"}
+                else ""
+            )
+            synthetic = {
+                "room_id": room_id,
+                "room_url": cur_url,
+                "contact_name": contact_name,
+                # Tag so the brain (and post-mortems) can tell this
+                # row didn't come from the rooms-list sidebar.
+                "source": "page_url_fallback",
+            }
+            logger.info(
+                "get_messages: returning URL-derived synthetic conv "
+                "room_id=%s contact_name=%r (sidebar empty, "
+                "conversation view open)",
+                room_id, contact_name,
+            )
+            conversations = [synthetic]
 
     return conversations
 
@@ -343,36 +531,149 @@ async def _extract_conversation(el) -> dict | None:
         return None
 
     # Room URL/ID
-    # 2026 layout URL shape:
-    #   /ab/messages/rooms/room_<hex>?companyReference=...&sidebar=true
-    # Legacy shape:
-    #   /nx/messages/<id>
-    # The old parser split on ``/messages/`` then took ``.split("/")[0]``,
-    # which returned the literal string "rooms" for every 2026 conversation
-    # — making every downstream ``get_conversation_messages(room_id)`` call
-    # navigate to /ab/messages/rooms/rooms (Upwork 404). Probe specifically
-    # for ``room_<hex>`` segments, fall back to legacy parsing only when
-    # the new pattern doesn't match.
-    import re as _re
-    room_link = await el.query_selector('a[href*="/messages/"]')
-    if room_link:
-        href = await room_link.get_attribute("href")
-        if href:
-            conv["room_url"] = href if href.startswith("http") else f"https://www.upwork.com{href}"
-            m = _re.search(r"room_[A-Za-z0-9_-]+", href)
-            if m:
-                conv["room_id"] = m.group(0)
-            elif "/messages/" in href:
-                # Legacy fallback. Skip the "rooms" path segment if we hit
-                # the new URL layout without finding a room_<hex> match.
-                tail = href.split("/messages/", 1)[-1].split("?", 1)[0]
-                first = tail.split("/", 1)[0]
-                if first in ("rooms", "room"):
-                    parts = tail.split("/")
-                    if len(parts) > 1 and parts[1]:
-                        conv["room_id"] = parts[1]
-                else:
-                    conv["room_id"] = first
+    # Accepted shapes (in order of preference):
+    #   1. /ab/messages/rooms/room_<hex>?companyReference=...&sidebar=true
+    #   2. /ab/messages/rooms/<uuid>          (2026 migration — strict)
+    #   3. /nx/messages/<numeric-id>          (legacy)
+    #
+    # Upwork row DOM exposes MULTIPLE ``a[href*="/messages/"]`` anchors
+    # per row — the real room link plus auxiliary anchors pointing at
+    # attachments (``/ab/messages/att/<uuid>``), file previews
+    # (``/ab/messages/file/...``), and nav/skeleton placeholders (the
+    # bare inbox URL ``/ab/messages/rooms``).
+    #
+    # Earlier parsers either:
+    #   • grabbed the FIRST anchor (polluting room_url with the inbox
+    #     URL), or
+    #   • accepted "any non-rooms first segment" — the latter is what
+    #     harvested ``att`` and bare attachment UUIDs as room_ids.
+    #   • OR were too strict, rejecting ALL UUIDs — which made the
+    #     2026-05-20 19:23 incident: Upwork has migrated some/all real
+    #     rooms to UUID-shape paths (``/ab/messages/rooms/<uuid>``),
+    #     and James Blue's row in the current DOM has NO ``room_<hex>``
+    #     anchor at all. That row became unreachable because the
+    #     extractor refused all UUIDs.
+    #
+    # Fix — three-pass strict scan with re-introduced UUID branch:
+    #   Pass 1: ``room_<hex>`` always wins. Lock the FIRST match and
+    #           break.
+    #   Pass 2 (only if Pass 1 found nothing): accept strict UUID at
+    #           ``/ab/messages/rooms/<uuid>`` ONLY (path-equality,
+    #           lowercase hex, no extra path segments before or after
+    #           the UUID). This is what distinguishes a real room
+    #           anchor from an attachment-UUID anchor at
+    #           ``/ab/messages/att/<uuid>`` or
+    #           ``/ab/messages/rooms/<uuid>/something``.
+    #   Pass 3 (only if Pass 1 + 2 found nothing): accept legacy
+    #           /nx/messages/<numeric-id> only (Upwork legacy ids are
+    #           numeric — slugs are not real rooms).
+    # Anything else — /att/<uuid>, /file/<id>, uppercase UUID, UUID with
+    # trailing segment, alphanumeric /nx/messages/<slug>, bare inbox URL
+    # — is rejected. Partial conv is safer than seeding downstream
+    # with a non-room URL.
+    candidates = await el.query_selector_all('a[href*="/messages/"]')
+    chosen_href: str | None = None
+    chosen_room_id: str | None = None
+
+    # Legacy numeric /nx/messages/<digits>. Reject slug/word forms.
+    _nx_legacy_pat = re.compile(
+        r"(?:^|^https?://[^/]+)/nx/messages/(\d+)(?:[/?#]|$)",
+        re.IGNORECASE,
+    )
+
+    # Strict UUID at /ab/messages/rooms/<uuid> only. Path-equality:
+    #   • absolute (https?://host) or relative
+    #   • path is EXACTLY /ab/messages/rooms/<uuid> with optional
+    #     trailing slash
+    #   • UUID is strict 8-4-4-4-12 lowercase hex
+    #   • nothing after the UUID except optional trailing slash
+    # Query/fragment are stripped before matching so the regex doesn't
+    # need to model them. Rules out:
+    #   /ab/messages/att/<uuid>       (intermediate segment)
+    #   /ab/messages/file/<uuid>      (intermediate segment)
+    #   /ab/messages/rooms/<uuid>/x   (trailing segment)
+    #   /ab/messages/rooms/<UPPER>    (uppercase hex)
+    _uuid_room_pat = re.compile(
+        r"^(?:https?://[^/]+)?/ab/messages/rooms/"
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$"
+    )
+
+    # Pass 1: room_<hex> always wins. Lock the FIRST match and break.
+    for cand in candidates:
+        href = await cand.get_attribute("href")
+        if not href:
+            continue
+        m = re.search(r"room_[A-Za-z0-9_-]+", href)
+        if m:
+            chosen_href = href
+            chosen_room_id = m.group(0)
+            break
+
+    # Pass 2: only if no room_<hex> was found, accept strict UUID at
+    # /ab/messages/rooms/<uuid>. First match wins.
+    if chosen_href is None:
+        for cand in candidates:
+            href = await cand.get_attribute("href")
+            if not href:
+                continue
+            # Strip query + fragment before path-equality match.
+            path_only = href.split("#", 1)[0].split("?", 1)[0]
+            um = _uuid_room_pat.match(path_only)
+            if um:
+                chosen_href = href
+                chosen_room_id = um.group(1)
+                break
+
+    # Pass 3: only if no room_<hex> AND no strict-UUID, accept legacy
+    # numeric /nx/messages/<id>. First valid match wins.
+    if chosen_href is None:
+        for cand in candidates:
+            href = await cand.get_attribute("href")
+            if not href:
+                continue
+            nm = _nx_legacy_pat.search(href)
+            if nm:
+                chosen_href = href
+                chosen_room_id = nm.group(1)
+                break
+
+    if chosen_href:
+        conv["room_url"] = (
+            chosen_href
+            if chosen_href.startswith("http")
+            else f"https://www.upwork.com{chosen_href}"
+        )
+        if chosen_room_id:
+            conv["room_id"] = chosen_room_id
+    elif candidates:
+        # Row had message-link anchors but none resolved to a per-room
+        # URL. Most likely a virtualized skeleton row, attachment-only
+        # anchor, or unknown shape — surface it so the upstream
+        # rooms-panel-stability poll can be tuned.
+        #
+        # Diagnostic: dump the actual hrefs we scanned (first 5, each
+        # truncated to 200 chars). Upwork has shipped at least 3 layout
+        # variants since the 2026 migration — without the raw hrefs we
+        # can't tell whether the row genuinely has no room link or
+        # whether the room URL is in a shape we don't recognize yet.
+        scanned_hrefs: list[str] = []
+        for cand in candidates[:5]:
+            try:
+                href = await cand.get_attribute("href")
+            except Exception:
+                href = None
+            if href:
+                scanned_hrefs.append(href[:200])
+            else:
+                scanned_hrefs.append("<no-href>")
+        logger.warning(
+            "room-list row had %d message anchors but NONE resolved to a "
+            "known room-id shape; skipping room_url/room_id for "
+            "contact_name=%r. Scanned hrefs (first 200 chars each): %r",
+            len(candidates),
+            conv.get("contact_name"),
+            scanned_hrefs,
+        )
 
     # Last message preview
     preview_el = await el.query_selector('[data-test="message-preview"], .preview, .last-message')
@@ -424,7 +725,43 @@ async def get_conversation_messages(
     else:
         url = f"https://www.upwork.com/ab/messages/rooms/{room_id}"
 
-    page = await browser.safe_goto(url)
+    # safe_goto now performs a post-nav URL check and raises
+    # UpworkRoomNotFound if Upwork's SPA silently redirected the room
+    # URL to /ab/messages. Translate that into a structured error so
+    # the brain gets a groundable signal instead of a 500 / silent
+    # inbox scrape (2026-05-20 16:48 incident).
+    #
+    # force_reload=True is REQUIRED on the read path. The picked Brave
+    # tab is often already sitting on the target room URL (the user
+    # opens conversations manually, or a prior MCP call left the tab
+    # there). A bare goto to the same URL is a no-op for the SPA — the
+    # React tree doesn't remount, the Service Worker at /ab/messages/sw.js
+    # serves the page from cache, and the scroll-to-bottom + render-
+    # stability poll succeeds INSTANTLY on a frozen DOM. The bubble
+    # extractor then returns the same stale messages forever. Root
+    # cause 2026-05-24: identical "10:37 PM" timestamps returned on
+    # the James Blue thread across hour-apart calls even though those
+    # bubbles were ≥5 days old. ``page.reload`` is distinct enough at
+    # the browser layer to defeat both the SPA short-circuit and the
+    # SW cache.
+    try:
+        page = await browser.safe_goto(url, force_reload=True)
+    except UpworkRoomNotFound as exc:
+        logger.warning(
+            "get_conversation_messages: room not found — requested=%s redirected_to=%s",
+            exc.requested_url, exc.final_url,
+        )
+        return {
+            "error": "room_not_found",
+            "requested": exc.requested_url,
+            "redirected_to": exc.final_url,
+            "message": (
+                "The Upwork room URL silently redirected away from the "
+                "requested conversation — the room id is invalid, "
+                "deleted, or not accessible to this account. Call "
+                "`upwork_get_messages` to list current rooms."
+            ),
+        }
 
     # Give Tiptap + the thread renderer a moment to mount after nav.
     import asyncio as _aio
@@ -457,34 +794,10 @@ async def get_conversation_messages(
         prev_count = -1
         stable_ticks = 0
         for _i in range(15):  # max ~3 s budget
-            tick = await page.evaluate(r"""
+            tick = await page.evaluate(
+                r"""
                 (() => {
-                    const sels = [
-                        '[data-test*="message-list"]',
-                        '[data-test*="thread"] [class*="scroll"]',
-                        'main [class*="scroll"]',
-                        'div[class*="virtual"]',
-                        'div[class*="MessageList"]',
-                    ];
-                    let scroller = null;
-                    for (const s of sels) {
-                        const el = document.querySelector(s);
-                        if (el && el.scrollHeight > el.clientHeight) {
-                            scroller = el; break;
-                        }
-                    }
-                    if (!scroller) {
-                        let best = null, bestH = 0;
-                        document.querySelectorAll('*').forEach(el => {
-                            const st = getComputedStyle(el);
-                            if ((st.overflowY === 'auto' || st.overflowY === 'scroll') &&
-                                el.scrollHeight > el.clientHeight &&
-                                el.scrollHeight > bestH) {
-                                best = el; bestH = el.scrollHeight;
-                            }
-                        });
-                        scroller = best;
-                    }
+                    const scroller = """ + _FIND_CHAT_SCROLLER_JS.strip() + r""";
                     if (scroller) {
                         scroller.scrollTop = scroller.scrollHeight;
                     }
@@ -493,7 +806,8 @@ async def get_conversation_messages(
                     ).length;
                     return {scrolled: !!scroller, count};
                 })()
-            """)
+                """
+            )
             count = (tick or {}).get("count", 0)
             if count == prev_count and count > 0:
                 stable_ticks += 1
@@ -555,6 +869,87 @@ async def get_conversation_messages(
             '[data-test="message"], .message-item, .chat-message'
         )
 
+    # Fix 1: log bubble count after warmup so silent extraction failures
+    # are diagnosable. The earlier "0 messages" returns gave the brain no
+    # signal — same pattern as the rooms-list "0 row elements matched"
+    # warning in get_messages (this file, around line 303).
+    logger.info(
+        "get_conversation_messages: %d bubble container(s) matched at %s",
+        len(containers), getattr(page, "url", "?"),
+    )
+
+    # Fix 2: widen bubble selector with secondary scan. Upwork has shipped
+    # several layout variants since the 2026 migration — when the primary
+    # `[data-test="story-container"]` (and legacy fallbacks) return 0,
+    # try modern ARIA / qa-test / substring variants before giving up.
+    # Same shape as the inbox-side selector-chain widening landed
+    # 2026-05-20.
+    if not containers:
+        containers = await page.query_selector_all(
+            '[role="listitem"], [data-qa*="message"], div[class*="story-"]'
+        )
+        logger.info(
+            "get_conversation_messages: primary selector empty, widened "
+            "fallback matched %d at %s",
+            len(containers), getattr(page, "url", "?"),
+        )
+
+    # Fix 3: a11y-tree fallback when bubble selectors all return empty AND
+    # we're on a real conversation URL. Playwright exposes
+    # `page.accessibility.snapshot()` (an ARIA tree of the current page);
+    # Upwork's chat panes are ARIA-rich, so message text is reachable
+    # through the accessibility tree even when the DOM hooks
+    # (`story-container` etc.) drift. Cheapest fallback before giving up
+    # — no extra LLM call, no tab contention. Reserved for "all selectors
+    # failed" path: the regular extraction loop below is preferred when
+    # any container matched.
+    if not containers:
+        cur_url = getattr(page, "url", "") or ""
+        is_on_room = bool(re.search(
+            r"/ab/messages/rooms/(?:room_[A-Za-z0-9_-]+|"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d+)",
+            cur_url,
+        ))
+        if is_on_room:
+            try:
+                a11y = await page.accessibility.snapshot()
+            except Exception as exc:
+                logger.warning(
+                    "get_conversation_messages: a11y snapshot failed: %s",
+                    exc,
+                )
+                a11y = None
+            if a11y:
+                # Flatten the ARIA tree into a single readable string.
+                # Cap total at 30 KB and depth at 8 so a pathological
+                # tree can't blow up the return. Skip nodes with no
+                # name and no interactive role.
+                def _flatten(node, depth=0, out=None):
+                    out = out if out is not None else []
+                    if depth > 8 or sum(len(s) for s in out) > 30_000:
+                        return out
+                    name = (node.get("name") or "").strip()
+                    role = node.get("role") or ""
+                    if name or role in {"button", "link", "img"}:
+                        out.append(f"{'  ' * depth}[{role}] {name}")
+                    for child in (node.get("children") or []):
+                        _flatten(child, depth + 1, out)
+                    return out
+                tree_text = "\n".join(_flatten(a11y))
+                logger.info(
+                    "get_conversation_messages: bubbles empty — a11y "
+                    "fallback emitted %d chars",
+                    len(tree_text),
+                )
+                return {
+                    "messages": [],
+                    "contact_name": "",
+                    "room_id": room_id,
+                    "room_url": cur_url,
+                    "dom_fallback": tree_text[:30_000],
+                    "source": "a11y_fallback",
+                }
+
     # Track sender across consecutive bubbles — Upwork sometimes only
     # renders the header on the FIRST bubble of a run from the same
     # person, leaving subsequent bubbles with body only. Carry forward
@@ -570,7 +965,37 @@ async def get_conversation_messages(
     if isinstance(_ctx_contact, str) and _is_nav_noise(_ctx_contact):
         _ctx_contact = None
 
-    for el in containers[-limit:]:
+    # Iterative scroll-up accumulation (2026-05-24). The single-pass
+    # path used to take only the trailing ``[-limit:]`` slice of the
+    # mounted bubbles — which broke whenever Brave's tab was scrolled
+    # away from the bottom (today's incident: 20 mounted but they were
+    # the OLDEST 20, so the newest 13 messages were silently missed).
+    # ``_gather_all_bubbles_iter`` scrolls UP from the current bottom-
+    # warmed position, dedups by content fingerprint, and returns the
+    # bubbles in chronological order — top of chat = oldest first.
+    try:
+        ordered_handles, _gather_dropped = await _gather_all_bubbles_iter(
+            page, target_count=limit,
+        )
+    except Exception:
+        # Defensive fallback: if the iterative gatherer raised, fall back
+        # to the original single-pass behavior with the already-mounted
+        # containers. Same data path as before the fix, just less complete.
+        logger.warning(
+            "get_conversation_messages: iterative gatherer raised, "
+            "falling back to single-pass extraction",
+            exc_info=True,
+        )
+        ordered_handles = list(containers)
+        _gather_dropped = 0
+
+    logger.info(
+        "get_conversation_messages: iterative gather settled — "
+        "%d unique bubbles (target=%d, fingerprint_failures=%d)",
+        len(ordered_handles), limit, _gather_dropped,
+    )
+
+    for el in ordered_handles[-limit:]:
         try:
             msg = await _extract_message(
                 el,
@@ -614,6 +1039,13 @@ async def get_conversation_messages(
                         raw_ts, class_hint, msg.get("sender"),
                     )
                     continue
+
+                # Orphan-bubble continuation fix (2026-05-23). See
+                # _resolve_orphan_bubble below.
+                if not msg.get("sender"):
+                    _resolve_orphan_bubble(msg, conversation["messages"])
+                    continue
+
                 conversation["messages"].append(msg)
         except Exception:
             continue
@@ -693,6 +1125,36 @@ _TIMESTAMP_RE = re.compile(
 
 _INBOX_PATH = "/ab/messages/rooms"
 
+# Shapes accepted as bare (non-URL) room ids:
+#   * ``room_<alphanum_underscore_dash>`` — legacy + 2026 hex prefix shape
+#   * Strict UUID 8-4-4-4-12 lowercase hex — 2026 migration shape
+#   * Pure numeric — legacy /nx/messages/<digits>
+#
+# Anything else (free-form text like a contact name, partial id with a
+# space, slash-prefixed paths handled separately below) is REFUSED with
+# a contact-name-shaped error. This closes the 2026-05-20 21:21 incident
+# where the brain called ``upwork_get_conversation(room_id="James Blue")``
+# and the bare-string slipped past the inbox-URL guard, navigated to
+# ``/ab/messages/rooms/James Blue``, got redirected to the 404 page,
+# and the bubble extractor scraped the "Looking for something?" surface.
+_BARE_ROOM_ID_SHAPES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^room_[A-Za-z0-9_-]+$"),
+    re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ),
+    re.compile(r"^\d+$"),
+)
+
+
+def _looks_like_known_bare_room_id(value: str) -> bool:
+    """True iff ``value`` matches one of the known bare room-id shapes.
+
+    Strictly anchored — partial matches don't count. Used by
+    ``_validate_room_id`` to reject contact-name-shaped strings before
+    they reach the browser.
+    """
+    return any(p.match(value) for p in _BARE_ROOM_ID_SHAPES)
+
 
 def _validate_room_id(room_id: str | None) -> None:
     """Validate ``room_id`` before any browser navigation.
@@ -752,6 +1214,27 @@ def _validate_room_id(room_id: str | None) -> None:
                 "— never the inbox URL"
             )
 
+    # URL-shaped inputs (absolute http(s):// or path-relative starting
+    # with /) pass the URL-segment check above and are accepted from
+    # here. Anything else is a BARE id — it must match one of the
+    # known shapes (room_<...>, strict UUID, or pure numeric). A
+    # bare string with whitespace, slashes, or free-form letters is
+    # almost certainly a contact name (e.g. "James Blue", "James")
+    # that the brain confused for a room id — reject loudly with the
+    # same actionable recovery message as the inbox-URL guard.
+    is_url_shaped = (
+        cleaned.startswith("http://")
+        or cleaned.startswith("https://")
+        or cleaned.startswith("/")
+    )
+    if not is_url_shaped and not _looks_like_known_bare_room_id(cleaned):
+        raise ValueError(
+            f"room_id={room_id!r} looks like a contact name, not a "
+            "room id. Call `upwork_get_messages` first and pass the "
+            "returned `room_id` to `upwork_get_conversation` — never "
+            "a contact name."
+        )
+
 
 # Parses 12-hour clock strings like "10:39 PM" / "2:11 PM" / "9:20 PM PDT"
 # back into (hour, minute) tuples so we can compare bubble timestamps
@@ -802,32 +1285,376 @@ def _parse_time_of_day(raw: str | None) -> tuple[int, int] | None:
     return hour, minute
 
 
+# Date hints in bubble timestamps. Upwork's chat usually shows just
+# "10:37 PM" with no date — those are ambiguous (could be today, could be
+# yesterday). Only DROP as "future" when the bubble explicitly carries a
+# date marker that resolves to today/tomorrow/a later calendar day.
+# The 2026-05-21 22:13 incident: 4 real bubbles ("10:37 PM" James Blue,
+# "10:30 PM" Vato) got dropped at 22:14 because the old filter assumed
+# "same day" and saw 22:37 > 22:14 → future → drop. They were yesterday's
+# messages. With date-aware filtering, time-only strings now KEEP.
+_TODAY_PREFIX_RE = re.compile(r"\bToday\b", re.IGNORECASE)
+_TOMORROW_PREFIX_RE = re.compile(r"\bTomorrow\b", re.IGNORECASE)
+_YESTERDAY_PREFIX_RE = re.compile(r"\bYesterday\b", re.IGNORECASE)
+_MONTH_NAME_RE = re.compile(
+    r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"(?:uary|ruary|ch|il|e|y|ust|tember|ober|ember)?\b",
+    re.IGNORECASE,
+)
+_SLASH_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
+_ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+
+
+def _timestamp_has_date(raw: str | None) -> bool:
+    """True if ``raw`` carries an explicit date marker (not just HH:MM).
+
+    Catches: "Today 10:37 PM", "Yesterday 9:20 PM", "Tomorrow 8:00 AM",
+    "May 21 10:37 PM", "5/21 10:37 PM", "2026-05-21 22:37".
+    Misses (intentionally): plain "10:37 PM" / "9:20 PM PDT" / "13:30" —
+    those are ambiguous and treated as "no date hint" → KEEP.
+    """
+    if not raw or not isinstance(raw, str):
+        return False
+    if _TODAY_PREFIX_RE.search(raw):
+        return True
+    if _TOMORROW_PREFIX_RE.search(raw):
+        return True
+    if _YESTERDAY_PREFIX_RE.search(raw):
+        return True
+    if _MONTH_NAME_RE.search(raw):
+        return True
+    if _SLASH_DATE_RE.search(raw):
+        return True
+    if _ISO_DATE_RE.search(raw):
+        return True
+    return False
+
+
 def _bubble_timestamp_in_future(
     raw_timestamp: str | None, *, now=None, skew_seconds: int = 60
 ) -> bool:
-    """Return True iff ``raw_timestamp`` parses to a time-of-day that
-    lies more than ``skew_seconds`` after ``now``. Unparseable inputs
-    return False (= "keep"). A bubble with a future timestamp is a
-    strong signal that the extractor latched onto unrelated DOM (a
-    "Last seen 2:11 PM" tag, a notification badge, etc.).
+    """Return True iff ``raw_timestamp`` resolves to a moment more than
+    ``skew_seconds`` after ``now``. Unparseable inputs return False
+    (= "keep"). A bubble with a future timestamp signals the extractor
+    latched onto unrelated DOM (a "Last seen 2:11 PM" tag, a notification
+    badge, etc.).
 
-    Only compares HH:MM within the local day. If the parsed time is
-    earlier than now, we assume it's a real earlier-today message and
-    keep it — we never drop on a backward delta (Upwork doesn't render
-    tomorrow's clock for today's bubbles, so a "future" delta is the
-    only red flag).
+    Date-aware (2026-05-21 fix): plain time-of-day strings like "10:37 PM"
+    with no date prefix are KEPT regardless of clock comparison — they
+    could be yesterday's messages, not future ones. Only drop when the
+    bubble has an explicit date hint AND that hint resolves to the future:
+      - "Tomorrow ..."         → DROP
+      - "Today HH:MM" + HH:MM > now  → DROP
+      - "Yesterday ..."        → KEEP (definitionally past)
+      - "May 22 ..." (today is May 21) → DROP
+      - "10:37 PM" (no date)   → KEEP (assume past/yesterday)
     """
     import datetime as _dt
 
-    parsed = _parse_time_of_day(raw_timestamp)
-    if parsed is None:
+    if not raw_timestamp or not isinstance(raw_timestamp, str):
         return False
+
     if now is None:
         now = _dt.datetime.now()
-    hour, minute = parsed
-    bubble_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    delta_seconds = (bubble_dt - now).total_seconds()
-    return delta_seconds > skew_seconds
+
+    # Explicit future-date prefixes — always drop.
+    if _TOMORROW_PREFIX_RE.search(raw_timestamp):
+        return True
+    # Explicit past-date prefixes — always keep.
+    if _YESTERDAY_PREFIX_RE.search(raw_timestamp):
+        return False
+
+    # "Today HH:MM" — compare against now using HH:MM-within-day.
+    if _TODAY_PREFIX_RE.search(raw_timestamp):
+        # Strip "Today" and re-parse the remainder as time-of-day.
+        remainder = _TODAY_PREFIX_RE.sub("", raw_timestamp, count=1).strip()
+        parsed = _parse_time_of_day(remainder)
+        if parsed is None:
+            return False
+        hour, minute = parsed
+        bubble_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return (bubble_dt - now).total_seconds() > skew_seconds
+
+    # Calendar-date markers (Month name, M/D, ISO). If present AND parseable
+    # into a date that strictly follows today → drop. Otherwise keep.
+    # We don't try to fully parse here (no dateparser dep): if a date hint
+    # is present, fall through to the time-only check below for the HH:MM
+    # part. If the date hint matches today's month/day, treat as today.
+    today = now.date()
+    has_calendar_hint = bool(
+        _ISO_DATE_RE.search(raw_timestamp)
+        or _SLASH_DATE_RE.search(raw_timestamp)
+        or _MONTH_NAME_RE.search(raw_timestamp)
+    )
+
+    if has_calendar_hint:
+        # Try ISO first (most precise).
+        iso_m = _ISO_DATE_RE.search(raw_timestamp)
+        if iso_m:
+            try:
+                parsed_date = _dt.date.fromisoformat(iso_m.group(0))
+                if parsed_date > today:
+                    return True  # future calendar date → drop
+                if parsed_date < today:
+                    return False  # past calendar date → keep
+                # Same day → fall through to HH:MM compare below.
+            except ValueError:
+                pass
+
+        # Slash form like "5/22" or "5/22/2026". If we can parse it and
+        # it's strictly after today, drop.
+        slash_m = _SLASH_DATE_RE.search(raw_timestamp)
+        if slash_m:
+            parts = slash_m.group(0).split("/")
+            try:
+                month = int(parts[0])
+                day = int(parts[1])
+                year = int(parts[2]) if len(parts) > 2 else today.year
+                if year < 100:
+                    year += 2000
+                parsed_date = _dt.date(year, month, day)
+                if parsed_date > today:
+                    return True
+                if parsed_date < today:
+                    return False
+            except (ValueError, IndexError):
+                pass
+
+        # Month-name form. Don't try to fully parse — if the month doesn't
+        # match today's, it's ambiguous (could be last year, could be next
+        # year). Conservatively KEEP to avoid dropping real messages.
+        # Future calendar-date drops are best-effort, not authoritative.
+
+    # No date hint → ambiguous, KEEP (the safer behavior post-fix).
+    return False
+
+
+async def _gather_all_bubbles_iter(
+    page,
+    *,
+    target_count: int,
+    max_iterations: int = 25,
+    no_progress_limit: int = 2,
+    scroll_step_fraction: float = 0.7,
+    settle_seconds: float = 0.4,
+) -> tuple[list, int]:
+    """Iteratively scroll the chat container UP from the current position,
+    accumulating all unique bubble element handles.
+
+    Why this exists (2026-05-24 fix): Upwork's chat list is virtualized.
+    Only ~20 bubbles around the current scroll position are mounted in the
+    DOM at any time. A single-pass extraction returns whatever happened to
+    be mounted — usually the newest 20, but if Brave's tab was previously
+    scrolled to the top (e.g. user reviewed history), the OLDEST 20 are
+    mounted instead. Today's incident: brain's tool call saw 20 mounted
+    bubbles but returned only the 5 oldest because Brave was scrolled up
+    and the newer 13 were never mounted.
+
+    Fix: scroll UP iteratively from the current position (which the
+    caller has already scrolled to bottom). On each iteration, capture
+    every mounted bubble's absolute Y position + a content fingerprint
+    in ONE JS call (atomic snapshot). Dedup across iterations by
+    fingerprint. Stop when:
+      - We've accumulated ``target_count + 5`` unique bubbles, OR
+      - Two consecutive iterations add zero new bubbles (top reached
+        or scroll wedged), OR
+      - ``max_iterations`` exceeded (safety brake).
+
+    Returns ``(element_handles_chronological, dropped_count)``:
+      - ``element_handles_chronological``: list of Playwright element
+        handles, sorted by absolute Y (top of chat = oldest = first).
+        Caller passes each handle through ``_extract_message`` as
+        before.
+      - ``dropped_count``: how many bubbles the gatherer SAW but
+        couldn't fingerprint (rare — only when JS eval failed). Useful
+        for the diagnostic log so silent extraction failures surface.
+
+    Pure WRT page state: scrolls but doesn't click / type / navigate.
+    Defensive: every JS call is wrapped; failure falls through with
+    whatever was gathered so far.
+    """
+    import asyncio as _aio
+
+    seen_keys: dict[str, tuple[float, object]] = {}
+    no_progress = 0
+    dropped = 0
+
+    for iter_n in range(max_iterations):
+        # Pick selector chain to query bubble containers. Same chain as
+        # the caller's single-pass extraction, kept in sync so that if
+        # one path matches the other does too.
+        containers = await page.query_selector_all(
+            '[data-test="story-container"]'
+        )
+        if not containers:
+            containers = await page.query_selector_all(
+                '[data-test="message"], .message-item, .chat-message'
+            )
+        if not containers:
+            containers = await page.query_selector_all(
+                '[role="listitem"], [data-qa*="message"], div[class*="story-"]'
+            )
+
+        if not containers:
+            # Nothing mounted — wait one beat then break. The caller's
+            # outer fallback chain handles "0 containers" via a11y tree.
+            break
+
+        new_count_this_iter = 0
+        for el in containers:
+            # One JS eval per bubble to get absolute-Y + a stable
+            # fingerprint. This is the slow path (~20 ms per bubble);
+            # keeping it inline because batching via evaluate_all would
+            # need element-handle round-trip plumbing that's not worth
+            # the complexity for ≤50 bubbles per iteration.
+            try:
+                probe = await el.evaluate(r"""
+                    (el) => {
+                        const rect = el.getBoundingClientRect();
+                        let scroller = el.closest('[class*="scroll"]');
+                        if (!scroller) scroller = document.scrollingElement || document.documentElement;
+                        const absY = rect.top + (scroller ? scroller.scrollTop : 0);
+                        const h = el.querySelector('[data-test="story-header"]');
+                        const b = el.querySelector('[data-test="story-message"]');
+                        const headerTxt = (h && h.textContent || '').trim();
+                        const bodyTxt = (b && b.textContent || '').trim().slice(0, 200);
+                        return [absY, headerTxt + '|' + bodyTxt];
+                    }
+                """)
+            except Exception:
+                dropped += 1
+                continue
+
+            if not probe or not isinstance(probe, (list, tuple)) or len(probe) != 2:
+                dropped += 1
+                continue
+            absY, fp = probe[0], probe[1]
+            # Skeleton check: a bubble with empty header AND empty body
+            # fingerprints to literal "|" — virtualization placeholder,
+            # no real content. Skip silently (not a fingerprint failure).
+            if not fp or fp.strip("|").strip() == "":
+                continue
+
+            if fp in seen_keys:
+                continue
+
+            seen_keys[fp] = (float(absY) if absY is not None else 0.0, el)
+            new_count_this_iter += 1
+
+        if len(seen_keys) >= target_count + 5:
+            logger.info(
+                "get_conversation_messages: scroll-iter %d: hit target "
+                "(%d unique bubbles, target=%d)",
+                iter_n + 1, len(seen_keys), target_count,
+            )
+            break
+
+        if new_count_this_iter == 0:
+            no_progress += 1
+            if no_progress >= no_progress_limit:
+                logger.info(
+                    "get_conversation_messages: scroll-iter %d: stopped "
+                    "(no new bubbles for %d iterations; %d unique total)",
+                    iter_n + 1, no_progress_limit, len(seen_keys),
+                )
+                break
+        else:
+            no_progress = 0
+
+        # Scroll UP by ``scroll_step_fraction`` of the visible viewport.
+        # Returns False when we're already at the top (scrollTop == 0)
+        # OR when the scroller selector chain finds nothing scrollable.
+        try:
+            scrolled_up = await page.evaluate(
+                r"""
+                (frac) => {
+                    const scroller = """ + _FIND_CHAT_SCROLLER_JS.strip() + r""";
+                    if (!scroller) return false;
+                    const before = scroller.scrollTop;
+                    if (before <= 0) return false;
+                    scroller.scrollTop = Math.max(0, before - (scroller.clientHeight * frac));
+                    return scroller.scrollTop < before;
+                }
+                """,
+                scroll_step_fraction,
+            )
+        except Exception:
+            scrolled_up = False
+
+        if not scrolled_up:
+            logger.info(
+                "get_conversation_messages: scroll-iter %d: top of chat "
+                "reached (or scroll wedged); %d unique bubbles gathered",
+                iter_n + 1, len(seen_keys),
+            )
+            break
+
+        await _aio.sleep(settle_seconds)
+
+    # Sort by absolute Y (top of chat = lowest Y = oldest first).
+    ordered = sorted(seen_keys.values(), key=lambda t: t[0])
+    handles = [el for _, el in ordered]
+    return handles, dropped
+
+
+def _resolve_orphan_bubble(
+    msg: dict,
+    prior_messages: list[dict],
+) -> str:
+    """Decide what to do with a bubble that has no resolvable sender.
+
+    Some Upwork bubbles render with body content but no header — long
+    messages get split into multiple sibling DOM bubbles where only
+    the FIRST carries the story-header. Without this guard, the brain
+    quotes the orphan with attribution "(no timestamp, no sender)" and
+    dresses it up as authoritative contact content. Today's incident:
+    James Blue's 10:37 PM spec list was split into a header bubble
+    ("I want to give you the overal expectation of the program:") +
+    a continuation bubble (the 30-line spec) — the second bubble was
+    emitted with no sender/timestamp and quoted as orphan.
+
+    Rule (in priority order):
+      1. If the prior appended bubble is a CONTACT bubble (``is_mine``
+         is False AND has a resolved ``sender``), concatenate the
+         orphan body onto the prior bubble's content. Mutates the
+         prior dict in-place.
+      2. Otherwise drop the orphan (no append happens — caller must
+         `continue` to skip the append). A warning is logged with a
+         body preview so we can audit how often this fires.
+
+    Returns ``"attached"`` or ``"dropped"``. Pure WRT ``msg`` (the
+    orphan dict is never appended); only the prior contact bubble is
+    mutated in the attach case. No exceptions.
+    """
+    body = (msg.get("content") or "").strip()
+    if not body:
+        logger.warning(
+            "get_conversation_messages: dropping orphan bubble with "
+            "no body and no sender",
+        )
+        return "dropped"
+    if (
+        prior_messages
+        and prior_messages[-1].get("is_mine") is False
+        and prior_messages[-1].get("sender")
+    ):
+        prior = prior_messages[-1]
+        prior_body = (prior.get("content") or "").rstrip()
+        prior["content"] = f"{prior_body}\n{body}" if prior_body else body
+        logger.info(
+            "get_conversation_messages: orphan bubble attached to "
+            "prior contact bubble sender=%r ts=%r body_chars=%d",
+            prior.get("sender"),
+            prior.get("timestamp"),
+            len(body),
+        )
+        return "attached"
+    logger.warning(
+        "get_conversation_messages: dropping orphan bubble with no "
+        "sender and no foreign predecessor body_preview=%r",
+        body[:80],
+    )
+    return "dropped"
 
 
 async def _extract_message(
@@ -1057,7 +1884,27 @@ async def send_message(params: SendMessageParams) -> dict:
     else:
         url = f"https://www.upwork.com/ab/messages/rooms/{params.room_id}"
 
-    page = await browser.safe_goto(url)
+    # Post-nav room-id check inside safe_goto — refuses to silently
+    # type a draft into the wrong conversation when Upwork's SPA
+    # redirects an invalid room URL to /ab/messages.
+    try:
+        page = await browser.safe_goto(url)
+    except UpworkRoomNotFound as exc:
+        logger.warning(
+            "send_message: room not found — requested=%s redirected_to=%s",
+            exc.requested_url, exc.final_url,
+        )
+        return {
+            "error": "room_not_found",
+            "requested": exc.requested_url,
+            "redirected_to": exc.final_url,
+            "message": (
+                "Refused to type message — Upwork redirected the room "
+                "URL away from the requested conversation. The room id "
+                "is invalid, deleted, or not accessible to this account. "
+                "Call `upwork_get_messages` to list current rooms."
+            ),
+        }
 
     import asyncio as _aio
     # Give the Tiptap editor a moment to mount + focus after navigation.
@@ -1214,7 +2061,28 @@ async def edit_message(params: EditMessageParams) -> dict:
     else:
         url = f"https://www.upwork.com/ab/messages/rooms/{params.room_id}"
 
-    page = await browser.safe_goto(url)
+    # Post-nav room-id check — editing is even more sensitive than
+    # sending, since an inbox-landing would expose YOUR previous bubbles
+    # in whatever chat happens to be open in the shared Brave profile
+    # to a potential hover+edit by a hover-triggered selector.
+    try:
+        page = await browser.safe_goto(url)
+    except UpworkRoomNotFound as exc:
+        logger.warning(
+            "edit_message: room not found — requested=%s redirected_to=%s",
+            exc.requested_url, exc.final_url,
+        )
+        return {
+            "error": "room_not_found",
+            "requested": exc.requested_url,
+            "redirected_to": exc.final_url,
+            "message": (
+                "Refused to edit — Upwork redirected the room URL away "
+                "from the requested conversation. The room id is "
+                "invalid, deleted, or not accessible to this account. "
+                "Call `upwork_get_messages` to list current rooms."
+            ),
+        }
 
     import asyncio as _aio
     await _aio.sleep(1.5)

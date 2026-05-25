@@ -202,6 +202,99 @@ def verify_quotes_against_tool_results(
     )
 
 
+# ─── Channel-read enforcement gate ────────────────────────────────────────
+#
+# F1 phase-2 stays observation-only for general chat (where many "quotes"
+# are actually the brain paraphrasing earlier turns, not lifting from a
+# fresh tool result). On turns where a *channel-read* tool has run,
+# however, the brain's quote lines ARE supposed to be verbatim from the
+# live read — any unverified quote on that turn is a real grounding bug
+# we must block, not just log.
+#
+# Substring match so MCP-wrapped names like
+# ``mcp_<hash>_upwork_get_conversation`` still register.
+_CHANNEL_READ_TOOL_PATTERNS: tuple[str, ...] = (
+    # Upwork
+    "upwork_get_conversation",
+    "upwork_get_messages",
+    "upwork_last_conversation",
+    "upwork_inbox_check",
+    "upwork_get_unread_count",
+    "upwork_check_session",
+    # WhatsApp
+    "whatsapp_read",
+    "whatsapp_get_messages",
+    "whatsapp_get_chat",
+    # Email
+    "email_read",
+    "email_get_messages",
+    # Instagram
+    "instagram_read_dms",
+    "instagram_get_dms",
+    "instagram_get_messages",
+    # Telegram
+    "telegram_get_messages",
+)
+
+
+def _was_channel_read_tool_called(tool_call_history: Iterable[str]) -> bool:
+    """True iff any tool name in the history matches a channel-read pattern."""
+    if not tool_call_history:
+        return False
+    for name in tool_call_history:
+        if not name:
+            continue
+        lowered = name.lower()
+        for pattern in _CHANNEL_READ_TOOL_PATTERNS:
+            if pattern in lowered:
+                return True
+    return False
+
+
+def phase2_enforcement_verdict(
+    reply_text: str,
+    tool_call_history: Iterable[str],
+    tool_results: Iterable[str],
+) -> tuple[bool, str]:
+    """Return ``(should_block, reason)`` for the F1 retry gate.
+
+    Phase-2 enforces (returns ``should_block=True``) ONLY when:
+
+      1. At least one channel-read tool ran this turn, AND
+      2. The reply has at least one unverified quote line.
+
+    Non-channel turns stay observation-only no matter what
+    ``F1_PHASE2_ENFORCE`` is set to — flipping the global flag would
+    over-trigger on internal chat / planning replies where "quotes"
+    are paraphrases of earlier conversation.
+
+    Never raises — verifier failures are degraded to ``(False, "")``
+    so a buggy regex can't take down the turn.
+    """
+    try:
+        if not _was_channel_read_tool_called(tool_call_history):
+            return False, ""
+        quotes = parse_quote_lines(reply_text or "")
+        if not quotes:
+            return False, ""
+        report = verify_quotes_against_tool_results(
+            quotes, tool_results or [],
+        )
+        if report.unverified_count == 0:
+            return False, ""
+        sample = ""
+        if report.unverified_quotes:
+            q, why = report.unverified_quotes[0]
+            sample = f"line {q.line_no} ({q.sender}): {q.content[:60]!r} — {why}"
+        return True, (
+            f"channel-read turn with {report.unverified_count}/"
+            f"{report.total_quotes} unverified quotes; first: {sample}"
+        )
+    except Exception:  # noqa: BLE001 — gate must never crash the loop
+        logger.debug("phase2_enforcement_verdict raised; degrading", exc_info=True)
+        return False, ""
+
+
 def observe_or_enforce(
     reply_text: str,
     tool_results: Iterable[str],

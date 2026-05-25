@@ -554,6 +554,41 @@ def _check_f1_violation(
 # warning rather than burning iterations on a wedged brain.
 _F1_MAX_RETRIES: int = 2
 
+# Cap F1 confabulation raw-data-injection retries at 2 per turn. Each retry
+# re-runs `detect_confabulation` on the new draft + `phase2_enforcement_
+# verdict` against fresh tool data; both must pass to ship. Before 2026-05-23
+# the retry was a one-shot gated on `not _confab_injected`, so the post-retry
+# output was accepted blindly — that gap is what shipped today's "08:39 UTC
+# since last check" fabrication. See HANDOFF_2026-05-23.md.
+_F1_CONFAB_MAX_RETRIES: int = 2
+
+
+def _pop_confabulated_draft_for_retry(
+    messages: list[LLMMessage],
+) -> LLMMessage | None:
+    """Remove the trailing assistant draft so it can't poison F1 retry.
+
+    The F1 confabulation backstop re-rolls the brain with a raw-tool-output
+    injection. Originally, the bad draft was appended to ``messages`` BEFORE
+    the injection, so the retried brain saw its own confabulated paraphrase
+    as established context and reproduced the same hallucination
+    (2026-05-22 10:09 incident: 3 unverified quotes → retry → 3 unverified
+    quotes again).
+
+    This helper pops the trailing assistant message if and only if the last
+    message is in fact an assistant turn. Returns the popped message
+    (caller may log/preserve it) or ``None`` if nothing was popped — which
+    is the safe behavior when the last message is ``user``/``tool``/``system``,
+    so we never strip non-draft turns.
+
+    Pure: mutates the provided list in-place; no I/O.
+    """
+    if not messages:
+        return None
+    if messages[-1].role != "assistant":
+        return None
+    return messages.pop()
+
 # Keywords that indicate the user wants to DO something (not just check status).
 # When absent, only core channel tools are injected to reduce tool count.
 # Matched with word boundaries to prevent "followers" matching "follow".
@@ -841,8 +876,56 @@ _CHANNEL_TO_MCP: dict[str, str] = {
     "email": "mcp-email",
 }
 
-# Max chars for a tool result before truncation (prevents MCP JSON blowup)
+# Max chars for a tool result before truncation (prevents MCP JSON blowup).
+# 4000 chars is the right default for general-purpose tools that might
+# return mega-arrays (50+ contacts, scraped page snapshots, etc.) where
+# the brain only needs a summary.
 _MAX_TOOL_RESULT_CHARS = 4000
+
+# Channel-read tools are the exception: the WHOLE conversation IS the
+# thing the brain needs, and a 4K cap silently drops everything past
+# the first 3-5 messages. The 2026-05-24 incident: brain's
+# upwork_get_conversation returned a 20-bubble JSON (~10.9 KB), the
+# 4K cap chopped it to 4 KB with the last 6598 chars (15+ messages)
+# replaced by a single `[truncated N chars]` marker — brain quoted
+# only the first 2-3 messages it could see and the user thought the
+# brain was hallucinating "no new messages from James" when really
+# the tool result never reached the LLM.
+#
+# 50K (~12k tokens) is a safer ceiling for channel reads — covers
+# ~100 messages of a typical chat without blowing up cache budget.
+_MAX_TOOL_RESULT_CHARS_CHANNEL_READ = 50000
+
+# Substring match against the tool name to pick which cap applies.
+# Mirrored from f1_content_verifier._CHANNEL_READ_TOOL_PATTERNS so
+# both modules agree on what counts as a channel read.
+_CHANNEL_READ_TOOL_NAME_PATTERNS: tuple[str, ...] = (
+    "upwork_get_conversation",
+    "upwork_get_messages",
+    "upwork_last_conversation",
+    "upwork_inbox_check",
+    "whatsapp_read",
+    "whatsapp_get_messages",
+    "whatsapp_get_chat",
+    "email_read",
+    "email_get_messages",
+    "instagram_read_dms",
+    "instagram_get_dms",
+    "instagram_get_messages",
+    "telegram_get_messages",
+)
+
+
+def _is_channel_read_tool_name(tool_name: str | None) -> bool:
+    """True iff ``tool_name`` matches a channel-read pattern.
+
+    Substring match so MCP-wrapped names like
+    ``mcp_<hash>_upwork_get_conversation`` still register.
+    """
+    if not tool_name:
+        return False
+    lowered = tool_name.lower()
+    return any(pat in lowered for pat in _CHANNEL_READ_TOOL_NAME_PATTERNS)
 
 
 def _extract_tool_names_from_search_result(result: str) -> list[str]:
@@ -1014,17 +1097,36 @@ def _prune_old_tool_results(
     return result
 
 
-def _cap_tool_result(result: str) -> str:
+def _cap_tool_result(result: str, tool_name: str | None = None) -> str:
     """Truncate oversized tool results to save tokens.
 
-    MCP tools can return huge JSON arrays (50+ contacts, full page snapshots).
-    Cap at ~4K chars — enough for the LLM to understand, not enough to blow up context.
+    MCP tools can return huge JSON arrays (50+ contacts, full page
+    snapshots). The general-purpose cap of 4K chars keeps the brain
+    focused on a summary.
+
+    Channel-read tools (upwork/whatsapp/email/instagram/telegram) are
+    the exception — the whole conversation IS the load-bearing data,
+    so they get a much larger cap (50K ≈ ~12k tokens, ~100 messages).
+    Without this exception the 2026-05-24 incident reproduces: the
+    brain's `upwork_get_conversation` result (~10.9 KB JSON for a
+    20-bubble thread) was chopped to 4 KB and the user saw "no new
+    messages" replies because the truncated marker was where the new
+    messages should have been.
+
+    Pure. ``tool_name`` defaults to None for legacy callers — those
+    still get the 4K cap (no behavior change for non-channel paths).
     """
-    if not result or len(result) <= _MAX_TOOL_RESULT_CHARS:
+    if not result:
         return result
-    # Keep first part + tail hint
-    truncated = result[:_MAX_TOOL_RESULT_CHARS]
-    remaining = len(result) - _MAX_TOOL_RESULT_CHARS
+    cap = (
+        _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
+        if _is_channel_read_tool_name(tool_name)
+        else _MAX_TOOL_RESULT_CHARS
+    )
+    if len(result) <= cap:
+        return result
+    truncated = result[:cap]
+    remaining = len(result) - cap
     return f"{truncated}\n... [truncated {remaining} chars]"
 
 
@@ -3025,9 +3127,11 @@ class Agent:
         # data, and (b) emitting `> sender (ts): …` quotes whose content
         # doesn't appear in any tool result this turn. When either fires
         # OR F1 retries exhaust, we spoon-feed the raw tool output into
-        # ONE final attempt. This flag ensures the injection happens at
-        # most once per turn — repeated injection thrashes context.
+        # ONE more attempt and RE-RUN the detector on the retry output.
+        # `_confab_injected` records whether ANY injection has happened;
+        # `_confab_retries` caps how many we'll try before degrading.
         _confab_injected: bool = False
+        _confab_retries: int = 0
 
         # Auto-promote-to-background nudge: when a foreground turn drags
         # past N tool-using iterations and the brain hasn't yet called
@@ -4159,19 +4263,25 @@ class Agent:
                         # the draft with a log warning rather than burn more
                         # iterations on a wedged brain.
 
-                    # F1 confabulation backstop — runs when (a) F1 phase-1
-                    # passed but the draft still confabulates, or (b) F1
-                    # retries exhausted and the violating draft is about to
-                    # ship. Catches the 2026-05-20 14:23 incident: brain
-                    # called upwork_last_conversation, got real James Blue
-                    # data, F1 rejected paraphrasing twice, then panicked
-                    # and emitted "No Upwork conversations found, make sure
-                    # you're logged in" — a confabulated tool failure.
-                    # Injects the raw tool output verbatim for ONE final
-                    # rewrite attempt. See f1_confabulation_detector.py.
+                    # F1 confabulation backstop — runs on EVERY draft of a
+                    # channel-read turn (not just the first one). Catches:
+                    #   (a) The 2026-05-20 14:23 incident: confabulated tool
+                    #       failure ("No conversations found, make sure
+                    #       you're logged in") when tool returned real data.
+                    #   (b) Made-up `> sender (ts): …` quotes whose content
+                    #       doesn't appear in any tool result this turn.
+                    #   (c) Phase-2 enforcement: any unverified quote on a
+                    #       channel-read turn (gated check; non-channel
+                    #       turns stay observation-only).
+                    #   (d) F1 phase-1 retries exhausted with a residual
+                    #       violation.
+                    # 2026-05-23 fix: detector now re-runs on the RETRY
+                    # output too (the `not _confab_injected` gate that used
+                    # to skip the post-retry check is gone). Retries are
+                    # capped at `_F1_CONFAB_MAX_RETRIES`; further drafts
+                    # ship with `[F1-accepted-degraded]` to break the loop.
                     if (
                         _final_content
-                        and not _confab_injected
                         and any(
                             _is_channel_read_tool(n)
                             for n in _tool_call_history
@@ -4182,87 +4292,145 @@ class Agent:
                                 detect_confabulation as _detect_confab,
                                 build_raw_data_injection as _build_raw_inj,
                             )
+                            try:
+                                from lazyclaw.runtime.f1_content_verifier import (
+                                    phase2_enforcement_verdict,
+                                )
+                            except ImportError:
+                                phase2_enforcement_verdict = None  # type: ignore
                             _confab_verdict = _detect_confab(
                                 _final_content,
                                 _tool_call_history,
                                 _tool_results,
                             )
+                            _phase2_block = False
+                            _phase2_reason = ""
+                            if phase2_enforcement_verdict is not None:
+                                _phase2_block, _phase2_reason = (
+                                    phase2_enforcement_verdict(
+                                        _final_content,
+                                        _tool_call_history,
+                                        _tool_results,
+                                    )
+                                )
                             _f1_exhausted_with_violation = (
                                 _f1_retries >= _F1_MAX_RETRIES
                                 and _check_f1_violation(
                                     _final_content, _tool_results,
                                 ) is not None
                             )
-                            if (
+                            _needs_retry = (
                                 _confab_verdict.is_confabulation
+                                or _phase2_block
                                 or _f1_exhausted_with_violation
+                            )
+                            if (
+                                _needs_retry
+                                and _confab_retries < _F1_CONFAB_MAX_RETRIES
                             ):
                                 if _confab_verdict.is_confabulation:
                                     logger.warning(
-                                        "[F1-confabulation] reply claims tool "
-                                        "failure but tool succeeded with "
-                                        "%d-byte payload. tool_name=%s "
-                                        "kind=%s phrase=%r. Triggering raw-"
-                                        "data injection retry.",
-                                        _confab_verdict.payload_bytes,
+                                        "[F1-confabulation] tool=%s kind=%s "
+                                        "phrase=%r payload=%d bytes. "
+                                        "Triggering raw-data injection retry "
+                                        "(%d of %d).",
                                         _confab_verdict.tool_name,
                                         _confab_verdict.kind,
                                         _confab_verdict.offending_phrase,
+                                        _confab_verdict.payload_bytes,
+                                        _confab_retries + 1,
+                                        _F1_CONFAB_MAX_RETRIES,
                                     )
                                     _inj_reason = "confabulation"
+                                elif _phase2_block:
+                                    logger.warning(
+                                        "[F1-phase2-block] retry (%d of %d) "
+                                        "forced — %s",
+                                        _confab_retries + 1,
+                                        _F1_CONFAB_MAX_RETRIES,
+                                        _phase2_reason,
+                                    )
+                                    _inj_reason = "phase2_unverified_quote"
                                 else:
                                     logger.warning(
-                                        "[F1-retry-exhausted] %d attempts "
-                                        "exhausted; falling through to raw-"
-                                        "data injection. last_violation=%s",
+                                        "[F1-retry-exhausted] %d phase-1 "
+                                        "attempts exhausted; raw-data "
+                                        "injection (%d of %d). last_violation"
+                                        "=%s",
                                         _F1_MAX_RETRIES,
+                                        _confab_retries + 1,
+                                        _F1_CONFAB_MAX_RETRIES,
                                         _check_f1_violation(
                                             _final_content, _tool_results,
                                         ),
                                     )
                                     _inj_reason = "retry_exhausted"
+                                # On the SECOND forced retry, the prior
+                                # injection didn't fix the brain — log a
+                                # distinct marker so we can grep production
+                                # for cases where the second retry was
+                                # actually load-bearing.
+                                if _confab_retries >= 1:
+                                    logger.warning(
+                                        "[F1-post-retry-rewrite-forced] "
+                                        "first injection didn't clear; "
+                                        "forcing second rewrite. reason=%s "
+                                        "kind=%s",
+                                        _inj_reason,
+                                        _confab_verdict.kind,
+                                    )
                                 _raw_inj = _build_raw_inj(
                                     _confab_verdict,
                                     _tool_call_history,
                                     _tool_results,
                                     reason=_inj_reason,
                                 )
-                                messages.append(LLMMessage(
-                                    role="assistant", content=_final_content,
-                                ))
+                                # Pop the brain's confabulated draft BEFORE
+                                # appending the injection. Otherwise the
+                                # retry sees its own poisoned paraphrase as
+                                # prior context and reproduces the same
+                                # hallucination (2026-05-22 10:09 incident:
+                                # 3 unverified quotes pre-retry → same 3
+                                # unverified quotes post-retry).
+                                _popped = _pop_confabulated_draft_for_retry(
+                                    messages,
+                                )
+                                if _popped is not None:
+                                    logger.info(
+                                        "[F1-confabulation] popped draft "
+                                        "(%d chars) before retry — reason=%s "
+                                        "kind=%s",
+                                        len(_popped.content or ""),
+                                        _inj_reason,
+                                        _confab_verdict.kind,
+                                    )
                                 messages.append(LLMMessage(
                                     role="user", content=_raw_inj,
                                 ))
                                 _confab_injected = True
+                                _confab_retries += 1
                                 streamed_content = ""
                                 continue
+                            if _needs_retry:
+                                # Retries exhausted — ship the draft anyway
+                                # with a loud log. Better one slightly bad
+                                # reply than an infinite retry loop.
+                                logger.warning(
+                                    "[F1-accepted-degraded] confab retries "
+                                    "exhausted (%d/%d); shipping draft. "
+                                    "verdict_kind=%s phase2_block=%s "
+                                    "draft_head=%r",
+                                    _confab_retries,
+                                    _F1_CONFAB_MAX_RETRIES,
+                                    _confab_verdict.kind,
+                                    _phase2_block,
+                                    (_final_content or "")[:160],
+                                )
                         except Exception:
                             logger.debug(
                                 "F1 confabulation detector raised "
                                 "(non-fatal)", exc_info=True,
                             )
-                    # Degraded-accept: raw-data injection was already used
-                    # this turn AND F1 still fails. Ship the draft anyway —
-                    # better a slightly imperfect quote than another retry
-                    # loop. See [F1-accepted-degraded] in postmortem notes.
-                    elif (
-                        _final_content
-                        and _confab_injected
-                        and _f1_retries >= _F1_MAX_RETRIES
-                        and any(
-                            _is_channel_read_tool(n)
-                            for n in _tool_call_history
-                        )
-                        and _check_f1_violation(
-                            _final_content, _tool_results,
-                        ) is not None
-                    ):
-                        logger.warning(
-                            "[F1-accepted-degraded] shipping draft after "
-                            "raw-data injection + F1 retry exhaustion. "
-                            "draft_head=%r",
-                            (_final_content or "")[:160],
-                        )
 
                     # Knowledge-gap self-recall — re-prompt brain with LazyBrain
                     # + personal_memory injection BEFORE this answer ships, when
@@ -4583,7 +4751,11 @@ class Agent:
                     # Cap oversized results before injecting into context
                     # Skip capping + caching for approval responses (JSON args must stay intact)
                     if isinstance(result, str) and not result.startswith(APPROVAL_PREFIX):
-                        result = _cap_tool_result(result)
+                        # Pass tool name so channel-read calls get the
+                        # 50K cap instead of the 4K default — see
+                        # `_cap_tool_result` for the 2026-05-24
+                        # incident this fixes.
+                        result = _cap_tool_result(result, tc.name)
                         # Don't memoize failures — caching errors made retries
                         # return the same stale error in 0 ms, masking the fact
                         # that the brain wasn't varying its args. With this

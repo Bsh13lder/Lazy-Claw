@@ -349,7 +349,24 @@ def _pick_hybrid_memories(
                 continue
             if m["id"] in seen_ids:
                 continue
-            content = _truncate_memory(m.get("content") or "")
+            # Sanitize paraphrase-class content (session-log / fact /
+            # other / NULL) BEFORE truncation so embedded `**Sender
+            # (HH:MM):**` patterns are mangled before they enter the
+            # cached system prompt. Without this, a reference- or
+            # project-typed note that happens to QUOTE a session-log
+            # excerpt would surface the mimic surface intact. The
+            # memory pool here mixes legacy personal_memory (no type)
+            # with lazybrain notes (typed) — pass each through the
+            # sanitizer which is a no-op for authoritative types.
+            from lazyclaw.lazybrain.paraphrase_sanitizer import (
+                sanitize_recall_content,
+            )
+            raw_content = sanitize_recall_content(
+                m.get("content"),
+                m.get("memory_type"),
+                title=m.get("title"),
+            )
+            content = _truncate_memory(raw_content)
             if not content:
                 continue
             cost = len(content) + 4  # bullet + newline overhead

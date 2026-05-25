@@ -16,6 +16,10 @@ from lazyclaw.lazybrain import (
     recap,
     topic_rollup,
 )
+from lazyclaw.lazybrain.paraphrase_sanitizer import (
+    is_paraphrase_class,
+    sanitize_recall_content,
+)
 from lazyclaw.skills.base import BaseSkill
 
 
@@ -204,12 +208,29 @@ class SemanticSearchSkill(BaseSkill):
         if not data["results"]:
             return f"No notes matched “{query}” (source: {data['source']})."
         lines = [f"Top {len(data['results'])} matches (source: {data['source']}):"]
+        any_paraphrase = False
         for n in data["results"]:
             score = n.get("_score")
             label = f" · {score:.3f}" if isinstance(score, (int, float)) else ""
-            snippet = (n.get("content") or "").strip().replace("\n", " ")[:140]
+            title = n.get("title") or "(untitled)"
+            # Sanitize paraphrase-class hits BEFORE snippet truncation so
+            # embedded `**Sender (HH:MM):**` patterns get mangled. Plain
+            # search has no memory_type-only mode, so a paraphrase hit
+            # mixed with authoritative hits is the norm — sanitize per row.
+            raw = sanitize_recall_content(
+                n.get("content"), n.get("memory_type"), title=title,
+            )
+            snippet = raw.strip().replace("\n", " ")[:140]
             lines.append(
-                f"  • [[{n.get('title') or '(untitled)'}]]{label} — {snippet}"
+                f"  • [[{title}]]{label} — {snippet}"
+            )
+            if is_paraphrase_class(n.get("memory_type")):
+                any_paraphrase = True
+        if any_paraphrase:
+            lines.append(
+                "\n⚠ Some results are paraphrase-class memories — embedded "
+                "(HH:MM) markers are NOT verbatim. Call the channel tool "
+                "for live quotes."
             )
         return "\n".join(lines)
 

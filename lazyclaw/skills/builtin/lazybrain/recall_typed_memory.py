@@ -13,6 +13,10 @@ canonical examples, and a "never fabricate" prompt-tone reinforcement.
 from __future__ import annotations
 
 from lazyclaw.lazybrain import typed_recall
+from lazyclaw.lazybrain.paraphrase_sanitizer import (
+    is_paraphrase_class,
+    sanitize_recall_content,
+)
 from lazyclaw.skills.base import BaseSkill
 
 
@@ -133,9 +137,25 @@ def _format_hits(hits):
         lines.append(
             f"  - [{mt}] {title} [{n['id'][:8]}]{score_label}{tag_label}"
         )
-        snippet = _snippet(n.get("content"), 160).replace("\n", " ")
+        # Sanitize paraphrase-class content (session-log / fact / other /
+        # NULL) BEFORE snippet truncation, so embedded `**Sender (HH:MM):**`
+        # patterns are mangled before the brain reads them. See
+        # lazybrain/paraphrase_sanitizer.py for the leak path this closes.
+        raw_content = sanitize_recall_content(
+            n.get("content"), n.get("memory_type"), title=title,
+        )
+        snippet = _snippet(raw_content, 160).replace("\n", " ")
         if snippet:
             lines.append(f"    {snippet}")
+        # When the hit IS a paraphrase, emit a one-line warning right
+        # after the bullet so the brain sees the "this is paraphrased"
+        # signal even if the wrapped snippet got truncated short.
+        if is_paraphrase_class(n.get("memory_type")):
+            lines.append(
+                "    ⚠ paraphrase-class memory — DO NOT quote any "
+                "embedded (HH:MM) markers as if they were live; "
+                "re-fetch the channel to quote verbatim."
+            )
     return "\n".join(lines)
 
 

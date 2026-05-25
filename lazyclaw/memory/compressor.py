@@ -35,6 +35,89 @@ WINDOW_SIZE = 30
 SUMMARIZE_THRESHOLD = 30
 
 
+def _quarantine_history_view(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Sanitize polluted assistant rows before the LLM sees them.
+
+    Wraps :func:`quarantine_polluted_history` so the import stays local
+    (the filter pulls in regex helpers we don't want loaded for cold
+    paths that don't ship a turn — e.g. CLI counters). Pure: never
+    mutates the input list. Defensive: any failure is logged and the
+    original list is returned unchanged so a filter bug can't take
+    down the turn.
+
+    The current call sites do not have access to this turn's tool
+    results yet (compression happens BEFORE tool dispatch), so only
+    the wikilink-in-quote check fires here. Quote-mismatch is reserved
+    for a future call site that has access to live tool results.
+    """
+    try:
+        from lazyclaw.runtime.context_journal_filter import (
+            quarantine_polluted_history,
+        )
+        return quarantine_polluted_history(messages, tool_results_this_turn=None)
+    except Exception:
+        logger.debug("history quarantine filter failed", exc_info=True)
+        return messages
+
+
+def _quarantine_decrypted_dicts(decrypted: list[dict]) -> list[dict]:
+    """Sanitize polluted assistant rows in the raw decrypted-dict list.
+
+    Runs BEFORE the compression split so polluted rows outside the
+    recent-window slice (i.e. those about to be baked into the
+    summary string) get the QUARANTINE placeholder. Without this, the
+    older-half summarizer paraphrases the original polluted content
+    into the long-term summary and the brain mimics it on every
+    subsequent turn.
+
+    Builds a minimal LLMMessage view, runs the same wikilink/quote
+    filter, then rebuilds a dict list with sanitized content swapped
+    in for any row the filter flagged. Original dicts are NEVER
+    mutated. Quarantined assistant rows get ``metadata=None`` and
+    ``has_tool_calls=False`` because a sanitized body cannot validly
+    anchor downstream tool results — the matching tool rows will be
+    dropped by the existing ``_to_llm_messages`` validator, which is
+    the correct behavior (a quarantined reply shouldn't have its
+    side-effects replayed).
+    """
+    if not decrypted:
+        return list(decrypted)
+
+    view = [
+        LLMMessage(role=d["role"], content=d.get("content") or "")
+        for d in decrypted
+    ]
+    # scan_limit=None → scan the FULL list. The default trailing-window
+    # limit was tuned for the post-compression view (where only recent
+    # rows enter the LLM's attention); for the pre-split case the whole
+    # list will be summarized so polluted rows anywhere matter.
+    try:
+        from lazyclaw.runtime.context_journal_filter import (
+            quarantine_polluted_history,
+        )
+        sanitized = quarantine_polluted_history(
+            view, tool_results_this_turn=None, scan_limit=None,
+        )
+    except Exception:
+        logger.debug("decrypted-dict quarantine failed", exc_info=True)
+        sanitized = view
+
+    out: list[dict] = []
+    for i, original in enumerate(decrypted):
+        new_content = (
+            sanitized[i].content if i < len(sanitized) else original.get("content")
+        )
+        if new_content != original.get("content"):
+            cloned = dict(original)
+            cloned["content"] = new_content
+            cloned["metadata"] = None
+            cloned["has_tool_calls"] = False
+            out.append(cloned)
+        else:
+            out.append(original)
+    return out
+
+
 async def compress_history(
     config: Config,
     eco_router: EcoRouter,
@@ -82,6 +165,9 @@ async def compress_history(
                 "tool_name": tool_name, "metadata": metadata,
                 "has_tool_calls": bool(metadata),
             })
+        # Sanitize raw dicts BEFORE LLMMessage conversion + return so the
+        # quarantine acts as a single source of truth for sanitization.
+        decrypted = _quarantine_decrypted_dicts(decrypted)
         return _to_llm_messages(decrypted)
 
     # Full path: decrypt all messages for compression
@@ -97,6 +183,14 @@ async def compress_history(
             "tool_name": tool_name, "metadata": metadata,
             "has_tool_calls": bool(metadata),
         })
+
+    # Sanitize the FULL decrypted dict list BEFORE the split, so polluted
+    # assistant rows outside the recent-WINDOW_SIZE slice get the
+    # QUARANTINE placeholder before _quick_summary / summarize_chunk bake
+    # the original polluted content into the long-term summary string.
+    # Without this, the brain mimics yesterday's hallucination on every
+    # subsequent turn via the summary the LLM reads as authoritative.
+    decrypted = _quarantine_decrypted_dicts(decrypted)
 
     # Already checked above — this path only runs for >WINDOW_SIZE
     if len(decrypted) <= WINDOW_SIZE:
@@ -163,7 +257,7 @@ async def compress_history(
         )
     ]
     result.extend(_to_llm_messages(recent))
-    return result
+    return _quarantine_history_view(result)
 
 
 def _quick_summary(messages: list[dict]) -> str:

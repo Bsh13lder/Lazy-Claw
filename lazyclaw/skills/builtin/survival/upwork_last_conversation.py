@@ -210,13 +210,71 @@ class UpworkLastConversationSkill(BaseSkill):
 
     @staticmethod
     def _format_conversation(conv: dict, *, fallback_contact: str) -> str:
-        """Render the conversation as a compact Markdown card."""
+        """Render the conversation as a compact Markdown card.
+
+        Format ordering matters for grounding (2026-05-24 audit):
+
+        1. The MCP returns ``messages`` in chronological order
+           (oldest-first by absolute Y), so the LAST element is the
+           NEWEST message in the thread.
+        2. The brain's F1 quote-then-summarize prompt instructs it to
+           "quote the 3 most recent contact-side messages." Without an
+           explicit callout, Opus 4.6/4.7 on prompt-cached contexts
+           consistently picked the FIRST 3 contact-side messages
+           instead — driven by cached paraphrases from prior session
+           turns that (correctly at the time) called those "the
+           latest." The F1 phase-2 content verifier observed this 8+
+           times across May 21–24 ("3 unverified against fresh tool
+           results") but only logs, doesn't block.
+        3. Fix: prepend an UNAMBIGUOUS ``📌 MOST RECENT 3 MESSAGES
+           FROM <contact>`` section that pre-extracts the last 3
+           contact-side messages with NEWEST-FIRST ordering and
+           explicit ``[NEWEST]`` markers. The brain quotes what's
+           labeled, so cached confusion can't beat explicit labels.
+           The full chronological transcript follows for context.
+        """
         contact = conv.get("contact_name") or fallback_contact
         msgs = conv.get("messages") or []
         if not msgs:
             return f"Conversation with **{contact}**: (no messages)"
 
-        lines = [f"💬 **Last Upwork conversation — {contact}**", ""]
+        lines: list[str] = [
+            f"💬 **Last Upwork conversation — {contact}**",
+            "",
+        ]
+
+        # 📌 MOST RECENT CONTACT-SIDE — pre-extracted, newest first,
+        # unambiguously labeled so the brain can't pick the oldest end.
+        contact_side = [
+            m for m in msgs
+            if not m.get("is_mine")
+            and (m.get("content") or "").strip()
+        ]
+        latest_three = list(reversed(contact_side[-3:]))  # newest first
+        if latest_three:
+            lines.append(
+                f"📌 **3 MOST RECENT MESSAGES FROM {contact}** "
+                f"(newest first — quote these for any 'what did X say' "
+                f"or 'most recent' question):"
+            )
+            lines.append("")
+            for idx, m in enumerate(latest_three):
+                ts = m.get("timestamp") or "(no timestamp)"
+                content = (m.get("content") or "").strip()
+                marker = "[NEWEST]" if idx == 0 else f"[#{idx + 1}]"
+                lines.append(f"{marker} `{ts}` — **{contact}**:")
+                for ln in content.splitlines():
+                    lines.append(f"  {ln}")
+                lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        # 📜 Full chronological transcript (oldest first) for context.
+        lines.append(
+            "📜 **Full chronological transcript** "
+            "(oldest first; LAST entry = newest message in thread):"
+        )
+        lines.append("")
         for m in msgs[-30:]:  # cap rendered messages
             sender = m.get("sender") or ("(me)" if m.get("is_mine") else "(them)")
             ts = m.get("timestamp") or ""

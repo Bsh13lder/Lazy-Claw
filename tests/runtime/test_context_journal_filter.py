@@ -28,6 +28,7 @@ from lazyclaw.runtime import context_builder
 from lazyclaw.runtime.context_journal_filter import (
     filter_pinned_for_cache,
     is_journal_title,
+    quarantine_polluted_history,
     should_inject_journal,
 )
 
@@ -279,3 +280,196 @@ async def test_build_context_excludes_journal_and_null_pinned(
         "user-typed pinned note missing — pinned injection layer "
         "didn't fire; the contamination assertions above pass trivially"
     )
+
+
+# ─── quarantine_polluted_history ──────────────────────────────────────────
+#
+# Closes the durable defense against the 2026-05-22 10:39 mimic cycle:
+# yesterday's persisted assistant reply ("**James Blue (9:12 PM):** Mac
+# [[computer]]") was loaded as history → the brain mimicked the wikilink
+# leak → F1 phase-2 fired → retry produced the same content → degraded-
+# accept shipped → next turn the cycle repeats. The in-memory history
+# quarantine breaks the loop without mutating the DB.
+
+from lazyclaw.llm.providers.base import LLMMessage  # noqa: E402
+
+
+def _assistant(content: str) -> LLMMessage:
+    return LLMMessage(role="assistant", content=content)
+
+
+def _user(content: str) -> LLMMessage:
+    return LLMMessage(role="user", content=content)
+
+
+def _tool(content: str, tool_call_id: str = "tc-1") -> LLMMessage:
+    return LLMMessage(role="tool", content=content, tool_call_id=tool_call_id)
+
+
+def test_quarantines_assistant_with_wikilink_in_quote() -> None:
+    """The load-bearing case: a bold-sender quote line containing a
+    ``[[wikilink]]`` token is the deterministic memory-leak signature.
+    The assistant message must be replaced with a quarantine stub."""
+    polluted = (
+        "Here is what James said:\n\n"
+        "**James Blue (9:12 PM):** I have a Mac [[computer]] and iPad\n\n"
+        "Let me know if you need more."
+    )
+    messages = [
+        _user("check upwork"),
+        _assistant(polluted),
+    ]
+
+    filtered = quarantine_polluted_history(messages)
+
+    assert filtered[0].role == "user"
+    assert filtered[0].content == "check upwork"
+    assert filtered[1].role == "assistant"
+    assert "[QUARANTINED" in filtered[1].content
+    assert "[[computer]]" not in filtered[1].content
+    assert "James Blue" not in filtered[1].content
+
+
+def test_does_not_quarantine_clean_user_or_tool_messages() -> None:
+    """Only ``role='assistant'`` is eligible. A user message that
+    contains ``[[wikilink]]`` (the user typed it themselves) and a
+    tool result that contains a polluted assistant draft (echo) must
+    both pass through unchanged."""
+    messages = [
+        _user("show me my note about [[james blue contract]]"),
+        _tool("**James (9:12 PM):** Mac [[computer]]"),
+        _assistant("Reading your notes now."),
+    ]
+
+    filtered = quarantine_polluted_history(messages)
+
+    assert filtered[0].content == "show me my note about [[james blue contract]]"
+    assert filtered[1].content == "**James (9:12 PM):** Mac [[computer]]"
+    # Clean assistant text — no quarantine.
+    assert "[QUARANTINED" not in filtered[2].content
+    assert filtered[2].content == "Reading your notes now."
+
+
+def test_quarantine_replaces_content_keeps_role() -> None:
+    """The quarantined replacement must preserve ``role`` and message
+    type. Downstream code (tool_call pairing, provider serializers)
+    keys off these fields, so a quarantined row that morphed into
+    ``role='system'`` would corrupt the conversation shape."""
+    polluted = (
+        "> James (9:12 PM): my budget is [[budget_2026]]"
+    )
+    messages = [_assistant(polluted)]
+
+    filtered = quarantine_polluted_history(messages)
+
+    # Same class, same role, content swapped.
+    assert isinstance(filtered[0], LLMMessage)
+    assert filtered[0].role == "assistant"
+    assert "[QUARANTINED" in filtered[0].content
+    assert filtered[0].tool_calls is None
+
+
+def test_quarantine_only_scans_last_N_messages() -> None:
+    """Performance guard: messages older than the trailing scan window
+    must NOT be inspected (the compressor has already collapsed them
+    into a summary anyway). Build a 30-message history where ONLY the
+    oldest assistant row is polluted — it must NOT be quarantined."""
+    from lazyclaw.runtime.context_journal_filter import _QUARANTINE_SCAN_LIMIT
+
+    # Polluted at index 0 — way outside the scan window.
+    polluted_old = "**Bob (1:00 PM):** Hello [[old_note]]"
+    # Clean assistants for the rest, plus user turns to look realistic.
+    history: list[LLMMessage] = [_assistant(polluted_old)]
+    # Pad with (_QUARANTINE_SCAN_LIMIT + 5) clean messages so the
+    # polluted message ends up before the window starts. The scan
+    # only inspects the last _QUARANTINE_SCAN_LIMIT messages.
+    pad = _QUARANTINE_SCAN_LIMIT + 5
+    for i in range(pad):
+        history.append(_user(f"msg {i}"))
+        history.append(_assistant(f"clean reply {i}"))
+
+    filtered = quarantine_polluted_history(history)
+
+    # The old polluted message MUST survive untouched — out of scan range.
+    assert filtered[0].content == polluted_old
+    # And clean trailing messages must also survive untouched.
+    assert filtered[-1].content.startswith("clean reply")
+
+
+def test_quarantine_handles_empty_or_none_content() -> None:
+    """Defensive: empty list, empty content, and None-content rows
+    must not raise. Pollution scan returns ``None`` for blanks."""
+    # Empty list
+    assert quarantine_polluted_history([]) == []
+    # Empty content
+    msg_empty = _assistant("")
+    out = quarantine_polluted_history([msg_empty])
+    assert out[0].content == ""
+
+    # None content — has to roundtrip without crashing.
+    msg_none = LLMMessage(role="assistant", content="")  # type: ignore
+    # Force-override content to None via __dict__ so we test the
+    # defensive ``or ""`` in the scanner.
+    msg_none.content = None  # type: ignore[assignment]
+    out2 = quarantine_polluted_history([msg_none])
+    # Either passed through with None content, OR got coerced — both
+    # are acceptable; the crucial assertion is "no raise".
+    assert out2[0].role == "assistant"
+
+
+def test_quarantine_does_not_mutate_input() -> None:
+    """Coding-style rule: immutable returns. The caller's list AND
+    the original message objects must not be mutated."""
+    polluted = "**Alice (10:00 AM):** test [[leak]]"
+    original = _assistant(polluted)
+    messages = [original]
+    snapshot_content = original.content
+
+    out = quarantine_polluted_history(messages)
+
+    assert original.content == snapshot_content  # original object intact
+    assert messages[0] is original                # input list intact
+    assert out is not messages                    # new list returned
+    assert "[QUARANTINED" in out[0].content       # quarantine applied to copy
+
+
+def test_quarantine_quote_mismatch_when_tool_results_provided() -> None:
+    """When ``tool_results_this_turn`` is given AND the assistant
+    quotes don't appear in the tool data, quarantine fires. This is
+    the second signal (in addition to wikilink)."""
+    # Brain invented quotes that nowhere appear in the live tool data.
+    polluted = (
+        "Here's what they said:\n"
+        "> James (9:12 PM): I will pay $500 for this job\n"
+        "> James (9:14 PM): Deadline is next Monday\n"
+        "> James (9:15 PM): Send me your wallet address"
+    )
+    # Live tool result contains entirely different content — so all
+    # three quotes are unverified (majority => quarantine).
+    fresh_tool_results = [
+        '[{"sender": "James", "content": "Hello, are you available?"}]',
+    ]
+
+    messages = [_assistant(polluted)]
+    filtered = quarantine_polluted_history(
+        messages, tool_results_this_turn=fresh_tool_results,
+    )
+    assert "[QUARANTINED" in filtered[0].content
+
+
+def test_quarantine_quote_match_keeps_assistant_clean() -> None:
+    """Negative companion to the previous test — when quotes DO
+    appear in the tool data, the assistant message is NOT quarantined."""
+    safe_reply = (
+        "Here's what James said:\n"
+        "> James (9:12 PM): Hello, are you available for this job?"
+    )
+    fresh_tool_results = [
+        '[{"sender": "James", "content": "Hello, are you available for this job?"}]',
+    ]
+    messages = [_assistant(safe_reply)]
+    filtered = quarantine_polluted_history(
+        messages, tool_results_this_turn=fresh_tool_results,
+    )
+    assert "[QUARANTINED" not in filtered[0].content
+    assert filtered[0].content == safe_reply

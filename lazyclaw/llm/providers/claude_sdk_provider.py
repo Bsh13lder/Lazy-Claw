@@ -63,6 +63,22 @@ _DISALLOWED_BUILT_INS = [
     "run_command", "RunCommand",  # Claude Code's bash equivalent
     "SlashCommand",          # Claude Code's slash-command invoker
     "Skills",                # Plural variant occasionally emitted
+    # Added 2026-05-26 after the WhatsApp "I don't have those tools" incident:
+    # on a no-lazyclaw-tools turn (e.g. a bare "yes") the SDK fell back to
+    # its interactive built-in preset and emitted `AskUserQuestion`; the
+    # brain then modelled its own toolset as "scheduling, planning,
+    # monitoring, worktree management" — exactly these built-ins — and
+    # confabulated that it couldn't reach the (actually-present) whatsapp
+    # MCP tools. `disallowed_tools` is the real lever (it's always applied;
+    # `allowed_tools` only governs auto-approval, which bypassPermissions
+    # already moots), so name every leak-prone built-in here.
+    "AskUserQuestion",       # interactive prompt — lazyclaw owns user Q&A
+    "EnterPlanMode", "ExitPlanMode",          # "planning"
+    "Monitor",                                # "monitoring"
+    "EnterWorktree", "ExitWorktree",          # "worktree management"
+    "CronCreate", "CronList", "CronDelete",   # "scheduling" (use schedule_job)
+    "ScheduleWakeup", "RemoteTrigger", "PushNotification",
+    "ListMcpResourcesTool", "ReadMcpResourceTool", "LSP",
 ]
 
 # MCP tool name pattern from lazyclaw's registry: `mcp_<uuid>_<tool_name>`.

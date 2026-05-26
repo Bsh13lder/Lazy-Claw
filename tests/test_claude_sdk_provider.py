@@ -18,9 +18,38 @@ from lazyclaw.llm.providers.claude_sdk_provider import (
     SDKUnavailable,
     _build_tool_wrappers,
     _dedup_tool_calls,
+    _DISALLOWED_BUILT_INS,
     _serialize_messages,
     _shorten_tool_name,
 )
+
+
+class TestDisallowedBuiltIns:
+    """The SDK falls back to its interactive built-in preset on no-tools
+    turns; those built-ins (AskUserQuestion + the scheduling/planning/
+    monitoring/worktree family) must be blocked so the brain can't emit
+    them or model them as its own toolset (2026-05-26 WhatsApp incident).
+    """
+
+    def test_blocks_ask_user_question(self) -> None:
+        assert "AskUserQuestion" in _DISALLOWED_BUILT_INS
+
+    def test_blocks_leaked_builtin_categories(self) -> None:
+        # The four categories the brain literally named when it confabulated
+        # its toolset: scheduling / planning / monitoring / worktree.
+        for name in (
+            "EnterPlanMode", "ExitPlanMode",          # planning
+            "Monitor",                                # monitoring
+            "EnterWorktree", "ExitWorktree",          # worktree
+            "CronCreate", "CronList", "CronDelete",   # scheduling
+            "ScheduleWakeup",
+        ):
+            assert name in _DISALLOWED_BUILT_INS, f"{name} must be disallowed"
+
+    def test_still_blocks_original_builtins(self) -> None:
+        # Regression guard: the original blocked set must remain.
+        for name in ("Bash", "Read", "Write", "Edit", "Task", "Skill"):
+            assert name in _DISALLOWED_BUILT_INS
 
 
 # ---------------------------------------------------------------------------

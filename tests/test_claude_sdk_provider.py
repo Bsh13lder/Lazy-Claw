@@ -21,7 +21,44 @@ from lazyclaw.llm.providers.claude_sdk_provider import (
     _DISALLOWED_BUILT_INS,
     _serialize_messages,
     _shorten_tool_name,
+    _split_leading_system,
 )
+
+
+class TestSplitLeadingSystem:
+    """Leading system messages (full SOUL.md + channel/routing context)
+    must be routed into the SDK's native system_prompt, not buried in the
+    serialized body — so the dispatch CORE LAW + F1 rules get top attention.
+    """
+
+    def test_pulls_leading_system_run(self) -> None:
+        msgs = [
+            LLMMessage(role="system", content="SOUL"),
+            LLMMessage(role="system", content="CHANNEL"),
+            LLMMessage(role="user", content="hi"),
+        ]
+        system_text, rest = _split_leading_system(msgs)
+        assert system_text == "SOUL\n\nCHANNEL"
+        assert [m.role for m in rest] == ["user"]
+
+    def test_no_leading_system(self) -> None:
+        msgs = [LLMMessage(role="user", content="hi")]
+        system_text, rest = _split_leading_system(msgs)
+        assert system_text == ""
+        assert len(rest) == 1
+
+    def test_mid_history_system_stays_in_body(self) -> None:
+        # A compaction marker mid-conversation is NOT leading — it stays in
+        # the serialized body, not the native system_prompt.
+        msgs = [
+            LLMMessage(role="system", content="SOUL"),
+            LLMMessage(role="user", content="q1"),
+            LLMMessage(role="system", content="[compacted]"),
+            LLMMessage(role="user", content="q2"),
+        ]
+        system_text, rest = _split_leading_system(msgs)
+        assert system_text == "SOUL"
+        assert [m.role for m in rest] == ["user", "system", "user"]
 
 
 class TestDisallowedBuiltIns:

@@ -145,6 +145,34 @@ def _rewrite_tool_name_for_sdk(name: str) -> str:
     return name
 
 
+def _split_leading_system(
+    messages: list[LLMMessage],
+) -> tuple[str, list[LLMMessage]]:
+    """Pull the leading run of ``role == "system"`` messages off the front.
+
+    The agent builds ``[system_prompt(=full SOUL.md), channel_context?,
+    routing_hint?] + history + [user]`` (agent.py:2904-2934). Flattening
+    that SOUL.md into a ``[System Context]`` text block buried in the
+    prompt string gives Opus weak attention on the dispatch CORE LAW + F1
+    grounding rules — a prime driver of the SDK path's tool-call refusals
+    and confabulation. Routing those leading system messages into the
+    SDK's NATIVE ``system_prompt`` field instead pins them at top priority
+    (and lets the SDK/CLI cache them). Any non-leading system messages
+    (e.g. a mid-history compaction marker) stay in the serialized body.
+
+    Returns ``(joined_system_text, remaining_messages)``.
+    """
+    idx = 0
+    leading: list[str] = []
+    for msg in messages:
+        if msg.role == "system" and msg.content:
+            leading.append(msg.content)
+            idx += 1
+        else:
+            break
+    return "\n\n".join(leading), messages[idx:]
+
+
 def _serialize_messages(messages: list[LLMMessage]) -> str:
     """Render the conversation as a single prompt string for the SDK.
 
@@ -541,8 +569,11 @@ class ClaudeSDKProvider(BaseLLMProvider):
         # concurrent chat() callers on the same provider instance don't
         # clobber each other's short→full tool-name resolution. See the
         # class docstring for the race window history.
-        prompt_text = _serialize_messages(messages)
-        options, name_map = self._build_options(tools_spec, create_sdk_mcp_server)
+        _system_text, _body_messages = _split_leading_system(messages)
+        prompt_text = _serialize_messages(_body_messages)
+        options, name_map = self._build_options(
+            tools_spec, create_sdk_mcp_server, system_prompt=_system_text or None,
+        )
 
         logger.info(
             "Claude SDK call: tools=%d, model=%s, prompt_len=%d chars",
@@ -755,8 +786,11 @@ class ClaudeSDKProvider(BaseLLMProvider):
                 )
 
         tools_spec: list[dict] = kwargs.get("tools") or []
-        prompt_text = _serialize_messages(messages)
-        options, name_map = self._build_options(tools_spec, create_sdk_mcp_server)
+        _system_text, _body_messages = _split_leading_system(messages)
+        prompt_text = _serialize_messages(_body_messages)
+        options, name_map = self._build_options(
+            tools_spec, create_sdk_mcp_server, system_prompt=_system_text or None,
+        )
 
         logger.info(
             "Claude SDK stream: tools=%d, model=%s, prompt_len=%d chars",
@@ -913,6 +947,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         self,
         tools_spec: list[dict],
         create_sdk_mcp_server,
+        system_prompt: str | None = None,
     ) -> tuple[Any, dict[str, str]]:
         """Construct ClaudeAgentOptions for one chat() call.
 
@@ -992,10 +1027,13 @@ class ClaudeSDKProvider(BaseLLMProvider):
         if self._claude_bin:
             kw["cli_path"] = self._claude_bin
 
-        # System prompt: brief, similar to the CLI provider's "you are
-        # LazyClaw" preamble. System context blocks already arrive in the
-        # serialized messages, so this is just an identity marker.
-        kw["system_prompt"] = (
+        # System prompt: prefer the caller's full system content (SOUL.md +
+        # channel/routing context) routed into the SDK's NATIVE system field
+        # so the dispatch CORE LAW + F1 grounding rules get top attention
+        # priority (and SDK/CLI caching) instead of being buried in a
+        # serialized [System Context] body block. Fall back to a brief
+        # identity stub only when the caller passed no system content.
+        kw["system_prompt"] = system_prompt or (
             "You are LazyClaw, an AI agent. Any [System Context] blocks "
             "in the conversation contain your project rules. Use tools "
             "from the MCP server when the user wants action; answer "

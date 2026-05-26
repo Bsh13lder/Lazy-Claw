@@ -60,14 +60,20 @@ async def seeded_user(config: Config) -> tuple[str, bytes]:
 
 
 class RecordingLaneQueue:
-    """Captures (lane_key, message) for every enqueue. Pretends to run."""
+    """Captures (routing_lane_key, message) for every enqueue. Pretends to run.
+
+    The daemon enqueues with the bare ``user_id`` as identity and a separate
+    ``lane_key`` for routing, so the routing key is what we assert on here.
+    """
 
     def __init__(self) -> None:
         self.captured: list[tuple[str, str]] = []
         self._running = True
 
-    async def enqueue(self, user_id: str, message: str, **kwargs: Any) -> str:
-        self.captured.append((user_id, message))
+    async def enqueue(
+        self, user_id: str, message: str, *, lane_key: str | None = None, **kwargs: Any
+    ) -> str:
+        self.captured.append((lane_key or user_id, message))
         return ""  # empty success result — no mark_run_outcome triggers
 
 
@@ -145,6 +151,65 @@ async def test_reminder_routes_to_heartbeat_lane_not_foreground(
         assert lane_key == f"{user_id}:heartbeat", (
             f"Reminder must route to heartbeat lane; got {lane_key!r}"
         )
+
+
+async def test_due_cron_job_invokes_handler_with_bare_user_id(
+    config: Config, seeded_user: tuple[str, bytes]
+) -> None:
+    """A daemon-fired cron job must invoke the message handler with the
+    BARE ``user_id`` — never the ``{user_id}:heartbeat`` lane-routing key.
+
+    Repros the 2026-05-16 regression (commit 33db41a): the daemon began
+    enqueueing on ``f"{user_id}:heartbeat"``, but ``LaneQueue`` used that
+    same string as the job's identity, so ``process_message`` passed it to
+    ``get_user_dek`` → ``ValueError: User <id>:heartbeat not found``. Every
+    daemon-fired brain turn (cron, watcher, MCP auto-reply) failed 100%.
+
+    The lane key (routing) and the user_id (identity) must be decoupled.
+    """
+    from lazyclaw.queue.lane import LaneQueue
+
+    user_id, key = seeded_user
+
+    async with db_session(config) as db:
+        await db.execute(
+            "INSERT INTO agent_jobs (id, user_id, name, job_type, "
+            "instruction, cron_expression, status, next_run) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "job-cron-identity",
+                user_id,
+                encrypt("test-cron", key),
+                "cron",
+                encrypt("do thing", key),
+                "*/5 * * * *",
+                "active",
+                "1970-01-01T00:00:00+00:00",
+            ),
+        )
+        await db.commit()
+
+    received_uids: list[str] = []
+
+    async def handler(uid: str, _msg: str, **_kw: Any) -> str:
+        received_uids.append(uid)
+        return ""
+
+    queue = LaneQueue()
+    queue.set_handler(handler)
+    await queue.start()
+    daemon = HeartbeatDaemon(config=config, lane_queue=queue)
+    try:
+        await daemon._check_due_jobs(user_id)
+        await asyncio.sleep(0.05)  # let the lane processor drain the job
+    finally:
+        await queue.stop()
+
+    assert received_uids == [user_id], (
+        "daemon-fired cron must call the handler with the bare user_id; "
+        f"got {received_uids!r}. A ':heartbeat'-suffixed id breaks "
+        "get_user_dek (User <id>:heartbeat not found)."
+    )
 
 
 async def test_heartbeat_lane_does_not_contend_with_foreground_lane(

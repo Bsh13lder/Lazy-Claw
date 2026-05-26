@@ -36,52 +36,67 @@ class LaneQueue:
         """Set the message handler (typically agent.process_message)."""
         self._handler = handler
 
-    async def enqueue(self, user_id: str, message: str, **kwargs) -> str:
-        """Enqueue a message and wait for the result. Returns the agent response."""
+    async def enqueue(
+        self, user_id: str, message: str, *, lane_key: str | None = None, **kwargs
+    ) -> str:
+        """Enqueue a message and wait for the result. Returns the agent response.
+
+        ``lane_key`` controls which FIFO lane the job runs on; it defaults to
+        ``user_id``. Pass a distinct ``lane_key`` (e.g. ``f"{user_id}:heartbeat"``)
+        to run daemon-originated work in parallel with the user's foreground
+        chat WITHOUT corrupting the job's identity — the handler always receives
+        the bare ``user_id``. Conflating the two broke get_user_dek (commit
+        33db41a → ``User <id>:heartbeat not found``).
+        """
         if not self._running:
             raise RuntimeError("LaneQueue not started")
 
+        key = lane_key or user_id
         job = Job(user_id=user_id, message=message, kwargs=kwargs)
-        lane = self._get_lane(user_id)
+        lane = self._get_lane(key)
         await lane.put(job)
-        logger.debug("Enqueued job for user %s (queue size: %d)", user_id, lane.qsize())
+        logger.debug(
+            "Enqueued job for user %s on lane %s (queue size: %d)",
+            user_id, key, lane.qsize(),
+        )
 
         # Await thread-safe future from async context
         loop = asyncio.get_running_loop()
         return await asyncio.wrap_future(job.result_future, loop=loop)
 
-    def _get_lane(self, user_id: str) -> asyncio.Queue[Job]:
-        """Get or create a lane for a user."""
-        if user_id not in self._lanes:
-            self._lanes[user_id] = asyncio.Queue()
+    def _get_lane(self, lane_key: str) -> asyncio.Queue[Job]:
+        """Get or create a lane keyed by ``lane_key`` (not necessarily a user_id)."""
+        if lane_key not in self._lanes:
+            self._lanes[lane_key] = asyncio.Queue()
             # Start a processor task for this lane
-            self._processors[user_id] = asyncio.create_task(
-                self._process_lane(user_id)
+            self._processors[lane_key] = asyncio.create_task(
+                self._process_lane(lane_key)
             )
-        return self._lanes[user_id]
+        return self._lanes[lane_key]
 
-    async def _process_lane(self, user_id: str) -> None:
-        """Process jobs in a user's lane serially."""
-        lane = self._lanes[user_id]
+    async def _process_lane(self, lane_key: str) -> None:
+        """Process jobs in a lane serially. Each job carries its own bare
+        ``user_id`` (the handler's identity), independent of ``lane_key``."""
+        lane = self._lanes[lane_key]
         while self._running:
             try:
                 job = await asyncio.wait_for(lane.get(), timeout=60.0)
             except asyncio.TimeoutError:
                 # Clean up idle lanes
                 if lane.empty():
-                    del self._lanes[user_id]
-                    del self._processors[user_id]
-                    logger.debug("Cleaned up idle lane for user %s", user_id)
+                    del self._lanes[lane_key]
+                    del self._processors[lane_key]
+                    logger.debug("Cleaned up idle lane %s", lane_key)
                     return
                 continue
 
             try:
                 result = await self._handler(job.user_id, job.message, **job.kwargs)
-                logger.debug("Job completed for user %s (result_len=%d)", user_id, len(result or ""))
+                logger.debug("Job completed for user %s (result_len=%d)", job.user_id, len(result or ""))
                 if not job.result_future.done():
                     job.result_future.set_result(result)
             except Exception as e:
-                logger.error("Job failed for user %s: %s", user_id, e, exc_info=True)
+                logger.error("Job failed for user %s: %s", job.user_id, e, exc_info=True)
                 if not job.result_future.done():
                     job.result_future.set_result(f"Error processing message: {e}")
             finally:

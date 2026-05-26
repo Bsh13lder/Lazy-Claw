@@ -907,11 +907,13 @@ _CHANNEL_READ_TOOL_NAME_PATTERNS: tuple[str, ...] = (
     "whatsapp_read",
     "whatsapp_get_messages",
     "whatsapp_get_chat",
+    "whatsapp_list_chats",
     "email_read",
     "email_get_messages",
     "instagram_read_dms",
     "instagram_get_dms",
     "instagram_get_messages",
+    "instagram_get_notifications",
     "telegram_get_messages",
 )
 
@@ -5504,6 +5506,14 @@ class Agent:
                         "list_memories",
                         "lookup_project_asset",
                     }:
+                        return True
+                    # Channel reads (whatsapp_read/list_chats, email_read,
+                    # instagram_read_dms, etc.) are pure fetches — a Web UI
+                    # "check my whatsapp" must answer INLINE, not get
+                    # AUTO-PROMOTE'd to a background task whose result lands
+                    # on Telegram (2026-05-26 incident). `_is_channel_read_
+                    # tool_name` already curates the channel-read surface.
+                    if _is_channel_read_tool_name(name):
                         return True
                     return (
                         "_get_" in n

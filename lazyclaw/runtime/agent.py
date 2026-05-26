@@ -4065,6 +4065,73 @@ class Agent:
                         streamed_content = ""
                         continue
 
+                    # Action-claim retries EXHAUSTED: the brain kept
+                    # narrating a dispatch it never made (the SDK-path
+                    # failure mode — Opus writes "✅ running in the
+                    # background" instead of emitting a run_background
+                    # tool_use block). Rather than ship that false "done",
+                    # force the dispatch to task_runner — same failsafe as
+                    # the AUTO-PROMOTE text-only path, but reachable when the
+                    # brain claimed the action at iter 0 (never auto-promoted).
+                    # Guards mirror that path: foreground only, real task
+                    # runner, not a meta-question, not already dispatched.
+                    if (
+                        _claim_match
+                        and _halluc_retries >= _HALLUC_MAX_RETRIES
+                        and self._task_runner is not None
+                        and user_id is not None
+                        and not getattr(self, "is_background", False)
+                        and "run_background" not in _called_tool_names
+                        and not _is_meta_question(message)
+                    ):
+                        logger.warning(
+                            "Action-claim failsafe: brain claimed dispatch "
+                            "%d× without a tool_use block — runtime "
+                            "force-submitting original message to task_runner",
+                            _halluc_retries,
+                        )
+                        try:
+                            from lazyclaw.runtime.agent_settings import (
+                                get_agent_settings,
+                            )
+                            _agent_settings = await get_agent_settings(
+                                self.config, user_id,
+                            )
+                            _bg_task_id = await self._task_runner.submit(
+                                user_id=user_id,
+                                instruction=message,
+                                name=None,
+                                timeout=_agent_settings.get(
+                                    "specialist_timeout_s", 600,
+                                ),
+                                callback=callback,
+                                source="brain",
+                                caller_depth=self._depth,
+                            )
+                            if self._team_lead and _fg_task_id:
+                                self._team_lead.cancel(_fg_task_id)
+                                _fg_task_id = None
+                            await cb.on_event(AgentEvent(
+                                FAST_DISPATCH,
+                                "Force-dispatched after action-claim with no "
+                                "tool call",
+                                {"task_id": _bg_task_id},
+                            ))
+                            await cb.on_event(AgentEvent(
+                                "done", "Dispatched", {},
+                            ))
+                            if _delegate_registered and self.registry:
+                                self.registry.unregister("delegate")
+                            return (
+                                "Continuing in background — will report "
+                                "back when done."
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Action-claim force-dispatch failed; "
+                                "continuing inline",
+                            )
+
                     # Nudge: if iteration 0 returned text-only but channel
                     # tools were available, the LLM likely repeated old data
                     # from history instead of calling the tool. Force retry once.

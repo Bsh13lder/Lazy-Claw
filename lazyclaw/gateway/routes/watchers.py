@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 
@@ -180,6 +180,100 @@ async def _fetch_watcher(user_id: str, watcher_id: str) -> dict | None:
 async def list_watchers(user: User = Depends(get_current_user)):
     items = await _fetch_all_watchers(user.id)
     return {"watchers": items}
+
+
+@router.post("")
+async def create_watcher(
+    payload: dict = Body(...),
+    user: User = Depends(get_current_user),
+):
+    """Create a JS/site watcher (job_type='watcher') from the Web UI.
+
+    Body: url, what_to_watch, check_interval_minutes (default 5),
+    use_my_browser (route checks through the user's signed-in Brave/CDP
+    by adding the host to live_hosts — needed for logged-in / Cloudflare
+    pages), duration_hours (None=indefinite, 0=one-shot), custom_js.
+
+    Mirrors the `watch_site` skill's create path. The `use_my_browser`
+    toggle is the UI surface for the daemon's live-host CDP routing
+    (_needs_live_browser); builtins (upwork/linkedin) are always live.
+    """
+    from urllib.parse import urlparse
+
+    url = (payload.get("url") or "").strip()
+    what = (payload.get("what_to_watch") or payload.get("what") or "").strip()
+    if not url or not what:
+        raise HTTPException(
+            status_code=400, detail="url and what_to_watch are required",
+        )
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        raise HTTPException(
+            status_code=400, detail="url must be a valid http(s) URL",
+        )
+
+    try:
+        interval_min = max(1, int(payload.get("check_interval_minutes") or 5))
+    except (TypeError, ValueError):
+        interval_min = 5
+    custom_js = (payload.get("custom_js") or "").strip() or None
+
+    # duration_hours: None -> indefinite, 0 -> one-shot, >0 -> expires
+    expires_at = None
+    one_shot = False
+    duration = payload.get("duration_hours")
+    if duration is not None:
+        try:
+            d = float(duration)
+        except (TypeError, ValueError):
+            d = -1.0
+        if d == 0:
+            one_shot = True
+        elif d > 0:
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(hours=d)
+            ).isoformat()
+
+    from lazyclaw.browser.watcher import build_watcher_context
+    from lazyclaw.heartbeat.orchestrator import create_job
+
+    context = build_watcher_context(
+        url=url,
+        custom_js=custom_js,
+        check_interval=interval_min * 60,
+        expires_at=expires_at,
+        one_shot=one_shot,
+    )
+    job_id = await create_job(
+        config=_config,
+        user_id=user.id,
+        name=f"Watch: {what}",
+        instruction=what,
+        job_type="watcher",
+        context=context,
+    )
+
+    # CDP routing: toggle ON -> poll this host through the user's
+    # signed-in Brave (passive). Builtins (upwork/linkedin) are always live.
+    live_browser = False
+    if bool(payload.get("use_my_browser")):
+        from lazyclaw.browser.browser_settings import add_live_host
+        try:
+            await add_live_host(_config, user.id, host)
+            live_browser = True
+        except ValueError:
+            pass
+    from lazyclaw.heartbeat.daemon import _needs_live_browser
+    if _needs_live_browser(host):
+        live_browser = True
+
+    return {
+        "id": job_id,
+        "status": "ok",
+        "host": host,
+        "live_browser": live_browser,
+        "check_interval_minutes": interval_min,
+    }
 
 
 @router.get("/summary")

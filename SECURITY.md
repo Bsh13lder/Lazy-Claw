@@ -1,7 +1,34 @@
-# Security Architecture
+# Security Policy & Architecture
 
 LazyClaw encrypts all user content at rest using AES-256-GCM with envelope encryption.
-This document explains the threat model, key hierarchy, and operational procedures.
+This document explains how to report a vulnerability, the threat model, key hierarchy, and operational procedures.
+
+> **Audit status:** LazyClaw has **not yet had a third-party security audit.** The cryptography is built entirely on well-established primitives (AES-256-GCM, PBKDF2-HMAC-SHA256) — no homemade schemes — and the full implementation is open source under `lazyclaw/crypto/`. Independent review is welcome and encouraged.
+
+---
+
+## Reporting a Vulnerability
+
+**Please do not open a public GitHub Issue for security vulnerabilities.**
+
+Instead, report privately via [GitHub Security Advisories](https://github.com/Bsh13lder/Lazy-Claw/security/advisories/new) (Security tab → "Report a vulnerability"). This keeps the details private until a fix ships.
+
+When reporting, please include:
+- A description of the vulnerability and its impact
+- Steps to reproduce (proof-of-concept if possible)
+- Affected version / commit
+- Any suggested remediation
+
+**What to expect:**
+- Acknowledgement of your report as soon as possible (best-effort — this is a solo-maintained project)
+- An assessment and, where valid, a fix on a priority basis
+- Credit in the release notes if you'd like it (or anonymity if you prefer)
+
+Because LazyClaw is encryption-first, reports touching the key hierarchy, KDF parameters, AAD binding, or the DEK cache are treated as highest priority.
+
+### Supported versions
+
+LazyClaw is in early beta and ships daily. Only the latest `main` is supported — please reproduce against current `main` before reporting.
 
 ---
 

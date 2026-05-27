@@ -678,6 +678,10 @@ _CRON_KEYWORDS = frozenset({
 
 _CRON_TOOL_NAMES = frozenset({
     "schedule_job", "list_jobs", "manage_job", "set_reminder",
+    # edit_job changes a cron's schedule / instruction / name (manage_job
+    # is pause/resume/delete only). Without it here, "edit my cron to run
+    # every 30 min" forces a search_tools round-trip to find the tool.
+    "edit_job",
 })
 
 # MCP management keywords → inject install_mcp_server + connect/list/etc.

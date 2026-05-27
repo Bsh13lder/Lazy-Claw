@@ -35,8 +35,16 @@ def test_manage_job_is_in_task_tool_names():
 
 def test_cron_tool_set_is_complete():
     assert _CRON_TOOL_NAMES == frozenset({
-        "schedule_job", "list_jobs", "manage_job", "set_reminder",
+        "schedule_job", "list_jobs", "manage_job", "set_reminder", "edit_job",
     })
+
+
+def test_edit_job_in_cron_tool_names():
+    """`edit_job` (changes a cron's schedule / instruction / name) must be
+    auto-injected on edit-a-cron intent — otherwise "edit my cron job to run
+    every 30 min" forces a search_tools round-trip, since manage_job only
+    does pause/resume/delete, not cron-expression edits."""
+    assert "edit_job" in _CRON_TOOL_NAMES
 
 
 def test_bare_jobs_word_does_not_match_survival():

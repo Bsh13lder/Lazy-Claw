@@ -1301,6 +1301,25 @@ export const updateWatcher = (id: string, body: {
     body: JSON.stringify(body),
   });
 
+export const createWatcher = (body: {
+  url: string;
+  what_to_watch: string;
+  check_interval_minutes?: number;
+  use_my_browser?: boolean;
+  duration_hours?: number | null;
+  custom_js?: string;
+}) =>
+  request<{
+    id: string;
+    status: string;
+    host: string;
+    live_browser: boolean;
+    check_interval_minutes: number;
+  }>("/api/watchers", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 export const deleteWatcher = (id: string) =>
   request<{ status: string }>(`/api/watchers/${id}`, { method: "DELETE" });
 

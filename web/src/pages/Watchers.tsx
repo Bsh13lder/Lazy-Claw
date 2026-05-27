@@ -77,6 +77,7 @@ export default function Watchers() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const { sendMessage, setChatOpen } = useChat();
 
   const reload = useCallback(async () => {
@@ -146,6 +147,12 @@ export default function Watchers() {
             <h1 className="text-lg font-semibold text-text-primary flex-1">
               Watchers
             </h1>
+            <button
+              onClick={() => setCreateOpen(true)}
+              className="text-xs px-2.5 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20"
+            >
+              + New watcher
+            </button>
             <button
               onClick={() => void reload()}
               disabled={loading}
@@ -274,11 +281,151 @@ export default function Watchers() {
         />
       )}
 
+      {createOpen && (
+        <NewWatcherModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={async (msg) => {
+            setCreateOpen(false);
+            await reload();
+            setToast(msg);
+          }}
+        />
+      )}
+
       {toast && (
         <div className="fixed bottom-4 right-4 text-xs bg-bg-secondary border border-border rounded px-3 py-2 shadow-lg text-text-primary">
           {toast}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── new watcher modal ──────────────────────────────────────────────────────
+
+const _BUILTIN_LIVE_HOSTS = ["upwork.com", "linkedin.com"];
+
+interface NewWatcherProps {
+  onClose: () => void;
+  onCreated: (msg: string) => void | Promise<void>;
+}
+
+function NewWatcherModal({ onClose, onCreated }: NewWatcherProps) {
+  const [url, setUrl] = useState("");
+  const [what, setWhat] = useState("");
+  const [intervalMinutes, setIntervalMinutes] = useState("5");
+  const [useMyBrowser, setUseMyBrowser] = useState(false);
+  const [touchedToggle, setTouchedToggle] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Auto-suggest "use my browser" for known login/Cloudflare hosts unless
+  // the user has manually toggled it.
+  const hostNeedsLogin = useMemo(() => {
+    try {
+      const h = new URL(url).host.replace(/^www\./, "");
+      return _BUILTIN_LIVE_HOSTS.some((b) => h === b || h.endsWith(`.${b}`));
+    } catch {
+      return false;
+    }
+  }, [url]);
+  const effectiveUseMyBrowser = touchedToggle ? useMyBrowser : hostNeedsLogin;
+
+  const submit = async () => {
+    setErr(null);
+    if (!url.trim() || !what.trim()) {
+      setErr("URL and what-to-watch are required.");
+      return;
+    }
+    let minutes = parseInt(intervalMinutes, 10);
+    if (!Number.isFinite(minutes) || minutes < 1) minutes = 5;
+    setBusy(true);
+    try {
+      const res = await api.createWatcher({
+        url: url.trim(),
+        what_to_watch: what.trim(),
+        check_interval_minutes: minutes,
+        use_my_browser: effectiveUseMyBrowser,
+      });
+      const via = res.live_browser ? "your signed-in browser" : "a fresh browser";
+      await onCreated(`Watching ${res.host} every ${minutes}m via ${via}.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-md bg-bg-secondary border border-border rounded-lg shadow-xl p-5 flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-text-primary flex-1">New watcher</h2>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary text-lg leading-none">×</button>
+        </div>
+
+        <label className="text-xs text-text-secondary flex flex-col gap-1">
+          URL
+          <input
+            type="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://example.com/page"
+            className="bg-bg-primary border border-border rounded px-2 py-1.5 text-sm text-text-primary"
+          />
+        </label>
+
+        <label className="text-xs text-text-secondary flex flex-col gap-1">
+          Watch for
+          <input
+            value={what}
+            onChange={(e) => setWhat(e.target.value)}
+            placeholder='e.g. "new reply" or "price drop"'
+            className="bg-bg-primary border border-border rounded px-2 py-1.5 text-sm text-text-primary"
+          />
+        </label>
+
+        <label className="text-xs text-text-secondary flex flex-col gap-1">
+          Check every (minutes)
+          <input
+            type="number"
+            min={1}
+            value={intervalMinutes}
+            onChange={(e) => setIntervalMinutes(e.target.value)}
+            className="bg-bg-primary border border-border rounded px-2 py-1.5 text-sm text-text-primary w-24"
+          />
+        </label>
+
+        <label className="flex items-start gap-2 text-xs text-text-secondary cursor-pointer mt-1">
+          <input
+            type="checkbox"
+            checked={effectiveUseMyBrowser}
+            onChange={(e) => { setTouchedToggle(true); setUseMyBrowser(e.target.checked); }}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="text-text-primary">This page needs my login</span> — check it
+            through my signed-in browser (CDP). Required for logged-in or
+            Cloudflare-protected pages; a fresh browser can't see those.
+            {hostNeedsLogin && !touchedToggle && (
+              <span className="text-emerald-400"> (auto-on for this host)</span>
+            )}
+          </span>
+        </label>
+
+        {err && <div className="text-xs text-rose-400">{err}</div>}
+
+        <div className="flex justify-end gap-2 mt-1">
+          <button onClick={onClose} className="text-xs px-3 py-1.5 rounded border border-border text-text-secondary hover:bg-bg-hover">Cancel</button>
+          <button
+            onClick={() => void submit()}
+            disabled={busy}
+            className="text-xs px-3 py-1.5 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
+          >
+            {busy ? "Creating…" : "Create watcher"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

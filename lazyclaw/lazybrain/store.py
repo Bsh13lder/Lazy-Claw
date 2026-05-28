@@ -626,7 +626,7 @@ async def get_note(config: Config, user_id: str, note_id: str) -> dict | None:
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, title, content, tags, importance, pinned, "
-            "trace_session_id, title_key, created_at, updated_at "
+            "trace_session_id, title_key, created_at, updated_at, memory_type "
             "FROM notes WHERE id = ? AND user_id = ?",
             (note_id, user_id),
         )
@@ -644,6 +644,7 @@ async def get_note(config: Config, user_id: str, note_id: str) -> dict | None:
         "title_key": row[7],
         "created_at": row[8],
         "updated_at": row[9],
+        "memory_type": row[10],
     }
 
 

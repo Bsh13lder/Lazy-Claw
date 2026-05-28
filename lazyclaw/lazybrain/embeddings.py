@@ -297,8 +297,13 @@ async def _vec_upsert(
     user_id: str,
     note_id: str,
     vec: list[float],
-) -> None:
+) -> bool:
     """Mirror ``vec`` into the vec0 table. Best-effort — never raises.
+
+    Returns True on success (including when vec0 is unavailable and we
+    skip gracefully), False when an exception is caught.  The bool lets
+    callers decide whether to invalidate the ``_VEC_WARMED`` guard so
+    the mirror re-warms on the next semantic_search.
 
     vec0 doesn't support ``ON CONFLICT`` / ``INSERT OR REPLACE``
     (UPSERT isn't implemented for virtual tables), so we DELETE-then-
@@ -308,7 +313,7 @@ async def _vec_upsert(
     try:
         async with db_session(config) as db:
             if not await _vec_available(config, db):
-                return
+                return True
             packed = _pack(vec)
             await db.execute(
                 "DELETE FROM vec_note_embeddings WHERE note_id = ?",
@@ -321,8 +326,10 @@ async def _vec_upsert(
                 (note_id, user_id, EMBED_MODEL, EMBED_DIM, packed),
             )
             await db.commit()
+        return True
     except Exception:
         logger.debug("vec0 upsert failed for %s", note_id, exc_info=True)
+        return False
 
 
 async def _vec_delete(config: Config, note_id: str) -> None:
@@ -829,7 +836,12 @@ async def upsert_embedding(
 
     # vec0 mirror writethrough — primary search backend when sqlite-vec
     # is available. No-op + best-effort when the extension didn't load.
-    await _vec_upsert(config, user_id, note_id, vec)
+    # Recovery: if the mirror write failed, evict the warm-guard key so
+    # _ensure_vec_mirror_warmed re-runs on the next semantic_search and
+    # back-fills the missing note once the transient error clears.
+    if not await _vec_upsert(config, user_id, note_id, vec):
+        from lazyclaw.db.connection import get_db_path
+        _VEC_WARMED.discard((str(get_db_path(config)), user_id))
 
     # Mark the note's embedding as fresh — clears the dirty flag set by
     # the content writer in store.py (best-effort; no-op if column missing).

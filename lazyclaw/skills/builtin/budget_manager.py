@@ -244,7 +244,12 @@ class AddExpenseSkill(BaseSkill):
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
-        from lazyclaw.budgets import resolver, settings as budget_settings, store
+        from lazyclaw.budgets import (
+            pending as budget_pending,
+            resolver,
+            settings as budget_settings,
+            store,
+        )
         from lazyclaw.tasks.store import list_tasks
 
         try:
@@ -272,9 +277,17 @@ class AddExpenseSkill(BaseSkill):
                     match_note = f" (matched _{res.reason}_ to **{res.resolved.name}**)"
             elif res.reason == "multi":
                 names = ", ".join(f"**{c.name}**" for c in res.candidates[:6])
+                budget_pending.set_pending(budget_pending.PendingExpenseChoice(
+                    user_id=user_id, amount=amount, currency=currency,
+                    description=description, vendor=vendor, spent_at=spent_at,
+                    task_name=task_name, kind="project",
+                    candidates=tuple((c.id, c.name) for c in res.candidates[:6]),
+                    project_id=None, project_name=None,
+                    token=budget_pending.new_token(),
+                ))
                 return (
                     f"⚠️ Multiple projects match `{project_query}`: {names}. "
-                    f"Reply with the exact project name to log "
+                    f"Tap one below or reply with the exact name to log "
                     f"{_fmt_money(amount, currency or 'EUR')}"
                     + (f" ({description})" if description else "")
                     + ". (No expense was logged.)"
@@ -314,11 +327,20 @@ class AddExpenseSkill(BaseSkill):
                 )
                 if recent else "(no projects yet — name one to create it)"
             )
+            if recent:
+                budget_pending.set_pending(budget_pending.PendingExpenseChoice(
+                    user_id=user_id, amount=amount, currency=currency,
+                    description=description, vendor=vendor, spent_at=spent_at,
+                    task_name=task_name, kind="project",
+                    candidates=tuple((p["id"], p["name"]) for p in recent),
+                    project_id=None, project_name=None,
+                    token=budget_pending.new_token(),
+                ))
             return (
                 f"Which project for {_fmt_money(amount, currency or 'EUR')}"
                 + (f" ({description})" if description else "")
                 + "?\n" + recent_list
-                + "\n\nReply with a project name. Tip: say "
+                + "\n\nTap one below or reply with a project name. Tip: say "
                 "_'set default <name>'_ once to skip this prompt next time."
             )
 
@@ -339,10 +361,18 @@ class AddExpenseSkill(BaseSkill):
                 task_note = f" → task **{tres.resolved.title}**"
             elif tres.reason == "multi":
                 names = ", ".join(f"**{c.title}**" for c in tres.candidates[:6])
+                budget_pending.set_pending(budget_pending.PendingExpenseChoice(
+                    user_id=user_id, amount=amount, currency=currency,
+                    description=description, vendor=vendor, spent_at=spent_at,
+                    task_name=task_name, kind="task",
+                    candidates=tuple((c.id, c.title) for c in tres.candidates[:6]),
+                    project_id=proj["id"], project_name=proj["name"],
+                    token=budget_pending.new_token(),
+                ))
                 return (
                     f"⚠️ Multiple tasks on **{proj['name']}** match "
-                    f"`{task_name}`: {names}. Reply with the exact task title "
-                    "(or omit it to log on the project itself)."
+                    f"`{task_name}`: {names}. Tap one below or reply with "
+                    "the exact title (or omit task_name to log on the project)."
                 )
             else:
                 # No task match — log on project, mention it.
@@ -358,6 +388,9 @@ class AddExpenseSkill(BaseSkill):
             description=description, vendor=vendor,
             task_id=task_id, spent_at=spent_at,
         )
+        # Resolved successfully — invalidate any older pending choice so a
+        # stale button tap can't fire a duplicate expense.
+        budget_pending.clear_pending(user_id)
         projects_after = await store.list_projects(self._config, user_id)
         current = next((p for p in projects_after if p["id"] == proj["id"]), None)
         cur = expense.get("currency")

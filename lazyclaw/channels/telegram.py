@@ -120,6 +120,39 @@ def _has_html_links(text: str) -> bool:
     return '<a href="' in text
 
 
+def _build_expense_keyboard(user_id: str) -> "InlineKeyboardMarkup | None":
+    """Return an inline keyboard for the user's pending expense-choice, or
+    None if there isn't one. Up to 6 candidate buttons (2 per row) + 📥 Inbox.
+    Empty when no pending state — caller passes None to reply_text so no
+    keyboard renders."""
+    try:
+        from lazyclaw.budgets.pending import get_pending
+    except Exception:
+        return None
+    pending = get_pending(user_id)
+    if pending is None or not pending.candidates:
+        return None
+
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for cid, label in pending.candidates[:6]:
+        # Telegram caps callback_data at 64 bytes. token (12) + uuid (36) +
+        # prefix (~14) = ~62 → fits with a small margin.
+        cb = f"expense:pick:{pending.token}:{cid}"
+        row.append(InlineKeyboardButton((label or "?")[:30], callback_data=cb))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    # Inbox option is always offered so a user can park an unrouted expense
+    # without polluting an existing project.
+    rows.append([InlineKeyboardButton(
+        "📥 Inbox", callback_data=f"expense:inbox:{pending.token}",
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
 def _prepare_html(text: str) -> str:
     """Escape HTML entities in text but preserve <a> tags for Telegram HTML mode."""
     # Extract <a> tags and replace with placeholders
@@ -973,6 +1006,14 @@ class TelegramAdapter(ChannelAdapter):
         self._app.add_handler(
             CallbackQueryHandler(
                 self._handle_progress_callback, pattern=r"^progress:",
+            )
+        )
+        # Expense-choice callbacks — buttons attached when add_expense had
+        # to ask back (multi-match project/task, or no-project + no-default).
+        # Format: "expense:pick:<token>:<id>" or "expense:inbox:<token>".
+        self._app.add_handler(
+            CallbackQueryHandler(
+                self._handle_expense_callback, pattern=r"^expense:",
             )
         )
 
@@ -1890,11 +1931,17 @@ class TelegramAdapter(ChannelAdapter):
 
             full_response = f"{response}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
 
+            # Expense-choice keyboard: when add_expense couldn't resolve a
+            # project/task unambiguously, it stashed candidates here. Attach
+            # the inline keyboard so the user can pick with one tap.
+            expense_markup = _build_expense_keyboard(user_id)
+
             # Split long messages (4096 char limit), footer on last chunk
             if len(full_response) <= 4096:
                 await _telegram_send_with_retry(
                     lambda: update.message.reply_text(
                         full_response, parse_mode=parse_mode,
+                        reply_markup=expense_markup,
                     )
                 )
             else:
@@ -1904,11 +1951,12 @@ class TelegramAdapter(ChannelAdapter):
                     resp_chunks.append(response[i : i + 4000])
                 for i, chunk in enumerate(resp_chunks):
                     if i == len(resp_chunks) - 1:
-                        # Last chunk gets footer
+                        # Last chunk gets footer + the expense keyboard (if any)
                         chunk_with_footer = f"{chunk}\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{footer}"
                         await _telegram_send_with_retry(
                             lambda c=chunk_with_footer: update.message.reply_text(
                                 c, parse_mode=parse_mode,
+                                reply_markup=expense_markup,
                             )
                         )
                     else:
@@ -1947,6 +1995,135 @@ class TelegramAdapter(ChannelAdapter):
                     self._server_dashboard.unregister_request(request_id)
             # else: fast dispatch — background task still running,
             # dashboard card stays visible until background_done/failed
+
+    async def _handle_expense_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle taps on expense-choice inline buttons.
+
+        Callback shapes:
+          ``expense:pick:<token>:<id>``  — id is project_id or task_id
+          ``expense:inbox:<token>``      — log to a managed Inbox project
+
+        The pending choice was stashed by ``add_expense`` when it couldn't
+        resolve unambiguously. We re-fire the expense with the chosen value
+        and clear the pending state. Stale tokens (cache expired, or a newer
+        capture replaced the entry) reply with a clear error.
+        """
+        from lazyclaw.budgets import pending as budget_pending
+        from lazyclaw.budgets import store as budget_store
+        from lazyclaw.tasks.store import get_task
+
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) < 3 or parts[0] != "expense":
+            return
+        action = parts[1]
+        token = parts[2]
+
+        # Resolve who the chat belongs to.
+        try:
+            chat_id = str(query.message.chat_id) if query.message else None
+            user_id = await resolve_user_id(self._config, chat_id=chat_id)
+        except Exception:
+            logger.warning("Expense callback user resolution failed", exc_info=True)
+            return
+
+        entry = budget_pending.get_pending(user_id)
+        if entry is None:
+            try:
+                await query.edit_message_text(
+                    "⚠️ This choice expired. Log the expense again."
+                )
+            except Exception:
+                pass
+            return
+        if entry.token != token:
+            try:
+                await query.edit_message_text(
+                    "⚠️ Newer expense capture replaced this prompt — pick on the latest one."
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            if action == "pick":
+                if len(parts) < 4:
+                    return
+                chosen_id = parts[3]
+                if entry.kind == "project":
+                    expense = await budget_store.create_expense(
+                        self._config, user_id, chosen_id,
+                        amount=entry.amount, currency=entry.currency,
+                        description=entry.description, vendor=entry.vendor,
+                        spent_at=entry.spent_at,
+                    )
+                    proj = await budget_store.get_project(
+                        self._config, user_id, chosen_id,
+                    )
+                    desc = f" ({entry.description})" if entry.description else ""
+                    name = proj["name"] if proj else "project"
+                    msg = (
+                        f"✅ Logged {entry.amount} {expense.get('currency')} "
+                        f"on {name}{desc}."
+                    )
+                elif entry.kind == "task":
+                    if not entry.project_id:
+                        await query.edit_message_text("⚠️ Lost the project context — log again.")
+                        return
+                    expense = await budget_store.create_expense(
+                        self._config, user_id, entry.project_id,
+                        amount=entry.amount, currency=entry.currency,
+                        description=entry.description, vendor=entry.vendor,
+                        spent_at=entry.spent_at, task_id=chosen_id,
+                    )
+                    task = await get_task(self._config, user_id, chosen_id)
+                    title = (task.get("title") if task else None) or "task"
+                    desc = f" ({entry.description})" if entry.description else ""
+                    msg = (
+                        f"✅ Logged {entry.amount} {expense.get('currency')} on "
+                        f"{entry.project_name} → {title}{desc}."
+                    )
+                else:
+                    msg = "⚠️ Unknown pending kind."
+            elif action == "inbox":
+                inbox = await budget_store.create_project(
+                    self._config, user_id, "Inbox",
+                )
+                expense = await budget_store.create_expense(
+                    self._config, user_id, inbox["id"],
+                    amount=entry.amount, currency=entry.currency,
+                    description=entry.description, vendor=entry.vendor,
+                    spent_at=entry.spent_at,
+                )
+                desc = f" ({entry.description})" if entry.description else ""
+                msg = (
+                    f"📥 Logged {entry.amount} {expense.get('currency')} to "
+                    f"Inbox{desc}. Move it later from the Web UI."
+                )
+            else:
+                return
+        except Exception as exc:
+            logger.warning(
+                "Expense callback failed (action=%s token=%s): %s",
+                action, token, exc, exc_info=True,
+            )
+            try:
+                await query.edit_message_text(f"⚠️ Couldn't log the expense: {exc}")
+            except Exception:
+                pass
+            return
+        finally:
+            budget_pending.clear_pending(user_id)
+
+        try:
+            await query.edit_message_text(_strip_markdown(msg))
+        except Exception:
+            logger.debug("Expense callback edit_message_text failed", exc_info=True)
 
     async def send_message(
         self, external_user_id: str, message: OutboundMessage,

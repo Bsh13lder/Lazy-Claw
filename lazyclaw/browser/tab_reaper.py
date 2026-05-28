@@ -330,6 +330,7 @@ async def refresh_white_screens(
     backend,
     *,
     max_checks: int = 8,
+    anchored_hosts: frozenset[str] | set[str] | None = None,
 ) -> int:
     """Scan up to ``max_checks`` tabs for white-screen state and reload
     any that match. Returns the number reloaded.
@@ -341,6 +342,15 @@ async def refresh_white_screens(
 
     The currently-active tab is checked LAST so we don't switch focus
     in the middle of a user action.
+
+    Tabs whose normalized host is in ``anchored_hosts`` are SKIPPED:
+    these are the user's signed-in, Cloudflare-protected watcher tabs
+    (upwork.com / linkedin.com / user live_hosts). A CF "Checking your
+    browser…" interstitial renders nearly blank and would trip the
+    white-screen heuristic — force-reloading it restarts the CF
+    challenge on the protected tab and can knock the watcher offline.
+    Mirrors the host normalization used by ``sweep_stale_tabs`` /
+    ``enforce_tab_cap``.
     """
     try:
         tabs = await backend.tabs()
@@ -348,9 +358,16 @@ async def refresh_white_screens(
         logger.debug("refresh_white_screens: tabs() failed", exc_info=True)
         return 0
 
-    # Active tab last; system tabs skipped entirely
+    anchored = anchored_hosts or frozenset()
+
+    # Active tab last; system tabs skipped entirely; anchored CF watcher
+    # tabs skipped (a CF interstitial looks blank — never reload it).
     ordered = sorted(
-        [t for t in tabs if not _is_pinned_url(getattr(t, "url", ""))],
+        [
+            t for t in tabs
+            if not _is_pinned_url(getattr(t, "url", ""))
+            and _normalize_host(getattr(t, "url", "")) not in anchored
+        ],
         key=lambda t: 1 if getattr(t, "active", False) else 0,
     )[:max_checks]
 
@@ -460,7 +477,9 @@ async def run_tab_health_cycle(
     )
     blanks_refreshed = 0
     if refresh_blanks:
-        blanks_refreshed = await refresh_white_screens(backend)
+        blanks_refreshed = await refresh_white_screens(
+            backend, anchored_hosts=anchored_hosts,
+        )
 
     return {
         "tabs_scanned": tabs_scanned,

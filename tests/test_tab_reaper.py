@@ -468,6 +468,80 @@ async def test_refresh_white_screens_skips_system_tabs():
 
 
 @pytest.mark.asyncio
+async def test_refresh_white_screens_skips_anchored_cf_tab():
+    """A blank-looking anchored CF watcher tab (upwork.com) must NOT be
+    reloaded — a Cloudflare interstitial renders nearly blank and a
+    reload would restart the challenge on the protected signed-in tab."""
+    backend = _FakeBackend(
+        [
+            _FakeTab(id="active", url="https://a.com", active=True),
+            _FakeTab(id="cf_watcher", url="https://www.upwork.com/ab/messages"),
+        ],
+        eval_results={
+            "cf_watcher": {"ready": True, "blank": True, "text_len": 0,
+                           "children": 1, "interactive": 0, "images": 0},
+        },
+    )
+    refreshed = await tab_reaper.refresh_white_screens(
+        backend, anchored_hosts=frozenset({"upwork.com"}),
+    )
+    assert refreshed == 0
+    assert backend.reloaded == 0
+    # The anchored tab must not even be switched-to for the check.
+    cf_switches = [s for s, _ in backend.switched if s == "cf_watcher"]
+    assert cf_switches == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_white_screens_still_reloads_non_anchored_blank():
+    """Anchored exemption is host-scoped — non-anchored blanks still reload."""
+    backend = _FakeBackend(
+        [
+            _FakeTab(id="active", url="https://a.com", active=True),
+            _FakeTab(id="cf_watcher", url="https://upwork.com/messages"),
+            _FakeTab(id="dead", url="https://random.com"),
+        ],
+        eval_results={
+            "cf_watcher": {"ready": True, "blank": True, "text_len": 0,
+                           "children": 0, "interactive": 0, "images": 0},
+            "dead": {"ready": True, "blank": True, "text_len": 0,
+                     "children": 0, "interactive": 0, "images": 0},
+        },
+    )
+    refreshed = await tab_reaper.refresh_white_screens(
+        backend, anchored_hosts=frozenset({"upwork.com"}),
+    )
+    # Only the non-anchored blank reloads; the anchored CF tab is spared.
+    assert refreshed == 1
+    assert backend.reloaded == 1
+
+
+@pytest.mark.asyncio
+async def test_run_tab_health_cycle_threads_anchored_to_refresh():
+    """End-to-end: anchored_urls reach refresh_white_screens so a blank
+    CF watcher tab survives the full health cycle."""
+    backend = _FakeBackend(
+        [
+            _FakeTab(id="active", url="https://a.com", active=True),
+            _FakeTab(id="cf_watcher", url="https://www.upwork.com/ab/messages"),
+        ],
+        eval_results={
+            "cf_watcher": {"ready": True, "blank": True, "text_len": 0,
+                           "children": 1, "interactive": 0, "images": 0},
+        },
+    )
+    # Keep cf_watcher off the idle/cap reapers too (recently observed).
+    tab_reaper.record_tab_observation(await backend.tabs())
+    summary = await tab_reaper.run_tab_health_cycle(
+        backend, idle_seconds=600.0, max_tabs=8,
+        anchored_urls=["https://www.upwork.com/ab/messages"],
+    )
+    assert summary["blanks_refreshed"] == 0
+    assert backend.reloaded == 0
+    assert "upwork.com" in summary["anchored_hosts"]
+
+
+@pytest.mark.asyncio
 async def test_refresh_white_screens_uses_focus_false():
     """Switching tabs for the check must NOT steal user focus."""
     backend = _FakeBackend([

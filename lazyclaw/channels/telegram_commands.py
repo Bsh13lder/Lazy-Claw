@@ -2543,6 +2543,13 @@ class TelegramCommands:
             return
         action, value = data.split(":", 1)
         chat_id = str(query.message.chat_id)
+        # Top-level authorization gate: destructive branches (wipe:confirm,
+        # nuke:all/messages/memories/logs/vault, rmadmin) act on the resolved
+        # user's encrypted data. Reject unauthorized chats before ANY branch.
+        # This is a superset guard; per-branch checks below stay in place.
+        if not self._is_allowed(chat_id):
+            logger.warning("Unauthorized Telegram callback from chat %s", chat_id)
+            return
         user_id = await self._resolve_user(chat_id)
 
         if action == "accept":

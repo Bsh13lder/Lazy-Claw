@@ -6,7 +6,7 @@ import ApprovalDialog from "./ApprovalDialog";
 import { useChat } from "../context/ChatContext";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "vault" | "settings";
+export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "sheets" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -31,6 +31,7 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   mcp: { label: "MCP", description: "Server integrations" },
   memory: { label: "Memory", description: "Personal facts & logs" },
   lazybrain: { label: "LazyBrain", description: "Encrypted Logseq-style PKM" },
+  sheets: { label: "Sheets", description: "Private encrypted spreadsheets — agent-editable" },
   vault: { label: "Vault", description: "Encrypted credentials" },
   settings: { label: "Settings", description: "Agent configuration" },
 };
@@ -86,6 +87,14 @@ const ICONS: Record<Page, NavIcon> = {
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
       <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z" />
       <path d="M12 16v-4M12 8h.01" />
+    </svg>
+  ),
+  sheets: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="1" />
+      <line x1="3" y1="9" x2="21" y2="9" />
+      <line x1="3" y1="15" x2="21" y2="15" />
+      <line x1="9" y1="3" x2="9" y2="21" />
     </svg>
   ),
   vault: (
@@ -153,7 +162,7 @@ const ICONS: Record<Page, NavIcon> = {
 // start on Home, work in your brain, run automations, configure tools, debug.
 const NAV_GROUPS: { label: string; items: Page[] }[] = [
   { label: "Home",       items: ["overview", "activity", "code-specialist", "chat", "tasks"] },
-  { label: "Knowledge",  items: ["lazybrain", "memory", "vault"] },
+  { label: "Knowledge",  items: ["lazybrain", "sheets", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
   { label: "Tools",      items: ["hub", "skills", "mcp"] },
   { label: "Debug",      items: ["replay", "audit"] },

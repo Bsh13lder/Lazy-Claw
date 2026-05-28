@@ -199,14 +199,85 @@ class UpworkLastConversationSkill(BaseSkill):
         return self._registry.get(suffix)
 
     async def _resolve_me_name(self, user_id: str) -> str | None:
-        """Pull display_name from the user's SkillsProfile. Best effort."""
+        """Resolve the user's own display name for ``is_mine`` tagging.
+
+        Two sources, in priority order (best effort throughout):
+
+          1. The stored ``SkillsProfile.display_name`` — the fast path,
+             set once by the user via the ``set_display_name`` NL skill.
+          2. **Fallback** — when the stored name is empty/None (user
+             never set it, or ``sync_upwork_profile`` silently failed),
+             pull the live name from the Upwork profile settings page via
+             the ``upwork_get_my_profile`` MCP tool. Without this, an
+             unset ``display_name`` yields ``me_name=None`` and the
+             MCP's class-hint fallback (documented as always-False on the
+             2026 layout) mis-tags EVERY one of the user's own bubbles as
+             the contact — the exact sender-confabulation class this
+             project fights.
+
+        When BOTH sources come up empty we emit a LOUD warning so the
+        unreliable attribution is diagnosable in logs.
+
+        This method is ``async`` and is awaited from ``execute`` (which is
+        itself ``async``), so calling the async MCP tool here is safe —
+        no event loop is created or nested.
+        """
+        # 1. Stored profile display_name (fast path).
         try:
             from lazyclaw.survival.profile import get_profile
             profile = await get_profile(self._config, user_id)
-            return getattr(profile, "display_name", None) or None
+            stored = getattr(profile, "display_name", None) or None
         except Exception:
             logger.debug("display_name lookup failed", exc_info=True)
+            stored = None
+        if stored:
+            return stored
+
+        # 2. Fallback: derive from the live Upwork profile. Best effort —
+        # any failure leaves us at None and falls through to the warning.
+        live = await self._resolve_me_name_from_live_profile(user_id)
+        if live:
+            logger.info(
+                "upwork_last_conversation: display_name unset — derived "
+                "me_name=%r from live Upwork profile (set_display_name to "
+                "make this deterministic)",
+                live,
+            )
+            return live
+
+        logger.warning(
+            "upwork_last_conversation: could NOT resolve me_name for user "
+            "%s (stored display_name empty AND live-profile fallback "
+            "missed) — sender attribution for this extraction is "
+            "UNRELIABLE; the MCP class-hint fallback mis-tags the user's "
+            "own messages as the contact. Run set_display_name or "
+            "sync_upwork_profile to fix.",
+            user_id,
+        )
+        return None
+
+    async def _resolve_me_name_from_live_profile(
+        self, user_id: str,
+    ) -> str | None:
+        """Best-effort live-profile name via ``upwork_get_my_profile``.
+
+        Returns the scraped profile ``name`` (the same source
+        ``sync_upwork_profile`` writes into ``display_name``) or None on
+        any failure / missing tool / blank name.
+        """
+        get_my_profile = self._find_tool("upwork_get_my_profile")
+        if get_my_profile is None:
             return None
+        try:
+            raw = await get_my_profile.execute(user_id, {})
+        except Exception:
+            logger.debug(
+                "upwork_get_my_profile fallback raised", exc_info=True,
+            )
+            return None
+        profile = _normalize_profile(raw)
+        name = (profile.get("name") or "").strip()
+        return name or None
 
     @staticmethod
     def _format_conversation(conv: dict, *, fallback_contact: str) -> str:
@@ -336,6 +407,25 @@ def _normalize_inbox(raw) -> list[dict]:
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
+
+
+def _normalize_profile(raw) -> dict:
+    """Coerce upwork_get_my_profile output into a dict.
+
+    The MCP returns either ``{name, title, ...}`` or a JSON string of
+    same. Defensive against both shapes, the ``{"result": {...}}``
+    envelope, and None — mirrors ``_normalize_conversation``.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(raw, dict) and "result" in raw and isinstance(raw["result"], dict):
+        raw = raw["result"]
+    if not isinstance(raw, dict):
+        return {}
+    return raw
 
 
 def _normalize_conversation(raw) -> dict:

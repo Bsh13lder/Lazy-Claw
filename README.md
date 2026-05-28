@@ -407,7 +407,7 @@ First-class MCP support — both client and server.
 |--------|---------|
 | `mcp-taskai` | Task intelligence — categorize, prioritize, detect duplicates |
 | `mcp-lazydoctor` | Self-healing — lint, typecheck, test, auto-fix |
-| `claude-code` | Persistent Claude Code MCP session (Opus 4.7, 1M context, $0 via subscription) — primary path for all code work |
+| `claude-code` | Persistent Claude Code MCP session (Opus 4.8, 1M context, $0 via subscription) — primary path for all code work |
 | `mcp-instagram` | Instagram DMs, feed, posting via private mobile API. No browser needed. |
 | `mcp-whatsapp` | WhatsApp messaging via web protocol (19 tools). QR auth, no API needed. |
 | `mcp-email` | Send/read/search email via SMTP+IMAP. Gmail, Outlook, any provider. |

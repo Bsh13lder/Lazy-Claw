@@ -89,3 +89,48 @@ async def push_telegram(
     except Exception as exc:
         logger.warning("push_telegram failed: %s", exc)
         return False
+
+
+async def push_telegram_document(
+    config: Any,
+    content: bytes,
+    filename: str,
+    *,
+    caption: str | None = None,
+) -> bool:
+    """Send a file to the admin Telegram chat as a document attachment.
+
+    Same best-effort contract as :func:`push_telegram`: returns ``True`` if the
+    send completed, ``False`` if Telegram isn't configured or any step failed.
+    Used by ``send_sheet`` to deliver an exported .xlsx/.csv to the user.
+    """
+    import io
+
+    token = getattr(config, "telegram_bot_token", None) if config else None
+    chat_id = os.environ.get("TELEGRAM_ADMIN_CHAT")
+    if not token or not chat_id:
+        logger.debug("push_telegram_document skipped: missing token or admin chat id")
+        return False
+    if not content:
+        return False
+
+    try:
+        from telegram import Bot  # type: ignore
+    except ImportError:
+        logger.debug("push_telegram_document skipped: telegram package not installed")
+        return False
+
+    try:
+        bot = Bot(token=token)
+        buf = io.BytesIO(content)
+        buf.name = filename
+        await bot.send_document(
+            chat_id=int(chat_id),
+            document=buf,
+            filename=filename,
+            caption=(caption or "")[:1024] or None,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("push_telegram_document failed: %s", exc)
+        return False

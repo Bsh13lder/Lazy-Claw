@@ -1046,6 +1046,8 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6": (3.00, 15.0),
     "claude-haiku-4-5-20251001": (1.00, 5.0),
     "claude-opus-4-6": (5.00, 25.0),
+    "claude-opus-4-7": (5.00, 25.0),
+    "claude-opus-4-8": (5.00, 25.0),
 }
 
 # EUR/USD exchange rate (approximate)

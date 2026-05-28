@@ -451,10 +451,17 @@ def detect_confabulation(
 
 # ─── raw-data injection helpers ──────────────────────────────────────────
 
-# Max chars of raw tool output to inject into the corrective prompt. Past
-# this the prompt grows unwieldy AND the model loses focus. 4000 chars is
-# ~4 long Upwork messages worth of conversation text.
-_RAW_INJECTION_TRUNCATE_CHARS: int = 4000
+# Max chars of raw tool output to inject into the corrective prompt.
+# This payload is ALWAYS a read-tool result (see _select_raw_payload's
+# _is_read_tool gate), so the F1 repair must re-inject the *whole*
+# conversation — a 4 KB cap here silently re-introduced the exact
+# 2026-05-24 truncation incident that the 50 KB channel-read result cap
+# (agent._MAX_TOOL_RESULT_CHARS_CHANNEL_READ) was added to fix: a 10.9 KB
+# Upwork conversation JSON got chopped to ~4 KB, the F1 retry only saw the
+# first 2-3 messages, and the brain re-confabulated "no new messages".
+# Matched to the channel-read cap (50000) so the repair sees what the
+# original read saw.
+_RAW_INJECTION_TRUNCATE_CHARS: int = 50000
 
 _TRUNCATE_SUFFIX: str = "\n...[truncated]"
 

@@ -17,6 +17,7 @@ from typing import Any
 
 from lazyclaw.config import Config
 from lazyclaw.lazybrain import store
+from lazyclaw.lazybrain.paraphrase_sanitizer import sanitize_recall_content
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,9 @@ async def topic_rollup(
     for n in corpus_notes:
         title = n.get("title") or "(untitled)"
         titles.append(title)
-        body = (n.get("content") or "").strip()
+        body = sanitize_recall_content(
+            n.get("content"), n.get("memory_type"), title=title
+        ).strip()
         body = body[:600] + ("…" if len(body) > 600 else "")
         excerpts.append(f"### [[{title}]]\n{body}")
     corpus = "\n\n".join(excerpts)

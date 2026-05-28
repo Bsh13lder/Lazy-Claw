@@ -681,6 +681,25 @@ CREATE INDEX IF NOT EXISTS idx_canvas_boards_user
 ON canvas_boards(user_id, updated_at);
 
 -- ────────────────────────────────────────────────────────────────────────
+-- Sheets: private encrypted spreadsheets (Univer web editor + agent edits)
+-- One encrypted JSON blob per sheet — `payload` is AES-256-GCM ciphertext
+-- (enc:v1) over the Univer `IWorkbookData` snapshot (cells, formulas, styles,
+-- multiple worksheets). Same granularity as canvas_boards: atomic restore,
+-- full UI fidelity, no fragile per-cell schema. Plaintext `name` is
+-- user-facing and used to list sheets in the sidebar. .xlsx is a *derived*
+-- export format, never the source of truth.
+CREATE TABLE IF NOT EXISTS sheets (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sheets_user
+ON sheets(user_id, updated_at);
+
+-- ────────────────────────────────────────────────────────────────────────
 -- LazyBrain: graph node positions (Phase 19.1)
 -- Remembers where each note sat in the graph view so the layout survives
 -- reloads and follows the user across devices. Positions are plaintext

@@ -72,6 +72,18 @@ dependencies = [
     # the brute-force path with identical recall quality. Base dep
     # (default-on per feedback_optional_extras_for_core_features).
     "sqlite-vec>=0.1.9",
+    # Sheets feature — read/write .xlsx server-side (the Univer web editor's
+    # xlsx import/export is Pro-gated, so we convert snapshot⇄xlsx in Python
+    # instead). openpyxl (MIT) writes+re-edits and preserves formulas as
+    # text; python-calamine (MIT) is the fast read path; xlcalculator (MIT)
+    # evaluates formulas server-side for cells the agent edits without a
+    # browser recalc pass. All permissively licensed — deliberately NOT
+    # HyperFormula/Handsontable (GPL/commercial) or `formulas`/`pycel`
+    # (EUPL/GPL). Base deps (default-on per
+    # feedback_optional_extras_for_core_features).
+    "openpyxl>=3.1.0",
+    "python-calamine>=0.2.3",
+    "xlcalculator>=0.5.0",
 ]
 
 [project.optional-dependencies]

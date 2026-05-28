@@ -222,6 +222,20 @@ class SkillRegistry:
         self.register(AddRecurringExpenseSkill(config=config))
         self.register(SetDefaultExpenseProjectSkill(config=config))
 
+        # Sheets — private encrypted spreadsheets (Univer web editor +
+        # agent-editable). Same local-encrypted-store profile as budgets/tasks.
+        from lazyclaw.skills.builtin.sheets import (
+            CreateSheetSkill, ListSheetsSkill, ReadSheetSkill,
+            RecalcSheetSkill, SendSheetSkill, SetCellsSkill, SetFormulaSkill,
+        )
+        self.register(CreateSheetSkill(config=config))
+        self.register(ListSheetsSkill(config=config))
+        self.register(ReadSheetSkill(config=config))
+        self.register(SetCellsSkill(config=config))
+        self.register(SetFormulaSkill(config=config))
+        self.register(RecalcSheetSkill(config=config))
+        self.register(SendSheetSkill(config=config))
+
         # Progress tracking — pulse check-ins via templates (Tier 2 of
         # the progress-tracking system). Templates store
         # questions + buttons + cadence; the heartbeat fires them on

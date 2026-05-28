@@ -41,45 +41,17 @@ from lazyclaw.llm.providers.base import (
     StreamChunk,
     ToolCall,
 )
+from lazyclaw.llm.providers._disallowed_builtins import DISALLOWED_BUILT_INS
 
 logger = logging.getLogger(__name__)
 
 
 # Built-in Claude Code tools and MCP defaults that must always be blocked.
-# `strict_mcp_config=True` locks external MCPs out, but Claude Code's
-# *native* tool list is a separate Anthropic surface — it has to be
-# enumerated here. Tools observed leaking past strict_mcp_config in live
-# logs on 2026-05-14: `Skill`, `run_command` (with `RunCommand` camel
-# variant added defensively). When Sonnet/Opus emits one of these,
-# lazyclaw's runtime drops it as a hallucinated tool — wasted slot in
-# the batch + a confused brain.
-_DISALLOWED_BUILT_INS = [
-    "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-    "WebSearch", "WebFetch", "Task", "Agent",
-    "TodoWrite", "NotebookEdit", "BashOutput", "KillShell",
-    "ToolSearch",
-    # Added 2026-05-14 after live leak observations:
-    "Skill",                 # Claude Code's skill-runner — clashes with lazyclaw's `search_tools`
-    "run_command", "RunCommand",  # Claude Code's bash equivalent
-    "SlashCommand",          # Claude Code's slash-command invoker
-    "Skills",                # Plural variant occasionally emitted
-    # Added 2026-05-26 after the WhatsApp "I don't have those tools" incident:
-    # on a no-lazyclaw-tools turn (e.g. a bare "yes") the SDK fell back to
-    # its interactive built-in preset and emitted `AskUserQuestion`; the
-    # brain then modelled its own toolset as "scheduling, planning,
-    # monitoring, worktree management" — exactly these built-ins — and
-    # confabulated that it couldn't reach the (actually-present) whatsapp
-    # MCP tools. `disallowed_tools` is the real lever (it's always applied;
-    # `allowed_tools` only governs auto-approval, which bypassPermissions
-    # already moots), so name every leak-prone built-in here.
-    "AskUserQuestion",       # interactive prompt — lazyclaw owns user Q&A
-    "EnterPlanMode", "ExitPlanMode",          # "planning"
-    "Monitor",                                # "monitoring"
-    "EnterWorktree", "ExitWorktree",          # "worktree management"
-    "CronCreate", "CronList", "CronDelete",   # "scheduling" (use schedule_job)
-    "ScheduleWakeup", "RemoteTrigger", "PushNotification",
-    "ListMcpResourcesTool", "ReadMcpResourceTool", "LSP",
-]
+# Single source of truth lives in `_disallowed_builtins.py` so the SDK and
+# legacy CLI transports can never drift apart again. See that module for
+# the full rationale + incident history. Local alias keeps existing
+# references (`_DISALLOWED_BUILT_INS`) unchanged.
+_DISALLOWED_BUILT_INS = DISALLOWED_BUILT_INS
 
 # MCP tool name pattern from lazyclaw's registry: `mcp_<uuid>_<tool_name>`.
 # We strip the UUID prefix when registering with the SDK (cleaner names +

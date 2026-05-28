@@ -30,7 +30,10 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     # Anthropic — https://docs.anthropic.com/en/docs/about-claude/pricing
     "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
     "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
+    # Opus dropped to $5/$25 per M at the 4.5 generation (was $15/$75).
     "claude-opus-4-6": {"input": 0.005, "output": 0.025},
+    "claude-opus-4-7": {"input": 0.005, "output": 0.025},
+    "claude-opus-4-8": {"input": 0.005, "output": 0.025},
     # Claude Code CLI — subscription, no per-token cost
     "claude-cli": {"input": 0.0, "output": 0.0},
     "claude-cli (sonnet)": {"input": 0.0, "output": 0.0},
@@ -71,6 +74,10 @@ _ANTHROPIC_MODEL_MAP = {
     "claude-4-5-haiku": "claude-haiku-4-5-20251001",
     "claude-opus-4-6": "claude-opus-4-6",
     "claude-4-6-opus": "claude-opus-4-6",
+    "claude-opus-4-7": "claude-opus-4-7",
+    "claude-4-7-opus": "claude-opus-4-7",
+    "claude-opus-4-8": "claude-opus-4-8",
+    "claude-4-8-opus": "claude-opus-4-8",
 }
 
 _OPENAI_MODEL_MAP = {

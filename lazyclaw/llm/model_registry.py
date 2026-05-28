@@ -223,8 +223,35 @@ MODEL_CATALOG: dict[str, ModelProfile] = {
         provider="anthropic",
         is_local=False,
         ram_mb=0,
-        cost_input=15.0,      # $15/M input
-        cost_output=75.0,     # $75/M output
+        # $5/$25 per M — Opus dropped from $15/$75 at the 4.5 generation (anthropic.com/news/claude-opus-4-8)
+        cost_input=5.0,       # $5/M input
+        cost_output=25.0,     # $25/M output
+        icon="\U0001f48e",    # 💎
+        max_context=200000,
+        tool_calling=True,
+        role="fallback",
+    ),
+    "claude-opus-4-7": ModelProfile(
+        name="claude-opus-4-7",
+        display_name="Opus 4.7",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=5.0,       # $5/M input
+        cost_output=25.0,     # $25/M output
+        icon="\U0001f48e",    # 💎
+        max_context=200000,
+        tool_calling=True,
+        role="fallback",
+    ),
+    "claude-opus-4-8": ModelProfile(
+        name="claude-opus-4-8",
+        display_name="Opus 4.8",
+        provider="anthropic",
+        is_local=False,
+        ram_mb=0,
+        cost_input=5.0,       # $5/M input
+        cost_output=25.0,     # $25/M output
         icon="\U0001f48e",    # 💎
         max_context=200000,
         tool_calling=True,

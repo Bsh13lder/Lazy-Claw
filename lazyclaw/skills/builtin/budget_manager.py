@@ -348,9 +348,11 @@ class AddExpenseSkill(BaseSkill):
         task_id: str | None = None
         task_note = ""
         if task_name:
-            # Pull this user's open tasks, filter to ones whose decrypted
-            # category casefolds to the project's name_key.
-            all_tasks = await list_tasks(self._config, user_id, owner="all")
+            # Pull this user's tasks, filter to ones whose decrypted category
+            # casefolds to the project's name_key. owner=None means "all
+            # owners" — list_tasks treats a literal "all" as an owner value
+            # and matches nothing, so task attachment silently never worked.
+            all_tasks = await list_tasks(self._config, user_id)
             project_tasks = [
                 t for t in all_tasks
                 if (t.get("category") or "").strip().lower() == proj["name_key"]
@@ -374,10 +376,38 @@ class AddExpenseSkill(BaseSkill):
                     f"`{task_name}`: {names}. Tap one below or reply with "
                     "the exact title (or omit task_name to log on the project)."
                 )
+            elif any(t.get("id") and t.get("title") for t in project_tasks):
+                # Task name given but nothing matched, yet the project HAS
+                # tasks — ASK which one (don't silently drop the attachment or
+                # guess). Offer the project's tasks as candidates; the Telegram
+                # layer renders them as tap-buttons + an "on the project (no
+                # task)" escape. No expense is logged until the user picks.
+                cands = tuple(
+                    (t["id"], t["title"])
+                    for t in project_tasks
+                    if t.get("id") and t.get("title")
+                )[:6]
+                names = ", ".join(f"**{title}**" for _id, title in cands)
+                budget_pending.set_pending(budget_pending.PendingExpenseChoice(
+                    user_id=user_id, amount=amount, currency=currency,
+                    description=description, vendor=vendor, spent_at=spent_at,
+                    task_name=task_name, kind="task",
+                    candidates=cands,
+                    project_id=proj["id"], project_name=proj["name"],
+                    token=budget_pending.new_token(),
+                ))
+                more = "" if len(project_tasks) <= 6 else f" (+{len(project_tasks) - 6} more)"
+                return (
+                    f"⚠️ No task on **{proj['name']}** matches `{task_name}`. "
+                    f"Which one? {names}{more}. Tap a button below, reply with "
+                    f"the exact title, or say 'on the project' to log "
+                    f"{_fmt_money(amount, currency or 'EUR')} on **{proj['name']}** "
+                    "itself. (No expense logged yet.)"
+                )
             else:
-                # No task match — log on project, mention it.
+                # Project has no tasks at all — nothing to attach to.
                 task_note = (
-                    f" (no task matched `{task_name}` on **{proj['name']}** — "
+                    f" (no tasks on **{proj['name']}** yet — "
                     "logged on the project itself)"
                 )
 

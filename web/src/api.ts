@@ -1878,3 +1878,50 @@ export const deleteLazyBrainCanvas = (id: string) =>
     `/api/lazybrain/canvas/${encodeURIComponent(id)}`,
     { method: "DELETE" },
   );
+
+// ── Sheets — private encrypted spreadsheets (Univer editor) ─────────────
+
+export interface SheetMeta {
+  id: string;
+  name: string;
+  created_at?: string;
+  updated_at: string;
+}
+
+// Univer IWorkbookData snapshot — opaque to LazyClaw, owned by the editor.
+// We persist it verbatim (encrypted) and hand it back on load.
+export type UniverSnapshot = Record<string, unknown>;
+
+export interface SheetDoc extends SheetMeta {
+  payload: UniverSnapshot;
+}
+
+export const listSheets = () =>
+  request<{ sheets: SheetMeta[]; count: number }>("/api/sheets").then(
+    (r) => r.sheets,
+  );
+
+export const getSheet = (id: string) =>
+  request<SheetDoc>(`/api/sheets/${encodeURIComponent(id)}`);
+
+export const createSheet = (name: string) =>
+  request<{ sheet: SheetMeta }>("/api/sheets", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  }).then((r) => r.sheet);
+
+export const saveSheet = (id: string, name: string, payload: UniverSnapshot) =>
+  request<{ sheet: SheetMeta }>(`/api/sheets/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ name, payload }),
+  }).then((r) => r.sheet);
+
+export const deleteSheet = (id: string) =>
+  request<{ status: string; id: string }>(
+    `/api/sheets/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+
+// Download URL for the server-side xlsx/csv export (Phase 3 endpoint).
+export const sheetExportUrl = (id: string, format: "xlsx" | "csv" = "xlsx") =>
+  `/api/sheets/${encodeURIComponent(id)}/export?format=${format}`;

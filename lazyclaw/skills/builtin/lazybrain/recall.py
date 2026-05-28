@@ -58,6 +58,11 @@ class GetNoteSkill(BaseSkill):
             self._config, user_id, note["title_key"] or note_id
         )
         tags = " ".join(f"#{t}" for t in note.get("tags") or []) or "(no tags)"
+        body = sanitize_recall_content(
+            note["content"],
+            note.get("memory_type"),
+            title=note.get("title"),
+        )
         return (
             f"📝 {note['title'] or '(untitled)'}\n"
             f"ID: {note['id']}\n"
@@ -65,7 +70,7 @@ class GetNoteSkill(BaseSkill):
             f"Importance: {note.get('importance', 5)}/10"
             f"{' · 📌 pinned' if note.get('pinned') else ''}\n"
             f"Backlinks: {len(backlinks)}\n\n"
-            f"{note['content']}"
+            f"{body}"
         )
 
 

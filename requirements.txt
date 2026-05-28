@@ -33,3 +33,9 @@ claude-agent-sdk>=0.1.81
 # from pyproject.toml so Docker layer-cache picks it up before pip
 # install -e. Graceful fallback when extension can't load.
 sqlite-vec>=0.1.9
+# Sheets feature — server-side .xlsx read/write + formula eval. Mirrored
+# from pyproject.toml so the Docker layer-cache pre-fetches the wheels
+# before `pip install -e .`. All MIT-licensed.
+openpyxl>=3.1.0
+python-calamine>=0.2.3
+xlcalculator>=0.5.0

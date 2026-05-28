@@ -145,11 +145,21 @@ def _build_expense_keyboard(user_id: str) -> "InlineKeyboardMarkup | None":
             row = []
     if row:
         rows.append(row)
-    # Inbox option is always offered so a user can park an unrouted expense
-    # without polluting an existing project.
-    rows.append([InlineKeyboardButton(
-        "📥 Inbox", callback_data=f"expense:inbox:{pending.token}",
-    )])
+    # Escape-hatch bottom button. For a task-clarification (kind="task") the
+    # project is already known, so offer "on the project, no task" — tapping
+    # Inbox here would wrongly yank the expense into a separate Inbox project.
+    # For a project-clarification, offer the Inbox parking spot so the user
+    # can stash an unrouted expense without polluting an existing project.
+    if pending.kind == "task" and pending.project_id:
+        proj_label = (pending.project_name or "project")[:24]
+        rows.append([InlineKeyboardButton(
+            f"📌 On {proj_label} (no task)",
+            callback_data=f"expense:projonly:{pending.token}",
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "📥 Inbox", callback_data=f"expense:inbox:{pending.token}",
+        )])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1078,6 +1088,11 @@ class TelegramAdapter(ChannelAdapter):
             await query.edit_message_text("\u26a0\ufe0f Could not identify you.")
             return
 
+        # Security: only authorized chats may approve/reject plans.
+        if cb_chat_id is None or not self._is_allowed(cb_chat_id):
+            logger.warning("Unauthorized plan callback from chat %s", cb_chat_id)
+            return
+
         from lazyclaw.runtime import plan_checkpoint
 
         if action == "approve":
@@ -1127,6 +1142,7 @@ class TelegramAdapter(ChannelAdapter):
         from datetime import datetime as _dt
         from datetime import time as _time
         from datetime import timedelta as _td
+        from datetime import timezone
 
         from lazyclaw.tasks.store import (
             complete_task, get_task, update_task,
@@ -1148,6 +1164,11 @@ class TelegramAdapter(ChannelAdapter):
             lc_user_id = await resolve_user_id(self._config, chat_id=cb_chat_id)
         except Exception:
             logger.warning("Task callback user resolution failed", exc_info=True)
+            return
+
+        # Security: only authorized chats may mutate tasks.
+        if cb_chat_id is None or not self._is_allowed(cb_chat_id):
+            logger.warning("Unauthorized task callback from chat %s", cb_chat_id)
             return
 
         # Tasks may belong to a different user_id than the chat's resolved
@@ -1246,6 +1267,11 @@ class TelegramAdapter(ChannelAdapter):
             owner_id = await get_task_owner(self._config, task_id) or chat_user_id
         except Exception:
             logger.warning("progress callback user resolution failed", exc_info=True)
+            return
+
+        # Security: only authorized chats may record progress / complete tasks.
+        if cb_chat_id is None or not self._is_allowed(cb_chat_id):
+            logger.warning("Unauthorized progress callback from chat %s", cb_chat_id)
             return
 
         try:
@@ -2004,6 +2030,7 @@ class TelegramAdapter(ChannelAdapter):
         Callback shapes:
           ``expense:pick:<token>:<id>``  — id is project_id or task_id
           ``expense:inbox:<token>``      — log to a managed Inbox project
+          ``expense:projonly:<token>``   — log on the known project, no task
 
         The pending choice was stashed by ``add_expense`` when it couldn't
         resolve unambiguously. We re-fire the expense with the chosen value
@@ -2030,6 +2057,11 @@ class TelegramAdapter(ChannelAdapter):
             user_id = await resolve_user_id(self._config, chat_id=chat_id)
         except Exception:
             logger.warning("Expense callback user resolution failed", exc_info=True)
+            return
+
+        # Security: only authorized chats may log expenses.
+        if chat_id is None or not self._is_allowed(chat_id):
+            logger.warning("Unauthorized expense callback from chat %s", chat_id)
             return
 
         entry = budget_pending.get_pending(user_id)
@@ -2104,6 +2136,23 @@ class TelegramAdapter(ChannelAdapter):
                 msg = (
                     f"📥 Logged {entry.amount} {expense.get('currency')} to "
                     f"Inbox{desc}. Move it later from the Web UI."
+                )
+            elif action == "projonly":
+                # Task-clarification escape: log on the already-known project
+                # with no task attached.
+                if not entry.project_id:
+                    await query.edit_message_text("⚠️ Lost the project context — log again.")
+                    return
+                expense = await budget_store.create_expense(
+                    self._config, user_id, entry.project_id,
+                    amount=entry.amount, currency=entry.currency,
+                    description=entry.description, vendor=entry.vendor,
+                    spent_at=entry.spent_at,
+                )
+                desc = f" ({entry.description})" if entry.description else ""
+                msg = (
+                    f"✅ Logged {entry.amount} {expense.get('currency')} on "
+                    f"{entry.project_name}{desc} (no task)."
                 )
             else:
                 return

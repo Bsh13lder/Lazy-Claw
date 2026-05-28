@@ -31,6 +31,7 @@ from lazyclaw.llm.providers.base import (
     StreamChunk,
     ToolCall,
 )
+from lazyclaw.llm.providers._disallowed_builtins import DISALLOWED_BUILT_INS
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,13 @@ _WARM_EXPIRE_S = 60  # Kill warm process if unused after 60s
 # has globally (Canva, Gmail, Google Drive, Calendar, WebSearch, etc.).
 # Without this list Sonnet will use its own WebSearch / WebFetch and
 # put the answer in `content`, bypassing our agent loop entirely.
-_DISALLOWED_BUILT_INS = [
-    "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-    "WebSearch", "WebFetch", "Task", "Agent",
-    "TodoWrite", "NotebookEdit", "BashOutput", "KillShell",
-]
+#
+# Single source of truth lives in `_disallowed_builtins.py` and is shared
+# with the SDK transport so the two block-lists can never drift again
+# (the CLI list previously lagged behind the SDK's AskUserQuestion / Cron
+# / Plan / Monitor / Worktree hardening). Local alias keeps existing
+# references unchanged.
+_DISALLOWED_BUILT_INS = DISALLOWED_BUILT_INS
 _TOOL_CALL_PATTERN = re.compile(
     r"\[TOOL_CALL\](.*?)\[/TOOL_CALL\]",
     re.DOTALL,

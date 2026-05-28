@@ -11,6 +11,7 @@ was False → AUTO-PROMOTE fired → background task → verbose Telegram push
 
 from __future__ import annotations
 
+from lazyclaw.runtime import result_verifier as _rv
 from lazyclaw.runtime.agent import (
     _CHANNEL_READ_TOOL_NAME_PATTERNS,
     _is_channel_read_tool_name,
@@ -43,3 +44,46 @@ def test_instagram_notifications_recognized() -> None:
 def test_patterns_include_channel_listings() -> None:
     assert "whatsapp_list_chats" in _CHANNEL_READ_TOOL_NAME_PATTERNS
     assert "instagram_get_notifications" in _CHANNEL_READ_TOOL_NAME_PATTERNS
+
+
+# ── classify() must be SKIPPED for channel reads ──────────────────────────
+# result_verifier's failure-marker regexes (e.g. "timed out",
+# "not authorized") match the *quoted human message* inside a conversation
+# JSON and falsely stamp it `→ FAILED:`. agent.py guards the classify()
+# call with _is_channel_read_tool_name so a quoted human message is never
+# mistaken for a tool failure. These tests pin both halves of that guard.
+
+_CHANNEL_READ_WITH_FAILURE_WORDS = (
+    '[{"sender":"James","content":"The accept bot timed out '
+    'last night, can you fix it?"}]'
+)
+
+
+def test_classify_would_falsely_fail_channel_read_without_guard() -> None:
+    # Proves the danger: classify() on its own DOES flag a quoted human
+    # "timed out" as a failure — which is exactly why the call site must
+    # skip it for channel reads.
+    status, reason = _rv.classify(
+        "upwork_get_conversation", _CHANNEL_READ_WITH_FAILURE_WORDS,
+    )
+    assert status == "failed"
+    assert reason == "timeout"
+
+
+def test_channel_read_tool_is_gated_so_classify_is_skipped() -> None:
+    # The guard the agent uses: when this returns True, classify() is
+    # never called, so the quoted human message can't be stamped FAILED.
+    assert _is_channel_read_tool_name("upwork_get_conversation")
+    assert _is_channel_read_tool_name(
+        "mcp_x_whatsapp_read"
+    )
+
+
+def test_non_channel_tool_still_classified_as_failed() -> None:
+    # Non-channel tools are NOT gated, so genuine failures still get
+    # stamped — the fix must not blanket-disable classify().
+    assert not _is_channel_read_tool_name("run_command")
+    status, reason = _rv.classify(
+        "run_command", "Error: the request timed out",
+    )
+    assert status == "failed"

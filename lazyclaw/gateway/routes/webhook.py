@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -59,14 +60,28 @@ async def _verify_secret(request: Request) -> None:
             logger.warning("Failed to retrieve webhook secret from vault", exc_info=True)
 
     if not expected:
-        # No secret configured = open (local Docker network only)
-        return
+        # SECURITY: fail closed. With no secret configured the webhook would
+        # otherwise accept unauthenticated requests and run them through the
+        # agent as the default user. Refuse instead of silently allowing.
+        logger.warning(
+            "Webhook rejected: no secret configured. Set the WEBHOOK_SECRET "
+            "env var (or store a 'webhook_secret' credential in the vault for "
+            "the default user) to enable the webhook endpoint.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Webhook disabled: no secret configured. Set WEBHOOK_SECRET "
+                "(or a vault 'webhook_secret' credential) to enable it."
+            ),
+        )
 
     provided = (
         request.headers.get("X-Webhook-Secret", "")
         or request.query_params.get("secret", "")
     )
-    if provided != expected:
+    # Constant-time comparison to avoid leaking the secret via timing.
+    if not secrets.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 

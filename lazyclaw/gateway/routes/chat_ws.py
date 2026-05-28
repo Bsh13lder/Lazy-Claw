@@ -460,9 +460,59 @@ class WebSocketCallback:
         return "skip"
 
 
+def _allowed_origins() -> set[str]:
+    """Return the configured allowed WS origins.
+
+    Sourced from the same gateway ``cors_origin`` config the CORS
+    middleware uses (``lazyclaw/gateway/app.py`` passes
+    ``[_config.cors_origin]`` to ``CORSMiddleware``). Supports a
+    comma-separated list so multi-origin deployments work, and trims a
+    trailing slash so ``http://host/`` matches the browser-sent
+    ``http://host`` Origin.
+    """
+    raw = getattr(_config, "cors_origin", "") or ""
+    return {
+        o.strip().rstrip("/")
+        for o in raw.split(",")
+        if o.strip()
+    }
+
+
+def _origin_allowed(ws: WebSocket) -> bool:
+    """Validate the WS handshake ``Origin`` header (CSWSH defense).
+
+    The session cookie is ``samesite=lax``, which does NOT block
+    cross-site WebSocket handshakes, so a malicious page could open a
+    WS with the victim's cookie. We mitigate by checking ``Origin``:
+
+    - Origin ABSENT  → ALLOW. Native / non-browser clients (CLI, mobile,
+      tests) legitimately omit it; rejecting would break them. Browsers
+      always send Origin on cross-origin WS, so an absent Origin is not
+      an attacker vector here.
+    - Origin PRESENT and matches a configured origin → ALLOW.
+    - Origin PRESENT and does NOT match → REJECT.
+    """
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True
+    return origin.rstrip("/") in _allowed_origins()
+
+
 async def _authenticate_ws(ws: WebSocket):
-    """Authenticate WebSocket via session cookie."""
+    """Authenticate WebSocket via session cookie + Origin check.
+
+    Returns ``None`` when the handshake should be refused — either the
+    Origin failed the CSWSH check or the session cookie was missing /
+    invalid.
+    """
     from lazyclaw.gateway.auth import get_session_user
+
+    if not _origin_allowed(ws):
+        logger.warning(
+            "WebSocket chat rejected: disallowed Origin %r",
+            ws.headers.get("origin"),
+        )
+        return None
 
     session_id = ws.cookies.get("session_id")
     if not session_id:
@@ -513,6 +563,16 @@ async def _run_agent_turn(
 
 @ws_chat_router.websocket("/ws/chat")
 async def chat_websocket(ws: WebSocket):
+    # CSWSH defense — reject a cross-site handshake before touching the
+    # session cookie. 1008 = policy violation.
+    if not _origin_allowed(ws):
+        logger.warning(
+            "WebSocket chat rejected: disallowed Origin %r",
+            ws.headers.get("origin"),
+        )
+        await ws.close(code=1008, reason="Origin not allowed")
+        return
+
     user = await _authenticate_ws(ws)
     if not user:
         await ws.close(code=4001, reason="Unauthorized")

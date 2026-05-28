@@ -305,6 +305,85 @@ async def test_accept_existing_template_sets_active(tmp_config):
     assert "fieldnation_com_accept" in args[0]
 
 
+# ── _handle_callback top-level auth gate (destructive branches) ──────
+
+
+def _patch_db_spy(monkeypatch):
+    """Patch telegram_commands.db_session so we can assert no DELETE runs.
+
+    Returns the list that captures every SQL string passed to db.execute.
+    The destructive branches import db_session lazily from
+    lazyclaw.db.connection, so we patch it at the source module.
+    """
+    from lazyclaw.db import connection as conn_mod
+
+    executed: list[str] = []
+
+    class _FakeDB:
+        async def execute(self, sql, *args, **kwargs):
+            executed.append(sql)
+            return MagicMock()
+
+        async def commit(self):
+            pass
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return _FakeDB()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(conn_mod, "db_session", lambda cfg: _FakeCtx())
+    return executed
+
+
+@pytest.mark.asyncio
+async def test_nuke_all_unauthorized_chat_no_deletion(tmp_config, monkeypatch):
+    """An unauthorized chat firing nuke:all must NOT delete anything."""
+    executed = _patch_db_spy(monkeypatch)
+    handler = _make_commands_handler(tmp_config, allowed_chat="999")
+    update = MagicMock()
+    update.callback_query = _make_query("nuke:all", chat_id="100")
+
+    await handler._handle_callback(update, MagicMock())
+
+    # Gate fired before the branch: no SQL, no edit, no resolve.
+    assert executed == []
+    assert not any("DELETE" in s.upper() for s in executed)
+    update.callback_query.edit_message_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wipe_confirm_unauthorized_chat_no_deletion(tmp_config, monkeypatch):
+    """An unauthorized chat firing wipe:confirm must NOT clear history."""
+    executed = _patch_db_spy(monkeypatch)
+    handler = _make_commands_handler(tmp_config, allowed_chat="999")
+    update = MagicMock()
+    update.callback_query = _make_query("wipe:confirm", chat_id="100")
+
+    await handler._handle_callback(update, MagicMock())
+
+    assert not any("DELETE" in s.upper() for s in executed)
+    update.callback_query.edit_message_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wipe_confirm_authorized_chat_deletes(tmp_config, monkeypatch):
+    """Authorized chat keeps existing behavior: wipe:confirm clears history."""
+    executed = _patch_db_spy(monkeypatch)
+    handler = _make_commands_handler(tmp_config, allowed_chat="100")
+    update = MagicMock()
+    update.callback_query = _make_query("wipe:confirm", chat_id="100")
+
+    await handler._handle_callback(update, MagicMock())
+
+    assert any(
+        "DELETE FROM agent_messages" in s for s in executed
+    ), "authorized wipe:confirm should delete agent_messages"
+    update.callback_query.edit_message_text.assert_called_once()
+
+
 # ── watch_site forwards accept_template_slug ─────────────────────────
 
 

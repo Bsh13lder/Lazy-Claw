@@ -27,8 +27,8 @@ _CLAUDE_CODE_MANIFEST = {
         "description": "claude-code MCP",
         "models": [
             {
-                "id": "claude-opus-4-7",
-                "display_name": "Claude Opus 4.7 (via Claude Code MCP)",
+                "id": "claude-opus-4-8",
+                "display_name": "Claude Opus 4.8 (via Claude Code MCP)",
                 "context_tokens": 1_000_000,
                 "cost": "$0 via Claude Code subscription",
             },
@@ -56,7 +56,7 @@ def test_connected_claude_code_renders_with_model_details() -> None:
     assert "MCP-PROVIDED MODELS:" in text
     assert "claude-code" in text
     assert "✓ connected" in text
-    assert "Claude Opus 4.7" in text
+    assert "Claude Opus 4.8" in text
     assert "Context: 1M tokens" in text
     assert "$0 via Claude Code subscription" in text
 
@@ -66,7 +66,7 @@ def test_disconnected_model_backed_mcp_still_listed_with_marker() -> None:
     lines = _render_mcp_models_section(servers, _CLAUDE_CODE_MANIFEST)
     text = "\n".join(lines)
     assert "✗ not connected" in text
-    assert "Claude Opus 4.7" in text
+    assert "Claude Opus 4.8" in text
 
 
 # ── Tool-only MCPs do NOT pollute the model list ─────────────────────

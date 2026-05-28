@@ -25,8 +25,10 @@ import re
 
 import pytest
 
+from lazyclaw.runtime.agent import _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
 from lazyclaw.runtime.f1_confabulation_detector import (
     ConfabulationVerdict,
+    _RAW_INJECTION_TRUNCATE_CHARS,
     _find_wikilink_in_quote_block,
     build_raw_data_injection,
     detect_confabulation,
@@ -200,8 +202,8 @@ def test_raw_data_injection_includes_payload_and_directive() -> None:
 
 
 def test_raw_data_injection_truncates_huge_payload() -> None:
-    """Payloads over ~4000 chars get truncated with a marker."""
-    huge_payload = '{"junk":"' + ("x" * 10000) + '"}'
+    """Payloads over the 50K channel-read ceiling still get truncated."""
+    huge_payload = '{"junk":"' + ("x" * 60000) + '"}'
     verdict = ConfabulationVerdict(
         is_confabulation=True,
         kind="failure_claim",
@@ -218,7 +220,56 @@ def test_raw_data_injection_truncates_huge_payload() -> None:
     )
     assert "...[truncated]" in msg
     # Message shouldn't be wildly bigger than the truncate limit + overhead.
-    assert len(msg) < 6000
+    assert len(msg) < _RAW_INJECTION_TRUNCATE_CHARS + 2000
+
+
+def test_raw_injection_cap_matches_channel_read_cap() -> None:
+    """Regression: the F1 repair re-injection cap must equal the 50K
+    channel-read result cap. A 4 KB cap here silently re-introduced the
+    2026-05-24 truncation incident (10.9 KB Upwork JSON chopped to 4 KB,
+    F1 retry saw only the first 2-3 messages, brain re-confabulated
+    "no new messages"). See agent._MAX_TOOL_RESULT_CHARS_CHANNEL_READ.
+    """
+    assert _RAW_INJECTION_TRUNCATE_CHARS == 50000
+    assert (
+        _RAW_INJECTION_TRUNCATE_CHARS
+        == _MAX_TOOL_RESULT_CHARS_CHANNEL_READ
+    )
+
+
+def test_raw_injection_preserves_payload_over_4kb() -> None:
+    """A >4 KB read payload must survive un-truncated into the repair
+    prompt (the old 4000-char cap would have chopped it).
+    """
+    # 8 KB of distinct, quotable conversation text — well over the old
+    # 4 KB cap, well under the new 50 KB ceiling.
+    sentinel_tail = "FINAL_MESSAGE_SENTINEL_QUOTE_ME"
+    big_payload = (
+        '{"messages":["'
+        + ("padding message number with lots of words. " * 180)
+        + sentinel_tail
+        + '"]}'
+    )
+    assert len(big_payload) > 4000
+    assert len(big_payload) < 50000
+    verdict = ConfabulationVerdict(
+        is_confabulation=True,
+        kind="failure_claim",
+        offending_phrase="no data",
+        unverified_quote_count=0,
+        tool_name="upwork_last_conversation",
+        payload_bytes=len(big_payload),
+    )
+    msg = build_raw_data_injection(
+        verdict,
+        ["upwork_last_conversation"],
+        [big_payload],
+        reason="confabulation",
+    )
+    # Whole payload preserved — no truncation marker, and the LAST
+    # message (which a 4 KB cap would have dropped) is present.
+    assert "...[truncated]" not in msg
+    assert sentinel_tail in msg
 
 
 def test_raw_data_injection_retry_exhausted_reason() -> None:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { ChatProvider } from "./context/ChatContext";
 import { AgentStatusProvider } from "./context/AgentStatusContext";
@@ -19,13 +19,17 @@ import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
 import LazyBrain from "./pages/LazyBrain";
 import Notes from "./pages/Notes";
+// Univer is a ~7 MB editor — code-split so it only loads when Sheets opens,
+// keeping it out of every other page's bundle (and the PWA precache).
+const Sheets = lazy(() => import("./pages/Sheets"));
 import Vault from "./pages/Vault";
 import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
+import InstallPrompt from "./components/InstallPrompt";
 
 const VALID_PAGES: readonly Page[] = [
   "overview", "activity", "code-specialist", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
-  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain",
+  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain", "sheets",
   "vault", "settings",
 ];
 
@@ -94,6 +98,7 @@ function AppContent() {
       case "mcp": return <Mcp />;
       case "memory": return <Memory />;
       case "lazybrain": return <LazyBrain />;
+      case "sheets": return <Sheets />;
       case "vault": return <Vault />;
       case "settings": return <Settings />;
       default: return <Overview onNavigate={setPage} />;
@@ -107,8 +112,17 @@ function AppContent() {
     <AgentStatusProvider>
       <ChatProvider>
         <NavShell activePage={page} onNavigate={setPage}>
-          {pageContent}
+          <Suspense
+            fallback={
+              <div className="h-full flex items-center justify-center text-text-muted text-sm">
+                Loading…
+              </div>
+            }
+          >
+            {pageContent}
+          </Suspense>
         </NavShell>
+        <InstallPrompt />
       </ChatProvider>
     </AgentStatusProvider>
   );

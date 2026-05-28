@@ -83,8 +83,37 @@ services:
     container_name: lazyclaw-web
     restart: unless-stopped
     mem_limit: 256m
+    # Caddy (HTTPS, app.lazytasker.com:443) is the primary public entry point.
+    # 3001:80 is also published for plain-HTTP localhost/LAN debugging.
     ports:
       - "3001:80"
+    expose:
+      - "80"
+
+  # HTTPS front door. Issues a real Let's Encrypt cert via Cloudflare
+  # DNS-01 (no inbound port needed) and reverse-proxies to lazyclaw-web.
+  # This is what makes the PWA installable from the phone. See caddy/.
+  caddy:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    container_name: lazyclaw-caddy
+    restart: unless-stopped
+    mem_limit: 128m
+    ports:
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+      - "80:80"         # HTTP→HTTPS redirect
+    env_file: .env
+    environment:
+      - TZ=Europe/Madrid
+    depends_on:
+      - lazyclaw-web
+    volumes:
+      # Persist issued certs + ACME account across restarts so we don't
+      # re-hit Let's Encrypt rate limits on every `docker compose up`.
+      - caddy_data:/data
+      - caddy_config:/config
 
   n8n:
     build:
@@ -124,3 +153,5 @@ services:
 volumes:
   n8n_data:
   claude_data:
+  caddy_data:
+  caddy_config:

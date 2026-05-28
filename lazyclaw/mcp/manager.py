@@ -82,7 +82,7 @@ BUNDLED_MCPS = {
         # WHY this is the right call for code-tagged work.
         "description": (
             "PRIMARY EXECUTOR for ALL code-tagged work — regardless of which "
-            "brain you are. Persistent agent process: Opus 4.7 with 1M-token "
+            "brain you are. Persistent agent process: Opus 4.8 with 1M-token "
             "context that does NOT reset between calls in the same session, "
             "so it never loses track on multi-step coding loops "
             "(write → run → test → fix → re-run). Wrap any non-trivial code "
@@ -102,8 +102,8 @@ BUNDLED_MCPS = {
         # intentionally omit this field — they have no AI model to advertise.
         "models": [
             {
-                "id": "claude-opus-4-7",
-                "display_name": "Claude Opus 4.7 (via Claude Code MCP)",
+                "id": "claude-opus-4-8",
+                "display_name": "Claude Opus 4.8 (via Claude Code MCP)",
                 "context_tokens": 1_000_000,
                 "cost": "$0 via Claude Code subscription",
             },

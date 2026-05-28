@@ -677,6 +677,17 @@ _BUDGET_TOOL_NAMES = frozenset({
     "set_default_expense_project",
 })
 
+# Budget WRITES are quick single-shot ops (one DB row + a fire-and-forget
+# LazyBrain mirror), NOT long-running work — so they must stay INLINE and be
+# exempt from AUTO-PROMOTE, just like the budget READS. Without this,
+# "log 12 on clubbay" hit AUTO-PROMOTE at iter 1 and got shoved into a slow
+# background task + verbose Telegram push, turning a <1s log into 44s + 68s
+# (2026-05-28 expense-latency incident).
+_QUICK_INLINE_BUDGET_WRITES = frozenset({
+    "add_expense", "set_project_budget", "add_project_budget",
+    "add_recurring_expense", "set_default_expense_project",
+})
+
 # Cron / heartbeat job keywords → inject schedule_job/list_jobs/manage_job.
 # The brain owns "show / edit / pause / delete background jobs" intents that
 # the bare survival keyword "jobs" used to swallow into the gig-economy
@@ -5033,11 +5044,20 @@ class Agent:
                     # LLM context (so it stops paraphrasing errors as
                     # success) and into stuck_detector.detect_no_progress.
                     _result_str = result if isinstance(result, str) else str(result)
-                    from lazyclaw.runtime import result_verifier as _rv
-                    _rv_status, _rv_reason = _rv.classify(tc.name, _result_str)
-                    if _rv_status == "failed" and _rv_reason:
-                        _result_str = _rv.stamp_failed(_result_str, _rv_reason)
-                        result = _result_str  # keep downstream paths in sync
+                    # Skip classify() for channel reads: result_verifier's
+                    # failure-marker regexes ("timed out", "not authorized",
+                    # "Error", ...) match the *quoted human message* inside a
+                    # conversation JSON and falsely stamp it `→ FAILED:`. The
+                    # 50K-cap helper (_is_channel_read_tool_name) is the same
+                    # gate used for the channel-read result cap, so reuse it.
+                    if _is_channel_read_tool_name(tc.name):
+                        _rv_status, _rv_reason = "uncertain", None
+                    else:
+                        from lazyclaw.runtime import result_verifier as _rv
+                        _rv_status, _rv_reason = _rv.classify(tc.name, _result_str)
+                        if _rv_status == "failed" and _rv_reason:
+                            _result_str = _rv.stamp_failed(_result_str, _rv_reason)
+                            result = _result_str  # keep downstream paths in sync
 
                     # ── Fix A: MCP-tool reinjection ───────────────────
                     # When the brain calls connect_mcp_server /
@@ -5507,7 +5527,9 @@ class Agent:
                 # Exemption (added 2026-05-13 after Upwork-conversation bug):
                 # if EVERY tool call this turn is a quick read-only inspection
                 # (recall_memories, search_tools, *_get_*, *_search_*,
-                # vault_get, list_*, etc.), skip auto-promote even past the
+                # vault_get, list_*, etc.) — or a quick single-shot budget
+                # write (see _QUICK_INLINE_BUDGET_WRITES) — skip auto-promote
+                # even past the
                 # iter threshold. The brain is just paging through info to
                 # reply inline; forcing run_background here strands the
                 # follow-up tool calls and the user gets the misleading
@@ -5558,6 +5580,10 @@ class Agent:
                         "list_projects",
                         "get_project",
                     }:
+                        return True
+                    # Quick single-shot budget writes stay inline too — see
+                    # _QUICK_INLINE_BUDGET_WRITES (2026-05-28 latency incident).
+                    if n in _QUICK_INLINE_BUDGET_WRITES:
                         return True
                     # Channel reads (whatsapp_read/list_chats, email_read,
                     # instagram_read_dms, etc.) are pure fetches — a Web UI

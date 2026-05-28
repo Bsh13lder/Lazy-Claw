@@ -50,6 +50,11 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     # prompt and the NL flow stalls (web UI calls the store directly, so it
     # only bites the chat channels).
     "budgets": ALLOW,
+    # Private encrypted spreadsheets — local encrypted store + agent-owned
+    # file export, same no-external-blast-radius profile as tasks/budgets.
+    # Without ALLOW every "put 10 in A1" / "make me a sheet" over Telegram
+    # hits an approval prompt and the NL flow stalls.
+    "sheets": ALLOW,
     # Meta-tools the brain MUST be able to call without an approval loop:
     # search_tools is how the brain discovers anything beyond the 16 base
     # tools; orchestration covers dispatch_subagents / delegate /

@@ -36,6 +36,56 @@ logger = logging.getLogger(__name__)
 CDP_IDLE_TIMEOUT = 300
 
 
+async def _target_needs_host_browser(
+    target_url: str | None, user_id: str | None,
+) -> bool:
+    """True when navigating to ``target_url`` MUST go through the user's
+    signed-in host browser (Cloudflare-protected hosts like upwork.com /
+    linkedin.com + the user's own ``live_hosts`` extras).
+
+    Reuses the single canonical predicate ``_needs_live_browser`` and the
+    builtin frozenset from ``heartbeat.daemon`` — there is exactly one
+    CF-sensitive host list in the codebase and we do NOT fork a second.
+    A fresh/headless container browser fails Cloudflare's fingerprint
+    SILENTLY (empty results, no error), so for these hosts we must refuse
+    to drive the wrong-identity browser rather than fall through to it.
+
+    Lazy imports keep the ``browser → heartbeat`` edge off module load
+    (heartbeat already imports browser; a top-level import here would
+    risk a cycle).
+    """
+    if not target_url:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+
+    from lazyclaw.heartbeat.daemon import _needs_live_browser
+
+    user_extras: frozenset[str] = frozenset()
+    if user_id:
+        try:
+            from lazyclaw.browser.browser_settings import get_live_hosts
+            from lazyclaw.config import load_config
+
+            user_extras = frozenset(
+                await get_live_hosts(load_config(), user_id)
+            )
+        except Exception:
+            logger.debug(
+                "Could not load user live_hosts for CF guard (user=%s)",
+                user_id, exc_info=True,
+            )
+            user_extras = frozenset()
+
+    return _needs_live_browser(host, user_extras)
+
+
 @dataclass(frozen=True)
 class TabInfo:
     """Immutable info about a browser tab."""
@@ -307,8 +357,18 @@ class CDPBackend:
         )
         return result
 
-    async def _ensure_connected(self) -> CDPConnection:
+    async def _ensure_connected(
+        self, target_url: str | None = None,
+    ) -> CDPConnection:
         """Lazy connect: discover Chrome and connect to active tab.
+
+        ``target_url`` (when known by the caller, e.g. ``goto``) lets us
+        guard Cloudflare-protected navigations: if the host browser can't
+        be reached and the upcoming nav target is CF-sensitive
+        (upwork.com / linkedin.com / user ``live_hosts``), we raise
+        instead of silently falling through to the wrong-identity
+        container browser (which fails CF's fingerprint with empty
+        results and no error).
 
         Resolution order (see host_bridge.find_cdp_with_preference):
           1. If the user opted in to host-browser mode, probe
@@ -371,6 +431,38 @@ class CDPBackend:
                             flag_path.unlink()
                     except Exception:
                         pass
+
+            # Cloudflare guard: the host browser is still unreachable after
+            # retries. For CF-sensitive targets (upwork.com / linkedin.com /
+            # user live_hosts) we MUST NOT fall through to the container
+            # Brave — it fails Cloudflare's fingerprint silently (empty
+            # extractor results, no error) and the caller can never tell.
+            # Raise the standard "Cannot reach Brave" RuntimeError the
+            # host-bridge heal endpoint keys on so recovery can kick in.
+            # Non-CF hosts keep the existing fallback behavior unchanged.
+            if (
+                prefer_host
+                and source != "host"
+                and await _target_needs_host_browser(target_url, self._user_id)
+            ):
+                from urllib.parse import urlparse as _urlparse
+
+                _host = (_urlparse(target_url or "").hostname or "").lower()
+                from lazyclaw.browser.host_bridge import HOST_GATEWAY_HOSTNAME
+
+                logger.error(
+                    "CF guard: host Brave unreachable on %s:%s — refusing to "
+                    "drive container browser to Cloudflare-protected host %s",
+                    HOST_GATEWAY_HOSTNAME, self._port, _host,
+                )
+                raise RuntimeError(
+                    f"Cannot reach Brave: the Cloudflare-protected host "
+                    f"'{_host}' must be driven through your signed-in Brave on "
+                    f"port {self._port}, but the host browser is unreachable. "
+                    "A fresh container browser would be blocked by Cloudflare "
+                    "and silently return empty results. Start/repair the host "
+                    "Brave bridge (e.g. `make host-bridge`) and retry."
+                )
 
             origin: str | None = None
             if source == "host" and host_token:
@@ -707,7 +799,7 @@ class CDPBackend:
         return []
 
     async def goto(self, url: str) -> None:
-        conn = await self._ensure_connected()
+        conn = await self._ensure_connected(target_url=url)
 
         self._emit(
             kind="navigate", action="goto", url=url,

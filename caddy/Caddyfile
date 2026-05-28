@@ -1,0 +1,34 @@
+# LazyClaw HTTPS front door.
+#
+# Caddy terminates TLS with a REAL Let's Encrypt certificate obtained via
+# the Cloudflare DNS-01 challenge. Because the challenge is solved over the
+# Cloudflare API (a TXT record), the cert is issued without any public
+# inbound port — app.lazytasker.com can resolve purely to the Mac's private
+# WireGuard IP and the cert is still browser-trusted. Chrome on the phone
+# then sees a valid secure context → the PWA installs.
+#
+# Traffic path: phone (on the private VPN) → Caddy (TLS) → lazyclaw-web
+# (nginx, serves the SPA + proxies /api + /ws to the lazyclaw gateway).
+# No third party ever decrypts application traffic; Cloudflare only ever
+# sees the _acme-challenge TXT during issuance/renewal.
+
+{
+	# ACME account email — renewal + expiry notices. Set in .env.
+	email {$ACME_EMAIL}
+}
+
+{$LAZYCLAW_DOMAIN:app.lazytasker.com} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+		# Resolve the ACME challenge against public resolvers, not the
+		# split-horizon LAN view, so propagation checks see the TXT.
+		resolvers 1.1.1.1 8.8.8.8
+	}
+
+	encode zstd gzip
+
+	# nginx already routes the SPA, /api/* and /ws/* internally, so we
+	# hand the whole request surface to it. reverse_proxy upgrades
+	# WebSockets automatically.
+	reverse_proxy lazyclaw-web:80
+}

@@ -25,6 +25,7 @@ import pytest
 from lazyclaw.config import Config
 from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.lazybrain import store, typed_recall
+from lazyclaw.skills.builtin.lazybrain.recall import GetNoteSkill
 from lazyclaw.skills.builtin.lazybrain.recall_typed_memory import (
     RecallTypedMemorySkill,
 )
@@ -250,6 +251,29 @@ async def test_skill_rejects_empty_inputs(tmp_config):
     skill = RecallTypedMemorySkill(config=tmp_config)
     out = await skill.execute("user-typed", {})
     assert "no input" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_get_note_sanitizes_session_log_sender_block(tmp_config):
+    """A session-log note fetched via lazybrain_get_note must have its
+    ``**Sender (HH:MM):**`` block mangled into paraphrase framing so the
+    brain can't lift it verbatim as a live channel quote."""
+    note = await store.save_note(
+        tmp_config, "user-typed",
+        content=(
+            "Working session recap.\n\n"
+            "**James Blue (10:37 PM):** narrowed scope to 6 cities."
+        ),
+        title="Session 2026-05-25 — James planning",
+        memory_type="session-log",
+    )
+    skill = GetNoteSkill(config=tmp_config)
+    out = await skill.execute("user-typed", {"note_id": note["id"]})
+    # Verbatim sender block is gone — the brain can't copy it as a quote.
+    assert "**James Blue (10:37 PM):**" not in out
+    # Paraphrase framing IS present.
+    assert "[CACHED PARAPHRASE" in out
+    assert "[paraphrased: James Blue @ 10:37 PM]" in out
 
 
 @pytest.mark.asyncio

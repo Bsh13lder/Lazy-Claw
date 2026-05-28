@@ -29,6 +29,7 @@ from lazyclaw.skills.builtin.survival.upwork_last_conversation import (
     _match_contact,
     _normalize_conversation,
     _normalize_inbox,
+    _normalize_profile,
 )
 
 
@@ -117,12 +118,19 @@ class _Registry:
         get_conversation_response=None,
         include_messages=True,
         include_conversation=True,
+        get_my_profile_response=None,
+        include_my_profile=False,
     ):
         self._get_messages = (
             _FakeTool(get_messages_response) if include_messages else None
         )
         self._get_conversation = (
             _FakeTool(get_conversation_response) if include_conversation else None
+        )
+        # Profile tool is opt-in so existing tests (which never registered
+        # it) keep exercising the no-fallback path.
+        self._get_my_profile = (
+            _FakeTool(get_my_profile_response) if include_my_profile else None
         )
 
     def list_mcp_tools(self):
@@ -131,12 +139,20 @@ class _Registry:
             names.append({"function": {"name": "mcp_xyz_upwork_get_messages"}})
         if self._get_conversation is not None:
             names.append({"function": {"name": "mcp_xyz_upwork_get_conversation"}})
+        if self._get_my_profile is not None:
+            names.append({"function": {"name": "mcp_xyz_upwork_get_my_profile"}})
         return names
 
     def get(self, name):
-        if "upwork_get_messages" in (name or ""):
+        n = name or ""
+        # Order matters: "upwork_get_my_profile" must be matched before the
+        # broader "upwork_get_messages"/"_conversation" substrings (none
+        # overlap, but match the most specific intent first).
+        if "upwork_get_my_profile" in n:
+            return self._get_my_profile
+        if "upwork_get_messages" in n:
             return self._get_messages
-        if "upwork_get_conversation" in (name or ""):
+        if "upwork_get_conversation" in n:
             return self._get_conversation
         return None
 
@@ -298,6 +314,97 @@ async def test_skill_me_name_none_when_profile_blank(tmp_config):
     cv_call = registry._get_conversation.calls[0]
     assert cv_call.get("me_name") is None
     assert "Last Upwork conversation" in result
+
+
+@pytest.mark.asyncio
+async def test_me_name_falls_back_to_live_profile_when_display_name_blank(
+    tmp_config,
+):
+    """Empty stored display_name → derive me_name from the live Upwork
+    profile via upwork_get_my_profile, so the user's own bubbles are
+    still attributed correctly (sender-confabulation defense)."""
+    inbox = [{"contact_name": "X", "room_url": "https://x"}]
+    conv = {"messages": [{"sender": "X", "content": "y", "is_mine": False}]}
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        get_conversation_response={"result": conv},
+        include_my_profile=True,
+        get_my_profile_response={"result": {"name": "Vato Tchipa"}},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    await skill.execute("u1", {})
+    cv_call = registry._get_conversation.calls[0]
+    # Live profile name flowed into me_name even though display_name was
+    # never set.
+    assert cv_call.get("me_name") == "Vato Tchipa"
+    # The profile fallback was actually invoked.
+    assert len(registry._get_my_profile.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stored_display_name_short_circuits_live_profile(tmp_config):
+    """When display_name IS set, the live-profile fallback must NOT be
+    called — it's the slow scrape path, only a last resort."""
+    from lazyclaw.survival.profile import update_profile
+    await update_profile(tmp_config, "u1", {"display_name": "Stored Name"})
+
+    inbox = [{"contact_name": "X", "room_url": "https://x"}]
+    conv = {"messages": [{"sender": "X", "content": "y", "is_mine": False}]}
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        get_conversation_response={"result": conv},
+        include_my_profile=True,
+        get_my_profile_response={"result": {"name": "Live Name"}},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    await skill.execute("u1", {})
+    cv_call = registry._get_conversation.calls[0]
+    assert cv_call.get("me_name") == "Stored Name"
+    # Fallback must not have been touched.
+    assert len(registry._get_my_profile.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_me_name_unresolved_emits_loud_warning(tmp_config, caplog):
+    """display_name blank AND live profile returns no name → me_name=None
+    AND a loud warning is logged so unreliable attribution is
+    diagnosable."""
+    import logging as _logging
+
+    inbox = [{"contact_name": "X", "room_url": "https://x"}]
+    conv = {"messages": [{"sender": "X", "content": "y", "is_mine": False}]}
+    registry = _Registry(
+        get_messages_response={"result": inbox},
+        get_conversation_response={"result": conv},
+        include_my_profile=True,
+        # Live profile scrape missed the name (e.g. selectors all failed).
+        get_my_profile_response={"result": {}},
+    )
+    skill = UpworkLastConversationSkill(config=tmp_config, registry=registry)
+    with caplog.at_level(
+        _logging.WARNING,
+        logger="lazyclaw.skills.builtin.survival.upwork_last_conversation",
+    ):
+        await skill.execute("u1", {})
+    cv_call = registry._get_conversation.calls[0]
+    assert cv_call.get("me_name") is None
+    # A WARNING-level record about unreliable attribution must exist.
+    warnings = [
+        r for r in caplog.records
+        if r.levelno >= _logging.WARNING
+        and "UNRELIABLE" in r.getMessage()
+    ]
+    assert warnings, "expected a loud me_name-unresolved warning"
+
+
+def test_normalize_profile_shapes():
+    """_normalize_profile coerces dict / JSON string / envelope / garbage."""
+    assert _normalize_profile({"name": "A"}) == {"name": "A"}
+    assert _normalize_profile(json.dumps({"name": "A"})) == {"name": "A"}
+    assert _normalize_profile({"result": {"name": "A"}}) == {"name": "A"}
+    assert _normalize_profile(None) == {}
+    assert _normalize_profile("not-json") == {}
+    assert _normalize_profile([1, 2]) == {}
 
 
 @pytest.mark.asyncio

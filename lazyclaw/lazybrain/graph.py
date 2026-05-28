@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from lazyclaw.config import Config
 from lazyclaw.db.connection import db_session
@@ -81,6 +82,23 @@ def _try_leiden(
         return {}
 
 
+def _tag_count(raw: Any) -> int:
+    """Count tags in a JSON-encoded tag list stored in ``notes.tags``.
+
+    Each tag serialises to two double-quote characters in JSON (opening and
+    closing), so ``count('"') // 2`` gives the tag count without a full JSON
+    parse.  Returns 0 for NULL or an empty array.
+
+    Examples::
+
+        _tag_count(None)            → 0
+        _tag_count("[]")            → 0
+        _tag_count('["a"]')         → 1
+        _tag_count('["a","b","c"]') → 3
+    """
+    return (raw or "[]").count('"') // 2
+
+
 async def get_graph(
     config: Config,
     user_id: str,
@@ -137,6 +155,36 @@ async def get_graph(
         )
         edges_raw = await edge_rows.fetchall()
 
+        # D1 — Secondary fetch: collect all resolved to_note_id values that
+        # fall outside the primary LIMIT window. Fetch those rows so an edge
+        # to a low-importance note is never silently dropped just because the
+        # note didn't make the top-N cut.  The extra set is naturally small
+        # (bounded by the number of distinct edge targets).
+        resolved_targets = {row[1] for row in edges_raw if row[1]}
+        missing_targets = resolved_targets - ids
+        if missing_targets:
+            # Apply the same include_rolled_up / include_archived filters so
+            # hidden notes don't sneak back in through the secondary path.
+            sec_clauses = ["user_id = ?"]
+            sec_params: list = [user_id]
+            sec_ph = ",".join("?" * len(missing_targets))
+            sec_clauses.append(f"id IN ({sec_ph})")
+            sec_params.extend(missing_targets)
+            if not include_rolled_up:
+                sec_clauses.append("(tags IS NULL OR tags NOT LIKE ?)")
+                sec_params.append('%"rolled-up"%')
+            if not include_archived:
+                sec_clauses.append("(archived IS NULL OR archived = 0)")
+            sec_where = " AND ".join(sec_clauses)
+            sec_rows_cur = await db.execute(
+                f"SELECT id, title_key, pinned, importance, tags, created_at "
+                f"FROM notes WHERE {sec_where}",
+                sec_params,
+            )
+            sec_rows = await sec_rows_cur.fetchall()
+            node_rows = list(node_rows) + sec_rows
+            ids |= {row[0] for row in sec_rows}
+
     edges = []
     for from_id, to_id, to_page, edge_type, source in edges_raw:
         if to_id and to_id in ids:
@@ -147,8 +195,10 @@ async def get_graph(
                 "edge_type": edge_type or "wikilink",
                 "edge_source": source,
             })
-        # Unresolved edges (no target note yet) are dropped from the graph
-        # view — they surface instead in the backlinks panel of the orphan.
+        # Only edges with NULL to_note_id are dropped (unresolved wikilinks —
+        # the target page hasn't been created yet). All edges pointing at
+        # existing notes are now rendered; the secondary fetch above ensures
+        # their targets are in the node list regardless of the LIMIT window.
 
     # Phase I — Leiden community partition. Cache key disambiguates by the
     # filter mode so "default", "include_rolled_up", and "include_archived"
@@ -168,7 +218,7 @@ async def get_graph(
             "label": row[1] or row[0][:8],
             "pinned": bool(row[2]),
             "importance": row[3],
-            "tag_count": len((row[4] or "[]").count('"') // 2 and row[4] or "[]"),
+            "tag_count": _tag_count(row[4]),
             "community_id": community_by_id.get(row[0]),
         }
         for row in node_rows
@@ -183,9 +233,36 @@ async def get_neighbors(
     note_id: str,
     *,
     depth: int = 1,
+    include_rolled_up: bool = False,
+    include_archived: bool = False,
 ) -> dict:
-    """BFS out from ``note_id`` up to ``depth`` hops. Returns same shape as get_graph."""
+    """BFS out from ``note_id`` up to ``depth`` hops.
+
+    Returns the same ``{nodes, edges}`` shape as :func:`get_graph`.
+
+    ``include_rolled_up`` and ``include_archived`` mirror the identically-named
+    parameters on :func:`get_graph`:
+
+    * ``include_rolled_up=False`` (default) — notes tagged ``rolled-up`` are
+      excluded from both the result set and the BFS traversal frontier, so they
+      can't act as hidden hops to deeper nodes.
+    * ``include_archived=False`` (default) — notes with ``archived=1`` are
+      similarly excluded.
+
+    Pass ``True`` for either flag to surface hidden notes when the caller
+    explicitly requests the full neighbourhood (e.g. the vault / archive view).
+    """
     depth = max(1, min(3, depth))
+
+    # Build the tag/archived filter fragment used to gate which notes are
+    # allowed into the BFS visited set.  Reused in multiple queries below.
+    filter_clauses: list[str] = []
+    if not include_rolled_up:
+        filter_clauses.append("(tags IS NULL OR tags NOT LIKE '%\"rolled-up\"%')")
+    if not include_archived:
+        filter_clauses.append("(archived IS NULL OR archived = 0)")
+    filter_sql = (" AND " + " AND ".join(filter_clauses)) if filter_clauses else ""
+
     visited: set[str] = {note_id}
     frontier: set[str] = {note_id}
 
@@ -194,18 +271,25 @@ async def get_neighbors(
             if not frontier:
                 break
             placeholders = ",".join("?" * len(frontier))
-            # Outbound: links whose from_note_id is in the frontier
+            # Outbound: links whose from_note_id is in the frontier.
+            # Only follow edges whose target passes the visibility filter —
+            # hidden notes must not enter `visited` and can't be traversed.
             rows_out = await db.execute(
-                f"SELECT DISTINCT to_note_id FROM note_links "
-                f"WHERE user_id = ? AND from_note_id IN ({placeholders}) "
-                f"AND to_note_id IS NOT NULL",
+                f"SELECT DISTINCT nl.to_note_id FROM note_links nl "
+                f"JOIN notes n ON n.id = nl.to_note_id "
+                f"WHERE nl.user_id = ? AND nl.from_note_id IN ({placeholders}) "
+                f"AND nl.to_note_id IS NOT NULL"
+                f"{filter_sql.replace('tags', 'n.tags').replace('archived', 'n.archived')}",
                 (user_id, *frontier),
             )
             out_ids = {r[0] for r in await rows_out.fetchall() if r[0]}
-            # Inbound: links pointing at the frontier
+            # Inbound: links pointing at the frontier, from notes that also
+            # pass the visibility filter (hidden source notes stay invisible).
             rows_in = await db.execute(
-                f"SELECT DISTINCT from_note_id FROM note_links "
-                f"WHERE user_id = ? AND to_note_id IN ({placeholders})",
+                f"SELECT DISTINCT nl.from_note_id FROM note_links nl "
+                f"JOIN notes n ON n.id = nl.from_note_id "
+                f"WHERE nl.user_id = ? AND nl.to_note_id IN ({placeholders})"
+                f"{filter_sql.replace('tags', 'n.tags').replace('archived', 'n.archived')}",
                 (user_id, *frontier),
             )
             in_ids = {r[0] for r in await rows_in.fetchall()}
@@ -216,22 +300,34 @@ async def get_neighbors(
     if not visited:
         return {"nodes": [], "edges": []}
 
-    # Fetch node metadata for everything in `visited`
+    # Fetch node metadata for everything in `visited`, applying the same
+    # visibility filter so hidden notes don't appear even if they ended up
+    # in `visited` via the seed `note_id` itself.
     placeholders = ",".join("?" * len(visited))
+    vis_clauses = [f"user_id = ?", f"id IN ({placeholders})"]
+    vis_params: list = [user_id, *visited]
+    if not include_rolled_up:
+        vis_clauses.append("(tags IS NULL OR tags NOT LIKE ?)")
+        vis_params.append('%"rolled-up"%')
+    if not include_archived:
+        vis_clauses.append("(archived IS NULL OR archived = 0)")
+    vis_where = " AND ".join(vis_clauses)
+
     async with db_session(config) as db:
-        node_rows = await db.execute(
+        node_rows_cur = await db.execute(
             f"SELECT id, title_key, pinned, importance "
-            f"FROM notes WHERE user_id = ? AND id IN ({placeholders})",
-            (user_id, *visited),
+            f"FROM notes WHERE {vis_where}",
+            vis_params,
         )
-        nodes_raw = await node_rows.fetchall()
-        edge_rows = await db.execute(
+        nodes_raw = await node_rows_cur.fetchall()
+        edge_rows_cur = await db.execute(
             f"SELECT from_note_id, to_note_id, to_page_name, edge_type, source "
             f"FROM note_links WHERE user_id = ? AND from_note_id IN ({placeholders})",
             (user_id, *visited),
         )
-        edges_raw = await edge_rows.fetchall()
+        edges_raw = await edge_rows_cur.fetchall()
 
+    visible_ids = {row[0] for row in nodes_raw}
     nodes = [
         {
             "id": row[0],
@@ -251,7 +347,7 @@ async def get_neighbors(
             "edge_source": edge_source,
         }
         for from_id, to_id, page, edge_type, edge_source in edges_raw
-        if to_id and to_id in visited
+        if to_id and to_id in visible_ids
     ]
     return {"nodes": nodes, "edges": edges}
 

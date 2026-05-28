@@ -74,7 +74,9 @@ async def topic_rollup(
     # topic "Madrid"); it degrades to [] when Ollama is down so this stays
     # safe in offline mode.
     backlinked = await store.get_backlinks(config, user_id, topic)
-    searched = await store.search_notes(config, user_id, topic, limit=30)
+    # include_rolled_up=True: notes absorbed into prior rollups must still
+    # contribute to subsequent topic rollups — preserves cumulative knowledge.
+    searched = await store.search_notes(config, user_id, topic, limit=30, include_rolled_up=True)
 
     semantic_results: list[dict] = []
     try:

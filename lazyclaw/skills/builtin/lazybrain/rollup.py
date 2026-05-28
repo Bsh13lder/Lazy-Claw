@@ -308,7 +308,15 @@ class MarkRolledUpSkill(BaseSkill):
 
     async def execute(self, user_id: str, params: dict) -> str:
         source_ids = params.get("source_ids") or []
-        period_id = (params.get("period_id") or "").strip()
+        # `period_id` is the canonical name in the schema. Accept `week_id`
+        # and `month_id` as runtime-only aliases so stale cron instructions
+        # that were generated before the schema fix don't fail forever.
+        period_id = (
+            params.get("period_id")
+            or params.get("week_id")
+            or params.get("month_id")
+            or ""
+        ).strip()
         rollup_id = (params.get("rollup_id") or "").strip()
         if not source_ids or not period_id or not rollup_id:
             return "❌ source_ids, period_id, and rollup_id are all required."

@@ -536,7 +536,7 @@ async def build_context(
         if _lb_total:
             logger.info(
                 "LazyBrain auto-inject filter: %d / %d notes passed "
-                "memory_type gate (excluded: session-log + NULL + fact + other)",
+                "memory_type gate (excluded: session-log + NULL + other)",
                 _lb_kept, _lb_total,
             )
         # Re-sort merged pool by importance DESC so _pick_hybrid_memories

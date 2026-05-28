@@ -38,7 +38,7 @@ from lazyclaw.lazybrain.paraphrase_sanitizer import (
 
 @pytest.mark.parametrize("mt,expected", [
     ("session-log", True),
-    ("fact", True),
+    ("fact", False),    # fact is now authoritative — passes through unchanged
     ("other", True),
     (None, True),       # fail-closed: NULL → paraphrase
     ("", True),         # empty string → paraphrase
@@ -191,11 +191,12 @@ def test_sanitize_session_log_strips_and_wraps():
     assert "James provided a detailed spec" in out
 
 
-def test_sanitize_fact_type_also_sanitized():
+def test_sanitize_fact_type_passes_through_unchanged():
+    """'fact' is now authoritative — content passes through without paraphrase wrapping."""
     content = "Vato (3:23 PM): clarification message"
     out = sanitize_recall_content(content, "fact")
-    assert "[paraphrased: Vato @ 3:23 PM]" in out
-    assert out.startswith("[CACHED PARAPHRASE")
+    assert out == content
+    assert "[CACHED PARAPHRASE" not in out
 
 
 def test_sanitize_project_type_passes_through_unchanged():

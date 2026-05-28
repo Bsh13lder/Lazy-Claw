@@ -94,7 +94,10 @@ def test_filter_pinned_drops_null_memory_type_fail_closed() -> None:
     assert excluded == ["Legacy pinned"]
 
 
-def test_filter_pinned_drops_session_log_and_fact_and_other() -> None:
+def test_filter_pinned_drops_session_log_and_other_but_keeps_fact() -> None:
+    """'fact' is now in AUTO_INJECT_TYPES — it is kept by the pinned filter.
+    Only 'session-log', 'other', and NULL are excluded.
+    """
     pinned = [
         {"title": "session recap", "memory_type": "session-log",
          "content": "x"},
@@ -103,7 +106,7 @@ def test_filter_pinned_drops_session_log_and_fact_and_other() -> None:
         {"title": "real rule", "memory_type": "feedback", "content": "x"},
     ]
     kept, _ = filter_pinned_for_cache(pinned)
-    assert [n["title"] for n in kept] == ["real rule"]
+    assert [n["title"] for n in kept] == ["random fact", "real rule"]
 
 
 def test_filter_pinned_never_mutates_input() -> None:

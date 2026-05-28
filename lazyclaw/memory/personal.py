@@ -47,6 +47,14 @@ async def save_memory(
         from lazyclaw.lazybrain import events as lb_events
         from lazyclaw.lazybrain import store as lb_store
 
+        # Map legacy personal_memory type strings to taxonomy values so the
+        # explicit memory_type kwarg wins over the classifier (store.py:561).
+        _LEGACY_TYPE_MAP: dict[str, str] = {
+            "preference": "user",
+            "context": "project",
+        }
+        lb_memory_type: str = _LEGACY_TYPE_MAP.get(memory_type, "fact")
+
         note = await lb_store.save_note(
             config,
             user_id,
@@ -54,6 +62,7 @@ async def save_memory(
             title=f"{memory_type.capitalize()}: {content[:60]}",
             tags=["memory", "auto", f"owner/{owner}", f"kind/{memory_type}"],
             importance=importance,
+            memory_type=lb_memory_type,
         )
         lb_events.publish_note_saved(
             user_id, note["id"], note["title"], note["tags"], source="memory",

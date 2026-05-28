@@ -45,6 +45,7 @@ _AUTHORITATIVE_TYPES: frozenset[str] = frozenset({
     "feedback",
     "project",
     "reference",
+    "fact",
 })
 
 

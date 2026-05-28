@@ -28,15 +28,18 @@ def test_memory_types_is_closed_set_of_seven() -> None:
     }
 
 
-def test_auto_inject_types_excludes_session_log_and_fact_and_other() -> None:
+def test_auto_inject_types_excludes_session_log_and_other_but_keeps_fact() -> None:
     """Load-bearing assertion: session-log paraphrases must NEVER be in
-    the auto-inject set. ``fact`` and ``other`` are also out of the
-    cached layer — they're queryable on-demand only."""
+    the auto-inject set. ``other`` is also out (opaque catch-all). ``fact``
+    is IN — it's the default for genuine knowledge saved via save_memory /
+    lazybrain_save_note, and excluding it silently dropped every new
+    agent memory from the cached system-prompt layer (fixed Group A 2026-05)."""
     assert mt.AUTO_INJECT_TYPES == {
-        "user", "feedback", "project", "reference",
+        "user", "feedback", "project", "reference", "fact",
     }
     assert "session-log" not in mt.AUTO_INJECT_TYPES
-    assert "fact" not in mt.AUTO_INJECT_TYPES
+    assert "other" not in mt.AUTO_INJECT_TYPES
+    assert "fact" in mt.AUTO_INJECT_TYPES
     assert "other" not in mt.AUTO_INJECT_TYPES
     assert mt.AUTO_INJECT_TYPES.issubset(mt.MEMORY_TYPES)
 
@@ -177,13 +180,17 @@ def test_normalize_unknown_collapses_to_default() -> None:
 def test_is_auto_inject_type_fails_closed_on_none_and_unknown() -> None:
     """The cached system prompt must be safe by default — a row whose
     memory_type is NULL (pre-migration, or a write path that didn't pass
-    the new arg) must NOT be auto-injected. Same for typos / drift."""
+    the new arg) must NOT be auto-injected. Same for typos / drift.
+    ``fact`` is the explicit exception: it IS auto-inject (fixed Group A
+    2026-05); see test_auto_inject_types_excludes_session_log_and_other_but_keeps_fact."""
     assert mt.is_auto_inject_type(None) is False
     assert mt.is_auto_inject_type("session-log") is False
-    assert mt.is_auto_inject_type("fact") is False
     assert mt.is_auto_inject_type("other") is False
     assert mt.is_auto_inject_type("typo") is False
     assert mt.is_auto_inject_type("") is False
+    # ``fact`` is intentionally INCLUDED — verified positively here so a
+    # regression that removes it from AUTO_INJECT_TYPES trips this test.
+    assert mt.is_auto_inject_type("fact") is True
 
 
 @pytest.mark.parametrize(

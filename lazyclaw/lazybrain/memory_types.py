@@ -54,7 +54,7 @@ MEMORY_TYPES: frozenset[str] = frozenset({
 # the 2026-05-19 16:19 hallucination class. See MEMORY/project-f1-
 # mechanical-enforcement.
 AUTO_INJECT_TYPES: frozenset[str] = frozenset({
-    "user", "feedback", "project", "reference",
+    "user", "feedback", "project", "reference", "fact",
 })
 
 # Default for notes that pre-date the column / for opaque callers. We bias

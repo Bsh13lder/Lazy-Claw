@@ -70,6 +70,17 @@ class SaveNoteSkill(BaseSkill):
                     "type": "boolean",
                     "description": "Pin to the top of the timeline and inject into agent context.",
                 },
+                "memory_type": {
+                    "type": "string",
+                    "enum": ["user", "feedback", "project", "reference", "fact"],
+                    "description": (
+                        "Knowledge scope of this note. Optional — omit to let the "
+                        "classifier infer from tags/content. "
+                        "user=facts about the user, feedback=rules/corrections, "
+                        "project=scope/decisions, reference=external pointers, "
+                        "fact=general facts."
+                    ),
+                },
             },
             "required": ["content"],
         }
@@ -87,6 +98,7 @@ class SaveNoteSkill(BaseSkill):
             tags=tags,
             importance=int(params.get("importance") or 5),
             pinned=bool(params.get("pinned") or False),
+            memory_type=params.get("memory_type") or None,
         )
         events.publish_note_saved(
             user_id, note["id"], note["title"], note["tags"], source="agent"

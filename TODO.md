@@ -1072,3 +1072,19 @@ Container rebuilt 2026-05-18 00:50:17. At 00:51:07 user asked "Check james last 
 - Acceptance criteria from `docs/plans/p1-unified-code-session.md` met except live `--resume` log-line check (requires real container dispatch — to be verified on next James-bot turn).
 
 **Out of scope for P1, queued for P2/P3**: per-message classifier routing, brain becomes thin dispatcher, CodeSpecialist.tsx per-contract timeline, forking @steipete/claude-code-mcp (not needed — persistence lives at specialist-brain layer via lazyclaw's own CLI/SDK provider; claude-code MCP stays stateless per call with stable workFolder providing a second layer via Claude CLI's per-cwd auto-continuity).
+
+## Phase 23: Awake Mode — lid-closed operation
+
+- [x] **23.1 Host bridge server** — `scripts/awake_bridge_server.py`: standalone FastAPI (no lazyclaw imports), 5 endpoints (health/status/on/off/nap/daily-wake), `caffeinate -dimsu` + `pmset` via subprocess. PID tracking in state dir.
+- [x] **23.2 Installer** — `scripts/install-host-awake-bridge.sh`: creates root-owned venv at `/usr/local/lazyclaw/host-awake/`, generates bearer token, writes `/Library/LaunchDaemons/sh.lazyclaw.awake-bridge.plist` (boot-time, KeepAlive). TCC-safe path (not ~/Desktop). Uninstaller: `scripts/uninstall-host-awake-bridge.sh`.
+- [x] **23.3 Makefile targets** — `awake-bridge`, `awake-bridge-uninstall`, `awake-bridge-status`, `awake-bridge-restart`.
+- [x] **23.4 Container client** — `lazyclaw/host/awake_client.py` (`lazyclaw/host/__init__.py`): marker/token gating, process-local circuit breaker (60 s backoff), `host.docker.internal:18791` (Docker) / `127.0.0.1` (native). Methods: `status`, `turn_on`, `turn_off`, `nap`, `set_daily_wake`.
+- [x] **23.5 Settings** — `lazyclaw/settings/general.py`: `awake` sub-dict in `DEFAULT_GENERAL` (enabled/daily_wake_enabled/daily_wake_time/suppressed_until), validation (`HH:MM` regex + range, ISO-8601 suppressed_until), partial-merge (siblings preserved).
+- [x] **23.6 NL skill** — `lazyclaw/skills/builtin/awake_mode.py` (`AwakeModeSkill`): actions on/off/nap/daily_wake/status, battery-warning, bridge-missing message, registered in `registry.py`. Auto-discovered by brain → Telegram NL works immediately.
+- [x] **23.7 Heartbeat reconcile** — `lazyclaw/heartbeat/daemon._reconcile_awake_mode()`: every tick; re-asserts caffeinate if dead, re-applies pmset on drift, respects suppressed_until nap window. Wrapped in try/except.
+- [x] **23.8 Gateway route** — `lazyclaw/gateway/routes/awake.py`: `GET /api/awake/status`, `POST /api/awake/toggle`, `PATCH /api/awake/settings`. Registered in `gateway/app.py`.
+- [x] **23.9 Web UI** — `AwakeBadge.tsx` in Header (🟢 awake / 🌙 sleep ok, click to toggle, 30 s poll); Power tab in Settings (enable toggle, daily-wake toggle + time picker).
+- [x] **23.10 Tests** — 31 tests: `tests/test_awake_pmset_parsers.py` (parse_batt, parse_sched, _extract_clock), `tests/test_awake_settings.py` (defaults, HH:MM validation, merge isolation, async update scenarios). All green.
+- [x] **23.11 Docs** — spec at `docs/superpowers/specs/2026-05-28-awake-mode-design.md`, DOCS.md + CLAUDE.md + MEMORY.md updated.
+
+**Verification**: 31 new tests pass. Python syntax clean on all 11 modified/new files. Web UI TypeScript consistent (AwakeStatus type, api calls, component). Bridge is macOS-only; on other platforms skill returns a clear "not installed" message.

@@ -354,6 +354,14 @@ class HeartbeatDaemon:
         except Exception:
             logger.debug("EOD summary sweep failed", exc_info=True)
 
+        # Awake mode reconcile — re-assert caffeinate + pmset if they drifted
+        # (container restart, post-nap wake, etc.). Cheap HTTP probe; fails
+        # silently so a missing bridge never blocks other heartbeat work.
+        try:
+            await self._reconcile_awake_mode()
+        except Exception:
+            logger.debug("awake mode reconcile failed", exc_info=True)
+
         # Keep persistent browser alive if enabled for any user
         await self._ensure_persistent_browser()
 
@@ -368,6 +376,74 @@ class HeartbeatDaemon:
                 await self._check_tab_health()
             except Exception:
                 logger.debug("tab health sweep failed", exc_info=True)
+
+    async def _reconcile_awake_mode(self) -> None:
+        """Re-assert caffeinate + pmset schedule when they drift from settings.
+
+        Fires every heartbeat tick (60 s default). Cheap: one HTTP probe to
+        the host awake bridge + one settings read. If the bridge is not
+        installed or unreachable, exits silently — the circuit breaker in
+        awake_client prevents latency build-up.
+        """
+        from lazyclaw.host import awake_client
+        from lazyclaw.host.awake_client import AwakeBridgeUnavailable
+        from lazyclaw.settings.general import get_general_settings, update_general_settings
+
+        if not awake_client.is_configured():
+            return
+
+        async with db_session(self._config) as db:
+            cursor = await db.execute("SELECT id FROM users LIMIT 10")
+            user_ids = [r[0] for r in await cursor.fetchall()]
+
+        for user_id in user_ids:
+            try:
+                settings = await get_general_settings(self._config, user_id)
+                awake_cfg = settings.get("awake", {})
+
+                if not awake_cfg.get("enabled", True):
+                    continue
+
+                # Respect suppressed_until set by the 'nap' action.
+                suppressed_until = awake_cfg.get("suppressed_until")
+                if suppressed_until:
+                    try:
+                        from datetime import datetime, timezone
+                        until = datetime.fromisoformat(
+                            suppressed_until.replace("Z", "+00:00")
+                        )
+                        if datetime.now(timezone.utc) < until:
+                            continue  # still napping — don't re-assert
+                        else:
+                            # Nap expired — clear the suppression
+                            await update_general_settings(
+                                self._config, user_id,
+                                {"awake": {"suppressed_until": None}},
+                            )
+                    except (ValueError, TypeError):
+                        pass
+
+                st = await awake_client.status()
+
+                # Re-assert caffeinate if it died (container restart, etc.)
+                if not st.get("caffeinate_running"):
+                    await awake_client.turn_on()
+                    logger.info("awake_mode: re-asserted caffeinate for user %s", user_id)
+
+                # Re-apply daily wake if the pmset schedule drifted
+                if awake_cfg.get("daily_wake_enabled"):
+                    wanted = awake_cfg.get("daily_wake_time", "07:00")
+                    live = st.get("daily_wake")
+                    if live != wanted:
+                        await awake_client.set_daily_wake(wanted, True)
+                        logger.info(
+                            "awake_mode: re-applied daily wake %s for user %s", wanted, user_id
+                        )
+
+            except AwakeBridgeUnavailable:
+                return  # circuit breaker tripped — stop trying all users
+            except Exception:
+                logger.debug("awake reconcile failed for user %s", user_id, exc_info=True)
 
     async def _check_tab_health(self) -> None:
         """Per-user tab reap + cap + white-screen refresh.

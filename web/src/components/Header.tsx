@@ -1,4 +1,5 @@
 import { useAuth } from "../context/AuthContext";
+import AwakeBadge from "./AwakeBadge";
 
 interface HeaderProps {
   onToggleSidebar: () => void;
@@ -34,8 +35,9 @@ export default function Header({ onToggleSidebar, sidebarOpen }: HeaderProps) {
         </div>
       </div>
 
-      {/* Right: user + logout */}
+      {/* Right: awake badge + user + logout */}
       <div className="flex items-center gap-2">
+        <AwakeBadge />
         <div className="flex items-center gap-2 px-2 py-1 rounded-lg">
           <div className="w-6 h-6 rounded-full bg-accent-soft flex items-center justify-center">
             <span className="text-xs font-semibold text-accent">

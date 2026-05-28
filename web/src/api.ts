@@ -975,6 +975,24 @@ export const deleteVaultKey = (key: string) =>
 
 // ── General settings + System about ────────────────────────────────────────
 
+export interface AwakeSettings {
+  enabled: boolean;
+  daily_wake_enabled: boolean;
+  daily_wake_time: string; // "HH:MM"
+  suppressed_until: string | null;
+}
+
+export interface AwakeStatus {
+  bridge_installed: boolean;
+  bridge_reachable: boolean;
+  caffeinate_running: boolean;
+  on_ac_power: boolean | null;
+  battery_percent: number | null;
+  daily_wake: string | null; // live pmset reading
+  scheduled_wakes: string[];
+  settings: AwakeSettings;
+}
+
 export interface GeneralSettings {
   // "brave" + "scraper" added when the providers were wired in
   // gateway/routes/system.py. "auto" still picks the best available.
@@ -987,6 +1005,7 @@ export interface GeneralSettings {
     | "duckduckgo";
   show_cost_badges: boolean;
   auto_save_browser_templates?: boolean;
+  awake?: AwakeSettings;
 }
 
 export interface SearchQuota {
@@ -1039,6 +1058,27 @@ export const updateGeneralSettings = (updates: Partial<GeneralSettings>) =>
 
 export const getAboutInfo = () =>
   request<{ success: boolean; data: AboutInfo }>("/api/system/about").then((r) => r.data);
+
+// ── Awake mode ──────────────────────────────────────────────────────────────
+
+export const getAwakeStatus = () =>
+  request<{ success: boolean; data: AwakeStatus }>("/api/awake/status").then((r) => r.data);
+
+export const toggleAwakeMode = (enabled: boolean) =>
+  request<{ success: boolean; enabled: boolean }>("/api/awake/toggle", {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
+
+export const updateAwakeSettings = (updates: {
+  enabled?: boolean;
+  daily_wake_enabled?: boolean;
+  daily_wake_time?: string;
+}) =>
+  request<{ success: boolean; data: AwakeSettings }>("/api/awake/settings", {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  }).then((r) => r.data);
 
 // ── ECO ────────────────────────────────────────────────────────────────────
 

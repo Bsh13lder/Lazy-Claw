@@ -17,7 +17,7 @@ import Modal from "../components/Modal";
 
 // ── Tab types ──────────────────────────────────────────────────────────────
 
-type TabId = "models" | "search" | "teams" | "permissions" | "about";
+type TabId = "models" | "search" | "teams" | "permissions" | "about" | "power";
 
 interface TabDef {
   readonly id: TabId;
@@ -117,11 +117,21 @@ function SlidersIcon() {
 
 // ── Tab definitions ────────────────────────────────────────────────────────
 
+function PowerIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18.36 6.64A9 9 0 1 1 5.63 5.63" />
+      <line x1="12" y1="2" x2="12" y2="12" />
+    </svg>
+  );
+}
+
 const TABS: readonly TabDef[] = [
   { id: "models", label: "Models", icon: <SlidersIcon /> },
   { id: "search", label: "Search", icon: <SearchIcon /> },
   { id: "teams", label: "Teams", icon: <UsersIcon /> },
   { id: "permissions", label: "Permissions", icon: <ShieldIcon /> },
+  { id: "power", label: "Power", icon: <PowerIcon /> },
   { id: "about", label: "About", icon: <InfoIcon /> },
 ] as const;
 
@@ -230,6 +240,7 @@ const CLAUDE_CLI_MODELS: readonly { value: string; label: string }[] = [
   { value: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 — 1M context (beta)" },
   { value: "claude-opus-4-6[1m]", label: "Opus 4.6 — 1M context" },
   { value: "claude-opus-4-7[1m]", label: "Opus 4.7 — 1M context" },
+  { value: "claude-opus-4-8[1m]", label: "Opus 4.8 — 1M context (latest)" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5 — fastest" },
 ];
 
@@ -280,9 +291,22 @@ function ClaudeModePanel({
     }
   };
 
+  // Maps each per-mode CLAUDE role key to its generic "last-picked" mirror so
+  // Telegram / CLI fall back to the same choice (matches ModelAssignment).
+  const CLAUDE_GENERIC_MIRROR = {
+    claude_brain_model: "brain_model",
+    claude_worker_model: "worker_model",
+    claude_fallback_model: "fallback_model",
+  } as const;
+
   const handleModel = async (key: typeof CLAUDE_ROLES[number]["key"], value: string) => {
     try {
-      await onSettingsUpdate({ [key]: value });
+      // Dual-write: per-mode override keeps CLAUDE-mode isolation, generic
+      // mirror ensures Telegram / CLI fall back to the same choice.
+      await onSettingsUpdate({
+        [key]: value,
+        [CLAUDE_GENERIC_MIRROR[key]]: value,
+      });
       toast.success("Model updated");
     } catch {
       toast.error("Failed to update model");
@@ -1809,6 +1833,93 @@ function AboutTab({ about }: { readonly about: AboutInfo | null }) {
   );
 }
 
+// ── Power tab ─────────────────────────────────────────────────────────────
+
+function PowerTab({
+  general,
+  onUpdate,
+}: {
+  readonly general: GeneralSettings | null;
+  readonly onUpdate: (updates: Partial<GeneralSettings>) => Promise<void>;
+}) {
+  const toast = useToast();
+  const awake = general?.awake;
+  const [saving, setSaving] = useState(false);
+
+  const patch = async (fields: Record<string, unknown>) => {
+    setSaving(true);
+    try {
+      await onUpdate({ awake: fields as never });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 max-w-xl">
+      <SectionHeading
+        title="Power & Sleep"
+        subtitle="Keep LazyClaw running with the lid closed. Requires the host awake bridge (make awake-bridge)."
+      />
+
+      {/* Awake mode toggle */}
+      <div className="bg-bg-secondary rounded-xl border border-border p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-text-primary">Stay awake by default</p>
+            <p className="text-xs text-text-muted mt-0.5">Hold a no-sleep assertion whenever the agent is running. Works lid-closed when plugged in.</p>
+          </div>
+          <Toggle
+            on={awake?.enabled ?? true}
+            disabled={saving}
+            onChange={() => patch({ enabled: !(awake?.enabled ?? true) })}
+          />
+        </div>
+      </div>
+
+      {/* Daily auto-wake */}
+      <div className="bg-bg-secondary rounded-xl border border-border p-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-text-primary">Daily auto-wake</p>
+            <p className="text-xs text-text-muted mt-0.5">Tell the hardware to wake itself every day at the set time (pmset). Works even from deep sleep.</p>
+          </div>
+          <Toggle
+            on={awake?.daily_wake_enabled ?? false}
+            disabled={saving}
+            onChange={() => patch({ daily_wake_enabled: !(awake?.daily_wake_enabled ?? false) })}
+          />
+        </div>
+        {(awake?.daily_wake_enabled) && (
+          <div className="flex items-center gap-3">
+            <label className="text-xs text-text-muted w-24 shrink-0">Wake time</label>
+            <input
+              type="time"
+              value={awake?.daily_wake_time ?? "07:00"}
+              disabled={saving}
+              onChange={(e) => patch({ daily_wake_time: e.target.value })}
+              className="bg-bg-hover border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent"
+            />
+            <span className="text-xs text-text-muted">every day</span>
+          </div>
+        )}
+      </div>
+
+      {/* Install hint */}
+      <div className="rounded-xl border border-border bg-bg-secondary/50 p-4">
+        <p className="text-xs text-text-muted">
+          <strong className="text-text-secondary">First time?</strong> Run{" "}
+          <code className="bg-bg-hover px-1.5 py-0.5 rounded text-accent text-[11px]">make awake-bridge</code>{" "}
+          on your Mac host (one-time, needs sudo), then restart the container.
+          The badge in the header will turn green once it's connected.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Settings page ─────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -1982,6 +2093,9 @@ export default function Settings() {
         )}
         {tab === "permissions" && (
           <PermissionsTab perms={perms} onPermsUpdate={handlePermsUpdate} />
+        )}
+        {tab === "power" && (
+          <PowerTab general={general} onUpdate={handleGeneralUpdate} />
         )}
         {tab === "about" && <AboutTab about={about} />}
       </div>

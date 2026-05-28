@@ -248,6 +248,7 @@ These are non-obvious architectural decisions that apply everywhere. For dated c
 - **Agent Skills compatibility**: Skills in Claude Code agent format (YAML + markdown) importable via `lazyclaw skill import`.
 - **Docker Claude CLI persistence**: `docker-compose.yml` mounts named volume at `~/.claude` so `claude login` persists across `down/up`.
 - **Host Brave bridge**: `scripts/install-host-brave-bridge.sh` — launchd plist runs Brave with user profile + CDP token. `make host-bridge && make rebuild` to activate. Container Chromium fallback when no host browser found.
+- **Host Awake bridge**: `scripts/install-host-awake-bridge.sh` — **root** LaunchDaemon (`/Library/LaunchDaemons/sh.lazyclaw.awake-bridge.plist`) on port **18791**. Controls `caffeinate` (lid-closed no-sleep) and `pmset` (hardware wake alarms). Root required for `pmset schedule/repeat`. `make awake-bridge` (one-time sudo). Container client: `lazyclaw/host/awake_client.py`. NL skill: `awake_mode`. Heartbeat self-heals every tick via `daemon._reconcile_awake_mode()`. Settings stored in `users.settings.general.awake`. Web UI: AwakeBadge in Header + Power tab in Settings.
 
 ## Git Commit Rules
 

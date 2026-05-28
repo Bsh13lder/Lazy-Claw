@@ -1,6 +1,7 @@
 .PHONY: claude-login claude-status up down rebuild logs \
         host-bridge host-bridge-uninstall host-bridge-status host-bridge-restart \
-        host-stt host-stt-uninstall host-stt-status host-stt-restart
+        host-stt host-stt-uninstall host-stt-status host-stt-restart \
+        awake-bridge awake-bridge-uninstall awake-bridge-status awake-bridge-restart
 
 up:
 	docker compose up -d
@@ -112,3 +113,42 @@ host-stt-status:
 host-stt-restart:
 	@launchctl kickstart -k "gui/$$(id -u)/sh.lazyclaw.stt-bridge" \
 	    && echo "Host STT bridge restarted via launchd."
+
+# ── Host AWAKE bridge — lid-closed sleep prevention + scheduled wake ──────────
+# `make awake-bridge` installs a root LaunchDaemon that lets the agent keep
+# the Mac awake when the lid is closed (caffeinate) and schedule hardware
+# wake-up alarms (pmset). Needs one-time sudo.
+#
+# After installing, restart the container so it picks up the new token:
+#   docker compose restart lazyclaw
+#
+# Then say "stay awake" in Telegram or click the badge in the Web UI.
+awake-bridge:
+	@bash scripts/install-host-awake-bridge.sh
+	@echo ""
+	@echo "Now: docker compose restart lazyclaw   # so the container reads the new .env token"
+
+awake-bridge-uninstall:
+	@bash scripts/uninstall-host-awake-bridge.sh
+
+awake-bridge-status:
+	@if [ -f "/Library/LaunchDaemons/sh.lazyclaw.awake-bridge.plist" ]; then \
+	    echo "launchd plist:  installed at /Library/LaunchDaemons/sh.lazyclaw.awake-bridge.plist"; \
+	else \
+	    echo "launchd plist:  NOT installed (run: make awake-bridge)"; \
+	fi
+	@if grep -qE '^LAZYCLAW_HOST_AWAKE_TOKEN=' .env 2>/dev/null; then \
+	    echo "shared token:   set in .env"; \
+	else \
+	    echo "shared token:   NOT set in .env"; \
+	fi
+	@if curl -fsS --max-time 2 http://localhost:18791/health >/dev/null 2>&1; then \
+	    echo "AWAKE service:  healthy on localhost:18791 ✓"; \
+	    curl -s http://localhost:18791/health | python3 -m json.tool 2>/dev/null || true; \
+	else \
+	    echo "AWAKE service:  not reachable (check ~/Library/Logs/LazyClaw/awake-bridge.err)"; \
+	fi
+
+awake-bridge-restart:
+	@sudo launchctl kickstart -k "system/sh.lazyclaw.awake-bridge" \
+	    && echo "Awake bridge restarted via launchd."

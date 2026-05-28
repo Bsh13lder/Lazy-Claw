@@ -44,10 +44,25 @@ DEFAULT_GENERAL = {
     # in_progress task and its day's progress entries. Off-switch for
     # users who don't want a daily push.
     "eod_summary": True,
+    # Awake mode — keep the macOS host (and thus the agent) running with the
+    # lid closed. The mechanics (caffeinate / pmset) live in the host awake
+    # bridge; this block is the *policy* the heartbeat reconciles toward.
+    # `enabled` defaults on so the agent keeps working when plugged in (on
+    # battery the lid still sleeps — the skill surfaces that). A "nap" sets
+    # `suppressed_until` so reconcile leaves the machine asleep until it wakes.
+    "awake": {
+        "enabled": True,
+        "daily_wake_enabled": False,
+        "daily_wake_time": "07:00",
+        "suppressed_until": None,
+    },
 }
 
 # Validates "-Xh", "-Xm", "-Xd" with an optional combined form like "-2h30m".
 _OFFSET_RE = re.compile(r"^-(?:\d+d)?(?:\d+h)?(?:\d+m)?$")
+
+# Validates a 24-hour clock time "HH:MM" (00:00–23:59), zero-padded or not.
+_HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 async def get_general_settings(config: Config, user_id: str) -> dict:
@@ -76,6 +91,13 @@ async def get_general_settings(config: Config, user_id: str) -> dict:
     # in the Brave rewrite (2026-05-02). Old rows shouldn't crash the UI.
     if merged.get("search_provider") in _LEGACY_PROVIDERS:
         merged["search_provider"] = "auto"
+    # `awake` is nested — merge defaults so partial stored dicts get every key,
+    # and never hand back the shared DEFAULT_GENERAL["awake"] reference.
+    awake = dict(DEFAULT_GENERAL["awake"])
+    stored_awake = general.get("awake")
+    if isinstance(stored_awake, dict):
+        awake.update(stored_awake)
+    merged["awake"] = awake
     return merged
 
 
@@ -135,6 +157,40 @@ async def update_general_settings(
             cleaned.append(s)
         clean["reminder_offsets"] = cleaned
 
+    if "awake" in updates and updates["awake"] is not None:
+        au = updates["awake"]
+        if not isinstance(au, dict):
+            raise ValueError("awake must be an object")
+        clean_awake: dict = {}
+        if "enabled" in au and au["enabled"] is not None:
+            clean_awake["enabled"] = bool(au["enabled"])
+        if "daily_wake_enabled" in au and au["daily_wake_enabled"] is not None:
+            clean_awake["daily_wake_enabled"] = bool(au["daily_wake_enabled"])
+        if "daily_wake_time" in au and au["daily_wake_time"] is not None:
+            t = str(au["daily_wake_time"]).strip()
+            if not _HHMM_RE.match(t):
+                raise ValueError(
+                    f"Invalid daily_wake_time {t!r}. Use HH:MM (00:00–23:59)."
+                )
+            hh, mm = t.split(":")
+            clean_awake["daily_wake_time"] = f"{int(hh):02d}:{int(mm):02d}"
+        if "suppressed_until" in au:
+            su = au["suppressed_until"]
+            if su is None:
+                clean_awake["suppressed_until"] = None
+            else:
+                su_str = str(su).strip()
+                try:
+                    from datetime import datetime
+                    datetime.fromisoformat(su_str.replace("Z", "+00:00"))
+                except ValueError:
+                    raise ValueError(
+                        f"Invalid suppressed_until {su!r}; want ISO-8601 or null."
+                    )
+                clean_awake["suppressed_until"] = su_str
+        if clean_awake:
+            clean["awake"] = clean_awake
+
     if not clean:
         return await get_general_settings(config, user_id)
 
@@ -154,8 +210,16 @@ async def update_general_settings(
     general = current.get("general", {})
     if not isinstance(general, dict):
         general = {}
+    prev_awake = general.get("awake") if isinstance(general.get("awake"), dict) else {}
     general = dict(general)
     general.update(clean)
+    # awake updates are partial — merge into the existing sub-dict instead of
+    # letting general.update() replace the whole thing.
+    if "awake" in clean:
+        merged_awake = dict(DEFAULT_GENERAL["awake"])
+        merged_awake.update(prev_awake)
+        merged_awake.update(clean["awake"])
+        general["awake"] = merged_awake
 
     # Mirror show_cost_badges into the legacy eco.show_badges flag so the ECO
     # tab and the cost-badge renderer keep agreeing.

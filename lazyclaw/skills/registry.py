@@ -198,6 +198,13 @@ class SkillRegistry:
         self.register(RescheduleTaskSkill(config=config))
         self.register(AskAboutTaskSkill(config=config))
 
+        # Awake mode — keep the macOS host running lid-closed via caffeinate +
+        # pmset. Works through the host awake bridge (root LaunchDaemon). NL-
+        # discoverable: "stay awake", "sleep for 2h", "wake me at 7am", etc.
+        from lazyclaw.skills.builtin.awake_mode import AwakeModeSkill
+
+        self.register(AwakeModeSkill(config=config))
+
         # Project budget manager — set budgets, log expenses (mirrored to
         # LazyBrain notes wikilinking the project), recurring auto-charged
         # spend. A "project" is the task category, so these roll up the same

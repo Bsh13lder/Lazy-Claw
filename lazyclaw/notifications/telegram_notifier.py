@@ -19,22 +19,31 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_markdown(text: str) -> str:
-    """Remove common markdown formatting for plain-text Telegram messages."""
+    """Remove common markdown formatting for plain-text Telegram messages.
+
+    Closed pairs are stripped first; any orphan `**` runs left after a
+    mid-stream truncation upstream are then collapsed, so the user never
+    sees raw `**foo` leak through.
+    """
     # Bold: **text** or __text__
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__', r'\1', text, flags=re.DOTALL)
     # Italic: *text* or _text_
-    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text, flags=re.DOTALL)
     # Strikethrough: ~~text~~
-    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    text = re.sub(r'~~(.+?)~~', r'\1', text, flags=re.DOTALL)
     # Inline code: `text`
-    text = re.sub(r'`(.+?)`', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text, flags=re.DOTALL)
     # Headers: ### text → text
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     # Links: [text](url) → text (url)
     text = re.sub(r'\[(.+?)\]\((.+?)\)', r'\1 (\2)', text)
     # Bullet points: - text → • text
     text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
+    # Orphan bold/strike runs (truncation leftovers). `**` and `~~` never
+    # appear as literal content in real chat output, so it's safe to drop.
+    text = re.sub(r'\*\*+', '', text)
+    text = re.sub(r'~~+', '', text)
     return text
 
 
@@ -177,7 +186,13 @@ class TelegramNotifier:
                         meta[attr] = val
                 stats_line = _format_stats_html(meta) if self._verbose else ""
                 tools_line = _format_tools_html(meta) if self._verbose else ""
-                preview = getattr(summary, "result_preview", None)
+                # Prefer the full response over the 200-char CLI preview —
+                # Telegram has its own ~4 KB envelope and the user expects
+                # the complete reply, not a truncated stub.
+                preview = (
+                    getattr(summary, "result_full", "")
+                    or getattr(summary, "result_preview", None)
+                )
                 if preview:
                     stripped = _strip_markdown(preview)
                     # Silent-mode suppression for cron pushes (verbose=False).

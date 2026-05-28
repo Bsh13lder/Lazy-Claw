@@ -85,10 +85,15 @@ class WorkSummary:
     total_tokens: int
     mode: str  # "direct" or "team"
     task_description: str  # first 100 chars of user message
-    result_preview: str  # first 200 chars of response
+    result_preview: str  # first 200 chars of response (CLI / activity feed)
     # Model attribution (added for 4-brain ECO local mode)
     models_used: tuple[tuple[str, str, bool], ...] = ()  # ((display_name, icon, is_local), ...)
     total_cost: float = 0.0  # USD for this request
+    # Full response text — Telegram-bound consumers should prefer this over
+    # result_preview so the user gets the complete message (capped downstream
+    # by the channel's own length limit, e.g. ~3500 chars for Telegram).
+    # Default empty for back-compat with any old callers/pickles.
+    result_full: str = ""
 
 
 @dataclass(frozen=True)

@@ -54,6 +54,7 @@ def build_work_summary(
         mode="team" if specialists else "direct",
         task_description=user_message[:100],
         result_preview=response[:200],
+        result_full=response,
         models_used=tuple(models_used or ()),
         total_cost=total_cost,
     )

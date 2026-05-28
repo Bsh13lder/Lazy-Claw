@@ -659,6 +659,24 @@ _TASK_TOOL_NAMES = frozenset({
     "schedule_job", "list_jobs", "manage_job",
 })
 
+# Budget / expense keywords → inject budget manager tools directly so NL
+# control ("set nima budget to 500", "log 40 hosting on nima", "how much
+# have I spent on nima") works over Telegram without a search_tools hop.
+_BUDGET_KEYWORDS = frozenset({
+    "budget", "budgets",
+    "expense", "expenses", "spending",
+    "spent", "cost", "costs", " spend",
+    "how much have i spent", "how much did i spend", "how much spent",
+    "recurring expense", "recurring charge", "monthly cost",
+    "expense report", "spending report", "set budget",
+})
+
+_BUDGET_TOOL_NAMES = frozenset({
+    "set_project_budget", "add_project_budget", "add_expense",
+    "list_expenses", "expense_report", "add_recurring_expense",
+    "set_default_expense_project",
+})
+
 # Cron / heartbeat job keywords → inject schedule_job/list_jobs/manage_job.
 # The brain owns "show / edit / pause / delete background jobs" intents that
 # the bare survival keyword "jobs" used to swallow into the gig-economy
@@ -2504,6 +2522,23 @@ class Agent:
                     len(_contact_tools_extra),
                 )
 
+            # Budget/expense keyword detection → inject budget manager tools
+            _budget_tools_extra: list = []
+            _wants_budget = any(kw in _msg_lower for kw in _BUDGET_KEYWORDS)
+            if not _wants_budget and _history_tool_names & _BUDGET_TOOL_NAMES:
+                _wants_budget = True
+                logger.info("Budget tools re-injected from recent history context")
+            if _wants_budget:
+                for bname in _BUDGET_TOOL_NAMES:
+                    schema = self.registry.get_tool_schema(bname)
+                    if schema is not None:
+                        _budget_tools_extra.append(schema)
+                if _budget_tools_extra:
+                    logger.info(
+                        "Budget keywords detected — %d budget tools injected",
+                        len(_budget_tools_extra),
+                    )
+
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
             _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
@@ -2806,6 +2841,12 @@ class Agent:
             for ct in _contact_tools_extra:
                 if ct.get("function", {}).get("name") not in _existing_names:
                     tools.append(ct)
+
+            # Add budget manager tools (deduplicated)
+            _existing_names = {t.get("function", {}).get("name") for t in tools}
+            for bt in _budget_tools_extra:
+                if bt.get("function", {}).get("name") not in _existing_names:
+                    tools.append(bt)
 
             # Add survival tools (deduplicated)
             _existing_names = {t.get("function", {}).get("name") for t in tools}
@@ -5509,6 +5550,13 @@ class Agent:
                         "list_contacts",
                         "list_memories",
                         "lookup_project_asset",
+                        # Budget reads — a Web UI "show me nima's expenses" /
+                        # "expense report" must answer INLINE, not get
+                        # AUTO-PROMOTE'd to a Telegram-bound background task.
+                        "list_expenses",
+                        "expense_report",
+                        "list_projects",
+                        "get_project",
                     }:
                         return True
                     # Channel reads (whatsapp_read/list_chats, email_read,

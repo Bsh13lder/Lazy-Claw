@@ -255,7 +255,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_attempted_at TEXT,                       -- timestamp of last execution attempt
     trace_session_id TEXT,                        -- conversation trace that created this task
     lazybrain_note_id TEXT,                       -- mirror note id for status sync
-    pre_reminders TEXT                            -- JSON array of pending advance-reminder ISO timestamps
+    pre_reminders TEXT,                           -- JSON array of pending advance-reminder ISO timestamps
+    allocated_budget REAL                         -- per-task slice of the parent project's budget (nullable; plaintext)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status
@@ -459,6 +460,96 @@ ON pipeline_deals(user_id, stage);
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_deals_contact
 ON pipeline_deals(user_id, contact_id);
+
+-- Project budgets + expenses (Tasks-page money manager). A "project" mirrors
+-- the free-text tasks.category: projects.name_key == casefold(category), so a
+-- project can pre-exist a task and tasks auto-associate by category match. No
+-- task migration. amount is PLAINTEXT (like pipeline_deals.amount) so totals
+-- SUM in SQL; name/description/vendor/notes are encrypted per-user DEK.
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,                -- encrypted display name
+    name_key TEXT NOT NULL,            -- plaintext casefold name; join key to tasks.category
+    budget REAL DEFAULT 0,             -- plaintext base-currency budget
+    currency TEXT NOT NULL DEFAULT 'EUR',
+    status TEXT NOT NULL DEFAULT 'active',   -- active | archived
+    description TEXT,                  -- encrypted
+    lazybrain_note_id TEXT,            -- the "<Name> Project" page note
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_user
+ON projects(user_id, status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_namekey
+ON projects(user_id, name_key);
+
+CREATE TABLE IF NOT EXISTS project_expenses (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    task_id TEXT,                      -- optional FK to tasks(id), nullable
+    amount REAL NOT NULL DEFAULT 0,    -- plaintext, project base currency unless currency overrides
+    currency TEXT NOT NULL DEFAULT 'EUR',
+    description TEXT,                  -- encrypted
+    vendor TEXT,                       -- encrypted
+    notes TEXT,                        -- encrypted
+    spent_at TEXT,                     -- plaintext ISO date of the spend
+    status TEXT NOT NULL DEFAULT 'posted',   -- posted | void
+    recurring_expense_id TEXT,         -- NULL for one-off, else originating rule id
+    lazybrain_note_id TEXT,            -- per-expense note that wikilinks the project
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_expenses_project
+ON project_expenses(user_id, project_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_project_expenses_task
+ON project_expenses(user_id, task_id);
+
+-- Recurring expense rules. The agent_jobs cron engine materializes a
+-- project_expenses row on each due tick (mirror of recurring tasks). The
+-- agent_jobs row is the scheduler; this table is the template + dedup anchor.
+CREATE TABLE IF NOT EXISTS recurring_expenses (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    task_id TEXT,                      -- optional task to attach generated rows to
+    amount REAL NOT NULL DEFAULT 0,    -- plaintext
+    currency TEXT NOT NULL DEFAULT 'EUR',
+    description TEXT,                  -- encrypted template description (e.g. "Hosting")
+    vendor TEXT,                       -- encrypted
+    cron_expression TEXT NOT NULL,     -- plaintext cron (e.g. '0 0 1 * *' monthly)
+    job_id TEXT,                       -- agent_jobs(id) running the schedule
+    next_run TEXT,                     -- mirror of agent_jobs.next_run for inspection
+    last_charged_at TEXT,              -- dedup guard: ISO of last materialized row
+    status TEXT NOT NULL DEFAULT 'active',   -- active | paused
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_recurring_expenses_project
+ON recurring_expenses(user_id, project_id, status);
+
+-- Budget top-ups (credit side of the ledger). Each row adds money to a
+-- project's budget and records WHERE it came from (`source`). Shown in the
+-- project Log alongside expenses. amount plaintext; source encrypted.
+CREATE TABLE IF NOT EXISTS budget_entries (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    amount REAL NOT NULL DEFAULT 0,    -- plaintext credit/top-up (signed: negative on edit-down)
+    currency TEXT NOT NULL DEFAULT 'EUR',
+    source TEXT,                       -- encrypted "where the money came from" / audit reason
+    kind TEXT NOT NULL DEFAULT 'credit',  -- credit | edit  (audit type)
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_entries_project
+ON budget_entries(user_id, project_id);
 
 -- Performance indexes for common query patterns
 CREATE INDEX IF NOT EXISTS idx_job_queue_user_status

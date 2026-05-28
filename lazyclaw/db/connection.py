@@ -178,6 +178,16 @@ async def init_db(config: Config) -> None:
             # to the back of the queue, fair-share next cycle. Plaintext:
             # operational timestamp, no user content.
             ("notes", "last_reindex_attempt_at", "ALTER TABLE notes ADD COLUMN last_reindex_attempt_at TEXT"),
+            # Budget ledger audit kind (2026-05-28) — distinguishes top-ups
+            # ('credit') from Edit-budget audit rows ('edit'). DBs that
+            # created budget_entries before this column was added would
+            # otherwise fail to record edits.
+            ("budget_entries", "kind", "ALTER TABLE budget_entries ADD COLUMN kind TEXT NOT NULL DEFAULT 'credit'"),
+            # Per-task budget allocation (2026-05-28) — a task can carry its
+            # own slice of the parent project budget (project 950 → task 500
+            # → task tracks its own spent vs 500). Plaintext REAL like
+            # projects.budget so totals SUM in SQL. Optional / nullable.
+            ("tasks", "allocated_budget", "ALTER TABLE tasks ADD COLUMN allocated_budget REAL"),
         ]
         for table, column, sql in migrations:
             try:

@@ -6,6 +6,8 @@ import { TaskCard } from "../components/tasks/TaskCard";
 import { TaskDetail } from "../components/tasks/TaskDetail";
 import { PRIORITY_RANK } from "../components/tasks/taskHelpers";
 import { NotesView } from "../components/notes/NotesView";
+import { ProjectBudgetRail } from "../components/budgets/ProjectBudgetRail";
+import { ProjectPanel } from "../components/budgets/ProjectPanel";
 
 /**
  * Tasks page — three-pane layout that degrades gracefully:
@@ -244,6 +246,7 @@ export default function Tasks() {
   const [reloadTick, setReloadTick] = useState(0);
   const [detailOpen, setDetailOpen] = useState<boolean>(readDetailOpen);
   const [railDrawerOpen, setRailDrawerOpen] = useState(false);
+  const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const aliveRef = useRef(true);
 
   useEffect(() => { writeDetailOpen(detailOpen); }, [detailOpen]);
@@ -286,15 +289,34 @@ export default function Tasks() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return tasks;
     return tasks.filter((t) => {
+      if (projectFilter && (t.category || "").trim().toLowerCase() !== projectFilter) {
+        return false;
+      }
+      if (!q) return true;
       if (t.title.toLowerCase().includes(q)) return true;
       if (t.description?.toLowerCase().includes(q)) return true;
       if (t.category?.toLowerCase().includes(q)) return true;
       if (parseSteps(t.steps).some((s) => s.title.toLowerCase().includes(q))) return true;
       return false;
     });
-  }, [tasks, search]);
+  }, [tasks, search, projectFilter]);
+
+  // Distinct task categories feed the Projects rail's auto-detect — any
+  // category typed on a task shows up as a project even before it has a budget.
+  const categories = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const t of tasks) {
+      const c = (t.category || "").trim();
+      if (!c) continue;
+      const k = c.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(c);
+    }
+    return out;
+  }, [tasks]);
 
   const grouped = useMemo(() => groupByDueBucket(filtered), [filtered]);
   const selectedTask = tasks.find((t) => t.id === selectedId) ?? null;
@@ -366,6 +388,19 @@ export default function Tasks() {
           ))}
         </div>
       </div>
+
+      <ProjectBudgetRail
+        categories={categories}
+        selectedKey={projectFilter}
+        onSelect={(key) => {
+          setProjectFilter(key);
+          // Show ALL of a project's tasks regardless of due bucket when
+          // drilling into it, so the project view isn't hidden by "Today".
+          if (key) setBucket("all");
+          setRailDrawerOpen(false);
+        }}
+        reloadKey={reloadTick}
+      />
     </div>
   );
 
@@ -405,6 +440,16 @@ export default function Tasks() {
         </svg>
         {detailOpen ? "hide detail" : "show detail"}
       </button>
+
+      {projectFilter && (
+        <ProjectPanel
+          projectKey={projectFilter}
+          displayName={
+            categories.find((c) => c.toLowerCase() === projectFilter) ?? projectFilter
+          }
+          onChanged={() => setReloadTick((n) => n + 1)}
+        />
+      )}
 
       {!loaded ? (
         <p className="text-xs text-text-muted text-center py-16 italic">Loading tasks…</p>

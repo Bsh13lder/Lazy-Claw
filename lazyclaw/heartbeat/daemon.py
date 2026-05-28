@@ -584,6 +584,16 @@ class HeartbeatDaemon:
                     # missing, task done) — orchestrator.mark_run pauses
                     # below.
 
+                # Recurring-expense jobs short-circuit before the brain too.
+                # Instruction shape is "[EXPENSE:<recurring_id>]" — we
+                # materialize the next expense + quiet Telegram push, zero LLM.
+                if instruction and instruction.startswith("[EXPENSE:"):
+                    handled = await self._fire_recurring_expense(
+                        user_id, job_id, instruction, cron_expression,
+                    )
+                    if handled:
+                        continue
+
                 logger.info("Job '%s' (%s) is due, enqueueing", job_name, job_id)
                 if not self._lane_queue._running:
                     logger.debug("LaneQueue not ready yet — skipping job '%s' this tick", job_name)
@@ -1750,6 +1760,82 @@ class HeartbeatDaemon:
             )
         except Exception:
             logger.debug("pulse: mark_run failed", exc_info=True)
+
+    async def _fire_recurring_expense(
+        self,
+        user_id: str,
+        job_id: str,
+        instruction: str,
+        cron_expression: str,
+    ) -> bool:
+        """Materialize this period's recurring expense + send a quiet Telegram
+        push. Zero LLM. Returns True so the caller ``continue``s and does not
+        enqueue the instruction to the brain.
+
+        Format of ``instruction``: ``[EXPENSE:<recurring_id>]``.
+        """
+        from lazyclaw.budgets import store as budgets
+        from lazyclaw.heartbeat import orchestrator as _orchestrator
+
+        try:
+            recurring_id = instruction[len("[EXPENSE:"):].rstrip("]")
+        except Exception:
+            logger.debug("malformed EXPENSE instruction: %r", instruction)
+            return False
+        if not recurring_id:
+            return False
+
+        try:
+            expense = await budgets.materialize_recurring_expense(
+                self._config, user_id, recurring_id,
+            )
+        except Exception:
+            logger.warning(
+                "recurring expense materialize failed (rid=%s user=%s)",
+                recurring_id, user_id, exc_info=True,
+            )
+            expense = None
+
+        # Quiet push only when a row was actually charged (None = paused/deleted
+        # rule or dedup skip). The rule may have been deleted under us — pause
+        # the orphan job so it stops ticking.
+        if expense is None:
+            rule = None
+            try:
+                rule = await budgets.get_recurring(
+                    self._config, user_id, recurring_id,
+                )
+            except Exception:
+                logger.debug("recurring rule lookup failed", exc_info=True)
+            if rule is None:
+                try:
+                    await _orchestrator.delete_job(self._config, user_id, job_id)
+                except Exception:
+                    logger.debug("orphan expense job cleanup failed", exc_info=True)
+                return True
+        elif self._telegram_push:
+            amount = expense.get("amount")
+            currency = expense.get("currency")
+            project = expense.get("_project_name", "project")
+            try:
+                await self._telegram_push(
+                    f"💸 Charged {amount} {currency} to {project} (recurring expense)."
+                )
+            except Exception:
+                logger.debug("recurring expense push failed", exc_info=True)
+
+        # Advance next_run so the daemon doesn't re-fire this tick.
+        try:
+            from lazyclaw.heartbeat.cron import calculate_next_run
+
+            next_run = calculate_next_run(cron_expression, user_id=user_id)
+            await _orchestrator.mark_run(self._config, job_id, next_run)
+            await _orchestrator.mark_run_outcome(
+                self._config, user_id, job_id, "success",
+            )
+        except Exception:
+            logger.debug("recurring expense mark_run failed", exc_info=True)
+        return True
 
         return True
 

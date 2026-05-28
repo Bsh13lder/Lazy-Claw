@@ -50,6 +50,9 @@ TASK_COLUMNS = [
     "progress_template_id",
     "nudge_sent_at",
     "last_pulse_fired_at",
+    # Per-task budget allocation — a slice of the parent project's budget.
+    # Plaintext REAL (same profile as projects.budget); nullable.
+    "allocated_budget",
 ]
 
 # progress_log is encrypted JSON — same envelope as tags/steps. Adding
@@ -319,6 +322,7 @@ async def create_task(
                 None,  # progress_template_id
                 None,  # nudge_sent_at
                 None,  # last_pulse_fired_at
+                None,  # allocated_budget — opted into via update_task
             ),
         )
         await db.commit()

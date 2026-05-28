@@ -68,6 +68,9 @@ class UpdateTaskBody(BaseModel):
     due_date: str | None = None
     reminder_at: str | None = None
     tags: list[str] | None = None
+    # Per-task budget allocation — a slice of the parent project's budget.
+    # `None` leaves it alone; `0` clears it.
+    allocated_budget: float | None = None
 
 
 class ParseBody(BaseModel):
@@ -167,6 +170,44 @@ async def delete_task_route(
     if not ok:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "deleted", "id": task_id}
+
+
+@router.post("/{task_id}/ai-describe")
+async def ai_describe_task_route(
+    task_id: str,
+    user: User = Depends(get_current_user),
+):
+    """One-click AI explanation: generates a short description of what the
+    task is about (from title + project) and saves it. If a description
+    already exists, the AI text is appended under a divider instead of
+    overwriting the user's notes."""
+    from lazyclaw.tasks.ai_describe import describe_task
+
+    task = await get_task(_config, user.id, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    text = await describe_task(
+        _config, user.id,
+        title=task.get("title") or "",
+        category=task.get("category"),
+        existing_description=task.get("description"),
+    )
+    if not text:
+        raise HTTPException(
+            status_code=503,
+            detail="AI worker is unavailable right now — try again in a moment.",
+        )
+
+    existing = (task.get("description") or "").strip()
+    if existing:
+        merged = f"{existing}\n\n---\n_AI:_ {text}"
+    else:
+        merged = text
+
+    await update_task(_config, user.id, task_id, description=merged)
+    refreshed = await get_task(_config, user.id, task_id)
+    return {"task": refreshed, "ai_text": text}
 
 
 # ---------------------------------------------------------------------------

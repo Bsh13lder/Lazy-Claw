@@ -198,6 +198,23 @@ class SkillRegistry:
         self.register(RescheduleTaskSkill(config=config))
         self.register(AskAboutTaskSkill(config=config))
 
+        # Project budget manager — set budgets, log expenses (mirrored to
+        # LazyBrain notes wikilinking the project), recurring auto-charged
+        # spend. A "project" is the task category, so these roll up the same
+        # categories tasks already use.
+        from lazyclaw.skills.builtin.budget_manager import (
+            AddExpenseSkill, AddProjectBudgetSkill, AddRecurringExpenseSkill,
+            ExpenseReportSkill, ListExpensesSkill, SetDefaultExpenseProjectSkill,
+            SetProjectBudgetSkill,
+        )
+        self.register(SetProjectBudgetSkill(config=config))
+        self.register(AddProjectBudgetSkill(config=config))
+        self.register(AddExpenseSkill(config=config))
+        self.register(ListExpensesSkill(config=config))
+        self.register(ExpenseReportSkill(config=config))
+        self.register(AddRecurringExpenseSkill(config=config))
+        self.register(SetDefaultExpenseProjectSkill(config=config))
+
         # Progress tracking — pulse check-ins via templates (Tier 2 of
         # the progress-tracking system). Templates store
         # questions + buttons + cadence; the heartbeat fires them on

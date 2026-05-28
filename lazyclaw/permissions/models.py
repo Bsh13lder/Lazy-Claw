@@ -44,6 +44,12 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     "mcp_management": ALLOW,
     "survival": ALLOW,
     "tasks": ALLOW,
+    # Project budgets + expenses — local encrypted store, no external blast
+    # radius (same profile as tasks/lazybrain/pipeline). Without ALLOW every
+    # "set nima budget" / "log 40 hosting" over Telegram hits an approval
+    # prompt and the NL flow stalls (web UI calls the store directly, so it
+    # only bites the chat channels).
+    "budgets": ALLOW,
     # Meta-tools the brain MUST be able to call without an approval loop:
     # search_tools is how the brain discovers anything beyond the 16 base
     # tools; orchestration covers dispatch_subagents / delegate /

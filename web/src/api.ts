@@ -684,6 +684,8 @@ export interface TaskItem {
   lazybrain_note_id?: string | null;
   /** JSON-encoded list of TaskStep. Parse via `parseSteps(task.steps)`. */
   steps?: string | null;
+  /** Per-task slice of the parent project's budget (nullable). */
+  allocated_budget?: number | null;
 }
 
 export interface TaskDraft {
@@ -767,6 +769,7 @@ export const updateTask = (
     due_date: string | null;
     reminder_at: string | null;
     tags: string[];
+    allocated_budget: number;
   }>,
 ) =>
   request<{ task: TaskItem }>(`/api/tasks/${id}`, {
@@ -790,6 +793,169 @@ export const rescheduleTask = (
 
 export const deleteTask = (id: string) =>
   request<{ status: string; id: string }>(`/api/tasks/${id}`, {
+    method: "DELETE",
+  });
+
+export const aiDescribeTask = (id: string) =>
+  request<{ task: TaskItem; ai_text: string }>(`/api/tasks/${id}/ai-describe`, {
+    method: "POST",
+  });
+
+// ── Budgets (project budgets + expenses) ─────────────────────────────────────
+
+export interface Project {
+  id: string;
+  name: string;
+  name_key: string;
+  budget: number;
+  currency: string;
+  status: "active" | "archived";
+  description: string | null;
+  lazybrain_note_id: string | null;
+  /** Rolled-up totals (present on list/report). */
+  spent?: number;
+  remaining?: number;
+}
+
+export interface Expense {
+  id: string;
+  project_id: string;
+  task_id: string | null;
+  amount: number;
+  currency: string;
+  description: string | null;
+  vendor: string | null;
+  notes: string | null;
+  spent_at: string | null;
+  status: "posted" | "void";
+  recurring_expense_id: string | null;
+  lazybrain_note_id: string | null;
+}
+
+export const listProjects = (status: "active" | "archived" | "all" = "all") =>
+  request<{ projects: Project[]; count: number }>(
+    `/api/budgets/projects?status=${status}`,
+  ).then((r) => r.projects);
+
+export const createProject = (body: {
+  name: string;
+  budget?: number;
+  currency?: string;
+  description?: string;
+}) =>
+  request<{ project: Project }>("/api/budgets/projects", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }).then((r) => r.project);
+
+export const updateProject = (
+  id: string,
+  body: Partial<{
+    name: string;
+    budget: number;
+    currency: string;
+    description: string;
+    status: "active" | "archived";
+  }>,
+) =>
+  request<{ project: Project }>(`/api/budgets/projects/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  }).then((r) => r.project);
+
+export const setProjectBudget = (id: string, budget: number, currency?: string) =>
+  request<{ project: Project }>(`/api/budgets/projects/${id}/budget`, {
+    method: "PUT",
+    body: JSON.stringify({ budget, currency }),
+  }).then((r) => r.project);
+
+export const deleteProject = (id: string, cascade = false) =>
+  request<{ status: string }>(
+    `/api/budgets/projects/${id}?cascade=${cascade}`,
+    { method: "DELETE" },
+  );
+
+export const listExpenses = (projectId: string, taskId?: string) => {
+  const qs = taskId ? `?task_id=${encodeURIComponent(taskId)}` : "";
+  return request<{ expenses: Expense[]; count: number }>(
+    `/api/budgets/projects/${projectId}/expenses${qs}`,
+  ).then((r) => r.expenses);
+};
+
+export const createExpense = (
+  projectId: string,
+  body: {
+    amount: number;
+    currency?: string;
+    description?: string;
+    vendor?: string;
+    notes?: string;
+    task_id?: string;
+    spent_at?: string;
+  },
+) =>
+  request<{ expense: Expense }>(`/api/budgets/projects/${projectId}/expenses`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }).then((r) => r.expense);
+
+export const deleteExpense = (expenseId: string) =>
+  request<{ status: string }>(`/api/budgets/expenses/${expenseId}`, {
+    method: "DELETE",
+  });
+
+export const createRecurringExpense = (
+  projectId: string,
+  body: {
+    amount: number;
+    cron_expression: string;
+    currency?: string;
+    description?: string;
+    vendor?: string;
+    task_id?: string;
+  },
+) =>
+  request<{ recurring: unknown }>(
+    `/api/budgets/projects/${projectId}/recurring`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+
+export interface BudgetEntry {
+  id: string;
+  project_id: string;
+  amount: number;
+  currency: string;
+  source: string | null;
+  /** `credit` = top-up via Add budget. `edit` = audit row written by Edit budget. */
+  kind?: "credit" | "edit";
+  created_at: string;
+}
+
+export const addBudgetEntry = (
+  projectId: string,
+  body: { amount: number; source?: string; currency?: string },
+) =>
+  request<{ entry: BudgetEntry & { new_budget: number } }>(
+    `/api/budgets/projects/${projectId}/budget-entries`,
+    { method: "POST", body: JSON.stringify(body) },
+  ).then((r) => r.entry);
+
+export const listBudgetEntries = (projectId: string) =>
+  request<{ entries: BudgetEntry[]; count: number }>(
+    `/api/budgets/projects/${projectId}/budget-entries`,
+  ).then((r) => r.entries);
+
+export const updateBudgetEntry = (
+  entryId: string,
+  body: Partial<{ amount: number; source: string; currency: string }>,
+) =>
+  request<{ entry: BudgetEntry }>(`/api/budgets/entries/${entryId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  }).then((r) => r.entry);
+
+export const deleteBudgetEntry = (entryId: string) =>
+  request<{ status: string }>(`/api/budgets/entries/${entryId}`, {
     method: "DELETE",
   });
 

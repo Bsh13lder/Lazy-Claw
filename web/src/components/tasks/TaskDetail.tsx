@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
+
+const STEPS_OPEN_KEY = "lazyclaw.task.steps.open";
+function readSectionOpen(key: string, def = false): boolean {
+  try { const v = localStorage.getItem(key); return v === null ? def : v === "1"; } catch { return def; }
+}
+function writeSectionOpen(key: string, val: boolean) {
+  try { localStorage.setItem(key, val ? "1" : "0"); } catch { /* ignore */ }
+}
 import type { TaskItem, TaskStep } from "../../api";
 import {
+  aiDescribeTask,
   completeTask,
   deleteTask,
   parseSteps,
@@ -18,6 +27,7 @@ import { AiStepsButton } from "./AiStepsButton";
 import { MarkdownNotes } from "./MarkdownNotes";
 import { TaskRescheduleInput } from "./TaskRescheduleInput";
 import { useLiveCountdown } from "./useLiveCountdown";
+import { TaskExpensePanel } from "../budgets/TaskExpensePanel";
 
 /**
  * Right pane — full control over a single task.
@@ -57,6 +67,8 @@ export function TaskDetail({
   const [newStep, setNewStep] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [stepsOpen, setStepsOpen] = useState(() => readSectionOpen(STEPS_OPEN_KEY, false));
+  useEffect(() => { writeSectionOpen(STEPS_OPEN_KEY, stepsOpen); }, [stepsOpen]);
 
   // Reset local state when the selected task changes.
   useEffect(() => {
@@ -290,21 +302,50 @@ export function TaskDetail({
           </div>
         )}
 
-        {/* Steps */}
+        {/* Steps — collapsible. Header click toggles; the AI button is
+            isolated from the toggle so clicking it doesn't expand/collapse. */}
         <div>
-          <div className="flex items-center gap-2 mb-2">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setStepsOpen((o) => !o)}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setStepsOpen((o) => !o); } }}
+            className="flex items-center gap-2 mb-2 cursor-pointer select-none"
+            aria-expanded={stepsOpen}
+          >
+            <svg
+              width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+              className={`text-text-muted shrink-0 transition-transform ${stepsOpen ? "rotate-90" : ""}`}
+            >
+              <polyline points="9 6 15 12 9 18" />
+            </svg>
             <h3 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
               Steps
             </h3>
             {steps.length > 0 && (
-              <span className="text-[10px] ticker text-text-muted">
-                {steps.filter((s) => s.done).length}/{steps.length}
-              </span>
+              <>
+                <span className="text-[10px] ticker text-text-muted">
+                  {steps.filter((s) => s.done).length}/{steps.length}
+                </span>
+                {!stepsOpen && (
+                  <div className="h-1 w-16 rounded-full bg-bg-tertiary overflow-hidden" aria-hidden>
+                    <div
+                      className="h-full bg-accent"
+                      style={{ width: `${steps.length ? (steps.filter((s) => s.done).length / steps.length) * 100 : 0}%` }}
+                    />
+                  </div>
+                )}
+              </>
             )}
-            <div className="ml-auto">
+            {!stepsOpen && steps.length === 0 && (
+              <span className="text-[10px] text-text-muted">empty</span>
+            )}
+            <div className="ml-auto" onClick={(e) => e.stopPropagation()}>
               <AiStepsButton task={task} onAdded={onChanged} />
             </div>
           </div>
+          {stepsOpen && (
           <div className="space-y-1">
             {steps.map((s, idx) => (
               <div
@@ -380,13 +421,23 @@ export function TaskDetail({
               )}
             </form>
           </div>
+          )}
         </div>
 
         {/* Description */}
         <div>
-          <h3 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary mb-1.5">
-            Notes
-          </h3>
+          <div className="flex items-center justify-between mb-1.5">
+            <h3 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+              Notes
+            </h3>
+            <AiExplainButton
+              taskId={task.id}
+              onExplained={(updated) => {
+                setDescription(updated.description ?? "");
+                onChanged();
+              }}
+            />
+          </div>
           <MarkdownNotes
             value={description}
             onChange={setDescription}
@@ -429,6 +480,16 @@ export function TaskDetail({
               />
             </form>
           </div>
+        </div>
+
+        {/* Budget / Cost — per-project budget bar + this task's expenses */}
+        <div className="pt-2 border-t border-border/50">
+          <TaskExpensePanel
+            taskId={task.id}
+            category={task.category}
+            allocatedBudget={task.allocated_budget ?? null}
+            onChanged={onChanged}
+          />
         </div>
 
         {/* Actions */}
@@ -477,6 +538,49 @@ export function TaskDetail({
           {task.reminder_job_id && <span>· reminder scheduled</span>}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** One-click: ask the cheap worker LLM to explain what the task is about and
+ *  save it into the description. Existing notes are preserved (the AI text is
+ *  appended under a divider). */
+function AiExplainButton({
+  taskId,
+  onExplained,
+}: {
+  taskId: string;
+  onExplained: (updated: TaskItem) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const run = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const res = await aiDescribeTask(taskId);
+      onExplained(res.task);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      {err && <span className="text-[10px] text-rose-400 truncate max-w-[14ch]" title={err}>{err}</span>}
+      <button
+        type="button"
+        onClick={() => void run()}
+        disabled={busy}
+        title="Ask AI to explain what this task is about and add it to the notes"
+        className="flex items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border border-accent/40 bg-accent-soft text-accent hover:bg-accent/15 disabled:opacity-40"
+      >
+        <span aria-hidden>✨</span>
+        {busy ? "Thinking…" : "Explain"}
+      </button>
     </div>
   );
 }

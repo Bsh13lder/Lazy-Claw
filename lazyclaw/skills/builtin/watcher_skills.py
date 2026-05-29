@@ -77,6 +77,18 @@ class WatchSiteSkill(BaseSkill):
                         "by the contract-intake auto-setup flow."
                     ),
                 },
+                "on_change_instruction": {
+                    "type": "string",
+                    "description": (
+                        "Optional, OPT-IN. By default a watcher only NOTIFIES "
+                        "on change — it never drives the browser, so it can't "
+                        "interrupt other work. Set this ONLY when the user "
+                        "explicitly wants the agent to ACT on a change (e.g. "
+                        "'watch X and auto-reply'). The text is the instruction "
+                        "the agent runs when a change is detected. Leave unset "
+                        "for plain 'just tell me when it changes' monitoring."
+                    ),
+                },
             },
             "required": ["url", "what_to_watch"],
         }
@@ -96,6 +108,10 @@ class WatchSiteSkill(BaseSkill):
         # contract-intake auto-setup flow to deliver 1-tap acceptance
         # from the Telegram alert itself.
         accept_template_slug = params.get("accept_template_slug")
+        # Opt-in: only drive a brain turn on change when explicitly asked.
+        # Default (None) = notify-only, no browser hijack. See
+        # heartbeat/watcher_dispatch.decide_on_change_action.
+        on_change_instruction = params.get("on_change_instruction")
 
         # Block MCP channels — use watch_messages skill instead
         if url.lower() in ("whatsapp", "wa"):
@@ -133,6 +149,7 @@ class WatchSiteSkill(BaseSkill):
             notify_template=None,
             one_shot=one_shot,
             accept_template_slug=accept_template_slug,
+            on_change_instruction=on_change_instruction,
         )
 
         # Create job

@@ -13,6 +13,7 @@ from lazyclaw.runtime.skill_lesson_auto import (
     outcome_from_result,
     record_skill_outcome,
 )
+from lazyclaw.runtime.browser_turn_lock import acquire_live_browser_if_needed
 from lazyclaw.runtime.tool_result import ToolResult
 from lazyclaw.skills.registry import SkillRegistry
 
@@ -74,6 +75,12 @@ class ToolExecutor:
                 logger.info("Tool %s requires approval for user %s", tool_call.name, user_id)
                 return f"{APPROVAL_PREFIX}{tool_call.name}:{args_json}"
 
+        # Serialize live-Brave access: if this tool drives the user's single
+        # live host Brave, hold the per-user lock for the rest of the turn so a
+        # concurrent foreground / background / watcher turn can't steal the tab
+        # mid-sequence (the 2026-05-29 research-vs-submit collision).
+        await acquire_live_browser_if_needed(user_id, tool_call.name)
+
         try:
             # Per-tool timeout: skill.timeout overrides executor default
             effective_timeout = getattr(skill, "timeout", None) or self._timeout
@@ -129,6 +136,8 @@ class ToolExecutor:
         skill = self._registry.get(tool_call.name)
         if not skill:
             return f"Error: Unknown tool '{tool_call.name}'"
+
+        await acquire_live_browser_if_needed(user_id, tool_call.name)
 
         try:
             effective_timeout = getattr(skill, "timeout", None) or self._timeout

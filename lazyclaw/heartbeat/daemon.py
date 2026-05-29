@@ -16,6 +16,14 @@ from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.heartbeat.cron import calculate_next_run, is_due
+from lazyclaw.heartbeat.watcher_dispatch import (
+    ACTION_BRAIN,
+    decide_on_change_action,
+)
+from lazyclaw.runtime.browser_turn_lock import (
+    WATCHER_POLL_LOCK_TIMEOUT_S,
+    live_browser_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1019,9 +1027,27 @@ class HeartbeatDaemon:
                     touch_browser_activity()
                     check_error: str | None = None
                     try:
-                        changed, notification, new_ctx = await check_watcher(
-                            active_backend, ctx, passive=use_live,
-                        )
+                        if use_live:
+                            # The live Brave is shared with foreground/background
+                            # turns. Take the per-user lock so this poll can't
+                            # steal the tab mid-turn; skip the tick (retry next
+                            # interval) if a turn is holding it. (2026-05-29)
+                            async with live_browser_guard(
+                                user_id, timeout=WATCHER_POLL_LOCK_TIMEOUT_S,
+                            ) as _got:
+                                if not _got:
+                                    logger.debug(
+                                        "Watcher '%s' poll skipped — live Brave busy",
+                                        job_name,
+                                    )
+                                    continue
+                                changed, notification, new_ctx = await check_watcher(
+                                    active_backend, ctx, passive=use_live,
+                                )
+                        else:
+                            changed, notification, new_ctx = await check_watcher(
+                                active_backend, ctx, passive=use_live,
+                            )
                     except Exception as exc:
                         check_error = f"{type(exc).__name__}: {exc}"
                         # Record the failure before re-raising to keep the
@@ -1092,27 +1118,22 @@ class HeartbeatDaemon:
                         #     brain's reply IS the message
                         #   * otherwise → 🔔 raw push (no brain turn)
                         accept_slug = ctx.get("accept_template_slug")
-                        on_change_instr = (
-                            ctx.get("on_change_instruction")
-                            if "on_change_instruction" in ctx
-                            else new_ctx.get("on_change_instruction")
-                            if "on_change_instruction" in new_ctx
-                            else (
-                                f"Watcher '{job_name}' detected new content "
-                                f"at {ctx.get('url', '')}. Read the page, "
-                                f"summarize what changed, and route per "
-                                f"normal rules (auto-reply where safe, "
-                                f"escalate sensitive items, draft for "
-                                f"active deals). Stay terse."
-                            )
+                        # Default is notification-only: the passive poll already
+                        # built a zero-token diff, so tell the user what changed
+                        # WITHOUT a brain turn that would drive the live Brave and
+                        # steal the active tab from a foreground/background task
+                        # (the 2026-05-29 tab-steal incident). A brain turn fires
+                        # ONLY when the watcher was created with an explicit
+                        # on_change_instruction (opt-in — mirrors the MCP watcher).
+                        decision = decide_on_change_action(
+                            ctx,
+                            new_ctx,
+                            accept_slug=accept_slug,
+                            lane_running=bool(
+                                self._lane_queue and self._lane_queue._running
+                            ),
                         )
-                        will_fire_brain = bool(
-                            on_change_instr
-                            and on_change_instr.strip()
-                            and self._lane_queue
-                            and self._lane_queue._running
-                            and not accept_slug
-                        )
+                        will_fire_brain = decision.action == ACTION_BRAIN
 
                         if accept_slug:
                             try:
@@ -1158,7 +1179,7 @@ class HeartbeatDaemon:
 
                         if will_fire_brain:
                             try:
-                                instr = on_change_instr.strip()
+                                instr = decision.instruction or ""
                                 if instr:
                                     # Heartbeat lane — see note at
                                     # _check_due_jobs above.

@@ -1709,6 +1709,34 @@ class Agent:
         callback=None,
         channel_context: str | None = None,
     ) -> str:
+        """Public turn entry — serialize live-Brave access, then run the turn.
+
+        Wrapping here covers EVERY caller uniformly (lane handler, gateway,
+        web WS, Telegram, background TaskRunner) since they all funnel through
+        process_message. The per-user lock is taken lazily INSIDE the turn (only
+        when a browser-driving tool actually runs) and released when the turn
+        ends, so two turns can't drive the one live Brave at once and steal each
+        other's tab. See runtime/browser_turn_lock.py (2026-05-29).
+        """
+        from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
+
+        async with browser_turn_scope():
+            return await self._process_message_inner(
+                user_id,
+                message,
+                chat_session_id=chat_session_id,
+                callback=callback,
+                channel_context=channel_context,
+            )
+
+    async def _process_message_inner(
+        self,
+        user_id: str,
+        message: str,
+        chat_session_id: str | None = None,
+        callback=None,
+        channel_context: str | None = None,
+    ) -> str:
         cb = callback or NullCallback()
         cancel_token = CancellationToken()
         if hasattr(cb, 'cancel_token'):

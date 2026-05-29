@@ -104,6 +104,7 @@ def build_watcher_context(
     notify_template: str | None = None,
     one_shot: bool = False,
     accept_template_slug: str | None = None,
+    on_change_instruction: str | None = None,
 ) -> str:
     """Build the JSON context blob stored encrypted in agent_jobs.context.
 
@@ -112,6 +113,13 @@ def build_watcher_context(
     callback fires ``run_browser_template(name=f'{slug}_accept')`` —
     that's how contract-intake watchers deliver the
     1-tap-under-3-seconds promise.
+
+    ``on_change_instruction`` is OPT-IN. When unset (the default) the
+    watcher only pushes a notification on change — it never drives the
+    live Brave, so it can't steal the active tab from a foreground or
+    background task. Set it only when the user explicitly wants the agent
+    to ACT on changes (e.g. auto-reply). See
+    ``heartbeat/watcher_dispatch.decide_on_change_action``.
     """
     page_type = _detect_page_type(url)
 
@@ -124,6 +132,7 @@ def build_watcher_context(
         "notify_template": notify_template,
         "one_shot": one_shot,
         "accept_template_slug": accept_template_slug,
+        "on_change_instruction": on_change_instruction,
         "last_value": None,
         "last_check": None,
     }

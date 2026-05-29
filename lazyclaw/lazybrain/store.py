@@ -535,7 +535,15 @@ async def save_note(
     )
     if not is_journal_note and "[[Journal —" not in content:
         try:
-            day = now[:10]  # YYYY-MM-DD
+            # Use the USER's timezone day, not UTC. Journal pages are titled
+            # via ``timezone_util.today_iso`` (Europe/Madrid); deriving the
+            # auto-link day from ``now`` (UTC) made notes saved between local
+            # midnight and the UTC offset link to *yesterday's* journal.
+            # Local import avoids any import-cycle risk (mirrors memory_types
+            # below). See MEMORY/feedback-date-blind-timestamp-filters.
+            from lazyclaw.lazybrain import timezone_util
+
+            day = timezone_util.today_iso(user_id)  # YYYY-MM-DD in user TZ
             day_title = await _existing_journal_title(config, user_id, day)
             if day_title:
                 content = content.rstrip() + f"\n\n_[[{day_title}]]_"
@@ -772,22 +780,39 @@ async def update_note(
 
 
 async def delete_note(config: Config, user_id: str, note_id: str) -> bool:
-    """Delete a note. ``note_links`` rows clean up via ON DELETE CASCADE.
+    """Delete a note and every dependent row.
 
-    Best-effort cleanup of the FTS title + chunk indexes — they have no
-    foreign key, so we sweep them ourselves to avoid orphaned BM25 hits
-    pointing at deleted ids.
+    ``PRAGMA foreign_keys`` is OFF in this deployment, so NO ``ON DELETE
+    CASCADE`` fires — we must sweep every dependent table ourselves or
+    orphans pile up:
+      - title FTS (``notes_fts``) + chunk FTS (``note_chunks_fts``)
+      - dense embeddings (``note_embeddings`` + the ``vec0`` mirror)
+      - the ``note_chunks`` base table
+      - ``note_links`` BOTH directions (outbound from this note as phantom
+        graph edges; inbound pointers nulled so backlinks don't dangle)
+    Without these sweeps deleted notes kept surfacing in dense / chunk-BM25
+    results and as phantom edges until the next reindex.
     """
     try:
         from lazyclaw.lazybrain import fts as _fts
+        from lazyclaw.lazybrain import embeddings as _emb
         await _fts.delete(config, note_id)
         await _fts.delete_chunks(config, note_id)
+        await _emb.delete_embedding(config, note_id)  # note_embeddings + vec0
     except Exception:
-        logger.debug("fts cleanup on delete failed", exc_info=True)
+        logger.debug("index cleanup on delete failed", exc_info=True)
     async with db_session(config) as db:
         cursor = await db.execute(
             "DELETE FROM notes WHERE id = ? AND user_id = ?",
             (note_id, user_id),
+        )
+        # note_chunks has no FK cascade — sweep it ourselves.
+        await db.execute("DELETE FROM note_chunks WHERE note_id = ?", (note_id,))
+        # Outbound links from this (now dead) note would orphan as phantom
+        # graph edges — FK cascade is OFF, so delete them explicitly.
+        await db.execute(
+            "DELETE FROM note_links WHERE user_id = ? AND from_note_id = ?",
+            (user_id, note_id),
         )
         # Any inbound links now point to a deleted note — null out the pointer
         await db.execute(

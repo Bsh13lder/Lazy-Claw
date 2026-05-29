@@ -47,6 +47,9 @@ type SimNode = {
   degree: number;
   /** Resolved primary category key (or "_singleton"). Drives forceX/Y anchor. */
   cat: string;
+  /** Per-node cluster anchor. Singletons get an individual ring slot so the
+   *  halo reads as a round ring instead of collapsing onto one centroid. */
+  target?: { x: number; y: number };
   __initialDragPos?: { x: number; y: number; fx: number | null; fy: number | null };
 } & SimulationNodeDatum;
 
@@ -137,6 +140,44 @@ const CLUSTER_STRENGTH = 0.18;
  *  Radius scales with sqrt(N) so larger graphs get bigger continents. */
 function clusterRadius(n: number): number {
   return 180 + Math.sqrt(n) * 14;
+}
+/** Soft one-sided radial containment. Below CLUSTER_STRENGTH so continents
+ *  keep their shape; only reels in nodes that drift past the disc edge. */
+const ENVELOPE_STRENGTH = 0.06;
+/** Envelope radius as a multiple of clusterRadius — just outside the
+ *  singleton halo (clusterRadius * 1.55) plus breathing room. */
+const ENVELOPE_RADIUS_MULT = 1.8;
+
+/**
+ * d3 custom force: soft radial containment toward a disc of `radius`.
+ *
+ * One-sided spring — only acts on nodes whose distance from origin exceeds
+ * `radius`, so interior cluster structure is untouched but stray arms,
+ * singletons, and repulsion filaments get reeled back into a round disc.
+ * This is what gives the graph a circular overall silhouette. Scaled by
+ * d3's alpha each tick, so it settles cleanly with the existing cooldown.
+ */
+function forceEnvelope<N extends SimulationNodeDatum>(
+  radius: number,
+  strength: number,
+) {
+  let nodes: N[] = [];
+  function force(alpha: number) {
+    for (const n of nodes) {
+      const x = n.x ?? 0;
+      const y = n.y ?? 0;
+      const d = Math.hypot(x, y);
+      if (d > radius && d > 1e-6) {
+        const k = ((d - radius) / d) * strength * alpha;
+        n.vx = (n.vx ?? 0) - x * k;
+        n.vy = (n.vy ?? 0) - y * k;
+      }
+    }
+  }
+  force.initialize = (n: N[]) => {
+    nodes = n;
+  };
+  return force;
 }
 
 const ZOOM_EXTENT: [number, number] = [0.15, 5];
@@ -349,6 +390,27 @@ export function ForceGraph({
         catCentroid.set(c, { x: Math.cos(angle) * r, y: Math.sin(angle) * r });
       });
 
+      // Spread singletons EVENLY around their own halo ring instead of
+      // collapsing them all onto the single "_singleton" centroid — that
+      // collapse created one big off-center lobe that broke the circular
+      // silhouette. Each singleton gets a stable angle slot on the ring.
+      const singletonR = cR * 1.55;
+      const singletonIds: string[] = [];
+      for (const n of graph.nodes) {
+        const note = notesById?.[n.id];
+        if (categoryFor(note, !!n.pinned) === "_singleton") singletonIds.push(n.id);
+      }
+      const singletonAnchor = new Map<string, { x: number; y: number }>();
+      singletonIds.forEach((id, k) => {
+        const a = (k / Math.max(singletonIds.length, 1)) * Math.PI * 2 - Math.PI / 2;
+        singletonAnchor.set(id, {
+          x: Math.cos(a) * singletonR,
+          y: Math.sin(a) * singletonR,
+        });
+      });
+      const anchorFor = (id: string, cat: string): { x: number; y: number } =>
+        singletonAnchor.get(id) ?? catCentroid.get(cat) ?? { x: 0, y: 0 };
+
       const nodeMap = new Map<string, SimNode>();
       const nodes: SimNode[] = graph.nodes.map((n) => {
         const note = notesById?.[n.id];
@@ -357,7 +419,7 @@ export function ForceGraph({
           n.id.slice(0, 8);
         const pinPos = pinned[n.id];
         const cat = categoryFor(note, !!n.pinned);
-        const c = catCentroid.get(cat);
+        const anchor = anchorFor(n.id, cat);
         const sim: SimNode = {
           id: n.id,
           text,
@@ -367,10 +429,11 @@ export function ForceGraph({
           tags: note?.tags ?? [],
           degree: degMap.get(n.id) ?? 0,
           cat,
-          // Seed near the cluster centroid so pre-tick converges with the
+          target: anchor,
+          // Seed near the cluster anchor so pre-tick converges with the
           // right topology instead of unwinding from origin.
-          x: pinPos?.x ?? (c ? c.x + (Math.random() - 0.5) * 40 : 0),
-          y: pinPos?.y ?? (c ? c.y + (Math.random() - 0.5) * 40 : 0),
+          x: pinPos?.x ?? anchor.x + (Math.random() - 0.5) * 40,
+          y: pinPos?.y ?? anchor.y + (Math.random() - 0.5) * 40,
           fx: pinPos?.x ?? null,
           fy: pinPos?.y ?? null,
         };
@@ -415,11 +478,17 @@ export function ForceGraph({
         // forceX/forceY are cheap and play nicely with charge/link.
         .force(
           "clusterX",
-          forceX<SimNode>((n) => catCentroid.get(n.cat)?.x ?? 0).strength(CLUSTER_STRENGTH),
+          forceX<SimNode>((n) => n.target?.x ?? 0).strength(CLUSTER_STRENGTH),
         )
         .force(
           "clusterY",
-          forceY<SimNode>((n) => catCentroid.get(n.cat)?.y ?? 0).strength(CLUSTER_STRENGTH),
+          forceY<SimNode>((n) => n.target?.y ?? 0).strength(CLUSTER_STRENGTH),
+        )
+        // Round the overall silhouette: pull any node past the disc edge
+        // back inside. One-sided, so interior continents are untouched.
+        .force(
+          "envelope",
+          forceEnvelope<SimNode>(cR * ENVELOPE_RADIUS_MULT, ENVELOPE_STRENGTH),
         )
         .alphaDecay(ALPHA_DECAY);
 

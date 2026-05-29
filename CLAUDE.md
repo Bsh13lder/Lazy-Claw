@@ -152,7 +152,7 @@ These are non-obvious architectural decisions that apply everywhere. For dated c
 - **User isolation**: ALL queries scoped by `user_id`. No cross-user data access.
 - **No hardcoded tools**: All tools from skill registry. Agent discovers dynamically via `search_tools()`. Only 4 base tools sent per message (search_tools, recall_memories, save_memory, delegate). ~95% token savings vs sending all 195+ tools.
 - **Lane Queue**: Serial per-user foreground execution. Background tasks run in parallel via TaskRunner.
-- **Brain-as-dispatcher**: Mid-turn pivot detector in `runtime/agent.py` re-routes the brain back to dispatch when it starts doing work itself. `dispatch_subagents` is non-blocking; parallel `run_background` results consolidated into ONE final reply.
+- **Brain-as-dispatcher**: Mid-turn pivot detector in `runtime/agent.py` re-routes the brain back to dispatch when it starts doing work itself. `dispatch_subagents` is non-blocking; both parallel `run_background` AND `dispatch_subagents` results now auto-consolidate into ONE final reply via TaskRunner brain-fanout (`register_subagent_fanout`/`record_subagent_result`, fired without needing a follow-up user turn). AUTO-PROMOTE skips turns that already dispatched. See DOCS.md → "dispatch_subagents consolidation (2026-05-29)".
 - **TAOR loop**: Think-Act-Observe-Reflect cycle in `taor.py`. Independent tools run concurrently via `asyncio.gather`.
 - **Fast chat path**: Simple messages get last 6 messages + SOUL.md only (no capabilities/memories/tools).
 - **Slim heartbeat path**: Tier-A reminders skip SOUL.md + 95% of tools — agent loads only reminder-relevant tools.

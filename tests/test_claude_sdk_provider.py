@@ -88,6 +88,19 @@ class TestDisallowedBuiltIns:
         for name in ("Bash", "Read", "Write", "Edit", "Task", "Skill"):
             assert name in _DISALLOWED_BUILT_INS
 
+    def test_blocks_workflow_orchestration_builtins(self) -> None:
+        # 2026-05-29 "Chek my whats up" incident: the brain hallucinated a
+        # `Workflow` tool twice (foreground + background worker), each dropped
+        # by the runtime but burning an iteration. `Workflow` and the
+        # Task-orchestration family are Claude Code built-ins with no lazyclaw
+        # equivalent, so block them at the SDK boundary.
+        for name in (
+            "Workflow",
+            "TaskCreate", "TaskGet", "TaskList",
+            "TaskOutput", "TaskStop", "TaskUpdate",
+        ):
+            assert name in _DISALLOWED_BUILT_INS, f"{name} must be disallowed"
+
 
 # ---------------------------------------------------------------------------
 # pure helpers

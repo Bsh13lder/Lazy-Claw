@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
@@ -190,6 +191,74 @@ MAX_TASK_DEPTH = 2
 # Maximum chars per task result included in the synthetic consolidation
 # message. Aggressive truncation keeps the synthetic LLM call cheap.
 _CONSOLIDATION_RESULT_PREVIEW = 1500
+
+
+# A background worker's final reply longer than this is treated as a real
+# synthesis, never as a bare promise — even if it contains a courtesy
+# action-claim line. Keeps the RC3 guard from clobbering legitimate answers.
+_STRANDED_PROMISE_MAX_LEN = 500
+
+
+# Narrow, dedicated regex for the stranded-fan-out signature. Deliberately
+# NARROWER than agent.py's broad ``_ACTION_CLAIM_RE`` so RC3 never rewrites
+# a genuine short answer that merely ends with a courtesy line ("Bitcoin is
+# $X. I'll keep you posted." must survive). It matches only forward-looking
+# statements ABOUT dispatched work — readers/workers scanning, "I'll have
+# your summary shortly", "I'll fold the results into my next reply",
+# "results will follow".
+_DISPATCH_STATUS_RE = re.compile(
+    r"("
+    r"\b(?:readers?|workers?|agents?|subagents?)\s+(?:are|is)\s+"
+    r"(?:scanning|reading|searching|pulling|checking|fetching|gathering)\b"
+    r"|\bscanning\s+(?:your|the|both|whatsapp|email|messages?|inbox|chats?)\b"
+    r"|\bi'?ll\s+have\s+(?:your|the|that|a|it|them|both)\b[^.\n]{0,40}?\b"
+    r"(?:in\s+a\s+(?:few|moment|sec|couple)|shortly|soon|momentarily|ready)"
+    r"|\bi'?ll\s+fold\s+(?:the\s+|these\s+|their\s+)?results?\b"
+    r"|\bfold\s+(?:the\s+|their\s+)?results?\s+into\s+my\s+next\b"
+    r"|\binto\s+my\s+next\s+(?:reply|turn|message)\b"
+    r"|\b(?:results?|summary|answer|update)\s+(?:will\s+)?(?:follow|arrive|land|come\s+(?:back|in))\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_stranded_dispatch_promise(
+    result_text: str | None,
+    tools_used: list[str] | None,
+) -> bool:
+    """RC3 guard — True when a background worker dispatched subagents and
+    then ended its turn with a SHORT dispatch-status promise instead of a
+    synthesized answer.
+
+    The 2026-05-29 "Chek my whats up" bug: an AUTO-PROMOTE'd worker called
+    ``dispatch_subagents`` and replied "two readers are scanning WhatsApp
+    and Email in parallel. I'll have your summary in a few seconds." with
+    no tool calls. That promise was stored as the task result and rendered
+    as "✅ Background task completed" — a lie, since the worker produced no
+    answer and its subagents stranded (a finished worker has no "next
+    reply" to fold results into).
+
+    The guard is deliberately tight to avoid destroying real answers:
+
+      * fires ONLY when ``dispatch_subagents`` is among ``tools_used`` (so
+        there genuinely IS async work the promise refers to but this
+        finished worker can never fulfill), AND
+      * the reply is short (``< _STRANDED_PROMISE_MAX_LEN`` chars — a status
+        line, not a synthesis), AND
+      * the reply matches the NARROW :data:`_DISPATCH_STATUS_RE` (forward-
+        looking statements about the dispatched work — NOT the broad
+        action-claim family, so "Bitcoin is $X. I'll keep you posted."
+        survives untouched).
+
+    Empty replies are handled by the dedicated empty-reply fallback and
+    return False here.
+    """
+    text = (result_text or "").strip()
+    if not text or len(text) > _STRANDED_PROMISE_MAX_LEN:
+        return False
+    if not any("dispatch_subagents" in (t or "") for t in (tools_used or [])):
+        return False
+    return bool(_DISPATCH_STATUS_RE.search(text))
 
 
 @dataclass
@@ -668,6 +737,32 @@ class TaskRunner:
                         f"text and called no tools. Likely brain stalled — please retry."
                     )
 
+            # RC3 — a worker that dispatched subagents and then only
+            # PROMISED ("two readers are scanning… I'll have your summary in
+            # a few seconds") must NOT store that promise as a "✅ completed"
+            # result. A finished worker has no next turn to fulfill it, so
+            # its subagents strand. Rewrite to honest status so the
+            # completion card never impersonates a delivered answer.
+            # (2026-05-29 "Chek my whats up" incident.)
+            _tools_used = (
+                list(_captured_summary.tools_used or [])
+                if _captured_summary else []
+            )
+            if _looks_like_stranded_dispatch_promise(result, _tools_used):
+                logger.warning(
+                    "Background task %s stored a stranded dispatch promise "
+                    "(%.80r) — rewriting to honest status",
+                    task_id[:8], result,
+                )
+                result = (
+                    "⏳ This task dispatched background subagents and then "
+                    "replied with a status only — it produced no synthesized "
+                    "answer of its own. If the subagents return useful data it "
+                    "will arrive in a separate consolidated reply; if nothing "
+                    "follows shortly, ask me to retry inline.\n\n"
+                    f"(Worker's interim status: {result.strip()[:200]})"
+                )
+
             # Store result (encrypted) + cost stats from work_summary
             encrypted_result = encrypt(result, key)
             _cost = _captured_summary.total_cost if _captured_summary else 0.0
@@ -972,6 +1067,66 @@ class TaskRunner:
                     logger.warning("on_complete callback failed for task %s: %s", task_id[:8], exc)
 
     # ── Brain fan-out consolidation ──────────────────────────────────
+
+    def register_subagent_fanout(
+        self,
+        group_id: str,
+        user_id: str,
+        task_ids: list[str],
+        callback: "AgentCallback | None",
+        chat_session_id: str | None = None,
+    ) -> bool:
+        """RC2 — register a ``dispatch_subagents`` fan-out so its results
+        consolidate into ONE brain reply, reusing the exact brain-fan-out
+        machinery ``run_background`` uses (``_record_brain_result`` →
+        ``_consolidate`` → ``lane_queue.enqueue``).
+
+        Returns ``False`` (no-op) when no lane queue is wired, so the caller
+        can keep the legacy fire-and-forget behaviour (results drain via
+        ``pending_subagent_notes`` on the next user turn). MUST be called
+        BEFORE the subagents are spawned so the group's ``pending`` set is
+        populated before any sibling can settle (race-free).
+        """
+        if self._lane_queue is None or not task_ids:
+            return False
+        group = self._brain_groups.get(group_id)
+        if group is None:
+            group = _BrainFanoutGroup(
+                group_id=group_id,
+                user_id=user_id,
+                consolidator_cb=callback,
+                chat_session_id=chat_session_id,
+            )
+            self._brain_groups[group_id] = group
+        group.pending.update(task_ids)
+        logger.info(
+            "Subagent fan-out group %s registered %d task(s) (user=%s)",
+            group_id, len(task_ids), user_id,
+        )
+        return True
+
+    def record_subagent_result(
+        self,
+        task_id: str,
+        name: str,
+        success: bool,
+        result: str = "",
+        error: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        """RC2 — feed a settled ``dispatch_subagents`` result into its
+        fan-out group. When the last sibling settles, the existing
+        ``_consolidate`` fires ONE synthetic brain turn. No-op when the
+        task isn't part of a registered group (legacy / unregistered path).
+        """
+        self._record_brain_result(_FanoutResult(
+            task_id=task_id,
+            name=name,
+            success=success,
+            result=result or "",
+            error=error or "",
+            duration_ms=duration_ms,
+        ))
 
     def _record_brain_result(self, outcome: _FanoutResult) -> None:
         """Append a settled brain-fan-out task to its group; if this was

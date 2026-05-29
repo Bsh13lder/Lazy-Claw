@@ -11,6 +11,7 @@ exclusion both prevent it).
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from lazyclaw.skills.base import BaseSkill
@@ -58,6 +59,8 @@ class DispatchSubagentsSkill(BaseSkill):
         permission_checker=None,
         callback: AgentCallback | None = None,
         team_lead: TeamLead | None = None,
+        task_runner=None,
+        chat_session_id: str | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -65,6 +68,15 @@ class DispatchSubagentsSkill(BaseSkill):
         self._permission_checker = permission_checker
         self._callback = callback
         self._team_lead = team_lead
+        # RC2 — when a TaskRunner with a wired lane queue is available, the
+        # dispatch's subagent results consolidate into ONE brain reply
+        # (reusing the run_background brain-fan-out machinery) instead of
+        # stranding in pending_subagent_notes that only drain on the next
+        # user turn. chat_session_id routes the consolidation turn back to
+        # the originating chat. Both optional → legacy fire-and-forget when
+        # unset.
+        self._task_runner = task_runner
+        self._chat_session_id = chat_session_id
 
     # The skill returns immediately after spawning background subagents,
     # so a tight outer timeout is fine — we never block waiting for fan-out
@@ -258,16 +270,62 @@ class DispatchSubagentsSkill(BaseSkill):
             [(c.agent_type.value, c.task[:40]) for c in configs],
         )
 
-        task_ids = await dispatcher.submit_async(configs, user_id)
+        # RC2 — set up auto-consolidation when a lane-queue-backed TaskRunner
+        # is available. The subagents' results are bucketed under a shared
+        # group; when the last settles, TaskRunner fires ONE synthetic brain
+        # turn that folds them into a single reply on the originating chat.
+        # Without this the brain's "I'll fold results into my next reply"
+        # promise was never fulfilled (2026-05-29 "Chek my whats up" bug).
+        _tr = self._task_runner
+        _group_id: str | None = None
+        if _tr is not None and getattr(_tr, "_lane_queue", None) is not None:
+            _group_id = uuid.uuid4().hex[:12]
+
+        def _on_register(ids: list[str]) -> None:
+            if _group_id:
+                _tr.register_subagent_fanout(
+                    _group_id, user_id, ids,
+                    self._callback, self._chat_session_id,
+                )
+
+        def _on_settle(task_id: str, res) -> None:
+            if _group_id:
+                _tr.record_subagent_result(
+                    task_id,
+                    name=f"{res.agent_type.value} subagent",
+                    success=res.success,
+                    result=res.result or "",
+                    error=res.error or "",
+                    duration_ms=res.duration_ms,
+                )
+
+        task_ids = await dispatcher.submit_async(
+            configs, user_id,
+            on_register=_on_register if _group_id else None,
+            on_settle=_on_settle if _group_id else None,
+            fanout_group_id=_group_id,
+        )
         breakdown = ", ".join(
             f"{c.agent_type.value}: {c.task[:50]}" for c in configs
         )
+        if _group_id:
+            _fold = (
+                "When ALL subagents settle, their results are automatically "
+                "consolidated into ONE follow-up reply for the user — you do "
+                "NOT need to chase them. For THIS turn, reply with a brief "
+                "honest status (e.g. 'Started 2 subagents — I'll send the "
+                "consolidated result shortly')."
+            )
+        else:
+            _fold = (
+                "They stream results back as `background_done` events you "
+                "absorb on later turns. Reply to the user with a short "
+                "status — DO NOT wait for results in this turn."
+            )
         return (
             f"Dispatched {len(task_ids)} subagents in the background "
-            f"(lane='subagent'). They appear in the Activity panel and "
-            f"stream results back as `background_done` events on later "
-            f"turns. Reply to the user with a short status — DO NOT wait "
-            f"for results in this turn.\n"
+            f"(lane='subagent'). They appear in the Activity panel. "
+            f"{_fold}\n"
             f"Task IDs: {', '.join(task_ids)}\n"
             f"Tasks: {breakdown}"
         )

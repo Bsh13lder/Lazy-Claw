@@ -692,6 +692,14 @@ async def chat_websocket(ws: WebSocket):
                 # next TAOR iteration. Subagent results never render as
                 # chat messages — the brain consolidates them.
                 if _is_subagent_terminal:
+                    # RC2 — when the subagent belongs to a consolidating
+                    # fan-out (dispatch_subagents wired through TaskRunner),
+                    # the consolidation turn (task_runner._consolidate)
+                    # delivers ONE merged reply. Drop the per-subagent
+                    # side-note here so the result isn't ALSO injected as a
+                    # pending note → delivered twice. (2026-05-29 fix.)
+                    if getattr(evt, "fanout_group_id", None):
+                        continue
                     if evt.kind == "background_done":
                         note = (
                             f"[bg {evt.task_id} done] "

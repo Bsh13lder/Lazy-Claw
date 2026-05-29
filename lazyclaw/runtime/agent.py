@@ -320,6 +320,20 @@ _ACTION_CLAIM_RE = re.compile(
     r"|\bin\s+the\s+meantime"
     # ── 8. Time-stamped fake starts ───────────────────────────────────────
     r"|\bstarted:?\s*(?:~|just\s+now|a\s+(?:moment|minute|few)|\d+\s*(?:minute|second|hour))"
+    # ── 9. Channel-read / "I'll have it shortly" refusal family ───────────
+    # (2026-05-29 "Chek my whats up + chek mail" incident: the background
+    #  worker shipped "two readers are scanning WhatsApp and Email in
+    #  parallel. I'll have your summary in a few seconds." with tool_calls=0.
+    #  None of the verb patterns above matched it, so the force-dispatch
+    #  failsafe never fired and the promise was stored as the task result.)
+    r"|\bi'?ll\s+have\s+(?:your|the|that|a|it|them|both)\b[^.\n]{0,40}?\b(?:in\s+a\s+(?:few|moment|sec|couple)|shortly|soon|momentarily|ready|in\s+\d+\s*(?:sec|min))"
+    r"|\b(?:i'?ll|i\s+will)\s+(?:summari[sz]e|recap)\b"
+    r"|\bi'?ll\s+(?:send|get)\s+(?:you\s+)?(?:a|the|your)\s+(?:summary|recap|results?|rundown)\b"
+    r"|\bone\s+moment\b"
+    r"|\bgive\s+me\s+(?:a\s+)?(?:moment|sec|second)\b"
+    r"|\blet\s+me\s+(?:check|pull|grab|fetch|read|scan|take\s+a\s+look|go\s+(?:check|grab|read)|look\s+(?:up|into|at))\b"
+    r"|\b(?:scanning|pulling|polling)\s+(?:your|the|both|through|whatsapp|email|emails?|messages?|inbox|chats?|dms?)\b"
+    r"|\b(?:readers?|agents?|workers?|subagents?)\s+(?:are|is)\s+(?:scanning|reading|searching|pulling|checking|fetching|gathering)\b"
     r")",
     re.IGNORECASE,
 )
@@ -2090,6 +2104,12 @@ class Agent:
                 permission_checker=self.executor._checker if self.executor else None,
                 callback=cb,
                 team_lead=self._team_lead,
+                # RC2 — give the skill the lane-queue-backed runner + chat
+                # session so its subagent results consolidate into ONE reply
+                # (foreground turns only; bg workers don't re-fan-out after
+                # RC4 keeps them inline).
+                task_runner=self._task_runner,
+                chat_session_id=chat_session_id,
             )
             self.registry.register(dispatch_skill)
             _dispatch_registered = True
@@ -4090,6 +4110,16 @@ class Agent:
                         _claim_match
                         and tools
                         and _halluc_retries < _HALLUC_MAX_RETRIES
+                        # If the brain ALREADY dispatched async work this
+                        # turn, a "I'll send the consolidated result shortly"
+                        # status is TRUTHFUL — dispatch_subagents auto-
+                        # consolidates (RC2) and run_background pushes when
+                        # done. Don't treat it as a hallucinated action-claim
+                        # or we'd force a confused re-roll / re-dispatch.
+                        # (2026-05-29 — pairs with the broadened
+                        # _ACTION_CLAIM_RE so legit dispatch statuses survive.)
+                        and "dispatch_subagents" not in _called_tool_names
+                        and "run_background" not in _called_tool_names
                     ):
                         _halluc_retries += 1
                         _matched_phrase = _claim_match.group(0)[:60]
@@ -4140,6 +4170,9 @@ class Agent:
                         and user_id is not None
                         and not getattr(self, "is_background", False)
                         and "run_background" not in _called_tool_names
+                        # Already dispatched subagents → the status is true,
+                        # do NOT force a redundant background task (RC2).
+                        and "dispatch_subagents" not in _called_tool_names
                         and not _is_meta_question(message)
                     ):
                         logger.warning(
@@ -5612,6 +5645,15 @@ class Agent:
                     and _has_run_bg
                     and not _promoted_to_bg
                     and "run_background" not in _called_tool_names
+                    # `dispatch_subagents` is ALREADY a non-blocking async
+                    # dispatch (returns immediately with task IDs). Promoting
+                    # a turn that called it to a background worker is
+                    # redundant AND triggers a nested fan-out whose subagent
+                    # results strand in pending_subagent_notes — the
+                    # 2026-05-29 "Chek my whats up" future-tense-promise bug.
+                    # Let the dispatch_subagents consolidation turn deliver
+                    # the results instead (task_runner brain-fanout).
+                    and "dispatch_subagents" not in _called_tool_names
                     and iteration >= _PROMOTE_BG_AT_ITER
                     and not _only_readonly_so_far
                 ):

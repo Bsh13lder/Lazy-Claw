@@ -54,4 +54,15 @@ DISALLOWED_BUILT_INS: list[str] = [
     "CronCreate", "CronList", "CronDelete",   # "scheduling" (use schedule_job)
     "ScheduleWakeup", "RemoteTrigger", "PushNotification",
     "ListMcpResourcesTool", "ReadMcpResourceTool", "LSP",
+    # Added 2026-05-29 after the "Chek my whats up + chek mail" incident:
+    # under MODE_CLAUDE+SDK the brain hallucinated a `Workflow` tool_use
+    # block on BOTH the foreground turn and the auto-promoted background
+    # worker (log lines 3993/3996 + 4110/4113). Each was dropped as
+    # hallucinated, but burned the iteration's first action. `Workflow` and
+    # the Task-orchestration family (`TaskCreate`/`TaskList`/…) are Claude
+    # Code's multi-agent built-ins; lazyclaw orchestrates via `delegate` /
+    # `dispatch_subagents` / `run_background`, so block the whole family.
+    "Workflow",
+    "TaskCreate", "TaskGet", "TaskList",
+    "TaskOutput", "TaskStop", "TaskUpdate",
 ]

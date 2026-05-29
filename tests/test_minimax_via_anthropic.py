@@ -278,6 +278,55 @@ def test_action_claim_regex_corpus_negatives() -> None:
     assert hits == [], f"unexpected matches: {hits!r}"
 
 
+def test_action_claim_regex_channel_read_refusal_family() -> None:
+    """2026-05-29 "Chek my whats up + chek mail" incident.
+
+    The background worker shipped a future-tense promise with tool_calls=0:
+    "two readers are scanning WhatsApp and Email in parallel. I'll have your
+    summary in a few seconds." None of the pre-existing verb patterns matched
+    it, so the force-dispatch failsafe never fired and the promise was stored
+    as the task result. These phrasings (observed + the variants the log
+    forensics enumerated as MISSES) MUST now match.
+    """
+    from lazyclaw.runtime.agent import _ACTION_CLAIM_RE
+
+    corpus = [
+        # The exact promise that shipped.
+        "two readers are scanning WhatsApp and Email in parallel. "
+        "I'll have your summary in a few seconds.",
+        # Variants enumerated as MISSES by the investigation.
+        "I'll have your summary in a few seconds.",
+        "I'll have your WhatsApp and email summary in a few seconds.",
+        "Let me check your WhatsApp and email for you.",
+        "One moment while I check.",
+        "I'll summarize them for you momentarily.",
+        "Pulling your messages now.",
+        "Let me read your WhatsApp and email.",
+        "Give me a sec while I pull your inbox.",
+        "I'll send you a summary shortly.",
+        "Two workers are fetching your messages.",
+    ]
+    misses = [s for s in corpus if not _ACTION_CLAIM_RE.search(s)]
+    assert misses == [], f"unmatched: {misses!r}"
+
+
+def test_action_claim_regex_channel_read_refusal_negatives() -> None:
+    """The channel-read additions must NOT swallow legitimate no-tool prose."""
+    from lazyclaw.runtime.agent import _ACTION_CLAIM_RE
+
+    benign = [
+        "Let me know if you want more detail.",
+        "Here's a summary of the three options below.",
+        "One option is to enable caching.",
+        "I'll explain the trade-offs.",
+        "Your WhatsApp is connected and 3 chats are unread.",
+        "I read the file and everything looks correct.",
+        "Reading the docs is the fastest way to learn this.",
+    ]
+    hits = [s for s in benign if _ACTION_CLAIM_RE.search(s)]
+    assert hits == [], f"unexpected matches: {hits!r}"
+
+
 # ── text-only counter ───────────────────────────────────────────────────────
 
 

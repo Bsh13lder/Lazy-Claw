@@ -224,6 +224,9 @@ class AgentDispatcher:
         self,
         configs: list[SubagentConfig],
         user_id: str,
+        on_register=None,
+        on_settle=None,
+        fanout_group_id: str | None = None,
     ) -> list[str]:
         """Fire-and-forget submit. Returns task IDs immediately.
 
@@ -235,22 +238,49 @@ class AgentDispatcher:
 
         The parent agent is freed immediately, so the user can keep chatting
         while the subagents run in the "background" lane.
+
+        RC2 consolidation hooks (all optional; legacy behaviour when unset):
+
+        * ``on_register(task_ids)`` — called ONCE, synchronously, BEFORE any
+          subagent is spawned (so a fan-out group can be registered with the
+          full task-id set before a sibling can settle — race-free).
+        * ``on_settle(task_id, SubagentResult)`` — called as each subagent
+          settles (may be sync or async). The dispatch_subagents skill wires
+          this to ``TaskRunner.record_subagent_result`` so the last sibling
+          triggers ONE consolidation turn.
+        * ``fanout_group_id`` — when set, tagged onto the terminal bus event
+          (with ``source="brain"``) so the chat WS pump drops the per-subagent
+          side-note: the consolidator owns delivery, no double-render.
         """
         if not configs:
             return []
-        task_ids: list[str] = []
-        for cfg in configs:
-            task_id = f"subagent-{uuid.uuid4().hex[:8]}"
-            task_ids.append(task_id)
+        task_ids: list[str] = [
+            f"subagent-{uuid.uuid4().hex[:8]}" for _ in configs
+        ]
+        # Register the fan-out group BEFORE spawning so its pending set is
+        # populated before any subagent can settle and call on_settle.
+        if on_register is not None:
+            try:
+                on_register(list(task_ids))
+            except Exception:
+                logger.debug(
+                    "submit_async on_register hook failed", exc_info=True,
+                )
+        for cfg, task_id in zip(configs, task_ids):
             bg = asyncio.create_task(
-                self._run_and_publish(cfg, user_id, task_id),
+                self._run_and_publish(
+                    cfg, user_id, task_id,
+                    on_settle=on_settle,
+                    fanout_group_id=fanout_group_id,
+                ),
                 name=f"subagent-{cfg.agent_type.value}-{task_id[-8:]}",
             )
             _BACKGROUND_SUBAGENTS.add(bg)
             bg.add_done_callback(_BACKGROUND_SUBAGENTS.discard)
         logger.info(
-            "submit_async: spawned %d background subagents for user %s",
-            len(task_ids), user_id,
+            "submit_async: spawned %d background subagents for user %s "
+            "(consolidating=%s)",
+            len(task_ids), user_id, bool(fanout_group_id),
         )
         return task_ids
 
@@ -259,8 +289,11 @@ class AgentDispatcher:
         cfg: SubagentConfig,
         user_id: str,
         task_id: str,
+        on_settle=None,
+        fanout_group_id: str | None = None,
     ) -> None:
         """Run one background subagent and publish its terminal event."""
+        import inspect as _inspect
         from lazyclaw.runtime import task_event_bus
 
         result = await self._run_subagent(cfg, user_id, task_id_override=task_id)
@@ -275,11 +308,29 @@ class AgentDispatcher:
                 result=(result.result or "")[:4000] if result.success else None,
                 error=result.error if not result.success else None,
                 duration_ms=result.duration_ms,
+                # RC2: tag consolidating fan-outs so the chat WS pump drops
+                # the per-subagent side-note (consolidator owns delivery).
+                source="brain" if fanout_group_id else None,
+                fanout_group_id=fanout_group_id,
             ))
         except Exception:
             logger.debug(
                 "task_event_bus publish failed for %s", task_id, exc_info=True,
             )
+
+        # RC2: feed the settled result into the fan-out group so the last
+        # sibling triggers ONE consolidation turn. Fired AFTER the bus event
+        # so the (dropped) side-note can never race ahead of consolidation.
+        if on_settle is not None:
+            try:
+                _maybe = on_settle(task_id, result)
+                if _inspect.isawaitable(_maybe):
+                    await _maybe
+            except Exception:
+                logger.debug(
+                    "submit_async on_settle hook failed for %s",
+                    task_id, exc_info=True,
+                )
 
     async def _run_subagent(
         self,

@@ -55,6 +55,11 @@ DEFAULT_CATEGORY_PERMISSIONS: dict[str, str] = {
     # Without ALLOW every "put 10 in A1" / "make me a sheet" over Telegram
     # hits an approval prompt and the NL flow stalls.
     "sheets": ALLOW,
+    # Private encrypted documents + PDF toolkit — local encrypted store +
+    # agent-owned file export, same no-external-blast-radius profile as
+    # sheets/tasks/budgets.
+    "docs": ALLOW,
+    "pdf": ALLOW,
     # Meta-tools the brain MUST be able to call without an approval loop:
     # search_tools is how the brain discovers anything beyond the 16 base
     # tools; orchestration covers dispatch_subagents / delegate /

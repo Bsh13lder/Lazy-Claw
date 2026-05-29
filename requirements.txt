@@ -39,3 +39,11 @@ sqlite-vec>=0.1.9
 openpyxl>=3.1.0
 python-calamine>=0.2.3
 xlcalculator>=0.5.0
+# Docs feature — .docx generation from the Univer document snapshot. MIT.
+python-docx>=1.1.0
+# PDF toolkit — pypdf (BSD-3) + reportlab (BSD) + pdfplumber (MIT) + pikepdf
+# (MPL-2.0). Permissive only; deliberately NOT PyMuPDF/borb (AGPL).
+pypdf>=4.0.0
+reportlab>=4.0.0
+pdfplumber>=0.11.0
+pikepdf>=8.0.0

@@ -6,7 +6,7 @@ import ApprovalDialog from "./ApprovalDialog";
 import { useChat } from "../context/ChatContext";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "sheets" | "vault" | "settings";
+export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "docs" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -31,7 +31,7 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   mcp: { label: "MCP", description: "Server integrations" },
   memory: { label: "Memory", description: "Personal facts & logs" },
   lazybrain: { label: "LazyBrain", description: "Encrypted Logseq-style PKM" },
-  sheets: { label: "Sheets", description: "Private encrypted spreadsheets — agent-editable" },
+  docs: { label: "Docs", description: "Sheets, documents & PDFs — all agent-editable, encrypted" },
   vault: { label: "Vault", description: "Encrypted credentials" },
   settings: { label: "Settings", description: "Agent configuration" },
 };
@@ -89,12 +89,12 @@ const ICONS: Record<Page, NavIcon> = {
       <path d="M12 16v-4M12 8h.01" />
     </svg>
   ),
-  sheets: (
+  docs: (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="18" height="18" rx="1" />
-      <line x1="3" y1="9" x2="21" y2="9" />
-      <line x1="3" y1="15" x2="21" y2="15" />
-      <line x1="9" y1="3" x2="9" y2="21" />
+      <path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M15 3v5h5" />
+      <line x1="8" y1="13" x2="16" y2="13" />
+      <line x1="8" y1="17" x2="13" y2="17" />
     </svg>
   ),
   vault: (
@@ -162,7 +162,7 @@ const ICONS: Record<Page, NavIcon> = {
 // start on Home, work in your brain, run automations, configure tools, debug.
 const NAV_GROUPS: { label: string; items: Page[] }[] = [
   { label: "Home",       items: ["overview", "activity", "code-specialist", "chat", "tasks"] },
-  { label: "Knowledge",  items: ["lazybrain", "sheets", "memory", "vault"] },
+  { label: "Knowledge",  items: ["lazybrain", "docs", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
   { label: "Tools",      items: ["hub", "skills", "mcp"] },
   { label: "Debug",      items: ["replay", "audit"] },
@@ -337,7 +337,7 @@ export default function NavShell({ activePage, onNavigate, children }: NavShellP
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           {/* Page header bar — hidden on LazyBrain so the PKM gets full
               canvas, and on Chat where AgentConsole owns the top strip. */}
-          {activePage !== "lazybrain" && activePage !== "chat" && (
+          {activePage !== "lazybrain" && activePage !== "chat" && activePage !== "docs" && (
             <header className="shrink-0 px-6 py-3 border-b border-border bg-bg-secondary/50 backdrop-blur-sm">
               <div className="flex items-center gap-2">
                 <span className="text-text-muted text-xs">LazyClaw</span>

@@ -19,9 +19,10 @@ import Mcp from "./pages/Mcp";
 import Memory from "./pages/Memory";
 import LazyBrain from "./pages/LazyBrain";
 import Notes from "./pages/Notes";
-// Univer is a ~7 MB editor — code-split so it only loads when Sheets opens,
-// keeping it out of every other page's bundle (and the PWA precache).
-const Sheets = lazy(() => import("./pages/Sheets"));
+// Unified "Docs" workspace — hosts Sheets / Documents / PDFs as sub-tabs.
+// It lazy-loads each type internally, so the heavy Univer (~10 MB) and pdf.js
+// chunks only load when their sub-tab is opened.
+const Documents = lazy(() => import("./pages/Documents"));
 import Vault from "./pages/Vault";
 import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
@@ -29,13 +30,15 @@ import InstallPrompt from "./components/InstallPrompt";
 
 const VALID_PAGES: readonly Page[] = [
   "overview", "activity", "code-specialist", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
-  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain", "sheets",
+  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain", "docs",
   "vault", "settings",
 ];
 
 function readPageFromUrl(): Page {
   if (typeof window === "undefined") return "overview";
   const q = new URLSearchParams(window.location.search).get("page");
+  // Legacy deep links — Sheets/PDF folded into the unified Docs workspace.
+  if (q === "sheets" || q === "pdf") return "docs";
   return (VALID_PAGES as readonly string[]).includes(q ?? "") ? (q as Page) : "overview";
 }
 
@@ -98,7 +101,7 @@ function AppContent() {
       case "mcp": return <Mcp />;
       case "memory": return <Memory />;
       case "lazybrain": return <LazyBrain />;
-      case "sheets": return <Sheets />;
+      case "docs": return <Documents />;
       case "vault": return <Vault />;
       case "settings": return <Settings />;
       default: return <Overview onNavigate={setPage} />;

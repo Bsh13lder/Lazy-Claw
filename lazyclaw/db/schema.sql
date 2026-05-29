@@ -700,6 +700,39 @@ CREATE INDEX IF NOT EXISTS idx_sheets_user
 ON sheets(user_id, updated_at);
 
 -- ────────────────────────────────────────────────────────────────────────
+-- Docs: private encrypted word-processor documents (Univer Docs editor +
+-- agent edits). Same one-blob-per-document pattern as sheets/canvas —
+-- `payload` is AES-256-GCM (enc:v1) over the Univer `IDocumentData` snapshot.
+-- .docx is a derived export, never the source of truth.
+CREATE TABLE IF NOT EXISTS docs (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_docs_user
+ON docs(user_id, updated_at);
+
+-- ────────────────────────────────────────────────────────────────────────
+-- PDF files: user-uploaded / agent-generated PDFs the agent can fill,
+-- annotate, merge, split, extract from, redact, or sign. `payload` is
+-- AES-256-GCM (enc:v1) over base64(PDF bytes) — same encrypted-blob pattern,
+-- binary-safe via base64. `pages` is plaintext for the sidebar listing.
+CREATE TABLE IF NOT EXISTS pdf_files (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    pages       INTEGER,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pdf_files_user
+ON pdf_files(user_id, updated_at);
+
+-- ────────────────────────────────────────────────────────────────────────
 -- LazyBrain: graph node positions (Phase 19.1)
 -- Remembers where each note sat in the graph view so the layout survives
 -- reloads and follows the user across devices. Positions are plaintext

@@ -1,5 +1,17 @@
 # TODO
 
+## Documents Workspace — Sheets / Docs / PDF ✅ COMPLETE (2026-05-29)
+Private encrypted, agent-editable office suite. Three independent backends under one "Docs" web tab. See DOCS.md → "Documents Workspace".
+- [x] **Sheets** — Univer Sheets (Apache-2.0) embed + `lazyclaw/sheets/{snapshot,store,xlsx_io,recalc}.py` + `/api/sheets` + 7 skills. `IWorkbookData` blob per sheet; openpyxl export; xlcalculator recalc. (71 tests)
+- [x] **Docs** — Univer Docs embed + `lazyclaw/docs/{snapshot,store,docx_io}.py` + `/api/docs` + 6 skills. `IDocumentData` blob; python-docx export; LibreOffice-headless PDF (best-effort, 503 if absent). (53 tests)
+- [x] **PDF** — `lazyclaw/pdf/{ops,store}.py` (pypdf/reportlab/pdfplumber/pikepdf — NO PyMuPDF/AGPL) + `/api/pdf` + 8 skills (fill/sign/merge/split/extract/redact/generate). react-pdf viewer. (68 tests)
+- [x] **Unified web workspace** — `web/src/pages/Documents.tsx` sub-tab shell; each type its own lazy chunk; `univer-*` excluded from PWA precache; single "Docs" nav entry.
+- [x] **Permissions** — `sheets`/`docs`/`pdf` categories default ALLOW.
+- [ ] **Deploy** — `docker compose build lazyclaw lazyclaw-web && docker compose up -d` (source baked into images). Optional: add LibreOffice to gateway image for doc→PDF export.
+- [ ] **Future** — PDF true-redaction (content-stream scrub, not visual mask); Univer rich-formatting preservation through docx round-trip; Slides (Univer slides not preset-ready).
+
+**Verification**: 192 tests green (71+53+68). Web build clean (Sheets/Docs/PDF code-split). Gateway mounts all `/api/{sheets,docs,pdf}` routes; registry registers all 21 skills.
+
 ## Phase 1: Foundation
 - [x] **1.1 Crypto core** — `lazyclaw/crypto/encryption.py`: AES-256-GCM + PBKDF2, `enc:v1:` format, server-side key derivation.
 - [x] **1.2 Crypto fields** — encrypt_field, decrypt_field, is_encrypted (in encryption.py).

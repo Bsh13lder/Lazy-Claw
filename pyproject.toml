@@ -84,6 +84,19 @@ dependencies = [
     "openpyxl>=3.1.0",
     "python-calamine>=0.2.3",
     "xlcalculator>=0.5.0",
+    # Docs feature — server-side .docx generation from the Univer document
+    # snapshot (the Docs analogue of openpyxl; Univer's native docx export is
+    # Pro-gated, so we map IDocumentData → docx ourselves). MIT.
+    "python-docx>=1.1.0",
+    # PDF toolkit — fill forms, merge/split/rotate, overlay text+signatures,
+    # extract text/tables, redact, generate. All permissively licensed
+    # (pypdf BSD-3, reportlab BSD, pdfplumber MIT, pikepdf MPL-2.0) —
+    # deliberately NOT PyMuPDF/borb (AGPL). Base deps (default-on per
+    # feedback_optional_extras_for_core_features).
+    "pypdf>=4.0.0",
+    "reportlab>=4.0.0",
+    "pdfplumber>=0.11.0",
+    "pikepdf>=8.0.0",
 ]
 
 [project.optional-dependencies]

@@ -41,6 +41,8 @@ from lazyclaw.gateway.routes.audio import router as audio_router
 from lazyclaw.gateway.routes.tasks import router as tasks_router
 from lazyclaw.gateway.routes.budgets import router as budgets_router
 from lazyclaw.gateway.routes.sheets import router as sheets_router
+from lazyclaw.gateway.routes.docs import router as docs_router
+from lazyclaw.gateway.routes.pdf import router as pdf_router
 from lazyclaw.gateway.routes.awake import router as awake_router
 from lazyclaw.gateway.routes.contacts import router as internal_contacts_router
 from lazyclaw.llm.model_manager import seed_default_models
@@ -224,6 +226,8 @@ app.include_router(audio_router)
 app.include_router(tasks_router)
 app.include_router(budgets_router)
 app.include_router(sheets_router)
+app.include_router(docs_router)
+app.include_router(pdf_router)
 app.include_router(awake_router)
 app.include_router(internal_contacts_router)
 from lazyclaw.gateway.routes.goals import router as goals_router  # noqa: E402

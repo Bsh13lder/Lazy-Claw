@@ -179,7 +179,7 @@ export interface McpTool {
 
 // ── Request helper ─────────────────────────────────────────────────────────
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
@@ -801,6 +801,14 @@ export const aiDescribeTask = (id: string) =>
     method: "POST",
   });
 
+/** Manual explain: the user's own rough text, polished by the AI and saved as
+ * the task's description (replaces the body — no _AI:_ append). */
+export const polishExplanation = (id: string, text: string) =>
+  request<{ task: TaskItem; ai_text: string }>(
+    `/api/tasks/${id}/ai-polish-explanation`,
+    { method: "POST", body: JSON.stringify({ explanation_text: text }) },
+  );
+
 // ── Budgets (project budgets + expenses) ─────────────────────────────────────
 
 export interface Project {
@@ -830,6 +838,8 @@ export interface Expense {
   status: "posted" | "void";
   recurring_expense_id: string | null;
   lazybrain_note_id: string | null;
+  /** Decrypted project name — present on the cross-project ledger only. */
+  project_name?: string | null;
 }
 
 export const listProjects = (status: "active" | "archived" | "all" = "all") =>
@@ -881,6 +891,12 @@ export const listExpenses = (projectId: string, taskId?: string) => {
     `/api/budgets/projects/${projectId}/expenses${qs}`,
   ).then((r) => r.expenses);
 };
+
+/** Every expense across all projects (newest-first), each with project_name. */
+export const listAllExpenses = () =>
+  request<{ expenses: Expense[]; count: number }>(
+    "/api/budgets/expenses",
+  ).then((r) => r.expenses);
 
 export const createExpense = (
   projectId: string,
@@ -1925,3 +1941,101 @@ export const deleteSheet = (id: string) =>
 // Download URL for the server-side xlsx/csv export (Phase 3 endpoint).
 export const sheetExportUrl = (id: string, format: "xlsx" | "csv" = "xlsx") =>
   `/api/sheets/${encodeURIComponent(id)}/export?format=${format}`;
+
+// ── Docs — private encrypted word-processor documents (Univer Docs) ──────
+
+export interface DocMeta {
+  id: string;
+  name: string;
+  created_at?: string;
+  updated_at: string;
+}
+
+// Univer IDocumentData snapshot — opaque to LazyClaw, owned by the editor.
+export type UniverDocSnapshot = Record<string, unknown>;
+
+export interface DocDoc extends DocMeta {
+  payload: UniverDocSnapshot;
+}
+
+export const listDocs = () =>
+  request<{ docs: DocMeta[]; count: number }>("/api/docs").then((r) => r.docs);
+
+export const getDoc = (id: string) =>
+  request<DocDoc>(`/api/docs/${encodeURIComponent(id)}`);
+
+export const createDoc = (name: string) =>
+  request<{ doc: DocMeta }>("/api/docs", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  }).then((r) => r.doc);
+
+export const saveDoc = (id: string, name: string, payload: UniverDocSnapshot) =>
+  request<{ doc: DocMeta }>(`/api/docs/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ name, payload }),
+  }).then((r) => r.doc);
+
+export const deleteDoc = (id: string) =>
+  request<{ status: string; id: string }>(
+    `/api/docs/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+
+// Server-side export (docx; pdf when LibreOffice is available).
+export const docExportUrl = (id: string, format: "docx" | "pdf" = "docx") =>
+  `/api/docs/${encodeURIComponent(id)}/export?format=${format}`;
+
+// ── PDF files — view/upload/manage; agent fills/merges/extracts/signs ────
+
+export interface PdfMeta {
+  id: string;
+  name: string;
+  pages?: number | null;
+  created_at?: string;
+  updated_at: string;
+}
+
+export const listPdfs = () =>
+  request<{ files: PdfMeta[]; count: number }>("/api/pdf").then((r) => r.files);
+
+// Upload a PDF (multipart). Bypasses the JSON `request` wrapper so the browser
+// sets the multipart boundary itself.
+export const uploadPdf = async (file: File): Promise<PdfMeta> => {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch("/api/pdf/import", {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) {
+    let message = `Upload failed (${res.status})`;
+    try {
+      const body = await res.json();
+      message = body.detail || body.message || body.error || message;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  return (await res.json()).file as PdfMeta;
+};
+
+export const deletePdf = (id: string) =>
+  request<{ status: string; id: string }>(
+    `/api/pdf/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+
+export const extractPdfText = (id: string) =>
+  request<{ text: string; pages: number }>(
+    `/api/pdf/${encodeURIComponent(id)}/extract`,
+  );
+
+// Raw PDF bytes for the react-pdf <Document file={...}> viewer.
+export const pdfRawUrl = (id: string) => `/api/pdf/${encodeURIComponent(id)}/raw`;
+
+// Download as an attachment.
+export const pdfDownloadUrl = (id: string) =>
+  `/api/pdf/${encodeURIComponent(id)}/download`;

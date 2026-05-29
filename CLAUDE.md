@@ -111,6 +111,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Pipeline** | `pipeline/` | CRM-style pipeline store for workflow tracking |
 | **Survival** | `survival/` | Gig economy tools — job matching, applications, invoices, contract intake |
 | **LazyBrain** | `lazybrain/` | Python-native Obsidian-grade PKM — encrypted notes + wikilinks + force-directed graph + daily journal + auto-capture + callouts + transclusion + canvas. Single home for every memory source with `owner/{user,agent}` + kind tags. AI-native (autolink, semantic_search, RAG ask, topic_rollup, morning_briefing). 28 NL skills. See DOCS.md for details. |
+| **Documents** | `sheets/` `docs/` `pdf/` | Private encrypted office suite. Univer Sheets + Docs (one `enc:v1` Univer `IWorkbookData`/`IDocumentData` JSON blob per file — same pattern as `canvas.py`) + a permissive PDF toolkit (pypdf/reportlab/pdfplumber/pikepdf). One "Docs" web workspace (3 sub-tabs); agent skills create/read/edit/export/send. See DOCS.md. |
 
 Supporting: `llm/` (multi-provider router + ECO mode + Claude SDK/CLI provider), `heartbeat/` (cron daemon), `permissions/` (allow/ask/deny + audit), `db/` (aiosqlite + connection pool), `web/` (React 19 + TypeScript + Vite + Tailwind), `n8n-custom/` (n8n webhook integration).
 
@@ -185,6 +186,14 @@ These are non-obvious architectural decisions that apply everywhere. For dated c
 - **DB connection pool**: Single shared aiosqlite connection (14ms → 0.2ms per query).
 - **PBKDF2 LRU cache**: Key derivation cached (420ms → 0ms per message).
 - **MCP parallel startup**: `asyncio.gather` connects all MCP servers simultaneously (~2s vs 12s).
+
+### Documents (Sheets / Docs / PDF)
+- **One encrypted blob per file**: Sheets/Docs persist the Univer snapshot (`IWorkbookData` / `IDocumentData`) as a single `enc:v1` JSON blob — same atomic pattern as `lazybrain/canvas.py`, NOT a per-cell/per-glyph schema. PDFs store `enc:v1(base64(bytes))` in `pdf_files`. Stores live in `sheets/store.py`, `docs/store.py`, `pdf/store.py`.
+- **Univer Pro sidestep**: Univer's native xlsx/docx import-export + charts + live-collab are Pro-gated. We keep the free Apache-2.0 editor and convert server-side — `sheets/xlsx_io.py` (openpyxl), `docs/docx_io.py` (python-docx; LibreOffice headless for doc→pdf, returns 503 if `soffice` absent). `sheets/recalc.py` evaluates agent-edited formulas via xlcalculator (Univer recalcs in-browser).
+- **PDF reality**: reflow text-editing is unsupported by every permissive tool — `pdf/ops.py` does fill-form / overlay-text+sign / merge / split / rotate / extract / redact(visual-mask only) / generate. Web is view+manage only; the agent does the edits.
+- **License discipline (CRITICAL)**: permissive only — Univer (Apache-2.0), openpyxl/xlcalculator/python-docx/pdfplumber (MIT), pypdf/reportlab (BSD), pikepdf (MPL). NEVER HyperFormula/Handsontable/PyMuPDF/borb (AGPL/commercial) — they'd poison the MIT licence. Every existing PDF MCP server secretly wraps PyMuPDF; we wrap pypdf/reportlab ourselves.
+- **Agent skills**: `create_sheet/doc`, `read_*`, `set_cells`/`set_formula`/`append_to_doc`/`fill_pdf_form`/`merge_pdfs`/`generate_pdf`, `send_*` (deliver via `push_telegram_document` + web-download fallback). Categories `sheets`/`docs`/`pdf` default ALLOW.
+- **Web**: one lazy "Docs" workspace (`web/src/pages/Documents.tsx`) with Sheets/Documents/PDF sub-tabs, each its OWN lazy chunk so Univer (~10 MB) and pdf.js load only when their sub-tab opens. The `univer-*` chunk is excluded from the PWA precache (`vite.config.ts` globIgnores). WS needs the browser Origin in `CORS_ORIGIN` (else "disconnected").
 
 ### Channels & Security
 - **Telegram security**: Admin chat lock (first /start claims). Unauthorized chats blocked. Exponential backoff retry on network errors.

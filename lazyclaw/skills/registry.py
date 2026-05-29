@@ -236,6 +236,36 @@ class SkillRegistry:
         self.register(RecalcSheetSkill(config=config))
         self.register(SendSheetSkill(config=config))
 
+        # Docs — private encrypted word-processor documents (Univer Docs
+        # editor + agent edits). Same encrypted-blob profile as sheets.
+        from lazyclaw.skills.builtin.docs import (
+            AppendToDocSkill, CreateDocSkill, ListDocsSkill, ReadDocSkill,
+            SendDocSkill, SetDocContentSkill,
+        )
+        self.register(CreateDocSkill(config=config))
+        self.register(ListDocsSkill(config=config))
+        self.register(ReadDocSkill(config=config))
+        self.register(AppendToDocSkill(config=config))
+        self.register(SetDocContentSkill(config=config))
+        self.register(SendDocSkill(config=config))
+
+        # PDF toolkit — fill/sign/merge/split/extract/generate over an
+        # encrypted PDF store. Permissive libs only (pypdf/reportlab/
+        # pdfplumber/pikepdf), never PyMuPDF/borb (AGPL).
+        from lazyclaw.skills.builtin.pdf import (
+            AddTextToPdfSkill, FillPdfFormSkill, GeneratePdfSkill,
+            ListPdfsSkill, MergePdfsSkill, ReadPdfSkill, SendPdfSkill,
+            SplitPdfSkill,
+        )
+        self.register(ListPdfsSkill(config=config))
+        self.register(ReadPdfSkill(config=config))
+        self.register(MergePdfsSkill(config=config))
+        self.register(SplitPdfSkill(config=config))
+        self.register(FillPdfFormSkill(config=config))
+        self.register(AddTextToPdfSkill(config=config))
+        self.register(GeneratePdfSkill(config=config))
+        self.register(SendPdfSkill(config=config))
+
         # Progress tracking — pulse check-ins via templates (Tier 2 of
         # the progress-tracking system). Templates store
         # questions + buttons + cadence; the heartbeat fires them on

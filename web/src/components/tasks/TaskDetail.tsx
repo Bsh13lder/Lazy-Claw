@@ -13,6 +13,7 @@ import {
   completeTask,
   deleteTask,
   parseSteps,
+  polishExplanation,
   setTaskSteps,
   toggleTaskStep,
   updateTask,
@@ -542,9 +543,13 @@ export function TaskDetail({
   );
 }
 
-/** One-click: ask the cheap worker LLM to explain what the task is about and
- *  save it into the description. Existing notes are preserved (the AI text is
- *  appended under a divider). */
+type ExplainMode = "idle" | "menu" | "manual";
+
+/** "Explain" with two modes:
+ *  • Auto — the cheap worker LLM explains the task from its title/project and
+ *    APPENDS under a divider (existing notes preserved).
+ *  • Manual — the user types their OWN rough explanation; the AI polishes it
+ *    and REPLACES the description (they authored it). */
 function AiExplainButton({
   taskId,
   onExplained,
@@ -552,15 +557,35 @@ function AiExplainButton({
   taskId: string;
   onExplained: (updated: TaskItem) => void;
 }) {
+  const [mode, setMode] = useState<ExplainMode>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
 
-  const run = async () => {
+  const runAuto = async () => {
     setErr(null);
     setBusy(true);
     try {
       const res = await aiDescribeTask(taskId);
       onExplained(res.task);
+      setMode("idle");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runManual = async () => {
+    const text = draft.trim();
+    if (!text) { setErr("Write a few words first."); return; }
+    setErr(null);
+    setBusy(true);
+    try {
+      const res = await polishExplanation(taskId, text);
+      onExplained(res.task);
+      setDraft("");
+      setMode("idle");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -569,18 +594,70 @@ function AiExplainButton({
   };
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="relative flex items-center gap-2">
       {err && <span className="text-[10px] text-rose-400 truncate max-w-[14ch]" title={err}>{err}</span>}
       <button
         type="button"
-        onClick={() => void run()}
+        onClick={() => setMode(mode === "idle" ? "menu" : "idle")}
         disabled={busy}
-        title="Ask AI to explain what this task is about and add it to the notes"
+        title="Explain this task — auto, or polish your own words"
         className="flex items-center gap-1 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border border-accent/40 bg-accent-soft text-accent hover:bg-accent/15 disabled:opacity-40"
       >
         <span aria-hidden>✨</span>
         {busy ? "Thinking…" : "Explain"}
       </button>
+
+      {mode === "menu" && (
+        <div className="absolute right-0 top-full mt-1 z-30 w-56 rounded-lg border border-border bg-bg-secondary shadow-xl p-1 flex flex-col gap-0.5">
+          <button
+            type="button"
+            onClick={() => void runAuto()}
+            disabled={busy}
+            className="text-left px-2 py-1.5 rounded hover:bg-bg-hover text-[11px] text-text-primary disabled:opacity-40"
+          >
+            ✨ Auto-explain
+            <span className="block text-[9px] text-text-muted">AI writes it from the title — appends to notes</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMode("manual"); setErr(null); }}
+            className="text-left px-2 py-1.5 rounded hover:bg-bg-hover text-[11px] text-text-primary"
+          >
+            ✍ Write my own
+            <span className="block text-[9px] text-text-muted">You type it, AI polishes — replaces notes</span>
+          </button>
+        </div>
+      )}
+
+      {mode === "manual" && (
+        <div className="absolute right-0 top-full mt-1 z-30 w-72 rounded-lg border border-border bg-bg-secondary shadow-xl p-2 flex flex-col gap-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            autoFocus
+            rows={4}
+            placeholder="Explain this task in your own words — the AI will clean it up."
+            className="bg-bg-primary border border-border rounded px-2 py-1.5 text-[12px] text-text-primary resize-none focus:outline-none focus:border-accent/40"
+          />
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => { setMode("idle"); setDraft(""); setErr(null); }}
+              className="text-[10px] uppercase tracking-wider px-2 py-1 rounded text-text-muted hover:text-text-primary"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void runManual()}
+              disabled={busy}
+              className="text-[10px] uppercase tracking-wider px-2.5 py-1 rounded border border-accent/40 bg-accent-soft text-accent hover:bg-accent/15 disabled:opacity-40"
+            >
+              {busy ? "Polishing…" : "Polish & save"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

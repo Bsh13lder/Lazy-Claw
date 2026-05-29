@@ -8,6 +8,7 @@ import { PRIORITY_RANK } from "../components/tasks/taskHelpers";
 import { NotesView } from "../components/notes/NotesView";
 import { ProjectBudgetRail } from "../components/budgets/ProjectBudgetRail";
 import { ProjectPanel } from "../components/budgets/ProjectPanel";
+import { ExpensesView } from "../components/budgets/ExpensesView";
 
 /**
  * Tasks page — three-pane layout that degrades gracefully:
@@ -48,17 +49,21 @@ const BUCKETS: { id: Bucket; label: string; sub: string }[] = [
 const DETAIL_OPEN_KEY = "lazyclaw.tasks.detailOpen";
 const TAB_KEY = "lazyclaw.tasks.tab";
 
-type WorkspaceTab = "tasks" | "notes";
+type WorkspaceTab = "tasks" | "notes" | "expenses";
+
+const WORKSPACE_TABS: readonly WorkspaceTab[] = ["tasks", "notes", "expenses"];
+const isWorkspaceTab = (v: string | null): v is WorkspaceTab =>
+  v != null && (WORKSPACE_TABS as readonly string[]).includes(v);
 
 function readActiveTab(): WorkspaceTab {
   // URL wins so deep-links land on the right tab.
   if (typeof window !== "undefined") {
     const t = new URLSearchParams(window.location.search).get("tab");
-    if (t === "notes" || t === "tasks") return t;
+    if (isWorkspaceTab(t)) return t;
   }
   try {
     const v = localStorage.getItem(TAB_KEY);
-    if (v === "notes" || v === "tasks") return v;
+    if (isWorkspaceTab(v)) return v;
   } catch {
     /* ignore */
   }
@@ -90,6 +95,24 @@ function readDetailOpen(): boolean {
 function writeDetailOpen(open: boolean): void {
   try {
     localStorage.setItem(DETAIL_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+// Collapsible rail sections (Channel / Bucket) — open by default, persisted.
+const RAIL_SECTION_KEY = "lazyclaw.tasks.rail";
+function readSectionOpen(section: string, def = true): boolean {
+  try {
+    const v = localStorage.getItem(`${RAIL_SECTION_KEY}.${section}.open`);
+    return v === null ? def : v === "1";
+  } catch {
+    return def;
+  }
+}
+function writeSectionOpen(section: string, open: boolean): void {
+  try {
+    localStorage.setItem(`${RAIL_SECTION_KEY}.${section}.open`, open ? "1" : "0");
   } catch {
     /* ignore */
   }
@@ -235,6 +258,28 @@ function groupByDueBucket(tasks: TaskItem[]): Record<string, TaskItem[]> {
   return out;
 }
 
+function SectionHeader({
+  label, open, onToggle,
+}: { label: string; open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="w-full flex items-center gap-1.5 mb-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary hover:text-text-primary transition-colors"
+    >
+      <svg
+        width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+        className={`transition-transform ${open ? "rotate-90" : ""}`}
+      >
+        <polyline points="9 18 15 12 9 6" />
+      </svg>
+      <span>{label}</span>
+    </button>
+  );
+}
+
 export default function Tasks() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(readActiveTab);
   const [channel, setChannel] = useState<Channel>("mine");
@@ -247,7 +292,20 @@ export default function Tasks() {
   const [detailOpen, setDetailOpen] = useState<boolean>(readDetailOpen);
   const [railDrawerOpen, setRailDrawerOpen] = useState(false);
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
+  const [channelOpen, setChannelOpen] = useState(() => readSectionOpen("channel"));
+  const [bucketOpen, setBucketOpen] = useState(() => readSectionOpen("bucket"));
   const aliveRef = useRef(true);
+
+  const toggleChannel = () => {
+    const next = !channelOpen;
+    setChannelOpen(next);
+    writeSectionOpen("channel", next);
+  };
+  const toggleBucket = () => {
+    const next = !bucketOpen;
+    setBucketOpen(next);
+    writeSectionOpen("bucket", next);
+  };
 
   useEffect(() => { writeDetailOpen(detailOpen); }, [detailOpen]);
   useEffect(() => { writeActiveTab(activeTab); }, [activeTab]);
@@ -340,9 +398,8 @@ export default function Tasks() {
   const filterRail = (
     <div className="space-y-4">
       <div>
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary mb-2">
-          Channel
-        </p>
+        <SectionHeader label="Channel" open={channelOpen} onToggle={toggleChannel} />
+        {channelOpen && (
         <div className="flex flex-col gap-1">
           {(Object.keys(CHANNEL_LABELS) as Channel[]).map((c) => {
             const meta = CHANNEL_LABELS[c];
@@ -365,12 +422,12 @@ export default function Tasks() {
             );
           })}
         </div>
+        )}
       </div>
 
       <div>
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary mb-2">
-          Bucket
-        </p>
+        <SectionHeader label="Bucket" open={bucketOpen} onToggle={toggleBucket} />
+        {bucketOpen && (
         <div className="flex flex-col gap-1">
           {BUCKETS.map((b) => (
             <button
@@ -387,6 +444,7 @@ export default function Tasks() {
             </button>
           ))}
         </div>
+        )}
       </div>
 
       <ProjectBudgetRail
@@ -448,6 +506,7 @@ export default function Tasks() {
             categories.find((c) => c.toLowerCase() === projectFilter) ?? projectFilter
           }
           onChanged={() => setReloadTick((n) => n + 1)}
+          onDeleted={() => { setProjectFilter(null); setReloadTick((n) => n + 1); }}
         />
       )}
 
@@ -545,12 +604,29 @@ export default function Tasks() {
               </svg>
               Notes
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("expenses")}
+              className={`px-3 py-1.5 rounded-md text-[14px] font-semibold transition-colors flex items-center gap-2 ${
+                activeTab === "expenses"
+                  ? "bg-bg-primary text-text-primary shadow-[0_1px_0_rgba(255,255,255,0.04)_inset]"
+                  : "text-text-muted hover:text-text-primary"
+              }`}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={activeTab === "expenses" ? "text-accent" : ""}>
+                <line x1="12" y1="1" x2="12" y2="23" />
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+              </svg>
+              Expenses
+            </button>
           </div>
 
           <p className="hidden sm:block text-[11px] text-text-muted">
             {activeTab === "tasks"
               ? "Encrypted · NL time · markdown · AI sub-steps"
-              : "Encrypted · markdown · [[wikilinks]] · no AI"}
+              : activeTab === "notes"
+              ? "Encrypted · markdown · [[wikilinks]] · no AI"
+              : "Encrypted · grouped by project · log & delete spend"}
           </p>
 
           {activeTab === "tasks" && (
@@ -621,9 +697,13 @@ export default function Tasks() {
               )}
             </div>
           </>
-        ) : (
+        ) : activeTab === "notes" ? (
           <div className="flex-1 min-h-0 overflow-y-auto">
             <NotesView variant="embedded" />
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <ExpensesView onChanged={() => setReloadTick((n) => n + 1)} />
           </div>
         )}
       </div>

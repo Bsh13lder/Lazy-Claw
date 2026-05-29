@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { TaskItem } from "../../api";
-import { completeTask, parseSteps } from "../../api";
+import { completeTask, deleteTask, parseSteps } from "../../api";
 import {
   PRIORITY_GUTTER,
   PRIORITY_LABEL,
@@ -38,6 +38,14 @@ export function TaskCard({
   const [ticked, setTicked] = useState(task.status === "done");
   const [busy, setBusy] = useState(false);
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const onDelete = async () => {
+    setBusy(true);
+    try { await deleteTask(task.id); onChanged(); }
+    catch { setBusy(false); }
+    finally { setConfirmDelete(false); }
+  };
 
   const onTick = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -132,6 +140,14 @@ export function TaskCard({
               >
                 ⏰
               </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setRescheduleOpen(false); setConfirmDelete(true); }}
+                title="Delete task"
+                className="text-[10px] px-1.5 py-0.5 rounded border border-border/60 text-text-muted hover:text-rose-400 hover:border-rose-400/40 transition-colors"
+              >
+                🗑
+              </button>
             </div>
           )}
         </div>
@@ -146,6 +162,29 @@ export function TaskCard({
             autoFocus
             onChanged={() => { onChanged(); setRescheduleOpen(false); }}
           />
+        </div>
+      )}
+
+      {/* Two-stage delete confirm — survives losing hover (rendered on the card,
+          not in the hover-only rail). */}
+      {confirmDelete && (
+        <div onClick={(e) => e.stopPropagation()} className="pl-[26px] pr-1 pt-0.5 flex items-center gap-2">
+          <span className="text-[11px] text-rose-300 flex-1">Delete this task?</span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onDelete()}
+            className="text-[10px] px-2 py-0.5 rounded border border-rose-400/40 text-rose-300 bg-rose-400/10 hover:bg-rose-400/20 disabled:opacity-40"
+          >
+            {busy ? "…" : "Delete"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(false)}
+            className="text-[10px] px-2 py-0.5 rounded border border-border text-text-secondary hover:bg-bg-hover"
+          >
+            Cancel
+          </button>
         </div>
       )}
     </div>

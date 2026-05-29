@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as api from "../../api";
 import type { Expense, Project } from "../../api";
-import { fmtMoney } from "./ProjectBudgetRail";
+import { fmtMoney } from "./money";
 
 const PANEL_OPEN_KEY = "lazyclaw.task.budget.open";
 function readPanelOpen(def = false): boolean {

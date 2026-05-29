@@ -141,9 +141,10 @@ async def test_skill_stashes_on_multi_project_match(cfg):
     assert "nima" in candidate_names and "ninja" in candidate_names
 
 
-async def test_skill_stashes_when_no_project_no_default(cfg):
-    """No project named + no default = stash the top-N recent projects so
-    the user can tap one (or send 📥 Inbox)."""
+async def test_skill_logs_to_general_when_no_project_no_default(cfg):
+    """No project named + no default = log to the catch-all 'General' project
+    silently (no ask-back stash). The disambiguation stash is reserved for the
+    AMBIGUOUS case (a named project matching several)."""
     from lazyclaw.skills.builtin.budget_manager import AddExpenseSkill
 
     await store.create_project(cfg, "u1", "personal")
@@ -152,11 +153,12 @@ async def test_skill_stashes_when_no_project_no_default(cfg):
     skill = AddExpenseSkill(config=cfg)
     reply = await skill.execute("u1", {"amount": 12, "description": "coffee"})
 
-    assert "Which project" in reply or "?" in reply
-    entry = pending.get_pending("u1")
-    assert entry is not None
-    assert entry.amount == 12
-    assert len(entry.candidates) >= 1
+    # Logged to General, not deferred to a clarification.
+    assert "General" in reply
+    assert pending.get_pending("u1") is None
+    projects = await store.list_projects(cfg, "u1")
+    general = [p for p in projects if p["name_key"] == "general"]
+    assert len(general) == 1 and float(general[0]["spent"]) == 12.0
 
 
 async def test_skill_clears_pending_on_successful_log(cfg):

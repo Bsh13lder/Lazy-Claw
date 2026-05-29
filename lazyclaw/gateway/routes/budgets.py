@@ -178,6 +178,16 @@ async def delete_project_route(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/expenses")
+async def list_all_expenses_route(
+    user: User = Depends(get_current_user),
+):
+    """Cross-project expense ledger for the global Expenses view — every
+    posted expense, newest-first, each carrying its ``project_name``."""
+    expenses = await store.list_all_expenses(_config, user.id)
+    return {"expenses": expenses, "count": len(expenses)}
+
+
 @router.get("/projects/{project_id}/expenses")
 async def list_expenses_route(
     project_id: str,

@@ -107,3 +107,53 @@ async def test_unmatched_task_no_tasks_logs_on_project(cfg):
     assert await _spent(cfg) == 12.0
     # Nothing to disambiguate → no pending choice.
     assert budget_pending.get_pending("u1") is None
+
+
+async def test_no_project_no_default_logs_to_general(cfg):
+    """No project named and no default set → land in the catch-all 'General'
+    project silently (no ask-back). Frictionless 'spent 12 on coffee'."""
+    skill = AddExpenseSkill(cfg)
+    msg = await skill.execute("u1", {"amount": 12, "description": "coffee"})
+
+    # Logged, not deferred.
+    assert "General" in msg
+    assert await _spent(cfg) == 12.0
+    # No clarification pending — it did NOT ask which project.
+    assert budget_pending.get_pending("u1") is None
+
+    # The expense landed on a project whose name_key is exactly "general".
+    projects = await store.list_projects(cfg, "u1")
+    general = [p for p in projects if p["name_key"] == "general"]
+    assert len(general) == 1
+    assert float(general[0]["spent"]) == 12.0
+
+
+async def test_general_is_idempotent(cfg):
+    """Two no-project expenses reuse ONE General project (idempotent by key)."""
+    skill = AddExpenseSkill(cfg)
+    await skill.execute("u1", {"amount": 12, "description": "coffee"})
+    await skill.execute("u1", {"amount": 8, "description": "tea"})
+
+    projects = await store.list_projects(cfg, "u1")
+    general = [p for p in projects if p["name_key"] == "general"]
+    assert len(general) == 1
+    assert float(general[0]["spent"]) == 20.0
+
+
+async def test_multi_match_still_asks_back(cfg):
+    """A named project matching MULTIPLE projects must still ask back and log
+    nothing — the General fallback only covers the truly-no-project path."""
+    await store.create_project(cfg, "u1", "ClubBay Marketing", budget=500)
+    await store.create_project(cfg, "u1", "ClubBay Events", budget=500)
+
+    skill = AddExpenseSkill(cfg)
+    msg = await skill.execute("u1", {
+        "amount": 30, "description": "flyers", "project": "ClubBay",
+    })
+
+    assert "Multiple projects match" in msg
+    assert "No expense was logged" in msg
+    # Nothing logged; a project-choice is pending.
+    assert await _spent(cfg) == 0.0
+    pend = budget_pending.get_pending("u1")
+    assert pend is not None and pend.kind == "project"

@@ -15,6 +15,11 @@ from lazyclaw.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
 
+# Catch-all project for expenses captured with no project named and no default
+# configured (e.g. "spent 12 on coffee"). Idempotent by name_key — every
+# unrouted expense lands here instead of stalling the capture with an ask-back.
+GENERAL_PROJECT_NAME = "General"
+
 
 def _fmt_money(amount, currency: str | None) -> str:
     try:
@@ -172,13 +177,14 @@ class AddExpenseSkill(BaseSkill):
     Precision-first resolution:
       • exact (casefold) project match → auto-routes;
       • single substring/fuzzy match → auto-routes with a note;
-      • multiple matches OR no match (with no default project set) → REFUSES to
-        guess and returns a clarification listing candidates the brain relays
-        to the user. Same rules apply to ``task_name`` within the resolved
-        project.
+      • multiple matches for a NAMED project → REFUSES to guess and returns a
+        clarification listing candidates the brain relays to the user;
+      • no project named (and no default set) → logs to the catch-all
+        ``General`` project silently. Same disambiguation rules apply to
+        ``task_name`` within the resolved project.
 
-    Set ``set_default_expense_project`` once and lone-amount captures like
-    'spent 12 on coffee' route there without a second turn.
+    Set ``set_default_expense_project`` to route lone-amount captures like
+    'spent 12 on coffee' to a project of your choosing instead of ``General``.
     """
 
     def __init__(self, config=None) -> None:
@@ -192,10 +198,11 @@ class AddExpenseSkill(BaseSkill):
     def description(self) -> str:
         return (
             "Log a spent expense on a project (e.g. 'log 40 EUR hosting on "
-            "nima'). NEVER guess the project silently — if the user didn't "
-            "name one and no default is set, the skill returns a clarification "
-            "listing candidates; relay that ask to the user verbatim, then "
-            "call add_expense again with their pick. Optionally attach to a "
+            "nima'). If the user names a project that matches MULTIPLE, the "
+            "skill returns a clarification listing candidates — relay that ask "
+            "verbatim, then call add_expense again with their pick. If the user "
+            "names NO project (e.g. 'spent 12 on coffee') it logs to the "
+            "catch-all 'General' project automatically. Optionally attach to a "
             "specific task by passing `task_name` (fuzzy-matched within the "
             "project's tasks; multi-match returns a clarification too). "
             "Creates the project if needed; expense mirrors to a LazyBrain "
@@ -318,31 +325,16 @@ class AddExpenseSkill(BaseSkill):
             match_note = f" (new project **{proj['name']}**)"
 
         if proj is None:
-            recent = projects[:5]
-            recent_list = (
-                "\n".join(
-                    f"- **{p['name']}** ({_fmt_money(p.get('spent', 0), p.get('currency'))}/"
-                    f"{_fmt_money(p.get('budget'), p.get('currency'))})"
-                    for p in recent
-                )
-                if recent else "(no projects yet — name one to create it)"
+            # No project named and no default configured → log to the catch-all
+            # "General" project (idempotent by name_key) rather than asking
+            # back. Keeps lone-amount captures like "spent 12 on coffee"
+            # frictionless; the expense still mirrors to the [[General Project]]
+            # LazyBrain note. (An AMBIGUOUS named project — the "multi" branch
+            # above — still asks back; only the truly-no-project path lands here.)
+            proj = await store.create_project(
+                self._config, user_id, GENERAL_PROJECT_NAME,
             )
-            if recent:
-                budget_pending.set_pending(budget_pending.PendingExpenseChoice(
-                    user_id=user_id, amount=amount, currency=currency,
-                    description=description, vendor=vendor, spent_at=spent_at,
-                    task_name=task_name, kind="project",
-                    candidates=tuple((p["id"], p["name"]) for p in recent),
-                    project_id=None, project_name=None,
-                    token=budget_pending.new_token(),
-                ))
-            return (
-                f"Which project for {_fmt_money(amount, currency or 'EUR')}"
-                + (f" ({description})" if description else "")
-                + "?\n" + recent_list
-                + "\n\nTap one below or reply with a project name. Tip: say "
-                "_'set default <name>'_ once to skip this prompt next time."
-            )
+            match_note = f" (logged to **{proj['name']}**)"
 
         # ── Resolve the task (optional) ────────────────────────────────
         task_id: str | None = None

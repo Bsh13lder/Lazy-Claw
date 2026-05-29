@@ -108,6 +108,30 @@ async def test_mixed_currency_flagged_in_report(cfg):
     assert report["projects"][0]["mixed_currency"] is True
 
 
+async def test_list_all_expenses_cross_project(cfg):
+    a = await store.create_project(cfg, "u1", "Alpha", budget=100)
+    b = await store.create_project(cfg, "u1", "Beta", budget=100)
+    await store.create_expense(cfg, "u1", a["id"], amount=10, description="x")
+    await store.create_expense(cfg, "u1", b["id"], amount=20, description="y")
+
+    rows = await store.list_all_expenses(cfg, "u1")
+    assert len(rows) == 2
+    by_name = {r["project_name"]: r["amount"] for r in rows}
+    assert by_name == {"Alpha": 10.0, "Beta": 20.0}
+    # Each row carries its project id for grouping in the UI.
+    assert all(r.get("project_id") for r in rows)
+
+
+async def test_list_all_expenses_excludes_void(cfg):
+    a = await store.create_project(cfg, "u1", "Alpha", budget=100)
+    keep = await store.create_expense(cfg, "u1", a["id"], amount=10)
+    drop = await store.create_expense(cfg, "u1", a["id"], amount=99)
+    await store.update_expense(cfg, "u1", drop["id"], status="void")
+
+    rows = await store.list_all_expenses(cfg, "u1")
+    assert [r["id"] for r in rows] == [keep["id"]]
+
+
 async def test_delete_project_refuses_then_cascade(cfg):
     proj = await store.create_project(cfg, "u1", "nima", budget=500)
     await store.create_expense(cfg, "u1", proj["id"], amount=40)

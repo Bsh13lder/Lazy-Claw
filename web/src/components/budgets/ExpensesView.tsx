@@ -1,0 +1,189 @@
+import { useEffect, useMemo, useState } from "react";
+import * as api from "../../api";
+import type { Expense, Project } from "../../api";
+import { fmtMoney } from "./money";
+import { ExpenseRow } from "./ExpenseRow";
+import { ProjectExpenseAdder } from "./ExpenseAdder";
+
+/**
+ * Global Expenses workspace tab — every expense across all projects, grouped
+ * by project with per-project subtotals + a grand total. An add-expense form
+ * picks the project (incl. the catch-all "General"). Mirrors how chat-captured
+ * expenses land: a lone "spent 12 on coffee" shows up under General here.
+ */
+
+interface Group {
+  projectId: string;
+  name: string;
+  currency: string;
+  rows: Expense[];
+  subtotal: number;
+}
+
+export function ExpensesView({ onChanged }: { onChanged?: () => void }) {
+  const [expenses, setExpenses] = useState<Expense[] | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tick, setTick] = useState(0);
+  const [adding, setAdding] = useState(false);
+  const [addProject, setAddProject] = useState<string>("");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([api.listAllExpenses(), api.listProjects("all")])
+      .then(([ex, ps]) => { if (alive) { setExpenses(ex); setProjects(ps); } })
+      .catch(() => { if (alive) { setExpenses([]); setProjects([]); } });
+    return () => { alive = false; };
+  }, [tick]);
+
+  const refresh = () => { setTick((n) => n + 1); onChanged?.(); };
+
+  const currencyByProject = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of projects) m.set(p.id, p.currency || "EUR");
+    return m;
+  }, [projects]);
+
+  const groups = useMemo<Group[]>(() => {
+    if (!expenses) return [];
+    const byId = new Map<string, Group>();
+    for (const e of expenses) {
+      const pid = e.project_id;
+      let g = byId.get(pid);
+      if (!g) {
+        g = {
+          projectId: pid,
+          name: e.project_name || "(unknown project)",
+          currency: currencyByProject.get(pid) || e.currency || "EUR",
+          rows: [],
+          subtotal: 0,
+        };
+        byId.set(pid, g);
+      }
+      g.rows.push(e);
+      g.subtotal += e.amount || 0;
+    }
+    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [expenses, currencyByProject]);
+
+  // Grand total split per currency — no FX conversion (matches spending report).
+  const totalsByCurrency = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of expenses || []) {
+      const c = e.currency || "EUR";
+      m.set(c, (m.get(c) || 0) + (e.amount || 0));
+    }
+    return Array.from(m.entries());
+  }, [expenses]);
+
+  // Dropdown options: General first, then known projects, then any project a
+  // (legacy) expense references that isn't in the active list.
+  const projectNames = useMemo(
+    () => Array.from(new Set([
+      "General",
+      ...projects.map((p) => p.name),
+      ...groups.map((g) => g.name),
+    ])).filter(Boolean),
+    [projects, groups],
+  );
+
+  const toggleGroup = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  if (expenses === null) {
+    return <div className="p-6 text-sm text-text-muted">Loading expenses…</div>;
+  }
+
+  return (
+    <div className="p-3 flex flex-col gap-3">
+      {/* Header: add toggle + grand total */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={() => {
+            setAdding((o) => !o);
+            if (!addProject) setAddProject(projectNames[0] || "General");
+          }}
+          className="text-[12px] px-3 py-1.5 rounded-lg border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20"
+        >
+          {adding ? "Close" : "+ Add expense"}
+        </button>
+        <span className="ml-auto text-[12px] text-text-secondary">
+          Total:{" "}
+          <span className="font-medium text-text-primary">
+            {totalsByCurrency.length === 0
+              ? fmtMoney(0)
+              : totalsByCurrency.map(([c, v]) => fmtMoney(v, c)).join(" · ")}
+          </span>
+        </span>
+      </div>
+
+      {adding && (
+        <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-bg-secondary/40 p-2.5">
+          <label className="text-[11px] text-text-secondary flex items-center gap-2">
+            Project
+            <select
+              value={addProject}
+              onChange={(e) => setAddProject(e.target.value)}
+              className="bg-bg-primary border border-border rounded px-2 py-1 text-sm text-text-primary"
+            >
+              {projectNames.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <ProjectExpenseAdder
+            projectName={addProject || "General"}
+            defaultCurrency={projects.find((p) => p.name === addProject)?.currency || "EUR"}
+            onSaved={() => { setAdding(false); refresh(); }}
+          />
+        </div>
+      )}
+
+      {groups.length === 0 ? (
+        <p className="text-sm text-text-muted">
+          No expenses yet. Add one above, or just say "spent 12 on coffee" in chat —
+          it lands under General.
+        </p>
+      ) : (
+        groups.map((g) => {
+          const open = !collapsed.has(g.projectId);
+          return (
+            <div key={g.projectId} className="rounded-lg border border-border/60 bg-bg-secondary/40">
+              <button
+                onClick={() => toggleGroup(g.projectId)}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left"
+              >
+                <svg
+                  width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                  className={`transition-transform text-text-muted ${open ? "rotate-90" : ""}`}
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span className="text-[13px] font-semibold text-text-primary flex-1 truncate">{g.name}</span>
+                <span className="text-[11px] text-text-muted whitespace-nowrap">
+                  {fmtMoney(g.subtotal, g.currency)}
+                </span>
+              </button>
+              {open && (
+                <div className="px-2 pb-2 flex flex-col gap-1">
+                  {g.rows.map((e) => (
+                    <ExpenseRow
+                      key={e.id}
+                      date={e.spent_at || ""}
+                      expense={e}
+                      onChanged={refresh}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}

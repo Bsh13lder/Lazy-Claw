@@ -596,6 +596,40 @@ async def list_expenses(
     return [_expense_to_dict(r, key) for r in rows]
 
 
+async def list_all_expenses(
+    config: Config,
+    user_id: str,
+    *,
+    status: str | None = "posted",
+) -> list[dict]:
+    """Every expense across ALL of the user's projects, newest-first, each
+    enriched with the (decrypted) ``project_name`` of its project. Powers the
+    global Expenses view. User-scoped; ``status`` filters posted/void."""
+    key = await get_user_dek(config, user_id)
+    where = "user_id = ?"
+    params: list = [user_id]
+    if status:
+        where += " AND status = ?"
+        params.append(status)
+
+    async with db_session(config) as db:
+        cursor = await db.execute(
+            f"SELECT {EXPENSE_SELECT} FROM project_expenses "
+            f"WHERE {where} ORDER BY spent_at DESC, created_at DESC",
+            params,
+        )
+        rows = await cursor.fetchall()
+
+    expenses = [_expense_to_dict(r, key) for r in rows]
+    if not expenses:
+        return []
+
+    # Attach each expense's project name (decrypted once per project) so the
+    # cross-project view can group/label without a second round-trip.
+    name_by_id = {p["id"]: p["name"] for p in await list_projects(config, user_id)}
+    return [{**e, "project_name": name_by_id.get(e["project_id"])} for e in expenses]
+
+
 async def update_expense(
     config: Config, user_id: str, expense_id: str, **fields
 ) -> bool:

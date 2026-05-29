@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../../api";
 import type { Project } from "../../api";
+import { fmtMoney } from "./money";
 
 /**
  * Projects rail section — lists budgeted projects with a budget-vs-spent bar
@@ -11,11 +12,6 @@ import type { Project } from "../../api";
  * The rail key for filtering is the project's ``name_key`` (casefold name),
  * which matches ``task.category`` casefolded — the same join the backend uses.
  */
-
-export function fmtMoney(amount: number | null | undefined, currency?: string | null): string {
-  const n = typeof amount === "number" ? amount : 0;
-  return `${n.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${currency || "EUR"}`;
-}
 
 interface RailEntry {
   key: string;
@@ -38,6 +34,12 @@ export function ProjectBudgetRail({ categories, selectedKey, onSelect, reloadKey
   const [createOpen, setCreateOpen] = useState(false);
   const [prefillName, setPrefillName] = useState<string>("");
   const [tick, setTick] = useState(0);
+  // Two-stage delete confirm. stage="cascade" appears only after a 409
+  // (project still has expenses) so the destructive path is opt-in.
+  const [confirm, setConfirm] = useState<
+    { key: string; id: string; stage: "first" | "cascade" } | null
+  >(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -46,6 +48,25 @@ export function ProjectBudgetRail({ categories, selectedKey, onSelect, reloadKey
       .catch(() => { if (alive) setProjects([]); });
     return () => { alive = false; };
   }, [reloadKey, tick]);
+
+  const removeProject = async (key: string, id: string, cascade: boolean) => {
+    setBusy(true);
+    try {
+      await api.deleteProject(id, cascade);
+      setConfirm(null);
+      if (selectedKey === key) onSelect(null);
+      setTick((n) => n + 1);
+    } catch (e) {
+      // 409 = project still has expenses → escalate to the cascade confirm.
+      if (e instanceof api.ApiError && e.status === 409) {
+        setConfirm({ key, id, stage: "cascade" });
+      } else {
+        setConfirm(null);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const entries = useMemo<RailEntry[]>(() => {
     const byKey = new Map<string, RailEntry>();
@@ -87,14 +108,24 @@ export function ProjectBudgetRail({ categories, selectedKey, onSelect, reloadKey
           const proj = e.project;
           const budget = proj?.budget ?? 0;
           const spent = proj?.spent ?? 0;
-          const pct = budget > 0 ? Math.min(100, (spent / budget) * 100) : 0;
+          const rawPct = budget > 0 ? (spent / budget) * 100 : 0;
+          const pct = Math.min(100, rawPct);
+          const over = budget > 0 && spent > budget;
+          // Traffic-light: <70% emerald, 70–90% amber, >90% red.
           const tone =
-            pct >= 100 ? "bg-red-400" : pct >= 80 ? "bg-amber" : "bg-accent";
+            rawPct > 90 ? "bg-red-400" : rawPct >= 70 ? "bg-amber" : "bg-emerald-400";
+          const confirming = confirm?.key === e.key;
+          const select = () => onSelect(active ? null : e.key);
           return (
-            <button
+            <div
               key={e.key}
-              onClick={() => onSelect(active ? null : e.key)}
-              className={`text-left px-2.5 py-1.5 rounded-md transition-colors border ${
+              role="button"
+              tabIndex={0}
+              onClick={select}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); select(); }
+              }}
+              className={`group text-left px-2.5 py-1.5 rounded-md transition-colors border cursor-pointer ${
                 active
                   ? "border-accent/40 bg-accent-soft text-accent"
                   : "border-transparent text-text-secondary hover:bg-bg-hover"
@@ -116,13 +147,60 @@ export function ProjectBudgetRail({ categories, selectedKey, onSelect, reloadKey
                     set budget
                   </span>
                 )}
+                {proj && (
+                  <button
+                    type="button"
+                    title="Delete project"
+                    aria-label={`Delete project ${e.name}`}
+                    onClick={(ev) => { ev.stopPropagation(); setConfirm({ key: e.key, id: proj.id, stage: "first" }); }}
+                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-text-muted hover:text-rose-400 text-[12px] leading-none transition-opacity"
+                  >
+                    🗑
+                  </button>
+                )}
               </div>
-              {proj && budget > 0 && (
-                <div className="mt-1 h-1 rounded-full bg-bg-tertiary overflow-hidden">
-                  <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
+              {proj && budget > 0 && !confirming && (
+                <div className="mt-1 flex items-center gap-1.5">
+                  <div className="flex-1 h-2 rounded-full bg-bg-tertiary overflow-hidden">
+                    <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
+                  </div>
+                  {over ? (
+                    <span className="text-[9px] font-semibold text-red-400 whitespace-nowrap">⚠ OVER</span>
+                  ) : (
+                    <span className="text-[9px] text-text-muted whitespace-nowrap tabular-nums">
+                      {Math.round(rawPct)}%
+                    </span>
+                  )}
                 </div>
               )}
-            </button>
+              {confirming && (
+                <div
+                  className="mt-1.5 flex items-center gap-1.5 flex-wrap"
+                  onClick={(ev) => ev.stopPropagation()}
+                >
+                  <span className="text-[10px] text-rose-300 flex-1 min-w-0">
+                    {confirm!.stage === "cascade"
+                      ? "Has expenses — delete project + all its expenses & notes?"
+                      : "Delete this project?"}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={(ev) => { ev.stopPropagation(); void removeProject(e.key, confirm!.id, confirm!.stage === "cascade"); }}
+                    className="text-[10px] px-1.5 py-0.5 rounded border border-rose-400/40 text-rose-300 bg-rose-400/10 hover:bg-rose-400/20 disabled:opacity-40"
+                  >
+                    {busy ? "…" : confirm!.stage === "cascade" ? "Delete all" : "Delete"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(ev) => { ev.stopPropagation(); setConfirm(null); }}
+                    className="text-[10px] px-1.5 py-0.5 rounded border border-border text-text-secondary hover:bg-bg-hover"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
           );
         })}
       </div>

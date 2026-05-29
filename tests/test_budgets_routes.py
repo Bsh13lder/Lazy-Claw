@@ -81,6 +81,23 @@ async def test_delete_project_with_expenses_returns_409(client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_all_expenses_endpoint(client) -> None:
+    tc = client
+    pa = tc.post("/api/budgets/projects", json={"name": "Alpha", "budget": 100}).json()["project"]
+    pb = tc.post("/api/budgets/projects", json={"name": "Beta", "budget": 100}).json()["project"]
+    tc.post(f"/api/budgets/projects/{pa['id']}/expenses", json={"amount": 10, "description": "x"})
+    tc.post(f"/api/budgets/projects/{pb['id']}/expenses", json={"amount": 20, "description": "y"})
+
+    r = tc.get("/api/budgets/expenses")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 2
+    names = {e["project_name"] for e in body["expenses"]}
+    assert names == {"Alpha", "Beta"}
+    assert all("project_id" in e and "project_name" in e for e in body["expenses"])
+
+
+@pytest.mark.asyncio
 async def test_set_budget_and_report(client) -> None:
     tc = client
     pid = tc.post("/api/budgets/projects", json={"name": "nima"}).json()["project"]["id"]

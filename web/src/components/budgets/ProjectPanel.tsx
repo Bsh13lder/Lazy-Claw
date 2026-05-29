@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import * as api from "../../api";
 import type { BudgetEntry, Expense, Project } from "../../api";
-import { fmtMoney } from "./ProjectBudgetRail";
+import { fmtMoney } from "./money";
+import { ExpenseRow } from "./ExpenseRow";
+import { ProjectExpenseAdder } from "./ExpenseAdder";
 
 /**
  * Project management banner — shown at the top of the task list when a project
@@ -20,15 +22,21 @@ export function ProjectPanel({
   projectKey,
   displayName,
   onChanged,
+  onDeleted,
 }: {
   projectKey: string;
   displayName: string;
   onChanged: () => void;
+  /** Called after the project is deleted so the parent can clear the filter. */
+  onDeleted?: () => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [tick, setTick] = useState(0);
   const [pane, setPane] = useState<Pane>("none");
   const [expanded, setExpanded] = useState(false);
+  // Two-stage delete: "cascade" appears only after a 409 (still has expenses).
+  const [confirm, setConfirm] = useState<"first" | "cascade" | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -41,12 +49,31 @@ export function ProjectPanel({
   const refresh = () => { setTick((n) => n + 1); onChanged(); };
   const toggle = (p: Pane) => setPane((cur) => (cur === p ? "none" : p));
 
+  const removeProject = async (cascade: boolean) => {
+    if (!project) return;
+    setDeleting(true);
+    try {
+      await api.deleteProject(project.id, cascade);
+      setConfirm(null);
+      onDeleted?.();
+      onChanged();
+    } catch (e) {
+      if (e instanceof api.ApiError && e.status === 409) setConfirm("cascade");
+      else setConfirm(null);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const name = project?.name || displayName;
   const budget = project?.budget ?? 0;
   const spent = project?.spent ?? 0;
   const remaining = project?.remaining ?? (budget - spent);
-  const pct = budget > 0 ? Math.min(100, (spent / budget) * 100) : 0;
-  const tone = pct >= 100 ? "bg-red-400" : pct >= 80 ? "bg-amber" : "bg-accent";
+  const rawPct = budget > 0 ? (spent / budget) * 100 : 0;
+  const pct = Math.min(100, rawPct);
+  const over = budget > 0 && spent > budget;
+  // Traffic-light: <70% emerald, 70–90% amber, >90% red.
+  const tone = rawPct > 90 ? "bg-red-400" : rawPct >= 70 ? "bg-amber" : "bg-emerald-400";
 
   return (
     <div className="m-2 rounded-xl border border-border/60 bg-bg-secondary/60 p-3">
@@ -82,16 +109,52 @@ export function ProjectPanel({
           </svg>
           <span>Options</span>
         </button>
+        {project && (
+          <button
+            onClick={() => setConfirm("first")}
+            title="Delete project"
+            aria-label="Delete project"
+            className="shrink-0 text-text-muted hover:text-rose-400 text-sm leading-none px-1"
+          >
+            🗑
+          </button>
+        )}
       </div>
+
+      {confirm && (
+        <div className="mt-2 flex items-center gap-2 flex-wrap rounded-lg border border-rose-400/30 bg-rose-400/5 px-2.5 py-2">
+          <span className="text-[11px] text-rose-300 flex-1 min-w-0">
+            {confirm === "cascade"
+              ? `Delete "${name}" plus all its expenses, recurring rules & notes?`
+              : `Delete project "${name}"?`}
+          </span>
+          <button
+            onClick={() => void removeProject(confirm === "cascade")}
+            disabled={deleting}
+            className="text-[11px] px-2.5 py-1 rounded border border-rose-400/40 text-rose-300 bg-rose-400/10 hover:bg-rose-400/20 disabled:opacity-40"
+          >
+            {deleting ? "Deleting…" : confirm === "cascade" ? "Delete all" : "Delete"}
+          </button>
+          <button
+            onClick={() => setConfirm(null)}
+            className="text-[11px] px-2.5 py-1 rounded border border-border text-text-secondary hover:bg-bg-hover"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Budget bar */}
       {budget > 0 ? (
         <div className="mt-2">
-          <div className="h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
+          <div className="h-2 rounded-full bg-bg-tertiary overflow-hidden">
             <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
           </div>
           <div className="flex items-center justify-between text-[10px] text-text-muted mt-1">
-            <span>{pct.toFixed(0)}% used</span>
+            <span>
+              {Math.round(rawPct)}% used
+              {over && <span className="ml-1.5 font-semibold text-red-400">⚠ OVER</span>}
+            </span>
             <span className={remaining < 0 ? "text-red-400" : ""}>
               {fmtMoney(remaining, project?.currency)} left
             </span>
@@ -439,119 +502,3 @@ function BudgetRow({
   );
 }
 
-function ExpenseRow({
-  date, expense, onChanged,
-}: { date: string; expense: Expense; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const remove = async () => {
-    setBusy(true);
-    try { await api.deleteExpense(expense.id); onChanged(); }
-    finally { setBusy(false); }
-  };
-  return (
-    <div className="flex items-center gap-2 text-[11px] text-text-secondary px-2 py-1 rounded bg-bg-tertiary/40">
-      <span className="text-text-muted w-20 shrink-0">{date}</span>
-      <span className="flex-1 truncate">
-        {expense.description || expense.vendor || "expense"}
-        {expense.recurring_expense_id && <span className="text-accent/60"> · recurring</span>}
-      </span>
-      <span>− {fmtMoney(expense.amount, expense.currency)}</span>
-      <button
-        onClick={() => void remove()}
-        className="text-text-muted hover:text-rose-400"
-        title="Delete expense"
-        disabled={busy}
-      >×</button>
-    </div>
-  );
-}
-
-const RECUR_PRESETS: { label: string; cron: string }[] = [
-  { label: "One-off", cron: "" },
-  { label: "Monthly", cron: "0 0 1 * *" },
-  { label: "Weekly", cron: "0 0 * * 1" },
-  { label: "Yearly", cron: "0 0 1 1 *" },
-];
-
-function ProjectExpenseAdder({
-  projectName, defaultCurrency, onSaved,
-}: { projectName: string; defaultCurrency: string; onSaved: () => void }) {
-  const [amount, setAmount] = useState("");
-  const [description, setDescription] = useState("");
-  const [currency, setCurrency] = useState(defaultCurrency);
-  const [cron, setCron] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const submit = async () => {
-    setErr(null);
-    const value = parseFloat(amount);
-    if (!Number.isFinite(value) || value <= 0) { setErr("Enter an amount."); return; }
-    setBusy(true);
-    try {
-      const proj = await api.createProject({ name: projectName, currency });
-      if (cron) {
-        await api.createRecurringExpense(proj.id, {
-          amount: value, cron_expression: cron, currency,
-          description: description.trim() || undefined,
-        });
-      } else {
-        await api.createExpense(proj.id, {
-          amount: value, currency,
-          description: description.trim() || undefined,
-        });
-      }
-      onSaved();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="mt-2 flex flex-col gap-2 p-2 rounded-lg bg-bg-tertiary/40 border border-border/50">
-      <div className="flex gap-2">
-        <input
-          type="number" min={0} value={amount} autoFocus
-          onChange={(e) => setAmount(e.target.value)}
-          placeholder="Amount"
-          className="bg-bg-primary border border-border rounded px-2 py-1 text-sm text-text-primary w-24"
-        />
-        <input
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="What for? (e.g. domain renewal)"
-          className="bg-bg-primary border border-border rounded px-2 py-1 text-sm text-text-primary flex-1"
-        />
-        <input
-          value={currency} maxLength={8}
-          onChange={(e) => setCurrency(e.target.value.toUpperCase())}
-          className="bg-bg-primary border border-border rounded px-2 py-1 text-sm text-text-primary w-16"
-        />
-      </div>
-      <div className="flex items-center gap-1">
-        {RECUR_PRESETS.map((p) => (
-          <button
-            key={p.label}
-            onClick={() => setCron(p.cron)}
-            className={`text-[10px] px-2 py-0.5 rounded border ${
-              cron === p.cron
-                ? "border-accent/40 bg-accent-soft text-accent"
-                : "border-border text-text-muted hover:bg-bg-hover"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-        <button
-          onClick={() => void submit()} disabled={busy}
-          className="ml-auto text-[10px] px-3 py-1 rounded border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
-        >
-          {busy ? "Saving…" : cron ? "Schedule" : "Add"}
-        </button>
-      </div>
-      {err && <div className="text-[10px] text-rose-400">{err}</div>}
-    </div>
-  );
-}

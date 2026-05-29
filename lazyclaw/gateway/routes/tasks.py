@@ -210,6 +210,40 @@ async def ai_describe_task_route(
     return {"task": refreshed, "ai_text": text}
 
 
+class PolishExplanationBody(BaseModel):
+    explanation_text: str = Field(min_length=1, max_length=5000)
+
+
+@router.post("/{task_id}/ai-polish-explanation")
+async def ai_polish_explanation_route(
+    task_id: str,
+    body: PolishExplanationBody,
+    user: User = Depends(get_current_user),
+):
+    """Manual explain: the user supplies their OWN rough explanation; the AI
+    rewrites it into clean prose and REPLACES the task description (no _AI:_
+    append — the user authored this). If the worker is unavailable, the user's
+    raw text is saved verbatim rather than failing — never lose their input."""
+    from lazyclaw.tasks.ai_polish_explanation import polish_explanation
+
+    task = await get_task(_config, user.id, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    raw = body.explanation_text.strip()
+    polished = await polish_explanation(
+        _config, user.id,
+        raw_text=raw,
+        title=task.get("title") or "",
+        category=task.get("category"),
+    )
+    final = polished or raw  # graceful fallback: keep the user's words
+
+    await update_task(_config, user.id, task_id, description=final)
+    refreshed = await get_task(_config, user.id, task_id)
+    return {"task": refreshed, "ai_text": final}
+
+
 # ---------------------------------------------------------------------------
 # Sub-task steps
 # ---------------------------------------------------------------------------

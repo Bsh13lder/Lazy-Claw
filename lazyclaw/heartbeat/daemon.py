@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -26,6 +27,68 @@ from lazyclaw.runtime.browser_turn_lock import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _tags_from_raw(raw: object) -> list[str]:
+    """Decode a notes.tags JSON blob into a list of tag strings.
+
+    Defensive: returns ``[]`` for NULL / malformed JSON / non-list payloads
+    so the active-user predicate never raises on a bad row.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return []
+    return [str(t) for t in value] if isinstance(value, list) else []
+
+
+def _is_journal_only_note(tags_raw: object) -> bool:
+    """True iff the note carries a ``journal/<date>`` tag.
+
+    Journal pages are the ONLY notes the seeder itself mints, so a user
+    whose every note is a journal page has produced no real content — they
+    are a dead/test account and must not be seeded (FIX A).
+    """
+    return any(t.startswith("journal/") for t in _tags_from_raw(tags_raw))
+
+
+def _user_owns_non_journal_note(
+    user_id: str,
+    note_rows: list[tuple[str, object]],
+) -> bool:
+    """Pure predicate: does ``user_id`` own at least one non-journal note?
+
+    ``note_rows`` is an iterable of ``(owner_user_id, tags_json)`` tuples
+    (the plaintext columns are enough — no decryption needed). We deliberately
+    key activity off note ownership rather than ``agent_messages`` because the
+    journal cluster lives entirely in ``notes``; a user with real notes is the
+    only one whose ``[[Journal — DATE]]`` links need an anchor.
+    """
+    for owner, tags_raw in note_rows:
+        if owner == user_id and not _is_journal_only_note(tags_raw):
+            return True
+    return False
+
+
+def select_active_user_ids(
+    all_user_ids: list[str],
+    note_rows: list[tuple[str, object]],
+) -> list[str]:
+    """Filter ``all_user_ids`` down to users that own a non-journal note.
+
+    Pure function (no DB / IO) so it is unit-testable in isolation. Preserves
+    input order. See ``_seed_today_journals`` for the FIX A rationale.
+    """
+    return [
+        uid
+        for uid in all_user_ids
+        if _user_owns_non_journal_note(uid, note_rows)
+    ]
+
 
 # Hosts that MUST be polled through the user's live (signed-in) Brave on
 # the primary CDP port. A fresh headless instance with a copied profile
@@ -2207,23 +2270,47 @@ class HeartbeatDaemon:
             )
 
     async def _seed_today_journals(self) -> None:
-        """Ensure each registered user has a journal note for today.
+        """Ensure each ACTIVE user has a journal note for today.
 
         Idempotent: keyed off ``self._last_journal_seed_iso[user_id]`` so we
         only call into LazyBrain once per user per day. The marker resets on
         restart, but ``ensure_today_journal`` itself looks up by tag before
         inserting, so a re-seed just re-finds the existing note — no dupes.
+
+        Active-user gate (FIX A — cross-user journal bug 2026-06-01): we used
+        to ``SELECT id FROM users`` and seed EVERY row, including a stale/dead
+        user and ``u-test``. Those accounts own nothing but journal stubs, so
+        each tick minted 2-3 duplicate journal pages per day and the real
+        user's ``[[Journal — DATE]]`` links resolved against journals owned by
+        the dead user → dangling backlinks. We now seed only users who own at
+        least one NON-journal note (see ``_user_owns_non_journal_note`` /
+        ``select_active_user_ids``). A user with zero real content has no
+        journal to anchor anyway.
         """
         from lazyclaw.lazybrain import journal as _journal
         from lazyclaw.lazybrain import timezone_util as _tzu
 
         try:
             async with db_session(self._config) as db:
+                cursor = await db.execute(
+                    "SELECT id, tags FROM notes"
+                )
+                note_rows = [
+                    (r[0], r[1]) for r in await cursor.fetchall()
+                ]
                 cursor = await db.execute("SELECT id FROM users")
-                users = [r[0] for r in await cursor.fetchall()]
+                all_users = [r[0] for r in await cursor.fetchall()]
         except Exception:
             logger.warning("Could not list users for journal seed", exc_info=True)
             return
+
+        users = select_active_user_ids(all_users, note_rows)
+        skipped = len(all_users) - len(users)
+        if skipped:
+            logger.debug(
+                "journal seed: skipping %d user(s) with no non-journal notes",
+                skipped,
+            )
 
         for user_id in users:
             today = _tzu.today_iso(user_id)

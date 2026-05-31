@@ -176,7 +176,31 @@ def _dump_aliases(aliases: list[str] | None) -> str | None:
         if norm and norm not in seen_set:
             seen.append(norm)
             seen_set.add(norm)
-    return json.dumps(seen) if seen else None
+    # ``ensure_ascii=False`` so non-ASCII chars (e.g. the journal em-dash
+    # ``—`` U+2014) are stored literally instead of as ``—`` (FIX B).
+    # The alias-resolution LIKE patterns in ``_reindex_links`` /
+    # ``_resolve_pending_links`` / ``find_by_title`` match the raw character,
+    # so an escaped ``—`` in the column would never match. title_key (a
+    # raw plaintext column) already stores the literal char, so this makes the
+    # two resolution paths symmetric.
+    return json.dumps(seen, ensure_ascii=False) if seen else None
+
+
+def _load_aliases(raw: str | None) -> list[str]:
+    """Decode the ``notes.aliases`` JSON column into a list of strings.
+
+    Mirrors :func:`_load_tags`. Returns ``[]`` for NULL / malformed JSON so
+    callers can treat aliases uniformly. Used by :func:`get_note` so
+    title-refresh callers can read back the preserved canonical alias
+    (FIX B — cross-user journal bug).
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return [str(a) for a in parsed if a]
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 async def _audit_wikilink_collision(
@@ -304,11 +328,16 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
     # rows; FTS isn't worth it for the alias index alone.
     unresolved = [t for t in targets if t not in resolved]
     for target in unresolved:
-        like = f'%"{target}"%'
+        # Aliases are stored ``normalize_page``-folded (lower-cased), so the
+        # raw mixed-case wikilink target must be folded the same way before the
+        # substring match — else ``[[Journal — DATE]]`` never binds to a
+        # retitled journal's preserved canonical alias (FIX B). Match on the
+        # lower-cased aliases column for symmetry.
+        like = f'%"{normalize_page(target)}"%'
         rows = await db.execute(
             "SELECT id FROM notes "
             "WHERE user_id = ? AND aliases IS NOT NULL "
-            "AND aliases LIKE ? ORDER BY created_at DESC LIMIT 1",
+            "AND lower(aliases) LIKE ? ORDER BY created_at DESC LIMIT 1",
             (user_id, like),
         )
         row = await rows.fetchone()
@@ -370,14 +399,31 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
 
 
 async def _resolve_pending_links(db, user_id: str, new_note: dict) -> None:
-    """If this new note's title fills a previously-unresolved wikilink, backfill it."""
-    key = new_note.get("title_key")
-    if not key:
+    """Backfill dangling wikilinks that now match this note's title OR aliases.
+
+    Matches ``to_page_name`` (case-insensitively) against the note's
+    ``title_key`` AND any of its aliases (FIX B — alias-aware backlink
+    resolution). This is what keeps ``[[Journal — DATE]]`` resolving after the
+    journal title is rewritten to a descriptive phrase: the canonical
+    ``journal — date`` string is preserved as an alias and matched here.
+    Aliases are already ``normalize_page``-folded on write, so we lower-case
+    the page name for a symmetric comparison.
+    """
+    title_key = (new_note.get("title_key") or "").strip().lower()
+    alias_keys = [
+        a.strip().lower()
+        for a in (new_note.get("aliases") or [])
+        if a and a.strip()
+    ]
+    keys = list(dict.fromkeys(k for k in [title_key, *alias_keys] if k))
+    if not keys:
         return
+    placeholders = ",".join("?" for _ in keys)
     await db.execute(
-        "UPDATE note_links SET to_note_id = ? "
-        "WHERE user_id = ? AND to_page_name = ? AND to_note_id IS NULL",
-        (new_note["id"], user_id, key),
+        f"UPDATE note_links SET to_note_id = ? "
+        f"WHERE user_id = ? AND to_note_id IS NULL "
+        f"AND lower(to_page_name) IN ({placeholders})",
+        (new_note["id"], user_id, *keys),
     )
 
 
@@ -634,7 +680,8 @@ async def get_note(config: Config, user_id: str, note_id: str) -> dict | None:
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, title, content, tags, importance, pinned, "
-            "trace_session_id, title_key, created_at, updated_at, memory_type "
+            "trace_session_id, title_key, created_at, updated_at, memory_type, "
+            "aliases "
             "FROM notes WHERE id = ? AND user_id = ?",
             (note_id, user_id),
         )
@@ -653,6 +700,7 @@ async def get_note(config: Config, user_id: str, note_id: str) -> dict | None:
         "created_at": row[8],
         "updated_at": row[9],
         "memory_type": row[10],
+        "aliases": _load_aliases(row[11]),  # FIX B: read-back preserved aliases
     }
 
 
@@ -721,6 +769,27 @@ async def update_note(
             # None in a frontmatter_updates dict means "delete the key" —
             # we mirror that by clearing the column.
             aliases_to_set = []
+
+    # FIX B (cross-user journal bug 2026-06-01): when a journal title is
+    # rewritten from ``Journal — DATE`` to a descriptive phrase, preserve the
+    # OLD title as an alias so inbound ``[[Journal — DATE]]`` backlinks keep
+    # resolving (via ``_resolve_pending_links`` / ``_reindex_links`` alias
+    # paths). Without this, the old code NULLed every inbound link whose
+    # ``to_page_name`` no longer equalled the new title_key, stranding the
+    # daily-note cluster. We never drop existing aliases on a title-only update.
+    existing_aliases = existing.get("aliases") or []
+    title_changed = title is not None and _title_key(existing["title"]) != title_key
+    if title_changed:
+        old_title = (existing.get("title") or "").strip()
+        base = (
+            list(aliases_to_set)
+            if aliases_to_set is not None
+            else list(existing_aliases)
+        )
+        if old_title and old_title not in base:
+            base.append(old_title)
+        aliases_to_set = base
+
     aliases_json: str | None = None
     if aliases_to_set is not None:
         aliases_json = _dump_aliases(aliases_to_set) or ""  # "" → null in column path below
@@ -754,17 +823,23 @@ async def update_note(
         )
         if content is not None:
             await _reindex_links(db, user_id, note_id, new_content)
-        # Title changed → either resolve pending backlinks or break stale ones
+        # Title changed → bind any pending backlinks that match the NEW title
+        # OR any alias (which now includes the OLD title — see FIX B above).
+        # We deliberately do NOT null inbound links whose ``to_page_name`` no
+        # longer equals the title_key: the old ``UPDATE ... SET to_note_id=NULL``
+        # broke ``[[Journal — DATE]]`` every time a journal was retitled.
         if title is not None:
-            await db.execute(
-                "UPDATE note_links SET to_note_id = NULL "
-                "WHERE user_id = ? AND to_note_id = ? AND to_page_name != ?",
-                (user_id, note_id, title_key or ""),
+            resolve_aliases = (
+                aliases_to_set if aliases_to_set is not None else existing_aliases
             )
             await _resolve_pending_links(
                 db,
                 user_id,
-                {"id": note_id, "title_key": title_key},
+                {
+                    "id": note_id,
+                    "title_key": title_key,
+                    "aliases": resolve_aliases,
+                },
             )
         await db.commit()
 

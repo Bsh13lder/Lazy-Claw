@@ -8,7 +8,7 @@ import {
   categoryKeysFor,
   colorForTags,
   isSystemTag,
-  SKILLS_VAULT_KEYS,
+  TELEMETRY_KEYS,
 } from "./noteColors";
 import {
   isRollupNote,
@@ -466,7 +466,7 @@ export function PageListSidebar({
   // set so shape notes don't just lose their chips — they actually
   // filter out of the graph too. Runs once on mount + on toggle.
   useEffect(() => {
-    for (const key of SKILLS_VAULT_KEYS) {
+    for (const key of TELEMETRY_KEYS) {
       const isCurrentlyHidden = hiddenCategories.has(key);
       const shouldBeHidden = !skillsVaultOpen;
       if (isCurrentlyHidden !== shouldBeHidden) {

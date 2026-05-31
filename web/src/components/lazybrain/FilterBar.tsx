@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Owner } from "./noteColors";
-import { FILTER_CATEGORIES, OWNER_META, SKILLS_VAULT_KEYS } from "./noteColors";
+import { FILTER_CATEGORIES, OWNER_META, TELEMETRY_KEYS } from "./noteColors";
 import {
   CategoryIcon,
   OWNER_ICONS,
@@ -18,10 +18,11 @@ interface Props {
   onSetOwner: (o: Owner | "all") => void;
   counts: Record<string, number>;
   ownerCounts: Record<Owner, number>;
-  /** True when the user has the Skills vault toggle on. Persisted by the
-   *  parent (see `useSkillsVault`). When off (default), all
-   *  `kind/shape*` chips are added to `hiddenCategories` and the toggle
-   *  button is dimmed. */
+  /** True when the user has the "Show agent telemetry" toggle on. Persisted
+   *  by the parent. When off (default), every telemetry chip
+   *  (`kind/shape*`, auto-captured system notes, `site-memory`) is added to
+   *  `hiddenCategories` and the toggle button is dimmed. Purely a view
+   *  filter — no note is deleted. */
   skillsVaultOpen: boolean;
   onToggleSkillsVault: () => void;
   /** Archive toggle — when on, the page re-fetches with rolled-up notes
@@ -46,13 +47,13 @@ export function FilterBar({
   onToggleShowRolledUp,
 }: Props) {
   const allCount = ownerCounts.user + ownerCounts.agent + ownerCounts.unknown;
-  // Total shape count across all kind/shape* chips → drives the Skills
-  // toggle's count badge so the user knows whether opening the vault
-  // reveals anything at all.
+  // Total telemetry count across all hidden-by-default chips (shape*, auto,
+  // site-memory) → drives the toggle's count badge so the user knows
+  // whether revealing telemetry surfaces anything at all.
   let shapeCount = 0;
-  for (const k of SKILLS_VAULT_KEYS) shapeCount += counts[k] ?? 0;
+  for (const k of TELEMETRY_KEYS) shapeCount += counts[k] ?? 0;
 
-  // Disclosure state — the chip grid + Skills vault button collapse
+  // Disclosure state — the chip grid + telemetry button collapse
   // behind a single compact row by default. The category chip list
   // would otherwise consume ~67% of the sidebar viewport before any
   // note row even appears.
@@ -76,13 +77,13 @@ export function FilterBar({
   };
 
   // Visible-chip + hidden-chip counts — both filtered by the same
-  // zero-count + skills-vault rules the chip grid uses below, so the
+  // zero-count + telemetry rules the chip grid uses below, so the
   // numbers in the disclosure match exactly what the user would see if
   // they expanded the section.
   let visibleChipCount = 0;
   let hiddenChipCount = 0;
   for (const c of FILTER_CATEGORIES) {
-    if (SKILLS_VAULT_KEYS.has(c.key) && !skillsVaultOpen) continue;
+    if (TELEMETRY_KEYS.has(c.key) && !skillsVaultOpen) continue;
     if ((counts[c.key] ?? 0) === 0) continue;
     visibleChipCount++;
     if (hiddenCategories.has(c.key)) hiddenChipCount++;
@@ -161,8 +162,8 @@ export function FilterBar({
 
         {filterBarOpen && (
           <div className="mt-2 space-y-2">
-            {/* Toggle row — Skills vault + Archive sit on the same line so
-                the user reads them as parallel "show me hidden things"
+            {/* Toggle row — agent-telemetry + Archive sit on the same line
+                so the user reads them as parallel "show me hidden things"
                 affordances. Each is independent. */}
             {(shapeCount > 0 || onToggleShowRolledUp) && (
               <div className="flex items-center gap-1.5 flex-wrap">
@@ -176,8 +177,8 @@ export function FilterBar({
                     }`}
                     title={
                       skillsVaultOpen
-                        ? "Skills vault open — agent's known shapes are visible. Click to hide."
-                        : "Skills vault hidden — click to reveal verified / pending / failed agent shapes."
+                        ? "Agent telemetry visible — auto-captured skill shapes, system notes, and site knowledge are shown. Click to hide. (View filter only — no notes are deleted.)"
+                        : "Agent telemetry hidden — click to reveal auto-captured skill shapes, system notes, and site knowledge. (View filter only — no notes are deleted.)"
                     }
                   >
                     <Wrench
@@ -185,7 +186,7 @@ export function FilterBar({
                       strokeWidth={1.75}
                       color={skillsVaultOpen ? "#22c55e" : undefined}
                     />
-                    <span>Skills</span>
+                    <span>Agent telemetry</span>
                     <span className="opacity-60 tabular-nums">{shapeCount}</span>
                   </button>
                 )}
@@ -227,10 +228,10 @@ export function FilterBar({
             {/* Category chips */}
             <div className="flex flex-wrap gap-1">
               {FILTER_CATEGORIES.map((c) => {
-                const isShapeChip = SKILLS_VAULT_KEYS.has(c.key);
-                // Hide shape chips entirely when the vault is closed —
-                // they re-appear the moment the user opens it.
-                if (isShapeChip && !skillsVaultOpen) return null;
+                const isTelemetryChip = TELEMETRY_KEYS.has(c.key);
+                // Hide telemetry chips entirely while telemetry is off —
+                // they re-appear the moment the user reveals it.
+                if (isTelemetryChip && !skillsVaultOpen) return null;
                 const hidden = hiddenCategories.has(c.key);
                 const count = counts[c.key] ?? 0;
                 if (count === 0) return null;

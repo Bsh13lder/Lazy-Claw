@@ -171,8 +171,9 @@ export const OWNER_META: Record<Owner, { emoji: string; label: string; ring: str
  *  `pinned` is excluded because it renders as a halo, not a filter chip. */
 const FILTER_ORDER: string[] = [
   "task", "deadline", "journal",
-  // Skill-shape cards live behind the "Skills vault" toggle in FilterBar
-  // — they're hidden by default to keep the user's vault uncluttered.
+  // Skill-shape cards + auto-captured / site-memory notes live behind the
+  // "Show agent telemetry" toggle in FilterBar — they're hidden by default
+  // so the graph opens on real knowledge, not auto/agent telemetry.
   "shape", "shape-pending", "shape-failed", "shape-known-bad",
   "lesson", "til",
   "decision", "idea", "price", "command", "recipe", "contact",
@@ -182,12 +183,31 @@ const FILTER_ORDER: string[] = [
   "context", "imported", "auto",
 ];
 
-/** Filter chips that the "Skills vault" toggle hides by default. The
- *  vault toggle in FilterBar reads this set to set up the initial
- *  hidden-categories state on first load. */
-export const SKILLS_VAULT_KEYS: ReadonlySet<string> = new Set([
+/** Filter chips that the "Show agent telemetry" toggle hides by default.
+ *  These are the auto-captured / agent-generated noise categories —
+ *  skill-shape cards, auto-captured system notes, and per-site knowledge —
+ *  that pollute the galaxy graph. Hidden by default (toggle OFF) so the
+ *  graph opens focused on real knowledge; the toggle re-reveals them.
+ *
+ *  This is purely a VIEW filter: hidden notes are excluded from the graph
+ *  render only. No note is ever deleted or altered, and toggling restores
+ *  them instantly.
+ *
+ *  FilterBar reads this set to split chips into "always shown" vs "telemetry"
+ *  groups, and LazyBrain reads it to seed the initial active-category state. */
+export const TELEMETRY_KEYS: ReadonlySet<string> = new Set([
+  // skill-shape (all outcome variants)
   "shape", "shape-pending", "shape-failed", "shape-known-bad",
+  // system / auto-captured agent notes
+  "auto",
+  // per-site knowledge captured by the browser
+  "site-memory",
 ]);
+
+/** @deprecated Renamed to {@link TELEMETRY_KEYS}, which now also covers the
+ *  `auto` (system) and `site-memory` categories. Kept as an alias so any
+ *  out-of-tree importer keeps compiling. */
+export const SKILLS_VAULT_KEYS = TELEMETRY_KEYS;
 
 /** User-facing display label per filter key. Falls back to `PALETTE[key].label`
  *  when a key isn't listed — so new kinds inherit the PALETTE label by default

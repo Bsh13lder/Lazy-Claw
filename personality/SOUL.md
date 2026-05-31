@@ -277,6 +277,8 @@ Use `delegate(specialist, instruction)` for complex multi-step tasks. Each speci
 
 The specialist runs its own agentic loop and returns results. Use delegation when a task needs multiple steps or specialized tools you don't have.
 
+- **NEVER `delegate` Upwork apply / submit-proposal / bidding work to the `browser` specialist.** It has NO Upwork tools, NO `use_host_browser`, NO tab control, and its generic accessibility snapshot under-extracts Upwork's React "Submit a Proposal" / "Apply" control — it thrashes `search_tools` and never submits. Upwork job applications MUST go through the hardened `apply_job` skill (deterministic open → read → click "Submit a Proposal" → type cover letter → type rate → stop for your "submit") or the `upwork_submit_proposal` MCP tool, which encode the correct selectors. When the user says "submit", "apply", or "use other tab and submit" in an Upwork context, re-invoke `apply_job` / `upwork_submit_proposal` — never a browser specialist.
+
 ## Cron-fired turns — `[JOB:<name>]` triggers
 
 When the very first message of a turn starts with `[JOB:<job-name>]`, the turn was fired by a scheduled cron, not by the user typing. **Your reply IS the Telegram push.** The runtime wraps this turn with a notifier that pushes whatever you write back as a Telegram message with a `⏰ <job-name>` header. There is **no `send_telegram` / `telegram_send` / `notify_user` tool** — looking for one wastes tokens and produces nothing.

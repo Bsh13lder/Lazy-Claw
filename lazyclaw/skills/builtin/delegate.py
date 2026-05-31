@@ -232,19 +232,30 @@ class DelegateSkill(BaseSkill):
         # suppressed when streaming=OFF via Fix J), the brain absorbs
         # the result as a side-note on its next turn.
         async def _run_delegate_bg() -> None:
+            # This runs in a DETACHED task — the foreground turn already
+            # returned and ran its browser_turn_scope.finally, so it can no
+            # longer own the live-Brave lock release for us. Re-enter the
+            # scope here so this child gets its OWN holder (its task identity
+            # differs from the inherited holder's .task) and releases the
+            # per-user lock in its own finally when it finishes. Without this,
+            # the lock acquired on the child's first browser tool call leaks
+            # for the process lifetime. Lazy import to avoid a circular import.
+            from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
+
             try:
-                result = await run_specialist(
-                    user_id=user_id,
-                    specialist=spec,
-                    task=enriched_instruction,
-                    registry=self._registry,
-                    eco_router=self._eco_router,
-                    permission_checker=self._permission_checker,
-                    callback=wrapped_callback,
-                    project_tag=project_tag,
-                    goal_id=goal_id,
-                    task_id=task_id,
-                )
+                async with browser_turn_scope():
+                    result = await run_specialist(
+                        user_id=user_id,
+                        specialist=spec,
+                        task=enriched_instruction,
+                        registry=self._registry,
+                        eco_router=self._eco_router,
+                        permission_checker=self._permission_checker,
+                        callback=wrapped_callback,
+                        project_tag=project_tag,
+                        goal_id=goal_id,
+                        task_id=task_id,
+                    )
             except Exception as exc:
                 logger.exception("delegate bg task %s crashed", task_id)
                 if self._team_lead is not None:

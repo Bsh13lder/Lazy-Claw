@@ -1118,13 +1118,16 @@ class HeartbeatDaemon:
                         #     brain's reply IS the message
                         #   * otherwise → 🔔 raw push (no brain turn)
                         accept_slug = ctx.get("accept_template_slug")
-                        # Default is notification-only: the passive poll already
-                        # built a zero-token diff, so tell the user what changed
-                        # WITHOUT a brain turn that would drive the live Brave and
-                        # steal the active tab from a foreground/background task
-                        # (the 2026-05-29 tab-steal incident). A brain turn fires
-                        # ONLY when the watcher was created with an explicit
-                        # on_change_instruction (opt-in — mirrors the MCP watcher).
+                        # Default is a brain turn on change (restored 2026-05-30
+                        # — see watcher_dispatch.py). An explicit
+                        # on_change_instruction is a custom override; otherwise a
+                        # sensible DEFAULT instruction fires the brain turn so
+                        # every pre-existing watcher reacts again (commit 0509308
+                        # had silently downgraded them all to notify-only because
+                        # the brand-new on_change_instruction field was never set).
+                        # The tab-steal that motivated notify-only is now
+                        # prevented by the per-user live-Brave lock, so this is
+                        # safe. Notify-only remains only when no lane is running.
                         decision = decide_on_change_action(
                             ctx,
                             new_ctx,
@@ -1132,6 +1135,7 @@ class HeartbeatDaemon:
                             lane_running=bool(
                                 self._lane_queue and self._lane_queue._running
                             ),
+                            job_name=job_name,
                         )
                         will_fire_brain = decision.action == ACTION_BRAIN
 

@@ -131,6 +131,112 @@ async def test_child_task_contends_not_nested():
     assert order == ["parent:holding", "parent:releasing", "child:got-lock"], order
 
 
+# ── detached-child LEAK regression (delegate / dispatch_subagents) ────
+#
+# RED before the fix: ``delegate._run_delegate_bg`` and
+# ``dispatcher._run_and_publish`` spawn the worker as a DETACHED
+# ``asyncio.create_task`` that is never awaited. The parent foreground turn
+# (these skills are non-blocking) returns immediately, so the parent's
+# ``browser_turn_scope.finally`` runs and is the ONLY releaser. The detached
+# child inherits the parent's holder via the contextvars copy but never
+# re-enters ``browser_turn_scope``, so when it later acquires the per-user lock
+# — AFTER the parent's finally already ran — the lock is taken with NO surviving
+# releaser and leaks for the process lifetime (proven: lock held 20:37 → 21:53
+# with zero turn activity). The fix wraps each detached child BODY in its own
+# ``browser_turn_scope`` so the child gets a FRESH holder (its task identity
+# differs from the inherited holder's ``.task``) and releases the lock in its
+# own ``finally`` when it finishes.
+#
+# These tests drive the REAL source coroutines with ``run_specialist``
+# replaced by a stub that takes the live-Brave lock (simulating the worker's
+# first browser tool call). The simulated detached-task shape: a parent scope
+# that has ALREADY exited, then the child coroutine run as its own task.
+
+
+async def _run_child_as_detached_task(child_coro_factory) -> None:
+    """Mimic the delegate/dispatcher shape: hold the lock in a parent scope,
+    capture the parent context, exit the parent scope, then run the child in a
+    task spawned FROM the captured (parent) context — so the child inherits the
+    parent's holder exactly as ``asyncio.create_task`` does in production."""
+    import contextvars
+
+    captured: contextvars.Context | None = None
+    async with browser_turn_scope():
+        await acquire_live_browser_if_needed("u1", "browser")
+        captured = contextvars.copy_context()
+    # Parent scope released. Run the child in a task using the parent's context
+    # (this is what create_task does inside a still-holding parent turn).
+    assert captured is not None
+    task = captured.run(asyncio.create_task, child_coro_factory())
+    await asyncio.wait_for(task, timeout=3.0)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_run_and_publish_releases_lock(monkeypatch):
+    """``AgentDispatcher._run_and_publish`` must NOT leak the live-Brave lock.
+
+    With ``run_specialist`` stubbed to acquire the live-Brave lock (a worker
+    browser tool call), running ``_run_and_publish`` as a detached task after
+    the parent scope exited must leave the per-user lock UNLOCKED."""
+    from lazyclaw.runtime import dispatcher as disp_mod
+    from lazyclaw.runtime.dispatcher import (
+        AgentDispatcher, AgentType, SubagentConfig,
+    )
+    from lazyclaw.teams import runner as runner_mod
+    from lazyclaw.teams.runner import SpecialistResult
+
+    async def _fake_run_specialist(*args, **kwargs):
+        # Simulate the subagent's first browser tool call taking the lock.
+        await acquire_live_browser_if_needed("u1", "browser")
+        return SpecialistResult(
+            agent_name="explore_agent",
+            task="lookup X",
+            result="ok",
+            tools_used=(),
+            model_used="worker",
+            duration_ms=1,
+            success=True,
+            error=None,
+        )
+
+    monkeypatch.setattr(runner_mod, "run_specialist", _fake_run_specialist)
+    # task_event_bus.publish must be a harmless no-op for the test.
+    from lazyclaw.runtime import task_event_bus
+    monkeypatch.setattr(task_event_bus, "publish", lambda *a, **k: None)
+
+    dispatcher = AgentDispatcher(
+        config=None, eco_router=None, registry=None, permission_checker=None,
+        team_lead=None, callback=None,
+    )
+    cfg = SubagentConfig(agent_type=AgentType.EXPLORE, task="lookup X")
+
+    await _run_child_as_detached_task(
+        lambda: dispatcher._run_and_publish(cfg, "u1", "subagent-test"),
+    )
+
+    assert not btl._get_user_lock("u1").locked()
+
+
+@pytest.mark.asyncio
+async def test_delegate_run_specialist_under_scope_releases_lock():
+    """Mirror of ``delegate._run_delegate_bg``'s fixed shape: the detached
+    child wraps its ``run_specialist`` call in ``browser_turn_scope``, so the
+    lock taken on the worker's first browser tool call is released when the
+    worker finishes — no leak after the parent turn already exited."""
+    async def fixed_delegate_child() -> None:
+        # Same lazy-import + tight-wrap shape as the source fix.
+        from lazyclaw.runtime.browser_turn_lock import (
+            browser_turn_scope as scope,
+        )
+        async with scope():
+            # Stand-in for run_specialist taking the lock on a browser call.
+            await acquire_live_browser_if_needed("u1", "browser")
+
+    await _run_child_as_detached_task(fixed_delegate_child)
+
+    assert not btl._get_user_lock("u1").locked()
+
+
 # ── standalone guard for heartbeat watcher polls (#6) ────────────────
 
 

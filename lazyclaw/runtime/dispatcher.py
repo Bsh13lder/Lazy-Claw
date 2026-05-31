@@ -296,7 +296,22 @@ class AgentDispatcher:
         import inspect as _inspect
         from lazyclaw.runtime import task_event_bus
 
-        result = await self._run_subagent(cfg, user_id, task_id_override=task_id)
+        # This runs in a DETACHED task spawned by submit_async — the parent
+        # foreground turn already returned and ran its browser_turn_scope.finally,
+        # so it no longer owns the live-Brave lock release. Re-enter the scope
+        # here so this subagent gets its OWN holder (its task identity differs
+        # from the inherited holder's .task) and releases the per-user lock in
+        # its own finally when it finishes. Without this, the lock acquired on
+        # the subagent's first browser tool call (e.g. an upwork_* read) leaks
+        # for the process lifetime, and it also makes multiple dispatched
+        # subagents correctly serialize on the per-user lock. Lazy import to
+        # avoid a circular import.
+        from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
+
+        async with browser_turn_scope():
+            result = await self._run_subagent(
+                cfg, user_id, task_id_override=task_id,
+            )
 
         kind = "background_done" if result.success else "background_failed"
         try:

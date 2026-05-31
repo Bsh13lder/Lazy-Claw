@@ -25,31 +25,54 @@ from lazyclaw.heartbeat.watcher_dispatch import (
 )
 
 
-# ── default is notification-only (the core fix) ──────────────────────
+# ── default fires a brain turn (regression fix 2026-05-30) ───────────
 
 
-def test_default_is_push_not_brain():
-    """No on_change_instruction + no accept_slug → notify only, NO browser turn."""
+def test_default_fires_brain_with_default_instruction():
+    """No on_change_instruction + running lane → brain turn with a non-empty
+    DEFAULT instruction (NOT notify-only).
+
+    Regression: commit 0509308 downgraded every pre-existing watcher to
+    notify-only because the brand-new ``on_change_instruction`` field is
+    never set on old watchers. The per-user live-Brave lock now prevents the
+    tab-steal that motivated the over-correction, so the brain-turn default
+    is restored. Custom ``on_change_instruction`` remains an override.
+    """
     decision = decide_on_change_action(
         {"url": "https://www.upwork.com/ab/messages/rooms/room_x"},
         {},
         accept_slug=None,
         lane_running=True,
     )
+    assert decision.action == ACTION_BRAIN
+    assert decision.instruction
+    assert decision.instruction.strip()
+
+
+def test_default_instruction_falls_back_to_push_when_lane_down():
+    """No instruction + no running lane → genuine notify-only (no brain turn)."""
+    decision = decide_on_change_action(
+        {"url": "https://www.upwork.com/ab/messages/rooms/room_x"},
+        {},
+        accept_slug=None,
+        lane_running=False,
+    )
     assert decision.action == ACTION_PUSH
     assert decision.instruction is None
 
 
-def test_empty_instruction_is_push():
-    """Whitespace-only on_change_instruction must NOT drive the browser."""
+def test_empty_instruction_falls_back_to_default_brain():
+    """Whitespace-only on_change_instruction → fall back to the DEFAULT brain
+    turn (not notify-only), since an empty override carries no intent."""
     for blank in ("", "   ", "\n\t"):
         decision = decide_on_change_action(
-            {"on_change_instruction": blank},
+            {"on_change_instruction": blank, "url": "https://example.com"},
             {},
             accept_slug=None,
             lane_running=True,
         )
-        assert decision.action == ACTION_PUSH, blank
+        assert decision.action == ACTION_BRAIN, blank
+        assert decision.instruction and decision.instruction.strip(), blank
 
 
 # ── opt-in: explicit instruction fires a brain turn ──────────────────

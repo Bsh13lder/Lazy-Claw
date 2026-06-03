@@ -25,9 +25,13 @@ from lazyclaw.db.connection import close_pool, db_session, init_db
 from lazyclaw.lazybrain import journal as lb_journal
 from lazyclaw.lazybrain import store as lb_store
 from lazyclaw.runtime import context_builder
+from lazyclaw.llm.providers.base import LLMMessage
 from lazyclaw.runtime.context_journal_filter import (
+    STALE_TOOL_ERROR_MARKER,
     filter_pinned_for_cache,
     is_journal_title,
+    is_stale_provider_error,
+    neutralize_stale_errors,
     quarantine_polluted_history,
     should_inject_journal,
 )
@@ -476,3 +480,71 @@ def test_quarantine_quote_match_keeps_assistant_clean() -> None:
     )
     assert "[QUARANTINED" not in filtered[0].content
     assert filtered[0].content == safe_reply
+
+
+# ─── neutralize_stale_errors (stale provider/credit/auth/rate-limit) ──────
+
+_CREDIT_ERR = (
+    "Could not draft proposal: Error code: 400 - {'type': 'error', 'error': "
+    "{'message': 'Your credit balance is too low to access the Anthropic API. "
+    "Please go to Plans & Billing.'}, 'request_id': 'req_011CbgSMgSgBV5JeQhSBHgLp'}"
+)
+
+
+def test_is_stale_provider_error_matches_and_misses():
+    assert is_stale_provider_error(_CREDIT_ERR)
+    assert is_stale_provider_error("Error code: 503 upstream down")
+    assert is_stale_provider_error("rate_limit_error: slow down")
+    assert is_stale_provider_error("credit balance too low")
+    # Benign content must NOT match.
+    assert not is_stale_provider_error("No file matched that path.")
+    assert not is_stale_provider_error('{"unread": 2, "rooms": []}')
+    assert not is_stale_provider_error("")
+    assert not is_stale_provider_error(None)
+
+
+def test_neutralize_tool_credit_error_preserves_pairing():
+    msgs = [
+        LLMMessage(role="user", content="apply 1"),
+        LLMMessage(role="tool", content=_CREDIT_ERR, tool_call_id="call_1"),
+    ]
+    out = neutralize_stale_errors(msgs)
+    assert len(out) == 2  # replace-not-drop
+    tool = out[1]
+    assert tool.role == "tool"
+    assert tool.tool_call_id == "call_1"  # pairing preserved
+    assert tool.content == STALE_TOOL_ERROR_MARKER
+    assert "credit balance" not in tool.content
+    assert "req_011" not in tool.content
+
+
+def test_neutralize_assistant_blocker_recitation():
+    msgs = [
+        LLMMessage(
+            role="assistant",
+            content="🔴 Blocker still active: credit balance too low — top up at Plans & Billing.",
+        ),
+    ]
+    out = neutralize_stale_errors(msgs)
+    assert out[0].content == STALE_TOOL_ERROR_MARKER
+
+
+def test_neutralize_leaves_benign_messages_untouched():
+    msgs = [
+        LLMMessage(role="user", content="hi"),
+        LLMMessage(role="assistant", content="all good"),
+        LLMMessage(role="tool", content="No file matched.", tool_call_id="c2"),
+        LLMMessage(role="tool", content='{"unread": 2}', tool_call_id="c3"),
+    ]
+    out = neutralize_stale_errors(msgs)
+    assert [m.content for m in out] == [
+        "hi", "all good", "No file matched.", '{"unread": 2}',
+    ]
+
+
+def test_neutralize_does_not_disturb_wikilink_quarantine():
+    """The two filters are independent — a wikilink-confab assistant row is
+    NOT touched by the stale-error neutralizer (no provider-error tokens)."""
+    confab = "> James Blue (9:12 PM): I have a Mac [[computer]]."
+    out = neutralize_stale_errors([LLMMessage(role="assistant", content=confab)])
+    assert out[0].content == confab  # untouched here; quarantine handles it

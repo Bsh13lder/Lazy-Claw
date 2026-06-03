@@ -107,6 +107,37 @@ def _is_meta_question(text: str | None) -> bool:
     return _META_QUESTION_RE.match(text) is not None
 
 
+# Message prefixes the daemon stamps on heartbeat-lane turns. Such turns drive
+# the BACKGROUND browser lane (their own tab) instead of the user's visible
+# tab, so a watcher/cron browser action can't steal/block the foreground.
+_BACKGROUND_TURN_PREFIXES = ("[WATCHER:", "[JOB:", "[REMINDER")
+
+# Non-idempotent generators / actions that must NEVER be served from the
+# per-turn duplicate-call cache. Each call must re-read the live page or
+# re-generate; otherwise a stale prior result is silently replayed — e.g.
+# ``draft_freelance_proposal`` once cached a draft of the WRONG job and the
+# next call returned the same wrong draft (2026-06-03). The stuck-detector
+# still guards true loops.
+_NEVER_CACHE_TOOLS = frozenset({
+    "draft_freelance_proposal",
+    "apply_job",
+})
+
+
+def _infer_browser_role(message: str) -> str:
+    """Infer the browser lane for a turn from its message prefix.
+
+    Belt-and-suspenders with the explicit ``browser_role`` the daemon passes:
+    keeps daemon-originated turns on the background lane even if a caller
+    forgets the kwarg.
+    """
+    from lazyclaw.runtime.browser_turn_lock import BACKGROUND_ROLE, VISIBLE_ROLE
+
+    if isinstance(message, str) and message.startswith(_BACKGROUND_TURN_PREFIXES):
+        return BACKGROUND_ROLE
+    return VISIBLE_ROLE
+
+
 # ── Meta-Tool Pattern ─────────────────────────────────────────────────
 # Instead of regex-guessing which tools the LLM needs (brittle, 5K tokens),
 # send only 3-4 base tools. LLM discovers others via search_tools on demand.
@@ -1068,14 +1099,12 @@ def _compact_history(
     return recent
 
 
-# Error patterns in assistant messages that should be stripped from history.
-# These cause the LLM to reference past errors ("looks like there were auth
-# errors earlier") instead of responding to the current message.
-_HISTORY_ERROR_RE = re.compile(
-    r"(Sorry, an error occurred|Error code: [45]\d{2}|"
-    r"authentication_error|invalid x-api-key|"
-    r"AuthenticationError|rate_limit_error)",
-    re.IGNORECASE,
+# Stale provider-error pattern + neutral marker. Canonical definitions live in
+# context_journal_filter so the recent-window filter (here) and the
+# pre-summarization filter (compressor) share ONE source of truth.
+from lazyclaw.runtime.context_journal_filter import (  # noqa: E402
+    STALE_PROVIDER_ERROR_RE as _HISTORY_ERROR_RE,
+    STALE_TOOL_ERROR_MARKER as _STALE_TOOL_ERROR_MARKER,
 )
 
 
@@ -1099,16 +1128,43 @@ def _is_rate_limit_exception(exc: BaseException) -> bool:
 
 
 def _filter_error_messages(history: list[LLMMessage]) -> list[LLMMessage]:
-    """Remove assistant messages that are just error dumps.
+    """Strip/neutralize stale error blobs from PRIOR turns.
 
-    Returns new list (immutable pattern).
+    Two shapes (the brain otherwise treats a past failure as live and either
+    references it or refuses to re-attempt):
+      * ``assistant`` message that is just an error dump  → DROP it.
+      * ``tool`` RESULT carrying a provider/credit/auth/rate-limit error
+        (matches :data:`_HISTORY_ERROR_RE`, e.g. ``Error code: 400 … credit
+        balance too low``) → keep the message so tool_use↔tool_result pairing
+        survives, but REPLACE its content with a neutral marker.
+
+    Operates only on loaded HISTORY (see call site in
+    ``_process_message_inner``); the current turn's live tool results are
+    appended later and are never touched here. Returns a new list (immutable).
     """
     result = []
-    skip_next_user = False
     for msg in history:
-        if msg.role == "assistant" and msg.content and _HISTORY_ERROR_RE.search(msg.content):
-            skip_next_user = False  # Don't skip user messages
+        content = msg.content or ""
+        if (
+            msg.role == "assistant"
+            and content
+            and _HISTORY_ERROR_RE.search(content)
+        ):
             continue  # Drop the error assistant message
+        if (
+            msg.role == "tool"
+            and content
+            and _HISTORY_ERROR_RE.search(content)
+        ):
+            result.append(
+                LLMMessage(
+                    role="tool",
+                    content=_STALE_TOOL_ERROR_MARKER,
+                    tool_call_id=msg.tool_call_id,
+                    tool_calls=msg.tool_calls,
+                )
+            )
+            continue
         result.append(msg)
     return result
 
@@ -1708,19 +1764,26 @@ class Agent:
         chat_session_id: str | None = None,
         callback=None,
         channel_context: str | None = None,
+        browser_role: str | None = None,
     ) -> str:
         """Public turn entry — serialize live-Brave access, then run the turn.
 
         Wrapping here covers EVERY caller uniformly (lane handler, gateway,
         web WS, Telegram, background TaskRunner) since they all funnel through
-        process_message. The per-user lock is taken lazily INSIDE the turn (only
-        when a browser-driving tool actually runs) and released when the turn
-        ends, so two turns can't drive the one live Brave at once and steal each
-        other's tab. See runtime/browser_turn_lock.py (2026-05-29).
+        process_message. The per-(user, role) lock is taken lazily INSIDE the
+        turn (only when a browser-driving tool actually runs) and released when
+        the turn ends. See runtime/browser_turn_lock.py.
+
+        ``browser_role`` selects the browser lane: ``"background"`` for
+        daemon-originated work (watcher/cron/reminder) so it drives its OWN tab
+        instead of the user's visible tab, ``"visible"`` for foreground turns.
+        The daemon passes it explicitly; when unset we infer it from the
+        message prefix so existing callers stay correct (2026-06-02).
         """
         from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
 
-        async with browser_turn_scope():
+        role = browser_role or _infer_browser_role(message)
+        async with browser_turn_scope(role):
             return await self._process_message_inner(
                 user_id,
                 message,
@@ -4897,9 +4960,11 @@ class Agent:
                         )
                         _mcp_pre_snapshot = snapshot_mcp_tool_names(self.registry)
 
-                    # Duplicate call cache — skip re-executing identical tool calls
+                    # Duplicate call cache — skip re-executing identical tool calls.
+                    # Non-idempotent generators/actions are never cached (see
+                    # _NEVER_CACHE_TOOLS) so a stale prior result can't replay.
                     _cache_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
-                    if _cache_key in _tool_call_cache:
+                    if tc.name not in _NEVER_CACHE_TOOLS and _cache_key in _tool_call_cache:
                         _tool_call_hit_count[_cache_key] = _tool_call_hit_count.get(_cache_key, 0) + 1
                         _hits = _tool_call_hit_count[_cache_key]
                         if _hits >= 2:
@@ -4974,9 +5039,9 @@ class Agent:
                             )
                             head = result[:512]  # only check the head; results can be huge
                             _is_err_result = any(m in head for m in _err_status_markers)
-                        if not _is_err_result:
+                        if not _is_err_result and tc.name not in _NEVER_CACHE_TOOLS:
                             _tool_call_cache[_cache_key] = result
-                        else:
+                        elif _is_err_result:
                             logger.debug(
                                 "Skipping cache for error result on %s (len=%d)",
                                 tc.name, len(result),

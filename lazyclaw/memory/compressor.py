@@ -93,11 +93,18 @@ def _quarantine_decrypted_dicts(decrypted: list[dict]) -> list[dict]:
     # list will be summarized so polluted rows anywhere matter.
     try:
         from lazyclaw.runtime.context_journal_filter import (
+            neutralize_stale_errors,
             quarantine_polluted_history,
         )
         sanitized = quarantine_polluted_history(
             view, tool_results_this_turn=None, scan_limit=None,
         )
+        # Also neutralize stale provider errors (credit/auth/rate-limit) on
+        # assistant AND tool rows. Runs pre-split on the FULL list, so neither
+        # the long-term summary (summarize_chunk / _quick_summary) nor the
+        # recent-window view can replay "credit balance too low" as a live
+        # blocker.
+        sanitized = neutralize_stale_errors(sanitized)
     except Exception:
         logger.debug("decrypted-dict quarantine failed", exc_info=True)
         sanitized = view

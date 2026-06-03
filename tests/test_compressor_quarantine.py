@@ -141,3 +141,50 @@ def test_missing_content_key_handled_gracefully():
     msgs = [{"id": "x", "role": "user", "metadata": None}]
     out = _quarantine_decrypted_dicts(msgs)
     assert len(out) == 1
+
+
+# ─── stale provider-error neutralization (pre-summarization) ──────────────
+
+_CREDIT_ERR = (
+    "Could not draft proposal: Error code: 400 - {'message': 'Your credit "
+    "balance is too low to access the Anthropic API. Please go to Plans & "
+    "Billing.'}, 'request_id': 'req_011CbgSMgSgBV5JeQhSBHgLp'}"
+)
+
+
+def _credit_error_tool_dict(idx: int) -> dict:
+    return {
+        "id": f"msg-{idx}",
+        "role": "tool",
+        "content": _CREDIT_ERR,
+        "tool_name": "draft_freelance_proposal",
+        "metadata": None,
+        "has_tool_calls": False,
+    }
+
+
+def test_stale_tool_error_neutralized_before_summary():
+    """A credit-error TOOL row in the to-be-summarized slice is neutralized
+    by the pre-split choke point, so summarize_chunk / _quick_summary never
+    bake "credit balance too low" into the long-term summary."""
+    msgs = [_clean_user_dict(0), _credit_error_tool_dict(1), _clean_user_dict(2)]
+    out = _quarantine_decrypted_dicts(msgs)
+    assert out[1] is not msgs[1]  # row replaced
+    assert "credit balance" not in out[1]["content"]
+    assert "req_011" not in out[1]["content"]
+    assert "EARLIER turn" in out[1]["content"]  # the neutral marker
+    # Clean rows untouched (still reused by reference).
+    assert out[0] is msgs[0]
+    assert out[2] is msgs[2]
+    # Original dict NOT mutated.
+    assert "credit balance" in msgs[1]["content"]
+
+
+def test_stale_tool_error_neutralized_outside_recent_window():
+    """The summary-leak regression: a credit error at index 5 of a 40-message
+    history (the OLDER slice that gets summarized) is neutralized first."""
+    msgs = [_clean_user_dict(i) for i in range(40)]
+    msgs[5] = _credit_error_tool_dict(5)
+    out = _quarantine_decrypted_dicts(msgs)
+    assert "credit balance" not in out[5]["content"]
+    assert "EARLIER turn" in out[5]["content"]

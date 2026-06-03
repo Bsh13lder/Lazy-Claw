@@ -84,13 +84,13 @@ async def generate_code_skill(
     Returns dict with id, name, code, description, parameters_schema.
     Raises SandboxError if generated code fails validation after retry.
     """
-    # Use eco_router if available (respects ECO mode), fallback to direct router
+    # Always route through ECO so CLAUDE mode uses the subscription/SDK and
+    # never the raw API key. Build one from config if a caller didn't pass it.
     if eco_router is None:
+        from lazyclaw.llm.eco_router import EcoRouter
         from lazyclaw.llm.router import LLMRouter
-        _router = LLMRouter(config)
-        _chat = lambda msgs: _router.chat(msgs, model=config.brain_model, user_id=user_id)
-    else:
-        _chat = lambda msgs: eco_router.chat(msgs, user_id=user_id)
+        eco_router = EcoRouter(config, LLMRouter(config))
+    _chat = lambda msgs: eco_router.chat(msgs, user_id=user_id)
 
     user_prompt = f"Create a code skill that: {description}"
     if name:

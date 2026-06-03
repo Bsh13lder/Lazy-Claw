@@ -378,6 +378,15 @@ class EcoRouter:
     def __init__(self, config: Config, paid_router: LLMRouter) -> None:
         self._config = config
         self._paid_router = paid_router
+        # Mark the paid router as ECO-managed so a direct ``.chat()`` on it does
+        # NOT re-trigger the CLAUDE-mode reroute (router.py). EcoRouter owns the
+        # CLAUDE→SDK decision itself; this transport is only its fallback. Set
+        # via setattr so a test double without the attr won't break.
+        if paid_router is not None:
+            try:
+                setattr(paid_router, "_eco_managed", True)
+            except Exception:  # pragma: no cover — defensive
+                pass
         self._rate_limiter = RateLimiter()
         # Apply MiniMax Token Plan tier to the limiter's 5h window so the
         # TUI shows the right cap (Plus=4500, Max=15000, etc.).
@@ -863,7 +872,7 @@ class EcoRouter:
         self._record_usage(user_id, "free")
 
         try:
-            response = await self._claude_cli.chat(messages, model="claude-cli", **kwargs)
+            response = await self._claude_cli.chat(messages, model="claude-cli", user_id=user_id, **kwargs)
         except Exception as exc:
             logger.warning("Claude CLI failed: %s", exc)
             self._last_claude_fallback = str(exc)
@@ -954,7 +963,7 @@ class EcoRouter:
         # SDKUnavailable bubbles up to the MODE_CLAUDE dispatcher which
         # falls back to the CLI transport. Other exceptions propagate.
         response = await self._claude_sdk.chat(
-            messages, model="claude-sdk", **kwargs,
+            messages, model="claude-sdk", user_id=user_id, **kwargs,
         )
 
         self._last_claude_fallback = None
@@ -1258,7 +1267,7 @@ class EcoRouter:
 
                 try:
                     async for chunk in self._claude_sdk.stream_chat(
-                        messages, model="claude-sdk", **kwargs,
+                        messages, model="claude-sdk", user_id=user_id, **kwargs,
                     ):
                         yield chunk
                     return

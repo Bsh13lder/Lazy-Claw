@@ -209,17 +209,14 @@ class WatchSiteSkill(BaseSkill):
                     ),
                 ),
             ]
-            # Use eco_router via ROLE_WORKER (cheap), fallback to direct router
-            try:
-                from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
-                from lazyclaw.llm.router import LLMRouter
-                eco = EcoRouter(self._config, LLMRouter(self._config))
-                response = await eco.chat(messages, user_id="system", role=ROLE_WORKER)
-            except Exception:
-                logger.warning("EcoRouter unavailable for extractor JS generation, falling back to direct LLM", exc_info=True)
-                from lazyclaw.llm.router import LLMRouter
-                router = LLMRouter(self._config)
-                response = await router.chat(messages, model=self._config.worker_model)
+            # Route through ECO via ROLE_WORKER (CLAUDE → SDK). No raw-LLMRouter
+            # fallback — that bypasses ECO and would hit the API key; EcoRouter
+            # has its own internal fallback chain and the outer handler degrades
+            # gracefully on failure.
+            from lazyclaw.llm.eco_router import EcoRouter, ROLE_WORKER
+            from lazyclaw.llm.router import LLMRouter
+            eco = EcoRouter(self._config, LLMRouter(self._config))
+            response = await eco.chat(messages, user_id="system", role=ROLE_WORKER)
             js = response.content.strip()
             # Strip markdown code blocks if present
             if js.startswith("```"):

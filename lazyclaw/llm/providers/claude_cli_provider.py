@@ -32,6 +32,7 @@ from lazyclaw.llm.providers.base import (
     ToolCall,
 )
 from lazyclaw.llm.providers._disallowed_builtins import DISALLOWED_BUILT_INS
+from lazyclaw.llm.providers._claude_home import isolated_claude_cwd as _isolated_claude_cwd
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +405,10 @@ class ClaudeCLIProvider(BaseLLMProvider):
         # Each entry: (process, spawn_time, args_tuple) — args must match to reuse.
         # Pool is filled in parallel after each chat() so bursty chat traffic
         # gets near-zero startup overhead on follow-up turns.
-        self._warm_procs: list[tuple[asyncio.subprocess.Process, float, tuple]] = []
+        # Each entry: (process, spawn_time, args_tuple, cwd) — args AND cwd
+        # must match to reuse, so a warm proc never carries another user's
+        # per-user session bucket.
+        self._warm_procs: list[tuple[asyncio.subprocess.Process, float, tuple, str]] = []
 
     async def verify_key(self) -> bool:
         """Check if claude CLI is available."""
@@ -417,6 +421,11 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 self._claude_bin, "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Session isolation: even this --version probe runs in the
+                # lazyclaw-owned cwd, never the inherited process cwd (the
+                # user's repo dir). --version loads no settings, so no
+                # --setting-sources flag is needed here.
+                cwd=_isolated_claude_cwd(),
             )
             await asyncio.wait_for(proc.wait(), timeout=10)
             return proc.returncode == 0
@@ -438,6 +447,9 @@ class ClaudeCLIProvider(BaseLLMProvider):
         """
         tools: list[dict] = kwargs.pop("tools", None) or []
         session_id: str | None = kwargs.pop("session_id", None)
+        # Session isolation: pin the spawn to a lazyclaw-owned cwd, scoped
+        # per user_id so multi-tenant deploys don't co-mingle transcripts.
+        cwd = _isolated_claude_cwd(kwargs.pop("user_id", None))
 
         # Build the prompt from messages
         prompt_text = _serialize_messages(messages)
@@ -456,6 +468,12 @@ class ClaudeCLIProvider(BaseLLMProvider):
             "--tools", "",  # Disable Claude Code's built-in core tools
             "--disallowedTools", *_DISALLOWED_BUILT_INS,  # Block MCPs + WebSearch
             "--model", self._model,
+            # Session isolation (inbound leak fix): empty value = load NO
+            # filesystem settings, so the spawned claude does NOT inherit the
+            # host user's personal ~/.claude/settings.json / CLAUDE.md /
+            # rules/* / hooks into lazyclaw's agent context. Mirrors the
+            # SDK's setting_sources=[] isolation mode.
+            "--setting-sources=",
         ]
 
         # Always override Claude Code's system prompt to prevent its
@@ -520,8 +538,10 @@ class ClaudeCLIProvider(BaseLLMProvider):
         logger.debug("Claude CLI prompt preview: %s", prompt_text[:500])
 
         for attempt in range(_MAX_RETRIES):
-            # Try to grab a pre-warmed process first
-            proc = self._grab_warm_proc(args)
+            # Try to grab a pre-warmed process first (must match BOTH args
+            # and the per-user cwd, else a warm proc could carry another
+            # user's session bucket).
+            proc = self._grab_warm_proc(args, cwd)
 
             try:
                 if proc is None:
@@ -536,6 +556,11 @@ class ClaudeCLIProvider(BaseLLMProvider):
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         env=_env,
+                        # Session isolation (outbound leak fix): pin cwd to a
+                        # lazyclaw-owned, per-user dir so session transcripts
+                        # don't land in the user's personal Claude Code bucket
+                        # (and don't co-mingle across users).
+                        cwd=cwd,
                     )
 
                 stdout, stderr = await asyncio.wait_for(
@@ -596,29 +621,31 @@ class ClaudeCLIProvider(BaseLLMProvider):
             # typical chat bursts (user fires 2-3 messages in a row).
             slots_to_fill = max(0, _WARM_POOL_SIZE - len(self._warm_procs))
             for _ in range(slots_to_fill):
-                asyncio.create_task(self._pre_warm(args))
+                asyncio.create_task(self._pre_warm(args, cwd))
 
             return self._parse_response(raw)
 
         raise RuntimeError("Claude CLI failed after all retries")
 
     def _grab_warm_proc(
-        self, args: list[str],
+        self, args: list[str], cwd: str,
     ) -> asyncio.subprocess.Process | None:
-        """Grab a pre-warmed process if one matches args and is alive.
+        """Grab a pre-warmed process if one matches args + cwd and is alive.
 
         CRITICAL: warm processes are spawned with specific CLI args
         (--system-prompt, --tools, --model). Only stdin content changes.
         Using a warm process spawned with different args would send the
         prompt to a process with the WRONG system prompt — causing the
-        model to ignore tools or behave incorrectly.
+        model to ignore tools or behave incorrectly. The cwd must ALSO
+        match: it is per-user, so reusing a proc spawned for another user
+        would write this user's transcript into that user's session bucket.
         """
         import time
         now = time.monotonic()
         args_key = tuple(args)
-        remaining: list[tuple[asyncio.subprocess.Process, float, tuple]] = []
+        remaining: list[tuple[asyncio.subprocess.Process, float, tuple, str]] = []
         result: asyncio.subprocess.Process | None = None
-        for proc, spawned_at, warm_args in self._warm_procs:
+        for proc, spawned_at, warm_args, warm_cwd in self._warm_procs:
             age = now - spawned_at
             if age > _WARM_EXPIRE_S or proc.returncode is not None:
                 # Expired or dead — kill it (best-effort; ProcessLookupError
@@ -630,24 +657,24 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 except Exception:
                     logger.warning("Failed to kill expired warm Claude CLI process", exc_info=True)
                 continue
-            if result is None and warm_args == args_key:
-                # Args match — use this one
+            if result is None and warm_args == args_key and warm_cwd == cwd:
+                # Args + cwd match — use this one
                 logger.debug("Using pre-warmed CLI process (age: %.1fs)", age)
                 result = proc
             else:
-                # Keep for later or different args — don't kill
-                remaining.append((proc, spawned_at, warm_args))
+                # Keep for later or different args/cwd — don't kill
+                remaining.append((proc, spawned_at, warm_args, warm_cwd))
         self._warm_procs = remaining
         return result
 
-    async def _pre_warm(self, args: list[str]) -> None:
+    async def _pre_warm(self, args: list[str], cwd: str) -> None:
         """Spawn a process in the background so it's ready for the next call.
 
         The process starts, loads claude, and blocks on stdin.read().
         When we later call proc.communicate(input=...), it gets the prompt
-        instantly. Args are stored so _grab_warm_proc only reuses matching
-        processes. Concurrent callers are permitted — each checks the pool
-        ceiling before spawning so we don't over-fill.
+        instantly. Args + cwd are stored so _grab_warm_proc only reuses
+        matching processes. Concurrent callers are permitted — each checks
+        the pool ceiling before spawning so we don't over-fill.
         """
         if len(self._warm_procs) >= _WARM_POOL_SIZE:
             return
@@ -661,6 +688,10 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_env,
+                # Session isolation: warm-pool procs use the SAME per-user
+                # isolated cwd as the main spawn, and _grab_warm_proc keys on
+                # (args, cwd) so a proc is never reused across users.
+                cwd=cwd,
             )
             # Re-check after spawn (avoid race where multiple coroutines
             # all spawned before the first appended). If we're now over
@@ -671,7 +702,7 @@ class ClaudeCLIProvider(BaseLLMProvider):
                 except ProcessLookupError:
                     pass
                 return
-            self._warm_procs.append((proc, time.monotonic(), tuple(args)))
+            self._warm_procs.append((proc, time.monotonic(), tuple(args), cwd))
             logger.debug("Pre-warmed CLI process (PID %s, pool=%d/%d)",
                          proc.pid, len(self._warm_procs), _WARM_POOL_SIZE)
         except Exception as exc:

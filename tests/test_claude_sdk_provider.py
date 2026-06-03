@@ -283,6 +283,69 @@ class TestEnvHandling:
         assert options.permission_mode == "bypassPermissions"
 
 
+class TestSessionIsolation:
+    """The SDK spawns a real ``claude`` process. Without isolation it
+    (a) loads the host user's PERSONAL ~/.claude settings/CLAUDE.md/rules/
+    hooks into lazyclaw's agent context (inbound leak), and (b) persists
+    the full decrypted conversation as a plaintext .jsonl transcript into
+    the SAME ~/.claude/projects/<cwd-hash> bucket as the user's personal
+    Claude Code sessions (outbound leak). _build_options must pin both.
+    """
+
+    def _opts(self):
+        p = ClaudeSDKProvider(model="sonnet")
+        options, _name_map = p._build_options(
+            tools_spec=[],
+            create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
+        )
+        return options
+
+    def test_setting_sources_disabled(self) -> None:
+        """setting_sources=[] = SDK isolation mode: the agent must NOT
+        load the host user's ~/.claude/settings.json, ~/.claude/CLAUDE.md,
+        ~/.claude/rules/*, or personal hooks. (inbound leak fix)"""
+        options = self._opts()
+        assert options.setting_sources == [], (
+            "setting_sources must be [] so the SDK does not inherit the "
+            "user's personal Claude Code settings/CLAUDE.md/hooks"
+        )
+
+    def test_cwd_isolated_off_user_repo(self, tmp_path) -> None:
+        """cwd must be pinned to a lazyclaw-owned dir under DATABASE_DIR so
+        SDK transcripts land in their OWN project bucket — never co-mingled
+        with the user's personal sessions in the process cwd. (outbound)"""
+        with patch.dict(os.environ, {"DATABASE_DIR": str(tmp_path)}, clear=False):
+            p = ClaudeSDKProvider(model="sonnet")
+            options, _ = p._build_options(
+                tools_spec=[],
+                create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
+            )
+        assert options.cwd is not None, "cwd must be pinned (was None → inherits process cwd)"
+        cwd = os.path.realpath(str(options.cwd))
+        # under the configured data dir, and not the current process cwd
+        assert cwd.startswith(os.path.realpath(str(tmp_path)))
+        assert cwd != os.path.realpath(os.getcwd())
+        # and the directory is actually created (claude needs a real cwd)
+        assert os.path.isdir(cwd)
+
+    def test_cwd_scoped_per_user(self, tmp_path) -> None:
+        """_build_options threads user_id into the cwd so multi-tenant
+        deploys don't co-mingle agent transcripts across users."""
+        with patch.dict(os.environ, {"DATABASE_DIR": str(tmp_path)}, clear=False):
+            p = ClaudeSDKProvider(model="sonnet")
+            opt_a, _ = p._build_options(
+                tools_spec=[], create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
+                user_id="alice",
+            )
+            opt_b, _ = p._build_options(
+                tools_spec=[], create_sdk_mcp_server=MagicMock(return_value=MagicMock()),
+                user_id="bob",
+            )
+        assert str(opt_a.cwd).endswith(os.path.join("claude_agent_home", "u-alice"))
+        assert str(opt_b.cwd).endswith(os.path.join("claude_agent_home", "u-bob"))
+        assert opt_a.cwd != opt_b.cwd
+
+
 class TestUsageNormalization:
     def test_zero_cost_with_subscription_diagnostic(self) -> None:
         u = ClaudeSDKProvider._normalize_usage(

@@ -334,10 +334,36 @@ class AddTaskSkill(BaseSkill):
                         "Default when unsure: 'user'."
                     ),
                 },
+                "category": {
+                    "type": "string",
+                    "description": (
+                        "The PROJECT this task belongs to (e.g. 'Private', "
+                        "'Kitchen Reno', 'lazyclaw'). When the user names or "
+                        "implies a project ('add to my private project', 'for "
+                        "the reno'), ALWAYS set it here — never bury the project "
+                        "name in tags. Omit it for a one-off task and the server "
+                        "may file it under an EXISTING bucket; it will not "
+                        "invent a new one."
+                    ),
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Sub-tasks / checklist items as a list of short strings. "
+                        "When the user enumerates things ('buy oil, bread, "
+                        "butter and fruit', 'pack passport, charger, meds'), put "
+                        "EACH item here as its own step — do NOT cram the list "
+                        "into description. Each becomes a checkable sub-task."
+                    ),
+                },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags (e.g. ['work', 'urgent'])",
+                    "description": (
+                        "Optional freeform labels (e.g. ['urgent', 'home']). "
+                        "NOT for the project — use `category` for that."
+                    ),
                 },
                 "pre_reminders": {
                     "type": "array",
@@ -454,6 +480,7 @@ class AddTaskSkill(BaseSkill):
                 reminder_at=reminder_at,
                 recurring=recurring,
                 tags=user_supplied_tags,
+                steps=params.get("steps"),
                 pre_reminders=pre_reminders,
             )
         except Exception as exc:
@@ -463,6 +490,16 @@ class AddTaskSkill(BaseSkill):
         result_parts = [f"Task added: {title}"]
         if task.get("category"):
             result_parts.append(f"Project: {task['category']}")
+        if task.get("steps"):
+            try:
+                step_titles = [
+                    s.get("title", "") for s in json.loads(task["steps"])
+                ]
+                step_titles = [s for s in step_titles if s]
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                step_titles = []
+            if step_titles:
+                result_parts.append("Subtasks: " + ", ".join(step_titles))
         if task.get("due_date"):
             result_parts.append(f"Due: {task['due_date']}")
         if task.get("reminder_at"):
@@ -1136,12 +1173,30 @@ async def _smart_enrich(
         intelligence = TaskIntelligence(AIClient(ai_config))
 
         result = await intelligence.categorize(title)
-        category = result.get("category")
+        category = (result.get("category") or "").strip()
 
         if category:
-            from lazyclaw.tasks.store import update_task
-            await update_task(config, user_id, task_id, category=category)
-            return f"AI: categorized as '{category}'"
+            from lazyclaw.tasks.store import list_categories, update_task
+
+            # Only file the task under a project the user ALREADY uses. The
+            # auto-categorizer happily invents generic buckets ("errands",
+            # "tech") the user never asked for — and a phantom project the user
+            # can't see coming is worse than leaving the task uncategorized.
+            # Explicit project intent comes from the brain via category=, not
+            # from this back-stop. (Fix: 2026-06-02 — surprise "errands" bug.)
+            existing = await list_categories(config, user_id)
+            match = next(
+                (c for c in existing if c.casefold() == category.casefold()),
+                None,
+            )
+            if match is None:
+                logger.debug(
+                    "AI suggested new category %r for task %s — skipped "
+                    "(not an existing bucket)", category, task_id,
+                )
+                return ""
+            await update_task(config, user_id, task_id, category=match)
+            return f"AI: categorized as '{match}'"
     except Exception:
         logger.debug("AI enrichment failed for task %s", task_id, exc_info=True)
 

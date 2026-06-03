@@ -28,6 +28,79 @@ def _fmt_money(amount, currency: str | None) -> str:
         return f"{amount} {currency or 'EUR'}"
 
 
+class CreateProjectSkill(BaseSkill):
+    """Create a first-class project (no budget required).
+
+    This is the skill to call when the user says "create a project", "make a
+    project for X", "start a private project", etc. It materializes a real
+    ``projects`` row + its ``<Name> Project`` LazyBrain wikilink page so the
+    project has a description, a graph node, and rename support — unlike a bare
+    task category, which stays a lightweight phantom until it proves itself.
+
+    Tasks tagged with this project's name (``category``) automatically roll up
+    under it.
+    """
+
+    def __init__(self, config=None) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "create_project"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create a project the user explicitly asked for (e.g. 'create a "
+            "private project', 'make a project for the kitchen reno'). Use the "
+            "name the user gave (or an obvious one like 'Personal'/'Private'). "
+            "Pass a short `description` explaining what the project is for — it "
+            "becomes the project's wikilink page text. To then put a task under "
+            "it, call add_task with category=<project name>. Don't use this for "
+            "budgets ('set X budget') — that's set_project_budget."
+        )
+
+    @property
+    def category(self) -> str:
+        return "tasks"
+
+    @property
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Project name, e.g. 'Private', 'Kitchen Reno'",
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "1–2 sentence explanation of what the project is for. "
+                        "Becomes the [[<Name> Project]] page body."
+                    ),
+                },
+            },
+            "required": ["project"],
+        }
+
+    async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.budgets import store
+
+        project = (params.get("project") or "").strip()
+        if not project:
+            return "Project name is required."
+        description = (params.get("description") or "").strip() or None
+
+        existing = await store.get_project_by_name(self._config, user_id, project)
+        proj = await store.create_project(
+            self._config, user_id, project, description=description,
+        )
+        verb = "already exists" if existing else "created"
+        suffix = " Add tasks to it with category=" + f"'{proj['name']}'."
+        return f"Project **{proj['name']}** {verb}.{suffix}"
+
+
 class SetProjectBudgetSkill(BaseSkill):
     """Create/update a project and set its budget."""
 

@@ -16,19 +16,23 @@ import { ProjectExpenseAdder } from "./ExpenseAdder";
  * pinned top-right, so the title row carries right padding and all actions live
  * on their own row below the bar — nothing sits under the toggle.
  */
-type Pane = "none" | "edit" | "add" | "task" | "expense" | "log";
+type Pane = "none" | "rename" | "add" | "task" | "expense" | "log";
 
 export function ProjectPanel({
   projectKey,
   displayName,
   onChanged,
   onDeleted,
+  onRenamed,
 }: {
   projectKey: string;
   displayName: string;
   onChanged: () => void;
   /** Called after the project is deleted so the parent can clear the filter. */
   onDeleted?: () => void;
+  /** Called after a rename with the new name_key so the parent can re-point
+   *  its project filter (tasks moved to the new category). */
+  onRenamed?: (newProjectKey: string) => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [tick, setTick] = useState(0);
@@ -168,27 +172,36 @@ export function ProjectPanel({
           under the show-detail toggle */}
       {expanded && (
       <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-        <PanelBtn active={pane === "edit"} onClick={() => toggle("edit")}>
-          {budget > 0 ? "Edit budget" : "Set budget"}
+        <PanelBtn active={pane === "rename"} onClick={() => toggle("rename")}>
+          ✏️ Rename / describe
         </PanelBtn>
-        {budget > 0 && (
-          <PanelBtn active={pane === "add"} onClick={() => toggle("add")}>+ Add budget</PanelBtn>
-        )}
+        {/* "+ Add budget" = a sourced top-up (ledger entry); self-creates the
+            project + sets the base when budget is still 0. This is the only
+            budget control — corrections happen in the 📋 Log. */}
+        <PanelBtn active={pane === "add"} onClick={() => toggle("add")}>+ Add budget</PanelBtn>
         <PanelBtn active={pane === "task"} onClick={() => toggle("task")}>+ Task</PanelBtn>
         <PanelBtn active={pane === "expense"} onClick={() => toggle("expense")}>+ Expense</PanelBtn>
         <PanelBtn active={pane === "log"} onClick={() => toggle("log")}>📋 Log</PanelBtn>
       </div>
       )}
 
-      {expanded && pane === "edit" && (
-        <BudgetEditor
-          mode="set" projectName={name} existing={project}
-          onSaved={() => { setPane("none"); refresh(); }}
+      {expanded && pane === "rename" && (
+        <ProjectMetaEditor
+          projectName={name} existing={project}
+          onSaved={(newName) => {
+            setPane("none");
+            const newKey = newName.trim().toLowerCase();
+            if (newKey && newKey !== name.toLowerCase() && onRenamed) {
+              onRenamed(newKey);
+            } else {
+              refresh();
+            }
+          }}
         />
       )}
       {pane === "add" && (
         <BudgetEditor
-          mode="add" projectName={name} existing={project}
+          projectName={name} existing={project}
           onSaved={() => { setPane("none"); refresh(); }}
         />
       )}
@@ -228,10 +241,73 @@ function PanelBtn({
   );
 }
 
-function BudgetEditor({
-  mode, projectName, existing, onSaved,
+function ProjectMetaEditor({
+  projectName, existing, onSaved,
 }: {
-  mode: "set" | "add";
+  projectName: string;
+  existing: Project | null;
+  /** Receives the (possibly new) project name after a successful save. */
+  onSaved: (newName: string) => void;
+}) {
+  const [newName, setNewName] = useState(projectName);
+  const [description, setDescription] = useState(existing?.description ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const save = async () => {
+    const trimmed = newName.trim();
+    if (!trimmed) { setErr("Name can't be empty."); return; }
+    setBusy(true);
+    setErr(null);
+    try {
+      // A category with no budget/expenses is a "phantom" project — no row yet.
+      // Materialize it under its CURRENT name first, then PATCH: the backend
+      // re-points every task's category when the name changes (no orphans).
+      const proj = existing ?? (await api.createProject({ name: projectName }));
+      const renamed = trimmed.toLowerCase() !== projectName.toLowerCase();
+      await api.updateProject(proj.id, {
+        ...(renamed ? { name: trimmed } : {}),
+        description: description.trim() || undefined,
+      });
+      onSaved(trimmed);
+    } catch {
+      setErr("Couldn't save. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      <input
+        value={newName} autoFocus maxLength={200}
+        onChange={(e) => setNewName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
+        placeholder="Project name"
+        className="bg-bg-primary border border-border rounded-lg px-2.5 py-1.5 text-sm text-text-primary"
+      />
+      <textarea
+        value={description} maxLength={2000} rows={3}
+        onChange={(e) => setDescription(e.target.value)}
+        placeholder="What is this project for? (becomes the [[Project]] wikilink page)"
+        className="bg-bg-primary border border-border rounded-lg px-2.5 py-1.5 text-sm text-text-primary resize-y"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => void save()} disabled={busy}
+          className="text-[11px] px-3 py-1.5 rounded-lg border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+        {err && <span className="text-[10px] text-red-400">{err}</span>}
+      </div>
+    </div>
+  );
+}
+
+function BudgetEditor({
+  projectName, existing, onSaved,
+}: {
   projectName: string;
   existing: Project | null;
   onSaved: () => void;
@@ -246,19 +322,14 @@ function BudgetEditor({
     if (!Number.isFinite(amount)) return;
     setBusy(true);
     try {
-      if (mode === "add") {
-        // Top-up → ledger entry with a source, bumps the budget.
-        const proj = existing ?? (await api.createProject({ name: projectName, currency }));
-        await api.addBudgetEntry(proj.id, {
-          amount,
-          source: source.trim() || undefined,
-          currency,
-        });
-      } else if (existing) {
-        await api.setProjectBudget(existing.id, amount, currency);
-      } else {
-        await api.createProject({ name: projectName, budget: amount, currency });
-      }
+      // Top-up → ledger entry with a source, bumps the budget. Self-creates
+      // the project when it's still a phantom (no row yet).
+      const proj = existing ?? (await api.createProject({ name: projectName, currency }));
+      await api.addBudgetEntry(proj.id, {
+        amount,
+        source: source.trim() || undefined,
+        currency,
+      });
       onSaved();
     } finally {
       setBusy(false);
@@ -272,7 +343,7 @@ function BudgetEditor({
           type="number" min={0} value={value} autoFocus
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
-          placeholder={mode === "add" ? "Amount to add to budget" : "New total budget"}
+          placeholder="Amount to add to budget"
           className="bg-bg-primary border border-border rounded-lg px-2.5 py-1.5 text-sm text-text-primary flex-1"
         />
         <input
@@ -284,26 +355,24 @@ function BudgetEditor({
           onClick={() => void save()} disabled={busy}
           className="text-[11px] px-3 py-1.5 rounded-lg border border-emerald-400/40 text-emerald-300 bg-emerald-400/10 hover:bg-emerald-400/20 disabled:opacity-40"
         >
-          {busy ? "Saving…" : mode === "add" ? "Add" : "Save"}
+          {busy ? "Saving…" : "Add"}
         </button>
       </div>
       {/* Source comment — "where is this money from?" */}
-      {mode === "add" && (
-        <div className="flex items-center gap-2">
-          <span className="text-text-muted" title="Source of the money">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-          </span>
-          <input
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
-            placeholder="Source — where is this money from? (e.g. client deposit)"
-            className="bg-bg-primary border border-border rounded-lg px-2.5 py-1.5 text-sm text-text-primary flex-1"
-          />
-        </div>
-      )}
+      <div className="flex items-center gap-2">
+        <span className="text-text-muted" title="Source of the money">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+        </span>
+        <input
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
+          placeholder="Source — where is this money from? (e.g. client deposit)"
+          className="bg-bg-primary border border-border rounded-lg px-2.5 py-1.5 text-sm text-text-primary flex-1"
+        />
+      </div>
     </div>
   );
 }

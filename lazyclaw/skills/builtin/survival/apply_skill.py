@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 
 _SEARCH_PREFIX = "SURVIVAL_SEARCH:"
 
+# Letter-generation provenance markers returned by `_generate_letter`.
+# Callers branch on these to decide whether the result reads as a genuine
+# (LLM-written) draft or a degraded fallback that must be flagged.
+_LETTER_SOURCE_LLM = "llm"            # EcoRouter / SDK / subscription path
+_LETTER_SOURCE_TEMPLATE = "template"  # deterministic deep fallback
+_LETTER_SOURCE_FAILED = "failed"      # no letter could be produced at all
+
 # LazyClaw branding prompt injected into cover letter generation.
 # Style anchor: warm + transparent + structured. Detailed style template
 # in draft_proposal_skill.py:_PROMPT_TEMPLATE — keep these two in sync.
@@ -133,10 +140,28 @@ class ApplyJobSkill(BaseSkill):
                 "Give me the full Upwork URL, or run 'search jobs' first."
             )
 
-        # Generate cover letter with LazyClaw branding
-        letter = await self._generate_letter(user_id, job, profile, custom_note)
+        # Generate cover letter with LazyClaw branding.
+        letter, letter_source = await self._generate_letter(
+            user_id, job, profile, custom_note,
+        )
 
-        # Update gig record to 'applied'
+        # Truthful failure: when no letter could be produced at all (every
+        # real path AND the template raised) we must NOT report progress.
+        # The caller/brain would otherwise mark the apply "done" with nothing
+        # to show. Surface a clear FAILURE so the UI says "couldn't apply".
+        if letter_source == _LETTER_SOURCE_FAILED or not (letter or "").strip():
+            return (
+                f"FAILED to apply to **{job.get('title', ref)}**: "
+                f"cover-letter generation failed (no letter produced). "
+                f"No proposal was submitted. "
+                f"Check the LLM route (MODE/transport) and try again."
+            )
+
+        # Only mark the gig 'applied' once we actually have a usable letter.
+        # NOTE: this skill DRAFTS only — it never submits the proposal
+        # (Upwork submission goes through `upwork_submit_proposal` or the
+        # browser 'submit' step, both initiated separately). The gig status
+        # 'applied' here means "draft prepared", not "proposal sent".
         found_gigs = await list_gigs(self._config, user_id, status="found")
         for gig in found_gigs:
             if gig.title == job.get("title") or gig.url == job.get("url"):
@@ -146,17 +171,32 @@ class ApplyJobSkill(BaseSkill):
                 )
                 break
 
-        # Browser platforms: fill the proposal form directly
-        if job.get("platform", "").lower() in BROWSER_PLATFORMS:
-            return await self._apply_via_browser(user_id, job, profile, letter)
+        # When only the deterministic template survived, the draft is
+        # degraded (LLM unavailable). Flag it so the brain/user knows the
+        # letter wasn't tailored by the model — never silently pass it off
+        # as a finished, model-written proposal.
+        degraded_note = (
+            "\n\n⚠️ Note: the LLM was unavailable, so this is a generic "
+            "TEMPLATE draft (not tailored to the brief). Review before sending."
+            if letter_source == _LETTER_SOURCE_TEMPLATE else ""
+        )
 
-        # Non-browser platforms: show letter + URL
+        # Browser platforms: fill the proposal form directly (no Submit click).
+        if job.get("platform", "").lower() in BROWSER_PLATFORMS:
+            return await self._apply_via_browser(
+                user_id, job, profile, letter, degraded_note,
+            )
+
+        # Non-browser platforms: show letter + URL. Wording makes clear the
+        # proposal has NOT been submitted — the user must do that manually.
         return (
-            f"Cover letter for: **{job['title']}** ({job.get('platform', 'N/A')})\n"
+            f"Cover letter DRAFTED (not yet submitted) for: "
+            f"**{job['title']}** ({job.get('platform', 'N/A')})\n"
             f"Budget: {job.get('budget', 'N/A')}\n\n"
             f"---\n{letter}\n---\n\n"
             f"URL: {job.get('url', 'N/A')}\n\n"
-            f"Open the link and submit manually, or say 'submit' to apply via browser."
+            f"Open the link and submit manually, or say 'submit' to apply "
+            f"via browser. Nothing has been sent yet.{degraded_note}"
         )
 
     async def _resolve_from_memory(self, user_id: str, ref: str) -> dict | None:
@@ -314,14 +354,16 @@ class ApplyJobSkill(BaseSkill):
 
     async def _apply_via_browser(
         self, user_id: str, job: dict, profile, letter: str,
+        degraded_note: str = "",
     ) -> str:
         """Fill Upwork proposal form via browser. Does NOT click Submit."""
         browser = self._registry.get("browser") if self._registry else None
         if browser is None:
             return (
-                f"Cover letter ready but browser not available.\n\n"
+                f"Cover letter DRAFTED (not submitted) but browser not "
+                f"available.\n\n"
                 f"---\n{letter}\n---\n\n"
-                f"Apply manually at: {job.get('url', 'N/A')}"
+                f"Apply manually at: {job.get('url', 'N/A')}{degraded_note}"
             )
 
         job_url = job.get("url", "")
@@ -347,25 +389,38 @@ class ApplyJobSkill(BaseSkill):
                 })
 
             return (
-                f"Proposal ready on Upwork for: **{job['title']}**\n\n"
+                f"Proposal form FILLED (NOT yet submitted) on Upwork for: "
+                f"**{job['title']}**\n\n"
                 f"---\n{letter}\n---\n\n"
                 f"Rate: ${profile.min_hourly_rate}/hr\n"
-                f"The proposal form is filled in the browser.\n\n"
-                f"Say 'submit' to click Submit, or 'edit' to change something."
+                f"The proposal form is filled in the browser but the Submit "
+                f"button has NOT been clicked.\n\n"
+                f"Say 'submit' to click Submit, or 'edit' to change "
+                f"something.{degraded_note}"
             )
 
         except Exception as exc:
             logger.warning("Browser apply failed: %s", exc)
             return (
-                f"Browser couldn't complete the application.\n"
-                f"Cover letter:\n---\n{letter}\n---\n\n"
-                f"Apply manually: {job_url}"
+                f"Browser couldn't complete the application — proposal NOT "
+                f"submitted.\n"
+                f"Cover letter draft:\n---\n{letter}\n---\n\n"
+                f"Apply manually: {job_url}{degraded_note}"
             )
 
     async def _generate_letter(
         self, user_id: str, job: dict, profile, custom_note: str,
-    ) -> str:
-        """Generate cover letter with LazyClaw branding."""
+    ) -> tuple[str, str]:
+        """Generate cover letter with LazyClaw branding.
+
+        Returns ``(letter, source)`` where ``source`` is one of
+        ``_LETTER_SOURCE_LLM`` (model-written via EcoRouter / subscription),
+        ``_LETTER_SOURCE_TEMPLATE`` (deterministic deep fallback), or
+        ``_LETTER_SOURCE_FAILED`` (nothing could be produced). The caller
+        uses ``source`` to keep the result truthful: an LLM draft reads as a
+        normal draft, a template draft is flagged as degraded, and a failure
+        is reported as a failure (never as a finished proposal).
+        """
         # 1500 chars of brief — enough room for the LLM to tailor the phase
         # list to the actual problem rather than guessing.
         desc = job.get("description", "N/A")[:1500]
@@ -405,35 +460,18 @@ class ApplyJobSkill(BaseSkill):
                 "- Sound human, not AI-generated\n"
             )
 
-        # Code-execution ladder per architecture decision (2026-05-09):
-        #   1. Claude Code MCP (primary — persistent session, never loses
-        #      track, full agentic loop)
-        #   2. `claude -p` CLI (fallback — one-shot, slower spawn but
-        #      $0 via subscription and avoids MCP-disconnect surprises)
-        #   3. Template (deep fallback — used only when both above fail)
-        # Skip directly to step 3 for non-lazyclaw branding mode (template
-        # is fine for a generic 150-word letter).
-        registry = self._registry
-        if registry is not None:
-            for tool_info in registry.list_mcp_tools():
-                func = tool_info.get("function", {})
-                tname = func.get("name", "").lower()
-                if "claude" in tname and "code" in tname:
-                    tool = registry.get(func.get("name", ""))
-                    if tool is not None:
-                        try:
-                            return await tool.execute(user_id, {"prompt": letter_prompt})
-                        except Exception as exc:
-                            logger.warning("Claude Code MCP letter gen failed, trying CLI: %s", exc)
-                            break  # MCP is reachable but failed — drop to CLI, don't retry MCP
-
-        # LLM fallback — route via EcoRouter so we respect the user's
-        # active mode (MODE_CLAUDE → subscription transport, HYBRID →
-        # paid API only if they have credit, etc.). Going through the
-        # plain LLMRouter with model="claude-cli" hit the Anthropic
-        # paid API because router.py:17 dispatches by `claude-` prefix
-        # → AnthropicProvider, which 400s when the user has $0 credit.
-        # EcoRouter knows about the subscription transport.
+        # Letter-generation ladder (revised 2026-06-02):
+        #   1. EcoRouter (PRIMARY) — respects the user's active mode. Under
+        #      MODE_CLAUDE this dispatches via the claude-agent-sdk on the
+        #      Max subscription ($0, working). Under HYBRID it uses the
+        #      configured brain. This is the ONLY model-backed path.
+        #   2. Template (deep fallback) — deterministic, used only when the
+        #      EcoRouter path fails or returns empty.
+        # The Claude Code MCP / raw `claude -p` letter-gen step was REMOVED:
+        # its subprocess picks up the (dead, $0-balance) ANTHROPIC_API_KEY
+        # from the container env and fails with "Credit balance is too low",
+        # which used to run BEFORE the working subscription path. EcoRouter
+        # already knows about the subscription transport — go straight to it.
         try:
             from lazyclaw.llm.providers.base import LLMMessage
             from lazyclaw.llm.router import LLMRouter
@@ -448,13 +486,25 @@ class ApplyJobSkill(BaseSkill):
             )
             text = (resp.content or "").strip()
             if text:
-                return text
+                return text, _LETTER_SOURCE_LLM
             logger.warning("EcoRouter returned empty letter, falling to template")
         except Exception as exc:
             logger.warning("EcoRouter letter gen failed: %s", exc)
 
-        # Fallback: template-based letter (used when LLM is unavailable).
-        # Keep aligned with the structure in _LAZYCLAW_BRANDING_TEMPLATE.
+        # Deep fallback: template-based letter (used when the LLM path is
+        # unavailable or empty). Wrapped so a failure here is reported as a
+        # genuine failure rather than masquerading as a finished proposal.
+        try:
+            return self._template_letter(job, profile), _LETTER_SOURCE_TEMPLATE
+        except Exception as exc:
+            logger.warning("Template letter gen failed: %s", exc)
+            return "", _LETTER_SOURCE_FAILED
+
+    def _template_letter(self, job: dict, profile) -> str:
+        """Deterministic deep-fallback cover letter (no LLM).
+
+        Keep aligned with the structure in _LAZYCLAW_BRANDING_TEMPLATE.
+        """
         skills_str = ", ".join(profile.skills[:3]) if profile.skills else "various technologies"
         signoff = profile.display_name or "the founder"
         github_block = (

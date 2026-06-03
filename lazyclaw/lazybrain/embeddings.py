@@ -467,24 +467,29 @@ async def _vec_topk(
             cap = max(1, min(200, k))
             if tag_substring:
                 like = f'%"{tag_substring}"%'
-                # JOIN against notes for the tag prefilter. The MATCH +
-                # LIMIT still goes through the ANN index — the JOIN just
-                # narrows the result rows.
+                # vec0 KNN with metadata filters (user_id/model/dim) + a JOIN
+                # requires the explicit ``k = ?`` constraint — a trailing
+                # ``LIMIT`` is NOT recognized as the KNN bound once extra
+                # predicates are present, which raised "A LIMIT or 'k = ?'
+                # constraint is required on vec0 knn queries" on every call
+                # (silent fallback). ``k = ?`` is the canonical sqlite-vec form.
                 cur = await db.execute(
                     "SELECT v.note_id, v.distance FROM vec_note_embeddings v "
                     "JOIN notes n ON n.id = v.note_id "
                     "WHERE v.user_id = ? AND v.model = ? AND v.dim = ? "
                     "AND v.embedding MATCH ? "
+                    "AND v.k = ? "
                     "AND n.tags LIKE ? "
-                    "ORDER BY v.distance LIMIT ?",
-                    (user_id, EMBED_MODEL, EMBED_DIM, packed, like, cap),
+                    "ORDER BY v.distance",
+                    (user_id, EMBED_MODEL, EMBED_DIM, packed, cap, like),
                 )
             else:
                 cur = await db.execute(
                     "SELECT note_id, distance FROM vec_note_embeddings "
                     "WHERE user_id = ? AND model = ? AND dim = ? "
                     "AND embedding MATCH ? "
-                    "ORDER BY distance LIMIT ?",
+                    "AND k = ? "
+                    "ORDER BY distance",
                     (user_id, EMBED_MODEL, EMBED_DIM, packed, cap),
                 )
             rows = await cur.fetchall()

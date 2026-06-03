@@ -357,6 +357,28 @@ class CDPBackend:
         )
         return result
 
+    def _pick_preferred_tab(self, page_tabs: list["CDPTab"]) -> "CDPTab":
+        """Pick the MRU page tab, EXCLUDING tabs owned by a background lane.
+
+        Background watcher/cron lanes park on their OWN tabs (tracked in
+        :mod:`lazyclaw.browser.owned_tabs`). The visible/foreground backend
+        must never land on one of those — otherwise the foreground would
+        steal or clobber a background tab and we'd be back to the single-tab
+        collision. Falls back to the raw MRU tab when EVERY open tab is owned
+        (correctness over isolation — the foreground still works). A
+        background backend transiently runs this too, but it immediately
+        re-pins to its own tab via ``switch_tab`` after connecting, so the
+        transient pick is harmless.
+        """
+        from lazyclaw.browser import owned_tabs
+
+        anchored = owned_tabs.all_owned_target_ids(self._user_id)
+        if anchored:
+            preferred = [t for t in page_tabs if t.id not in anchored]
+            if preferred:
+                return preferred[0]
+        return page_tabs[0]
+
     async def _ensure_connected(
         self, target_url: str | None = None,
     ) -> CDPConnection:
@@ -500,7 +522,7 @@ class CDPBackend:
                     )
                 # Use the most recently focused tab (Chromium returns tabs
                 # in MRU order in /json, with the active one first).
-                self._current_tab = page_tabs[0]
+                self._current_tab = self._pick_preferred_tab(page_tabs)
                 ws_url = self._current_tab.ws_url
                 logger.info(
                     "Host bridge: switched to page-level WS for tab %r (%s)",
@@ -519,7 +541,7 @@ class CDPBackend:
                     if not page_tabs:
                         raise ConnectionError("Chrome has no open tabs and failed to create one.")
 
-                self._current_tab = page_tabs[0]
+                self._current_tab = self._pick_preferred_tab(page_tabs)
                 ws_url = self._current_tab.ws_url
             else:
                 # Nothing reachable — auto-launch the container's own Brave.
@@ -535,7 +557,7 @@ class CDPBackend:
                     page_tabs = await self._create_tab()
                     if not page_tabs:
                         raise ConnectionError("Chrome has no open tabs and failed to create one.")
-                self._current_tab = page_tabs[0]
+                self._current_tab = self._pick_preferred_tab(page_tabs)
                 ws_url = self._current_tab.ws_url
 
             self._conn = CDPConnection()

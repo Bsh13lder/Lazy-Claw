@@ -96,6 +96,32 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _is_degraded_result(result) -> bool:
+    """True when the site-specific extractor produced NO real content.
+
+    A "degraded" read means the page wasn't actually scraped — the most
+    common cause on Cloudflare-protected hosts (upwork.com, linkedin.com)
+    or after a layout drift is that the extractor's selectors don't match,
+    so ``backend.evaluate()`` returns an empty value. Treating these as a
+    real reading poisons the baseline (``last_value``) and makes the
+    empty↔populated oscillation re-fire the watcher on every tick.
+
+    Degraded = falsy scalar (None / "" / whitespace-only string) OR an
+    empty container ({} / []). A populated dict such as the WhatsApp
+    ``{"unread_count": 0, "text": ""}`` is NOT degraded — that's a
+    legitimate "nothing unread" reading the downstream comparison already
+    handles; only a genuinely empty extraction is degraded.
+    """
+    if result is None:
+        return True
+    if isinstance(result, str):
+        return not result.strip()
+    if isinstance(result, (dict, list, tuple, set)):
+        return len(result) == 0
+    # Any other non-empty primitive (number, bool True, etc.) is real.
+    return not result
+
+
 def build_watcher_context(
     url: str,
     custom_js: str | None = None,
@@ -144,18 +170,26 @@ async def check_watcher(
     context: dict,
     *,
     passive: bool = False,
+    user_id: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[bool, str | None, dict]:
     """Run a single watcher check. Returns (changed, notification, updated_context).
 
     Zero LLM calls — pure JS execution via CDP.
 
-    When ``passive=True`` (used for watchers running against the user's
-    live Brave) the poller will NEVER steal focus or navigate the user's
-    current tab. If no matching tab is open the poll is skipped and the
-    context returned unchanged. This is the only safe mode against
-    Cloudflare-protected sites (upwork.com, linkedin.com) — a fresh
-    headless instance gets blocked at the JS challenge and silently
-    returns an empty extractor result forever.
+    When ``passive=True`` (the watcher runs against the user's live shared
+    Brave) the watcher drives its OWN dedicated parked tab — tracked by
+    ``context["anchor_target_id"]`` — and NEVER steals or navigates the user's
+    visible tab. The parked tab is created once at the watched URL (a
+    background ``Target.createTarget`` in the same signed-in Brave, so it
+    shares the session and passes Cloudflare) and re-resolved by target id on
+    later polls; it self-heals if the tab was closed. ``user_id``/``job_id``
+    let us register the tab in :mod:`lazyclaw.browser.owned_tabs` so the
+    foreground excludes it from MRU and the reaper anchors it.
+
+    When ``passive=False`` (a separate headless background browser, not the
+    shared Brave) the original host-match / navigate behavior applies — there's
+    no foreground tab to collide with on a private instance.
     """
     url = context.get("url", "")
     page_type = context.get("page_type", "auto")
@@ -171,39 +205,62 @@ async def check_watcher(
     else:
         js_code = _JS_GENERIC_HASH
 
-    # Navigate to URL if not already there
-    current_url = await backend.current_url()
-    current_host = urlparse(current_url).hostname or ""
-    target_host = urlparse(url).hostname or ""
-
-    if target_host and target_host not in current_host:
-        # Need to find or navigate to the right tab
+    # Resolve which tab to read.
+    created_anchor: str | None = None
+    if passive:
+        # LIVE shared Brave: use the watcher's OWN parked tab. Selection is by
+        # tab id, NEVER by host-match — host-match used to grab whatever tab
+        # was on the host (including the user's foreground tab), which is the
+        # exact tab-steal we're eliminating.
+        anchor_id = context.get("anchor_target_id")
         tabs = await backend.tabs()
-        target_tab = next(
-            (t for t in tabs if target_host in (urlparse(t.url).hostname or "")),
-            None,
-        )
-        if target_tab:
-            if passive:
-                await backend.switch_tab(target_tab.id, focus=False)
-            else:
-                await backend.switch_tab(target_tab.id)
-        else:
-            if passive:
-                # No matching tab in the user's live Brave — skip this
-                # poll rather than commandeer the user's current tab.
-                # Next poll will pick up changes once the user opens the
-                # watched page. last_check stays untouched so we retry
-                # promptly when the interval expires again.
+        if anchor_id and any(t.id == anchor_id for t in tabs):
+            await backend.switch_tab(anchor_id, focus=False)
+        elif url:
+            # First run, or the parked tab was closed/stale → create our own.
+            try:
+                created_anchor = await backend.new_tab(url)
+                await backend.switch_tab(created_anchor, focus=False)
+            except Exception:
                 logger.debug(
-                    "Passive watcher skip — no tab on host %s", target_host,
+                    "watcher parked-tab create/switch failed for %s",
+                    url, exc_info=True,
                 )
                 return False, None, context
-            # Tab not open — navigate current tab
-            await backend.goto(url)
-            # Wait for page load
+            if user_id is not None:
+                try:
+                    from lazyclaw.browser import owned_tabs
+
+                    key = f"watch:{job_id}" if job_id else f"watch:{url}"
+                    owned_tabs.set_owned(user_id, key, created_anchor)
+                except Exception:
+                    logger.debug("owned_tabs register failed", exc_info=True)
+            # Give the freshly opened tab a moment to load before extracting.
             import asyncio
             await asyncio.sleep(2)
+        else:
+            # No anchor and no URL → nothing to poll this tick.
+            return False, None, context
+    else:
+        # Headless background browser (separate instance) — original behavior.
+        current_url = await backend.current_url()
+        current_host = urlparse(current_url).hostname or ""
+        target_host = urlparse(url).hostname or ""
+
+        if target_host and target_host not in current_host:
+            tabs = await backend.tabs()
+            target_tab = next(
+                (t for t in tabs if target_host in (urlparse(t.url).hostname or "")),
+                None,
+            )
+            if target_tab:
+                await backend.switch_tab(target_tab.id)
+            else:
+                # Tab not open — navigate current tab
+                await backend.goto(url)
+                # Wait for page load
+                import asyncio
+                await asyncio.sleep(2)
 
     # WhatsApp sync wait (short, tab is usually loaded)
     if page_type == "whatsapp":
@@ -235,13 +292,35 @@ async def check_watcher(
     except Exception:
         logger.debug("nav-sidecar evaluate failed", exc_info=True)
 
+    # Degraded-read guard — when the site-specific extractor returned NO
+    # real content (Cloudflare challenge / layout drift / wrong-path tab),
+    # do NOT let it poison the baseline. Overwriting ``last_value`` with an
+    # empty read makes the next (populated) tick look "changed", and the
+    # empty↔full flip then re-fires the watcher on every heartbeat — an
+    # infinite self-feeding loop. Once we have a prior good baseline we skip
+    # this read entirely and return the ORIGINAL context unchanged so
+    # ``last_value`` survives and ``last_check`` stays untouched (retry
+    # promptly next interval, exactly like the passive no-tab skip above).
+    degraded = _is_degraded_result(result)
+    if degraded and last_value is not None:
+        logger.debug(
+            "Watcher degraded read on %s — preserving last good baseline, "
+            "skipping (sidecar ignored)", url,
+        )
+        return False, None, context
+
     # Normalize result for comparison
     if isinstance(result, dict):
         current_value = json.dumps(result, sort_keys=True)
     else:
         current_value = str(result) if result else ""
 
-    if sidecar is not None:
+    # The sidecar AUGMENTS a real read — it must never independently flip
+    # the hash when the primary extractor came back empty. On a degraded
+    # read (only reachable here when there is no prior baseline yet — the
+    # branch above already returned otherwise) we refuse to fold it in so a
+    # nav-badge blip can't masquerade as scraped content.
+    if sidecar is not None and not degraded:
         # Fold sidecar into the comparison value so a change in nav badges
         # or page identity also bumps the hash. Sorted-keys keeps the
         # serialization stable across polls.
@@ -255,6 +334,10 @@ async def check_watcher(
     new_context = dict(context)
     new_context["last_value"] = current_value
     new_context["last_check"] = datetime.now(timezone.utc).isoformat()
+    # Persist a freshly created parked-tab id so the next poll reuses it
+    # (saved by the daemon via update_job).
+    if created_anchor:
+        new_context["anchor_target_id"] = created_anchor
 
     # First check — just store baseline, no notification
     if last_value is None:

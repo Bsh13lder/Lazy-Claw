@@ -560,6 +560,13 @@ class HeartbeatDaemon:
             # Anchored hosts = URLs every active watcher targets, so
             # the reaper doesn't close the tab a watcher needs to poll.
             anchored_urls = await self._gather_watcher_urls(user_id)
+            # Anchored target ids = the exact tabs background lanes own
+            # (watcher parked tabs + bg brain-turn tab). Protects them even on
+            # a non-anchored host, and stops white-screen refresh from yanking
+            # a pinned background backend onto a foreign tab.
+            from lazyclaw.browser import owned_tabs as _owned_tabs
+
+            anchored_target_ids = _owned_tabs.all_owned_target_ids(user_id)
 
             backend = self._get_primary_cdp(user_id)
             try:
@@ -568,6 +575,7 @@ class HeartbeatDaemon:
                     idle_seconds=idle_seconds,
                     max_tabs=max_tabs,
                     anchored_urls=anchored_urls,
+                    anchored_target_ids=anchored_target_ids,
                     refresh_blanks=refresh_blanks,
                 )
                 if (
@@ -763,6 +771,7 @@ class HeartbeatDaemon:
                         user_id,
                         f"[JOB:{job_name}] {instruction}",
                         lane_key=f"{user_id}:heartbeat",
+                        browser_role="background",
                         **cb_kwargs,
                     )
                 except Exception as exc:
@@ -850,6 +859,7 @@ class HeartbeatDaemon:
                     user_id,
                     f"[REMINDER] {message}",
                     lane_key=f"{user_id}:heartbeat",
+                    browser_role="background",
                     **cb_kwargs,
                 )
 
@@ -1063,6 +1073,7 @@ class HeartbeatDaemon:
                             user_id,
                             f"[WATCHER] '{job_name}' has expired and stopped.",
                             lane_key=f"{user_id}:heartbeat",
+                            browser_role="background",
                             **cb_kwargs,
                         )
                         continue
@@ -1091,25 +1102,33 @@ class HeartbeatDaemon:
                     check_error: str | None = None
                     try:
                         if use_live:
-                            # The live Brave is shared with foreground/background
-                            # turns. Take the per-user lock so this poll can't
-                            # steal the tab mid-turn; skip the tick (retry next
-                            # interval) if a turn is holding it. (2026-05-29)
+                            # The live Brave is shared, but the watcher drives
+                            # its OWN parked tab — so take only the BACKGROUND
+                            # lane lock. That serializes against other
+                            # background browser work (other polls + bg brain
+                            # turns) but NEVER against the foreground (visible)
+                            # lane, so a long foreground turn can't starve the
+                            # poll and the poll can't steal the visible tab.
+                            # Skip the tick if another background job holds it.
+                            # (2026-06-02 two-lane model)
                             async with live_browser_guard(
-                                user_id, timeout=WATCHER_POLL_LOCK_TIMEOUT_S,
+                                user_id, role="background",
+                                timeout=WATCHER_POLL_LOCK_TIMEOUT_S,
                             ) as _got:
                                 if not _got:
                                     logger.debug(
-                                        "Watcher '%s' poll skipped — live Brave busy",
+                                        "Watcher '%s' poll skipped — background lane busy",
                                         job_name,
                                     )
                                     continue
                                 changed, notification, new_ctx = await check_watcher(
                                     active_backend, ctx, passive=use_live,
+                                    user_id=user_id, job_id=job_id,
                                 )
                         else:
                             changed, notification, new_ctx = await check_watcher(
                                 active_backend, ctx, passive=use_live,
+                                user_id=user_id, job_id=job_id,
                             )
                     except Exception as exc:
                         check_error = f"{type(exc).__name__}: {exc}"
@@ -1255,6 +1274,7 @@ class HeartbeatDaemon:
                                             user_id,
                                             f"[WATCHER:{job_name}] {instr}",
                                             lane_key=f"{user_id}:heartbeat",
+                                            browser_role="background",
                                         ),
                                         name=f"watcher-brain-{job_id[:8]}",
                                     )
@@ -1471,6 +1491,7 @@ class HeartbeatDaemon:
                             user_id,
                             f"[MCP_WATCHER] New {_svc} messages. {auto_reply}\n\n{notification}",
                             lane_key=f"{user_id}:heartbeat",
+                            browser_role="background",
                             **cb_kwargs,
                         )
 
@@ -2421,8 +2442,26 @@ class HeartbeatDaemon:
             from lazyclaw.browser.cdp import find_chrome_cdp
 
             async with db_session(self._config) as db:
-                cursor = await db.execute("SELECT id FROM users LIMIT 10")
+                # Manage the browser for the user who ACTUALLY uses the system,
+                # most-recently-active first. A leftover seed/`default` account
+                # (rowid 1, zero activity) used to win because the loop below
+                # `return`s after the first non-off user — so the daemon drove
+                # `default`'s headless on the single CDP port and NEVER the real
+                # user's, colliding with the host Brave bridge (2026-06-03 bug).
+                cursor = await db.execute(
+                    "SELECT u.id FROM users u "
+                    "JOIN (SELECT user_id, MAX(created_at) AS last_at, "
+                    "             COUNT(*) AS n "
+                    "      FROM agent_messages GROUP BY user_id) m "
+                    "  ON m.user_id = u.id "
+                    "WHERE m.n > 0 "
+                    "ORDER BY m.last_at DESC LIMIT 10"
+                )
                 users = [r[0] for r in await cursor.fetchall()]
+                if not users:
+                    # Fresh install / no activity yet — fall back to all users.
+                    cursor = await db.execute("SELECT id FROM users LIMIT 10")
+                    users = [r[0] for r in await cursor.fetchall()]
 
             port = getattr(self._config, "cdp_port", 9222)
             browser_alive = bool(await find_chrome_cdp(port))

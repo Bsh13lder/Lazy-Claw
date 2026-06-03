@@ -567,7 +567,7 @@ async def test_run_tab_health_cycle_summary_shape():
     )
     assert set(summary.keys()) == {
         "tabs_scanned", "idle_closed", "cap_closed",
-        "blanks_refreshed", "anchored_hosts",
+        "blanks_refreshed", "anchored_hosts", "anchored_target_ids",
     }
     assert summary["tabs_scanned"] == 1
     assert summary["idle_closed"] == 0
@@ -638,3 +638,58 @@ async def test_run_tab_health_cycle_handles_backend_failure():
         _BoomBackend(), idle_seconds=600.0, max_tabs=8,
     )
     assert summary["tabs_scanned"] == 0
+
+
+# ── anchored_target_ids (background-lane owned tabs) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_sweep_skips_anchored_target_id():
+    """A background-owned tab is exempt from idle reap even when it's long
+    idle AND on a non-anchored host."""
+    bg = _FakeTab(id="BG", url="https://generic-site.com", active=False)
+    old = _FakeTab(id="OLD", url="https://stale.com", active=False)
+    backend = _FakeBackend([bg, old])
+    past = time.monotonic() - 10_000  # both long-idle
+    tab_reaper._seen_first["BG"] = past
+    tab_reaper._seen_first["OLD"] = past
+
+    closed = await tab_reaper.sweep_stale_tabs(
+        backend, idle_seconds=600.0, anchored_target_ids={"BG"},
+    )
+    assert "BG" not in backend.closed  # owned tab preserved
+    assert "OLD" in backend.closed     # the other idle tab still reaped
+    assert closed == 1
+
+
+@pytest.mark.asyncio
+async def test_cap_never_closes_anchored_target_id():
+    """The cap goes OVER rather than close a background-owned tab."""
+    tabs = [_FakeTab(id=f"t{i}", url=f"https://s{i}.com") for i in range(5)]
+    tabs[0].active = True
+    tabs[2].id = "BG"  # background-owned
+    backend = _FakeBackend(tabs)
+
+    await tab_reaper.enforce_tab_cap(
+        backend, max_tabs=2, anchored_target_ids={"BG"},
+    )
+    assert "BG" not in backend.closed
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_anchored_target_id():
+    """A blank background-owned tab is never switched-to or reloaded — that
+    would yank a pinned background backend onto a foreign tab."""
+    blank = {
+        "ready": True, "blank": True, "text_len": 0,
+        "children": 0, "interactive": 0, "images": 0, "url": "x",
+    }
+    bg = _FakeTab(id="BG", url="https://generic.com")
+    norm = _FakeTab(id="N", url="https://other.com")
+    backend = _FakeBackend([bg, norm], eval_results={"BG": blank, "N": blank})
+
+    refreshed = await tab_reaper.refresh_white_screens(
+        backend, anchored_target_ids={"BG"},
+    )
+    assert all(s[0] != "BG" for s in backend.switched)
+    assert refreshed == 1  # only the non-owned blank tab reloaded

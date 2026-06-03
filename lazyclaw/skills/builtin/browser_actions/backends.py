@@ -14,8 +14,15 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Shared CDP backend instance (lazy-initialized, on-demand)
+# Shared VISIBLE CDP backend instance (lazy-initialized, on-demand). This is
+# the user's foreground tab — the one they watch the agent drive.
 _cdp_backend = None
+
+# Per-user BACKGROUND CDP backends (2026-06-02). Daemon-originated browser work
+# (watcher polls + watcher/cron/reminder brain turns) drives a DEDICATED tab in
+# the SAME signed-in Brave so it never steals/blocks the visible tab. Keyed by
+# user_id; each is pinned to its own tab via owned_tabs + switch_tab.
+_background_backends: dict = {}
 
 # ── Shortcut mapping ────────────────────────────────────────────────────
 
@@ -312,16 +319,87 @@ async def stop_remote_session(user_id: str = "default") -> None:
     await backend._ensure_connected()
 
 
+async def get_background_backend(
+    user_id: str, target_key: str = "background", home_url: str | None = None,
+):
+    """Return a CDPBackend pinned to this user's BACKGROUND tab for *target_key*.
+
+    Daemon-originated browser work drives a dedicated tab in the SAME signed-in
+    Brave — never the user's visible tab. The tab is created once and
+    re-resolved by target id on later turns (self-heals if it was closed by the
+    reaper or a restart). It's registered in :mod:`lazyclaw.browser.owned_tabs`
+    so the visible backend EXCLUDES it from MRU and the reaper ANCHORS it.
+
+    ``target_key`` names the owning lane: ``"background"`` (shared bg
+    brain-turn tab) or ``f"watch:{job_id}"`` (a watcher's parked poll tab).
+    """
+    from lazyclaw.browser import owned_tabs
+    from lazyclaw.browser.cdp_backend import CDPBackend
+    from lazyclaw.browser.profile_resolver import resolve_profile_dir
+    from lazyclaw.config import load_config
+
+    config = load_config()
+    profile_dir = str(resolve_profile_dir(config, user_id))
+    port = getattr(config, "cdp_port", 9222)
+
+    backend = _background_backends.get(user_id)
+    if backend is None or getattr(backend, "_profile_dir", None) != profile_dir:
+        backend = CDPBackend(port=port, profile_dir=profile_dir, user_id=user_id)
+        _background_backends[user_id] = backend
+    else:
+        try:
+            backend.set_user_id(user_id)
+        except AttributeError:
+            pass
+
+    # Resolve / (re)create the owned tab and pin the backend to it. tabs() lists
+    # via HTTP without needing a live connection, so it's a cheap existence
+    # check before we decide to reuse or create.
+    target_id = owned_tabs.get_owned(user_id, target_key)
+    existing_ids: set[str] = set()
+    try:
+        existing_ids = {t.id for t in await backend.tabs()}
+    except Exception:
+        logger.debug("bg backend tabs() failed; creating a fresh tab", exc_info=True)
+
+    if target_id and target_id in existing_ids:
+        await backend.switch_tab(target_id, focus=False)
+    else:
+        new_id = await backend.new_tab(home_url or "about:blank")
+        await backend.switch_tab(new_id, focus=False)
+        owned_tabs.set_owned(user_id, target_key, new_id)
+    return backend
+
+
 async def get_backend(user_id: str, tab_context=None, visible: bool = False):
-    """Return TabContext if injected, else shared CDPBackend."""
+    """Return TabContext if injected, else the role-appropriate CDPBackend.
+
+    Routing (when no TabContext is injected and not a visible-takeover):
+      * background lane (watcher/cron/reminder turn) → ``get_background_backend``
+        (a dedicated tab, never the user's visible tab);
+      * visible lane (foreground turn) → the shared visible ``get_cdp_backend``.
+    """
     if tab_context is not None:
         return tab_context
     if visible:
         return await get_visible_cdp_backend(user_id)
+    from lazyclaw.runtime.browser_turn_lock import (
+        BACKGROUND_ROLE,
+        current_browser_role,
+    )
+    if current_browser_role() == BACKGROUND_ROLE:
+        return await get_background_backend(user_id)
     return await get_cdp_backend(user_id)
 
 
 def reset_backend() -> None:
-    """Reset the global backend (e.g. after connection loss)."""
+    """Reset the global backends (e.g. after connection loss).
+
+    Drops both the visible and all background backend instances. The
+    ``owned_tabs`` registry is intentionally left intact — the tabs still exist
+    in the browser and ``get_background_backend`` re-resolves them by id
+    (self-healing if any were closed).
+    """
     global _cdp_backend
     _cdp_backend = None
+    _background_backends.clear()

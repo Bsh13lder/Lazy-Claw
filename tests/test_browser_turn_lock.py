@@ -15,8 +15,11 @@ import pytest
 
 from lazyclaw.runtime import browser_turn_lock as btl
 from lazyclaw.runtime.browser_turn_lock import (
+    BACKGROUND_ROLE,
+    VISIBLE_ROLE,
     acquire_live_browser_if_needed,
     browser_turn_scope,
+    current_browser_role,
     tool_drives_live_browser,
 )
 
@@ -86,6 +89,86 @@ async def test_different_users_do_not_block():
     assert order[:2] == ["A:start", "B:start"], order
 
 
+# ── two-lane isolation: visible vs background never block each other ──
+
+
+@pytest.mark.asyncio
+async def test_visible_and_background_lanes_do_not_block():
+    """The whole point of the two-lane model: a foreground (visible) turn
+    holding the Brave must NOT block a background (watcher/cron) turn — they
+    hold different per-(user, role) locks and drive different tabs."""
+    order: list[str] = []
+
+    async def turn(role: str, name: str, hold: float):
+        async with browser_turn_scope(role):
+            await acquire_live_browser_if_needed("u1", "browser")
+            order.append(f"{name}:start")
+            await asyncio.sleep(hold)
+            order.append(f"{name}:end")
+
+    # Same user, DIFFERENT lanes → independent locks → they interleave (both
+    # start before either ends), unlike same-lane turns which serialize.
+    await asyncio.gather(
+        turn(VISIBLE_ROLE, "fg", 0.06),
+        _delayed(0.01, turn(BACKGROUND_ROLE, "bg", 0.06)),
+    )
+
+    assert order[:2] == ["fg:start", "bg:start"], order
+
+
+@pytest.mark.asyncio
+async def test_background_role_keys_separate_lock():
+    async with browser_turn_scope(BACKGROUND_ROLE):
+        await acquire_live_browser_if_needed("u1", "browser")
+        # The background lane lock is held; the visible lane is untouched.
+        assert btl._get_user_lock("u1", BACKGROUND_ROLE).locked()
+        assert not btl._get_user_lock("u1", VISIBLE_ROLE).locked()
+    assert not btl._get_user_lock("u1", BACKGROUND_ROLE).locked()
+
+
+@pytest.mark.asyncio
+async def test_background_turns_same_lane_serialize():
+    """Within the background lane, turns still serialize (one bg tab)."""
+    order: list[str] = []
+
+    async def turn(name: str, hold: float):
+        async with browser_turn_scope(BACKGROUND_ROLE):
+            await acquire_live_browser_if_needed("u1", "browser")
+            order.append(f"{name}:start")
+            await asyncio.sleep(hold)
+            order.append(f"{name}:end")
+
+    await asyncio.gather(turn("A", 0.10), _delayed(0.02, turn("B", 0.01)))
+    assert order == ["A:start", "A:end", "B:start", "B:end"], order
+
+
+@pytest.mark.asyncio
+async def test_current_browser_role_reflects_scope():
+    assert current_browser_role() == VISIBLE_ROLE  # default outside any scope
+    async with browser_turn_scope(BACKGROUND_ROLE):
+        assert current_browser_role() == BACKGROUND_ROLE
+    assert current_browser_role() == VISIBLE_ROLE  # reset on exit
+
+
+@pytest.mark.asyncio
+async def test_guard_background_role_does_not_block_visible_turn():
+    """A watcher poll guard on the background lane must NOT be blocked by a
+    foreground (visible) turn holding the visible lock — that was the
+    starvation bug."""
+    from lazyclaw.runtime.browser_turn_lock import live_browser_guard
+
+    # Foreground turn is holding the VISIBLE lane lock.
+    visible_lock = btl._get_user_lock("u1", VISIBLE_ROLE)
+    await visible_lock.acquire()
+    try:
+        async with live_browser_guard(
+            "u1", role=BACKGROUND_ROLE, timeout=0.5,
+        ) as got:
+            assert got is True  # background poll acquires despite fg holding
+    finally:
+        visible_lock.release()
+
+
 # ── re-entrancy: nested scope is a no-op, outer owns release ──────────
 
 
@@ -97,9 +180,9 @@ async def test_nested_scope_is_reentrant():
         async with browser_turn_scope():
             await acquire_live_browser_if_needed("u1", "browser")
         # Still inside outer scope — lock still held, so a fresh waiter blocks.
-        assert btl._per_user_locks["u1"].locked()
+        assert btl._get_user_lock("u1").locked()
     # Outer exited → released.
-    assert not btl._per_user_locks["u1"].locked()
+    assert not btl._get_user_lock("u1").locked()
 
 
 # ── child task CONTENDS (not treated as nested) — the #4 fix ─────────
@@ -246,8 +329,8 @@ async def test_live_browser_guard_acquires_and_releases():
 
     async with live_browser_guard("u1", timeout=1.0) as got:
         assert got is True
-        assert btl._per_user_locks["u1"].locked()
-    assert not btl._per_user_locks["u1"].locked()
+        assert btl._get_user_lock("u1").locked()
+    assert not btl._get_user_lock("u1").locked()
 
 
 @pytest.mark.asyncio
@@ -276,7 +359,7 @@ async def test_double_acquire_same_turn_is_idempotent():
         await asyncio.wait_for(
             acquire_live_browser_if_needed("u1", "use_host_browser"), timeout=1.0,
         )
-        assert btl._per_user_locks["u1"].locked()
+        assert btl._get_user_lock("u1").locked()
 
 
 # ── non-browser tool never acquires ──────────────────────────────────
@@ -286,7 +369,7 @@ async def test_double_acquire_same_turn_is_idempotent():
 async def test_non_browser_tool_does_not_acquire():
     async with browser_turn_scope():
         await acquire_live_browser_if_needed("u1", "whatsapp_read")
-        assert "u1" not in btl._per_user_locks or not btl._per_user_locks["u1"].locked()
+        assert not btl._get_user_lock("u1").locked()
 
 
 # ── no active scope → no-op (direct skill call path) ─────────────────
@@ -296,7 +379,7 @@ async def test_non_browser_tool_does_not_acquire():
 async def test_no_scope_is_noop():
     # Calling outside any turn scope must not raise or create a held lock.
     await acquire_live_browser_if_needed("u1", "browser")
-    assert "u1" not in btl._per_user_locks or not btl._per_user_locks["u1"].locked()
+    assert not btl._get_user_lock("u1").locked()
 
 
 # ── timeout degrades to unlocked instead of hanging ──────────────────

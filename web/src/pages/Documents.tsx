@@ -22,13 +22,23 @@ function initialKind(): DocKind {
   return saved === "docs" || saved === "pdf" || saved === "sheets" ? saved : "sheets";
 }
 
+interface DocumentsProps {
+  /** When true the workspace is the standalone fullscreen page (own browser
+   *  tab, no app chrome) — the pop-out button becomes an "exit" affordance. */
+  fullscreen?: boolean;
+}
+
 /**
  * Unified "Docs" workspace — one nav entry hosting Sheets, Documents, and PDFs
  * as sub-tabs. The three remain independent features (separate APIs, stores,
  * agent skills); this is purely the front-of-house consolidation so the user
  * sees a single "Docs" tab instead of three.
+ *
+ * The ⤢ button pops the whole workspace into a dedicated fullscreen browser
+ * tab (`/?page=docs-full`, rendered outside NavShell) for distraction-free
+ * document work; in that tab the same button becomes ⤡ "Exit fullscreen".
  */
-export default function Documents() {
+export default function Documents({ fullscreen = false }: DocumentsProps) {
   const [kind, setKind] = useState<DocKind>(initialKind);
 
   const select = (k: DocKind) => {
@@ -58,6 +68,34 @@ export default function Documents() {
             {t.label}
           </button>
         ))}
+
+        {fullscreen ? (
+          <button
+            onClick={() => {
+              window.location.href = "/?page=docs";
+            }}
+            className="ml-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-text-muted hover:bg-bg-hover hover:text-text-secondary transition-colors"
+            title="Exit fullscreen — back to the app"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 9H4V4M9 9 4 4M15 9h5V4M15 9l5-5M9 15H4v5M9 15l-5 5M15 15h5v5M15 15l5 5" />
+            </svg>
+            Exit fullscreen
+          </button>
+        ) : (
+          <button
+            onClick={() =>
+              window.open("/?page=docs-full", "_blank", "noopener")
+            }
+            className="ml-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-text-muted hover:bg-bg-hover hover:text-accent transition-colors"
+            title="Open the Docs workspace fullscreen in a new tab"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 3h6v6M21 3l-9 9M10 4H4v16h16v-6" />
+            </svg>
+            Fullscreen
+          </button>
+        )}
       </div>
 
       {/* Active type — remounts on switch (frees Univer/pdf.js resources) */}

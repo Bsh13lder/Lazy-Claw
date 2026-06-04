@@ -6,7 +6,10 @@ import ApprovalDialog from "./ApprovalDialog";
 import { useChat } from "../context/ChatContext";
 import StatusBar from "./StatusBar";
 
-export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "docs" | "vault" | "settings";
+// "docs-full" is the standalone fullscreen Documents workspace — it renders
+// OUTSIDE NavShell (no nav rail / chat sidebar / status bar), so it never
+// appears in the nav rail; it's reached only via /?page=docs-full.
+export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "docs" | "docs-full" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -32,6 +35,9 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   memory: { label: "Memory", description: "Personal facts & logs" },
   lazybrain: { label: "LazyBrain", description: "Encrypted Logseq-style PKM" },
   docs: { label: "Docs", description: "Sheets, documents & PDFs — all agent-editable, encrypted" },
+  // Standalone fullscreen Docs — never shown in the nav rail (not in NAV_GROUPS),
+  // but PAGE_META must stay exhaustive over Page for the activePage lookup.
+  "docs-full": { label: "Docs", description: "Fullscreen document workspace" },
   vault: { label: "Vault", description: "Encrypted credentials" },
   settings: { label: "Settings", description: "Agent configuration" },
 };
@@ -90,6 +96,16 @@ const ICONS: Record<Page, NavIcon> = {
     </svg>
   ),
   docs: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M15 3v5h5" />
+      <line x1="8" y1="13" x2="16" y2="13" />
+      <line x1="8" y1="17" x2="13" y2="17" />
+    </svg>
+  ),
+  // Reuse the docs glyph — "docs-full" is never rendered in the rail, this entry
+  // only keeps the ICONS Record exhaustive over Page.
+  "docs-full": (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M15 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <path d="M15 3v5h5" />

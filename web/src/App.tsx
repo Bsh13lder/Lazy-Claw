@@ -30,7 +30,7 @@ import InstallPrompt from "./components/InstallPrompt";
 
 const VALID_PAGES: readonly Page[] = [
   "overview", "activity", "code-specialist", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
-  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain", "docs",
+  "templates", "jobs", "watchers", "mcp", "memory", "lazybrain", "docs", "docs-full",
   "vault", "settings",
 ];
 
@@ -79,6 +79,29 @@ function AppContent() {
   }
 
   if (!user) return <Login />;
+
+  // Standalone fullscreen Documents workspace — rendered OUTSIDE NavShell so
+  // there is no nav rail / chat sidebar / status bar, just the editor full
+  // viewport. Opened in a new tab via /?page=docs-full from the Docs button.
+  if (page === "docs-full") {
+    return (
+      <AgentStatusProvider>
+        <ChatProvider>
+          <div className="h-screen w-screen overflow-hidden bg-bg-primary">
+            <Suspense
+              fallback={
+                <div className="h-full flex items-center justify-center text-text-muted text-sm">
+                  Loading…
+                </div>
+              }
+            >
+              <Documents fullscreen />
+            </Suspense>
+          </div>
+        </ChatProvider>
+      </AgentStatusProvider>
+    );
+  }
 
   const pageContent = (() => {
     switch (page) {

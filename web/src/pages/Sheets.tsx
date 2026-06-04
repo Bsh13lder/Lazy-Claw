@@ -18,6 +18,7 @@ import {
 import { UniverSheetsCorePreset } from "@univerjs/preset-sheets-core";
 import UniverPresetSheetsCoreEnUS from "@univerjs/preset-sheets-core/locales/en-US";
 import "@univerjs/preset-sheets-core/lib/index.css";
+import DocAiPopover from "../components/DocAiPopover";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -39,11 +40,15 @@ export default function Sheets() {
   const [loadingList, setLoadingList] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
+  const [reloadToken, setReloadToken] = useState(0);
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const univerRef = useRef<{ dispose: () => void } | null>(null);
   const apiRef = useRef<FUniver | null>(null);
   const dirtyRef = useRef(false);
   const nameRef = useRef("");
+  // Lets the ✨ AI popover flush pending edits before the agent reads the sheet.
+  const flushHandleRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   // Keep the latest name available to the autosave closure without
   // re-initialising Univer on every rename.
@@ -81,18 +86,23 @@ export default function Sheets() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const sheetId = activeId; // capture for the closure / cleanup
 
-    const flush = () => {
+    const flush = (): Promise<void> => {
       const api = apiRef.current;
-      if (!api || !dirtyRef.current) return;
+      if (!api || !dirtyRef.current) return Promise.resolve();
       const wb = api.getActiveWorkbook();
-      if (!wb) return;
+      if (!wb) return Promise.resolve();
       const snapshot = wb.save() as unknown as UniverSnapshot;
       dirtyRef.current = false;
       setSaveState("saving");
-      saveSheet(sheetId, nameRef.current, snapshot)
-        .then(() => !cancelled && setSaveState("saved"))
-        .catch(() => !cancelled && setSaveState("error"));
+      return saveSheet(sheetId, nameRef.current, snapshot)
+        .then(() => {
+          if (!cancelled) setSaveState("saved");
+        })
+        .catch(() => {
+          if (!cancelled) setSaveState("error");
+        });
     };
+    flushHandleRef.current = flush;
 
     const scheduleSave = () => {
       dirtyRef.current = true;
@@ -132,7 +142,7 @@ export default function Sheets() {
       univerRef.current = null;
       apiRef.current = null;
     };
-  }, [activeId]);
+  }, [activeId, reloadToken]);
 
   async function handleNew() {
     const created = await createSheet("Untitled sheet");
@@ -251,6 +261,18 @@ export default function Sheets() {
                 aria-label="Sheet name"
               />
               <SaveBadge state={saveState} />
+              <div className="ml-auto">
+                <DocAiPopover
+                  kind="sheets"
+                  docId={activeId}
+                  docName={activeName}
+                  beforeSubmit={() => flushHandleRef.current()}
+                  onReload={() => {
+                    dirtyRef.current = false;
+                    setReloadToken((t) => t + 1);
+                  }}
+                />
+              </div>
             </div>
             {/* Univer mounts here — needs a real pixel height */}
             <div ref={containerRef} className="flex-1 min-h-0" />

@@ -11,6 +11,7 @@ import {
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
+import DocAiPopover from "../components/DocAiPopover";
 
 // pdf.js worker (Vite + react-pdf 10 + pdfjs-dist 5). The `.mjs` worker exists
 // under node_modules/pdfjs-dist/build/ — resolved as a module URL so Vite
@@ -208,6 +209,15 @@ export default function Pdf() {
                     : ""}
               </span>
               <div className="ml-auto flex items-center gap-3 shrink-0">
+                <DocAiPopover
+                  kind="pdf"
+                  docId={activeId}
+                  docName={activeFile.name}
+                  onPdfApplied={(newId) => {
+                    // PDF ops create a new file — switch the viewer to it.
+                    refreshList(newId ?? activeId).catch(() => {});
+                  }}
+                />
                 <button
                   onClick={handleExtract}
                   disabled={extract.phase === "loading"}

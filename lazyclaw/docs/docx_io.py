@@ -21,6 +21,9 @@ import tempfile
 from typing import Any
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 from lazyclaw.docs import snapshot as D
 
@@ -30,39 +33,103 @@ logger = logging.getLogger(__name__)
 _SOFFICE_TIMEOUT_S = 60
 
 
+def _add_hyperlink(paragraph, text: str, url: str) -> None:
+    """Append a real ``w:hyperlink`` run to a python-docx paragraph.
+
+    python-docx has no hyperlink API, so we build the OOXML element directly:
+    relate the paragraph's part to the external ``url`` and wrap a run in a
+    ``w:hyperlink`` carrying that relationship id. Styled blue + underlined so
+    it reads as a link.
+    """
+    r_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    link = OxmlElement("w:hyperlink")
+    link.set(qn("r:id"), r_id)
+
+    run = OxmlElement("w:r")
+    rpr = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    rpr.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    rpr.append(underline)
+    run.append(rpr)
+
+    t = OxmlElement("w:t")
+    t.set(qn("xml:space"), "preserve")
+    t.text = text
+    run.append(t)
+    link.append(run)
+    paragraph._p.append(link)
+
+
 def snapshot_to_docx(snap: dict[str, Any]) -> bytes:
     """Render a Univer document snapshot to ``.docx`` bytes.
 
-    The first non-empty paragraph is emitted as a Heading 1 (a sensible title
-    for an otherwise plain document); every remaining paragraph becomes a body
-    paragraph. An empty document still produces a valid (empty) ``.docx``.
+    The first non-empty all-plain paragraph is emitted as a Heading 1 (a
+    sensible title for an otherwise plain document); every remaining paragraph
+    becomes a body paragraph. Runs carrying a ``url`` are written as real
+    ``w:hyperlink`` elements. An empty document still produces a valid ``.docx``.
     """
     document = Document()
-    paragraphs = D.get_paragraphs(snap)
+    paragraphs = D.get_paragraph_runs(snap)
 
     heading_used = False
-    for para in paragraphs:
-        text = "" if para is None else str(para)
-        if not heading_used and text.strip():
+    for runs in paragraphs:
+        has_link = any(r.get("url") for r in runs)
+        text = "".join(r.get("text", "") for r in runs)
+        if not heading_used and text.strip() and not has_link:
             document.add_heading(text, level=1)
             heading_used = True
-        else:
-            document.add_paragraph(text)
+            continue
+        para = document.add_paragraph()
+        for run in runs:
+            url = run.get("url")
+            if url:
+                _add_hyperlink(para, run.get("text", ""), str(url))
+            else:
+                para.add_run(run.get("text", ""))
 
     buf = io.BytesIO()
     document.save(buf)
     return buf.getvalue()
 
 
+def _docx_paragraph_runs(paragraph) -> list[dict[str, Any]]:
+    """Extract ordered runs (plain + hyperlink) from a python-docx paragraph."""
+    runs: list[dict[str, Any]] = []
+    rels = paragraph.part.rels
+    for child in paragraph._p:
+        tag = child.tag
+        if tag == qn("w:r"):
+            text = "".join(node.text or "" for node in child.findall(qn("w:t")))
+            if text:
+                runs.append({"text": text})
+        elif tag == qn("w:hyperlink"):
+            r_id = child.get(qn("r:id"))
+            url = None
+            if r_id and r_id in rels:
+                url = rels[r_id].target_ref
+            text = "".join(
+                node.text or "" for node in child.iter(qn("w:t"))
+            )
+            if text:
+                runs.append({"text": text, "url": url} if url else {"text": text})
+    return runs
+
+
 def docx_to_snapshot(data: bytes, name: str | None = None) -> dict[str, Any]:
-    """Parse ``.docx`` bytes into a Univer document snapshot."""
+    """Parse ``.docx`` bytes into a Univer document snapshot (links preserved)."""
     document = Document(io.BytesIO(data))
-    paragraphs = [p.text for p in document.paragraphs]
+    paragraphs = [_docx_paragraph_runs(p) for p in document.paragraphs]
     # Drop a single trailing empty paragraph python-docx often emits.
-    while paragraphs and paragraphs[-1] == "":
+    while paragraphs and not paragraphs[-1]:
         paragraphs.pop()
     base = D.blank_document(name or "Imported")
-    return D.set_text(base, "\n".join(paragraphs))
+    if not paragraphs:
+        return base
+    out = {**base, "body": D.build_body_with_runs(paragraphs)}
+    return out
 
 
 # ───────────────────────── PDF (best-effort) ────────────────────────

@@ -35,12 +35,28 @@ input (missing keys, wrong types) and degrade to an empty document.
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 from uuid import uuid4
 
 # Univer's paragraph terminator and body terminator.
 PARAGRAPH_BREAK = "\r"
 SECTION_BREAK = "\n"
+
+# Univer's custom-range sentinels. A hyperlink (or any custom range) wraps its
+# span of ``dataStream`` between these two control characters; the range's
+# ``startIndex`` points at CUSTOM_RANGE_START and ``endIndex`` at
+# CUSTOM_RANGE_END (both inclusive). See @univerjs/core DataStreamTreeTokenType.
+CUSTOM_RANGE_START = "\u001f"
+CUSTOM_RANGE_END = "\u001e"
+
+# CustomRangeType.HYPERLINK in @univerjs/core (i-document-data.d.ts).
+_HYPERLINK = 0
+
+
+def _strip_tokens(s: str) -> str:
+    """Remove the custom-range sentinel chars from a visible-text slice."""
+    return s.replace(CUSTOM_RANGE_START, "").replace(CUSTOM_RANGE_END, "")
 
 
 # ───────────────────────── document factory ─────────────────────────
@@ -132,7 +148,7 @@ def get_paragraphs(snap: dict[str, Any]) -> list[str]:
             if not isinstance(end, int) or end < prev or end > len(stream):
                 # Malformed index — bail to the stream-split fallback.
                 return _split_stream(stream)
-            out.append(stream[prev:end])
+            out.append(_strip_tokens(stream[prev:end]))
             prev = end + 1  # skip the "\r"
         return out
 
@@ -153,7 +169,7 @@ def _split_stream(stream: str) -> list[str]:
         body = body[:-1]
     if body == "":
         return [""]
-    return body.split(PARAGRAPH_BREAK)
+    return [_strip_tokens(p) for p in body.split(PARAGRAPH_BREAK)]
 
 
 def get_text(snap: dict[str, Any]) -> str:
@@ -203,3 +219,216 @@ def append_paragraph(snap: dict[str, Any], text: str) -> dict[str, Any]:
     out.setdefault("documentStyle", {})
     out["body"] = _build_body(paras)
     return out
+
+
+# ───────────────────────── rich runs (hyperlinks) ───────────────────
+#
+# A "run" is the unit of inline content: ``{"text": str}`` for plain text or
+# ``{"text": str, "url": str}`` for a hyperlink. A paragraph is a list of runs.
+# These helpers carry hyperlinks through the same immutable model the plain-text
+# helpers use, by emitting Univer ``customRanges`` bracketed in ``dataStream``
+# with the CUSTOM_RANGE_START / CUSTOM_RANGE_END sentinels.
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+
+def _clean_run_text(text: str) -> str:
+    """Sanitise run text: drop paragraph/section breaks and stray sentinels."""
+    return (
+        str(text)
+        .replace(PARAGRAPH_BREAK, " ")
+        .replace(SECTION_BREAK, " ")
+        .replace(CUSTOM_RANGE_START, "")
+        .replace(CUSTOM_RANGE_END, "")
+    )
+
+
+def build_body_with_runs(
+    paragraphs: list[list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build a Univer ``body`` from paragraphs-of-runs, emitting hyperlinks.
+
+    Each paragraph is a list of runs; a run with a truthy ``url`` becomes a
+    hyperlink ``customRange`` whose span in ``dataStream`` is wrapped with the
+    sentinel tokens. An empty paragraph (``[]``) collapses to a bare ``"\\r"``.
+    """
+    if not paragraphs:
+        paragraphs = [[]]
+
+    stream_parts: list[str] = []
+    para_meta: list[dict[str, Any]] = []
+    custom_ranges: list[dict[str, Any]] = []
+    cursor = 0
+    link_counter = 0
+
+    for runs in paragraphs:
+        for run in runs or []:
+            if not isinstance(run, dict):
+                continue
+            text = _clean_run_text(run.get("text", ""))
+            url = run.get("url")
+            if url:
+                start_token = cursor
+                stream_parts.append(CUSTOM_RANGE_START)
+                cursor += 1
+                stream_parts.append(text)
+                cursor += len(text)
+                end_token = cursor
+                stream_parts.append(CUSTOM_RANGE_END)
+                cursor += 1
+                custom_ranges.append(
+                    {
+                        "startIndex": start_token,
+                        "endIndex": end_token,
+                        "rangeId": f"link-{link_counter}",
+                        "rangeType": _HYPERLINK,
+                        "properties": {"url": str(url)},
+                    }
+                )
+                link_counter += 1
+            else:
+                stream_parts.append(text)
+                cursor += len(text)
+        stream_parts.append(PARAGRAPH_BREAK)
+        para_meta.append({"startIndex": cursor})
+        cursor += 1
+
+    data_stream = "".join(stream_parts) + SECTION_BREAK
+    return {
+        "dataStream": data_stream,
+        "paragraphs": para_meta,
+        "textRuns": [],
+        "customRanges": custom_ranges,
+        "sectionBreaks": [{"startIndex": len(data_stream) - 1}],
+    }
+
+
+def _paragraph_spans(stream: str) -> list[tuple[int, int]]:
+    """Absolute ``(start, end)`` char spans per paragraph (end = the ``\\r``).
+
+    Scans ``dataStream`` for paragraph terminators, which is robust regardless
+    of whether ``paragraphs`` metadata is present/consistent and yields the
+    absolute indices the hyperlink ``customRanges`` are expressed in.
+    """
+    spans: list[tuple[int, int]] = []
+    prev = 0
+    for idx, ch in enumerate(stream):
+        if ch == PARAGRAPH_BREAK:
+            spans.append((prev, idx))
+            prev = idx + 1
+    return spans
+
+
+def get_paragraph_runs(snap: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    """Return paragraphs as lists of runs, reconstructing hyperlinks.
+
+    Inverse of :func:`build_body_with_runs`. An empty paragraph yields ``[]``;
+    plain text yields a single ``{"text": …}`` run; hyperlink spans become
+    ``{"text": …, "url": …}`` runs in document order.
+    """
+    body = snap.get("body") if isinstance(snap, dict) else None
+    if not isinstance(body, dict):
+        return []
+    stream = body.get("dataStream")
+    if not isinstance(stream, str) or stream == "":
+        return []
+
+    start_map: dict[int, tuple[int, str]] = {}
+    for c in body.get("customRanges") or []:
+        if not isinstance(c, dict):
+            continue
+        s, e = c.get("startIndex"), c.get("endIndex")
+        props = c.get("properties")
+        url = props.get("url") if isinstance(props, dict) else None
+        if isinstance(s, int) and isinstance(e, int) and url:
+            start_map[s] = (e, str(url))
+
+    result: list[list[dict[str, Any]]] = []
+    for p_start, p_end in _paragraph_spans(stream):
+        runs: list[dict[str, Any]] = []
+        plain: list[str] = []
+        i = p_start
+        while i < p_end:
+            ch = stream[i]
+            if ch == CUSTOM_RANGE_START and i in start_map:
+                end_idx, url = start_map[i]
+                if plain:
+                    runs.append({"text": "".join(plain)})
+                    plain = []
+                runs.append({"text": _strip_tokens(stream[i + 1 : end_idx]), "url": url})
+                i = end_idx + 1
+            elif ch in (CUSTOM_RANGE_START, CUSTOM_RANGE_END):
+                i += 1  # stray sentinel — skip
+            else:
+                plain.append(ch)
+                i += 1
+        if plain:
+            runs.append({"text": "".join(plain)})
+        result.append(runs)
+    return result
+
+
+def append_paragraph_with_runs(
+    snap: dict[str, Any], runs: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Return a NEW snapshot with one paragraph (list of runs) appended.
+
+    A blank document is replaced by the new paragraph (matching
+    :func:`append_paragraph`); existing hyperlinks are preserved.
+    """
+    existing = get_paragraph_runs(snap) if isinstance(snap, dict) else []
+    if get_paragraphs(snap) in ([""], []):
+        new_paras = [list(runs)]
+    else:
+        new_paras = [*existing, list(runs)]
+    out = copy.deepcopy(snap) if isinstance(snap, dict) else {}
+    if "id" not in out:
+        out["id"] = f"doc-{uuid4().hex[:12]}"
+    out.setdefault("documentStyle", {})
+    out["body"] = build_body_with_runs(new_paras)
+    return out
+
+
+def runs_from_markdown(text: str) -> list[dict[str, Any]]:
+    """Parse inline markdown ``[label](url)`` links into a run list."""
+    text = str(text or "")
+    runs: list[dict[str, Any]] = []
+    pos = 0
+    for m in _MD_LINK_RE.finditer(text):
+        if m.start() > pos:
+            runs.append({"text": text[pos : m.start()]})
+        runs.append({"text": m.group(1), "url": m.group(2)})
+        pos = m.end()
+    if pos < len(text):
+        runs.append({"text": text[pos:]})
+    return runs or [{"text": text}]
+
+
+def make_link_runs(
+    text: str, link_text: str | None, url: str | None
+) -> list[dict[str, Any]]:
+    """Build runs for ``text`` where ``link_text`` is linked to ``url``.
+
+    Splits ``text`` around the first occurrence of ``link_text``; if absent,
+    the link is appended to the end. With no ``url``/``link_text``, returns a
+    single plain run.
+    """
+    text = str(text or "")
+    if not url or not link_text:
+        return [{"text": text}]
+    link_text = str(link_text)
+    idx = text.find(link_text)
+    if idx == -1:
+        runs: list[dict[str, Any]] = []
+        if text:
+            runs.append({"text": text if text.endswith(" ") else text + " "})
+        runs.append({"text": link_text, "url": str(url)})
+        return runs
+    runs = []
+    before, after = text[:idx], text[idx + len(link_text) :]
+    if before:
+        runs.append({"text": before})
+    runs.append({"text": link_text, "url": str(url)})
+    if after:
+        runs.append({"text": after})
+    return runs

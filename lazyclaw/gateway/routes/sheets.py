@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
+from lazyclaw.runtime.doc_specialist import ai_edit_document
 from lazyclaw.sheets.store import (
     create_sheet,
     delete_sheet,
@@ -50,6 +51,10 @@ class CreateSheetBody(BaseModel):
 class SaveSheetBody(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     payload: dict[str, Any]
+
+
+class AiEditBody(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
 
 
 @router.get("")
@@ -90,6 +95,27 @@ async def save_sheet_route(
     """Persist the workbook snapshot from the editor (autosave)."""
     row = await save_sheet(_config, user.id, body.name, body.payload, sheet_id=sheet_id)
     return {"sheet": row}
+
+
+@router.post("/{sheet_id}/ai")
+async def ai_edit_sheet_route(
+    sheet_id: str,
+    body: AiEditBody,
+    user: User = Depends(get_current_user),
+):
+    """Edit the open sheet from a natural-language instruction (✨ AI box).
+
+    Synchronous: runs one Document-Specialist turn (translating "add a total"
+    into the right formula) and returns the recalculated Univer snapshot so the
+    editor reloads in place.
+    """
+    result = await ai_edit_document(_config, user.id, "sheets", sheet_id, body.instruction)
+    return {
+        "ok": result.ok,
+        "summary": result.summary,
+        "snapshot": result.snapshot,
+        "error": result.error,
+    }
 
 
 @router.delete("/{sheet_id}")

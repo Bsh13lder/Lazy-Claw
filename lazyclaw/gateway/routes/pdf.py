@@ -23,17 +23,23 @@ import re
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.pdf import ops
 from lazyclaw.pdf.store import delete_pdf, get_pdf, list_pdfs, save_pdf
+from lazyclaw.runtime.doc_specialist import ai_edit_document
 
 _config = load_config()
 
 router = APIRouter(prefix="/api/pdf", tags=["pdf"])
 
 _PDF_MEDIA = "application/pdf"
+
+
+class AiEditBody(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
 
 
 def _safe_filename(name: str) -> str:
@@ -143,6 +149,27 @@ async def extract_pdf_route(
         except ops.PdfError:
             pages = 0
     return {"text": text, "pages": pages}
+
+
+@router.post("/{pdf_id}/ai")
+async def ai_edit_pdf_route(
+    pdf_id: str,
+    body: AiEditBody,
+    user: User = Depends(get_current_user),
+):
+    """Edit the open PDF from a natural-language instruction (✨ AI box).
+
+    PDF ops produce a NEW file (immutable), so the response carries
+    ``new_pdf_id`` for the viewer to switch to. PDFs can't be reflow
+    text-edited — this drives sign/fill/merge/split/rotate/generate.
+    """
+    result = await ai_edit_document(_config, user.id, "pdf", pdf_id, body.instruction)
+    return {
+        "ok": result.ok,
+        "summary": result.summary,
+        "new_pdf_id": result.new_id,
+        "error": result.error,
+    }
 
 
 @router.delete("/{pdf_id}")

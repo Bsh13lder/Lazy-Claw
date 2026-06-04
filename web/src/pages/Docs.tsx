@@ -19,6 +19,10 @@ import {
 import { UniverDocsCorePreset } from "@univerjs/preset-docs-core";
 import UniverPresetDocsCoreEnUS from "@univerjs/preset-docs-core/locales/en-US";
 import "@univerjs/preset-docs-core/lib/index.css";
+import { UniverDocsHyperLinkPreset } from "@univerjs/preset-docs-hyper-link";
+import UniverPresetDocsHyperLinkEnUS from "@univerjs/preset-docs-hyper-link/locales/en-US";
+import "@univerjs/preset-docs-hyper-link/lib/index.css";
+import DocAiPopover from "../components/DocAiPopover";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -52,11 +56,15 @@ export default function Docs() {
   const [loadingList, setLoadingList] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
+  const [reloadToken, setReloadToken] = useState(0);
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const univerRef = useRef<{ dispose: () => void } | null>(null);
   const apiRef = useRef<FUniver | null>(null);
   const dirtyRef = useRef(false);
   const nameRef = useRef("");
+  // Lets the ✨ AI popover flush pending edits before the agent reads the doc.
+  const flushHandleRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   // Keep the latest name available to the autosave closure without
   // re-initialising Univer on every rename.
@@ -94,19 +102,24 @@ export default function Docs() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const docId = activeId; // capture for the closure / cleanup
 
-    const flush = () => {
+    const flush = (): Promise<void> => {
       const api = apiRef.current;
-      if (!api || !dirtyRef.current) return;
+      if (!api || !dirtyRef.current) return Promise.resolve();
       const snapshot = api.getActiveDocument()?.getSnapshot() as
         | UniverDocSnapshot
         | undefined;
-      if (!snapshot) return;
+      if (!snapshot) return Promise.resolve();
       dirtyRef.current = false;
       setSaveState("saving");
-      saveDoc(docId, nameRef.current, snapshot)
-        .then(() => !cancelled && setSaveState("saved"))
-        .catch(() => !cancelled && setSaveState("error"));
+      return saveDoc(docId, nameRef.current, snapshot)
+        .then(() => {
+          if (!cancelled) setSaveState("saved");
+        })
+        .catch(() => {
+          if (!cancelled) setSaveState("error");
+        });
     };
+    flushHandleRef.current = flush;
 
     const scheduleSave = () => {
       dirtyRef.current = true;
@@ -120,9 +133,17 @@ export default function Docs() {
 
       const { univer, univerAPI } = createUniver({
         locale: LocaleType.EN_US,
-        locales: { [LocaleType.EN_US]: mergeLocales(UniverPresetDocsCoreEnUS) },
+        locales: {
+          [LocaleType.EN_US]: mergeLocales(
+            UniverPresetDocsCoreEnUS,
+            UniverPresetDocsHyperLinkEnUS,
+          ),
+        },
         theme: defaultTheme,
-        presets: [UniverDocsCorePreset({ container })],
+        presets: [
+          UniverDocsCorePreset({ container }),
+          UniverDocsHyperLinkPreset(),
+        ],
       });
       univerRef.current = univer;
       apiRef.current = univerAPI;
@@ -148,7 +169,7 @@ export default function Docs() {
       univerRef.current = null;
       apiRef.current = null;
     };
-  }, [activeId]);
+  }, [activeId, reloadToken]);
 
   async function handleNew() {
     const created = await createDoc("Untitled doc");
@@ -270,13 +291,27 @@ export default function Docs() {
                 aria-label="Document name"
               />
               <SaveBadge state={saveState} />
-              <a
-                href={docExportUrl(activeId, "docx")}
-                className="ml-auto text-xs text-text-muted hover:text-accent transition-colors"
-                title="Download as .docx"
-              >
-                Download .docx
-              </a>
+              <div className="ml-auto flex items-center gap-3">
+                <DocAiPopover
+                  kind="docs"
+                  docId={activeId}
+                  docName={activeName}
+                  beforeSubmit={() => flushHandleRef.current()}
+                  onReload={() => {
+                    // The AI saved the doc server-side; discard any local dirty
+                    // state and remount from the fresh snapshot.
+                    dirtyRef.current = false;
+                    setReloadToken((t) => t + 1);
+                  }}
+                />
+                <a
+                  href={docExportUrl(activeId, "docx")}
+                  className="text-xs text-text-muted hover:text-accent transition-colors"
+                  title="Download as .docx"
+                >
+                  Download .docx
+                </a>
+              </div>
             </div>
             {/* Univer mounts here — needs a real pixel height */}
             <div ref={containerRef} className="flex-1 min-h-0" />

@@ -502,6 +502,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] **Task Manager** — encrypted storage + nag escalation + Telegram inline buttons + AI quick-add
 - [x] **Channels** — Telegram native + WhatsApp / Instagram / Email MCPs, voice in/out (whisper.cpp)
 - [x] **Direct Google Workspace API** (Gmail/Calendar/Drive/Sheets/Docs) — atomic ops, no n8n round-trip
+- [x] **Encrypted office suite** — private Sheets / Docs / PDF, agent-editable; in-editor ✨ AI box ("add a Total column", "add a line with a link") — full NL control, no formulas needed; real `.docx` hyperlinks
 - [x] **Authenticated Bug Bounty toolkit** — forked claude-bug-bounty + 6 NL skills
 - [x] **React Web UI** — 19 pages + chat sidebar + live BrowserCanvas + WebSocket streaming
 - [x] **Docker + Docker Compose** (Dockerfile, docker-compose.yml, web/Dockerfile, host Brave bridge)

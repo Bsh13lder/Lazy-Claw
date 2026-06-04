@@ -7,10 +7,12 @@ Private encrypted, agent-editable office suite. Three independent backends under
 - [x] **PDF** — `lazyclaw/pdf/{ops,store}.py` (pypdf/reportlab/pdfplumber/pikepdf — NO PyMuPDF/AGPL) + `/api/pdf` + 8 skills (fill/sign/merge/split/extract/redact/generate). react-pdf viewer. (68 tests)
 - [x] **Unified web workspace** — `web/src/pages/Documents.tsx` sub-tab shell; each type its own lazy chunk; `univer-*` excluded from PWA precache; single "Docs" nav entry.
 - [x] **Permissions** — `sheets`/`docs`/`pdf` categories default ALLOW.
+- [x] **In-editor AI specialist (2026-06-04)** — ✨ popover in every editor → `POST /api/{sheets,docs,pdf}/{id}/ai` → `runtime/doc_specialist.py` (LLM→JSON plan→deterministic apply via `{docs,sheets,pdf}/ai_edit.py`; synchronous, no chat/background). Full NL control; editor reloads in place. `DocAiPopover.tsx`.
+- [x] **Hyperlinks ("text with a link")** — Univer `customRanges` in `docs/snapshot.py` (sentinel-bracketed `dataStream` + `properties.url`); `build_body_with_runs`/`get_paragraph_runs`/`make_link_runs`/`runs_from_markdown`; `docx_io` emits/parses real `w:hyperlink`; `append_to_doc` gains `link_text`/`link_url` + `[md](url)`; Docs editor mounts `UniverDocsHyperLinkPreset`.
 - [ ] **Deploy** — `docker compose build lazyclaw lazyclaw-web && docker compose up -d` (source baked into images). Optional: add LibreOffice to gateway image for doc→PDF export.
-- [ ] **Future** — PDF true-redaction (content-stream scrub, not visual mask); Univer rich-formatting preservation through docx round-trip; Slides (Univer slides not preset-ready).
+- [ ] **Future** — PDF true-redaction (content-stream scrub, not visual mask); Univer rich-formatting (bold/italic/headings) preservation through docx round-trip; Slides (Univer slides not preset-ready).
 
-**Verification**: 192 tests green (71+53+68). Web build clean (Sheets/Docs/PDF code-split). Gateway mounts all `/api/{sheets,docs,pdf}` routes; registry registers all 21 skills.
+**Verification**: 192 + ~70 tests green (Sheets/Docs/PDF + ai_edit + doc_specialist + hyperlink round-trip). Web build clean (`tsc -b` + vite); univer chunk (now incl. hyperlink preset) excluded from PWA precache. Gateway mounts all `/api/{sheets,docs,pdf}` routes incl. `/{id}/ai`.
 
 ## Phase 1: Foundation
 - [x] **1.1 Crypto core** — `lazyclaw/crypto/encryption.py`: AES-256-GCM + PBKDF2, `enc:v1:` format, server-side key derivation.

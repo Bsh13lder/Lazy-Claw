@@ -204,9 +204,11 @@ class AppendToDocSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Append a paragraph of text to the end of a document (e.g. 'add a "
-            "closing paragraph to my cover letter'). Identify the doc by id or "
-            "name; omit to use the most recently edited one."
+            "Append a paragraph to the end of a document (e.g. 'add a closing "
+            "paragraph to my cover letter'). To add a clickable hyperlink, pass "
+            "'link_url' (and optionally 'link_text' to choose which words link) "
+            "or write markdown links inline like '[my site](https://…)'. "
+            "Identify the doc by id or name; omit to use the most recent one."
         )
 
     @property
@@ -222,7 +224,24 @@ class AppendToDocSkill(BaseSkill):
                     "type": "string",
                     "description": "Doc id or name (optional — defaults to most recent)",
                 },
-                "text": {"type": "string", "description": "The paragraph text to append"},
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "The paragraph text to append. May contain inline "
+                        "markdown links '[label](https://…)'."
+                    ),
+                },
+                "link_url": {
+                    "type": "string",
+                    "description": "Optional URL to turn part of the text into a clickable link",
+                },
+                "link_text": {
+                    "type": "string",
+                    "description": (
+                        "Optional: which words in 'text' become the link "
+                        "(defaults to the whole URL, appended if not found)"
+                    ),
+                },
             },
             "required": ["text"],
         }
@@ -240,9 +259,28 @@ class AppendToDocSkill(BaseSkill):
         doc = await get_doc(self._config, user_id, did)
         if not doc:
             return "Doc not found."
-        updated = D.append_paragraph(doc["payload"], text)
+
+        # Decide whether this append carries a hyperlink: an explicit link_url,
+        # or inline markdown links in the text. Otherwise stay on the plain path.
+        link_url = params.get("link_url")
+        link_text = params.get("link_text")
+        runs = None
+        link_note = ""
+        if isinstance(link_url, str) and link_url.strip():
+            runs = D.make_link_runs(text, link_text or link_url, link_url)
+            link_note = " with a link"
+        else:
+            md = D.runs_from_markdown(text)
+            if any(r.get("url") for r in md):
+                runs = md
+                link_note = " with a link"
+
+        if runs is not None:
+            updated = D.append_paragraph_with_runs(doc["payload"], runs)
+        else:
+            updated = D.append_paragraph(doc["payload"], text)
         await save_doc(self._config, user_id, doc["name"], updated, doc_id=did)
-        return f"Appended a paragraph to **{doc['name']}**."
+        return f"Appended a paragraph{link_note} to **{doc['name']}**."
 
 
 class SetDocContentSkill(BaseSkill):

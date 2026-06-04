@@ -1942,6 +1942,30 @@ export const deleteSheet = (id: string) =>
 export const sheetExportUrl = (id: string, format: "xlsx" | "csv" = "xlsx") =>
   `/api/sheets/${encodeURIComponent(id)}/export?format=${format}`;
 
+// ── In-editor AI ("Document Specialist") ─────────────────────────────────
+// One synchronous turn that edits the open document from a NL instruction and
+// returns the fresh snapshot (sheets/docs) or the new file id (pdf).
+
+export interface AiEditResult {
+  ok: boolean;
+  summary: string;
+  snapshot?: UniverSnapshot | null;
+  error?: string | null;
+}
+
+export interface AiEditPdfResult {
+  ok: boolean;
+  summary: string;
+  new_pdf_id?: string | null;
+  error?: string | null;
+}
+
+export const aiEditSheet = (id: string, instruction: string) =>
+  request<AiEditResult>(`/api/sheets/${encodeURIComponent(id)}/ai`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+  });
+
 // ── Docs — private encrypted word-processor documents (Univer Docs) ──────
 
 export interface DocMeta {
@@ -1985,6 +2009,12 @@ export const deleteDoc = (id: string) =>
 // Server-side export (docx; pdf when LibreOffice is available).
 export const docExportUrl = (id: string, format: "docx" | "pdf" = "docx") =>
   `/api/docs/${encodeURIComponent(id)}/export?format=${format}`;
+
+export const aiEditDoc = (id: string, instruction: string) =>
+  request<AiEditResult>(`/api/docs/${encodeURIComponent(id)}/ai`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+  });
 
 // ── PDF files — view/upload/manage; agent fills/merges/extracts/signs ────
 
@@ -2039,3 +2069,9 @@ export const pdfRawUrl = (id: string) => `/api/pdf/${encodeURIComponent(id)}/raw
 // Download as an attachment.
 export const pdfDownloadUrl = (id: string) =>
   `/api/pdf/${encodeURIComponent(id)}/download`;
+
+export const aiEditPdf = (id: string, instruction: string) =>
+  request<AiEditPdfResult>(`/api/pdf/${encodeURIComponent(id)}/ai`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+  });

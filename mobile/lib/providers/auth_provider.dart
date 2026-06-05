@@ -1,7 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api/api_client.dart';
 import '../core/api/api_exceptions.dart';
-import '../core/config/server_config.dart';
 import '../models/user.dart';
 import '../repositories/auth_repository.dart';
 

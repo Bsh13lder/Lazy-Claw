@@ -22,6 +22,6 @@ void main() {
     expect(t.lastPath, '/api/auth/login');
     expect(t.lastBody, {'username': 'sam', 'password': 'pw12345678'});
     expect(result, isA<User>());
-    expect((result as User).username, 'sam');
+    expect(result.username, 'sam');
   });
 }

@@ -5,7 +5,6 @@ import '../chat/chat_controller.dart';
 import '../chat/chat_socket.dart';
 import '../chat/chat_message.dart';
 import '../core/config/server_config.dart';
-import '../core/api/api_client.dart';
 import '../providers/auth_provider.dart';
 
 final chatSocketProvider = Provider<ChatSocket>((ref) => ChatSocket());

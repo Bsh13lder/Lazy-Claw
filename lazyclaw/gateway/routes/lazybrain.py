@@ -1,7 +1,7 @@
 """LazyBrain REST API — CRUD, backlinks, graph, journal, tags."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
@@ -31,6 +31,10 @@ router = APIRouter(prefix="/api/lazybrain", tags=["lazybrain"])
 # ---------------------------------------------------------------------------
 
 class NoteCreate(BaseModel):
+    # Optional client-minted id for offline-first idempotent replay.
+    # When provided, the server uses it as the note id. A second POST
+    # with the same id returns the existing note without duplicating it.
+    id: str | None = Field(default=None, max_length=128)
     content: str = Field(min_length=1, max_length=200_000)
     title: str | None = Field(default=None, max_length=300)
     tags: list[str] | None = None
@@ -130,6 +134,7 @@ async def create_note_route(
         importance=body.importance,
         pinned=body.pinned,
         trace_session_id=body.trace_session_id,
+        note_id=body.id or None,
     )
     events.publish_note_saved(user.id, note["id"], note["title"], note["tags"])
     return note
@@ -177,6 +182,32 @@ async def delete_note_route(
         user.id, note_id, note["title"] if note else None
     )
     return {"status": "deleted", "id": note_id}
+
+
+@router.get("/notes/changes")
+async def note_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 datetime. Only notes updated after this timestamp are "
+            "returned. Omit to receive all notes (full sync). Use the `now` "
+            "field from the previous response as the next `since` value."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients.
+
+    Returns:
+    - ``notes``: live (non-deleted) notes updated after ``since``
+    - ``deleted``: ids of notes soft-deleted after ``since``
+    - ``now``: server ISO timestamp — pass this as ``since`` next time
+
+    Clients should persist ``now`` locally and send it on the next pull.
+    Last-write-wins on ``updated_at`` resolves any conflicts.
+    """
+    result = await store.get_note_changes(_config, user.id, since=since)
+    return result
 
 
 @router.get("/notes/{note_id}/backlinks")

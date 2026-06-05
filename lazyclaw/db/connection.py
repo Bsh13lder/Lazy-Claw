@@ -197,6 +197,13 @@ async def init_db(config: Config) -> None:
             # Clients learn of deletes via the /changes delta feed instead of
             # rows silently disappearing from list responses.
             ("tasks", "deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT"),
+            # Offline-sync tombstones for Notes + Budgets (feat/flutter-mobile).
+            # deleted_at: NULL = live, non-NULL = deleted; clients learn of
+            # deletes via each domain's /changes delta feed. updated_at already
+            # exists on notes/projects/project_expenses and is bumped on update.
+            ("notes", "deleted_at", "ALTER TABLE notes ADD COLUMN deleted_at TEXT"),
+            ("projects", "deleted_at", "ALTER TABLE projects ADD COLUMN deleted_at TEXT"),
+            ("project_expenses", "deleted_at", "ALTER TABLE project_expenses ADD COLUMN deleted_at TEXT"),
         ]
         for table, column, sql in migrations:
             try:

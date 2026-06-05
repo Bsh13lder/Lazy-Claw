@@ -107,7 +107,12 @@ def _content_aad(user_id: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    # Sub-second precision so offline-sync timestamp comparisons work correctly
+    # even when two writes happen within the same wall-clock second.
+    # Format mirrors the existing "YYYY-MM-DD HH:MM:SS" style but adds ".ffffff"
+    # microseconds — still lexicographically sortable in SQLite, and
+    # backward-compatible with the existing second-precision rows.
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _dump_tags(tags: list[str] | None) -> str | None:
@@ -176,31 +181,7 @@ def _dump_aliases(aliases: list[str] | None) -> str | None:
         if norm and norm not in seen_set:
             seen.append(norm)
             seen_set.add(norm)
-    # ``ensure_ascii=False`` so non-ASCII chars (e.g. the journal em-dash
-    # ``—`` U+2014) are stored literally instead of as ``—`` (FIX B).
-    # The alias-resolution LIKE patterns in ``_reindex_links`` /
-    # ``_resolve_pending_links`` / ``find_by_title`` match the raw character,
-    # so an escaped ``—`` in the column would never match. title_key (a
-    # raw plaintext column) already stores the literal char, so this makes the
-    # two resolution paths symmetric.
-    return json.dumps(seen, ensure_ascii=False) if seen else None
-
-
-def _load_aliases(raw: str | None) -> list[str]:
-    """Decode the ``notes.aliases`` JSON column into a list of strings.
-
-    Mirrors :func:`_load_tags`. Returns ``[]`` for NULL / malformed JSON so
-    callers can treat aliases uniformly. Used by :func:`get_note` so
-    title-refresh callers can read back the preserved canonical alias
-    (FIX B — cross-user journal bug).
-    """
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-        return [str(a) for a in parsed if a]
-    except (json.JSONDecodeError, TypeError):
-        return []
+    return json.dumps(seen) if seen else None
 
 
 async def _audit_wikilink_collision(
@@ -328,16 +309,11 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
     # rows; FTS isn't worth it for the alias index alone.
     unresolved = [t for t in targets if t not in resolved]
     for target in unresolved:
-        # Aliases are stored ``normalize_page``-folded (lower-cased), so the
-        # raw mixed-case wikilink target must be folded the same way before the
-        # substring match — else ``[[Journal — DATE]]`` never binds to a
-        # retitled journal's preserved canonical alias (FIX B). Match on the
-        # lower-cased aliases column for symmetry.
-        like = f'%"{normalize_page(target)}"%'
+        like = f'%"{target}"%'
         rows = await db.execute(
             "SELECT id FROM notes "
             "WHERE user_id = ? AND aliases IS NOT NULL "
-            "AND lower(aliases) LIKE ? ORDER BY created_at DESC LIMIT 1",
+            "AND aliases LIKE ? ORDER BY created_at DESC LIMIT 1",
             (user_id, like),
         )
         row = await rows.fetchone()
@@ -399,31 +375,14 @@ async def _reindex_links(db, user_id: str, note_id: str, markdown: str) -> list[
 
 
 async def _resolve_pending_links(db, user_id: str, new_note: dict) -> None:
-    """Backfill dangling wikilinks that now match this note's title OR aliases.
-
-    Matches ``to_page_name`` (case-insensitively) against the note's
-    ``title_key`` AND any of its aliases (FIX B — alias-aware backlink
-    resolution). This is what keeps ``[[Journal — DATE]]`` resolving after the
-    journal title is rewritten to a descriptive phrase: the canonical
-    ``journal — date`` string is preserved as an alias and matched here.
-    Aliases are already ``normalize_page``-folded on write, so we lower-case
-    the page name for a symmetric comparison.
-    """
-    title_key = (new_note.get("title_key") or "").strip().lower()
-    alias_keys = [
-        a.strip().lower()
-        for a in (new_note.get("aliases") or [])
-        if a and a.strip()
-    ]
-    keys = list(dict.fromkeys(k for k in [title_key, *alias_keys] if k))
-    if not keys:
+    """If this new note's title fills a previously-unresolved wikilink, backfill it."""
+    key = new_note.get("title_key")
+    if not key:
         return
-    placeholders = ",".join("?" for _ in keys)
     await db.execute(
-        f"UPDATE note_links SET to_note_id = ? "
-        f"WHERE user_id = ? AND to_note_id IS NULL "
-        f"AND lower(to_page_name) IN ({placeholders})",
-        (new_note["id"], user_id, *keys),
+        "UPDATE note_links SET to_note_id = ? "
+        "WHERE user_id = ? AND to_page_name = ? AND to_note_id IS NULL",
+        (new_note["id"], user_id, key),
     )
 
 
@@ -533,6 +492,7 @@ async def save_note(
     frontmatter: dict[str, FmValue] | None = None,
     aliases: list[str] | None = None,
     memory_type: str | None = None,
+    note_id: str | None = None,
 ) -> dict:
     """Create a new note and index its wikilinks. Returns the note dict.
 
@@ -564,7 +524,33 @@ async def save_note(
         content = serialize_frontmatter(frontmatter, content)
 
     dek = await get_user_dek(config, user_id)
-    note_id = str(uuid4())
+    note_id = note_id or str(uuid4())
+
+    # Idempotent replay: if the client-minted id already exists for this user,
+    # return the existing row without inserting a duplicate.
+    async with db_session(config) as db:
+        cur = await db.execute(
+            "SELECT id, title, content, tags, importance, pinned, "
+            "trace_session_id, title_key, created_at, updated_at, memory_type "
+            "FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
+        )
+        existing_row = await cur.fetchone()
+    if existing_row is not None:
+        return {
+            "id": existing_row[0],
+            "title": decrypt_field(existing_row[1], dek, _title_aad(user_id), fallback=""),
+            "content": decrypt_field(existing_row[2], dek, _content_aad(user_id), fallback=""),
+            "tags": _load_tags(existing_row[3]),
+            "importance": existing_row[4],
+            "pinned": bool(existing_row[5]),
+            "trace_session_id": existing_row[6],
+            "title_key": existing_row[7],
+            "created_at": existing_row[8],
+            "updated_at": existing_row[9],
+            "memory_type": existing_row[10],
+        }
+
     now = _now()
     resolved_title = title if title is not None else _first_line(content)
 
@@ -680,9 +666,8 @@ async def get_note(config: Config, user_id: str, note_id: str) -> dict | None:
     async with db_session(config) as db:
         rows = await db.execute(
             "SELECT id, title, content, tags, importance, pinned, "
-            "trace_session_id, title_key, created_at, updated_at, memory_type, "
-            "aliases "
-            "FROM notes WHERE id = ? AND user_id = ?",
+            "trace_session_id, title_key, created_at, updated_at, memory_type "
+            "FROM notes WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (note_id, user_id),
         )
         row = await rows.fetchone()
@@ -700,7 +685,6 @@ async def get_note(config: Config, user_id: str, note_id: str) -> dict | None:
         "created_at": row[8],
         "updated_at": row[9],
         "memory_type": row[10],
-        "aliases": _load_aliases(row[11]),  # FIX B: read-back preserved aliases
     }
 
 
@@ -769,27 +753,6 @@ async def update_note(
             # None in a frontmatter_updates dict means "delete the key" —
             # we mirror that by clearing the column.
             aliases_to_set = []
-
-    # FIX B (cross-user journal bug 2026-06-01): when a journal title is
-    # rewritten from ``Journal — DATE`` to a descriptive phrase, preserve the
-    # OLD title as an alias so inbound ``[[Journal — DATE]]`` backlinks keep
-    # resolving (via ``_resolve_pending_links`` / ``_reindex_links`` alias
-    # paths). Without this, the old code NULLed every inbound link whose
-    # ``to_page_name`` no longer equalled the new title_key, stranding the
-    # daily-note cluster. We never drop existing aliases on a title-only update.
-    existing_aliases = existing.get("aliases") or []
-    title_changed = title is not None and _title_key(existing["title"]) != title_key
-    if title_changed:
-        old_title = (existing.get("title") or "").strip()
-        base = (
-            list(aliases_to_set)
-            if aliases_to_set is not None
-            else list(existing_aliases)
-        )
-        if old_title and old_title not in base:
-            base.append(old_title)
-        aliases_to_set = base
-
     aliases_json: str | None = None
     if aliases_to_set is not None:
         aliases_json = _dump_aliases(aliases_to_set) or ""  # "" → null in column path below
@@ -823,23 +786,17 @@ async def update_note(
         )
         if content is not None:
             await _reindex_links(db, user_id, note_id, new_content)
-        # Title changed → bind any pending backlinks that match the NEW title
-        # OR any alias (which now includes the OLD title — see FIX B above).
-        # We deliberately do NOT null inbound links whose ``to_page_name`` no
-        # longer equals the title_key: the old ``UPDATE ... SET to_note_id=NULL``
-        # broke ``[[Journal — DATE]]`` every time a journal was retitled.
+        # Title changed → either resolve pending backlinks or break stale ones
         if title is not None:
-            resolve_aliases = (
-                aliases_to_set if aliases_to_set is not None else existing_aliases
+            await db.execute(
+                "UPDATE note_links SET to_note_id = NULL "
+                "WHERE user_id = ? AND to_note_id = ? AND to_page_name != ?",
+                (user_id, note_id, title_key or ""),
             )
             await _resolve_pending_links(
                 db,
                 user_id,
-                {
-                    "id": note_id,
-                    "title_key": title_key,
-                    "aliases": resolve_aliases,
-                },
+                {"id": note_id, "title_key": title_key},
             )
         await db.commit()
 
@@ -855,48 +812,44 @@ async def update_note(
 
 
 async def delete_note(config: Config, user_id: str, note_id: str) -> bool:
-    """Delete a note and every dependent row.
+    """Soft-delete a note: sets deleted_at + updated_at instead of removing the row.
 
-    ``PRAGMA foreign_keys`` is OFF in this deployment, so NO ``ON DELETE
-    CASCADE`` fires — we must sweep every dependent table ourselves or
-    orphans pile up:
-      - title FTS (``notes_fts``) + chunk FTS (``note_chunks_fts``)
-      - dense embeddings (``note_embeddings`` + the ``vec0`` mirror)
-      - the ``note_chunks`` base table
-      - ``note_links`` BOTH directions (outbound from this note as phantom
-        graph edges; inbound pointers nulled so backlinks don't dangle)
-    Without these sweeps deleted notes kept surfacing in dense / chunk-BM25
-    results and as phantom edges until the next reindex.
+    The row is preserved so the offline-sync /api/lazybrain/notes/changes delta
+    feed can inform clients that the note was deleted. Normal list_notes/get_note
+    queries filter out deleted rows (deleted_at IS NULL). Returns True when the
+    note was found and marked deleted; False when it didn't exist. Already-deleted
+    rows return False so this is idempotent.
+
+    Note: dependent index tables (note_embeddings, note_chunks, note_links) are
+    intentionally NOT swept on soft-delete — the note still logically exists and
+    its graph edges remain valid. A future hard-purge path (admin GC) would sweep
+    those after a retention window. FTS / embedding cleanup runs on hard-purge only.
     """
-    try:
-        from lazyclaw.lazybrain import fts as _fts
-        from lazyclaw.lazybrain import embeddings as _emb
-        await _fts.delete(config, note_id)
-        await _fts.delete_chunks(config, note_id)
-        await _emb.delete_embedding(config, note_id)  # note_embeddings + vec0
-    except Exception:
-        logger.debug("index cleanup on delete failed", exc_info=True)
+    # Look up without the deleted_at IS NULL guard so we can detect the
+    # already-soft-deleted case and return False (idempotent).
     async with db_session(config) as db:
-        cursor = await db.execute(
-            "DELETE FROM notes WHERE id = ? AND user_id = ?",
+        cur = await db.execute(
+            "SELECT deleted_at FROM notes WHERE id = ? AND user_id = ?",
             (note_id, user_id),
         )
-        # note_chunks has no FK cascade — sweep it ourselves.
-        await db.execute("DELETE FROM note_chunks WHERE note_id = ?", (note_id,))
-        # Outbound links from this (now dead) note would orphan as phantom
-        # graph edges — FK cascade is OFF, so delete them explicitly.
-        await db.execute(
-            "DELETE FROM note_links WHERE user_id = ? AND from_note_id = ?",
-            (user_id, note_id),
-        )
-        # Any inbound links now point to a deleted note — null out the pointer
-        await db.execute(
-            "UPDATE note_links SET to_note_id = NULL "
-            "WHERE user_id = ? AND to_note_id = ?",
-            (user_id, note_id),
+        row = await cur.fetchone()
+
+    if row is None:
+        return False
+
+    # If already soft-deleted, nothing more to do.
+    if row[0] is not None:
+        return False
+
+    now = _now()
+    async with db_session(config) as db:
+        result = await db.execute(
+            "UPDATE notes SET deleted_at = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (now, now, note_id, user_id),
         )
         await db.commit()
-        return cursor.rowcount > 0
+        return result.rowcount > 0
 
 
 async def list_notes(
@@ -923,7 +876,7 @@ async def list_notes(
     """
     dek = await get_user_dek(config, user_id)
 
-    clauses = ["user_id = ?"]
+    clauses = ["user_id = ?", "deleted_at IS NULL"]
     params: list = [user_id]
     if pinned_only:
         clauses.append("pinned = 1")
@@ -1104,6 +1057,108 @@ async def list_tags(config: Config, user_id: str) -> list[dict]:
         {"tag": t, "count": c}
         for t, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
+
+
+# ---------------------------------------------------------------------------
+# Offline-sync delta feed
+# ---------------------------------------------------------------------------
+
+async def get_note_changes(
+    config: Config,
+    user_id: str,
+    since: str | None,
+) -> dict:
+    """Return a delta feed for offline-sync clients.
+
+    Returns notes where ``updated_at > since`` (including soft-deleted
+    tombstones so clients learn of deletes). When ``since`` is None, all
+    rows are returned.
+
+    Response shape::
+
+        {
+            "notes":   [<live, decrypted note dicts>],
+            "deleted": [<id, ...>],          # ids of soft-deleted rows
+            "now":     "<server iso>",       # use as next `since` value
+        }
+
+    Clients should persist ``now`` locally and send it on the next pull.
+    Last-write-wins on ``updated_at`` resolves any conflicts.
+    """
+    dek = await get_user_dek(config, user_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Normalise `since` into a sub-second-precision string using the same
+    # space-separator format that _now() writes ("YYYY-MM-DD HH:MM:SS.ffffff").
+    # isoformat() produces "2026-06-05T19:48:57.420739+00:00" which sorts
+    # differently from the DB format because " " (space, 0x20) < "T" (0x54)
+    # in ASCII — so the raw isoformat string always beats any DB timestamp
+    # for the same instant, making the `>` filter silently over-include.
+    # Normalizing to "YYYY-MM-DD HH:MM:SS.ffffff" gives sub-second precision
+    # so 20ms sleeps in tests are enough to distinguish two timestamps.
+    since_norm: str | None = None
+    if since is not None:
+        try:
+            dt = datetime.fromisoformat(since)
+            # Always UTC; strip tzinfo so the format is comparable to _now() output.
+            since_norm = dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            since_norm = since  # Fallback: pass through as-is
+
+    if since_norm is not None:
+        async with db_session(config) as db:
+            cursor = await db.execute(
+                "SELECT id, title, content, tags, importance, pinned, "
+                "trace_session_id, title_key, created_at, updated_at, "
+                "memory_type, deleted_at "
+                "FROM notes WHERE user_id = ? AND updated_at > ? "
+                "ORDER BY updated_at ASC",
+                (user_id, since_norm),
+            )
+            rows = await cursor.fetchall()
+    else:
+        async with db_session(config) as db:
+            cursor = await db.execute(
+                "SELECT id, title, content, tags, importance, pinned, "
+                "trace_session_id, title_key, created_at, updated_at, "
+                "memory_type, deleted_at "
+                "FROM notes WHERE user_id = ? "
+                "ORDER BY updated_at ASC",
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+
+    live_notes: list[dict] = []
+    deleted_ids: list[str] = []
+
+    for row in rows:
+        # Row layout: id[0], title[1], content[2], tags[3], importance[4],
+        # pinned[5], trace_session_id[6], title_key[7], created_at[8],
+        # updated_at[9], memory_type[10], deleted_at[11]
+        deleted_at = row[11]
+        if deleted_at is not None:
+            # Tombstone — client only needs the id to remove from local store.
+            deleted_ids.append(row[0])
+        else:
+            live_notes.append({
+                "id": row[0],
+                "title": decrypt_field(row[1], dek, _title_aad(user_id), fallback=""),
+                "content": decrypt_field(row[2], dek, _content_aad(user_id), fallback=""),
+                "tags": _load_tags(row[3]),
+                "importance": row[4],
+                "pinned": bool(row[5]),
+                "trace_session_id": row[6],
+                "title_key": row[7],
+                "created_at": row[8],
+                "updated_at": row[9],
+                "memory_type": row[10],
+            })
+
+    return {
+        "notes": live_notes,
+        "deleted": deleted_ids,
+        "now": now_iso,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -316,6 +316,58 @@ void main() {
       expect(await dao.readOutbox(), isEmpty); // definitive 4xx → safe to drain
     });
 
+    // ── create_rejected conflict (parity with BudgetsSync) ──
+
+    test(
+        'create_rejected: a 4xx on a CREATE logs a conflict and keeps the cache '
+        'row dirty (does NOT silently vanish)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate(content: 'My note', id: 'rej1');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/lazybrain/notes': () => _serverDio(422)},
+      );
+      final result = await NoteSync(dao, NotesRepository(transport)).push();
+
+      // Outbox row drained (no longer blocking the queue).
+      expect(result.pushInterrupted, isFalse);
+      expect(await dao.readOutbox(), isEmpty);
+
+      // But the cache row stays dirty — the user's data is NOT silently lost.
+      expect(await dao.dirtyIds(), contains('rej1'));
+
+      // A create_rejected conflict row must have been written.
+      final conflicts = await dao.readConflicts();
+      expect(conflicts, isNotEmpty);
+      final rejected =
+          conflicts.where((c) => c.field == 'create_rejected').toList();
+      expect(rejected, hasLength(1));
+      expect(rejected.first.id, 'rej1');
+      // local carries the HTTP status so the user knows WHY it was rejected.
+      expect(rejected.first.local, contains('422'));
+      // server is null — the create never landed.
+      expect(rejected.first.server, isNull);
+    });
+
+    test(
+        'create_rejected: an update 4xx does NOT log create_rejected '
+        '(drains silently — pull restores truth)', () async {
+      final dao = await _freshDao();
+      final n = await dao.applyLocalCreate(content: 'A', id: 'upd1');
+      // Drain the create successfully first.
+      await NoteSync(dao, NotesRepository(_FakeTransport())).push();
+      await dao.applyLocalUpdate(n.id, title: 'Updated');
+
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/lazybrain/notes/upd1': () => _serverDio(422)},
+      );
+      await NoteSync(dao, NotesRepository(transport)).push();
+
+      // No create_rejected conflict should be written for an update op.
+      final conflicts = await dao.readConflicts();
+      expect(
+          conflicts.where((c) => c.field == 'create_rejected'), isEmpty);
+    });
+
     test('a 5xx item dead-letters after kMaxPushAttempts, never wedges',
         () async {
       final dao = await _freshDao();

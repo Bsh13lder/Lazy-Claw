@@ -132,7 +132,7 @@ class NotesNotifier extends StateNotifier<NotesState> {
       return inTitle || inContent || inTags;
     }).toList();
     final dirty = await _dao.dirtyIds();
-    state = NotesState(
+    state = state.copyWith(
       notes: filtered,
       dirtyIds: dirty,
       isLoading: false,
@@ -189,7 +189,7 @@ class NotesNotifier extends StateNotifier<NotesState> {
     }
     final notes = await _dao.list();
     final dirty = await _dao.dirtyIds();
-    state = NotesState(
+    state = state.copyWith(
       notes: notes,
       dirtyIds: dirty,
       isLoading: loading,

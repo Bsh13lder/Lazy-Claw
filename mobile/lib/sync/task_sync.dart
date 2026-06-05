@@ -104,11 +104,17 @@ class TaskSync {
             ? _withPayload(item, coalesced.payloads[item.seq]!)
             : item;
 
-        await _pushOne(effective);
-        // C2: retire the pushed item atomically (delete outbox row + clear
-        // dirty / hard-remove tombstone) so a crash can't split the two writes.
-        await _dao.commitPush(item.seq, item.entityId);
-        pushed++;
+        final committed = await _pushOne(effective);
+        if (committed) {
+          // C2: retire the pushed item atomically (delete outbox row + clear
+          // dirty / hard-remove tombstone) so a crash can't split the two writes.
+          await _dao.commitPush(item.seq, item.entityId);
+          pushed++;
+        }
+        // A drained-but-not-committed item (definitive 4xx, or a dead-lettered
+        // 5xx poison) has already had its outbox row removed inside the failure
+        // classifier; we leave its cache row dirty so the NEXT pull restores
+        // server truth — never silently dropping the user's edit.
       } on _PushInterrupted catch (e) {
         // Network down OR a retryable server error — stop, keep the rest queued.
         return SyncResult(
@@ -121,7 +127,12 @@ class TaskSync {
     return SyncResult(pushed: pushed);
   }
 
-  Future<void> _pushOne(OutboxItem item) async {
+  /// Push one queued op. Returns true when the server accepted it (so the
+  /// caller commits the retire); false when the item was DRAINED on a definitive
+  /// client error or dead-lettered as a 5xx poison (the failure classifier has
+  /// already removed its outbox row, and the cache stays dirty for the next
+  /// pull). Throws [_PushInterrupted] to STOP the drain and keep the queue.
+  Future<bool> _pushOne(OutboxItem item) async {
     final p = item.payload;
     try {
       switch (item.op) {
@@ -150,30 +161,40 @@ class TaskSync {
           // Unknown op — drop it (deleting the outbox row happens in push()).
           break;
       }
+      // Server accepted the op → the caller commits the retire.
+      return true;
     } catch (e) {
-      await _classifyPushFailure(item, e);
+      // Drained (returns false) or interrupting (throws).
+      return _classifyPushFailure(item, e);
     }
   }
 
   /// Decide what a push failure means and act on it. NEVER silently drops a
-  /// queued edit on a transient failure (C1):
+  /// queued edit on a transient failure (C1). Returns `true` ONLY for an
+  /// idempotent 404-on-complete/delete (treated as a success → caller commits
+  /// + counts it). For the other drain branches it removes THIS item's outbox
+  /// row here and returns `false`, leaving the cache row dirty so the next pull
+  /// re-establishes server truth. Throws [_PushInterrupted] to STOP the drain
+  /// and keep the queue.
   ///   * network (timeout/connection/cancel, status 0, non-badResponse) →
   ///     [_PushInterrupted] (stop draining, keep ALL queued items);
   ///   * server 5xx → retryable: bump the attempt counter, dead-letter after
   ///     [kMaxPushAttempts], otherwise [_PushInterrupted] (keep it queued);
-  ///   * 404 on complete/delete → treat as success (server already lost it);
-  ///   * other 4xx → safe to drain (the next pull re-establishes truth).
-  Future<void> _classifyPushFailure(OutboxItem item, Object e) async {
+  ///   * 404 on complete/delete → idempotent success (return true → caller commits);
+  ///   * other 4xx → drain the outbox row (return false; next pull restores it).
+  Future<bool> _classifyPushFailure(OutboxItem item, Object e) async {
     if (_isNetworkError(e)) {
       throw _PushInterrupted(e);
     }
     final api = _asApiError(e);
     final status = api?.status ?? _statusOf(e) ?? 0;
 
-    // 404 on complete/delete is idempotent success — the row is already gone.
+    // 404 on complete/delete is idempotent success — the row is already gone
+    // server-side. Return true so the caller commits (removes the outbox row
+    // AND clears dirty) and counts it as pushed.
     if (status == 404 &&
         (item.op == OutboxOp.delete || item.op == OutboxOp.complete)) {
-      return; // drain
+      return true;
     }
 
     if (status >= 500) {
@@ -182,19 +203,46 @@ class TaskSync {
       final attempts = await _dao.bumpOutboxAttempts(item.seq);
       if (attempts >= kMaxPushAttempts) {
         await _dao.deadLetterOutboxItem(item.seq);
-        return; // drain the poison item; local stays dirty for next pull
+        return false; // drained the poison item; local stays dirty for next pull
       }
       throw _PushInterrupted(e);
     }
 
     if (status >= 400) {
-      // Definitive client error (validation/conflict/404-on-create). Safe to
-      // drain; the next pull re-establishes server truth.
-      return;
+      // Definitive client error (validation/conflict). For an update/complete/
+      // delete this is safe to drain silently — the row exists server-side, so
+      // the next pull restores server truth. But a CREATE is client-originated:
+      // there is NO server truth to restore, so silently dropping the only
+      // queued record permanently strands the dirty cache row (an orphan the
+      // user can never re-sync). Log it as a visible conflict BEFORE draining
+      // so the UI / next sync can surface the rejection.
+      if (item.op == OutboxOp.create) {
+        await _logCreateRejected(item, status);
+      }
+      await _dao.deleteOutboxItem(item.seq);
+      return false; // drained
     }
 
     // Unknown shape with no usable status → treat as network-ish and keep it.
     throw _PushInterrupted(e);
+  }
+
+  /// Record a rejected CREATE in the `conflicts` table so a definitive 4xx on a
+  /// client-originated row is never silent. The local cache row stays dirty (its
+  /// `dirty=1` flag is the UI's "un-synced" signal); this surfaces WHY it can't
+  /// sync. The conflict row's `server` value is null (the create never landed)
+  /// and the `local` value carries the entity label + rejecting status for
+  /// diagnosis.
+  Future<void> _logCreateRejected(OutboxItem item, int status) async {
+    final p = item.payload;
+    final label = p['title']?.toString() ?? '';
+    final descriptor = label.isEmpty ? item.entity : '${item.entity}: $label';
+    await _dao.logConflict(
+      id: item.entityId,
+      field: 'create_rejected',
+      local: 'HTTP $status — $descriptor',
+      server: null, // create never landed → no server value
+    );
   }
 
   Map<String, dynamic> _patchFrom(Map<String, dynamic> payload) {

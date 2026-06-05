@@ -45,7 +45,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
           FilledButton(
               onPressed: _busy ? null : _submit,
               child: _busy
-                  ? const CircularProgressIndicator()
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Register')),
         ]),
       ),

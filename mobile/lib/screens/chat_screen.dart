@@ -7,7 +7,11 @@ import '../chat/chat_message.dart';
 import '../core/config/server_config.dart';
 import '../providers/auth_provider.dart';
 
-final chatSocketProvider = Provider<ChatSocket>((ref) => ChatSocket());
+final chatSocketProvider = Provider<ChatSocket>((ref) {
+  final s = ChatSocket();
+  ref.onDispose(s.dispose);
+  return s;
+});
 
 final chatControllerProvider =
     StateNotifierProvider<ChatController, List<ChatMessage>>(
@@ -22,6 +26,7 @@ class ChatScreen extends ConsumerStatefulWidget {
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _input = TextEditingController();
   bool _connected = false;
+  String? _connectError;
 
   @override
   void initState() {
@@ -29,20 +34,53 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _connect();
   }
 
+  @override
+  void dispose() {
+    _input.dispose();
+    super.dispose();
+  }
+
   Future<void> _connect() async {
-    final base = ref.read(baseUrlProvider);
-    final cookie = await ref.read(apiClientProvider).getSessionCookie();
-    if (cookie == null) return;
-    await ref.read(chatSocketProvider).connect(
-          ServerConfig.wsUrlFor(base),
-          cookie: 'session_id=$cookie',
-        );
-    if (mounted) setState(() => _connected = true);
+    setState(() {
+      _connectError = null;
+      _connected = false;
+    });
+    try {
+      final base = ref.read(baseUrlProvider);
+      final cookie = await ref.read(apiClientProvider).getSessionCookie();
+      if (cookie == null) {
+        ref.read(authProvider.notifier).handle401();
+        if (mounted) {
+          setState(() =>
+              _connectError = 'Session not found — please log in again');
+        }
+        return;
+      }
+      await ref.read(chatSocketProvider).connect(
+            ServerConfig.wsUrlFor(base),
+            cookie: 'session_id=$cookie',
+          );
+      if (mounted) setState(() => _connected = true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _connectError = e.toString());
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Invalidate chat providers whenever the user logs out so the next
+    // user gets a fresh socket and empty message list.
+    ref.listen<AuthState>(authProvider, (prev, next) {
+      if (next.status == AuthStatus.unauthenticated) {
+        ref.invalidate(chatControllerProvider);
+        ref.invalidate(chatSocketProvider);
+      }
+    });
+
     final messages = ref.watch(chatControllerProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_connected ? 'Chat' : 'Connecting…'),
@@ -54,6 +92,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ],
       ),
       body: Column(children: [
+        if (_connectError != null)
+          MaterialBanner(
+            content: Text(_connectError!),
+            actions: [
+              TextButton(
+                onPressed: _connect,
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
         Expanded(
           child: ListView.builder(
             reverse: true,
@@ -71,18 +119,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             padding: const EdgeInsets.all(8),
             child: Row(children: [
               Expanded(
-                child: TextField(controller: _input,
+                child: TextField(
+                    controller: _input,
                     decoration:
                         const InputDecoration(hintText: 'Message LazyClaw…')),
               ),
               IconButton(
                 icon: const Icon(Icons.send),
-                onPressed: () {
-                  final t = _input.text.trim();
-                  if (t.isEmpty) return;
-                  ref.read(chatControllerProvider.notifier).send(t);
-                  _input.clear();
-                },
+                // Disabled until the socket is connected.
+                onPressed: _connected
+                    ? () {
+                        final t = _input.text.trim();
+                        if (t.isEmpty) return;
+                        ref.read(chatControllerProvider.notifier).send(t);
+                        _input.clear();
+                      }
+                    : null,
               ),
             ]),
           ),
@@ -115,7 +167,8 @@ class _Bubble extends StatelessWidget {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           isUser
               ? Text(m.content,
-                  style: const TextStyle(color: Colors.white))
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.onPrimary))
               : MarkdownBody(data: m.content.isEmpty ? '…' : m.content),
           if (m.pendingApprovalId != null)
             Padding(

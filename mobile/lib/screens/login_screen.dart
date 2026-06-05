@@ -49,7 +49,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             key: const Key('login_submit'),
             onPressed: _busy ? null : _submit,
             child: _busy
-                ? const CircularProgressIndicator()
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
                 : const Text('Log in'),
           ),
           TextButton(

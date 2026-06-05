@@ -36,6 +36,7 @@ typedef ChannelFactory = WsSink Function(String url, Map<String, String> headers
 class ChatSocket {
   final ChannelFactory _factory;
   final _frames = StreamController<ServerFrame>.broadcast();
+  final _connected = StreamController<bool>.broadcast();
   WsSink? _sink;
   Timer? _ping;
 
@@ -46,6 +47,9 @@ class ChatSocket {
 
   Stream<ServerFrame> get frames => _frames.stream;
 
+  /// Emits `true` when connected, `false` on disconnect / error.
+  Stream<bool> get connectionState => _connected.stream;
+
   Future<void> connect(String wsUrl, {required String cookie}) async {
     // IMPORTANT: send the session cookie, and DO NOT send an Origin header
     // (native client → server allows absent Origin; presence triggers CORS).
@@ -53,11 +57,20 @@ class ChatSocket {
     _sink = sink;
     sink.stream.listen(
       (data) => _frames.add(parseServerFrame(data.toString())),
-      onError: (e) => _frames.add(ErrorFrame(e.toString())),
-      onDone: () => _ping?.cancel(),
+      onError: (e) {
+        _connected.add(false);
+        _frames.add(ErrorFrame(e.toString()));
+      },
+      onDone: () {
+        _ping?.cancel();
+        _connected.add(false);
+        // Finalize any in-flight streaming bubble so the UI doesn't spin forever.
+        _frames.add(const ErrorFrame('Disconnected'));
+      },
     );
     _ping = Timer.periodic(
         const Duration(seconds: 30), (_) => _sink?.add(encodePing()));
+    _connected.add(true);
   }
 
   void send(String content) => _sink?.add(encodeClientMessage(content));
@@ -69,5 +82,6 @@ class ChatSocket {
     _ping?.cancel();
     await _sink?.close();
     await _frames.close();
+    await _connected.close();
   }
 }

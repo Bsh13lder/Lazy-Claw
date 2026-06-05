@@ -19,4 +19,12 @@ class ChatMessage {
         pendingApprovalId: pendingApprovalId,
         pendingApprovalSkill: pendingApprovalSkill,
       );
+
+  /// Returns a copy with approval fields cleared (prevents double-tap).
+  ChatMessage clearApproval() => ChatMessage(
+        role: role,
+        content: content,
+        streaming: streaming,
+        // pendingApprovalId and pendingApprovalSkill intentionally omitted → null
+      );
 }

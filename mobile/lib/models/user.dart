@@ -12,8 +12,9 @@ class User {
   });
 
   factory User.fromJson(Map<String, dynamic> json) => User(
-        id: json['id'] as String,
-        username: json['username'] as String,
+        // Defensive coercion: never hard-cast external API data.
+        id: (json['id'] ?? '').toString(),
+        username: (json['username'] ?? '').toString(),
         displayName: json['display_name'] as String?,
         role: (json['role'] as String?) ?? 'user',
       );

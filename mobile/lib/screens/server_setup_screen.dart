@@ -32,7 +32,11 @@ class _ServerSetupScreenState extends ConsumerState<ServerSetupScreen> {
             onPressed: () async {
               final url = ServerConfig.normalizeBaseUrl(_ctrl.text);
               await ServerConfig.save(url);
+              // Clear stale session cookie before switching hosts.
+              await ref.read(apiClientProvider).clearSession();
               ref.read(baseUrlProvider.notifier).state = url;
+              // Logout so auth state is reset for the new server.
+              ref.read(authProvider.notifier).logout();
               if (context.mounted) Navigator.pop(context);
             },
             child: const Text('Save'),

@@ -17,12 +17,11 @@ class AuthState {
       const AuthState(AuthStatus.unauthenticated, null);
 }
 
+final baseUrlProvider = StateProvider<String>((ref) => 'http://127.0.0.1:18789');
+
 final apiClientProvider = Provider<ApiClient>((ref) {
-  // baseUrl is resolved asynchronously by bootstrap (Task 13); default for now.
   return ApiClient(baseUrl: ref.watch(baseUrlProvider));
 });
-
-final baseUrlProvider = StateProvider<String>((ref) => 'http://127.0.0.1:18789');
 
 final authRepositoryProvider = Provider<AuthRepository>((ref) =>
     AuthRepository(DioAuthTransport(ref.watch(apiClientProvider))));
@@ -76,7 +75,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
 final authProvider =
     StateNotifierProvider<AuthNotifier, AuthState>((ref) {
   final notifier = AuthNotifier(ref.watch(authRepositoryProvider));
-  // Wire the transport's 401 hook to force logout.
-  ref.watch(apiClientProvider).on401 = notifier.handle401;
+  // Wire the transport's 401 hook whenever this provider is (re)built.
+  // Using ref.read here is safe because apiClientProvider has no dependency
+  // on authProvider — it only flows in the other direction.
+  ref.read(apiClientProvider).on401 = notifier.handle401;
   return notifier;
 });

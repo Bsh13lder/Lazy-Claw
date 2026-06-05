@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'core/config/server_config.dart';
 import 'core/router/app_router.dart';
-import 'core/theme/app_theme.dart';
 import 'local/app_db.dart';
+import 'ui/app_theme.dart';
 import 'providers/auth_provider.dart';
 import 'providers/tasks_provider.dart';
 import 'sync/background_sync.dart';
@@ -52,7 +52,7 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
     final router = ref.watch(routerProvider);
     return MaterialApp.router(
       title: 'LazyClaw',
-      theme: buildTheme('blue'),
+      theme: buildAppTheme(),
       routerConfig: router,
     );
   }

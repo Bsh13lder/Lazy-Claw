@@ -4,11 +4,13 @@ import 'package:go_router/go_router.dart';
 import '../../providers/auth_provider.dart';
 import '../../screens/chat_screen.dart';
 import '../../screens/expenses_screen.dart';
+import '../../screens/home_screen.dart';
 import '../../screens/login_screen.dart';
 import '../../screens/notes_screen.dart';
 import '../../screens/register_screen.dart';
 import '../../screens/settings_screen.dart';
 import '../../screens/tasks_screen.dart';
+import '../../ui/components/lz_bottom_nav.dart';
 
 /// A [ChangeNotifier] that fires whenever the [authProvider] state changes,
 /// so [GoRouter.refreshListenable] re-evaluates the redirect immediately on
@@ -20,11 +22,16 @@ class _AuthListenable extends ChangeNotifier {
 }
 
 // ── Tab configuration ──────────────────────────────────────────────────────
+//
+// 6 destinations: Home · Chat · Tasks · Money(expenses) · Notes · Settings.
+// The branch order here MUST match the order of [StatefulShellBranch]es below
+// and the [LzNavDestination]s in [_ShellScaffold].
 
-const _tabs = [
+const _tabs = <_Tab>[
+  _Tab(path: '/home', label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home),
   _Tab(path: '/chat', label: 'Chat', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble),
   _Tab(path: '/tasks', label: 'Tasks', icon: Icons.check_circle_outline, activeIcon: Icons.check_circle),
-  _Tab(path: '/expenses', label: 'Expenses', icon: Icons.receipt_long_outlined, activeIcon: Icons.receipt_long),
+  _Tab(path: '/expenses', label: 'Money', icon: Icons.account_balance_wallet_outlined, activeIcon: Icons.account_balance_wallet),
   _Tab(path: '/notes', label: 'Notes', icon: Icons.notes_outlined, activeIcon: Icons.notes),
   _Tab(path: '/settings', label: 'Settings', icon: Icons.settings_outlined, activeIcon: Icons.settings),
 ];
@@ -52,19 +59,19 @@ class _ShellScaffold extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: shell,
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: shell.currentIndex,
-        onDestinationSelected: (index) => shell.goBranch(
+      bottomNavigationBar: LzBottomNav(
+        currentIndex: shell.currentIndex,
+        onSelected: (index) => shell.goBranch(
           index,
           // Re-open the same branch route instead of always going to initial.
           initialLocation: index == shell.currentIndex,
         ),
         destinations: _tabs
             .map(
-              (t) => NavigationDestination(
-                icon: Icon(t.icon),
-                selectedIcon: Icon(t.activeIcon),
+              (t) => LzNavDestination(
                 label: t.label,
+                icon: t.icon,
+                activeIcon: t.activeIcon,
               ),
             )
             .toList(),
@@ -78,7 +85,7 @@ class _ShellScaffold extends StatelessWidget {
 final routerProvider = Provider<GoRouter>((ref) {
   final listenable = _AuthListenable(ref);
   return GoRouter(
-    initialLocation: '/chat',
+    initialLocation: '/home',
     refreshListenable: listenable,
     redirect: (context, state) {
       final status = ref.read(authProvider).status;
@@ -87,7 +94,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (status == AuthStatus.loading) return null;
       final authed = status == AuthStatus.authenticated;
       if (!authed && !loggingIn) return '/login';
-      if (authed && loggingIn) return '/chat';
+      if (authed && loggingIn) return '/home';
       return null;
     },
     routes: [
@@ -100,6 +107,14 @@ final routerProvider = Provider<GoRouter>((ref) {
       StatefulShellRoute.indexedStack(
         builder: (context, state, shell) => _ShellScaffold(shell: shell),
         branches: [
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/home',
+                builder: (ctx, _) => const HomeScreen(),
+              ),
+            ],
+          ),
           StatefulShellBranch(
             routes: [
               GoRoute(

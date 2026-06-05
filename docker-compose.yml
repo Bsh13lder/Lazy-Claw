@@ -49,6 +49,12 @@ services:
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
+      # Serve the built mobile APK from the web Settings "Mobile App" tab.
+      # The APK is a gitignored build artifact (scripts/build-mobile-apk.sh
+      # writes host ./mobile/dist); mount it read-only so /api/mobile/apk
+      # (which resolves to /app/mobile/dist inside the container) streams the
+      # freshly-built file without baking the 50 MB binary into the image.
+      - ./mobile/dist:/app/mobile/dist:ro
       # Persistent workspace for the Code Specialist (claude-code MCP).
       # All code claude-code writes lands here under
       # /workspace/<project_tag>/<goal_id>/<task_id>/. Mounted directly

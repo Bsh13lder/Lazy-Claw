@@ -1,35 +1,101 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../core/api/api_exceptions.dart';
+import 'package:sqflite_sqlcipher/sqflite.dart';
+
+import '../local/task_dao.dart';
 import '../models/task.dart';
 import '../repositories/tasks_repository.dart';
+import '../sync/reachability.dart';
+import '../sync/task_sync.dart';
 import 'auth_provider.dart';
 
-// ── Repository provider ────────────────────────────────────────────────────
+// ── Infrastructure providers ────────────────────────────────────────────────
 
+/// The opened encrypted local DB. OVERRIDDEN in main() with the real handle —
+/// the bare provider throws so a missing override fails loudly in tests/dev.
+final appDatabaseProvider = Provider<Database>((ref) {
+  throw StateError(
+    'appDatabaseProvider must be overridden with an opened Database '
+    '(see main.dart / openAppDb).',
+  );
+});
+
+/// Local task store backed by the encrypted DB.
+final taskDaoProvider = Provider<TaskDao>((ref) {
+  return TaskDao(ref.watch(appDatabaseProvider));
+});
+
+/// Remote seam (Dio-backed). Same transport as before — now only used by the
+/// sync engine, never directly by the UI.
 final tasksRepositoryProvider = Provider<TasksRepository>((ref) {
   return TasksRepository(DioTasksTransport(ref.watch(apiClientProvider)));
 });
+
+/// The offline-first sync engine.
+final taskSyncProvider = Provider<TaskSync>((ref) {
+  return TaskSync(ref.watch(taskDaoProvider), ref.watch(tasksRepositoryProvider));
+});
+
+/// Reachability of the user's own backend (OS link + active host ping).
+/// Kept alive for the app lifetime and started lazily.
+final reachabilityProvider = Provider<Reachability>((ref) {
+  final probe = DefaultConnectivityProbe(ref.watch(apiClientProvider));
+  final reach = Reachability(probe);
+  ref.onDispose(reach.dispose);
+  return reach;
+});
+
+/// Whether the backend is reachable right now, as a reactive bool. The Tasks
+/// screen watches this to drive the offline banner.
+final reachableProvider = StateNotifierProvider<_ReachableNotifier, bool>((ref) {
+  final reach = ref.watch(reachabilityProvider);
+  return _ReachableNotifier(reach);
+});
+
+class _ReachableNotifier extends StateNotifier<bool> {
+  final Reachability _reach;
+  StreamSubscription<bool>? _sub;
+
+  _ReachableNotifier(this._reach) : super(_reach.value) {
+    _sub = _reach.reachable.listen((v) => state = v);
+    // Kick off the initial probe; updates flow back through the stream.
+    unawaited(_reach.start().then((_) => state = _reach.value));
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+}
 
 // ── State ──────────────────────────────────────────────────────────────────
 
 class TasksState {
   final List<Task> tasks;
+
+  /// Ids with un-pushed local edits — the UI shows a cloud-off badge on these.
+  final Set<String> dirtyIds;
   final bool isLoading;
   final String? error;
 
   const TasksState({
     this.tasks = const [],
+    this.dirtyIds = const {},
     this.isLoading = false,
     this.error,
   });
 
   TasksState copyWith({
     List<Task>? tasks,
+    Set<String>? dirtyIds,
     bool? isLoading,
     String? error,
   }) =>
       TasksState(
         tasks: tasks ?? this.tasks,
+        dirtyIds: dirtyIds ?? this.dirtyIds,
         isLoading: isLoading ?? this.isLoading,
         error: error,
       );
@@ -37,21 +103,33 @@ class TasksState {
 
 // ── Notifier ───────────────────────────────────────────────────────────────
 
+/// Offline-first tasks notifier.
+///
+/// Reads come from the local DAO (instant, works offline). Writes go to the
+/// DAO + outbox first (optimistic), then a best-effort [TaskSync.sync] pushes
+/// them when the backend is reachable. The UI never blocks on the network.
 class TasksNotifier extends StateNotifier<TasksState> {
-  final TasksRepository _repo;
-  TasksNotifier(this._repo) : super(const TasksState());
+  final TaskDao _dao;
+  final TaskSync _sync;
 
+  TasksNotifier(this._dao, this._sync) : super(const TasksState());
+
+  /// Load from the local cache immediately, then kick a background sync and
+  /// refresh from cache again when it settles.
   Future<void> load() async {
     state = state.copyWith(isLoading: true, error: null);
-    try {
-      final tasks = await _repo.listTasks();
-      state = TasksState(tasks: tasks, isLoading: false);
-    } on ApiError catch (e) {
-      state = TasksState(error: e.message, isLoading: false);
-    } catch (e) {
-      state = TasksState(error: e.toString(), isLoading: false);
-    }
+    await _refreshFromCache(loading: false);
+    // Best-effort sync; failures are silent (offline is a normal state).
+    unawaited(_syncThenRefresh());
   }
+
+  /// Pull-to-refresh: force a sync then re-read the cache.
+  Future<void> refresh() async {
+    await _syncThenRefresh();
+  }
+
+  /// Trigger a sync (e.g. when reachability flips to true) then refresh.
+  Future<void> syncNow() => _syncThenRefresh();
 
   Future<void> addTask(
     String title, {
@@ -60,74 +138,74 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? category,
   }) async {
     try {
-      final task = await _repo.createTask(
+      await _dao.applyLocalCreate(
         title,
-        priority: priority,
+        priority: priority ?? 'medium',
         dueDate: dueDate,
         category: category,
       );
-      // Immutable prepend — do not mutate existing list.
-      state = state.copyWith(tasks: [task, ...state.tasks]);
-    } on ApiError catch (e) {
-      state = state.copyWith(error: e.message);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
     }
   }
 
   Future<void> completeTask(String id) async {
-    // Optimistic update: mark done immediately.
-    final updated = state.tasks.map((t) {
-      if (t.id == id) return t.copyWith(status: 'done');
-      return t;
-    }).toList();
-    state = state.copyWith(tasks: updated);
-
     try {
-      await _repo.completeTask(id);
-    } on ApiError catch (e) {
-      // Rollback on failure.
-      state = state.copyWith(
-        tasks: state.tasks.map((t) {
-          if (t.id == id) return t.copyWith(status: 'todo');
-          return t;
-        }).toList(),
-        error: e.message,
-      );
+      await _dao.applyLocalComplete(id);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
     } catch (e) {
-      state = state.copyWith(
-        tasks: state.tasks.map((t) {
-          if (t.id == id) return t.copyWith(status: 'todo');
-          return t;
-        }).toList(),
-        error: e.toString(),
-      );
+      state = state.copyWith(error: e.toString());
     }
   }
 
   Future<void> deleteTask(String id) async {
-    // Optimistic remove.
-    final without = state.tasks.where((t) => t.id != id).toList();
-    state = state.copyWith(tasks: without);
-
     try {
-      await _repo.deleteTask(id);
-    } on ApiError catch (e) {
-      // Reload the list to restore the task.
-      state = state.copyWith(error: e.message);
-      await load();
+      await _dao.applyLocalDelete(id);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
-      await load();
     }
   }
 
   void clearError() => state = state.copyWith(error: null);
+
+  // ── internals ──────────────────────────────────────────────────────────
+
+  Future<void> _refreshFromCache({bool loading = false}) async {
+    final tasks = await _dao.list();
+    final dirty = await _dao.dirtyIds();
+    state = TasksState(tasks: tasks, dirtyIds: dirty, isLoading: loading);
+  }
+
+  Future<void> _syncThenRefresh() async {
+    try {
+      await _sync.sync();
+    } catch (_) {
+      // Offline / server down — the local cache already holds the truth.
+    }
+    if (mounted) await _refreshFromCache();
+  }
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────
 
 final tasksProvider =
     StateNotifierProvider<TasksNotifier, TasksState>((ref) {
-  return TasksNotifier(ref.watch(tasksRepositoryProvider));
+  final notifier = TasksNotifier(
+    ref.watch(taskDaoProvider),
+    ref.watch(taskSyncProvider),
+  );
+
+  // When the backend comes back online, drain the outbox + pull deltas.
+  ref.listen<bool>(reachableProvider, (prev, next) {
+    if (next == true && prev != true) {
+      notifier.syncNow();
+    }
+  });
+
+  return notifier;
 });

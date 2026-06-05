@@ -1,0 +1,252 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lazyclaw_mobile/local/app_db.dart';
+import 'package:lazyclaw_mobile/local/task_dao.dart';
+import 'package:lazyclaw_mobile/models/task.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+int _dbCounter = 0;
+
+/// Spin up a real in-memory SQLite (via ffi) with the production schema, so the
+/// DAO logic is verified against the actual engine — no hand-rolled fake DB.
+/// Each call gets an ISOLATED in-memory DB (`singleInstance: false` + a unique
+/// path) so state never bleeds between tests.
+Future<TaskDao> _freshDao() async {
+  final db = await databaseFactoryFfi.openDatabase(
+    'file:memdb${_dbCounter++}?mode=memory&cache=shared',
+    options: OpenDatabaseOptions(
+      version: kAppDbVersion,
+      singleInstance: false,
+      onCreate: (db, v) async => createAppDbSchema(db),
+    ),
+  );
+  return TaskDao(db);
+}
+
+Task _serverTask({
+  String id = 's1',
+  String title = 'Server task',
+  String status = 'todo',
+  String createdAt = '2026-06-05T10:00:00Z',
+}) =>
+    Task(
+      id: id,
+      userId: 'u1',
+      title: title,
+      priority: 'medium',
+      status: status,
+      owner: 'user',
+      nagCount: 0,
+      createdAt: createdAt,
+    );
+
+void main() {
+  setUpAll(() {
+    sqfliteFfiInit();
+  });
+
+  group('TaskDao local create', () {
+    test('mints a UUID, stores dirty row, and enqueues a create', () async {
+      final dao = await _freshDao();
+      final task = await dao.applyLocalCreate('Buy milk');
+
+      expect(task.id, isNotEmpty);
+      expect(task.title, 'Buy milk');
+      expect(task.status, 'todo');
+
+      final stored = await dao.getById(task.id);
+      expect(stored, isNotNull);
+
+      final dirty = await dao.dirtyIds();
+      expect(dirty, contains(task.id));
+
+      final outbox = await dao.readOutbox();
+      expect(outbox, hasLength(1));
+      expect(outbox.first.op, OutboxOp.create);
+      expect(outbox.first.entityId, task.id);
+      expect(outbox.first.payload['id'], task.id);
+      expect(outbox.first.payload['title'], 'Buy milk');
+    });
+
+    test('honours a caller-supplied id (idempotent replay)', () async {
+      final dao = await _freshDao();
+      final task = await dao.applyLocalCreate('Pinned', id: 'fixed-id');
+      expect(task.id, 'fixed-id');
+      final outbox = await dao.readOutbox();
+      expect(outbox.first.payload['id'], 'fixed-id');
+    });
+
+    test('passes optional fields into the outbox payload', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate(
+        'Dentist',
+        priority: 'high',
+        dueDate: '2026-06-20',
+        category: 'health',
+      );
+      final outbox = await dao.readOutbox();
+      expect(outbox.first.payload['priority'], 'high');
+      expect(outbox.first.payload['due_date'], '2026-06-20');
+      expect(outbox.first.payload['category'], 'health');
+    });
+  });
+
+  group('TaskDao local list excludes deletes', () {
+    test('list() hides tombstoned tasks', () async {
+      final dao = await _freshDao();
+      final a = await dao.applyLocalCreate('A');
+      await dao.applyLocalCreate('B');
+      await dao.applyLocalDelete(a.id);
+
+      final tasks = await dao.list();
+      expect(tasks.map((t) => t.title), ['B']);
+    });
+  });
+
+  group('TaskDao local update / complete / delete', () {
+    test('update bumps dirty + enqueues an update with the patch', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Old title');
+      await dao.readOutbox(); // create row exists
+
+      final updated = await dao.applyLocalUpdate(t.id, title: 'New title');
+      expect(updated!.title, 'New title');
+
+      final stored = await dao.getById(t.id);
+      expect(stored!.title, 'New title');
+
+      final outbox = await dao.readOutbox();
+      final updateItem = outbox.firstWhere((o) => o.op == OutboxOp.update);
+      expect(updateItem.payload['title'], 'New title');
+      expect(updateItem.payload['id'], t.id);
+    });
+
+    test('complete marks done + enqueues a complete', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Finish me');
+      final done = await dao.applyLocalComplete(t.id);
+      expect(done!.status, 'done');
+
+      final stored = await dao.getById(t.id);
+      expect(stored!.status, 'done');
+
+      final outbox = await dao.readOutbox();
+      expect(outbox.any((o) => o.op == OutboxOp.complete), isTrue);
+    });
+
+    test('delete tombstones + enqueues a delete', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Remove me');
+      final ok = await dao.applyLocalDelete(t.id);
+      expect(ok, isTrue);
+
+      expect(await dao.getById(t.id), isNotNull); // tombstone still present
+      expect((await dao.list()).map((e) => e.id), isNot(contains(t.id)));
+
+      final outbox = await dao.readOutbox();
+      expect(outbox.any((o) => o.op == OutboxOp.delete), isTrue);
+    });
+
+    test('update/complete/delete on a missing id is a no-op', () async {
+      final dao = await _freshDao();
+      expect(await dao.applyLocalUpdate('nope', title: 'x'), isNull);
+      expect(await dao.applyLocalComplete('nope'), isNull);
+      expect(await dao.applyLocalDelete('nope'), isFalse);
+      expect(await dao.readOutbox(), isEmpty);
+    });
+  });
+
+  group('TaskDao outbox replay ordering', () {
+    test('reads outbox in seq (insertion) order', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A');
+      await dao.applyLocalUpdate(t.id, title: 'A2');
+      await dao.applyLocalComplete(t.id);
+
+      final outbox = await dao.readOutbox();
+      expect(outbox.map((o) => o.op),
+          [OutboxOp.create, OutboxOp.update, OutboxOp.complete]);
+      // seq is strictly increasing.
+      for (var i = 1; i < outbox.length; i++) {
+        expect(outbox[i].seq, greaterThan(outbox[i - 1].seq));
+      }
+    });
+
+    test('deleteOutboxItem removes only the targeted row', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A');
+      await dao.applyLocalComplete(t.id);
+      final outbox = await dao.readOutbox();
+      await dao.deleteOutboxItem(outbox.first.seq);
+      final remaining = await dao.readOutbox();
+      expect(remaining, hasLength(1));
+      expect(remaining.first.op, OutboxOp.complete);
+    });
+  });
+
+  group('TaskDao clearDirty', () {
+    test('clears dirty flag for a live task', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A');
+      await dao.clearDirty(t.id);
+      expect(await dao.dirtyIds(), isEmpty);
+      expect(await dao.getById(t.id), isNotNull);
+    });
+
+    test('hard-removes a tombstone once its delete has pushed', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A');
+      await dao.applyLocalDelete(t.id);
+      await dao.clearDirty(t.id);
+      expect(await dao.getById(t.id), isNull);
+    });
+  });
+
+  group('TaskDao upsertFromServer + tombstone', () {
+    test('writes a clean server row', () async {
+      final dao = await _freshDao();
+      await dao.upsertFromServer(
+        _serverTask(id: 'srv', title: 'From server'),
+        serverUpdatedAt: '2026-06-05T11:00:00Z',
+      );
+      final stored = await dao.getById('srv');
+      expect(stored!.title, 'From server');
+      expect(await dao.dirtyIds(), isEmpty);
+      final row = await dao.getRow('srv');
+      expect(row!['updated_at'], '2026-06-05T11:00:00Z');
+    });
+
+    test('applyServerDelete tombstones an existing row', () async {
+      final dao = await _freshDao();
+      await dao.upsertFromServer(_serverTask(id: 'srv'));
+      await dao.applyServerDelete('srv');
+      expect((await dao.list()).map((e) => e.id), isNot(contains('srv')));
+    });
+  });
+
+  group('TaskDao cursor + conflicts', () {
+    test('cursor round-trips per entity', () async {
+      final dao = await _freshDao();
+      expect(await dao.getCursor(), isNull);
+      await dao.setCursor('2026-06-05T12:00:00Z');
+      expect(await dao.getCursor(), '2026-06-05T12:00:00Z');
+      await dao.setCursor('2026-06-05T13:00:00Z');
+      expect(await dao.getCursor(), '2026-06-05T13:00:00Z');
+    });
+
+    test('logs and reads conflicts (never silently dropped)', () async {
+      final dao = await _freshDao();
+      await dao.logConflict(
+        id: 't1',
+        field: 'title',
+        local: 'Local title',
+        server: 'Server title',
+        at: '2026-06-05T12:00:00Z',
+      );
+      final conflicts = await dao.readConflicts();
+      expect(conflicts, hasLength(1));
+      expect(conflicts.first.field, 'title');
+      expect(conflicts.first.local, 'Local title');
+      expect(conflicts.first.server, 'Server title');
+    });
+  });
+}

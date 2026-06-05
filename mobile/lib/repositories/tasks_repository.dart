@@ -8,6 +8,8 @@ abstract class TasksTransport {
     Map<String, dynamic>? queryParams,
   });
   Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body);
+  Future<Map<String, dynamic>> patchJson(
+      String path, Map<String, dynamic> body);
   Future<Map<String, dynamic>> deleteJson(String path);
 }
 
@@ -38,6 +40,17 @@ class DioTasksTransport implements TasksTransport {
       );
 
   @override
+  Future<Map<String, dynamic>> patchJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      _client.patch<Map<String, dynamic>>(
+        path,
+        data: body,
+        fromJson: (d) => Map<String, dynamic>.from(d as Map),
+      );
+
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) =>
       _client.delete<Map<String, dynamic>>(
         path,
@@ -45,9 +58,57 @@ class DioTasksTransport implements TasksTransport {
       );
 }
 
+/// A server task paired with its authoritative `updated_at` — the timestamp
+/// last-write-wins compares against. Keeps the immutable [Task] model free of
+/// sync-only fields.
+class ServerTask {
+  final Task task;
+  final String? updatedAt;
+  const ServerTask(this.task, this.updatedAt);
+}
+
+/// One server-side delta page from `GET /api/tasks/changes`.
+class TaskChanges {
+  /// Tasks created/updated server-side since the cursor (with their server
+  /// `updated_at` for LWW).
+  final List<ServerTask> tasks;
+
+  /// Ids the server soft-deleted since the cursor.
+  final List<String> deleted;
+
+  /// Server "now" timestamp — becomes the next cursor (avoids clock skew).
+  final String now;
+
+  const TaskChanges({
+    required this.tasks,
+    required this.deleted,
+    required this.now,
+  });
+}
+
 class TasksRepository {
   final TasksTransport _t;
   TasksRepository(this._t);
+
+  /// Pull the delta since [since] (ISO timestamp, null = full snapshot).
+  /// Maps `GET /api/tasks/changes?since=<iso>` → {tasks, deleted, now}.
+  Future<TaskChanges> fetchChanges({String? since}) async {
+    final json = await _t.getJson(
+      '/api/tasks/changes',
+      queryParams: since == null ? null : {'since': since},
+    );
+    final rawTasks = json['tasks'] as List? ?? const [];
+    final rawDeleted = json['deleted'] as List? ?? const [];
+    return TaskChanges(
+      tasks: rawTasks.map((e) {
+        final map = Map<String, dynamic>.from(e as Map);
+        final updatedAt = map['updated_at']?.toString();
+        return ServerTask(Task.fromJson(map), updatedAt);
+      }).toList(),
+      deleted: rawDeleted.map((e) => e.toString()).toList(),
+      now: (json['now'] ?? '').toString(),
+    );
+  }
 
   /// Fetch tasks. Optionally filter by owner / status / bucket.
   Future<List<Task>> listTasks({
@@ -71,8 +132,12 @@ class TasksRepository {
   }
 
   /// Create a task. Returns the created [Task].
+  ///
+  /// Pass [id] to send a client-minted UUID — the server's POST /api/tasks
+  /// accepts it, making the create idempotent on outbox replay.
   Future<Task> createTask(
     String title, {
+    String? id,
     String? description,
     String? category,
     String? priority,
@@ -81,6 +146,7 @@ class TasksRepository {
     String? recurring,
   }) async {
     final body = <String, dynamic>{'title': title};
+    if (id != null) body['id'] = id;
     if (description != null) body['description'] = description;
     if (category != null) body['category'] = category;
     if (priority != null) body['priority'] = priority;
@@ -92,6 +158,11 @@ class TasksRepository {
     // Server wraps: {"task": {...}}
     final raw = json['task'] as Map<String, dynamic>? ?? json;
     return Task.fromJson(raw);
+  }
+
+  /// Patch a task via PATCH /api/tasks/{id}. [patch] holds snake_case fields.
+  Future<void> updateTask(String id, Map<String, dynamic> patch) async {
+    await _t.patchJson('/api/tasks/$id', patch);
   }
 
   /// Mark a task done via POST /api/tasks/{id}/complete.

@@ -27,7 +27,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     super.dispose();
   }
 
-  Future<void> _refresh() => ref.read(tasksProvider.notifier).load();
+  Future<void> _refresh() => ref.read(tasksProvider.notifier).refresh();
 
   Future<void> _submitAdd() async {
     final title = _addController.text.trim();
@@ -58,10 +58,13 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       }
     });
 
+    final reachable = ref.watch(reachableProvider);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Tasks')),
       body: Column(
         children: [
+          if (!reachable) const _OfflineBanner(),
           Expanded(child: _buildBody(context, state)),
           _buildAddRow(context),
         ],
@@ -98,6 +101,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           final task = state.tasks[index];
           return _TaskTile(
             task: task,
+            pendingSync: state.dirtyIds.contains(task.id),
             onToggle: () =>
                 ref.read(tasksProvider.notifier).completeTask(task.id),
             onDelete: () =>
@@ -150,15 +154,48 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   }
 }
 
+// ── Offline banner ───────────────────────────────────────────────────────────
+
+class _OfflineBanner extends StatelessWidget {
+  const _OfflineBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.orange.shade700,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: const [
+              Icon(Icons.cloud_off, color: Colors.white, size: 18),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Computer offline — changes will sync',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Task tile ──────────────────────────────────────────────────────────────
 
 class _TaskTile extends StatelessWidget {
   final Task task;
+  final bool pendingSync;
   final VoidCallback onToggle;
   final VoidCallback onDelete;
 
   const _TaskTile({
     required this.task,
+    required this.pendingSync,
     required this.onToggle,
     required this.onDelete,
   });
@@ -212,7 +249,20 @@ class _TaskTile extends StatelessWidget {
               : null,
         ),
         subtitle: _buildSubtitle(context),
-        trailing: _buildPriorityChip(priorityColor),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (pendingSync) ...[
+              Tooltip(
+                message: 'Not synced yet — pending upload',
+                child: Icon(Icons.cloud_off_outlined,
+                    size: 18, color: Colors.grey.shade500),
+              ),
+              const SizedBox(width: 8),
+            ],
+            _buildPriorityChip(priorityColor),
+          ],
+        ),
       ),
     );
   }

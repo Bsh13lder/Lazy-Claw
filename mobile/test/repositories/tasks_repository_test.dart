@@ -38,6 +38,17 @@ class _FakeTransport implements TasksTransport {
   }
 
   @override
+  Future<Map<String, dynamic>> patchJson(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    lastMethod = 'PATCH';
+    lastPath = path;
+    lastBody = body;
+    return response;
+  }
+
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async {
     lastMethod = 'DELETE';
     lastPath = path;
@@ -145,6 +156,60 @@ void main() {
       final t = _FakeTransport(_taskJson(id: 'flat'));
       final task = await TasksRepository(t).createTask('Flat response');
       expect(task.id, 'flat');
+    });
+  });
+
+  group('TasksRepository.createTask with client id', () {
+    test('sends the client id in the body for idempotent replay', () async {
+      final t = _FakeTransport({'task': _taskJson(id: 'cid')});
+      await TasksRepository(t).createTask('Idempotent', id: 'cid');
+      expect(t.lastBody, containsPair('id', 'cid'));
+    });
+  });
+
+  group('TasksRepository.updateTask', () {
+    test('PATCH /api/tasks/{id} with the patch body', () async {
+      final t = _FakeTransport({'task': _taskJson(id: 'u1')});
+      await TasksRepository(t).updateTask('u1', {'title': 'New', 'status': 'todo'});
+      expect(t.lastMethod, 'PATCH');
+      expect(t.lastPath, '/api/tasks/u1');
+      expect(t.lastBody, containsPair('title', 'New'));
+      expect(t.lastBody, containsPair('status', 'todo'));
+    });
+  });
+
+  group('TasksRepository.fetchChanges', () {
+    test('GET /api/tasks/changes and maps tasks/deleted/now', () async {
+      final t = _FakeTransport({
+        'tasks': [
+          {..._taskJson(id: 'c1', title: 'Changed'), 'updated_at': '2026-06-05T11:00:00Z'},
+        ],
+        'deleted': ['gone1', 'gone2'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final changes = await TasksRepository(t).fetchChanges(
+          since: '2026-06-05T10:00:00Z');
+      expect(t.lastMethod, 'GET');
+      expect(t.lastPath, '/api/tasks/changes');
+      expect(t.lastQueryParams, containsPair('since', '2026-06-05T10:00:00Z'));
+      expect(changes.tasks, hasLength(1));
+      expect(changes.tasks.first.task.id, 'c1');
+      expect(changes.tasks.first.updatedAt, '2026-06-05T11:00:00Z');
+      expect(changes.deleted, ['gone1', 'gone2']);
+      expect(changes.now, '2026-06-05T12:00:00Z');
+    });
+
+    test('omits ?since when cursor is null (full snapshot)', () async {
+      final t = _FakeTransport({'tasks': [], 'deleted': [], 'now': 'x'});
+      await TasksRepository(t).fetchChanges();
+      expect(t.lastQueryParams, isNull);
+    });
+
+    test('tolerates missing deleted/now keys', () async {
+      final t = _FakeTransport({'tasks': []});
+      final changes = await TasksRepository(t).fetchChanges();
+      expect(changes.deleted, isEmpty);
+      expect(changes.now, '');
     });
   });
 

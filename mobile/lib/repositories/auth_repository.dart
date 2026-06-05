@@ -10,9 +10,14 @@ class DioAuthTransport implements AuthTransport {
   final ApiClient _client;
   DioAuthTransport(this._client);
   @override
-  Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body) =>
-      _client.post<Map<String, dynamic>>(path, data: body,
+  Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body) {
+    if (path == '/api/auth/me') {
+      return _client.get<Map<String, dynamic>>(path,
           fromJson: (d) => Map<String, dynamic>.from(d as Map));
+    }
+    return _client.post<Map<String, dynamic>>(path, data: body,
+        fromJson: (d) => Map<String, dynamic>.from(d as Map));
+  }
 }
 
 class AuthRepository {

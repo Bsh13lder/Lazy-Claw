@@ -84,12 +84,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(_connected ? 'Chat' : 'Connecting…'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: () => ref.read(authProvider.notifier).logout(),
-          ),
-        ],
       ),
       body: Column(children: [
         if (_connectError != null)

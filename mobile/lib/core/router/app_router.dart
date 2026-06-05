@@ -1,10 +1,14 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../providers/auth_provider.dart';
-import '../../screens/login_screen.dart';
-import '../../screens/register_screen.dart';
 import '../../screens/chat_screen.dart';
+import '../../screens/expenses_screen.dart';
+import '../../screens/login_screen.dart';
+import '../../screens/notes_screen.dart';
+import '../../screens/register_screen.dart';
+import '../../screens/settings_screen.dart';
+import '../../screens/tasks_screen.dart';
 
 /// A [ChangeNotifier] that fires whenever the [authProvider] state changes,
 /// so [GoRouter.refreshListenable] re-evaluates the redirect immediately on
@@ -14,6 +18,62 @@ class _AuthListenable extends ChangeNotifier {
     ref.listen<AuthState>(authProvider, (_, next) => notifyListeners());
   }
 }
+
+// ── Tab configuration ──────────────────────────────────────────────────────
+
+const _tabs = [
+  _Tab(path: '/chat', label: 'Chat', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble),
+  _Tab(path: '/tasks', label: 'Tasks', icon: Icons.check_circle_outline, activeIcon: Icons.check_circle),
+  _Tab(path: '/expenses', label: 'Expenses', icon: Icons.receipt_long_outlined, activeIcon: Icons.receipt_long),
+  _Tab(path: '/notes', label: 'Notes', icon: Icons.notes_outlined, activeIcon: Icons.notes),
+  _Tab(path: '/settings', label: 'Settings', icon: Icons.settings_outlined, activeIcon: Icons.settings),
+];
+
+class _Tab {
+  final String path;
+  final String label;
+  final IconData icon;
+  final IconData activeIcon;
+  const _Tab({
+    required this.path,
+    required this.label,
+    required this.icon,
+    required this.activeIcon,
+  });
+}
+
+// ── Shell scaffold ─────────────────────────────────────────────────────────
+
+class _ShellScaffold extends StatelessWidget {
+  final StatefulNavigationShell shell;
+  const _ShellScaffold({required this.shell});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: shell,
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: shell.currentIndex,
+        onDestinationSelected: (index) => shell.goBranch(
+          index,
+          // Re-open the same branch route instead of always going to initial.
+          initialLocation: index == shell.currentIndex,
+        ),
+        destinations: _tabs
+            .map(
+              (t) => NavigationDestination(
+                icon: Icon(t.icon),
+                selectedIcon: Icon(t.activeIcon),
+                label: t.label,
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+}
+
+// ── Router provider ────────────────────────────────────────────────────────
 
 final routerProvider = Provider<GoRouter>((ref) {
   final listenable = _AuthListenable(ref);
@@ -31,9 +91,57 @@ final routerProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
+      // Auth routes — OUTSIDE the shell so they have no bottom nav bar.
       GoRoute(path: '/login', builder: (ctx, _) => const LoginScreen()),
       GoRoute(path: '/register', builder: (ctx, _) => const RegisterScreen()),
-      GoRoute(path: '/chat', builder: (ctx, _) => const ChatScreen()),
+
+      // Main shell — StatefulShellRoute.indexedStack keeps each branch alive
+      // (the ChatScreen WebSocket connection survives tab switches).
+      StatefulShellRoute.indexedStack(
+        builder: (context, state, shell) => _ShellScaffold(shell: shell),
+        branches: [
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/chat',
+                builder: (ctx, _) => const ChatScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/tasks',
+                builder: (ctx, _) => const TasksScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/expenses',
+                builder: (ctx, _) => const ExpensesScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/notes',
+                builder: (ctx, _) => const NotesScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/settings',
+                builder: (ctx, _) => const SettingsScreen(),
+              ),
+            ],
+          ),
+        ],
+      ),
     ],
   );
 });

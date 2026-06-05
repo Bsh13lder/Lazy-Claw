@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState } from "react";
+import DocAboutButton from "../components/DocAboutButton";
 
 // Each type stays its own lazy chunk so opening "Sheets" doesn't pull in
 // pdf.js, and opening "PDF" doesn't pull in the ~10 MB Univer engine.
@@ -68,6 +69,10 @@ export default function Documents({ fullscreen = false }: DocumentsProps) {
             {t.label}
           </button>
         ))}
+
+        <span className="ml-1">
+          <DocAboutButton kind={kind} />
+        </span>
 
         {fullscreen ? (
           <button

@@ -1,7 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Release builds need INTERNET explicitly (Flutter only adds it to the
+         debug/profile manifests). Self-hosted LazyClaw is reached over plain
+         http on the LAN, so allow cleartext too (release blocks it by default). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="lazyclaw_mobile"
+        android:label="LazyClaw"
         android:name="${applicationName}"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"

@@ -13,7 +13,9 @@ import 'uuid.dart';
 ///
 /// v2: adds `outbox.attempts` so the push engine can count server 5xx retries
 ///     and dead-letter a poison item instead of silently dropping it.
-const int kAppDbVersion = 2;
+/// v3: adds `note_cache`, `project_cache`, `expense_cache` so Notes + Budgets
+///     are offline-first too (outbox/sync_state/conflicts are already generic).
+const int kAppDbVersion = 3;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -81,6 +83,64 @@ const List<String> kAppDbSchema = [
     at TEXT
   )
   ''',
+  '''
+  CREATE TABLE IF NOT EXISTS note_cache (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    content TEXT,
+    tags TEXT,
+    importance INTEGER,
+    pinned INTEGER,
+    trace_session_id TEXT,
+    title_key TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    dirty INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS project_cache (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    name_key TEXT,
+    budget REAL,
+    currency TEXT,
+    status TEXT,
+    description TEXT,
+    lazybrain_note_id TEXT,
+    spent REAL,
+    remaining REAL,
+    created_at TEXT,
+    updated_at TEXT,
+    dirty INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT
+  )
+  ''',
+  '''
+  CREATE TABLE IF NOT EXISTS expense_cache (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    task_id TEXT,
+    amount REAL,
+    currency TEXT,
+    description TEXT,
+    vendor TEXT,
+    notes TEXT,
+    spent_at TEXT,
+    status TEXT,
+    recurring_expense_id TEXT,
+    lazybrain_note_id TEXT,
+    project_name TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    dirty INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT
+  )
+  ''',
 ];
 
 /// Apply the full schema to [db]. Used by both [openAppDb] (via onCreate) and
@@ -103,6 +163,12 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
         'ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0',
       );
     }
+  }
+  // v2 → v3: add the Notes + Budgets offline cache tables. Every statement is
+  // CREATE TABLE IF NOT EXISTS, so re-running the full schema only creates the
+  // three new tables and leaves existing ones (and their data) untouched.
+  if (oldVersion < 3) {
+    await createAppDbSchema(db);
   }
 }
 

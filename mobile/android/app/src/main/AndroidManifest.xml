@@ -3,6 +3,8 @@
          debug/profile manifests). Self-hosted LazyClaw is reached over plain
          http on the LAN, so allow cleartext too (release blocks it by default). -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Required for local notifications on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="LazyClaw"
         android:name="${applicationName}"

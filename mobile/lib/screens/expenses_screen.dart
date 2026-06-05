@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../providers/budgets_provider.dart';
+import '../providers/tasks_provider.dart' show reachableProvider;
 
 class ExpensesScreen extends ConsumerStatefulWidget {
   const ExpensesScreen({super.key});
@@ -29,7 +30,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
     super.dispose();
   }
 
-  Future<void> _refresh() => ref.read(budgetsProvider.notifier).load();
+  Future<void> _refresh() => ref.read(budgetsProvider.notifier).refresh();
 
   Future<void> _submitAddExpense() async {
     final amountText = _amountController.text.trim();
@@ -105,8 +106,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
             onPressed: () async {
               final name = nameController.text.trim();
               if (name.isEmpty) return;
-              final budget =
-                  double.tryParse(budgetController.text.trim());
+              final budget = double.tryParse(budgetController.text.trim());
               Navigator.pop(ctx);
               await ref
                   .read(budgetsProvider.notifier)
@@ -131,8 +131,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
             content: Text(next.error!),
             action: SnackBarAction(
               label: 'Dismiss',
-              onPressed: () =>
-                  ref.read(budgetsProvider.notifier).clearError(),
+              onPressed: () => ref.read(budgetsProvider.notifier).clearError(),
             ),
           ),
         );
@@ -143,6 +142,8 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
     if (_selectedProjectId == null && state.projects.isNotEmpty) {
       _selectedProjectId = state.projects.first.id;
     }
+
+    final reachable = ref.watch(reachableProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -157,6 +158,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
       ),
       body: Column(
         children: [
+          if (!reachable) const _OfflineBanner(),
           Expanded(child: _buildBody(context, state)),
           _buildAddRow(context, state),
         ],
@@ -165,15 +167,11 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
   }
 
   Widget _buildBody(BuildContext context, BudgetsState state) {
-    if (state.isLoading &&
-        state.projects.isEmpty &&
-        state.expenses.isEmpty) {
+    if (state.isLoading && state.projects.isEmpty && state.expenses.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
 
-    if (!state.isLoading &&
-        state.projects.isEmpty &&
-        state.error == null) {
+    if (!state.isLoading && state.projects.isEmpty && state.error == null) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -181,8 +179,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
             const Icon(Icons.receipt_long_outlined,
                 size: 56, color: Colors.grey),
             const SizedBox(height: 12),
-            const Text('No projects yet',
-                style: TextStyle(color: Colors.grey)),
+            const Text('No projects yet', style: TextStyle(color: Colors.grey)),
             const SizedBox(height: 8),
             FilledButton.icon(
               onPressed: _showAddProjectDialog,
@@ -211,7 +208,12 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
                     ),
               ),
             ),
-            ...state.projects.map((p) => _ProjectCard(project: p)),
+            ...state.projects.map((p) => _ProjectCard(
+                  project: p,
+                  pendingSync: state.dirtyProjectIds.contains(p.id),
+                  onDelete: () =>
+                      ref.read(budgetsProvider.notifier).removeProject(p.id),
+                )),
             const Divider(height: 24),
           ],
           // ── Expenses list section ──────────────────────────────────
@@ -225,7 +227,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
                   ),
             ),
           ),
-          if (state.expenses.isEmpty && !state.isLoadingExpenses)
+          if (state.expenses.isEmpty && !state.isLoading)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 24, horizontal: 16),
               child: Center(
@@ -234,15 +236,13 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
               ),
             )
           else
-            ...state.expenses
-                .where((e) => !e.isVoid)
-                .map((e) => _ExpenseTile(
-                      expense: e,
-                      projects: state.projects,
-                      onDelete: () => ref
-                          .read(budgetsProvider.notifier)
-                          .removeExpense(e.id),
-                    )),
+            ...state.expenses.where((e) => !e.isVoid).map((e) => _ExpenseTile(
+                  expense: e,
+                  projects: state.projects,
+                  pendingSync: state.dirtyExpenseIds.contains(e.id),
+                  onDelete: () =>
+                      ref.read(budgetsProvider.notifier).removeExpense(e.id),
+                )),
         ],
       ),
     );
@@ -267,14 +267,12 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
             // Project picker row
             Row(
               children: [
-                const Icon(Icons.folder_outlined,
-                    size: 18, color: Colors.grey),
+                const Icon(Icons.folder_outlined, size: 18, color: Colors.grey),
                 const SizedBox(width: 6),
                 Expanded(
                   child: state.projects.isEmpty
                       ? const Text('No projects',
-                          style:
-                              TextStyle(color: Colors.grey, fontSize: 13))
+                          style: TextStyle(color: Colors.grey, fontSize: 13))
                       : DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
                             value: _selectedProjectId,
@@ -286,8 +284,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
                                 .map((p) => DropdownMenuItem<String>(
                                       value: p.id,
                                       child: Text(p.name,
-                                          style: const TextStyle(
-                                              fontSize: 13)),
+                                          style: const TextStyle(fontSize: 13)),
                                     ))
                                 .toList(),
                             onChanged: (v) =>
@@ -310,11 +307,11 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
                       prefixText: '\$ ',
                       border: OutlineInputBorder(),
                       isDense: true,
-                      contentPadding: EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 10),
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 8, vertical: 10),
                     ),
-                    keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true),
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
                     textInputAction: TextInputAction.next,
                   ),
                 ),
@@ -326,8 +323,8 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
                       hintText: 'Description…',
                       border: OutlineInputBorder(),
                       isDense: true,
-                      contentPadding: EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),
                     textInputAction: TextInputAction.done,
                     onSubmitted: (_) => _submitAddExpense(),
@@ -340,8 +337,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
                         height: 40,
                         child: Padding(
                           padding: EdgeInsets.all(8),
-                          child:
-                              CircularProgressIndicator(strokeWidth: 2),
+                          child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                       )
                     : IconButton(
@@ -358,12 +354,64 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen> {
   }
 }
 
+// ── Offline banner ───────────────────────────────────────────────────────────
+
+class _OfflineBanner extends StatelessWidget {
+  const _OfflineBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.orange.shade700,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: const [
+              Icon(Icons.cloud_off, color: Colors.white, size: 18),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Computer offline — changes will sync',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Cloud-off badge (shared) ─────────────────────────────────────────────────
+
+class _PendingSyncBadge extends StatelessWidget {
+  const _PendingSyncBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Not synced yet — pending upload',
+      child: Icon(Icons.cloud_off_outlined,
+          size: 16, color: Colors.grey.shade500),
+    );
+  }
+}
+
 // ── Project card with budget bar ───────────────────────────────────────────
 
 class _ProjectCard extends StatelessWidget {
   final Project project;
+  final bool pendingSync;
+  final VoidCallback onDelete;
 
-  const _ProjectCard({required this.project});
+  const _ProjectCard({
+    required this.project,
+    required this.pendingSync,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -373,79 +421,112 @@ class _ProjectCard extends StatelessWidget {
     final budget = project.budget;
     final currency = project.currency;
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    project.name,
-                    style:
-                        Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                  ),
-                ),
-                if (project.isArchived)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.withAlpha(40),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text('archived',
-                        style:
-                            TextStyle(fontSize: 10, color: Colors.grey)),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            if (budget > 0) ...[
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: fraction,
-                  backgroundColor: Colors.grey.withAlpha(40),
-                  valueColor: AlwaysStoppedAnimation<Color>(barColor),
-                  minHeight: 8,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  Text(
-                    '$currency ${_fmtAmount(spent)} spent',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: barColor),
-                  ),
-                  const Spacer(),
-                  Text(
-                    'of $currency ${_fmtAmount(budget)}',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: Colors.grey),
-                  ),
+    return Dismissible(
+      key: ValueKey('project-${project.id}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        color: Colors.red.shade600,
+        child: const Icon(Icons.delete_outline, color: Colors.white),
+      ),
+      confirmDismiss: (_) async {
+        return await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Delete project?'),
+                content: Text(
+                    '${project.name} and its budget bar will be removed.'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('Cancel')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('Delete')),
                 ],
               ),
-            ] else ...[
-              Text(
-                'No budget set',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: Colors.grey),
+            ) ??
+            false;
+      },
+      onDismissed: (_) => onDelete(),
+      child: Card(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      project.name,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ),
+                  if (pendingSync) ...[
+                    const _PendingSyncBadge(),
+                    const SizedBox(width: 6),
+                  ],
+                  if (project.isArchived)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.withAlpha(40),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text('archived',
+                          style: TextStyle(fontSize: 10, color: Colors.grey)),
+                    ),
+                ],
               ),
+              const SizedBox(height: 6),
+              if (budget > 0) ...[
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: fraction,
+                    backgroundColor: Colors.grey.withAlpha(40),
+                    valueColor: AlwaysStoppedAnimation<Color>(barColor),
+                    minHeight: 8,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Text(
+                      '$currency ${_fmtAmount(spent)} spent',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: barColor),
+                    ),
+                    const Spacer(),
+                    Text(
+                      'of $currency ${_fmtAmount(budget)}',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ] else ...[
+                Text(
+                  'No budget set',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: Colors.grey),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -462,11 +543,13 @@ class _ProjectCard extends StatelessWidget {
 class _ExpenseTile extends StatelessWidget {
   final Expense expense;
   final List<Project> projects;
+  final bool pendingSync;
   final VoidCallback onDelete;
 
   const _ExpenseTile({
     required this.expense,
     required this.projects,
+    required this.pendingSync,
     required this.onDelete,
   });
 
@@ -480,7 +563,7 @@ class _ExpenseTile extends StatelessWidget {
         '';
 
     return Dismissible(
-      key: ValueKey(expense.id),
+      key: ValueKey('expense-${expense.id}'),
       direction: DismissDirection.endToStart,
       background: Container(
         alignment: Alignment.centerRight,
@@ -535,6 +618,10 @@ class _ExpenseTile extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+            if (pendingSync) ...[
+              const _PendingSyncBadge(),
+              const SizedBox(width: 6),
+            ],
             Text(
               '${expense.currency} ${_fmtAmount(expense.amount)}',
               style: TextStyle(

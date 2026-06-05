@@ -1,14 +1,34 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../core/api/api_exceptions.dart';
+
+import '../local/budgets_dao.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../repositories/budgets_repository.dart';
+import '../sync/budgets_sync.dart';
 import 'auth_provider.dart';
+// Reuse the shared infra providers (DB handle + reachability) defined alongside
+// the Tasks offline-first stack — they are domain-agnostic.
+import 'tasks_provider.dart' show appDatabaseProvider, reachableProvider;
 
-// ── Repository provider ────────────────────────────────────────────────────
+// ── Infrastructure providers ────────────────────────────────────────────────
 
+/// Local budgets store (projects + expenses) backed by the encrypted DB.
+final budgetsDaoProvider = Provider<BudgetsDao>((ref) {
+  return BudgetsDao(ref.watch(appDatabaseProvider));
+});
+
+/// Remote seam (Dio-backed). Now only used by the sync engine, never directly
+/// by the UI (which reads/writes the local cache first).
 final budgetsRepositoryProvider = Provider<BudgetsRepository>((ref) {
   return BudgetsRepository(DioBudgetsTransport(ref.watch(apiClientProvider)));
+});
+
+/// The offline-first budgets sync engine (projects + expenses, shared cursor).
+final budgetsSyncProvider = Provider<BudgetsSync>((ref) {
+  return BudgetsSync(
+      ref.watch(budgetsDaoProvider), ref.watch(budgetsRepositoryProvider));
 });
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -16,27 +36,33 @@ final budgetsRepositoryProvider = Provider<BudgetsRepository>((ref) {
 class BudgetsState {
   final List<Project> projects;
   final List<Expense> expenses;
-  final bool isLoadingProjects;
-  final bool isLoadingExpenses;
+
+  /// Project ids with un-pushed local edits — the UI shows a cloud-off badge.
+  final Set<String> dirtyProjectIds;
+
+  /// Expense ids with un-pushed local edits.
+  final Set<String> dirtyExpenseIds;
+
+  final bool isLoading;
   final bool isSubmitting;
   final String? error;
 
   const BudgetsState({
     this.projects = const [],
     this.expenses = const [],
-    this.isLoadingProjects = false,
-    this.isLoadingExpenses = false,
+    this.dirtyProjectIds = const {},
+    this.dirtyExpenseIds = const {},
+    this.isLoading = false,
     this.isSubmitting = false,
     this.error,
   });
 
-  bool get isLoading => isLoadingProjects || isLoadingExpenses;
-
   BudgetsState copyWith({
     List<Project>? projects,
     List<Expense>? expenses,
-    bool? isLoadingProjects,
-    bool? isLoadingExpenses,
+    Set<String>? dirtyProjectIds,
+    Set<String>? dirtyExpenseIds,
+    bool? isLoading,
     bool? isSubmitting,
     String? error,
     bool clearError = false,
@@ -44,8 +70,9 @@ class BudgetsState {
       BudgetsState(
         projects: projects ?? this.projects,
         expenses: expenses ?? this.expenses,
-        isLoadingProjects: isLoadingProjects ?? this.isLoadingProjects,
-        isLoadingExpenses: isLoadingExpenses ?? this.isLoadingExpenses,
+        dirtyProjectIds: dirtyProjectIds ?? this.dirtyProjectIds,
+        dirtyExpenseIds: dirtyExpenseIds ?? this.dirtyExpenseIds,
+        isLoading: isLoading ?? this.isLoading,
         isSubmitting: isSubmitting ?? this.isSubmitting,
         error: clearError ? null : (error ?? this.error),
       );
@@ -53,37 +80,45 @@ class BudgetsState {
 
 // ── Notifier ───────────────────────────────────────────────────────────────
 
+/// Offline-first budgets notifier.
+///
+/// Reads come from the local DAO (instant, works offline). Writes go to the
+/// DAO + outbox first (optimistic), then a best-effort [BudgetsSync.sync]
+/// pushes them when the backend is reachable. The UI never blocks on the
+/// network.
 class BudgetsNotifier extends StateNotifier<BudgetsState> {
-  final BudgetsRepository _repo;
-  BudgetsNotifier(this._repo) : super(const BudgetsState());
+  final BudgetsDao _dao;
+  final BudgetsSync _sync;
 
-  Future<void> loadProjects() async {
-    state = state.copyWith(isLoadingProjects: true, clearError: true);
-    try {
-      final projects = await _repo.listProjects(status: 'active');
-      state = state.copyWith(projects: projects, isLoadingProjects: false);
-    } on ApiError catch (e) {
-      state = state.copyWith(isLoadingProjects: false, error: e.message);
-    } catch (e) {
-      state = state.copyWith(isLoadingProjects: false, error: e.toString());
-    }
-  }
+  BudgetsNotifier(this._dao, this._sync) : super(const BudgetsState());
 
-  Future<void> loadExpenses() async {
-    state = state.copyWith(isLoadingExpenses: true, clearError: true);
-    try {
-      final expenses = await _repo.listExpenses();
-      state = state.copyWith(expenses: expenses, isLoadingExpenses: false);
-    } on ApiError catch (e) {
-      state = state.copyWith(isLoadingExpenses: false, error: e.message);
-    } catch (e) {
-      state = state.copyWith(isLoadingExpenses: false, error: e.toString());
-    }
-  }
-
-  /// Load both projects and expenses in parallel.
+  /// Load from the local cache immediately, then kick a background sync and
+  /// refresh from cache again when it settles.
   Future<void> load() async {
-    await Future.wait([loadProjects(), loadExpenses()]);
+    state = state.copyWith(isLoading: true, clearError: true);
+    await _refreshFromCache(loading: false);
+    // Best-effort sync; failures are silent (offline is a normal state).
+    unawaited(_syncThenRefresh());
+  }
+
+  /// Pull-to-refresh: force a sync then re-read the cache.
+  Future<void> refresh() => _syncThenRefresh();
+
+  /// Trigger a sync (e.g. when reachability flips to true) then refresh.
+  Future<void> syncNow() => _syncThenRefresh();
+
+  Future<bool> addProject(String name, {double? budget}) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectCreate(name, budget: budget);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
   }
 
   Future<bool> addExpense(
@@ -94,23 +129,24 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   }) async {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
-      final expense = await _repo.createExpense(
+      // Stamp the project name so the new local row renders before the next
+      // pull rehydrates it from the server.
+      final projectName = state.projects
+          .where((p) => p.id == projectId)
+          .map((p) => p.name)
+          .cast<String?>()
+          .firstWhere((_) => true, orElse: () => null);
+      await _dao.applyLocalExpenseCreate(
         projectId,
         amount,
         description,
         vendor: vendor,
+        projectName: projectName,
       );
-      // Immutable prepend — do not mutate existing list.
-      state = state.copyWith(
-        expenses: [expense, ...state.expenses],
-        isSubmitting: false,
-      );
-      // Reload projects so budget bars update with new spent totals.
-      await loadProjects();
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
       return true;
-    } on ApiError catch (e) {
-      state = state.copyWith(isSubmitting: false, error: e.message);
-      return false;
     } catch (e) {
       state = state.copyWith(isSubmitting: false, error: e.toString());
       return false;
@@ -118,47 +154,68 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   }
 
   Future<void> removeExpense(String id) async {
-    // Optimistic remove — do not mutate existing list.
-    final without = state.expenses.where((e) => e.id != id).toList();
-    state = state.copyWith(expenses: without);
-
     try {
-      await _repo.deleteExpense(id);
-      // Reload projects so budget bars reflect the removal.
-      await loadProjects();
-    } on ApiError catch (e) {
-      state = state.copyWith(error: e.message);
-      await load(); // Restore from server.
+      await _dao.applyLocalExpenseDelete(id);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
-      await load();
     }
   }
 
-  Future<bool> addProject(String name, {double? budget}) async {
-    state = state.copyWith(isSubmitting: true, clearError: true);
+  Future<void> removeProject(String id) async {
     try {
-      final project = await _repo.createProject(name, budget: budget);
-      state = state.copyWith(
-        projects: [project, ...state.projects],
-        isSubmitting: false,
-      );
-      return true;
-    } on ApiError catch (e) {
-      state = state.copyWith(isSubmitting: false, error: e.message);
-      return false;
+      await _dao.applyLocalProjectDelete(id);
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
     } catch (e) {
-      state = state.copyWith(isSubmitting: false, error: e.toString());
-      return false;
+      state = state.copyWith(error: e.toString());
     }
   }
 
   void clearError() => state = state.copyWith(clearError: true);
+
+  // ── internals ──────────────────────────────────────────────────────────
+
+  Future<void> _refreshFromCache({bool loading = false}) async {
+    final projects = await _dao.listProjects();
+    final expenses = await _dao.listExpenses();
+    final dirtyProjects = await _dao.dirtyProjectIds();
+    final dirtyExpenses = await _dao.dirtyExpenseIds();
+    state = state.copyWith(
+      projects: projects,
+      expenses: expenses,
+      dirtyProjectIds: dirtyProjects,
+      dirtyExpenseIds: dirtyExpenses,
+      isLoading: loading,
+    );
+  }
+
+  Future<void> _syncThenRefresh() async {
+    try {
+      await _sync.sync();
+    } catch (_) {
+      // Offline / server down — the local cache already holds the truth.
+    }
+    if (mounted) await _refreshFromCache();
+  }
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────
 
 final budgetsProvider =
     StateNotifierProvider<BudgetsNotifier, BudgetsState>((ref) {
-  return BudgetsNotifier(ref.watch(budgetsRepositoryProvider));
+  final notifier = BudgetsNotifier(
+    ref.watch(budgetsDaoProvider),
+    ref.watch(budgetsSyncProvider),
+  );
+
+  // When the backend comes back online, drain the outbox + pull deltas.
+  ref.listen<bool>(reachableProvider, (prev, next) {
+    if (next == true && prev != true) {
+      notifier.syncNow();
+    }
+  });
+
+  return notifier;
 });

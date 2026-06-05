@@ -3,6 +3,8 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/note.dart';
 import '../providers/notes_provider.dart';
+// reachableProvider lives in tasks_provider (shared offline-first infra).
+import '../providers/tasks_provider.dart' show reachableProvider;
 
 // ── Notes list screen ──────────────────────────────────────────────────────
 
@@ -117,7 +119,12 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
           ),
         ],
       ),
-      body: _buildBody(context, state),
+      body: Column(
+        children: [
+          if (!ref.watch(reachableProvider)) const _OfflineBanner(),
+          Expanded(child: _buildBody(context, state)),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _openCreateDialog,
         tooltip: 'New note',
@@ -161,6 +168,7 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
           final note = state.sortedNotes[index];
           return _NoteTile(
             note: note,
+            pendingSync: state.dirtyIds.contains(note.id),
             onTap: () => _openNote(context, note),
             onDelete: () =>
                 ref.read(notesProvider.notifier).deleteNote(note.id),
@@ -185,11 +193,13 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
 
 class _NoteTile extends StatelessWidget {
   final Note note;
+  final bool pendingSync;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
   const _NoteTile({
     required this.note,
+    required this.pendingSync,
     required this.onTap,
     required this.onDelete,
   });
@@ -254,6 +264,14 @@ class _NoteTile extends StatelessWidget {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (pendingSync) ...[
+              Tooltip(
+                message: 'Not synced yet — pending upload',
+                child: Icon(Icons.cloud_off_outlined,
+                    size: 18, color: Colors.grey.shade500),
+              ),
+              const SizedBox(width: 6),
+            ],
             if (note.tags.isNotEmpty)
               Container(
                 padding:
@@ -270,6 +288,37 @@ class _NoteTile extends StatelessWidget {
             const SizedBox(width: 4),
             Icon(Icons.chevron_right, color: Colors.grey.shade600, size: 18),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Offline banner ───────────────────────────────────────────────────────────
+
+class _OfflineBanner extends StatelessWidget {
+  const _OfflineBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.orange.shade700,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: const [
+              Icon(Icons.cloud_off, color: Colors.white, size: 18),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Computer offline — changes will sync',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

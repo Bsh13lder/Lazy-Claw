@@ -58,9 +58,58 @@ class DioNotesTransport implements NotesTransport {
       );
 }
 
+/// A server note paired with its authoritative `updated_at` — the timestamp
+/// last-write-wins compares against. The [Note] model already surfaces
+/// `updatedAt`, but the sync engine reads the explicit server value here so the
+/// merge logic never depends on whichever field the API happened to echo.
+class ServerNote {
+  final Note note;
+  final String? updatedAt;
+  const ServerNote(this.note, this.updatedAt);
+}
+
+/// One server-side delta page from `GET /api/lazybrain/notes/changes`.
+class NoteChanges {
+  /// Notes created/updated server-side since the cursor (with their server
+  /// `updated_at` for LWW).
+  final List<ServerNote> notes;
+
+  /// Ids the server soft-deleted since the cursor.
+  final List<String> deleted;
+
+  /// Server "now" timestamp — becomes the next cursor (avoids clock skew).
+  final String now;
+
+  const NoteChanges({
+    required this.notes,
+    required this.deleted,
+    required this.now,
+  });
+}
+
 class NotesRepository {
   final NotesTransport _t;
   NotesRepository(this._t);
+
+  /// Pull the delta since [since] (ISO timestamp, null = full snapshot).
+  /// Maps `GET /api/lazybrain/notes/changes?since=<iso>` → {notes, deleted, now}.
+  Future<NoteChanges> fetchChanges({String? since}) async {
+    final json = await _t.getJson(
+      '/api/lazybrain/notes/changes',
+      queryParams: since == null ? null : {'since': since},
+    );
+    final rawNotes = json['notes'] as List? ?? const [];
+    final rawDeleted = json['deleted'] as List? ?? const [];
+    return NoteChanges(
+      notes: rawNotes.map((e) {
+        final map = Map<String, dynamic>.from(e as Map);
+        final updatedAt = map['updated_at']?.toString();
+        return ServerNote(Note.fromJson(map), updatedAt);
+      }).toList(),
+      deleted: rawDeleted.map((e) => e.toString()).toList(),
+      now: (json['now'] ?? '').toString(),
+    );
+  }
 
   /// Fetch notes. Optionally filter by tag / pinned status / limit.
   Future<List<Note>> listNotes({
@@ -92,7 +141,11 @@ class NotesRepository {
   }
 
   /// Create a note. [content] is required; [title] is optional.
+  ///
+  /// Pass [id] to send a client-minted UUID — `POST /api/lazybrain/notes`
+  /// accepts it, making the create idempotent on outbox replay.
   Future<Note> createNote({
+    String? id,
     String? title,
     required String content,
     List<String>? tags,
@@ -100,6 +153,7 @@ class NotesRepository {
     bool? pinned,
   }) async {
     final body = <String, dynamic>{'content': content};
+    if (id != null) body['id'] = id;
     if (title != null) body['title'] = title;
     if (tags != null) body['tags'] = tags;
     if (importance != null) body['importance'] = importance;
@@ -127,6 +181,13 @@ class NotesRepository {
 
     final json = await _t.patchJson('/api/lazybrain/notes/$id', body);
     return Note.fromJson(json);
+  }
+
+  /// Patch a note via PATCH /api/lazybrain/notes/{id} with a pre-built
+  /// snake_case field map. Used by the sync engine, which carries the outbox
+  /// payload (already snake_case) rather than named arguments.
+  Future<void> updateNotePatch(String id, Map<String, dynamic> patch) async {
+    await _t.patchJson('/api/lazybrain/notes/$id', patch);
   }
 
   /// Delete a note by [id].

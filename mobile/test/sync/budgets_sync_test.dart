@@ -1,0 +1,759 @@
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
+import 'package:lazyclaw_mobile/local/app_db.dart';
+import 'package:lazyclaw_mobile/local/budgets_dao.dart';
+import 'package:lazyclaw_mobile/models/expense.dart';
+import 'package:lazyclaw_mobile/models/project.dart';
+import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
+import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+// ── Programmable fake transport ──────────────────────────────────────────────
+
+class _Call {
+  final String method;
+  final String path;
+  final Map<String, dynamic>? body;
+  final Map<String, dynamic>? query;
+  _Call(this.method, this.path, {this.body, this.query});
+}
+
+/// Records every call. `changesResponse` is returned by GET /api/budgets/changes;
+/// the various fail maps inject errors on matching write paths.
+class _FakeTransport implements BudgetsTransport {
+  final List<_Call> calls = [];
+  Map<String, dynamic> changesResponse;
+
+  /// Substring → throw network ApiError(0) when a write path contains it.
+  final Set<String> failNetworkOnPaths;
+
+  /// Substring → throw a non-network ApiError(status) on the write path.
+  final Map<String, int> failServerOnPaths;
+
+  /// Substring → throw a real production-shaped [DioException] on the write
+  /// path (the `ApiError` lives in `DioException.error`).
+  final Map<String, DioException Function()> dioErrorOnPaths;
+
+  _FakeTransport({
+    Map<String, dynamic>? changesResponse,
+    Set<String>? failNetworkOnPaths,
+    Map<String, int>? failServerOnPaths,
+    Map<String, DioException Function()>? dioErrorOnPaths,
+  })  : changesResponse = changesResponse ??
+            {
+              'projects': [],
+              'expenses': [],
+              'deleted_projects': [],
+              'deleted_expenses': [],
+              'now': '',
+            },
+        failNetworkOnPaths = failNetworkOnPaths ?? const {},
+        failServerOnPaths = failServerOnPaths ?? const {},
+        dioErrorOnPaths = dioErrorOnPaths ?? const {};
+
+  void _maybeFail(String path) {
+    for (final entry in dioErrorOnPaths.entries) {
+      if (path.contains(entry.key)) throw entry.value();
+    }
+    for (final frag in failNetworkOnPaths) {
+      if (path.contains(frag)) throw ApiError(0, 'Network error');
+    }
+    for (final entry in failServerOnPaths.entries) {
+      if (path.contains(entry.key)) throw ApiError(entry.value, 'Server error');
+    }
+  }
+
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+      {Map<String, dynamic>? queryParams}) async {
+    calls.add(_Call('GET', path, query: queryParams));
+    if (path.contains('/changes')) return changesResponse;
+    return {'projects': [], 'expenses': []};
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+      String path, Map<String, dynamic> body) async {
+    _maybeFail(path);
+    calls.add(_Call('POST', path, body: body));
+    return {'status': 'ok'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> patchJson(
+      String path, Map<String, dynamic> body) async {
+    _maybeFail(path);
+    calls.add(_Call('PATCH', path, body: body));
+    return {'status': 'ok'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async {
+    _maybeFail(path);
+    calls.add(_Call('DELETE', path));
+    return {'status': 'deleted'};
+  }
+}
+
+// ── Harness ──────────────────────────────────────────────────────────────────
+
+int _dbCounter = 0;
+
+Future<BudgetsDao> _freshDao({String Function()? now}) async {
+  final db = await databaseFactoryFfi.openDatabase(
+    'file:budgetsyncmem${_dbCounter++}?mode=memory&cache=shared',
+    options: OpenDatabaseOptions(
+      version: kAppDbVersion,
+      singleInstance: false,
+      onCreate: (db, v) async => createAppDbSchema(db),
+    ),
+  );
+  return BudgetsDao(db, now: now);
+}
+
+Map<String, dynamic> _serverProjectJson({
+  String id = 'sp1',
+  String name = 'Server project',
+  double budget = 1000.0,
+  String status = 'active',
+  String? updatedAt,
+  String createdAt = '2026-06-05T10:00:00Z',
+}) =>
+    {
+      'id': id,
+      'name': name,
+      'budget': budget,
+      'currency': 'USD',
+      'status': status,
+      'spent': 0.0,
+      'remaining': budget,
+      'created_at': createdAt,
+      'updated_at': updatedAt ?? createdAt,
+    };
+
+Map<String, dynamic> _serverExpenseJson({
+  String id = 'se1',
+  String projectId = 'sp1',
+  double amount = 50.0,
+  String description = 'Server expense',
+  String? updatedAt,
+  String createdAt = '2026-06-05T10:00:00Z',
+}) =>
+    {
+      'id': id,
+      'project_id': projectId,
+      'amount': amount,
+      'currency': 'USD',
+      'description': description,
+      'status': 'posted',
+      'created_at': createdAt,
+      'updated_at': updatedAt ?? createdAt,
+    };
+
+/// A production-shaped server-error DioException — a real HTTP response with a
+/// status code, carrying the `ApiError` in `.error` exactly like the app's
+/// `_ErrorInterceptor` rethrows it. THE key regression guard.
+DioException _serverDio(int status) {
+  final req = RequestOptions(path: '/api/budgets/projects');
+  return DioException(
+    requestOptions: req,
+    type: DioExceptionType.badResponse,
+    response: Response(requestOptions: req, statusCode: status),
+    error: ApiError(status, 'Server $status'),
+  );
+}
+
+/// A connection-type DioException (no response reached us) — the network-down
+/// shape, with `ApiError(0)` in `.error` like the interceptor would produce.
+DioException _connectionDio() {
+  final req = RequestOptions(path: '/api/budgets/projects');
+  return DioException(
+    requestOptions: req,
+    type: DioExceptionType.connectionError,
+    error: ApiError(0, 'Network error'),
+  );
+}
+
+void main() {
+  setUpAll(() => sqfliteFfiInit());
+
+  // ── PUSH ──────────────────────────────────────────────────────────────────
+
+  group('BudgetsSync.push', () {
+    test('drains both entities in seq order and clears the outbox', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Proj', id: 'p1');
+      await dao.applyLocalExpenseCreate('p1', 25.0, 'Lunch', id: 'e1');
+      await dao.applyLocalProjectUpdate('p1', name: 'Proj2');
+
+      final transport = _FakeTransport();
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      expect(result.pushed, 3);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+
+      final writes = transport.calls.where((c) => c.method != 'GET').toList();
+      expect(writes[0].method, 'POST');
+      expect(writes[0].path, '/api/budgets/projects');
+      expect(writes[0].body!['id'], 'p1');
+      // Expense create routes to /projects/{id}/expenses with the client id.
+      expect(writes[1].method, 'POST');
+      expect(writes[1].path, '/api/budgets/projects/p1/expenses');
+      expect(writes[1].body!['id'], 'e1');
+      expect(writes[1].body!['amount'], 25.0);
+      // Project update routes to PATCH /projects/{id} with id stripped.
+      expect(writes[2].method, 'PATCH');
+      expect(writes[2].path, '/api/budgets/projects/p1');
+      expect(writes[2].body!.containsKey('id'), isFalse);
+      expect(writes[2].body!['name'], 'Proj2');
+    });
+
+    test('project create replays the client id (idempotent)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Pinned', id: 'fixed-proj');
+      final transport = _FakeTransport();
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      final call = transport.calls
+          .firstWhere((c) => c.path == '/api/budgets/projects');
+      expect(call.body!['id'], 'fixed-proj');
+    });
+
+    test('expense create replays the client id + project path', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('projX', 9.0, 'X', id: 'fixed-exp');
+      final transport = _FakeTransport();
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      final call = transport.calls.firstWhere(
+          (c) => c.path == '/api/budgets/projects/projX/expenses');
+      expect(call.body!['id'], 'fixed-exp');
+    });
+
+    test('a delete that pushed hard-removes the project tombstone', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Bye', id: 'd1');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+      await dao.applyLocalProjectDelete('d1');
+
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+      expect(await dao.getProject('d1'), isNull);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    test('a delete that pushed hard-removes the expense tombstone', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('p1', 5.0, 'Bye', id: 'ed1');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+      await dao.applyLocalExpenseDelete('ed1');
+
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+      expect(await dao.getExpense('ed1'), isNull);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    test('stops at the first network failure and keeps the rest queued',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('First', id: 'f1'); // POST ok
+      await dao.applyLocalExpenseCreate('f1', 5.0, 'second', id: 'e2'); // fails
+
+      final transport = _FakeTransport(
+        // The expense create POSTs to /projects/f1/expenses.
+        failNetworkOnPaths: {'/expenses'},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      expect(result.pushInterrupted, isTrue);
+      final remaining = await dao.readBudgetsOutbox();
+      // The project create drained; the failing expense create stays.
+      expect(remaining.map((o) => o.entity), contains(kExpenseEntity));
+      expect(remaining.every((o) => o.entity != kProjectEntity), isTrue);
+    });
+
+    test('non-network server error dequeues (does not wedge the queue)',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('A', id: 'a1');
+      await dao.applyLocalProjectCreate('B', id: 'b1');
+      final transport = _FakeTransport(
+        failServerOnPaths: {'/api/budgets/projects': 422},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      expect(result.pushInterrupted, isFalse);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    // ── Production DioException error-classification regression guards ──
+
+    test(
+        'a real DioException(badResponse, error: ApiError(500)) RETAINS the '
+        'outbox item (never silently dropped)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Keep me', id: 'srv5xx');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/budgets/projects': () => _serverDio(500)},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      expect(result.pushInterrupted, isTrue);
+      expect(result.pushed, 0);
+      final remaining = await dao.readBudgetsOutbox();
+      expect(remaining, hasLength(1));
+      expect(remaining.first.op, BudgetsOutboxOp.create);
+      expect(remaining.first.attempts, 1); // counted for eventual dead-letter
+    });
+
+    test(
+        'a connection-type DioException stops the drain and preserves the '
+        'whole queue', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('First', id: 'n1'); // POST ok
+      await dao.applyLocalExpenseCreate('n1', 3.0, 'second', id: 'n2'); // drop
+
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/expenses': () => _connectionDio()},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      expect(result.pushInterrupted, isTrue);
+      final remaining = await dao.readBudgetsOutbox();
+      expect(remaining.map((o) => o.entity), contains(kExpenseEntity));
+      expect(remaining.every((o) => o.entity != kProjectEntity), isTrue);
+      // No attempt bumped for a network error (only 5xx counts).
+      expect(
+          remaining.firstWhere((o) => o.entity == kExpenseEntity).attempts, 0);
+    });
+
+    test('a real DioException 404 on delete is treated as success (drains)',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Bye', id: 'gone404');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+      await dao.applyLocalProjectDelete('gone404');
+
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/budgets/projects/gone404': () => _serverDio(404)},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      expect(result.pushInterrupted, isFalse);
+      expect(result.pushed, 1);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      expect(await dao.getProject('gone404'), isNull); // tombstone removed
+    });
+
+    test('a real DioException 422 (client error) drains the item', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Bad', id: 'bad422');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/budgets/projects': () => _serverDio(422)},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      expect(result.pushInterrupted, isFalse);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+    });
+
+    test('a 5xx item dead-letters after kMaxPushAttempts, never wedges',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Poison', id: 'p1');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/budgets/projects': () => _serverDio(503)},
+      );
+      for (var i = 0; i < BudgetsSync.kMaxPushAttempts; i++) {
+        await BudgetsSync(dao, BudgetsRepository(transport)).push();
+      }
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      // Cache row stays dirty so the next pull re-establishes server truth.
+      expect(await dao.dirtyProjectIds(), contains('p1'));
+    });
+
+    test('commitPush is idempotent — replaying a retired item is a no-op',
+        () async {
+      final dao = await _freshDao();
+      final p = await dao.applyLocalProjectCreate('A', id: 'c2a');
+      final seq = (await dao.readBudgetsOutbox()).first.seq;
+      await dao.commitPush(seq, kProjectEntity, p.id);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      expect(await dao.dirtyProjectIds(), isEmpty);
+      await dao.commitPush(seq, kProjectEntity, p.id);
+      expect(await dao.dirtyProjectIds(), isEmpty);
+      expect(await dao.getProject(p.id), isNotNull);
+    });
+  });
+
+  // ── PULL + LWW ──────────────────────────────────────────────────────────
+
+  group('BudgetsSync.pull last-write-wins', () {
+    test('writes brand-new server project + expense into the cache', () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [_serverProjectJson(id: 'sp', name: 'Hello')],
+        'expenses': [_serverExpenseJson(id: 'se', projectId: 'sp')],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect(result.pulled, 2);
+      expect((await dao.getProject('sp'))!.name, 'Hello');
+      expect((await dao.getExpense('se'))!.projectId, 'sp');
+      expect(await dao.getCursor(), '2026-06-05T12:00:00Z');
+    });
+
+    test('passes the shared cursor as ?since', () async {
+      final dao = await _freshDao();
+      await dao.setCursor('2026-06-05T09:00:00Z');
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      final call =
+          transport.calls.firstWhere((c) => c.path.contains('/changes'));
+      expect(call.query, containsPair('since', '2026-06-05T09:00:00Z'));
+    });
+
+    test('server wins when local project is NOT dirty', () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(
+        Project.fromJson(_serverProjectJson(id: 'x', name: 'Old')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [
+          _serverProjectJson(
+              id: 'x', name: 'New', updatedAt: '2026-06-05T11:00:00Z')
+        ],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect((await dao.getProject('x'))!.name, 'New');
+      expect(await dao.readConflicts(), isEmpty);
+    });
+
+    test(
+        'server wins on dirty local project with older local time → conflict logged',
+        () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.applyLocalProjectCreate('Local name', id: 'c1');
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [
+          _serverProjectJson(
+              id: 'c1', name: 'Server name', updatedAt: '2026-06-05T11:00:00Z')
+        ],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.conflicts, 1);
+      expect((await dao.getProject('c1'))!.name, 'Server name');
+      final conflicts = await dao.readConflicts();
+      final nameConflict = conflicts.firstWhere((c) => c.field == 'name');
+      expect(nameConflict.local, 'Local name');
+      expect(nameConflict.server, 'Server name');
+    });
+
+    test('local wins (kept) when dirty local project is strictly newer; no log',
+        () async {
+      final dao = await _freshDao(now: () => '2026-06-05T12:00:00Z');
+      await dao.applyLocalProjectCreate('Local newest', id: 'c2');
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [
+          _serverProjectJson(
+              id: 'c2', name: 'Server older', updatedAt: '2026-06-05T11:00:00Z')
+        ],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T13:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.pulled, 0);
+      expect((await dao.getProject('c2'))!.name, 'Local newest');
+      expect(await dao.readConflicts(), isEmpty);
+      expect(await dao.dirtyProjectIds(), contains('c2'));
+    });
+
+    test('expense LWW: dirty local older → server wins + conflict logged',
+        () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.applyLocalExpenseCreate('p1', 5.0, 'Local desc', id: 'ec1');
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [
+          _serverExpenseJson(
+              id: 'ec1',
+              amount: 9.0,
+              description: 'Server desc',
+              updatedAt: '2026-06-05T11:00:00Z')
+        ],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.conflicts, greaterThanOrEqualTo(1));
+      expect((await dao.getExpense('ec1'))!.description, 'Server desc');
+      final conflicts = await dao.readConflicts();
+      expect(conflicts.any((c) => c.field == 'description'), isTrue);
+    });
+
+    test('applies project + expense tombstones (removes from lists)', () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(
+        Project.fromJson(_serverProjectJson(id: 'gp', name: 'Doomed')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      await dao.upsertExpenseFromServer(
+        Expense.fromJson(_serverExpenseJson(id: 'ge')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': ['gp'],
+        'deleted_expenses': ['ge'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect(result.deletedApplied, 2);
+      expect((await dao.listProjects()).map((e) => e.id), isNot(contains('gp')));
+      expect((await dao.listExpenses()).map((e) => e.id), isNot(contains('ge')));
+    });
+
+    test('pull network failure leaves the cursor untouched', () async {
+      final dao = await _freshDao();
+      await dao.setCursor('2026-06-05T09:00:00Z');
+      final transport = _FailingGetTransport();
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect(result.pullFailed, isTrue);
+      expect(await dao.getCursor(), '2026-06-05T09:00:00Z');
+    });
+
+    // ── H1: server tombstone vs an unsynced local edit ──
+
+    test(
+        'H1: server delete of a DIRTY local project logs a conflict + reconciles '
+        'the queued outbox op (delete-wins, never silent)', () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.applyLocalProjectCreate('My unsynced project', id: 'h1');
+      expect(await dao.outboxCount(), 1);
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': ['h1'],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.deletedApplied, 1);
+      expect(result.conflicts, greaterThanOrEqualTo(1));
+      final conflicts = await dao.readConflicts();
+      final nameConflict = conflicts.firstWhere((c) => c.field == 'name');
+      expect(nameConflict.local, 'My unsynced project');
+      expect(nameConflict.server, isNull); // server-deleted → no server value
+      expect(await dao.outboxCount(), 0); // queued create reconciled away
+      expect((await dao.listProjects()).map((e) => e.id), isNot(contains('h1')));
+    });
+
+    test('H1: server delete of a DIRTY local expense reconciles the queued op',
+        () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.applyLocalExpenseCreate('p1', 7.0, 'Unsynced exp', id: 'he1');
+      expect(await dao.outboxCount(), 1);
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': ['he1'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.deletedApplied, 1);
+      expect(result.conflicts, greaterThanOrEqualTo(1));
+      expect(await dao.outboxCount(), 0);
+      expect((await dao.listExpenses()).map((e) => e.id), isNot(contains('he1')));
+    });
+
+    test('H1: server delete of a CLEAN local row applies silently (no conflict)',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertProjectFromServer(
+        Project.fromJson(_serverProjectJson(id: 'clean', name: 'Synced')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': ['clean'],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect(result.deletedApplied, 1);
+      expect(result.conflicts, 0);
+      expect(await dao.readConflicts(), isEmpty);
+    });
+
+    // ── M1: conflict-table dedup ──
+
+    test('M1: re-observing the SAME conflict does not duplicate the row',
+        () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.applyLocalProjectCreate('Local name', id: 'm1');
+      final changes = {
+        'projects': [
+          _serverProjectJson(
+              id: 'm1', name: 'Server name', updatedAt: '2026-06-05T11:00:00Z')
+        ],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      };
+      await BudgetsSync(
+              dao, BudgetsRepository(_FakeTransport(changesResponse: changes)))
+          .pull();
+      final afterFirst = await dao.readConflicts();
+      // Make the row dirty again with the SAME local value vs the same server.
+      await dao.applyLocalProjectUpdate('m1', name: 'Local name');
+      await BudgetsSync(
+              dao, BudgetsRepository(_FakeTransport(changesResponse: changes)))
+          .pull();
+      final afterSecond = await dao.readConflicts();
+      final nameRows = afterSecond.where((c) => c.field == 'name').toList();
+      expect(nameRows,
+          hasLength(afterFirst.where((c) => c.field == 'name').length));
+    });
+
+    // ── M3: empty server `now` ──
+
+    test('M3: empty `now` with no datable rows → pull FAILS, cursor untouched',
+        () async {
+      final dao = await _freshDao();
+      await dao.setCursor('2026-06-05T09:00:00Z');
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect(result.pullFailed, isTrue);
+      expect(await dao.getCursor(), '2026-06-05T09:00:00Z');
+    });
+
+    test('M3: empty `now` falls back to the max row updated_at across BOTH',
+        () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [
+          _serverProjectJson(id: 'a', updatedAt: '2026-06-05T11:00:00Z'),
+        ],
+        'expenses': [
+          _serverExpenseJson(
+              id: 'b', projectId: 'a', updatedAt: '2026-06-05T13:00:00Z'),
+        ],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+      expect(result.pullFailed, isFalse);
+      expect(result.pulled, 2);
+      // Newest updated_at across projects + expenses wins.
+      expect(await dao.getCursor(), '2026-06-05T13:00:00Z');
+    });
+  });
+
+  // ── SYNC orchestration ────────────────────────────────────────────────────
+
+  group('BudgetsSync.sync', () {
+    test('push then pull; guards against concurrent runs', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('A', id: 'a1');
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [_serverProjectJson(id: 'srv', name: 'Server one')],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final sync = BudgetsSync(dao, BudgetsRepository(transport));
+
+      final result = await sync.sync();
+      expect(result.pushed, 1);
+      expect(result.pulled, 1);
+      expect(sync.isRunning, isFalse);
+
+      expect(await dao.getProject('srv'), isNotNull);
+      expect(await dao.outboxCount(), 0);
+    });
+
+    test('a concurrent sync() call is a no-op while one is running', () async {
+      final dao = await _freshDao();
+      final sync = BudgetsSync(dao, BudgetsRepository(_FakeTransport()));
+      final a = sync.sync();
+      final b = sync.sync();
+      final results = await Future.wait([a, b]);
+      expect(results, hasLength(2));
+    });
+  });
+}
+
+// ── test helpers ─────────────────────────────────────────────────────────────
+
+/// A transport whose GET always throws a network error (for pull failure test).
+class _FailingGetTransport implements BudgetsTransport {
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+          {Map<String, dynamic>? queryParams}) async =>
+      throw ApiError(0, 'Network error');
+  @override
+  Future<Map<String, dynamic>> postJson(
+          String path, Map<String, dynamic> body) async =>
+      {};
+  @override
+  Future<Map<String, dynamic>> patchJson(
+          String path, Map<String, dynamic> body) async =>
+      {};
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async => {};
+}

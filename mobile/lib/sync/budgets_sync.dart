@@ -1,0 +1,621 @@
+import 'package:dio/dio.dart';
+
+import '../core/api/api_exceptions.dart';
+import '../local/budgets_dao.dart';
+import '../models/expense.dart';
+import '../models/project.dart';
+import '../repositories/budgets_repository.dart';
+
+/// Raised when a push stops early because the network/server is unreachable, or
+/// because a retryable server error (5xx) should keep the queue intact. The
+/// drained-so-far items are already removed from the outbox; the rest stay
+/// queued for the next sync.
+class _PushInterrupted implements Exception {
+  final Object cause;
+  _PushInterrupted(this.cause);
+}
+
+/// Outcome of one [BudgetsSync.sync] run — handy for tests + UI diagnostics.
+class BudgetsSyncResult {
+  final int pushed;
+  final int pulled;
+  final int deletedApplied;
+  final int conflicts;
+  final bool pushInterrupted;
+  final bool pullFailed;
+  final Object? error;
+
+  const BudgetsSyncResult({
+    this.pushed = 0,
+    this.pulled = 0,
+    this.deletedApplied = 0,
+    this.conflicts = 0,
+    this.pushInterrupted = false,
+    this.pullFailed = false,
+    this.error,
+  });
+}
+
+/// The offline-first sync engine for budgets (projects + expenses together).
+///
+/// Mirrors `TaskSync` exactly. The two entities share ONE delta feed
+/// (`GET /api/budgets/changes`) and therefore ONE cursor.
+///
+/// * [push] drains the budgets outbox in seq order, routing each op to the
+///   matching `/api/budgets/*` endpoint. On a network OR retryable-server
+///   failure it STOPS (the failed item stays queued); only a definitive 4xx is
+///   allowed to drain.
+/// * [pull] fetches the changes feed and merges projects + expenses + both
+///   tombstone lists with last-write-wins by `updated_at`; the loser of a real
+///   both-sides change is recorded in `conflicts` (never silently dropped).
+/// * [sync] = push() then pull(), guarded against concurrent runs.
+class BudgetsSync {
+  final BudgetsDao _dao;
+  final BudgetsRepository _repo;
+
+  /// A retryable (5xx) item is dead-lettered after this many failed attempts so
+  /// one poison row can't wedge the whole queue forever.
+  static const int kMaxPushAttempts = 5;
+
+  bool _running = false;
+
+  BudgetsSync(this._dao, this._repo);
+
+  bool get isRunning => _running;
+
+  /// push() then pull(). A second call while one is in flight is a no-op.
+  Future<BudgetsSyncResult> sync() async {
+    if (_running) return const BudgetsSyncResult();
+    _running = true;
+    try {
+      final pushResult = await push();
+      final pullResult = await pull();
+      return BudgetsSyncResult(
+        pushed: pushResult.pushed,
+        pulled: pullResult.pulled,
+        deletedApplied: pullResult.deletedApplied,
+        conflicts: pullResult.conflicts,
+        pushInterrupted: pushResult.pushInterrupted,
+        pullFailed: pullResult.pullFailed,
+        error: pushResult.error ?? pullResult.error,
+      );
+    } finally {
+      _running = false;
+    }
+  }
+
+  // ── PUSH ────────────────────────────────────────────────────────────────
+
+  /// Drain the budgets outbox in seq order. Returns how many items were pushed.
+  /// On a network OR retryable-server failure it stops early (remaining items
+  /// retried next sync). A 4xx (validation/conflict/404) is safe to drain.
+  Future<BudgetsSyncResult> push() async {
+    final queue = await _dao.readBudgetsOutbox();
+
+    var pushed = 0;
+    for (final item in queue) {
+      try {
+        final committed = await _pushOne(item);
+        if (committed) {
+          // Retire the pushed item atomically (delete outbox row + clear dirty
+          // / hard-remove tombstone) so a crash can't split the two writes.
+          await _dao.commitPush(item.seq, item.entity, item.entityId);
+          pushed++;
+        }
+        // A drained-but-not-committed item (definitive 4xx, or a dead-lettered
+        // 5xx poison) has already had its outbox row removed inside the failure
+        // classifier; we leave its cache row dirty so the NEXT pull restores
+        // server truth — never silently dropping the user's edit.
+      } on _PushInterrupted catch (e) {
+        return BudgetsSyncResult(
+          pushed: pushed,
+          pushInterrupted: true,
+          error: e.cause,
+        );
+      }
+    }
+    return BudgetsSyncResult(pushed: pushed);
+  }
+
+  /// Push one queued op. Returns true when the server accepted it (so the caller
+  /// commits the retire); false when the item was DRAINED on a definitive
+  /// client error or dead-lettered as a 5xx poison (the failure classifier has
+  /// already removed its outbox row, and the cache stays dirty for the next
+  /// pull). Throws [_PushInterrupted] to STOP the drain and keep the queue.
+  Future<bool> _pushOne(BudgetsOutboxItem item) async {
+    final p = item.payload;
+    try {
+      if (item.isProject) {
+        switch (item.op) {
+          case BudgetsOutboxOp.create:
+            await _repo.createProject(
+              (p['name'] ?? '').toString(),
+              id: p['id']?.toString() ?? item.entityId,
+              budget: _asDouble(p['budget']),
+              description: p['description']?.toString(),
+            );
+            break;
+          case BudgetsOutboxOp.update:
+            await _repo.updateProject(item.entityId, _patchFrom(p));
+            break;
+          case BudgetsOutboxOp.delete:
+            await _repo.deleteProject(item.entityId);
+            break;
+          default:
+            break;
+        }
+      } else if (item.isExpense) {
+        switch (item.op) {
+          case BudgetsOutboxOp.create:
+            // The project id is carried in the payload so the create can target
+            // the right `/projects/{id}/expenses` URL on replay.
+            await _repo.createExpense(
+              (p['project_id'] ?? '').toString(),
+              _asDouble(p['amount']) ?? 0.0,
+              (p['description'] ?? '').toString(),
+              id: p['id']?.toString() ?? item.entityId,
+              vendor: p['vendor']?.toString(),
+            );
+            break;
+          case BudgetsOutboxOp.delete:
+            await _repo.deleteExpense(item.entityId);
+            break;
+          default:
+            break;
+        }
+      }
+      // Server accepted the op → the caller commits the retire.
+      return true;
+    } catch (e) {
+      // Drained (returns false) or interrupting (throws). A 404-on-delete is an
+      // idempotent success and returns true so it's counted + committed by the
+      // caller — never a silent success otherwise.
+      return _classifyPushFailure(item, e);
+    }
+  }
+
+  /// Decide what a push failure means and act on it. NEVER silently drops a
+  /// queued edit on a transient failure. Returns `true` ONLY for an idempotent
+  /// 404-on-delete (treated as a success → caller commits + counts it). For the
+  /// other drain branches it removes THIS item's outbox row here and returns
+  /// `false`, leaving the cache row dirty so the next pull re-establishes server
+  /// truth. Throws [_PushInterrupted] to STOP the drain and keep the queue.
+  ///   * network (timeout/connection/cancel, status 0, non-badResponse) →
+  ///     [_PushInterrupted] (stop draining, keep ALL queued items);
+  ///   * server 5xx → retryable: bump the attempt counter, dead-letter (drop the
+  ///     poison outbox row) after [kMaxPushAttempts], otherwise [_PushInterrupted]
+  ///     (keep it queued);
+  ///   * 404 on delete → idempotent success (return true → caller commits);
+  ///   * other 4xx → drain the outbox row (return false; next pull restores it).
+  Future<bool> _classifyPushFailure(BudgetsOutboxItem item, Object e) async {
+    if (_isNetworkError(e)) {
+      throw _PushInterrupted(e);
+    }
+    final api = _asApiError(e);
+    final status = api?.status ?? _statusOf(e) ?? 0;
+
+    // 404 on delete is idempotent success — the row is already gone server-side.
+    // Return true so the caller commits (removes the outbox row AND hard-removes
+    // the local tombstone) and counts it as pushed.
+    if (status == 404 && item.op == BudgetsOutboxOp.delete) {
+      return true;
+    }
+
+    if (status >= 500) {
+      // Retryable. Count the attempt; dead-letter a poison item (drop just the
+      // outbox row, leave the cache dirty), else stop and keep it queued for the
+      // next sync — NEVER silently drop.
+      final attempts = await _dao.bumpOutboxAttempts(item.seq);
+      if (attempts >= kMaxPushAttempts) {
+        await _dao.deadLetterOutboxItem(item.seq);
+        return false; // drained the poison item; local stays dirty for next pull
+      }
+      throw _PushInterrupted(e);
+    }
+
+    if (status >= 400) {
+      // Definitive client error (validation/conflict/404-on-create). Drop the
+      // outbox row; leave the cache dirty so the next pull re-establishes truth.
+      await _dao.deleteOutboxItem(item.seq);
+      return false; // drained
+    }
+
+    // Unknown shape with no usable status → treat as network-ish and keep it.
+    throw _PushInterrupted(e);
+  }
+
+  Map<String, dynamic> _patchFrom(Map<String, dynamic> payload) {
+    final out = Map<String, dynamic>.from(payload)..remove('id');
+    return out;
+  }
+
+  // ── PULL ────────────────────────────────────────────────────────────────
+
+  /// Fetch the server delta and merge with last-write-wins. Advances the shared
+  /// budgets cursor to the server's `now` on success. On a network failure it
+  /// returns `pullFailed: true` and leaves the cursor untouched.
+  Future<BudgetsSyncResult> pull() async {
+    final cursor = await _dao.getCursor();
+    BudgetChanges changes;
+    try {
+      changes = await _repo.fetchChanges(since: cursor);
+    } catch (e) {
+      return BudgetsSyncResult(pullFailed: true, error: e);
+    }
+
+    var pulled = 0;
+    var conflicts = 0;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    // 1) Project upserts first (expenses reference projects).
+    for (final sp in changes.projects) {
+      final applied = await _mergeServerProject(sp, syncedAt: nowIso);
+      if (applied.written) pulled++;
+      if (applied.conflict) conflicts++;
+    }
+
+    // 2) Expense upserts next.
+    for (final se in changes.expenses) {
+      final applied = await _mergeServerExpense(se, syncedAt: nowIso);
+      if (applied.written) pulled++;
+      if (applied.conflict) conflicts++;
+    }
+
+    var deletedApplied = 0;
+
+    // 3) Project tombstones.
+    for (final id in changes.deletedProjects) {
+      final logged = await _applyServerProjectTombstone(id, syncedAt: nowIso);
+      if (logged) conflicts++;
+      deletedApplied++;
+    }
+
+    // 4) Expense tombstones.
+    for (final id in changes.deletedExpenses) {
+      final logged = await _applyServerExpenseTombstone(id, syncedAt: nowIso);
+      if (logged) conflicts++;
+      deletedApplied++;
+    }
+
+    // Advance the shared cursor only when the server gave us a real clock. An
+    // empty `now` means we can't trust the page boundary — fall back to the max
+    // `updated_at` we actually observed; if even that is empty, treat the pull
+    // as FAILED so we don't silently skip the delta on the next run.
+    final nextCursor = _resolveCursor(changes);
+    if (nextCursor != null && nextCursor.isNotEmpty) {
+      await _dao.setCursor(nextCursor);
+    } else {
+      return BudgetsSyncResult(
+        pulled: pulled,
+        deletedApplied: deletedApplied,
+        conflicts: conflicts,
+        pullFailed: true,
+        error: StateError('server returned empty `now` with no datable rows'),
+      );
+    }
+
+    return BudgetsSyncResult(
+      pulled: pulled,
+      deletedApplied: deletedApplied,
+      conflicts: conflicts,
+    );
+  }
+
+  /// The cursor to advance to: the server `now` when present, else the newest
+  /// `updated_at` across the page's projects + expenses (so we never re-fetch
+  /// from scratch on a server that omitted `now`). Null/empty → pull failure.
+  String? _resolveCursor(BudgetChanges changes) {
+    if (changes.now.isNotEmpty) return changes.now;
+    String best = '';
+    for (final sp in changes.projects) {
+      final ua = sp.updatedAt ?? '';
+      if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
+    }
+    for (final se in changes.expenses) {
+      final ua = se.updatedAt ?? '';
+      if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
+    }
+    return best.isEmpty ? null : best;
+  }
+
+  // ── Project merge (LWW) ───────────────────────────────────────────────────
+
+  Future<_MergeOutcome> _mergeServerProject(
+    ServerProject sp, {
+    required String syncedAt,
+  }) {
+    final serverProject = sp.project;
+    final serverUpdatedAt = sp.updatedAt;
+
+    return _dao.runInTransaction<_MergeOutcome>((txn) async {
+      final localRow = await txn.getProjectRow(serverProject.id);
+
+      if (localRow == null) {
+        await txn.upsertProjectFromServer(
+          serverProject,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localDirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+      if (!localDirty) {
+        await txn.upsertProjectFromServer(
+          serverProject,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
+      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+
+      if (serverWins) {
+        final logged = await _logProjectFieldConflicts(
+            txn, localRow, serverProject, at: syncedAt);
+        await txn.upsertProjectFromServer(
+          serverProject,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return _MergeOutcome(written: true, conflict: logged);
+      }
+
+      // Local strictly newer — keep it; it re-pushes next sync. Nothing logged.
+      return const _MergeOutcome(written: false, conflict: false);
+    });
+  }
+
+  Future<bool> _logProjectFieldConflicts(
+    BudgetsTxn txn,
+    Map<String, Object?> localRow,
+    Project serverProject, {
+    required String at,
+  }) async {
+    const fields = <String>['name', 'budget', 'currency', 'status', 'description'];
+    final serverJson = serverProject.toJson();
+    var any = false;
+    for (final col in fields) {
+      final localVal = localRow[col]?.toString();
+      final serverVal = serverJson[col]?.toString();
+      if (localVal != serverVal) {
+        any = true;
+        await txn.logConflict(
+          id: serverProject.id,
+          field: col,
+          local: localVal,
+          server: serverVal,
+          at: at,
+        );
+      }
+    }
+    return any;
+  }
+
+  // ── Expense merge (LWW) ────────────────────────────────────────────────────
+
+  Future<_MergeOutcome> _mergeServerExpense(
+    ServerExpense se, {
+    required String syncedAt,
+  }) {
+    final serverExpense = se.expense;
+    final serverUpdatedAt = se.updatedAt;
+
+    return _dao.runInTransaction<_MergeOutcome>((txn) async {
+      final localRow = await txn.getExpenseRow(serverExpense.id);
+
+      if (localRow == null) {
+        await txn.upsertExpenseFromServer(
+          serverExpense,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localDirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+      if (!localDirty) {
+        await txn.upsertExpenseFromServer(
+          serverExpense,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
+      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+
+      if (serverWins) {
+        final logged = await _logExpenseFieldConflicts(
+            txn, localRow, serverExpense, at: syncedAt);
+        await txn.upsertExpenseFromServer(
+          serverExpense,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return _MergeOutcome(written: true, conflict: logged);
+      }
+
+      return const _MergeOutcome(written: false, conflict: false);
+    });
+  }
+
+  Future<bool> _logExpenseFieldConflicts(
+    BudgetsTxn txn,
+    Map<String, Object?> localRow,
+    Expense serverExpense, {
+    required String at,
+  }) async {
+    const fields = <String>[
+      'amount',
+      'currency',
+      'description',
+      'vendor',
+      'status',
+    ];
+    final serverJson = serverExpense.toJson();
+    var any = false;
+    for (final col in fields) {
+      final localVal = localRow[col]?.toString();
+      final serverVal = serverJson[col]?.toString();
+      if (localVal != serverVal) {
+        any = true;
+        await txn.logConflict(
+          id: serverExpense.id,
+          field: col,
+          local: localVal,
+          server: serverVal,
+          at: at,
+        );
+      }
+    }
+    return any;
+  }
+
+  // ── Tombstones (H1: server delete vs unsynced local edit) ──────────────────
+
+  Future<bool> _applyServerProjectTombstone(String id,
+      {required String syncedAt}) {
+    return _dao.runInTransaction<bool>((txn) async {
+      final localRow = await txn.getProjectRow(id);
+      var loggedConflict = false;
+
+      if (localRow != null) {
+        final dirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+        final alreadyDeleted = ((localRow['deleted'] as int?) ?? 0) == 1;
+        if (dirty && !alreadyDeleted) {
+          await _logTombstoneConflict(
+            txn,
+            localRow,
+            cols: const ['name', 'budget', 'description', 'status'],
+            at: syncedAt,
+          );
+          loggedConflict = true;
+        }
+        if (dirty) {
+          // The row is gone server-side; replaying its queued ops is pointless.
+          await txn.deleteOutboxForEntity(id);
+        }
+      }
+
+      await txn.applyServerProjectDelete(id, syncedAt: syncedAt);
+      return loggedConflict;
+    });
+  }
+
+  Future<bool> _applyServerExpenseTombstone(String id,
+      {required String syncedAt}) {
+    return _dao.runInTransaction<bool>((txn) async {
+      final localRow = await txn.getExpenseRow(id);
+      var loggedConflict = false;
+
+      if (localRow != null) {
+        final dirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+        final alreadyDeleted = ((localRow['deleted'] as int?) ?? 0) == 1;
+        if (dirty && !alreadyDeleted) {
+          await _logTombstoneConflict(
+            txn,
+            localRow,
+            cols: const ['amount', 'description', 'vendor', 'status'],
+            at: syncedAt,
+          );
+          loggedConflict = true;
+        }
+        if (dirty) {
+          await txn.deleteOutboxForEntity(id);
+        }
+      }
+
+      await txn.applyServerExpenseDelete(id, syncedAt: syncedAt);
+      return loggedConflict;
+    });
+  }
+
+  /// Record each non-empty local field as a conflict against the server delete
+  /// (server value is null — the row no longer exists).
+  Future<void> _logTombstoneConflict(
+    BudgetsTxn txn,
+    Map<String, Object?> localRow, {
+    required List<String> cols,
+    required String at,
+  }) async {
+    final id = (localRow['id'] as String?) ?? '';
+    for (final col in cols) {
+      final localVal = localRow[col]?.toString();
+      if (localVal == null || localVal.isEmpty) continue;
+      await txn.logConflict(
+        id: id,
+        field: col,
+        local: localVal,
+        server: null, // server-deleted → no server value
+        at: at,
+      );
+    }
+  }
+
+  // ── helpers ──────────────────────────────────────────────────────────────
+
+  static double? _asDouble(Object? v) {
+    if (v == null) return null;
+    if (v is double) return v;
+    if (v is int) return v.toDouble();
+    return double.tryParse(v.toString());
+  }
+
+  /// True when [a] >= [b] as ISO-8601 strings (lexicographic == chronological
+  /// for zero-padded ISO timestamps). Empty server time loses to any local time.
+  static bool _gte(String? a, String? b) {
+    final av = a ?? '';
+    final bv = b ?? '';
+    if (av.isEmpty) return false;
+    if (bv.isEmpty) return true;
+    return av.compareTo(bv) >= 0;
+  }
+
+  /// Unwrap an [ApiError] from either a bare throw or a [DioException] whose
+  /// `.error` carries the real [ApiError] (the production `_ErrorInterceptor`
+  /// shape). Returns null when [e] is neither.
+  static ApiError? _asApiError(Object e) => e is ApiError
+      ? e
+      : (e is DioException && e.error is ApiError
+          ? e.error as ApiError
+          : null);
+
+  /// Best-effort HTTP status for [e] across both error shapes.
+  static int? _statusOf(Object e) {
+    final api = _asApiError(e);
+    if (api != null) return api.status;
+    if (e is DioException) return e.response?.statusCode;
+    return null;
+  }
+
+  /// True when [e] is a transport-level failure that should STOP the drain and
+  /// keep the queue intact — robust to both the [ApiError] and the
+  /// [DioException] shapes thrown in production.
+  static bool _isNetworkError(Object e) {
+    final api = _asApiError(e);
+    if (api != null) {
+      // status 0 == no response reached us (DNS/connection/timeout).
+      return api.status == 0;
+    }
+    if (e is DioException) {
+      // Anything that isn't a real HTTP response is a transport failure.
+      if (e.type != DioExceptionType.badResponse) return true;
+      // A badResponse with no status code is also network-ish.
+      return e.response?.statusCode == null;
+    }
+    // A wholly unknown throw is not classifiable as a definitive server error;
+    // be conservative and DON'T treat it as network here — the caller will fall
+    // through to the unknown-shape branch and keep the item queued.
+    return false;
+  }
+}
+
+class _MergeOutcome {
+  final bool written;
+  final bool conflict;
+  const _MergeOutcome({required this.written, required this.conflict});
+}

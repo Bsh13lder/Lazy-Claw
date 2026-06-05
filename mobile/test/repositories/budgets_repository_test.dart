@@ -38,6 +38,17 @@ class _FakeTransport implements BudgetsTransport {
   }
 
   @override
+  Future<Map<String, dynamic>> patchJson(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    lastMethod = 'PATCH';
+    lastPath = path;
+    lastBody = body;
+    return response;
+  }
+
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async {
     lastMethod = 'DELETE';
     lastPath = path;
@@ -237,6 +248,103 @@ void main() {
       final t = _FakeTransport({'project': _projectJson()});
       await BudgetsRepository(t).createProject('Unfunded');
       expect(t.lastBody?.containsKey('budget'), isFalse);
+    });
+
+    test('sends a client id when provided (idempotent replay)', () async {
+      final t = _FakeTransport({'project': _projectJson()});
+      await BudgetsRepository(t).createProject('Pinned', id: 'client-uuid');
+      expect(t.lastBody, containsPair('id', 'client-uuid'));
+    });
+  });
+
+  group('BudgetsRepository.createExpense client id', () {
+    test('sends a client id when provided (idempotent replay)', () async {
+      final t = _FakeTransport({'expense': _expenseJson()});
+      await BudgetsRepository(t)
+          .createExpense('proj1', 5.0, 'Item', id: 'client-exp');
+      expect(t.lastBody, containsPair('id', 'client-exp'));
+    });
+  });
+
+  group('BudgetsRepository.updateProject / deleteProject', () {
+    test('PATCH /api/budgets/projects/{id} with the patch', () async {
+      final t = _FakeTransport({'project': _projectJson()});
+      await BudgetsRepository(t)
+          .updateProject('proj1', {'name': 'Renamed', 'budget': 200.0});
+      expect(t.lastMethod, 'PATCH');
+      expect(t.lastPath, '/api/budgets/projects/proj1');
+      expect(t.lastBody, containsPair('name', 'Renamed'));
+    });
+
+    test('DELETE /api/budgets/projects/{id}', () async {
+      final t = _FakeTransport({'status': 'deleted'});
+      await BudgetsRepository(t).deleteProject('proj9');
+      expect(t.lastMethod, 'DELETE');
+      expect(t.lastPath, '/api/budgets/projects/proj9');
+    });
+  });
+
+  group('BudgetsRepository.fetchChanges', () {
+    test('GET /api/budgets/changes parses both entities + tombstones + now',
+        () async {
+      final t = _FakeTransport({
+        'projects': [_projectJson(id: 'p1')],
+        'expenses': [_expenseJson(id: 'e1')],
+        'deleted_projects': ['dp1'],
+        'deleted_expenses': ['de1'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final changes = await BudgetsRepository(t).fetchChanges();
+      expect(t.lastMethod, 'GET');
+      expect(t.lastPath, '/api/budgets/changes');
+      expect(changes.projects, hasLength(1));
+      expect(changes.projects.first.project.id, 'p1');
+      expect(changes.expenses, hasLength(1));
+      expect(changes.expenses.first.expense.id, 'e1');
+      expect(changes.deletedProjects, ['dp1']);
+      expect(changes.deletedExpenses, ['de1']);
+      expect(changes.now, '2026-06-05T12:00:00Z');
+    });
+
+    test('carries server updated_at onto each entity for LWW', () async {
+      final t = _FakeTransport({
+        'projects': [
+          {..._projectJson(id: 'p1'), 'updated_at': '2026-06-05T11:00:00Z'}
+        ],
+        'expenses': [
+          {..._expenseJson(id: 'e1'), 'updated_at': '2026-06-05T11:30:00Z'}
+        ],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final changes = await BudgetsRepository(t).fetchChanges();
+      expect(changes.projects.first.updatedAt, '2026-06-05T11:00:00Z');
+      expect(changes.expenses.first.updatedAt, '2026-06-05T11:30:00Z');
+    });
+
+    test('passes since as query param when provided', () async {
+      final t = _FakeTransport({
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      await BudgetsRepository(t).fetchChanges(since: '2026-06-05T09:00:00Z');
+      expect(t.lastQueryParams, containsPair('since', '2026-06-05T09:00:00Z'));
+    });
+
+    test('sends no query param on a full (since-null) sync', () async {
+      final t = _FakeTransport({
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': [],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      await BudgetsRepository(t).fetchChanges();
+      expect(t.lastQueryParams, isNull);
     });
   });
 }

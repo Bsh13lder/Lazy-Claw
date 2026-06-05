@@ -14,10 +14,11 @@ import type {
 } from "../api";
 import { useToast } from "../context/ToastContext";
 import Modal from "../components/Modal";
+import MobileAppTab from "./settings/MobileAppTab";
 
 // ── Tab types ──────────────────────────────────────────────────────────────
 
-type TabId = "models" | "search" | "teams" | "permissions" | "about" | "power";
+type TabId = "models" | "search" | "teams" | "permissions" | "about" | "power" | "mobile";
 
 interface TabDef {
   readonly id: TabId;
@@ -117,6 +118,15 @@ function SlidersIcon() {
 
 // ── Tab definitions ────────────────────────────────────────────────────────
 
+function PhoneIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+      <line x1="12" y1="18" x2="12.01" y2="18" />
+    </svg>
+  );
+}
+
 function PowerIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -132,6 +142,7 @@ const TABS: readonly TabDef[] = [
   { id: "teams", label: "Teams", icon: <UsersIcon /> },
   { id: "permissions", label: "Permissions", icon: <ShieldIcon /> },
   { id: "power", label: "Power", icon: <PowerIcon /> },
+  { id: "mobile", label: "Mobile App", icon: <PhoneIcon /> },
   { id: "about", label: "About", icon: <InfoIcon /> },
 ] as const;
 
@@ -2097,6 +2108,7 @@ export default function Settings() {
         {tab === "power" && (
           <PowerTab general={general} onUpdate={handleGeneralUpdate} />
         )}
+        {tab === "mobile" && <MobileAppTab />}
         {tab === "about" && <AboutTab about={about} />}
       </div>
     </div>

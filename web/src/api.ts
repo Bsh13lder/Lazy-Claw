@@ -2075,3 +2075,12 @@ export const aiEditPdf = (id: string, instruction: string) =>
     method: "POST",
     body: JSON.stringify({ instruction }),
   });
+
+export async function getMobileVersion(): Promise<
+  { version: string; build: number; sha256: string; built_at: string } | null
+> {
+  const r = await fetch("/api/mobile/version", { credentials: "include" });
+  if (!r.ok) return null;
+  return r.json();
+}
+export const MOBILE_APK_URL = "/api/mobile/apk";

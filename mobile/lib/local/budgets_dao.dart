@@ -195,6 +195,20 @@ class BudgetsDao {
     return rows.isEmpty ? null : rows.first;
   }
 
+  /// Every NON-tombstoned expense cache row that belongs to [projectId]. Used by
+  /// the project-tombstone cascade so a server project delete sweeps its local
+  /// children even when the server didn't enumerate them in `deleted_expenses`.
+  Future<List<Map<String, Object?>>> _childExpenseRowsOn(
+    DatabaseExecutor exec,
+    String projectId,
+  ) async {
+    return exec.query(
+      'expense_cache',
+      where: 'project_id = ? AND deleted = 0',
+      whereArgs: [projectId],
+    );
+  }
+
   /// Run [action] inside a single DB transaction, handing it a transaction-
   /// scoped [BudgetsTxn] so a read + the dependent write commit atomically (no
   /// concurrent local write can slip between them). Used by the sync engine for
@@ -543,12 +557,6 @@ class BudgetsDao {
 
   // ── Outbox ─────────────────────────────────────────────────────────────────
 
-  /// All queued mutations in replay (seq ASC) order.
-  Future<List<BudgetsOutboxItem>> readOutbox() async {
-    final rows = await _db.query('outbox', orderBy: 'seq ASC');
-    return rows.map(BudgetsOutboxItem.fromRow).toList();
-  }
-
   /// Only the budgets-domain outbox items (project + expense), in seq order.
   /// Used by the sync engine so it never touches another domain's queue rows.
   Future<List<BudgetsOutboxItem>> readBudgetsOutbox() async {
@@ -601,13 +609,15 @@ class BudgetsDao {
     await _db.delete('outbox', where: 'seq = ?', whereArgs: [seq]);
   }
 
-  /// Remove every queued outbox op for [entityId]. Used when a server tombstone
-  /// makes a pending local op moot.
-  Future<int> deleteOutboxForEntity(String entityId) async {
+  /// Remove every queued outbox op for one [entity]'s [entityId]. Scoped to the
+  /// given entity discriminator so a project tombstone can never wipe another
+  /// domain's (or the sibling entity's) outbox row that happens to share an id.
+  /// Used when a server tombstone makes a pending local op moot.
+  Future<int> deleteOutboxForEntity(String entity, String entityId) async {
     return _db.delete(
       'outbox',
-      where: 'entity_id = ?',
-      whereArgs: [entityId],
+      where: 'entity = ? AND entity_id = ?',
+      whereArgs: [entity, entityId],
     );
   }
 
@@ -801,6 +811,11 @@ class BudgetsTxn {
   Future<Map<String, Object?>?> getExpenseRow(String id) =>
       _dao._getRowOn(_txn, 'expense_cache', id);
 
+  /// Non-tombstoned expense rows belonging to [projectId] on this transaction
+  /// (used by the project-tombstone cascade to sweep orphaned children).
+  Future<List<Map<String, Object?>>> childExpenseRows(String projectId) =>
+      _dao._childExpenseRowsOn(_txn, projectId);
+
   Future<void> upsertProjectFromServer(
     Project project, {
     String? serverUpdatedAt,
@@ -833,9 +848,13 @@ class BudgetsTxn {
       _dao._logConflictOn(_txn,
           id: id, field: field, local: local, server: server, at: at);
 
-  Future<int> deleteOutboxForEntity(String entityId) => _txn.delete(
+  /// Drop every queued outbox op for one [entity]'s [entityId] on this
+  /// transaction (scoped to the entity discriminator so a project tombstone
+  /// can't wipe a sibling expense — or another domain's — outbox row).
+  Future<int> deleteOutboxForEntity(String entity, String entityId) =>
+      _txn.delete(
         'outbox',
-        where: 'entity_id = ?',
-        whereArgs: [entityId],
+        where: 'entity = ? AND entity_id = ?',
+        whereArgs: [entity, entityId],
       );
 }

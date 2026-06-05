@@ -311,16 +311,36 @@ void main() {
       expect(await dao.dirtyProjectIds(), contains(p.id));
     });
 
-    test('deleteOutboxForEntity removes every queued op for one id', () async {
+    test('deleteOutboxForEntity removes every queued op for one entity+id',
+        () async {
       final dao = await _freshDao();
       final p = await dao.applyLocalProjectCreate('A', id: 'de1');
       await dao.applyLocalProjectUpdate(p.id, name: 'A2');
       await dao.applyLocalProjectDelete(p.id);
       await dao.applyLocalProjectCreate('Other', id: 'other');
-      final removed = await dao.deleteOutboxForEntity(p.id);
+      final removed = await dao.deleteOutboxForEntity(kProjectEntity, p.id);
       expect(removed, 3);
       final remaining = await dao.readBudgetsOutbox();
       expect(remaining.every((o) => o.entityId == 'other'), isTrue);
+    });
+
+    test(
+        'deleteOutboxForEntity is entity-scoped: a project tombstone never wipes '
+        'a sibling EXPENSE outbox row that shares the same id (C1)', () async {
+      final dao = await _freshDao();
+      // A project and an expense deliberately minted with the SAME id.
+      await dao.applyLocalProjectCreate('Collide', id: 'same');
+      await dao.applyLocalExpenseCreate('proj', 5.0, 'Collide exp', id: 'same');
+      expect(await dao.outboxCount(), 2);
+
+      // Scoped to the project entity → only the project row is removed.
+      final removed = await dao.deleteOutboxForEntity(kProjectEntity, 'same');
+      expect(removed, 1);
+
+      final remaining = await dao.readBudgetsOutbox();
+      expect(remaining, hasLength(1));
+      expect(remaining.single.entity, kExpenseEntity);
+      expect(remaining.single.entityId, 'same');
     });
   });
 

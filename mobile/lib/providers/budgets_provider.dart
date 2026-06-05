@@ -131,11 +131,9 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     try {
       // Stamp the project name so the new local row renders before the next
       // pull rehydrates it from the server.
-      final projectName = state.projects
-          .where((p) => p.id == projectId)
-          .map((p) => p.name)
-          .cast<String?>()
-          .firstWhere((_) => true, orElse: () => null);
+      final match =
+          state.projects.where((p) => p.id == projectId).firstOrNull;
+      final projectName = match?.name;
       await _dao.applyLocalExpenseCreate(
         projectId,
         amount,

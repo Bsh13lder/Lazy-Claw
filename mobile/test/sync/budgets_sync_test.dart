@@ -359,6 +359,81 @@ void main() {
       expect(await dao.readBudgetsOutbox(), isEmpty);
     });
 
+    test(
+        'H2: an EXPENSE create that 4xxes does not vanish — a "create rejected" '
+        'conflict is logged (cache row stays dirty for the UI)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalExpenseCreate('projZ', 17.0, 'Rejected lunch',
+          id: 'rej-exp');
+      final transport = _FakeTransport(
+        // The expense create POSTs to /projects/projZ/expenses.
+        dioErrorOnPaths: {'/expenses': () => _serverDio(422)},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      // Drained from the outbox (no infinite retry) but NOT silently — a
+      // conflict surfaces the rejection, and the dirty cache row stays put.
+      expect(result.pushInterrupted, isFalse);
+      expect(result.pushed, 0);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+
+      final conflicts = await dao.readConflicts();
+      final rejected =
+          conflicts.where((c) => c.field == 'create_rejected').toList();
+      expect(rejected, hasLength(1));
+      expect(rejected.single.id, 'rej-exp');
+      expect(rejected.single.local, contains('422'));
+      expect(rejected.single.server, isNull);
+
+      // The cache row is the only remaining record of the user's intent — it
+      // must still be present + dirty so the UI can show it as un-synced.
+      expect(await dao.getExpense('rej-exp'), isNotNull);
+      expect(await dao.dirtyExpenseIds(), contains('rej-exp'));
+    });
+
+    test(
+        'H2: a PROJECT create that 4xxes also logs a "create rejected" conflict',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalProjectCreate('Rejected project', id: 'rej-proj');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/budgets/projects': () => _serverDio(400)},
+      );
+      await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      final rejected = (await dao.readConflicts())
+          .where((c) => c.field == 'create_rejected')
+          .toList();
+      expect(rejected, hasLength(1));
+      expect(rejected.single.id, 'rej-proj');
+      expect(await dao.dirtyProjectIds(), contains('rej-proj'));
+    });
+
+    test(
+        'H2: a definitive 4xx on an UPDATE drains silently (no create_rejected '
+        'conflict — the next pull restores server truth)', () async {
+      final dao = await _freshDao();
+      // Commit the create first so the row is clean + server-known.
+      await dao.applyLocalProjectCreate('Exists', id: 'upd1');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+      // Now a local update that the server rejects with a 4xx.
+      await dao.applyLocalProjectUpdate('upd1', name: 'New name');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/budgets/projects/upd1': () => _serverDio(422)},
+      );
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      expect(result.pushInterrupted, isFalse);
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      // No create_rejected conflict for an update — drain is the right behavior.
+      expect(
+          (await dao.readConflicts())
+              .where((c) => c.field == 'create_rejected'),
+          isEmpty);
+    });
+
     test('a 5xx item dead-letters after kMaxPushAttempts, never wedges',
         () async {
       final dao = await _freshDao();
@@ -372,6 +447,39 @@ void main() {
       expect(await dao.readBudgetsOutbox(), isEmpty);
       // Cache row stays dirty so the next pull re-establishes server truth.
       expect(await dao.dirtyProjectIds(), contains('p1'));
+    });
+
+    test(
+        'M: multiple pending PROJECT updates coalesce into ONE PATCH carrying '
+        'the client updated_at (later values win)', () async {
+      final dao = await _freshDao();
+      // Create then commit so the row is clean (isolate the update coalescing).
+      await dao.applyLocalProjectCreate('Orig', id: 'co1');
+      await BudgetsSync(dao, BudgetsRepository(_FakeTransport())).push();
+
+      // Two consecutive local edits → two queued update rows.
+      await dao.applyLocalProjectUpdate('co1', name: 'Edit one');
+      await dao.applyLocalProjectUpdate('co1', name: 'Edit two', budget: 200.0);
+      expect(await dao.outboxCount(), 2);
+
+      final transport = _FakeTransport();
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).push();
+
+      // Both outbox rows retire, but only ONE PATCH hits the network.
+      expect(await dao.readBudgetsOutbox(), isEmpty);
+      final patches = transport.calls
+          .where((c) => c.method == 'PATCH' && c.path.contains('/co1'))
+          .toList();
+      expect(patches, hasLength(1));
+      // Later values win, both folded fields present.
+      expect(patches.single.body!['name'], 'Edit two');
+      expect(patches.single.body!['budget'], 200.0);
+      // Client updated_at is stamped on the merged PATCH so a self-stamping
+      // server can't win LWW and revert this edit.
+      expect(patches.single.body!.containsKey('updated_at'), isTrue);
+      expect(patches.single.body!.containsKey('id'), isFalse);
+      expect(result.pushed, greaterThanOrEqualTo(1));
     });
 
     test('commitPush is idempotent — replaying a retired item is a no-op',
@@ -606,6 +714,85 @@ void main() {
       expect(result.conflicts, greaterThanOrEqualTo(1));
       expect(await dao.outboxCount(), 0);
       expect((await dao.listExpenses()).map((e) => e.id), isNot(contains('he1')));
+    });
+
+    test(
+        'H1 cascade: server delete of a project sweeps its CLEAN local child '
+        'expenses (no orphans) — children become locally deleted', () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      // A clean (already-synced) project with two clean child expenses.
+      await dao.upsertProjectFromServer(
+        Project.fromJson(_serverProjectJson(id: 'par', name: 'Parent')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      await dao.upsertExpenseFromServer(
+        Expense.fromJson(_serverExpenseJson(id: 'ch1', projectId: 'par')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      await dao.upsertExpenseFromServer(
+        Expense.fromJson(_serverExpenseJson(id: 'ch2', projectId: 'par')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      expect((await dao.listExpenses()).map((e) => e.id),
+          containsAll(['ch1', 'ch2']));
+
+      // The server tombstones ONLY the project (does NOT enumerate the children
+      // in deleted_expenses) — the exact shape that used to orphan children.
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': ['par'],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.deletedApplied, 1);
+      // The parent + BOTH children are gone from the local lists (no orphans).
+      expect((await dao.listProjects()).map((e) => e.id), isNot(contains('par')));
+      final remainingExpenses = (await dao.listExpenses()).map((e) => e.id);
+      expect(remainingExpenses, isNot(contains('ch1')));
+      expect(remainingExpenses, isNot(contains('ch2')));
+      // Clean children cascaded silently — no conflict rows logged for them.
+      expect(await dao.readConflicts(), isEmpty);
+    });
+
+    test(
+        'H1 cascade: a DIRTY child expense logs a conflict + reconciles its '
+        'queued outbox op before the project delete clobbers it', () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.upsertProjectFromServer(
+        Project.fromJson(_serverProjectJson(id: 'par2', name: 'Parent2')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      // An unsynced (dirty) local child expense with a queued create op.
+      await dao.applyLocalExpenseCreate('par2', 42.0, 'Unsynced child',
+          id: 'dch');
+      expect(await dao.outboxCount(), 1);
+
+      final transport = _FakeTransport(changesResponse: {
+        'projects': [],
+        'expenses': [],
+        'deleted_projects': ['par2'],
+        'deleted_expenses': [],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result =
+          await BudgetsSync(dao, BudgetsRepository(transport)).pull();
+
+      expect(result.deletedApplied, 1);
+      // The dirty child's clobbered edit is logged (never silent).
+      expect(result.conflicts, greaterThanOrEqualTo(1));
+      final conflicts = await dao.readConflicts();
+      expect(conflicts.any((c) => c.field == 'description'), isTrue);
+      final descConflict =
+          conflicts.firstWhere((c) => c.field == 'description');
+      expect(descConflict.local, 'Unsynced child');
+      expect(descConflict.server, isNull); // server-deleted → no server value
+      // The now-moot queued create was reconciled away, and the child is gone.
+      expect(await dao.outboxCount(), 0);
+      expect((await dao.listExpenses()).map((e) => e.id), isNot(contains('dch')));
     });
 
     test('H1: server delete of a CLEAN local row applies silently (no conflict)',

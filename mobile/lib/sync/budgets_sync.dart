@@ -91,11 +91,26 @@ class BudgetsSync {
   /// retried next sync). A 4xx (validation/conflict/404) is safe to drain.
   Future<BudgetsSyncResult> push() async {
     final queue = await _dao.readBudgetsOutbox();
+    // Coalesce consecutive `update` ops per project so multiple pending PATCHes
+    // can't replay as separate round-trips that interleave with server-stamped
+    // times. The first update row of a run keeps the merged payload (carrying a
+    // client `updated_at` for LWW); the rest are no-op'd (just dequeued).
+    // Expenses have no `update` op, so only projects are affected.
+    final coalesced = _coalesceUpdates(queue);
 
     var pushed = 0;
     for (final item in queue) {
       try {
-        final committed = await _pushOne(item);
+        // Skipped duplicate update rows: just dequeue, no network call.
+        if (coalesced.skipSeqs.contains(item.seq)) {
+          await _dao.deleteOutboxItem(item.seq);
+          continue;
+        }
+        final effective = coalesced.payloads[item.seq] != null
+            ? _withPayload(item, coalesced.payloads[item.seq]!)
+            : item;
+
+        final committed = await _pushOne(effective);
         if (committed) {
           // Retire the pushed item atomically (delete outbox row + clear dirty
           // / hard-remove tombstone) so a crash can't split the two writes.
@@ -214,8 +229,16 @@ class BudgetsSync {
     }
 
     if (status >= 400) {
-      // Definitive client error (validation/conflict/404-on-create). Drop the
-      // outbox row; leave the cache dirty so the next pull re-establishes truth.
+      // Definitive client error (validation/conflict). For an update/delete this
+      // is safe to drain silently — the row exists server-side, so the next pull
+      // restores server truth and the local dirty row reconciles. But a CREATE
+      // is client-originated: there is NO server truth to restore, so silently
+      // dropping the only queued record permanently strands the dirty cache row
+      // (an orphan the user can never re-sync). Log it as a visible conflict
+      // BEFORE draining so the UI / next sync can surface the rejection.
+      if (item.op == BudgetsOutboxOp.create) {
+        await _logCreateRejected(item, status);
+      }
       await _dao.deleteOutboxItem(item.seq);
       return false; // drained
     }
@@ -224,9 +247,99 @@ class BudgetsSync {
     throw _PushInterrupted(e);
   }
 
+  /// Record a rejected CREATE in the `conflicts` table so a definitive 4xx on a
+  /// client-originated row is never silent. The local cache row stays dirty (its
+  /// `dirty=1` flag is the UI's "un-synced" signal); this surfaces WHY it can't
+  /// sync. The conflict row's `server` value is null (the create never landed)
+  /// and the `local` value carries the entity label + rejecting status for
+  /// diagnosis.
+  Future<void> _logCreateRejected(BudgetsOutboxItem item, int status) async {
+    final p = item.payload;
+    final label = item.isExpense
+        ? (p['description']?.toString() ?? p['amount']?.toString() ?? '')
+        : (p['name']?.toString() ?? '');
+    final descriptor = label.isEmpty ? item.entity : '${item.entity}: $label';
+    await _dao.logConflict(
+      id: item.entityId,
+      field: 'create_rejected',
+      local: 'HTTP $status — $descriptor',
+      server: null, // create never landed → no server value
+    );
+  }
+
   Map<String, dynamic> _patchFrom(Map<String, dynamic> payload) {
     final out = Map<String, dynamic>.from(payload)..remove('id');
     return out;
+  }
+
+  /// Replace an item's payload (used for the coalesced update head).
+  BudgetsOutboxItem _withPayload(
+          BudgetsOutboxItem item, Map<String, dynamic> payload) =>
+      BudgetsOutboxItem(
+        seq: item.seq,
+        op: item.op,
+        entity: item.entity,
+        entityId: item.entityId,
+        payload: payload,
+        createdAt: item.createdAt,
+        attempts: item.attempts,
+      );
+
+  // ── update coalescing ─────────────────────────────────────────────────────
+
+  /// Merge consecutive pending `update` ops for the same project into one
+  /// payload carried by the FIRST update row; the later rows are marked to be
+  /// dequeued without a network call. Each merged head also carries the client
+  /// `updated_at` (latest local edit time) so a server that stamps its own
+  /// `updated_at` can't win LWW and revert a newer local edit. Only project
+  /// updates exist in the budgets outbox (expenses have no `update` op).
+  _Coalesced _coalesceUpdates(List<BudgetsOutboxItem> queue) {
+    // entityId → seq of the head update row that will carry the merged payload.
+    final head = <String, int>{};
+    // head seq → merged payload (mutable while folding).
+    final merged = <int, Map<String, dynamic>>{};
+    final skip = <int>{};
+
+    for (final item in queue) {
+      if (item.op != BudgetsOutboxOp.update) continue;
+      final id = item.entityId;
+      final headSeq = head[id];
+      if (headSeq == null) {
+        head[id] = item.seq;
+        merged[item.seq] = Map<String, dynamic>.from(item.payload);
+      } else {
+        // Fold this later update into the head; later values win (LWW).
+        final into = merged[headSeq]!;
+        for (final entry in item.payload.entries) {
+          if (entry.key == 'id') continue;
+          into[entry.key] = entry.value;
+        }
+        skip.add(item.seq);
+      }
+    }
+
+    // Stamp the client updated_at on each coalesced head so the server can LWW.
+    for (final entry in merged.entries) {
+      entry.value['updated_at'] = _lwwTimeFor(queue, entry.key);
+    }
+
+    return _Coalesced(payloads: merged, skipSeqs: skip);
+  }
+
+  /// The newest local edit time to advertise for the entity owning [headSeq] —
+  /// the createdAt of the LAST update row folded into the head (queue order is
+  /// chronological), falling back to the head's own createdAt.
+  String _lwwTimeFor(List<BudgetsOutboxItem> queue, int headSeq) {
+    final headItem = queue.firstWhere((i) => i.seq == headSeq);
+    var best = headItem.createdAt;
+    for (final i in queue) {
+      if (i.op == BudgetsOutboxOp.update &&
+          i.entityId == headItem.entityId &&
+          i.createdAt.compareTo(best) > 0) {
+        best = i.createdAt;
+      }
+    }
+    return best;
   }
 
   // ── PULL ────────────────────────────────────────────────────────────────
@@ -497,13 +610,55 @@ class BudgetsSync {
         }
         if (dirty) {
           // The row is gone server-side; replaying its queued ops is pointless.
-          await txn.deleteOutboxForEntity(id);
+          await txn.deleteOutboxForEntity(kProjectEntity, id);
         }
       }
+
+      // H1: cascade the project delete to its local child expenses in the SAME
+      // transaction. The server delete cascades server-side but may not
+      // enumerate every child in `deleted_expenses` — without this sweep those
+      // children become permanent local orphans (their project is gone but they
+      // still render). A CLEAN child mirrors the server cascade (deleted=1); a
+      // DIRTY child has an un-pushed local edit the cascade is about to clobber,
+      // so we log a conflict + reconcile its queued outbox op BEFORE deleting it
+      // (delete-wins, never silent — same policy as the row's own tombstone).
+      final childConflict = await _cascadeChildExpenses(txn, id, at: syncedAt);
+      if (childConflict) loggedConflict = true;
 
       await txn.applyServerProjectDelete(id, syncedAt: syncedAt);
       return loggedConflict;
     });
+  }
+
+  /// Apply the server's project-delete cascade to every local child expense.
+  /// Returns true when at least one DIRTY child logged a conflict.
+  Future<bool> _cascadeChildExpenses(
+    BudgetsTxn txn,
+    String projectId, {
+    required String at,
+  }) async {
+    final children = await txn.childExpenseRows(projectId);
+    var loggedAny = false;
+    for (final child in children) {
+      final childId = (child['id'] as String?) ?? '';
+      if (childId.isEmpty) continue;
+      final dirty = ((child['dirty'] as int?) ?? 0) == 1;
+      if (dirty) {
+        // Un-pushed local edit on a child the project delete is clobbering — log
+        // it + drop its now-moot queued op (the child is gone server-side).
+        await _logTombstoneConflict(
+          txn,
+          child,
+          cols: const ['amount', 'description', 'vendor', 'status'],
+          at: at,
+        );
+        await txn.deleteOutboxForEntity(kExpenseEntity, childId);
+        loggedAny = true;
+      }
+      // Apply the server cascade locally for both clean + reconciled-dirty rows.
+      await txn.applyServerExpenseDelete(childId, syncedAt: at);
+    }
+    return loggedAny;
   }
 
   Future<bool> _applyServerExpenseTombstone(String id,
@@ -525,7 +680,7 @@ class BudgetsSync {
           loggedConflict = true;
         }
         if (dirty) {
-          await txn.deleteOutboxForEntity(id);
+          await txn.deleteOutboxForEntity(kExpenseEntity, id);
         }
       }
 
@@ -618,4 +773,12 @@ class _MergeOutcome {
   final bool written;
   final bool conflict;
   const _MergeOutcome({required this.written, required this.conflict});
+}
+
+/// Result of folding pending `update` ops: per-head merged payloads + the set of
+/// later update rows to dequeue without a network call.
+class _Coalesced {
+  final Map<int, Map<String, dynamic>> payloads;
+  final Set<int> skipSeqs;
+  const _Coalesced({required this.payloads, required this.skipSeqs});
 }

@@ -10,7 +10,10 @@ import 'uuid.dart';
 
 /// Schema version for the local cache DB. Bump + add a branch in
 /// [migrateAppDb] when the table shape changes.
-const int kAppDbVersion = 1;
+///
+/// v2: adds `outbox.attempts` so the push engine can count server 5xx retries
+///     and dead-letter a poison item instead of silently dropping it.
+const int kAppDbVersion = 2;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -59,7 +62,8 @@ const List<String> kAppDbSchema = [
     entity TEXT NOT NULL,
     entity_id TEXT NOT NULL,
     payload TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
   )
   ''',
   '''
@@ -87,10 +91,19 @@ Future<void> createAppDbSchema(Database db) async {
   }
 }
 
-/// Forward-migration hook. Currently a no-op (v1 is the first schema) but any
-/// future version bump branches here.
+/// Forward-migration hook. Each version bump adds a branch that runs when an
+/// older on-device DB is opened, so existing user data is preserved.
 Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
-  // No migrations yet — schema is at v1.
+  // v1 → v2: add the per-item retry counter used by the push engine.
+  if (oldVersion < 2) {
+    final cols = await db.rawQuery("PRAGMA table_info('outbox')");
+    final hasAttempts = cols.any((c) => c['name'] == 'attempts');
+    if (!hasAttempts) {
+      await db.execute(
+        'ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+  }
 }
 
 /// Read the DB passphrase from secure storage, generating + persisting a fresh

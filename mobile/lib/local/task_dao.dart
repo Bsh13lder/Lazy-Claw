@@ -24,6 +24,11 @@ class OutboxItem {
   final Map<String, dynamic> payload;
   final String createdAt;
 
+  /// How many times pushing this item failed with a retryable server error
+  /// (5xx). After [TaskSync.kMaxPushAttempts] it is dead-lettered instead of
+  /// being retried forever.
+  final int attempts;
+
   const OutboxItem({
     required this.seq,
     required this.op,
@@ -31,6 +36,7 @@ class OutboxItem {
     required this.entityId,
     required this.payload,
     required this.createdAt,
+    this.attempts = 0,
   });
 
   factory OutboxItem.fromRow(Map<String, Object?> row) => OutboxItem(
@@ -40,6 +46,7 @@ class OutboxItem {
         entityId: row['entity_id'] as String,
         payload: _decodePayload(row['payload'] as String?),
         createdAt: row['created_at'] as String? ?? '',
+        attempts: (row['attempts'] as int?) ?? 0,
       );
 
   static Map<String, dynamic> _decodePayload(String? raw) {
@@ -119,14 +126,28 @@ class TaskDao {
 
   /// Raw cache row (including dirty/deleted/updated_at) — used by the sync
   /// engine for last-write-wins decisions. Returns null when absent.
-  Future<Map<String, Object?>?> getRow(String id) async {
-    final rows = await _db.query(
+  Future<Map<String, Object?>?> getRow(String id) => _getRowOn(_db, id);
+
+  Future<Map<String, Object?>?> _getRowOn(
+    DatabaseExecutor exec,
+    String id,
+  ) async {
+    final rows = await exec.query(
       'task_cache',
       where: 'id = ?',
       whereArgs: [id],
       limit: 1,
     );
     return rows.isEmpty ? null : rows.first;
+  }
+
+  /// Run [action] inside a single DB transaction, handing it a transaction-
+  /// scoped [TaskTxn] so a read + the dependent write commit atomically (no
+  /// concurrent local write can slip between them). Used by the sync engine for
+  /// the dirty-check-then-upsert race (H2) and the server-tombstone-vs-local
+  /// reconcile (H1).
+  Future<T> runInTransaction<T>(Future<T> Function(TaskTxn) action) {
+    return _db.transaction((txn) => action(TaskTxn._(this, txn)));
   }
 
   // ── Server-driven upserts (pull) ─────────────────────────────────────────
@@ -141,6 +162,15 @@ class TaskDao {
     Task task, {
     String? serverUpdatedAt,
     String? syncedAt,
+  }) =>
+      _upsertFromServerOn(_db, task,
+          serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
+
+  Future<void> _upsertFromServerOn(
+    DatabaseExecutor exec,
+    Task task, {
+    String? serverUpdatedAt,
+    String? syncedAt,
   }) async {
     final now = syncedAt ?? _now();
     final updatedAt = serverUpdatedAt ??
@@ -150,7 +180,7 @@ class TaskDao {
       ..['dirty'] = 0
       ..['deleted'] = 0
       ..['last_synced_at'] = now;
-    await _db.insert(
+    await exec.insert(
       'task_cache',
       row,
       conflictAlgorithm: ConflictAlgorithm.replace,
@@ -159,9 +189,16 @@ class TaskDao {
 
   /// Apply a server tombstone: mark the local row deleted and clear dirty (the
   /// server already knows about this delete). Idempotent if the row is absent.
-  Future<void> applyServerDelete(String id, {String? syncedAt}) async {
+  Future<void> applyServerDelete(String id, {String? syncedAt}) =>
+      _applyServerDeleteOn(_db, id, syncedAt: syncedAt);
+
+  Future<void> _applyServerDeleteOn(
+    DatabaseExecutor exec,
+    String id, {
+    String? syncedAt,
+  }) async {
     final now = syncedAt ?? _now();
-    await _db.update(
+    await exec.update(
       'task_cache',
       {
         'deleted': 1,
@@ -347,15 +384,33 @@ class TaskDao {
 
   /// Mark a row clean after its mutation pushed successfully. For a delete that
   /// pushed, the tombstone can be hard-removed (server now owns the delete).
+  ///
+  /// Idempotent: a missing row, an already-clean row, and an already-removed
+  /// tombstone are all safe no-ops (so a crash-retry of [commitPush] can replay
+  /// without corrupting state).
   Future<void> clearDirty(String id, {bool removeIfDeleted = true}) async {
-    final row = await getRow(id);
-    if (row == null) return;
+    await _clearDirtyOn(_db, id, removeIfDeleted: removeIfDeleted);
+  }
+
+  Future<void> _clearDirtyOn(
+    DatabaseExecutor exec,
+    String id, {
+    bool removeIfDeleted = true,
+  }) async {
+    final rows = await exec.query(
+      'task_cache',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return;
+    final row = rows.first;
     final isDeleted = (row['deleted'] as int? ?? 0) == 1;
     if (isDeleted && removeIfDeleted) {
-      await _db.delete('task_cache', where: 'id = ?', whereArgs: [id]);
+      await exec.delete('task_cache', where: 'id = ?', whereArgs: [id]);
       return;
     }
-    await _db.update(
+    await exec.update(
       'task_cache',
       {'dirty': 0, 'last_synced_at': _now()},
       where: 'id = ?',
@@ -373,6 +428,56 @@ class TaskDao {
 
   Future<void> deleteOutboxItem(int seq) async {
     await _db.delete('outbox', where: 'seq = ?', whereArgs: [seq]);
+  }
+
+  /// Atomically retire a pushed item: delete its outbox row AND clear the local
+  /// dirty flag (or hard-remove a pushed tombstone) in ONE transaction. Either
+  /// both land or neither does, so a crash can never leave the outbox row gone
+  /// while the cache row is still marked dirty (or vice-versa). Idempotent on
+  /// replay — re-running with the row already gone is a no-op.
+  Future<void> commitPush(int seq, String entityId) async {
+    await _db.transaction((txn) async {
+      await txn.delete('outbox', where: 'seq = ?', whereArgs: [seq]);
+      await _clearDirtyOn(txn, entityId);
+    });
+  }
+
+  /// Record one more failed attempt for a retryable (5xx) server error so the
+  /// engine can dead-letter a poison item after N tries. Returns the new count.
+  Future<int> bumpOutboxAttempts(int seq) async {
+    return _db.transaction<int>((txn) async {
+      await txn.rawUpdate(
+        'UPDATE outbox SET attempts = attempts + 1 WHERE seq = ?',
+        [seq],
+      );
+      final rows = await txn.query(
+        'outbox',
+        columns: ['attempts'],
+        where: 'seq = ?',
+        whereArgs: [seq],
+        limit: 1,
+      );
+      if (rows.isEmpty) return 0;
+      return (rows.first['attempts'] as int?) ?? 0;
+    });
+  }
+
+  /// Drop a poison outbox item that exceeded the retry budget. The local cache
+  /// row is left dirty so the next pull re-establishes server truth; the item
+  /// itself never blocks the rest of the queue.
+  Future<void> deadLetterOutboxItem(int seq) async {
+    await _db.delete('outbox', where: 'seq = ?', whereArgs: [seq]);
+  }
+
+  /// Remove every queued outbox op for [entityId]. Used when a server tombstone
+  /// makes a pending local op moot (the row is gone server-side, so replaying
+  /// create/update/complete/delete against it is pointless or 404s).
+  Future<int> deleteOutboxForEntity(String entityId) async {
+    return _db.delete(
+      'outbox',
+      where: 'entity_id = ?',
+      whereArgs: [entityId],
+    );
   }
 
   Future<int> outboxCount() async {
@@ -403,14 +508,51 @@ class TaskDao {
 
   // ── Conflicts ────────────────────────────────────────────────────────────
 
+  /// Log a conflict, deduped on (id, field, local, server). An identical
+  /// unresolved conflict already on file is NOT re-inserted, so the table can't
+  /// grow unbounded when the same divergence is re-observed every sync (M1).
   Future<void> logConflict({
     required String id,
     required String field,
     String? local,
     String? server,
     String? at,
+  }) =>
+      _logConflictOn(_db, id: id, field: field, local: local, server: server, at: at);
+
+  Future<void> _logConflictOn(
+    DatabaseExecutor exec, {
+    required String id,
+    required String field,
+    String? local,
+    String? server,
+    String? at,
   }) async {
-    await _db.insert('conflicts', {
+    // Build the dedup WHERE dynamically: sqflite forbids binding `null` as a
+    // whereArg, so a null local/server is matched with `IS NULL` instead.
+    final where = StringBuffer('id = ? AND field = ?');
+    final args = <Object>[id, field];
+    if (local == null) {
+      where.write(' AND local IS NULL');
+    } else {
+      where.write(' AND local = ?');
+      args.add(local);
+    }
+    if (server == null) {
+      where.write(' AND server IS NULL');
+    } else {
+      where.write(' AND server = ?');
+      args.add(server);
+    }
+
+    final dupes = await exec.query(
+      'conflicts',
+      where: where.toString(),
+      whereArgs: args,
+      limit: 1,
+    );
+    if (dupes.isNotEmpty) return;
+    await exec.insert('conflicts', {
       'id': id,
       'field': field,
       'local': local,
@@ -509,4 +651,50 @@ class TaskDao {
         'steps': t.steps,
         'allocated_budget': t.allocatedBudget,
       };
+}
+
+/// Transaction-scoped façade over a [TaskDao] handed out by
+/// [TaskDao.runInTransaction]. Every call runs on the SAME open transaction, so
+/// a read followed by a dependent write commits atomically — nothing else can
+/// interleave between them.
+class TaskTxn {
+  final TaskDao _dao;
+  final Transaction _txn;
+  const TaskTxn._(this._dao, this._txn);
+
+  /// Raw cache row for [id] on this transaction (null when absent).
+  Future<Map<String, Object?>?> getRow(String id) =>
+      _dao._getRowOn(_txn, id);
+
+  /// Write the server-authoritative copy on this transaction.
+  Future<void> upsertFromServer(
+    Task task, {
+    String? serverUpdatedAt,
+    String? syncedAt,
+  }) =>
+      _dao._upsertFromServerOn(_txn, task,
+          serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
+
+  /// Apply a server tombstone on this transaction.
+  Future<void> applyServerDelete(String id, {String? syncedAt}) =>
+      _dao._applyServerDeleteOn(_txn, id, syncedAt: syncedAt);
+
+  /// Log a (deduped) conflict on this transaction.
+  Future<void> logConflict({
+    required String id,
+    required String field,
+    String? local,
+    String? server,
+    String? at,
+  }) =>
+      _dao._logConflictOn(_txn,
+          id: id, field: field, local: local, server: server, at: at);
+
+  /// Drop every queued outbox op for [entityId] on this transaction (used when
+  /// a server tombstone makes pending local ops moot).
+  Future<int> deleteOutboxForEntity(String entityId) => _txn.delete(
+        'outbox',
+        where: 'entity_id = ?',
+        whereArgs: [entityId],
+      );
 }

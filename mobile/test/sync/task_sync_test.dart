@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
 import 'package:lazyclaw_mobile/local/app_db.dart';
@@ -29,16 +30,26 @@ class _FakeTransport implements TasksTransport {
   /// Substring → throw a non-network ApiError(status) on the write path.
   final Map<String, int> failServerOnPaths;
 
+  /// Substring → throw a real [DioException] on the write path (mirrors what
+  /// production actually throws: the `ApiError` lives in `DioException.error`).
+  /// Each entry returns a fresh exception so the path/type can be asserted.
+  final Map<String, DioException Function()> dioErrorOnPaths;
+
   _FakeTransport({
     Map<String, dynamic>? changesResponse,
     Set<String>? failNetworkOnPaths,
     Map<String, int>? failServerOnPaths,
+    Map<String, DioException Function()>? dioErrorOnPaths,
   })  : changesResponse =
             changesResponse ?? {'tasks': [], 'deleted': [], 'now': ''},
         failNetworkOnPaths = failNetworkOnPaths ?? const {},
-        failServerOnPaths = failServerOnPaths ?? const {};
+        failServerOnPaths = failServerOnPaths ?? const {},
+        dioErrorOnPaths = dioErrorOnPaths ?? const {};
 
   void _maybeFail(String path) {
+    for (final entry in dioErrorOnPaths.entries) {
+      if (path.contains(entry.key)) throw entry.value();
+    }
     for (final frag in failNetworkOnPaths) {
       if (path.contains(frag)) throw ApiError(0, 'Network error');
     }
@@ -115,6 +126,30 @@ Map<String, dynamic> _serverTaskJson({
       'created_at': createdAt,
       'updated_at': updatedAt ?? createdAt,
     };
+
+/// A production-shaped server-error DioException: a real HTTP response with a
+/// status code, carrying the `ApiError` in `.error` exactly like the app's
+/// `_ErrorInterceptor` rethrows it.
+DioException _serverDio(int status) {
+  final req = RequestOptions(path: '/api/tasks');
+  return DioException(
+    requestOptions: req,
+    type: DioExceptionType.badResponse,
+    response: Response(requestOptions: req, statusCode: status),
+    error: ApiError(status, 'Server $status'),
+  );
+}
+
+/// A connection-type DioException (no response reached us) — the network-down
+/// shape. `.error` carries ApiError(0) like the interceptor would produce.
+DioException _connectionDio() {
+  final req = RequestOptions(path: '/api/tasks');
+  return DioException(
+    requestOptions: req,
+    type: DioExceptionType.connectionError,
+    error: ApiError(0, 'Network error'),
+  );
+}
 
 void main() {
   setUpAll(() => sqfliteFfiInit());
@@ -204,6 +239,149 @@ void main() {
       expect(result.pushInterrupted, isFalse);
       // Queue drained despite server rejecting — next pull restores truth.
       expect(await dao.readOutbox(), isEmpty);
+    });
+
+    // ── C1: production DioException error-classification regression guards ──
+
+    test(
+        'C1: a real DioException(badResponse, error: ApiError(500)) RETAINS the '
+        'outbox item (never silently dropped)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('Keep me', id: 'srv5xx');
+      // Production throws DioException with the ApiError nested in `.error`.
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/tasks': () => _serverDio(500)},
+      );
+      final sync = TaskSync(dao, TasksRepository(transport));
+      final result = await sync.push();
+
+      // 5xx is retryable → drain stops, the item stays queued.
+      expect(result.pushInterrupted, isTrue);
+      expect(result.pushed, 0);
+      final remaining = await dao.readOutbox();
+      expect(remaining, hasLength(1));
+      expect(remaining.first.op, OutboxOp.create);
+      // The attempt was counted (so it can eventually be dead-lettered).
+      expect(remaining.first.attempts, 1);
+    });
+
+    test(
+        'C1: a connection-type DioException stops the drain and preserves the '
+        'whole queue (_PushInterrupted semantics)', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('First', id: 'n1'); // POST /api/tasks → ok
+      final t2 = await dao.applyLocalCreate('Second', id: 'n2');
+      await dao.applyLocalUpdate(t2.id, title: 'patched'); // PATCH /api/tasks/n2
+
+      // The n2 PATCH hits a network drop (connection-type DioException). Both
+      // creates POST to /api/tasks and succeed first.
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/tasks/n2': () => _connectionDio()},
+      );
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+
+      expect(result.pushInterrupted, isTrue);
+      // Both creates drained; the failing update stays queued (queue preserved).
+      final remaining = await dao.readOutbox();
+      expect(remaining.map((o) => o.op), contains(OutboxOp.update));
+      expect(remaining.every((o) => o.op != OutboxOp.create), isTrue);
+      // No attempt counter bumped for a network error (only 5xx counts).
+      expect(remaining.firstWhere((o) => o.op == OutboxOp.update).attempts, 0);
+    });
+
+    test('C1: a real DioException 404 on delete is treated as success (drains)',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Bye', id: 'gone404');
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+      await dao.applyLocalDelete(t.id);
+
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/tasks/gone404': () => _serverDio(404)},
+      );
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+      expect(result.pushInterrupted, isFalse);
+      expect(result.pushed, 1); // 404-on-delete counted as a successful drain
+      expect(await dao.readOutbox(), isEmpty);
+      expect(await dao.getById(t.id), isNull); // tombstone hard-removed
+    });
+
+    test('C1: a real DioException 422 (client error) drains the item', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('Bad', id: 'bad422');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/tasks': () => _serverDio(422)},
+      );
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+      expect(result.pushInterrupted, isFalse);
+      expect(await dao.readOutbox(), isEmpty); // definitive 4xx → safe to drain
+    });
+
+    test('C1: a 5xx item dead-letters after kMaxPushAttempts, never wedges',
+        () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('Poison', id: 'p1');
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/api/tasks': () => _serverDio(503)},
+      );
+      // Drive enough sync attempts to exhaust the retry budget.
+      for (var i = 0; i < TaskSync.kMaxPushAttempts; i++) {
+        await TaskSync(dao, TasksRepository(transport)).push();
+      }
+      // After the last attempt the poison item is dead-lettered.
+      expect(await dao.readOutbox(), isEmpty);
+    });
+
+    // ── C2: atomic push commit (idempotent replay) ──
+
+    test('C2: commitPush is idempotent — replaying a retired item is a no-op',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A', id: 'c2a');
+      final outbox = await dao.readOutbox();
+      final seq = outbox.first.seq;
+      // First commit retires the item.
+      await dao.commitPush(seq, t.id);
+      expect(await dao.readOutbox(), isEmpty);
+      expect(await dao.dirtyIds(), isEmpty);
+      // Replaying the same commit (simulating a crash-retry) must not throw and
+      // must leave state correct.
+      await dao.commitPush(seq, t.id);
+      expect(await dao.dirtyIds(), isEmpty);
+      expect(await dao.getById(t.id), isNotNull); // row still present + clean
+    });
+
+    // ── H3: partial-update coalescing + client updated_at on PATCH ──
+
+    test(
+        'H3: multiple pending updates for one id coalesce into ONE PATCH '
+        'carrying the latest fields + client updated_at', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Title', id: 'h3');
+      // Pretend the create already synced so only updates remain queued.
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+      await dao.applyLocalUpdate(t.id, title: 'First edit');
+      await dao.applyLocalUpdate(t.id, description: 'Second edit');
+      await dao.applyLocalUpdate(t.id, title: 'Final title');
+
+      final transport = _FakeTransport();
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+
+      // All three update rows are gone from the outbox.
+      expect(await dao.readOutbox(), isEmpty);
+      // Exactly ONE PATCH hit the wire (the others were coalesced + dequeued).
+      final patches =
+          transport.calls.where((c) => c.method == 'PATCH').toList();
+      expect(patches, hasLength(1));
+      // Latest-wins fields are merged into the single payload.
+      expect(patches.first.body!['title'], 'Final title');
+      expect(patches.first.body!['description'], 'Second edit');
+      // The client updated_at is included so the server can honor client LWW.
+      expect(patches.first.body!.containsKey('updated_at'), isTrue);
+      // And `id` is still stripped from the PATCH body.
+      expect(patches.first.body!.containsKey('id'), isFalse);
+      // `pushed` counts the single network write.
+      expect(result.pushed, 1);
     });
   });
 
@@ -338,6 +516,114 @@ void main() {
       final result = await TaskSync(dao, TasksRepository(transport)).pull();
       expect(result.pullFailed, isTrue);
       expect(await dao.getCursor(), '2026-06-05T09:00:00Z');
+    });
+
+    // ── H1: server tombstone vs an unsynced local edit ──
+
+    test(
+        'H1: server delete of a DIRTY local row logs a conflict + reconciles '
+        'the queued outbox op (delete-wins, never silent)', () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      // A local dirty create (unsynced) for the id the server is deleting.
+      await dao.applyLocalCreate('My unsynced note', id: 'h1');
+      expect(await dao.outboxCount(), 1);
+
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': ['h1'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result = await TaskSync(dao, TasksRepository(transport)).pull();
+
+      // Delete applied, conflict logged, the moot outbox op reconciled away.
+      expect(result.deletedApplied, 1);
+      expect(result.conflicts, greaterThanOrEqualTo(1));
+      final conflicts = await dao.readConflicts();
+      final titleConflict = conflicts.firstWhere((c) => c.field == 'title');
+      expect(titleConflict.local, 'My unsynced note');
+      expect(titleConflict.server, isNull); // server-deleted → no server value
+      expect(await dao.outboxCount(), 0); // queued create reconciled away
+      expect((await dao.list()).map((e) => e.id), isNot(contains('h1')));
+    });
+
+    test('H1: server delete of a CLEAN local row applies silently (no conflict)',
+        () async {
+      final dao = await _freshDao();
+      await dao.upsertFromServer(
+        Task.fromJson(_serverTaskJson(id: 'clean', title: 'Synced')),
+        serverUpdatedAt: '2026-06-05T10:00:00Z',
+      );
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': ['clean'],
+        'now': '2026-06-05T12:00:00Z',
+      });
+      final result = await TaskSync(dao, TasksRepository(transport)).pull();
+      expect(result.deletedApplied, 1);
+      expect(result.conflicts, 0);
+      expect(await dao.readConflicts(), isEmpty);
+    });
+
+    // ── M1: conflict-table dedup ──
+
+    test('M1: re-observing the SAME conflict does not duplicate the row',
+        () async {
+      final dao = await _freshDao(now: () => '2026-06-05T10:00:00Z');
+      await dao.applyLocalCreate('Local title', id: 'm1');
+      final changes = {
+        'tasks': [
+          _serverTaskJson(
+              id: 'm1', title: 'Server title', updatedAt: '2026-06-05T11:00:00Z')
+        ],
+        'deleted': [],
+        'now': '2026-06-05T12:00:00Z',
+      };
+      // First pull logs the conflict and writes the server copy.
+      await TaskSync(dao, TasksRepository(_FakeTransport(changesResponse: changes)))
+          .pull();
+      final afterFirst = await dao.readConflicts();
+      // Make the row dirty again with the SAME local value vs the same server.
+      await dao.applyLocalUpdate('m1', title: 'Local title');
+      await TaskSync(dao, TasksRepository(_FakeTransport(changesResponse: changes)))
+          .pull();
+      final afterSecond = await dao.readConflicts();
+      // No duplicate identical (id, field, local, server) rows accumulated.
+      final titleRows =
+          afterSecond.where((c) => c.field == 'title').toList();
+      expect(titleRows, hasLength(afterFirst.where((c) => c.field == 'title').length));
+    });
+
+    // ── M3: empty server `now` ──
+
+    test('M3: empty `now` with no datable rows → pull FAILS, cursor untouched',
+        () async {
+      final dao = await _freshDao();
+      await dao.setCursor('2026-06-05T09:00:00Z');
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [],
+        'deleted': [],
+        'now': '', // server omitted its clock
+      });
+      final result = await TaskSync(dao, TasksRepository(transport)).pull();
+      expect(result.pullFailed, isTrue);
+      // Cursor must NOT advance (we'd otherwise skip the delta forever).
+      expect(await dao.getCursor(), '2026-06-05T09:00:00Z');
+    });
+
+    test('M3: empty `now` falls back to the max row updated_at', () async {
+      final dao = await _freshDao();
+      final transport = _FakeTransport(changesResponse: {
+        'tasks': [
+          _serverTaskJson(id: 'a', updatedAt: '2026-06-05T11:00:00Z'),
+          _serverTaskJson(id: 'b', updatedAt: '2026-06-05T13:00:00Z'),
+        ],
+        'deleted': [],
+        'now': '', // no server clock → fall back to newest updated_at
+      });
+      final result = await TaskSync(dao, TasksRepository(transport)).pull();
+      expect(result.pullFailed, isFalse);
+      expect(result.pulled, 2);
+      expect(await dao.getCursor(), '2026-06-05T13:00:00Z');
     });
   });
 

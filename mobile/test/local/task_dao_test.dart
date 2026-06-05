@@ -248,5 +248,78 @@ void main() {
       expect(conflicts.first.local, 'Local title');
       expect(conflicts.first.server, 'Server title');
     });
+
+    test('M1: dedups an identical conflict (incl. null server)', () async {
+      final dao = await _freshDao();
+      // Log the same (id, field, local, server=null) twice.
+      await dao.logConflict(id: 't1', field: 'title', local: 'A', server: null);
+      await dao.logConflict(id: 't1', field: 'title', local: 'A', server: null);
+      // A genuinely different server value is a distinct conflict.
+      await dao.logConflict(id: 't1', field: 'title', local: 'A', server: 'B');
+      final conflicts = await dao.readConflicts();
+      expect(conflicts, hasLength(2));
+    });
+  });
+
+  group('TaskDao push-commit + retry bookkeeping', () {
+    test('commitPush atomically dequeues + clears dirty; idempotent on replay',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A', id: 'cp1');
+      final seq = (await dao.readOutbox()).first.seq;
+
+      await dao.commitPush(seq, t.id);
+      expect(await dao.readOutbox(), isEmpty);
+      expect(await dao.dirtyIds(), isEmpty);
+      expect(await dao.getById(t.id), isNotNull);
+
+      // Replay (crash-retry) must be a safe no-op.
+      await dao.commitPush(seq, t.id);
+      expect(await dao.dirtyIds(), isEmpty);
+    });
+
+    test('commitPush hard-removes a pushed tombstone', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A', id: 'cp2');
+      await dao.applyLocalDelete(t.id);
+      final delSeq = (await dao.readOutbox())
+          .firstWhere((o) => o.op == OutboxOp.delete)
+          .seq;
+      await dao.commitPush(delSeq, t.id);
+      expect(await dao.getById(t.id), isNull);
+    });
+
+    test('bumpOutboxAttempts increments + returns the new count', () async {
+      final dao = await _freshDao();
+      await dao.applyLocalCreate('A', id: 'ba1');
+      final seq = (await dao.readOutbox()).first.seq;
+      expect(await dao.bumpOutboxAttempts(seq), 1);
+      expect(await dao.bumpOutboxAttempts(seq), 2);
+      expect((await dao.readOutbox()).first.attempts, 2);
+    });
+
+    test('deadLetterOutboxItem drops the row but leaves the cache dirty',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A', id: 'dl1');
+      final seq = (await dao.readOutbox()).first.seq;
+      await dao.deadLetterOutboxItem(seq);
+      expect(await dao.readOutbox(), isEmpty);
+      // Cache row stays dirty so the next pull re-establishes server truth.
+      expect(await dao.dirtyIds(), contains(t.id));
+    });
+
+    test('deleteOutboxForEntity removes every queued op for one id', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('A', id: 'de1');
+      await dao.applyLocalUpdate(t.id, title: 'A2');
+      await dao.applyLocalComplete(t.id);
+      // An unrelated entity's op must survive.
+      await dao.applyLocalCreate('Other', id: 'other');
+      final removed = await dao.deleteOutboxForEntity(t.id);
+      expect(removed, 3);
+      final remaining = await dao.readOutbox();
+      expect(remaining.every((o) => o.entityId == 'other'), isTrue);
+    });
   });
 }

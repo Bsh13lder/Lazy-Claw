@@ -20,13 +20,6 @@ logger = logging.getLogger(__name__)
 
 ENCRYPTED_FIELDS = frozenset({"title", "description", "category", "tags", "steps"})
 
-# A task category stays a lightweight bucket until it proves it's a real
-# project: once this many tasks share a category, we materialize a first-class
-# ``projects`` row (+ its ``<Name> Project`` LazyBrain wikilink page) so it gets
-# a description, a graph node, and rename support. Keeps casual one-off
-# categories from each spawning a PKM page (graph-clutter guard).
-_PROJECT_MATERIALIZE_THRESHOLD = 3
-
 TASK_COLUMNS = [
     "id", "user_id", "title", "description", "category", "priority",
     "status", "owner", "due_date", "reminder_at", "reminder_job_id", "recurring",
@@ -60,6 +53,12 @@ TASK_COLUMNS = [
     # Per-task budget allocation — a slice of the parent project's budget.
     # Plaintext REAL (same profile as projects.budget); nullable.
     "allocated_budget",
+    # Offline-sync columns (feat/flutter-mobile) — plaintext timestamps so
+    # the /changes delta feed can filter with a simple SQL comparison.
+    # updated_at: bumped on every mutation (insert + every UPDATE path).
+    # deleted_at: soft-delete tombstone; NULL = live, non-NULL = deleted.
+    "updated_at",
+    "deleted_at",
 ]
 
 # progress_log is encrypted JSON — same envelope as tags/steps. Adding
@@ -207,6 +206,7 @@ async def create_task(
     trace_session_id: str | None = None,
     steps: list[dict] | None = None,
     pre_reminders: list[str] | None = None,
+    task_id: str | None = None,
 ) -> dict:
     """Create a new task. Returns the full task dict (decrypted).
 
@@ -230,7 +230,18 @@ async def create_task(
         pre_reminders = validated_pre or None
 
     key = await get_user_dek(config, user_id)
-    task_id = str(uuid4())
+    task_id = task_id or str(uuid4())
+
+    # Idempotent replay: if the client-minted id already exists for this user,
+    # return the existing row without inserting a duplicate.
+    async with db_session(config) as db:
+        cur = await db.execute(
+            f"SELECT {TASK_SELECT} FROM tasks WHERE id = ? AND user_id = ?",
+            (task_id, user_id),
+        )
+        existing_row = await cur.fetchone()
+    if existing_row is not None:
+        return _row_to_dict(existing_row, key)
 
     enc_title = encrypt(title, key)
     enc_description = _encrypt_field(description, key)
@@ -259,6 +270,8 @@ async def create_task(
     reminder_offset_minutes = _compute_reminder_offset_minutes(due_date, reminder_at)
 
     created_at = datetime.now(timezone.utc).isoformat()
+    # On insert, updated_at == created_at (no mutations have occurred yet).
+    updated_at = created_at
 
     # Mirror into LazyBrain first so we can record the note id against the task row.
     # Fire-and-forget on failure so task creation never blocks on PKM problems.
@@ -330,15 +343,13 @@ async def create_task(
                 None,  # nudge_sent_at
                 None,  # last_pulse_fired_at
                 None,  # allocated_budget — opted into via update_task
+                updated_at,  # updated_at == created_at on insert
+                None,  # deleted_at — NULL until delete_task is called
             ),
         )
         await db.commit()
 
     logger.debug("Created task %s (%s) for user %s", task_id, owner, user_id)
-
-    # Promote the category to a real project once it's proven itself (≥N tasks).
-    # Guarded + best-effort — task creation never fails on PKM/budget problems.
-    await _maybe_materialize_project(config, user_id, category)
 
     return {
         "id": task_id, "user_id": user_id, "title": title,
@@ -361,6 +372,9 @@ async def create_task(
         "progress_template_id": None,
         "nudge_sent_at": None,
         "last_pulse_fired_at": None,
+        "allocated_budget": None,
+        "updated_at": updated_at,
+        "deleted_at": None,
     }
 
 
@@ -380,7 +394,7 @@ async def list_tasks(
     key = await get_user_dek(config, user_id)
     today_str = date.today().isoformat()
 
-    where_clauses = ["user_id = ?"]
+    where_clauses = ["user_id = ?", "deleted_at IS NULL"]
     params: list = [user_id]
 
     if owner:
@@ -431,7 +445,8 @@ async def get_task(
 
     async with db_session(config) as db:
         cursor = await db.execute(
-            f"SELECT {TASK_SELECT} FROM tasks WHERE id = ? AND user_id = ?",
+            f"SELECT {TASK_SELECT} FROM tasks "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (task_id, user_id),
         )
         row = await cursor.fetchone()
@@ -522,98 +537,6 @@ async def get_nagging_tasks(
                 continue
         results.append(_row_to_dict(row, keys[owner_uid]))
     return results
-
-
-async def list_categories(config: Config, user_id: str) -> list[str]:
-    """Return the user's distinct task categories (decrypted), preserving the
-    first-seen casing. These are the "projects" auto-detected from tasks even
-    before a real ``projects`` row exists.
-    """
-    tasks = await list_tasks(config, user_id, status="all")
-    seen: set[str] = set()
-    out: list[str] = []
-    for t in tasks:
-        cat = (t.get("category") or "").strip()
-        if not cat:
-            continue
-        key = cat.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(cat)
-    return out
-
-
-async def count_tasks_in_category(
-    config: Config, user_id: str, category: str
-) -> int:
-    """Count the user's tasks whose category matches ``category`` (casefold).
-
-    Categories are encrypted at rest, so this decrypts + matches in Python
-    rather than via a SQL ``WHERE``.
-    """
-    target = (category or "").strip().casefold()
-    if not target:
-        return 0
-    tasks = await list_tasks(config, user_id, status="all")
-    return sum(
-        1 for t in tasks if (t.get("category") or "").strip().casefold() == target
-    )
-
-
-async def rename_category(
-    config: Config, user_id: str, old_name: str, new_name: str
-) -> int:
-    """Re-point every task tagged with ``old_name`` to ``new_name``.
-
-    Categories are encrypted, so this can't be a single SQL UPDATE — we find
-    the matching tasks (casefold compare) and re-encrypt each. Keeps the
-    ``tasks.category`` ⇄ ``projects.name_key`` join consistent after a project
-    rename. Returns the number of tasks updated. A no-op (returns 0) when the
-    names are equivalent or ``old_name`` has no tasks.
-    """
-    old_key = (old_name or "").strip().casefold()
-    new_clean = (new_name or "").strip()
-    if not old_key or not new_clean or old_key == new_clean.casefold():
-        return 0
-    tasks = await list_tasks(config, user_id, status="all")
-    updated = 0
-    for t in tasks:
-        if (t.get("category") or "").strip().casefold() == old_key:
-            await update_task(config, user_id, t["id"], category=new_clean)
-            updated += 1
-    return updated
-
-
-async def _maybe_materialize_project(
-    config: Config, user_id: str, category: str | None
-) -> None:
-    """Promote a task category to a first-class project once it crosses the
-    materialization threshold.
-
-    Fire-and-forget: never raises, never blocks task creation. No-op when the
-    category is empty, below threshold, or already backed by a ``projects`` row.
-    """
-    cat = (category or "").strip()
-    if not cat:
-        return
-    try:
-        from lazyclaw.budgets import store as budget_store
-
-        existing = await budget_store.get_project_by_name(config, user_id, cat)
-        if existing is not None:
-            return
-        count = await count_tasks_in_category(config, user_id, cat)
-        if count < _PROJECT_MATERIALIZE_THRESHOLD:
-            return
-        await budget_store.create_project(config, user_id, cat)
-        logger.debug(
-            "Materialized project %r for user %s (%d tasks)", cat, user_id, count
-        )
-    except Exception:
-        logger.debug(
-            "project materialization skipped for %r", category, exc_info=True
-        )
 
 
 async def update_task(
@@ -707,6 +630,10 @@ async def update_task(
         set_clauses.append("completed_at = ?")
         params.append(datetime.now(timezone.utc).isoformat())
 
+    # Always bump updated_at on any mutation so offline clients can delta-sync.
+    set_clauses.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).isoformat())
+
     params.extend([task_id, user_id])
 
     async with db_session(config) as db:
@@ -753,9 +680,9 @@ async def fail_task(
     async with db_session(config) as db:
         result = await db.execute(
             "UPDATE tasks SET status = 'failed', last_error = ?, "
-            "attempt_count = ?, last_attempted_at = ? "
+            "attempt_count = ?, last_attempted_at = ?, updated_at = ? "
             "WHERE id = ? AND user_id = ?",
-            (error, attempts, now, task_id, user_id),
+            (error, attempts, now, now, task_id, user_id),
         )
         await db.commit()
 
@@ -980,9 +907,9 @@ async def complete_task(
         await db.execute(
             "UPDATE tasks SET status = 'done', completed_at = ?, "
             "reminder_job_id = NULL, nag_count = 0, "
-            "nudge_sent_at = NULL "
+            "nudge_sent_at = NULL, updated_at = ? "
             "WHERE id = ? AND user_id = ?",
-            (now, task_id, user_id),
+            (now, now, task_id, user_id),
         )
         await db.commit()
 
@@ -1069,21 +996,45 @@ async def complete_task(
 async def delete_task(
     config: Config, user_id: str, task_id: str
 ) -> bool:
-    """Delete a task and its associated reminder job."""
-    task = await get_task(config, user_id, task_id)
-    if not task:
+    """Soft-delete a task: sets deleted_at + updated_at instead of removing the row.
+
+    The row is preserved so the offline-sync /changes delta feed can inform
+    clients that the task was deleted. Normal list_tasks/get_task queries
+    filter out deleted rows (deleted_at IS NULL). Returns True when the task
+    was found and marked deleted; False when it didn't exist (already deleted
+    rows are also treated as not found so this is idempotent).
+    """
+    # Look up including already-deleted rows so we can still cancel the
+    # reminder job even if the row was previously soft-deleted.
+    async with db_session(config) as db:
+        cur = await db.execute(
+            f"SELECT {TASK_SELECT} FROM tasks WHERE id = ? AND user_id = ?",
+            (task_id, user_id),
+        )
+        raw_row = await cur.fetchone()
+
+    if raw_row is None:
+        return False
+
+    key = await get_user_dek(config, user_id)
+    task = _row_to_dict(raw_row, key)
+
+    # If already soft-deleted, nothing more to do.
+    if task.get("deleted_at") is not None:
         return False
 
     if task.get("reminder_job_id"):
         await _delete_reminder_job(config, user_id, task["reminder_job_id"])
 
+    now = datetime.now(timezone.utc).isoformat()
     async with db_session(config) as db:
         result = await db.execute(
-            "DELETE FROM tasks WHERE id = ? AND user_id = ?",
-            (task_id, user_id),
+            "UPDATE tasks SET deleted_at = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            (now, now, task_id, user_id),
         )
         await db.commit()
-        return result.rowcount > 0
+    return result.rowcount > 0
 
 
 # ---------------------------------------------------------------------------
@@ -1161,10 +1112,11 @@ async def set_steps(
     normalized = _normalize_steps(steps)
     enc = encrypt(json.dumps(normalized), key) if normalized else None
 
+    now = datetime.now(timezone.utc).isoformat()
     async with db_session(config) as db:
         await db.execute(
-            "UPDATE tasks SET steps = ? WHERE id = ? AND user_id = ?",
-            (enc, task_id, user_id),
+            "UPDATE tasks SET steps = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (enc, now, task_id, user_id),
         )
         await db.commit()
 
@@ -1255,11 +1207,13 @@ async def append_progress_entry(
         current = current[-200:]
 
     enc = encrypt(json.dumps(current), key)
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     async with db_session(config) as db:
         await db.execute(
-            "UPDATE tasks SET progress_log = ? WHERE id = ? AND user_id = ?",
-            (enc, task_id, user_id),
+            "UPDATE tasks SET progress_log = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (enc, now_iso, task_id, user_id),
         )
         await db.commit()
 
@@ -1310,6 +1264,66 @@ async def read_progress_log(
     if limit and len(log) > limit:
         return log[-limit:]
     return log
+
+
+async def get_task_changes(
+    config: Config,
+    user_id: str,
+    since: str | None,
+) -> dict:
+    """Return a delta feed for offline-sync clients.
+
+    Returns tasks where ``updated_at > since`` (including soft-deleted
+    tombstones so clients learn of deletes). When ``since`` is None, all
+    rows are returned.
+
+    Response shape::
+
+        {
+            "tasks":   [<live task dicts>],
+            "deleted": [<id, ...>],          # ids of soft-deleted rows
+            "now":     "<server iso>",       # use as next `since` value
+        }
+    """
+    key = await get_user_dek(config, user_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if since is not None:
+        async with db_session(config) as db:
+            cursor = await db.execute(
+                f"SELECT {TASK_SELECT} FROM tasks "
+                "WHERE user_id = ? AND updated_at > ? "
+                "ORDER BY updated_at ASC",
+                (user_id, since),
+            )
+            rows = await cursor.fetchall()
+    else:
+        async with db_session(config) as db:
+            cursor = await db.execute(
+                f"SELECT {TASK_SELECT} FROM tasks "
+                "WHERE user_id = ? "
+                "ORDER BY updated_at ASC",
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+
+    live_tasks: list[dict] = []
+    deleted_ids: list[str] = []
+    deleted_col_idx = TASK_COLUMNS.index("deleted_at")
+    id_col_idx = TASK_COLUMNS.index("id")
+
+    for row in rows:
+        if row[deleted_col_idx] is not None:
+            # Tombstone — client only needs the id to remove from local store.
+            deleted_ids.append(row[id_col_idx])
+        else:
+            live_tasks.append(_row_to_dict(row, key))
+
+    return {
+        "tasks": live_tasks,
+        "deleted": deleted_ids,
+        "now": now_iso,
+    }
 
 
 async def clear_nudge_sent(

@@ -188,6 +188,15 @@ async def init_db(config: Config) -> None:
             # → task tracks its own spent vs 500). Plaintext REAL like
             # projects.budget so totals SUM in SQL. Optional / nullable.
             ("tasks", "allocated_budget", "ALTER TABLE tasks ADD COLUMN allocated_budget REAL"),
+            # Offline-sync primitives (feat/flutter-mobile) ───────────────
+            # updated_at: last-write-wins timestamp bumped on every mutation.
+            # Backfill: existing rows get created_at so the column is never
+            # NULL; new rows are always stamped at insert time.
+            ("tasks", "updated_at", "ALTER TABLE tasks ADD COLUMN updated_at TEXT"),
+            # deleted_at: soft-delete tombstone. NULL = live; non-NULL = deleted.
+            # Clients learn of deletes via the /changes delta feed instead of
+            # rows silently disappearing from list responses.
+            ("tasks", "deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT"),
         ]
         for table, column, sql in migrations:
             try:
@@ -197,6 +206,17 @@ async def init_db(config: Config) -> None:
                     await db.execute(sql)
             except Exception:
                 logger.debug("Migration %s.%s skipped (column may already exist)", table, column, exc_info=True)
+
+        # Backfill: set updated_at = created_at for rows that existed before
+        # the migration added the column. Safe to re-run on every init_db
+        # (the WHERE guard makes it a no-op once all rows are stamped).
+        try:
+            await db.execute(
+                "UPDATE tasks SET updated_at = created_at "
+                "WHERE updated_at IS NULL AND created_at IS NOT NULL"
+            )
+        except Exception:
+            logger.debug("tasks.updated_at backfill skipped", exc_info=True)
 
         # ── Progress templates — bundled function + learned skill ─────────
         # Schema cloned from browser_templates: name + playbook are encrypted,

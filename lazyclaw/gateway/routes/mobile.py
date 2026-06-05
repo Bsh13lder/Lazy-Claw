@@ -1,0 +1,46 @@
+"""Serve the sideloadable Android APK + its version metadata."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+
+router = APIRouter(prefix="/api/mobile", tags=["mobile"])
+
+# Default served location; overridable for tests.
+_APK_DIR = Path(__file__).resolve().parents[3] / "mobile" / "dist"
+
+
+def set_apk_dir(path: Path) -> None:
+    global _APK_DIR
+    _APK_DIR = Path(path)
+
+
+def _apk_path() -> Path:
+    return _APK_DIR / "app-release.apk"
+
+
+def _version_path() -> Path:
+    return _APK_DIR / "version.json"
+
+
+@router.get("/version")
+async def mobile_version() -> JSONResponse:
+    vp = _version_path()
+    if not vp.exists() or not _apk_path().exists():
+        raise HTTPException(status_code=404, detail="No mobile build published")
+    return JSONResponse(json.loads(vp.read_text()))
+
+
+@router.get("/apk")
+async def mobile_apk() -> FileResponse:
+    ap = _apk_path()
+    if not ap.exists():
+        raise HTTPException(status_code=404, detail="No APK published")
+    return FileResponse(
+        ap,
+        media_type="application/vnd.android.package-archive",
+        filename="lazyclaw.apk",
+    )

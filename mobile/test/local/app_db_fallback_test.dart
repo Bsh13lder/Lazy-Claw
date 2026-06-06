@@ -33,4 +33,11 @@ void main() {
     );
     expect(result.health.isDegraded, false);
   });
+
+  test('DbHealth has value equality (no spurious provider rebuilds)', () {
+    expect(const DbHealth.ok(), const DbHealth.ok());
+    expect(const DbHealth.ok().hashCode, const DbHealth.ok().hashCode);
+    expect(const DbHealth.ok() == DbHealth.degraded(StateError('x')), false);
+    expect(DbHealth.degraded(StateError('x')).isDegraded, true);
+  });
 }

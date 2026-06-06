@@ -245,6 +245,13 @@ class DbHealth {
   const DbHealth.degraded(this.error) : status = DbHealthStatus.degraded;
 
   bool get isDegraded => status == DbHealthStatus.degraded;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DbHealth && other.status == status && other.error == error;
+
+  @override
+  int get hashCode => Object.hash(status, error);
 }
 
 /// Immutable pairing of an open [Database] handle with its [DbHealth].

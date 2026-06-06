@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
@@ -63,10 +64,20 @@ class SelfUpdateService {
       );
       if (!available) return null;
 
+      final normalizedSha = sha256 == null || sha256.isEmpty ? null : sha256;
+      if (normalizedSha == null) {
+        // Not fatal — the server normally provides a hash. But without one the
+        // installer can't verify integrity, so surface it for diagnosis.
+        debugPrint(
+          'self_update: server published an update without a sha256 — '
+          'install integrity will not be verified',
+        );
+      }
+
       return UpdateInfo(
         version: latestVersion,
         build: latestBuild,
-        sha256: sha256 == null || sha256.isEmpty ? null : sha256,
+        sha256: normalizedSha,
       );
     } catch (_) {
       // Server unreachable / malformed JSON / platform error → treat as "none".

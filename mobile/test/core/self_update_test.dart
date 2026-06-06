@@ -91,5 +91,20 @@ void main() {
       expect(info, isNotNull);
       expect(info!.sha256, isNull);
     });
+
+    test('empty-string sha256 → still non-null UpdateInfo, sha normalized null',
+        () async {
+      final service = SelfUpdateService(
+        _FakeGateway(
+          serverJson: {'version': '1.9.0', 'build': 20, 'sha256': ''},
+          current: (version: '1.7.1', build: 13),
+        ),
+      );
+
+      final info = await service.checkForUpdate();
+      expect(info, isNotNull);
+      expect(info!.sha256, isNull);
+      expect(info.version, '1.9.0');
+    });
   });
 }

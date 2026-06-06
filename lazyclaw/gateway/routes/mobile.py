@@ -1,4 +1,11 @@
-"""Serve the sideloadable Android APK + its version metadata."""
+"""Serve the sideloadable Android APK + its version metadata.
+
+NOTE: the ``/api/mobile/version`` and ``/api/mobile/apk`` endpoints are
+intentionally unauthenticated for first-run/self-update convenience on a
+trusted LAN. The APK is a generic client build and contains no user data.
+If the gateway is ever exposed to the public internet, gate these behind a
+signed/HMAC download URL or a shared secret.
+"""
 from __future__ import annotations
 
 import json

@@ -45,6 +45,7 @@ from lazyclaw.gateway.routes.docs import router as docs_router
 from lazyclaw.gateway.routes.pdf import router as pdf_router
 from lazyclaw.gateway.routes.awake import router as awake_router
 from lazyclaw.gateway.routes.contacts import router as internal_contacts_router
+from lazyclaw.gateway.routes.mobile import router as mobile_apk_router
 from lazyclaw.gateway.routes.mobile_settings import router as mobile_settings_router
 from lazyclaw.llm.model_manager import seed_default_models
 
@@ -233,6 +234,7 @@ app.include_router(awake_router)
 app.include_router(internal_contacts_router)
 from lazyclaw.gateway.routes.goals import router as goals_router  # noqa: E402
 app.include_router(goals_router)
+app.include_router(mobile_apk_router)
 app.include_router(mobile_settings_router)
 
 

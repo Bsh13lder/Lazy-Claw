@@ -1,25 +1,30 @@
-# Mobile Connection Robustness & Offline-First Hardening — Phase 1
+# Mobile Connection Robustness, Self-Update & Offline-First Hardening — Phase 1
 
 - **Date:** 2026-06-06
 - **Status:** Draft for review
 - **Branch:** `feat/flutter-mobile`
-- **Scope:** Flutter app (`mobile/`) only. **No backend changes.**
+- **Scope:** Flutter app (`mobile/`) only. **No backend changes** (in-app self-update reuses the existing `/api/mobile/{apk,version}` endpoints).
 
 ---
 
 ## 1. Context
 
-This is **Phase 1 of a 4-phase Flutter polish initiative**:
+This is **Phase 1 of a 10-phase Flutter polish initiative**:
 
 | Phase | Theme | Status |
 |---|---|---|
-| **1 — Connection / robustness** | Kill the "Notes keeps loading / loses connection" bug; make offline-first screens always render; foreground 30-min resync. | **This spec** |
-| 2 — Tasks polish | Advanced hybrid smart-add (multi-intent: task/expense/time/project), full task detail/edit panel, project CRUD wired into tasks. | Future |
-| 3 — Notes → Tasks | Move Notes into the Tasks tab (segmented `Tasks \| Notes`); "what is this note about" smart preview; in-note navigation. | Future |
-| 4 — Documents tab | Freed Notes slot becomes Documents (Sheets/Docs/PDF), **native** Flutter editing + ✨ AI. | Future |
-| 5 — Android widgets & quick actions | Home-screen widgets (quick-capture, today list, budget) + app-icon long-press quick actions, Todoist-style. | Future |
+| **1 — Connection / robustness + in-app self-update** | Kill the "Notes keeps loading / loses connection" bug; offline-first screens always render; foreground 30-min resync; **finish the in-app APK self-updater** so every later phase delivers as a one-tap update. | **This spec** |
+| 2 — Tasks polish | Advanced hybrid smart-add (multi-intent: task/expense/time/project), full task detail/edit panel, project CRUD, calendar view + per-project colors. | Banked |
+| 3 — Notes → Tasks | Move Notes into the Tasks tab (segmented `Tasks \| Notes`); "what is this note about" smart preview; in-note navigation. | Banked |
+| 4 — Documents tab | Freed Notes slot becomes Documents (Sheets/Docs/PDF), **native** Flutter editing + ✨ AI. | Banked |
+| 5 — Android widgets & quick actions | Home-screen widgets (quick-capture, today list, budget) + app-icon long-press quick actions, Todoist-style. | Banked |
+| 6 — Premium polish & trust | Biometric app lock · haptics + entrance/success animations · sync-transparency/conflict review · command palette. | Banked |
+| 7 — Voice | STT quick-add + push-to-talk voice chat (backend whisper already runs) + optional spoken replies. | Banked |
+| 8 — Agent-on-the-go | Browser live-view + 1-tap checkpoint approve/reject · live goal progress · Upwork job intake (✅/⏭) · session replay viewer. | Banked |
+| 9 — OS capture + daily habit | Android share-target ("Share to LazyClaw" → task/note/agent) · app shortcuts (with P5) · morning briefing + daily journal. | Banked |
+| 10 — Native push (big bet) | Replace Telegram-only push with FCM or self-hosted ntfy/UnifiedPush — contentless wake-ping + pull over WS + 1-tap actions; unlocks watcher/bg-task alerts on the phone. | Banked |
 
-Each phase gets its own spec → plan → build. (Phase 5's cheapest wins — the 4 app-icon quick actions + a quick-capture bar — reuse the existing add-sheets and could be pulled earlier as a standalone slice.)
+Each phase gets its own spec → plan → build. Order after P1 is flexible — the cheap **Phase 6** wins (haptics/biometric) can sprinkle in alongside other phases, and Phase 5's app-icon quick actions overlap Phase 9's capture work (build once, share). The **live agent-activity streaming timeline** in chat (a Phase-8/chat enhancement) rides on the existing WS frames and can fold into whichever chat-touching phase lands first.
 
 ---
 
@@ -49,6 +54,7 @@ Each phase gets its own spec → plan → build. (Phase 5's cheapest wins — th
 3. `isLoading` is **always** cleared; a genuine error surfaces an **error + Retry** state instead of a spinner.
 4. Reachability **initializes cleanly** — no false "offline" flash, no spurious double-sync.
 5. An **open app stays fresh**: foreground **30-min** resync **+ sync-on-resume**.
+6. **In-app self-update works end-to-end** — the app detects a newer published APK, downloads it with progress, verifies the `sha256`, and launches the installer — so every later phase ships as a one-tap update from the phone.
 
 ## 4. Non-goals (deferred to later phases)
 
@@ -113,6 +119,19 @@ Three options were considered for the dead-DB case:
 ### 6.7 Reset flow
 - Banner **Reset** → confirmation dialog → `resetAppDb()` → providers reload → launch sync re-pulls from server. Discards any unsynced outbox items — **only on explicit user tap**, with the dialog stating this.
 
+### 6.8 In-app self-update — finish the half-built updater
+The backend already serves `GET /api/mobile/version` (`{version, build, sha256, ...}`) and `GET /api/mobile/apk`; the app already has `core/version_check.dart` (`isUpdateAvailable`) + a Settings "Check for update" button that only shows a SnackBar. Missing: the **download + install** half and a **trustworthy version source**.
+
+- **Packages:** add **`ota_update` 7.1.0 (MIT)** — streams the APK download with progress, verifies the published **`sha256`** (`sha256checksum:`), then fires the system installer — and **`package_info_plus`** to read the *real* running `version`/`buildNumber`.
+- **Kill the hardcoded-version footgun:** today `core/constants/app_constants.dart` (`kAppVersion`/`kAppBuild`) is hand-synced with `pubspec.yaml` and the build script never touches it → false "you're up to date". Replace those reads with `PackageInfo.fromPlatform()` so **`pubspec.yaml` is the single source of truth**.
+- **Android plumbing** (`mobile/android/app/src/main/AndroidManifest.xml` + `res/xml/filepaths.xml`): add `REQUEST_INSTALL_PACKAGES`, the `ota_update` `FileProvider` + result-receiver, and the file-paths resource. First install triggers Android's one-time "Install unknown apps" grant (expected).
+- **UX:** keep the Settings "Check for update" entry but, on update-available, show an `LzDialog`/`LzBanner` (`v1.7.1 (13) → v1.8.0 (14)` + **Update**) wired to an `LzProgressBar` from `OtaEvent` progress; add **one** lightweight post-login startup check that shows a non-blocking banner if a newer build exists (no auto-download).
+- **⚠️ Signing-key discipline (carry into the plan, not code):** release APKs are currently signed with the **debug key**. Android refuses a self-update signed by a different key (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Self-update therefore works **only if every build uses the same signing key** — fine while always building on this Mac, but a **stable release keystore** is the durable fix and is a prerequisite for relying on OTA across machines/CI.
+- **iOS:** not applicable (Apple forbids sideload self-update) — Android-only, not a regression.
+
+### 6.9 Release / delivery convention (applies to EVERY shippable phase)
+On finishing any phase: **bump `pubspec.yaml` `version:`** (name and/or `+build`) → run `scripts/build-mobile-apk.sh` (publishes `mobile/dist/app-release.apk` + `version.json` with the new version + sha256) → the running app's self-updater (§6.8) detects the higher build and offers the one-tap update. This is the standing "bump the APK version so I can update from the phone" requirement.
+
 ---
 
 ## 7. Data flow (degraded boot)
@@ -148,6 +167,7 @@ Unit / widget tests under `mobile/test/`:
 4. **reachability** — optimistic default before the first probe; no spurious second sync on the initial `false→true` edge.
 5. **`foreground_sync`** — under `fakeAsync`, `syncNow` fires at the 30-min interval; the timer pauses on background and a sync runs on `resumed`.
 6. **widget** — empty + `error` renders `LzErrorState` with a working Retry; `degraded` health renders the banner.
+7. **self-update** — `isUpdateAvailable` already has tests; add: version source reads real `PackageInfo` values; the update flow surfaces a banner only when the server build is strictly higher; sha256 is passed through to the updater. (The actual install intent is device-tested, not unit-tested.)
 
 Coverage target: **80%+** on touched files (per repo testing rules).
 
@@ -161,9 +181,10 @@ Coverage target: **80%+** on touched files (per repo testing rules).
 - `mobile/lib/screens/notes_screen.dart`, `tasks_screen.dart`, and the Money/Budgets screen *(exact path confirmed at implementation)* — error-state + banner wiring.
 - `mobile/lib/ui/` — `LzErrorState`, `LzBanner.degraded()`.
 - `mobile/lib/sync/foreground_sync.dart` — **new** foreground scheduler + lifecycle sync.
+- **Self-update:** `mobile/pubspec.yaml` (`ota_update`, `package_info_plus`), `mobile/lib/core/constants/app_constants.dart` (drop hardcoded version → `PackageInfo`), `mobile/lib/screens/settings_screen.dart` (update dialog + progress), `mobile/lib/main.dart` (post-login update check), `mobile/android/app/src/main/AndroidManifest.xml` + `mobile/android/app/src/main/res/xml/filepaths.xml` (install permission + FileProvider), small new `mobile/lib/core/self_update.dart` service.
 - `mobile/test/...` — the tests above.
 
-No files outside `mobile/`.
+No files outside `mobile/`. (Self-update reuses the existing `lazyclaw/gateway/routes/mobile.py` endpoints — no backend edit.)
 
 ---
 
@@ -203,3 +224,23 @@ No files outside `mobile/`.
   - **Mi 15 / HyperOS reality (CRITICAL):** widgets + background quick-add die silently unless **Autostart = on** and **battery = No restrictions**; pin-widget is gated behind a Security-Center toggle. Ship an in-app one-time MIUI setup helper (same pattern as the existing cleartext/LAN-IP helper). Treat `updateWidget`-on-write as the source of truth, not self-refresh.
   - **Effort:** medium for P0+P1 (~2–4 focused days); larger if adopting Glance for premium polish. Main risk = HyperOS background death.
   - This is a **visual** area → use the Visual Companion when speccing P5.
+- **Phase 6 — Premium polish & trust.** Researched 2026-06-06; all small effort, big perceived-quality jump.
+  - **Biometric app lock** (`local_auth`): Face/fingerprint gate on launch + resume-from-background before releasing the SQLCipher key. Table-stakes for an E2E-encrypted app holding chat history, the credential vault, and finances.
+  - **Haptics + animations** (`HapticFeedback` built-in + `flutter_animate`, a Flutter Favorite): tactile feedback on send/complete/swipe + entrance/success motion. The motion tokens (`AppMotion`) already exist but nothing fires them yet — cheapest path to a "Things 3 / Linear" feel. Can sprinkle in during other phases.
+  - **Sync transparency / conflict review:** the engine already logs conflicts (never drops them) into a `conflicts` table with a `conflicts_sheet.dart` stub — make it legible (mine-vs-server diff cards + keep-mine/keep-server, retry/dead-letter visibility). Turns an invisible safety net into a trust feature.
+  - **Command palette:** ⌘K-style fuzzy quick-switcher (custom `LzBottomSheet` + fuzzy filter for design coherence, or the `command_palette` pkg) to jump to any screen / fire a quick action / ask the agent.
+- **Phase 7 — Voice.** Backend whisper STT already runs (`lazyclaw/audio/stt.py` + host Metal bridge on :18790; `/api/audio/transcribe`). Mobile is the missing half: a mic button in the chat composer + on quick-add sheets. Two tiers — (a) on-device `speech_to_text` for instant short quick-add, (b) `record` → upload to server whisper for accuracy (with a live waveform). Optional spoken replies via `flutter_tts`. Voice is the headline "wow" for an agent app.
+- **Phase 8 — Agent-on-the-go.** The differentiator; most endpoints already exist (mostly small mobile UI).
+  - **Browser live-view + 1-tap checkpoints:** `/api/browser/frame` + `/api/browser/checkpoint/*` — render the live frame, approve/reject risky actions from the phone. Supervise agent work while away from the desk (highest-leverage interaction).
+  - **Live goal progress:** poll `/api/goals/{goal_id}` — watch DRAFTING→EXECUTING→DONE with last-action + progress.
+  - **Upwork job intake (✅/⏭):** surface pending contracts → `/api/goals/code-task` intake on accept (mirrors the Telegram 1-tap-accept).
+  - **Session replay viewer:** `/api/replay/traces` + share tokens — review/share proof-of-work runs.
+  - **Live agent-activity timeline** (chat enhancement): upgrade the static tool-chips into a flowing "thinking → calling browser → drafting" feed off the existing WS frames (`flutter_animate`, no new transport).
+- **Phase 9 — OS capture + daily habit.**
+  - **Android share-target** (`receive_sharing_intent`): "Share to LazyClaw" from any app → quick sheet routes text/URL/image to a task, a note, or the agent ("summarize this URL"). Needs `SEND`/`SEND_MULTIPLE` intent filters. Turns the whole OS into a capture funnel.
+  - **App-icon quick actions:** shared with Phase 5 (build once).
+  - **Daily habit:** morning briefing (`/api/lazybrain/morning-briefing`) + daily journal (`/api/lazybrain/journal/{iso_date}`) — both endpoints ready; small editor/card UI. Pairs into a brief→work→journal loop.
+- **Phase 10 — Native push (big bet).** Replace today's Telegram-only push so the app stands alone. Display + 1-tap action buttons via the already-present `flutter_local_notifications` (`AndroidNotificationAction`); the missing piece is a wake transport + a backend device-token registry + per-event routing.
+  - **Privacy-first pattern:** send a **contentless wake-ping** and let the app pull the E2E payload over the existing WS/HTTPS (the Signal pattern) — no plaintext transits the push provider.
+  - **Transport choice (decide when speccing):** `firebase_messaging` (most reliable/battery-efficient, but routes a ping through Google + needs a Firebase project) **vs** self-hosted **ntfy/UnifiedPush** (the backend already speaks ntfy; keeps everything on the user's server — aligns with the self-hosted ethos). Lean ntfy/UnifiedPush to stay off Google.
+  - Unlocks watcher alerts, background-task-done, reminders, and approval requests on the phone. **Large effort**; HyperOS battery/autostart caveats apply (same MIUI helper as P5).

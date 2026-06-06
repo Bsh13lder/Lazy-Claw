@@ -6,6 +6,14 @@ import '../../screens/chat_screen.dart';
 import '../../screens/expenses_screen.dart';
 import '../../screens/home_screen.dart';
 import '../../screens/login_screen.dart';
+import '../../screens/more/audit_screen.dart';
+import '../../screens/more/jobs_screen.dart';
+import '../../screens/more/mcp_screen.dart';
+import '../../screens/more/memory_screen.dart';
+import '../../screens/more/more_hub.dart';
+import '../../screens/more/skills_screen.dart';
+import '../../screens/more/vault_screen.dart';
+import '../../screens/more/watchers_screen.dart';
 import '../../screens/notes_screen.dart';
 import '../../screens/register_screen.dart';
 import '../../screens/settings_screen.dart';
@@ -101,6 +109,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Auth routes — OUTSIDE the shell so they have no bottom nav bar.
       GoRoute(path: '/login', builder: (ctx, _) => const LoginScreen()),
       GoRoute(path: '/register', builder: (ctx, _) => const RegisterScreen()),
+
+      // Power-tools routes — full-screen over bottom nav (authed, back button).
+      GoRoute(path: '/more', builder: (ctx, _) => const MoreHubScreen()),
+      GoRoute(path: '/more/skills', builder: (ctx, _) => const SkillsScreen()),
+      GoRoute(path: '/more/vault', builder: (ctx, _) => const VaultScreen()),
+      GoRoute(path: '/more/memory', builder: (ctx, _) => const MemoryScreen()),
+      GoRoute(path: '/more/jobs', builder: (ctx, _) => const JobsScreen()),
+      GoRoute(path: '/more/watchers', builder: (ctx, _) => const WatchersScreen()),
+      GoRoute(path: '/more/mcp', builder: (ctx, _) => const McpScreen()),
+      GoRoute(path: '/more/audit', builder: (ctx, _) => const AuditScreen()),
 
       // Main shell — StatefulShellRoute.indexedStack keeps each branch alive
       // (the ChatScreen WebSocket connection survives tab switches).

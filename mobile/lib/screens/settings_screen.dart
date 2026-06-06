@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../core/config/server_config.dart';
@@ -14,6 +15,7 @@ import '../sync/background_sync.dart';
 import '../sync/budgets_sync.dart';
 import '../sync/note_sync.dart';
 import '../sync/task_sync.dart';
+import '../providers/settings_repo_provider.dart';
 import '../ui/ui.dart';
 import 'settings/conflicts_sheet.dart';
 import 'settings/settings_prefs.dart';
@@ -392,11 +394,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             AppSpacing.vGap(AppSpacing.xl),
           ],
 
-          // 6. Models / ECO mode (deferred — no mobile endpoints yet)
-          _buildModelsSection(isReachable: isReachable),
+          // 6. Power tools link
+          _buildPowerToolsSection(),
           AppSpacing.vGap(AppSpacing.xl),
 
-          // 7. About
+          // 7. Brain / ECO mode
+          _buildEcoSection(),
+          AppSpacing.vGap(AppSpacing.xl),
+
+          // 8. Permissions
+          _buildPermissionsSection(),
+          AppSpacing.vGap(AppSpacing.xl),
+
+          // 9. About
           _buildAboutSection(),
           AppSpacing.vGap(AppSpacing.xxl),
         ],
@@ -758,37 +768,150 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  Widget _buildModelsSection({required bool isReachable}) {
+  // ── Power tools link ─────────────────────────────────────────────────────
+
+  Widget _buildPowerToolsSection() {
     return LzSection(
-      title: 'Models / ECO mode',
+      title: 'Power tools',
       child: LzCard(
-        color: AppColors.bgSurfaceElevated,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+        padding: EdgeInsets.zero,
+        child: LzListTile(
+          leading: const Icon(Icons.bolt_outlined,
+              size: 20, color: AppColors.accent),
+          title: 'Power tools',
+          subtitle: 'Skills, vault, memory, jobs, watchers, MCP…',
+          onTap: () => context.push('/more'),
+          trailing: const Icon(Icons.chevron_right,
+              size: 18, color: AppColors.textMuted),
+        ),
+      ),
+    );
+  }
+
+  // ── ECO mode section ──────────────────────────────────────────────────────
+
+  Widget _buildEcoSection() {
+    final ecoState = ref.watch(ecoProvider);
+    return LzSection(
+      title: 'Brain / ECO mode',
+      child: ecoState.value.when(
+        loading: () => const LzCard(
+          child: SizedBox(
+            height: 80,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
+        error: (e, _) => LzBanner.error(
+          message: e.toString(),
+          safeAreaTop: false,
+        ),
+        data: (eco) => LzCard(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Mode chip row
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                children: eco.modes.map((m) {
+                  final selected = m == eco.mode;
+                  return LzChip(
+                    label: m,
+                    selected: selected,
+                    onTap: ecoState.saving
+                        ? null
+                        : () async {
+                            if (selected) return;
+                            final err = await ref
+                                .read(ecoProvider.notifier)
+                                .setMode(m);
+                            if (err != null && mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                    content: Text('ECO: $err')),
+                              );
+                            }
+                          },
+                  );
+                }).toList(),
+              ),
+              if (ecoState.saving) ...[
+                const SizedBox(height: AppSpacing.sm),
+                const LinearProgressIndicator(),
+              ],
+              const SizedBox(height: AppSpacing.md),
+              // Brain / worker / fallback captions
+              _EcoCaption(label: 'Brain', value: eco.brain),
+              const SizedBox(height: AppSpacing.xs),
+              _EcoCaption(label: 'Worker', value: eco.worker),
+              const SizedBox(height: AppSpacing.xs),
+              _EcoCaption(label: 'Fallback', value: eco.fallback),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Permissions section ───────────────────────────────────────────────────
+
+  Widget _buildPermissionsSection() {
+    final permState = ref.watch(permissionsProvider);
+    return LzSection(
+      title: 'Permissions',
+      child: permState.value.when(
+        loading: () => const LzCard(
+          child: SizedBox(
+            height: 80,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
+        error: (e, _) => LzBanner.error(
+          message: e.toString(),
+          safeAreaTop: false,
+        ),
+        data: (perms) {
+          final categories = perms.categoryDefaults.entries.toList()
+            ..sort((a, b) => a.key.compareTo(b.key));
+          return LzCard(
+            padding: EdgeInsets.zero,
+            child: Column(
               children: [
-                const Icon(Icons.psychology_outlined,
-                    size: 18, color: AppColors.textSecondary),
-                const SizedBox(width: AppSpacing.sm),
-                Text(
-                  isReachable
-                      ? 'Manage on the web for now'
-                      : 'Server offline',
-                  style: AppText.label
-                      .copyWith(color: AppColors.textSecondary),
-                ),
+                for (var i = 0; i < categories.length; i++) ...[
+                  if (i > 0)
+                    const Divider(height: 1, color: AppColors.borderSubtle),
+                  _PermCategoryRow(
+                    category: categories[i].key,
+                    level: categories[i].value,
+                    saving: permState.savingCategories
+                        .contains(categories[i].key),
+                    onChanged: (newLevel) async {
+                      final err = await ref
+                          .read(permissionsProvider.notifier)
+                          .setCategory(categories[i].key, newLevel);
+                      if (err != null && mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                              content:
+                                  Text('Permissions: $err')),
+                        );
+                      }
+                    },
+                  ),
+                ],
+                if (categories.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(AppSpacing.lg),
+                    child: Text(
+                      'No categories configured.',
+                      style: AppText.caption,
+                    ),
+                  ),
               ],
             ),
-            const SizedBox(height: AppSpacing.xs),
-            Text(
-              'ECO mode, model selection, and permission rules need backend '
-              'endpoints not yet exposed to the mobile client. '
-              'Use the web UI to adjust these.',
-              style: AppText.caption,
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -886,6 +1009,102 @@ class _IntervalPicker extends StatelessWidget {
       onChanged: (v) {
         if (v != null) onChanged(v);
       },
+    );
+  }
+}
+
+// ── ECO mode helper widgets ──────────────────────────────────────────────────
+
+/// A muted key/value caption row for ECO brain/worker/fallback model names.
+class _EcoCaption extends StatelessWidget {
+  const _EcoCaption({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text(
+          '$label: ',
+          style: AppText.caption.copyWith(
+            color: AppColors.textMuted,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value.isNotEmpty ? value : '—',
+            style: AppText.caption.copyWith(color: AppColors.textSecondary),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Permissions helper widget ─────────────────────────────────────────────────
+
+const _kPermLevels = ['allow', 'ask', 'deny'];
+
+/// One permissions category row: label on the left, allow/ask/deny chips on the
+/// right. While [saving] is true the chips are disabled and a micro spinner
+/// replaces the trailing area.
+class _PermCategoryRow extends StatelessWidget {
+  const _PermCategoryRow({
+    required this.category,
+    required this.level,
+    required this.saving,
+    required this.onChanged,
+  });
+
+  final String category;
+  final String level;
+  final bool saving;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.lg,
+        vertical: AppSpacing.md,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              category.replaceAll('_', ' '),
+              style: AppText.body,
+            ),
+          ),
+          if (saving)
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            Wrap(
+              spacing: AppSpacing.xs,
+              children: _kPermLevels.map((l) {
+                final selected = l == level;
+                Color? chipColor;
+                if (l == 'allow') chipColor = AppColors.success;
+                if (l == 'deny') chipColor = AppColors.error;
+                return LzChip(
+                  label: l,
+                  selected: selected,
+                  dense: true,
+                  color: chipColor,
+                  onTap: selected ? null : () => onChanged(l),
+                );
+              }).toList(),
+            ),
+        ],
+      ),
     );
   }
 }

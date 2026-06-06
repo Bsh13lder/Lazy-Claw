@@ -99,7 +99,15 @@ class NotesNotifier extends StateNotifier<NotesState> {
   /// refresh from cache again when it settles.
   Future<void> load() async {
     state = state.copyWith(isLoading: true, error: null, searchQuery: '');
-    await _refreshFromCache(loading: false);
+    try {
+      await _refreshFromCache(loading: false);
+    } catch (e) {
+      // A degraded/corrupt cache must never strand the screen on the loading
+      // skeleton — surface the error and let the UI recover.
+      state = state.copyWith(isLoading: false, error: e.toString());
+    } finally {
+      if (state.isLoading) state = state.copyWith(isLoading: false);
+    }
     // Best-effort sync; failures are silent (offline is a normal state).
     unawaited(_syncThenRefresh());
   }
@@ -203,7 +211,13 @@ class NotesNotifier extends StateNotifier<NotesState> {
     } catch (_) {
       // Offline / server down — the local cache already holds the truth.
     }
-    if (mounted) await _refreshFromCache();
+    if (!mounted) return;
+    try {
+      await _refreshFromCache();
+    } catch (e) {
+      // A cache-read throw here must not escape as an unhandled async error.
+      state = state.copyWith(error: e.toString());
+    }
   }
 }
 

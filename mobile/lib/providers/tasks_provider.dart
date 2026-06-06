@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../local/app_db.dart' show DbHealth;
 import '../local/task_dao.dart';
 import '../models/task.dart';
 import '../repositories/tasks_repository.dart';
@@ -20,6 +21,9 @@ final appDatabaseProvider = Provider<Database>((ref) {
     '(see main.dart / openAppDb).',
   );
 });
+
+/// DB health, OVERRIDDEN in main() with the real AppDbResult.health.
+final dbHealthProvider = StateProvider<DbHealth>((ref) => const DbHealth.ok());
 
 /// Local task store backed by the encrypted DB.
 final taskDaoProvider = Provider<TaskDao>((ref) {
@@ -57,7 +61,11 @@ class _ReachableNotifier extends StateNotifier<bool> {
   final Reachability _reach;
   StreamSubscription<bool>? _sub;
 
-  _ReachableNotifier(this._reach) : super(_reach.value) {
+  // Start OPTIMISTIC (true): assume the backend is reachable until the first
+  // probe resolves. This avoids both a false "offline" flash at launch AND the
+  // boot-time false→true edge that would fire a spurious double-sync. The real
+  // value flows in via the stream / the start() resolution below.
+  _ReachableNotifier(this._reach) : super(true) {
     _sub = _reach.reachable.listen((v) => state = v);
     // Kick off the initial probe; updates flow back through the stream.
     unawaited(_reach.start().then((_) => state = _reach.value));
@@ -118,7 +126,15 @@ class TasksNotifier extends StateNotifier<TasksState> {
   /// refresh from cache again when it settles.
   Future<void> load() async {
     state = state.copyWith(isLoading: true, error: null);
-    await _refreshFromCache(loading: false);
+    try {
+      await _refreshFromCache(loading: false);
+    } catch (e) {
+      // A degraded/corrupt cache must never strand the screen on the loading
+      // skeleton — surface the error and let the UI recover.
+      state = state.copyWith(isLoading: false, error: e.toString());
+    } finally {
+      if (state.isLoading) state = state.copyWith(isLoading: false);
+    }
     // Best-effort sync; failures are silent (offline is a normal state).
     unawaited(_syncThenRefresh());
   }
@@ -187,7 +203,13 @@ class TasksNotifier extends StateNotifier<TasksState> {
     } catch (_) {
       // Offline / server down — the local cache already holds the truth.
     }
-    if (mounted) await _refreshFromCache();
+    if (!mounted) return;
+    try {
+      await _refreshFromCache();
+    } catch (e) {
+      // A cache-read throw here must not escape as an unhandled async error.
+      state = state.copyWith(error: e.toString());
+    }
   }
 }
 

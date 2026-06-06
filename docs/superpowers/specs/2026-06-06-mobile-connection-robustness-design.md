@@ -182,5 +182,13 @@ No files outside `mobile/`.
   - **priority** — `!p1` / `!!` style;
   - **project + tags via slash `/project`** (and `#tag` / `@label`).
   Implementation = **client-side Dart parser** for the common patterns (instant, offline, zero token cost) **+ optional ✨ AI** call for messy input only. Plus: full task **detail/edit panel** (description, subtasks/steps, priority, due, reminder, recurring, labels, project) and **project CRUD wired into Tasks**.
+
+  **Calendar view (Phase 2):**
+  - A **calendar view** in the Tasks tab (month / week / agenda), switchable with the list view.
+  - **Per-project color-coding** — the `Project` entity gains a `color` field; each task renders in its project's color on the calendar (and consistently in the list, "accurate" across views).
+  - Project color is **set + editable in project settings** (part of project CRUD), with a **toggle** to show/hide color-coding on the calendar.
+  - **Add task from the calendar** — tap a day → smart-add sheet pre-filled with that date.
+  - **Auto-refresh on add** — optimistic local insert already reflects instantly via the offline engine; the calendar must re-render without a manual refresh.
+  - This is a **visual** design area — when we brainstorm Phase 2 we'll likely use the Visual Companion to compare calendar layouts and the color/picker UX. Needs a calendar package decision (e.g. `table_calendar`) and a backend `projects.color` field (small additive change).
 - **Phase 3 — Notes → Tasks + smart preview** (segmented `Tasks | Notes`, "what is this note about" preview, in-note navigation, smart typing).
 - **Phase 4 — Documents tab** (native Flutter Sheets/Docs/PDF editing + ✨ AI, in the freed Notes slot).

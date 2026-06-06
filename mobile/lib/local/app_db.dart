@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -224,3 +225,108 @@ Future<String> _defaultDbPath() async {
 
 /// Re-export so callers can mint ids without importing uuid.dart directly.
 String newLocalId() => uuidV4();
+
+/// Health of the opened app database.
+///
+/// [ok] means the encrypted on-device file DB opened normally. [degraded]
+/// means every attempt to open the file DB failed and we fell back to an
+/// ephemeral in-memory database so the app stays usable — the UI should show
+/// a banner and offer a retry/reset.
+enum DbHealthStatus { ok, degraded }
+
+/// Immutable result describing how the database open went.
+class DbHealth {
+  final DbHealthStatus status;
+  final Object? error;
+
+  const DbHealth.ok()
+      : status = DbHealthStatus.ok,
+        error = null;
+  const DbHealth.degraded(this.error) : status = DbHealthStatus.degraded;
+
+  bool get isDegraded => status == DbHealthStatus.degraded;
+}
+
+/// Immutable pairing of an open [Database] handle with its [DbHealth].
+class AppDbResult {
+  final Database db;
+  final DbHealth health;
+
+  const AppDbResult(this.db, this.health);
+}
+
+/// Number of milliseconds to wait between failed file-DB open attempts.
+const Duration _kFallbackBackoff = Duration(milliseconds: 150);
+
+/// Resilient open: retry the encrypted file DB [retries] times (short backoff
+/// between tries), then fall back to an in-memory DB. ALWAYS returns a usable
+/// [Database] so the provider graph can never crash on a DB-open failure.
+///
+/// [openImpl] and [openInMemory] are test seams. By default [openImpl] calls
+/// [openAppDb] (the real encrypted file DB) and [openInMemory] opens an
+/// ephemeral [inMemoryDatabasePath] DB seeded with [createAppDbSchema].
+Future<AppDbResult> openAppDbWithFallback({
+  FlutterSecureStorage? storage,
+  String? pathOverride,
+  int retries = 2,
+  Future<Database> Function()? openImpl,
+  Future<Database> Function()? openInMemory,
+}) async {
+  final open = openImpl ??
+      () => openAppDb(storage: storage, pathOverride: pathOverride);
+  final openMem = openInMemory ?? _openInMemoryAppDb;
+
+  Object? lastError;
+  // attempt 0..retries inclusive => (retries + 1) total tries.
+  for (var attempt = 0; attempt <= retries; attempt++) {
+    try {
+      final db = await open();
+      return AppDbResult(db, const DbHealth.ok());
+    } catch (err, stack) {
+      lastError = err;
+      // NEVER silently swallow — surface every failed attempt for diagnosis.
+      debugPrint(
+        'openAppDbWithFallback: file DB open attempt '
+        '${attempt + 1}/${retries + 1} failed: $err',
+      );
+      debugPrintStack(stackTrace: stack, label: 'openAppDbWithFallback');
+      if (attempt < retries) {
+        await Future<void>.delayed(_kFallbackBackoff);
+      }
+    }
+  }
+
+  // Every file-DB attempt failed — degrade to an ephemeral in-memory DB so the
+  // app keeps working (read-only-ish; nothing persists across restarts).
+  debugPrint(
+    'openAppDbWithFallback: exhausted ${retries + 1} attempts — '
+    'falling back to in-memory DB (degraded). last error: $lastError',
+  );
+  final mem = await openMem();
+  return AppDbResult(mem, DbHealth.degraded(lastError));
+}
+
+/// Default in-memory fallback DB: opens [inMemoryDatabasePath] and applies the
+/// full schema so DAOs find their tables even in degraded mode.
+Future<Database> _openInMemoryAppDb() async {
+  final db = await openDatabase(inMemoryDatabasePath);
+  await createAppDbSchema(db);
+  return db;
+}
+
+/// Wipe the corrupt DB file + its keychain passphrase so a fresh, healthy DB
+/// can be minted on the next [openAppDb] call. The caller is responsible for
+/// re-opening afterwards. Best-effort: a missing file is not an error.
+Future<void> resetAppDb({
+  FlutterSecureStorage? storage,
+  String? pathOverride,
+}) async {
+  final dbPath = pathOverride ?? await _defaultDbPath();
+  try {
+    await deleteDatabase(dbPath);
+  } catch (err) {
+    // File may not exist or be locked — log but don't block the key wipe.
+    debugPrint('resetAppDb: deleteDatabase failed (continuing): $err');
+  }
+  await (storage ?? const FlutterSecureStorage()).delete(key: kDbKeyName);
+}

@@ -1,7 +1,92 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lazyclaw_mobile/ui/ui.dart';
+
 import '../models/task.dart';
 import '../providers/tasks_provider.dart';
+import 'tasks/add_task_sheet.dart';
+import 'tasks/task_row.dart';
+
+// ── Sections ──────────────────────────────────────────────────────────────────
+
+/// The four section buckets rendered by [TasksScreen].
+enum _Section { overdue, today, upcoming, done }
+
+extension _SectionLabel on _Section {
+  String get label {
+    switch (this) {
+      case _Section.overdue:
+        return 'Overdue';
+      case _Section.today:
+        return 'Today';
+      case _Section.upcoming:
+        return 'Upcoming';
+      case _Section.done:
+        return 'Done';
+    }
+  }
+
+  IconData get emptyIcon {
+    switch (this) {
+      case _Section.overdue:
+        return Icons.warning_amber_rounded;
+      case _Section.today:
+        return Icons.today_outlined;
+      case _Section.upcoming:
+        return Icons.event_outlined;
+      case _Section.done:
+        return Icons.check_circle_outline;
+    }
+  }
+}
+
+// ── Grouping helper ───────────────────────────────────────────────────────────
+
+/// Splits [tasks] into the four section buckets.
+Map<_Section, List<Task>> _groupTasks(List<Task> tasks) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+
+  final overdue = <Task>[];
+  final todayList = <Task>[];
+  final upcoming = <Task>[];
+  final done = <Task>[];
+
+  for (final task in tasks) {
+    if (task.isDone) {
+      done.add(task);
+      continue;
+    }
+    if (task.dueDate == null) {
+      upcoming.add(task);
+      continue;
+    }
+    final DateTime dueDay;
+    try {
+      final d = DateTime.parse(task.dueDate!);
+      dueDay = DateTime(d.year, d.month, d.day);
+    } catch (_) {
+      upcoming.add(task);
+      continue;
+    }
+    if (dueDay.isBefore(today)) {
+      overdue.add(task);
+    } else if (dueDay == today) {
+      todayList.add(task);
+    } else {
+      upcoming.add(task);
+    }
+  }
+
+  return {
+    _Section.overdue: overdue,
+    _Section.today: todayList,
+    _Section.upcoming: upcoming,
+    _Section.done: done,
+  };
+}
+
+// ── Screen ────────────────────────────────────────────────────────────────────
 
 class TasksScreen extends ConsumerStatefulWidget {
   const TasksScreen({super.key});
@@ -11,45 +96,40 @@ class TasksScreen extends ConsumerStatefulWidget {
 }
 
 class _TasksScreenState extends ConsumerState<TasksScreen> {
-  final _addController = TextEditingController();
-  bool _adding = false;
-
   @override
   void initState() {
     super.initState();
-    // Load tasks on first render.
+    // Load tasks from the local cache on first render (offline-first).
     Future.microtask(() => ref.read(tasksProvider.notifier).load());
-  }
-
-  @override
-  void dispose() {
-    _addController.dispose();
-    super.dispose();
   }
 
   Future<void> _refresh() => ref.read(tasksProvider.notifier).refresh();
 
-  Future<void> _submitAdd() async {
-    final title = _addController.text.trim();
-    if (title.isEmpty) return;
-    setState(() => _adding = true);
-    await ref.read(tasksProvider.notifier).addTask(title);
-    _addController.clear();
-    if (mounted) setState(() => _adding = false);
+  Future<void> _openAddSheet() async {
+    final result = await showAddTaskSheet(context);
+    if (result == null || !mounted) return;
+    await ref.read(tasksProvider.notifier).addTask(
+          result.title,
+          priority: result.priority,
+          dueDate: result.dueDate,
+        );
   }
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(tasksProvider);
+    final reachable = ref.watch(reachableProvider);
 
     // Show error snackbar on new errors.
     ref.listen<TasksState>(tasksProvider, (prev, next) {
       if (next.error != null && next.error != prev?.error) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(next.error!),
+            backgroundColor: AppColors.bgSurfaceElevated,
+            content: Text(next.error!, style: AppText.body),
             action: SnackBarAction(
               label: 'Dismiss',
+              textColor: AppColors.accent,
               onPressed: () =>
                   ref.read(tasksProvider.notifier).clearError(),
             ),
@@ -58,252 +138,197 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       }
     });
 
-    final reachable = ref.watch(reachableProvider);
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Tasks')),
-      body: Column(
-        children: [
-          if (!reachable) const _OfflineBanner(),
-          Expanded(child: _buildBody(context, state)),
-          _buildAddRow(context),
+    return LzScaffold(
+      appBar: LzAppBar(
+        title: 'Tasks',
+        large: true,
+        gradientTitle: true,
+        actions: [
+          LzIconButton(
+            icon: Icons.add,
+            tooltip: 'New task',
+            onPressed: _openAddSheet,
+          ),
         ],
       ),
+      banner: reachable ? null : const LzBanner.offline(safeAreaTop: false),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: AppColors.accent,
+        foregroundColor: AppColors.onAccent,
+        tooltip: 'New task',
+        onPressed: _openAddSheet,
+        child: const Icon(Icons.add),
+      ),
+      body: _buildBody(state),
     );
   }
 
-  Widget _buildBody(BuildContext context, TasksState state) {
+  Widget _buildBody(TasksState state) {
+    // ── Loading skeleton ─────────────────────────────────────────────────────
     if (state.isLoading && state.tasks.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (!state.isLoading && state.tasks.isEmpty && state.error == null) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.check_circle_outline, size: 56, color: Colors.grey),
-            SizedBox(height: 12),
-            Text('No tasks yet — add one below',
-                style: TextStyle(color: Colors.grey)),
-          ],
+      return LzSkeleton.list(
+        count: 6,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
         ),
       );
     }
 
-    return RefreshIndicator(
+    // ── Overall empty state ──────────────────────────────────────────────────
+    if (!state.isLoading && state.tasks.isEmpty && state.error == null) {
+      return LzEmptyState(
+        icon: Icons.task_alt_outlined,
+        title: 'No tasks yet',
+        hint: 'Tap + to add your first task.',
+        actionLabel: 'Add task',
+        actionIcon: Icons.add,
+        onAction: _openAddSheet,
+      );
+    }
+
+    // ── Sectioned list ───────────────────────────────────────────────────────
+    final grouped = _groupTasks(state.tasks);
+
+    return LzRefresh(
       onRefresh: _refresh,
-      child: ListView.separated(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: state.tasks.length,
-        separatorBuilder: (context, index) => const Divider(height: 1),
-        itemBuilder: (context, index) {
-          final task = state.tasks[index];
-          return _TaskTile(
-            task: task,
-            pendingSync: state.dirtyIds.contains(task.id),
-            onToggle: () =>
-                ref.read(tasksProvider.notifier).completeTask(task.id),
-            onDelete: () =>
-                ref.read(tasksProvider.notifier).deleteTask(task.id),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildAddRow(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _addController,
-                decoration: const InputDecoration(
-                  hintText: 'Add a task…',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                  contentPadding:
-                      EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                ),
-                textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _submitAdd(),
-              ),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.lg,
+          AppSpacing.md,
+          AppSpacing.lg,
+          AppSpacing.xxxl, // leave room above the FAB
+        ),
+        children: [
+          for (final section in _Section.values)
+            _TaskSection(
+              section: section,
+              tasks: grouped[section] ?? const [],
+              dirtyIds: state.dirtyIds,
+              onComplete: (id) =>
+                  ref.read(tasksProvider.notifier).completeTask(id),
+              onDelete: (id) =>
+                  ref.read(tasksProvider.notifier).deleteTask(id),
             ),
-            const SizedBox(width: 8),
-            _adding
-                ? const SizedBox(
-                    width: 40,
-                    height: 40,
-                    child: Padding(
-                      padding: EdgeInsets.all(8),
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : IconButton(
-                    icon: const Icon(Icons.add),
-                    tooltip: 'Add task',
-                    onPressed: _submitAdd,
-                  ),
-          ],
-        ),
+        ],
       ),
     );
   }
 }
 
-// ── Offline banner ───────────────────────────────────────────────────────────
+// ── Section widget ─────────────────────────────────────────────────────────────
 
-class _OfflineBanner extends StatelessWidget {
-  const _OfflineBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.orange.shade700,
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: const [
-              Icon(Icons.cloud_off, color: Colors.white, size: 18),
-              SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Computer offline — changes will sync',
-                  style: TextStyle(color: Colors.white, fontSize: 13),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Task tile ──────────────────────────────────────────────────────────────
-
-class _TaskTile extends StatelessWidget {
-  final Task task;
-  final bool pendingSync;
-  final VoidCallback onToggle;
-  final VoidCallback onDelete;
-
-  const _TaskTile({
-    required this.task,
-    required this.pendingSync,
-    required this.onToggle,
+class _TaskSection extends StatefulWidget {
+  const _TaskSection({
+    required this.section,
+    required this.tasks,
+    required this.dirtyIds,
+    required this.onComplete,
     required this.onDelete,
   });
 
+  final _Section section;
+  final List<Task> tasks;
+  final Set<String> dirtyIds;
+  final void Function(String id) onComplete;
+  final void Function(String id) onDelete;
+
+  @override
+  State<_TaskSection> createState() => _TaskSectionState();
+}
+
+class _TaskSectionState extends State<_TaskSection> {
+  // "Done" section starts collapsed.
+  bool _collapsed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _collapsed = widget.section == _Section.done;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isDone = task.isDone;
-    final priorityColor = _priorityColor(task.priority, context);
+    // Never render the section header if there's nothing to show (and it's not
+    // the upcoming section which always appears as the catch-all bucket).
+    if (widget.tasks.isEmpty &&
+        widget.section != _Section.upcoming &&
+        widget.section != _Section.today) {
+      return const SizedBox.shrink();
+    }
 
-    return Dismissible(
-      key: ValueKey(task.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        color: Colors.red.shade600,
-        child: const Icon(Icons.delete_outline, color: Colors.white),
-      ),
-      confirmDismiss: (_) async {
-        return await showDialog<bool>(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                title: const Text('Delete task?'),
-                content: Text(task.title),
-                actions: [
-                  TextButton(
-                      onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('Cancel')),
-                  FilledButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      child: const Text('Delete')),
-                ],
-              ),
-            ) ??
-            false;
-      },
-      onDismissed: (_) => onDelete(),
-      child: ListTile(
-        leading: Checkbox(
-          value: isDone,
-          onChanged: isDone ? null : (_) => onToggle(),
-          activeColor: Theme.of(context).colorScheme.primary,
-        ),
-        title: Text(
-          task.title,
-          style: isDone
-              ? const TextStyle(
-                  decoration: TextDecoration.lineThrough,
-                  color: Colors.grey,
-                )
-              : null,
-        ),
-        subtitle: _buildSubtitle(context),
-        trailing: Row(
+    final count = widget.tasks.length;
+    final countBadge = count > 0
+        ? Text(
+            count.toString(),
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          )
+        : null;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
+      child: LzSection(
+        title: widget.section.label,
+        action: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (pendingSync) ...[
-              Tooltip(
-                message: 'Not synced yet — pending upload',
-                child: Icon(Icons.cloud_off_outlined,
-                    size: 18, color: Colors.grey.shade500),
-              ),
-              const SizedBox(width: 8),
+            if (countBadge != null) ...[
+              countBadge,
+              const SizedBox(width: AppSpacing.sm),
             ],
-            _buildPriorityChip(priorityColor),
+            if (widget.section == _Section.done)
+              GestureDetector(
+                onTap: () => setState(() => _collapsed = !_collapsed),
+                child: Icon(
+                  _collapsed
+                      ? Icons.keyboard_arrow_down
+                      : Icons.keyboard_arrow_up,
+                  size: 18,
+                  color: AppColors.textMuted,
+                ),
+              ),
           ],
         ),
+        child: _buildContent(),
       ),
     );
   }
 
-  Widget? _buildSubtitle(BuildContext context) {
-    final parts = <String>[];
-    if (task.category != null) parts.add(task.category!);
-    if (task.dueDate != null) parts.add('Due ${task.dueDate}');
-    if (parts.isEmpty) return null;
-    return Text(parts.join(' · '),
-        style: Theme.of(context)
-            .textTheme
-            .bodySmall
-            ?.copyWith(color: Colors.grey.shade600));
-  }
+  Widget _buildContent() {
+    if (_collapsed) return const SizedBox.shrink();
 
-  Widget _buildPriorityChip(Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withAlpha(30),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withAlpha(100)),
-      ),
-      child: Text(
-        task.priority,
-        style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600),
-      ),
+    if (widget.tasks.isEmpty) {
+      return LzEmptyState(
+        icon: widget.section.emptyIcon,
+        title: _emptyTitle(widget.section),
+      );
+    }
+
+    return Column(
+      children: [
+        for (int i = 0; i < widget.tasks.length; i++) ...[
+          TaskRow(
+            task: widget.tasks[i],
+            pendingSync:
+                widget.dirtyIds.contains(widget.tasks[i].id),
+            onComplete: () => widget.onComplete(widget.tasks[i].id),
+            onDelete: () => widget.onDelete(widget.tasks[i].id),
+          ),
+          if (i < widget.tasks.length - 1)
+            const SizedBox(height: AppSpacing.sm),
+        ],
+      ],
     );
   }
 
-  Color _priorityColor(String priority, BuildContext context) {
-    switch (priority) {
-      case 'urgent':
-        return Colors.red.shade700;
-      case 'high':
-        return Colors.orange.shade700;
-      case 'medium':
-        return Colors.blue.shade600;
+  String _emptyTitle(_Section section) {
+    switch (section) {
+      case _Section.today:
+        return 'Nothing due today';
+      case _Section.upcoming:
+        return 'No upcoming tasks';
       default:
-        return Colors.grey.shade600;
+        return 'All clear';
     }
   }
 }

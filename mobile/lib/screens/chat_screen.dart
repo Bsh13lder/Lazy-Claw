@@ -1,12 +1,34 @@
+/// Chat screen — premium redesign.
+///
+/// All provider wiring, socket connection logic, auth-invalidation listener,
+/// message-dispatch callbacks, approval/plan responses, and autoscroll are
+/// IDENTICAL to the original. Only the presentation layer is replaced:
+///   - [LzScaffold] + [LzAppBar] with [LzStatusDot] connection state
+///   - [LzBanner.error] for connection errors (replaces MaterialBanner)
+///   - [LzEmptyState] for the empty conversation
+///   - Premium message bubbles via [ChatBubble]
+///   - Tool-activity chips via [ToolChip]
+///   - Background-task result cards via [BgTaskCard]
+///   - Plan/approval cards via [PlanCard]
+///   - Multiline-growing input bar styled to the design system
+///
+/// Helper widgets live in `screens/chat/` to keep file size manageable.
+library;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import '../chat/chat_controller.dart';
 import '../chat/chat_message.dart';
 import '../chat/chat_socket.dart';
 import '../core/config/server_config.dart';
 import '../notifications/local_notifications.dart';
 import '../providers/auth_provider.dart';
+import '../ui/ui.dart';
+import 'chat/bg_task_card.dart';
+import 'chat/chat_bubble.dart';
+import 'chat/plan_card.dart';
+
+// ── Providers (preserved exactly) ─────────────────────────────────────────
 
 final chatSocketProvider = Provider<ChatSocket>((ref) {
   final s = ChatSocket();
@@ -22,6 +44,8 @@ final chatControllerProvider =
                   LocalNotifications.showTaskNotification(title, body),
             ));
 
+// ── Screen ─────────────────────────────────────────────────────────────────
+
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
   @override
@@ -30,6 +54,7 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _input = TextEditingController();
+  final _scrollController = ScrollController();
   bool _connected = false;
   String? _connectError;
 
@@ -45,8 +70,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void dispose() {
     _input.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
+
+  // ── Connection (logic preserved exactly) ──────────────────────────────────
 
   Future<void> _connect() async {
     setState(() {
@@ -76,6 +104,27 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  // ── Send ───────────────────────────────────────────────────────────────────
+
+  void _send() {
+    final t = _input.text.trim();
+    if (t.isEmpty || !_connected) return;
+    ref.read(chatControllerProvider.notifier).send(t);
+    _input.clear();
+    // Scroll to bottom after sending.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          0,
+          duration: AppMotion.base,
+          curve: AppMotion.curve,
+        );
+      }
+    });
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     // Invalidate chat providers whenever the user logs out so the next
@@ -89,375 +138,304 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     final messages = ref.watch(chatControllerProvider);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_connected ? 'Chat' : 'Connecting…'),
-      ),
-      body: Column(children: [
-        if (_connectError != null)
-          MaterialBanner(
-            content: Text(_connectError!),
-            actions: [
-              TextButton(
+    return LzScaffold(
+      resizeToAvoidBottomInset: true,
+      appBar: _buildAppBar(),
+      banner: _connectError != null
+          ? LzBanner.error(
+              message: _connectError!,
+              safeAreaTop: false,
+              action: TextButton(
                 onPressed: _connect,
-                child: const Text('Retry'),
+                child: Text(
+                  'Retry',
+                  style: AppText.label.copyWith(color: AppColors.error),
+                ),
               ),
-            ],
+            )
+          : null,
+      body: Column(
+        children: [
+          // Message list
+          Expanded(
+            child: messages.isEmpty
+                ? _EmptyConversation(connected: _connected)
+                : _MessageList(
+                    messages: messages,
+                    scrollController: _scrollController,
+                    onApprove: (id, ok) => ref
+                        .read(chatControllerProvider.notifier)
+                        .respondApproval(id, ok),
+                    onSend: (text) =>
+                        ref.read(chatControllerProvider.notifier).send(text),
+                  ),
           ),
-        Expanded(
-          child: ListView.builder(
-            reverse: true,
-            padding: const EdgeInsets.all(12),
-            itemCount: messages.length,
-            itemBuilder: (c, i) {
-              final m = messages[messages.length - 1 - i];
-              return _buildMessageWidget(context, m);
-            },
+          // Input bar
+          _InputBar(
+            controller: _input,
+            connected: _connected,
+            onSend: _send,
           ),
-        ),
-        SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Row(children: [
-              Expanded(
-                child: TextField(
-                    controller: _input,
-                    decoration:
-                        const InputDecoration(hintText: 'Message LazyClaw…')),
-              ),
-              IconButton(
-                icon: const Icon(Icons.send),
-                // Disabled until the socket is connected.
-                onPressed: _connected
-                    ? () {
-                        final t = _input.text.trim();
-                        if (t.isEmpty) return;
-                        ref.read(chatControllerProvider.notifier).send(t);
-                        _input.clear();
-                      }
-                    : null,
-              ),
-            ]),
-          ),
-        ),
-      ]),
-    );
-  }
-
-  Widget _buildMessageWidget(BuildContext context, ChatMessage m) {
-    if (m.role == 'bg_task' && m.bgTaskResult != null) {
-      return _BgTaskCard(m.bgTaskResult!);
-    }
-    if (m.role == 'plan' && m.planText != null) {
-      return _PlanCard(
-        planText: m.planText!,
-        steps: m.planSteps,
-        onSend: (text) =>
-            ref.read(chatControllerProvider.notifier).send(text),
-      );
-    }
-    return _Bubble(m,
-        onApprove: (id, ok) =>
-            ref.read(chatControllerProvider.notifier).respondApproval(id, ok));
-  }
-}
-
-// ── Chat bubble ────────────────────────────────────────────────────────────
-
-class _Bubble extends StatelessWidget {
-  final ChatMessage m;
-  final void Function(String id, bool approved) onApprove;
-  const _Bubble(this.m, {required this.onApprove});
-
-  @override
-  Widget build(BuildContext context) {
-    final isUser = m.role == 'user';
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.8),
-        decoration: BoxDecoration(
-          color: isUser
-              ? Theme.of(context).colorScheme.primary
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          isUser
-              ? Text(m.content,
-                  style: TextStyle(
-                      color: Theme.of(context).colorScheme.onPrimary))
-              : MarkdownBody(data: m.content.isEmpty ? '…' : m.content),
-          // Tool activity chips
-          if (m.toolActivities.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 4,
-              runSpacing: 4,
-              children: m.toolActivities
-                  .map((t) => _ToolChip(t))
-                  .toList(),
-            ),
-          ],
-          if (m.pendingApprovalId != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Row(children: [
-                Text('Approve ${m.pendingApprovalSkill}?'),
-                const Spacer(),
-                TextButton(
-                    onPressed: () => onApprove(m.pendingApprovalId!, false),
-                    child: const Text('Deny')),
-                FilledButton(
-                    onPressed: () => onApprove(m.pendingApprovalId!, true),
-                    child: const Text('Approve')),
-              ]),
-            ),
-        ]),
+        ],
       ),
     );
   }
-}
 
-// ── Tool activity chip ─────────────────────────────────────────────────────
+  // ── App bar with connection dot ────────────────────────────────────────────
 
-class _ToolChip extends StatefulWidget {
-  final ToolActivity activity;
-  const _ToolChip(this.activity);
+  PreferredSizeWidget _buildAppBar() {
+    final dot = _connected
+        ? const LzStatusDot.success(size: 9, glow: true)
+        : _connectError != null
+            ? const LzStatusDot.error(size: 9)
+            : const LzStatusDot.warn(size: 9);
 
-  @override
-  State<_ToolChip> createState() => _ToolChipState();
-}
-
-class _ToolChipState extends State<_ToolChip> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = widget.activity;
-    final isDone = t.resultPreview != null;
-    final color = isDone
-        ? Theme.of(context).colorScheme.secondaryContainer
-        : Theme.of(context).colorScheme.tertiaryContainer;
-    final onColor = isDone
-        ? Theme.of(context).colorScheme.onSecondaryContainer
-        : Theme.of(context).colorScheme.onTertiaryContainer;
-
-    return GestureDetector(
-      onTap: isDone ? () => setState(() => _expanded = !_expanded) : null,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return LzAppBar(
+      title: 'Chat',
+      actions: [
+        Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(
-                isDone ? Icons.check_circle_outline : Icons.settings_outlined,
-                size: 14,
-                color: onColor,
+            dot,
+            const SizedBox(width: AppSpacing.xs),
+            Text(
+              _connected
+                  ? 'Connected'
+                  : _connectError != null
+                      ? 'Offline'
+                      : 'Connecting…',
+              style: AppText.caption.copyWith(
+                color: _connected ? AppColors.success : AppColors.textMuted,
               ),
-              const SizedBox(width: 4),
-              Text(
-                t.name,
-                style: Theme.of(context)
-                    .textTheme
-                    .labelSmall
-                    ?.copyWith(color: onColor),
-              ),
-              if (isDone && t.resultPreview!.isNotEmpty) ...[
-                const SizedBox(width: 4),
-                Icon(
-                  _expanded
-                      ? Icons.expand_less
-                      : Icons.expand_more,
-                  size: 14,
-                  color: onColor,
-                ),
-              ],
-            ]),
-            if (_expanded && t.resultPreview != null && t.resultPreview!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  t.resultPreview!,
-                  style: Theme.of(context)
-                      .textTheme
-                      .labelSmall
-                      ?.copyWith(color: onColor),
-                  maxLines: 5,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
           ],
         ),
-      ),
+      ],
     );
   }
 }
 
-// ── Background task result card ─────────────────────────────────────────────
+// ── Message list ───────────────────────────────────────────────────────────
 
-class _BgTaskCard extends StatelessWidget {
-  final BackgroundTaskResult result;
-  const _BgTaskCard(this.result);
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final success = result.success;
-    final bg = success
-        ? scheme.primaryContainer
-        : scheme.errorContainer;
-    final fg = success
-        ? scheme.onPrimaryContainer
-        : scheme.onErrorContainer;
-    final icon = success ? Icons.check_circle : Icons.error_outline;
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.85),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Icon(icon, size: 18, color: fg),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  result.name,
-                  style: Theme.of(context)
-                      .textTheme
-                      .labelMedium
-                      ?.copyWith(fontWeight: FontWeight.w600, color: fg),
-                ),
-                if (result.detail != null && result.detail!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      result.detail!,
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelSmall
-                          ?.copyWith(color: fg),
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                if (result.durationMs != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      '${(result.durationMs! / 1000).toStringAsFixed(1)}s',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelSmall
-                          ?.copyWith(color: fg.withValues(alpha: 0.7)),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
-}
-
-// ── Plan card ──────────────────────────────────────────────────────────────
-
-class _PlanCard extends StatelessWidget {
-  final String planText;
-  final List<String> steps;
-  final void Function(String) onSend;
-  const _PlanCard({
-    required this.planText,
-    required this.steps,
+class _MessageList extends StatelessWidget {
+  const _MessageList({
+    required this.messages,
+    required this.scrollController,
+    required this.onApprove,
     required this.onSend,
   });
 
+  final List<ChatMessage> messages;
+  final ScrollController scrollController;
+  final void Function(String id, bool approved) onApprove;
+  final void Function(String text) onSend;
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.all(14),
-        constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.9),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: scheme.outline.withValues(alpha: 0.4)),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(Icons.assignment_outlined,
-                size: 16, color: scheme.primary),
-            const SizedBox(width: 6),
-            Text(
-              'Agent Plan',
-              style: Theme.of(context)
-                  .textTheme
-                  .labelLarge
-                  ?.copyWith(color: scheme.primary, fontWeight: FontWeight.w600),
+    return ListView.builder(
+      controller: scrollController,
+      reverse: true,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.lg,
+        vertical: AppSpacing.md,
+      ),
+      itemCount: messages.length,
+      itemBuilder: (ctx, i) {
+        final m = messages[messages.length - 1 - i];
+        return _buildMessageWidget(m);
+      },
+    );
+  }
+
+  Widget _buildMessageWidget(ChatMessage m) {
+    if (m.role == 'bg_task' && m.bgTaskResult != null) {
+      return BgTaskCard(m.bgTaskResult!);
+    }
+    if (m.role == 'plan' && m.planText != null) {
+      return PlanCard(
+        planText: m.planText!,
+        steps: m.planSteps,
+        onSend: onSend,
+      );
+    }
+    return ChatBubble(m, onApprove: onApprove);
+  }
+}
+
+// ── Empty state ────────────────────────────────────────────────────────────
+
+class _EmptyConversation extends StatelessWidget {
+  const _EmptyConversation({required this.connected});
+  final bool connected;
+
+  @override
+  Widget build(BuildContext context) {
+    return LzEmptyState(
+      icon: Icons.chat_bubble_outline_rounded,
+      title: connected ? 'Start a conversation' : 'Connecting to LazyClaw…',
+      hint: connected
+          ? 'Ask anything — LazyClaw is ready.'
+          : 'The assistant will appear here once connected.',
+    );
+  }
+}
+
+// ── Input bar ──────────────────────────────────────────────────────────────
+
+class _InputBar extends StatefulWidget {
+  const _InputBar({
+    required this.controller,
+    required this.connected,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final bool connected;
+  final VoidCallback onSend;
+
+  @override
+  State<_InputBar> createState() => _InputBarState();
+}
+
+class _InputBarState extends State<_InputBar> {
+  bool _hasText = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    super.dispose();
+  }
+
+  void _onTextChanged() {
+    final hasText = widget.controller.text.trim().isNotEmpty;
+    if (hasText != _hasText) {
+      setState(() => _hasText = hasText);
+    }
+  }
+
+  bool get _canSend => widget.connected && _hasText;
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomPad = MediaQuery.of(context).viewInsets.bottom;
+
+    return AnimatedPadding(
+      duration: AppMotion.base,
+      curve: AppMotion.curve,
+      padding: EdgeInsets.only(bottom: bottomPad),
+      child: SafeArea(
+        top: false,
+        child: Container(
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            border: Border(
+              top: BorderSide(color: AppColors.borderSubtle, width: 1),
             ),
-          ]),
-          const SizedBox(height: 8),
-          Text(planText,
-              style: Theme.of(context).textTheme.bodySmall),
-          if (steps.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            ...steps.asMap().entries.map((e) => Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${e.key + 1}. ',
-                        style: Theme.of(context).textTheme.labelSmall,
+          ),
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.sm,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              // Multiline growing text field
+              Expanded(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 140),
+                  child: TextField(
+                    controller: widget.controller,
+                    enabled: widget.connected,
+                    maxLines: null,
+                    minLines: 1,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    style: AppText.body.copyWith(color: AppColors.textPrimary),
+                    cursorColor: AppColors.accent,
+                    decoration: InputDecoration(
+                      hintText: widget.connected
+                          ? 'Message LazyClaw…'
+                          : 'Connecting…',
+                      hintStyle:
+                          AppText.body.copyWith(color: AppColors.textMuted),
+                      filled: true,
+                      fillColor: AppColors.bgSurface,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md,
+                        vertical: AppSpacing.sm + 2,
                       ),
-                      Expanded(
-                        child: Text(
-                          e.value,
-                          style: Theme.of(context).textTheme.bodySmall,
+                      border: OutlineInputBorder(
+                        borderRadius: AppRadii.rLg,
+                        borderSide: const BorderSide(
+                          color: AppColors.borderDefault,
                         ),
                       ),
-                    ],
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: AppRadii.rLg,
+                        borderSide: const BorderSide(
+                          color: AppColors.borderDefault,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: AppRadii.rLg,
+                        borderSide: const BorderSide(
+                          color: AppColors.accent,
+                          width: 1.5,
+                        ),
+                      ),
+                      disabledBorder: OutlineInputBorder(
+                        borderRadius: AppRadii.rLg,
+                        borderSide: const BorderSide(
+                          color: AppColors.borderSubtle,
+                        ),
+                      ),
+                    ),
                   ),
-                )),
-          ],
-          const SizedBox(height: 10),
-          // Note: plan approval is signaled via a normal message frame.
-          // Tapping "Approve" sends "approve" as a user message; "Reject" sends "reject".
-          Row(children: [
-            OutlinedButton(
-              onPressed: () => onSend('reject'),
-              child: const Text('Reject'),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              onPressed: () => onSend('approve'),
-              child: const Text('Approve'),
-            ),
-          ]),
-        ]),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              // Send button — disabled until connected + has text
+              AnimatedOpacity(
+                duration: AppMotion.fast,
+                opacity: _canSend ? 1.0 : 0.35,
+                child: GestureDetector(
+                  onTap: _canSend ? widget.onSend : null,
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      gradient: _canSend
+                          ? AppColors.accentGradient
+                          : null,
+                      color: _canSend ? null : AppColors.bgSurface,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: _canSend
+                            ? Colors.transparent
+                            : AppColors.borderDefault,
+                      ),
+                      boxShadow: _canSend ? AppElevation.card : AppElevation.none,
+                    ),
+                    child: Icon(
+                      Icons.arrow_upward_rounded,
+                      size: 20,
+                      color: _canSend
+                          ? AppColors.onAccent
+                          : AppColors.textMuted,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

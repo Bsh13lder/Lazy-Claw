@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/task.dart';
@@ -28,6 +29,13 @@ class TaskRow extends StatelessWidget {
   /// Opens the task detail/edit sheet. Null leaves the row non-tappable.
   final VoidCallback? onTap;
 
+  /// Fire a light haptic tick alongside completion so the gesture feels
+  /// tactile (checkbox tap + swipe-to-complete both route through here).
+  void _completeWithHaptic() {
+    HapticFeedback.lightImpact();
+    onComplete();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDone = task.isDone;
@@ -54,7 +62,7 @@ class TaskRow extends StatelessWidget {
       confirmDismiss: (direction) async {
         if (direction == DismissDirection.startToEnd) {
           // Complete in place — don't actually dismiss the tile.
-          if (!isDone) onComplete();
+          if (!isDone) _completeWithHaptic();
           return false;
         }
         // endToStart → confirm delete.
@@ -78,7 +86,7 @@ class TaskRow extends StatelessWidget {
           children: [
             // ── Checkbox affordance ──────────────────────────────────────
             GestureDetector(
-              onTap: isDone ? null : onComplete,
+              onTap: isDone ? null : _completeWithHaptic,
               child: AnimatedContainer(
                 duration: AppMotion.fast,
                 width: 24,

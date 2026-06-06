@@ -91,11 +91,11 @@ class BudgetsSync {
   /// retried next sync). A 4xx (validation/conflict/404) is safe to drain.
   Future<BudgetsSyncResult> push() async {
     final queue = await _dao.readBudgetsOutbox();
-    // Coalesce consecutive `update` ops per project so multiple pending PATCHes
+    // Coalesce consecutive `update` ops per entity so multiple pending PATCHes
     // can't replay as separate round-trips that interleave with server-stamped
     // times. The first update row of a run keeps the merged payload (carrying a
-    // client `updated_at` for LWW); the rest are no-op'd (just dequeued).
-    // Expenses have no `update` op, so only projects are affected.
+    // client `updated_at` for LWW); the rest are no-op'd (just dequeued). Both
+    // projects and expenses support `update`, and each is keyed by its own id.
     final coalesced = _coalesceUpdates(queue);
 
     var pushed = 0;
@@ -171,6 +171,9 @@ class BudgetsSync {
               id: p['id']?.toString() ?? item.entityId,
               vendor: p['vendor']?.toString(),
             );
+            break;
+          case BudgetsOutboxOp.update:
+            await _repo.updateExpense(item.entityId, _patchFrom(p));
             break;
           case BudgetsOutboxOp.delete:
             await _repo.deleteExpense(item.entityId);
@@ -287,12 +290,13 @@ class BudgetsSync {
 
   // ── update coalescing ─────────────────────────────────────────────────────
 
-  /// Merge consecutive pending `update` ops for the same project into one
+  /// Merge consecutive pending `update` ops for the same entity into one
   /// payload carried by the FIRST update row; the later rows are marked to be
   /// dequeued without a network call. Each merged head also carries the client
   /// `updated_at` (latest local edit time) so a server that stamps its own
-  /// `updated_at` can't win LWW and revert a newer local edit. Only project
-  /// updates exist in the budgets outbox (expenses have no `update` op).
+  /// `updated_at` can't win LWW and revert a newer local edit. Both project and
+  /// expense updates can appear in the budgets outbox; each coalesces on its own
+  /// id (entity ids never collide across the two tables).
   _Coalesced _coalesceUpdates(List<BudgetsOutboxItem> queue) {
     // entityId → seq of the head update row that will carry the merged payload.
     final head = <String, int>{};

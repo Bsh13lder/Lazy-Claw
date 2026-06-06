@@ -44,6 +44,8 @@ dependencies:
   web_socket_channel: ^3.0.1
   flutter_markdown: ^0.7.4
   lucide_icons: ^0.257.0
+  # Subtle list-entrance motion (declarative, finite). Used on the Tasks list.
+  flutter_animate: ^4.5.0
   flutter_local_notifications: ^18.0.0
   # Offline-first Tasks layer: encrypted local SQLite, reachability, bg sync.
   sqflite_sqlcipher: ^3.1.0

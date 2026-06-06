@@ -191,6 +191,12 @@ class BudgetsRepository {
     return Expense.fromJson(raw);
   }
 
+  /// Patch an expense via PATCH /api/budgets/expenses/{id}. [patch] holds
+  /// snake_case fields (amount/description/vendor/project_id/notes/spent_at).
+  Future<void> updateExpense(String id, Map<String, dynamic> patch) async {
+    await _t.patchJson('/api/budgets/expenses/$id', patch);
+  }
+
   /// Delete an expense by id (soft delete server-side).
   Future<void> deleteExpense(String id) async {
     await _t.deleteJson('/api/budgets/expenses/$id');

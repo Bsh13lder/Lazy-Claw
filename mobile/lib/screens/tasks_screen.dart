@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
@@ -108,12 +110,16 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   Future<void> _refresh() => ref.read(tasksProvider.notifier).refresh();
 
   Future<void> _openAddSheet() async {
+    // Tactile tick when summoning the add sheet (FAB + app-bar + button both
+    // route through here).
+    HapticFeedback.selectionClick();
     final result = await showAddTaskSheet(context);
     if (result == null || !mounted) return;
     await ref.read(tasksProvider.notifier).addTask(
           result.title,
           priority: result.priority,
           dueDate: result.dueDate,
+          category: result.category,
         );
   }
 
@@ -263,10 +269,42 @@ class _TaskSectionState extends State<_TaskSection> {
   // "Done" section starts collapsed.
   bool _collapsed = false;
 
+  // The staggered fade+slide entrance plays exactly once, on first mount. Once
+  // the last row finishes we drop the Animate wrappers so subsequent rebuilds
+  // (sync refresh, complete, delete, scroll) render plain rows — no replay.
+  bool _entered = false;
+
   @override
   void initState() {
     super.initState();
     _collapsed = widget.section == _Section.done;
+  }
+
+  void _markEntered() {
+    if (!_entered && mounted) setState(() => _entered = true);
+  }
+
+  /// Wrap [child] in a subtle, index-staggered fade+slide entrance — but only
+  /// until [_entered] flips. The flag is flipped by the LAST row's completion
+  /// so earlier rows are never cut short mid-animation.
+  Widget _entrance({required int index, required int last, required Widget child}) {
+    if (_entered) return child;
+    return child
+        .animate(
+          onComplete: index == last ? (_) => _markEntered() : null,
+        )
+        .fadeIn(
+          duration: AppMotion.base,
+          delay: Duration(milliseconds: 28 * index),
+          curve: AppMotion.curveEmphasized,
+        )
+        .slideY(
+          begin: 0.04,
+          end: 0,
+          duration: AppMotion.base,
+          delay: Duration(milliseconds: 28 * index),
+          curve: AppMotion.curveEmphasized,
+        );
   }
 
   @override
@@ -326,16 +364,21 @@ class _TaskSectionState extends State<_TaskSection> {
       );
     }
 
+    final last = widget.tasks.length - 1;
     return Column(
       children: [
         for (int i = 0; i < widget.tasks.length; i++) ...[
-          TaskRow(
-            task: widget.tasks[i],
-            pendingSync:
-                widget.dirtyIds.contains(widget.tasks[i].id),
-            onComplete: () => widget.onComplete(widget.tasks[i].id),
-            onDelete: () => widget.onDelete(widget.tasks[i].id),
-            onTap: () => widget.onOpen(widget.tasks[i]),
+          _entrance(
+            index: i,
+            last: last,
+            child: TaskRow(
+              task: widget.tasks[i],
+              pendingSync:
+                  widget.dirtyIds.contains(widget.tasks[i].id),
+              onComplete: () => widget.onComplete(widget.tasks[i].id),
+              onDelete: () => widget.onDelete(widget.tasks[i].id),
+              onTap: () => widget.onOpen(widget.tasks[i]),
+            ),
           ),
           if (i < widget.tasks.length - 1)
             const SizedBox(height: AppSpacing.sm),

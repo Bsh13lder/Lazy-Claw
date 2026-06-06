@@ -7,9 +7,9 @@ import '../models/project.dart';
 import 'app_db.dart';
 
 /// Outbox operation kinds for the budgets domain. Replayed against the server in
-/// `seq` order. Projects support create/update/delete; expenses support
-/// create/delete (update is intentionally omitted — the mobile UI never edits an
-/// expense in place, it deletes + re-adds).
+/// `seq` order. Both projects and expenses support create/update/delete — an
+/// expense can be edited in place (amount/description/vendor/project/date) via
+/// the detail sheet, which enqueues an `update` op.
 class BudgetsOutboxOp {
   static const create = 'create';
   static const update = 'update';
@@ -488,6 +488,64 @@ class BudgetsDao {
     });
 
     return (await getExpense(expenseId))!;
+  }
+
+  /// Patch an existing expense locally (amount/description/vendor/project/notes/
+  /// date). Only the supplied fields change; the rest are preserved. Bumps
+  /// updated_at + dirty and enqueues an `update`. Returns the patched Expense
+  /// (or null when the id is unknown). When the project changes we clear the
+  /// cached `project_name` so the ledger row falls back to the live project list
+  /// (which carries the correct current name) until the next pull re-stamps it.
+  Future<Expense?> applyLocalExpenseUpdate(
+    String id, {
+    double? amount,
+    String? description,
+    String? vendor,
+    String? projectId,
+    String? notes,
+    String? spentAt,
+  }) async {
+    final existing = await getExpense(id);
+    if (existing == null) return null;
+
+    final now = _now();
+
+    // Column patch (snake_case) — only the supplied fields. Mirrors the server
+    // PATCH body so the queued `update` op replays the same change set.
+    final patch = <String, dynamic>{
+      'amount': ?amount,
+      'description': ?description,
+      'vendor': ?vendor,
+      'project_id': ?projectId,
+      'notes': ?notes,
+      'spent_at': ?spentAt,
+    };
+
+    await _db.transaction((txn) async {
+      await txn.update(
+        'expense_cache',
+        {
+          ...patch,
+          // A project move invalidates the denormalised name cache.
+          if (projectId != null) 'project_name': null,
+          'updated_at': now,
+          'dirty': 1,
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      await _enqueueTxn(
+        txn,
+        BudgetsOutboxOp.update,
+        kExpenseEntity,
+        id,
+        {'id': id, ...patch},
+        now,
+      );
+    });
+
+    // Re-read so the canonical row (with the cleared project_name) is returned.
+    return getExpense(id);
   }
 
   /// Tombstone an expense locally (deleted=1) + enqueue a `delete`.

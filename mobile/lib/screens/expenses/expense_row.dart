@@ -9,6 +9,10 @@ import 'money_helpers.dart';
 ///
 /// Supports optional swipe-to-delete (pass [onDelete]) and an optional
 /// project tag chip (pass [showProject] = true with a non-empty [projects]).
+///
+/// Tapping the row body fires [onTap] — the Money screen wires this to open the
+/// expense detail/edit sheet. Null leaves the row non-tappable. The swipe-to-
+/// delete gesture is unchanged.
 class ExpenseRow extends StatelessWidget {
   const ExpenseRow({
     super.key,
@@ -17,6 +21,7 @@ class ExpenseRow extends StatelessWidget {
     required this.pendingSync,
     required this.onDelete,
     this.showProject = true,
+    this.onTap,
   });
 
   final Expense expense;
@@ -25,13 +30,19 @@ class ExpenseRow extends StatelessWidget {
   final VoidCallback? onDelete;
   final bool showProject;
 
+  /// Opens the expense detail/edit sheet. Null leaves the row non-tappable.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final projectName = _resolveProjectName();
     final desc = expense.displayDescription;
     final vendor = expense.vendor ?? '';
 
-    final content = _buildContent(context, desc, vendor, projectName);
+    final inner = _buildContent(context, desc, vendor, projectName);
+    final content = onTap == null
+        ? inner
+        : InkWell(onTap: onTap, child: inner);
 
     if (onDelete == null) {
       return content;

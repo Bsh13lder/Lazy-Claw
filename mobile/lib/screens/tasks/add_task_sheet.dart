@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
-/// A polished add-task bottom sheet: title field + optional due-date and
-/// priority quick-selectors.  Returns the data to the caller via [Navigator.pop]
-/// so the screen can invoke the provider without knowing about UI internals.
+/// A polished add-task bottom sheet with Todoist-style "smart add": as the user
+/// types, recognized natural-language tokens (due date, priority, `#project`)
+/// are parsed on-device and surfaced as chips. Parsed values pre-select the
+/// priority / due-date controls; manual taps always win.
+///
+/// Returns the data to the caller via [Navigator.pop] so the screen can invoke
+/// the provider without knowing about UI internals.
 class AddTaskSheet extends StatefulWidget {
   const AddTaskSheet({super.key});
 
@@ -13,8 +18,16 @@ class AddTaskSheet extends StatefulWidget {
 
 class _AddTaskSheetState extends State<AddTaskSheet> {
   final _titleController = TextEditingController();
-  String _priority = 'medium';
-  String? _dueDate;
+
+  /// Live parse of the current title text. Drives the detected-token chips and
+  /// the default selections for priority / due date.
+  ParsedTask _parsed = const ParsedTask(cleanTitle: '');
+
+  /// Manual overrides. When set, they win over the parsed values.
+  String? _manualPriority;
+  bool _dueDateTouched = false;
+  String? _manualDueDate;
+
   bool _submitting = false;
 
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
@@ -25,14 +38,40 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     super.dispose();
   }
 
+  // ── Effective (override-aware) values ───────────────────────────────────────
+
+  String get _effectivePriority =>
+      _manualPriority ?? _parsed.priority ?? 'medium';
+
+  String? get _effectiveDueDate =>
+      _dueDateTouched ? _manualDueDate : _parsed.dueDate;
+
+  bool get _hasDetection =>
+      _parsed.dueDate != null ||
+      _parsed.priority != null ||
+      _parsed.project != null;
+
+  void _onTitleChanged(String value) {
+    setState(() => _parsed = parseSmartAdd(value));
+  }
+
   Future<void> _submit() async {
-    final title = _titleController.text.trim();
+    // Re-parse from the live controller so a submit-via-keyboard can't race the
+    // onChanged callback.
+    final parsed = parseSmartAdd(_titleController.text);
+    final clean = parsed.cleanTitle.trim();
+    final title = clean.isNotEmpty ? clean : _titleController.text.trim();
     if (title.isEmpty) return;
+
+    final priority = _manualPriority ?? parsed.priority ?? 'medium';
+    final dueDate = _dueDateTouched ? _manualDueDate : parsed.dueDate;
+
     setState(() => _submitting = true);
     Navigator.of(context).pop(_AddTaskResult(
       title: title,
-      priority: _priority,
-      dueDate: _dueDate,
+      priority: priority,
+      dueDate: dueDate,
+      category: parsed.project,
     ));
   }
 
@@ -51,6 +90,9 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final effDue = _effectiveDueDate;
+    final effPriority = _effectivePriority;
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -58,12 +100,64 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
         // ── Title input ────────────────────────────────────────────────
         LzTextField(
           controller: _titleController,
-          hint: 'What needs to be done?',
+          hint: 'e.g. "Pay rent tomorrow !p1 #home"',
           prefixIcon: Icons.task_alt_outlined,
           textInputAction: TextInputAction.done,
+          onChanged: _onTitleChanged,
           onSubmitted: (_) => _submit(),
           autofocus: true,
         ),
+
+        // ── Smart-detected tokens (live) ───────────────────────────────
+        if (_hasDetection) ...[
+          const SizedBox(height: AppSpacing.md),
+          Row(
+            children: [
+              Icon(Icons.auto_awesome_outlined,
+                  size: 13, color: AppColors.accent),
+              const SizedBox(width: AppSpacing.xs),
+              Text(
+                'SMART DETECTED',
+                style: AppText.caption.copyWith(
+                  color: AppColors.accent,
+                  letterSpacing: 0.8,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          Wrap(
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.sm,
+            children: [
+              if (_parsed.dueDate != null)
+                LzChip(
+                  label: _parsed.dueDate!,
+                  icon: Icons.event_outlined,
+                  selected: true,
+                  color: AppColors.accent,
+                  dense: true,
+                ),
+              if (_parsed.priority != null)
+                LzChip(
+                  label: _parsed.priority!,
+                  icon: Icons.flag_outlined,
+                  selected: true,
+                  color: _priorityColor(_parsed.priority!),
+                  dense: true,
+                ),
+              if (_parsed.project != null)
+                LzChip(
+                  label: '#${_parsed.project!}',
+                  icon: Icons.folder_outlined,
+                  selected: true,
+                  color: AppColors.info,
+                  dense: true,
+                ),
+            ],
+          ),
+        ],
 
         const SizedBox(height: AppSpacing.xl),
 
@@ -79,14 +173,14 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
         const SizedBox(height: AppSpacing.sm),
         Row(
           children: _priorities.map((p) {
-            final selected = p == _priority;
+            final selected = p == effPriority;
             return Padding(
               padding: const EdgeInsets.only(right: AppSpacing.sm),
               child: LzChip(
                 label: p,
                 selected: selected,
                 color: _priorityColor(p),
-                onTap: () => setState(() => _priority = p),
+                onTap: () => setState(() => _manualPriority = p),
               ),
             );
           }).toList(),
@@ -109,38 +203,34 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
             LzChip(
               label: 'Today',
               icon: Icons.today_outlined,
-              selected: _dueDate == _isoToday(),
+              selected: effDue == _isoToday(),
               color: AppColors.warn,
-              onTap: () => setState(() {
-                _dueDate =
-                    _dueDate == _isoToday() ? null : _isoToday();
-              }),
+              onTap: () => _setDueDate(
+                  effDue == _isoToday() ? null : _isoToday()),
             ),
             const SizedBox(width: AppSpacing.sm),
             LzChip(
               label: 'Tomorrow',
               icon: Icons.event_outlined,
-              selected: _dueDate == _isoTomorrow(),
+              selected: effDue == _isoTomorrow(),
               color: AppColors.accent,
-              onTap: () => setState(() {
-                _dueDate =
-                    _dueDate == _isoTomorrow() ? null : _isoTomorrow();
-              }),
+              onTap: () => _setDueDate(
+                  effDue == _isoTomorrow() ? null : _isoTomorrow()),
             ),
             const SizedBox(width: AppSpacing.sm),
             LzChip(
               label: 'Pick…',
               icon: Icons.calendar_month_outlined,
-              selected: _dueDate != null &&
-                  _dueDate != _isoToday() &&
-                  _dueDate != _isoTomorrow(),
+              selected: effDue != null &&
+                  effDue != _isoToday() &&
+                  effDue != _isoTomorrow(),
               color: AppColors.info,
               onTap: _pickDate,
             ),
           ],
         ),
 
-        if (_dueDate != null) ...[
+        if (effDue != null) ...[
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
@@ -148,12 +238,12 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
                   size: 14, color: AppColors.textMuted),
               const SizedBox(width: AppSpacing.xs),
               Text(
-                'Due $_dueDate',
+                'Due $effDue',
                 style: AppText.caption.copyWith(color: AppColors.textSecondary),
               ),
               const Spacer(),
               GestureDetector(
-                onTap: () => setState(() => _dueDate = null),
+                onTap: () => _setDueDate(null),
                 child: Icon(Icons.close,
                     size: 14, color: AppColors.textMuted),
               ),
@@ -175,6 +265,15 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     );
   }
 
+  /// Apply a manual due-date selection (or clear). Marks the field as touched
+  /// so the parsed default no longer applies.
+  void _setDueDate(String? iso) {
+    setState(() {
+      _dueDateTouched = true;
+      _manualDueDate = iso;
+    });
+  }
+
   Future<void> _pickDate() async {
     final now = DateTime.now();
     final picked = await showDatePicker(
@@ -193,10 +292,9 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
       ),
     );
     if (picked != null) {
-      setState(() {
-        _dueDate =
-            '${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
-      });
+      _setDueDate(
+        '${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}',
+      );
     }
   }
 
@@ -217,17 +315,20 @@ class _AddTaskResult {
     required this.title,
     required this.priority,
     this.dueDate,
+    this.category,
   });
   final String title;
   final String priority;
   final String? dueDate;
+  final String? category;
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────
 
 /// Show the add-task sheet and return the submitted result, or null if
 /// dismissed. Callers invoke the provider directly with the returned data.
-Future<({String title, String priority, String? dueDate})?> showAddTaskSheet(
+Future<({String title, String priority, String? dueDate, String? category})?>
+    showAddTaskSheet(
   BuildContext context,
 ) async {
   final result = await LzBottomSheet.show<_AddTaskResult>(
@@ -240,5 +341,6 @@ Future<({String title, String priority, String? dueDate})?> showAddTaskSheet(
     title: result.title,
     priority: result.priority,
     dueDate: result.dueDate,
+    category: result.category,
   );
 }

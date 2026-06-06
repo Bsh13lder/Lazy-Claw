@@ -8,6 +8,7 @@ import '../providers/tasks_provider.dart'
 import '../ui/ui.dart';
 import 'expenses/add_expense_sheet.dart';
 import 'expenses/budget_summary_card.dart';
+import 'expenses/expense_detail_sheet.dart';
 import 'expenses/expense_row.dart';
 import 'expenses/money_helpers.dart';
 import 'expenses/project_card.dart';
@@ -60,6 +61,10 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
         },
       ),
     );
+  }
+
+  void _showExpenseDetail(Expense expense) {
+    showExpenseDetailSheet(context, ref, expense);
   }
 
   void _showAddProject() {
@@ -221,6 +226,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           state: state,
           onDeleteExpense: (id) =>
               ref.read(budgetsProvider.notifier).removeExpense(id),
+          onTapExpense: _showExpenseDetail,
           onRefresh: _refresh,
         ),
       ],
@@ -303,11 +309,13 @@ class _LedgerTab extends StatelessWidget {
   const _LedgerTab({
     required this.state,
     required this.onDeleteExpense,
+    required this.onTapExpense,
     required this.onRefresh,
   });
 
   final BudgetsState state;
   final void Function(String id) onDeleteExpense;
+  final void Function(Expense expense) onTapExpense;
   final Future<void> Function() onRefresh;
 
   @override
@@ -374,6 +382,7 @@ class _LedgerTab extends StatelessWidget {
                         pendingSync:
                             state.dirtyExpenseIds.contains(dayExpenses[j].id),
                         onDelete: () => onDeleteExpense(dayExpenses[j].id),
+                        onTap: () => onTapExpense(dayExpenses[j]),
                         showProject: true,
                       ),
                       if (j < dayExpenses.length - 1)

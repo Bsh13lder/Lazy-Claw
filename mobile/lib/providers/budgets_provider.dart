@@ -159,6 +159,40 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  /// Patch an existing expense locally (amount/description/vendor/project/notes/
+  /// date). Only the supplied fields change; the rest are preserved. Lands
+  /// optimistically in the cache + outbox, then best-effort syncs. Returns true
+  /// on success, false (with `state.error` set) when the local write throws.
+  Future<bool> updateExpense(
+    String id, {
+    double? amount,
+    String? description,
+    String? vendor,
+    String? projectId,
+    String? notes,
+    String? spentAt,
+  }) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalExpenseUpdate(
+        id,
+        amount: amount,
+        description: description,
+        vendor: vendor,
+        projectId: projectId,
+        notes: notes,
+        spentAt: spentAt,
+      );
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
   Future<void> removeExpense(String id) async {
     try {
       await _dao.applyLocalExpenseDelete(id);

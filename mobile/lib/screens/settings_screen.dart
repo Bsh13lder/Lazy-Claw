@@ -133,6 +133,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void initState() {
     super.initState();
     _urlController.text = ref.read(baseUrlProvider);
+    // Silently check for a newer build when Settings opens and populate the
+    // shared provider so the "Update available" tile can surface itself. We do
+    // NOT show the dialog automatically — that would be intrusive on every open.
+    // This complements the one-shot startup check in main.dart.
+    Future.microtask(_silentUpdateCheck);
+  }
+
+  /// Background update probe. [SelfUpdateService.checkForUpdate] never throws and
+  /// collapses "up to date" / "unreachable" into null, so a null result simply
+  /// leaves the provider untouched (no tile, no error noise).
+  Future<void> _silentUpdateCheck() async {
+    final info = await ref.read(selfUpdateServiceProvider).checkForUpdate();
+    if (!mounted || info == null) return;
+    ref.read(updateAvailableProvider.notifier).state = info;
   }
 
   @override
@@ -364,6 +378,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           vertical: AppSpacing.lg,
         ),
         children: [
+          // 0. Auto-surfaced "Update available" banner — self-hides when there
+          // is no pending update, so it can sit unconditionally at the top.
+          const SettingsUpdateTile(),
+
           // 1. Account
           _buildAccountSection(username: username, displayName: displayName),
           AppSpacing.vGap(AppSpacing.xl),
@@ -967,6 +985,53 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 }
 
 // ── Reusable sub-widgets ─────────────────────────────────────────────────────
+
+/// A prominent, accent-styled banner shown at the TOP of Settings whenever
+/// [updateAvailableProvider] holds a strictly-newer build. Tapping the banner —
+/// or its trailing "Update" button — opens the existing [showUpdateDialog]
+/// download/install flow. When no update is pending it renders nothing, so it
+/// can sit unconditionally at the head of the settings list.
+///
+/// Extracted as a public widget (the "testable body") so the present/absent
+/// behaviour can be pumped in isolation without the full screen's auth / eco /
+/// permissions / secure-storage dependencies.
+class SettingsUpdateTile extends ConsumerWidget {
+  const SettingsUpdateTile({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pending = ref.watch(updateAvailableProvider);
+    if (pending == null) return const SizedBox.shrink();
+
+    void open() => showUpdateDialog(context, ref, pending);
+
+    return Padding(
+      key: const Key('settings-update-available'),
+      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
+      child: LzCard(
+        color: AppColors.accent.withValues(alpha: 0.14),
+        borderColor: AppColors.accent,
+        padding: EdgeInsets.zero,
+        onTap: open,
+        child: LzListTile(
+          leading: const Icon(Icons.system_update_alt,
+              size: 22, color: AppColors.accent),
+          title: 'Update available',
+          titleStyle: AppText.body.copyWith(
+            color: AppColors.accent,
+            fontWeight: FontWeight.w700,
+          ),
+          subtitle: 'v${pending.version} (build ${pending.build})',
+          trailing: LzButton.primary(
+            label: 'Update',
+            icon: Icons.download,
+            onPressed: open,
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// [LzListTile] row with a token-themed [Switch] trailing widget.
 class _SwitchTile extends StatelessWidget {

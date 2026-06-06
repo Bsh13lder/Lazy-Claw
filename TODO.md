@@ -1,5 +1,18 @@
 # TODO
 
+## Mobile App (Flutter) ✅ v1.7.0 (2026-06-06)
+Native Android/iOS client in `mobile/`, donor-harvested from `taskbot_flutter`. See DOCS.md → "Mobile App" and `docs/superpowers/specs/2026-06-0{4,6}-*`.
+- [x] Milestone A — scaffold + login + WebSocket chat + self-served APK (Download/QR in web Settings)
+- [x] Broad parity — 6 tabs: Home · Chat · Tasks · Money · Notes · Settings
+- [x] Offline-first (encrypted SQLCipher cache + outbox + last-write-wins sync) for Tasks, Notes, Budgets + backend `?since=`/tombstone/client-id primitives
+- [x] Premium UI overhaul — shared `lib/ui/` design-system kit (Inter, tokens, `Lz*` components, custom nav)
+- [x] Full control — ECO-mode switch + permissions wired (Settings)
+- [x] Power surfaces — `/more` hub: Skills · Vault · Memory · Jobs · Watchers · MCP · Audit
+- [ ] FCM/APNs push (currently WS-while-open + poll); true background push needs a Firebase project
+- [ ] iOS release build + signing (Android-first shipped; codebase is cross-platform)
+- [ ] Offline writes for Memory (currently view+delete; `personal_memory`↔notes duality to resolve)
+- [ ] Device-side polish from on-device QA; FCM helps past HyperOS background limits
+
 ## Documents Workspace — Sheets / Docs / PDF ✅ COMPLETE (2026-05-29)
 Private encrypted, agent-editable office suite. Three independent backends under one "Docs" web tab. See DOCS.md → "Documents Workspace".
 - [x] **Sheets** — Univer Sheets (Apache-2.0) embed + `lazyclaw/sheets/{snapshot,store,xlsx_io,recalc}.py` + `/api/sheets` + 7 skills. `IWorkbookData` blob per sheet; openpyxl export; xlcalculator recalc. (71 tests)

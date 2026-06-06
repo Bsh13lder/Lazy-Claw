@@ -52,6 +52,40 @@ class LzBanner extends StatelessWidget {
   })  : variant = LzBannerVariant.info,
         icon = null;
 
+  /// A "local storage degraded" banner (warn): the device's local DB failed, so
+  /// the app is falling back to live data from the server. Offers a "Retry"
+  /// affordance ([onRetry]) to re-attempt the local store, and a "Reset"
+  /// affordance ([onReset]) to rebuild it from scratch.
+  factory LzBanner.degraded({
+    Key? key,
+    required VoidCallback onRetry,
+    required VoidCallback onReset,
+    bool safeAreaTop = true,
+  }) {
+    return LzBanner(
+      key: key,
+      message: 'Local storage unavailable — showing live data from server.',
+      variant: LzBannerVariant.warn,
+      safeAreaTop: safeAreaTop,
+      action: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _BannerTapAction(
+            label: 'Retry',
+            color: AppColors.warn,
+            onTap: onRetry,
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          _BannerTapAction(
+            label: 'Reset',
+            color: AppColors.warn,
+            onTap: onReset,
+          ),
+        ],
+      ),
+    );
+  }
+
   _Style get _style {
     switch (variant) {
       case LzBannerVariant.offline:
@@ -109,4 +143,39 @@ class _Style {
   final Color color;
   final IconData icon;
   const _Style(this.color, this.icon);
+}
+
+/// A compact, token-styled tappable text label used as a trailing affordance
+/// inside a banner (e.g. the Retry / Reset actions on [LzBanner.degraded]).
+class _BannerTapAction extends StatelessWidget {
+  const _BannerTapAction({
+    required this.label,
+    required this.onTap,
+    required this.color,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: AppRadii.rSm,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs,
+        ),
+        child: Text(
+          label,
+          style: AppText.caption.copyWith(
+            color: color,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
 }

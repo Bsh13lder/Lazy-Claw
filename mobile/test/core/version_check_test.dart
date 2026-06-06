@@ -62,5 +62,17 @@ void main() {
         isFalse,
       );
     });
+
+    test('older server name + lower build → no update (never downgrade)', () {
+      expect(
+        isUpdateAvailable(
+          latestVersion: '1.7.0',
+          latestBuild: 5,
+          currentVersion: '1.8.0',
+          currentBuild: 14,
+        ),
+        isFalse,
+      );
+    });
   });
 }

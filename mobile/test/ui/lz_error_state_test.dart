@@ -45,18 +45,18 @@ void main() {
         LzBanner.degraded(onRetry: () {}, onReset: () {}),
       ));
       expect(
-        find.text('Local storage unavailable — showing live data from server.'),
+        find.text('Local storage unavailable — data may be incomplete.'),
         findsOneWidget,
       );
     });
 
-    testWidgets('Retry affordance fires onRetry', (tester) async {
+    testWidgets('Refresh affordance fires onRetry', (tester) async {
       var retried = false;
       await tester.pumpWidget(_host(
         LzBanner.degraded(onRetry: () => retried = true, onReset: () {}),
       ));
-      expect(find.text('Retry'), findsOneWidget);
-      await tester.tap(find.text('Retry'));
+      expect(find.text('Refresh'), findsOneWidget);
+      await tester.tap(find.text('Refresh'));
       await tester.pump();
       expect(retried, isTrue);
     });

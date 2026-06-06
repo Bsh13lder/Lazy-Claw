@@ -147,7 +147,7 @@ void main() {
 
         expect(
           find.text(
-            'Local storage unavailable — showing live data from server.',
+            'Local storage unavailable — data may be incomplete.',
           ),
           findsOneWidget,
         );

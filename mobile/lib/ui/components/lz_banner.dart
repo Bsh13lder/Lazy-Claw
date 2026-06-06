@@ -53,9 +53,9 @@ class LzBanner extends StatelessWidget {
         icon = null;
 
   /// A "local storage degraded" banner (warn): the device's local DB failed, so
-  /// the app is falling back to live data from the server. Offers a "Retry"
-  /// affordance ([onRetry]) to re-attempt the local store, and a "Reset"
-  /// affordance ([onReset]) to rebuild it from scratch.
+  /// data may be incomplete. Offers a "Refresh" affordance ([onRetry]) to
+  /// re-read the current store, and a "Reset" affordance ([onReset]) to rebuild
+  /// it from scratch (the latter needs an app restart to re-open the file DB).
   factory LzBanner.degraded({
     Key? key,
     required VoidCallback onRetry,
@@ -64,14 +64,14 @@ class LzBanner extends StatelessWidget {
   }) {
     return LzBanner(
       key: key,
-      message: 'Local storage unavailable — showing live data from server.',
+      message: 'Local storage unavailable — data may be incomplete.',
       variant: LzBannerVariant.warn,
       safeAreaTop: safeAreaTop,
       action: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           _BannerTapAction(
-            label: 'Retry',
+            label: 'Refresh',
             color: AppColors.warn,
             onTap: onRetry,
           ),
@@ -146,7 +146,7 @@ class _Style {
 }
 
 /// A compact, token-styled tappable text label used as a trailing affordance
-/// inside a banner (e.g. the Retry / Reset actions on [LzBanner.degraded]).
+/// inside a banner (e.g. the Refresh / Reset actions on [LzBanner.degraded]).
 class _BannerTapAction extends StatelessWidget {
   const _BannerTapAction({
     required this.label,
@@ -163,16 +163,23 @@ class _BannerTapAction extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       borderRadius: AppRadii.rSm,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.sm,
-          vertical: AppSpacing.xs,
-        ),
-        child: Text(
-          label,
-          style: AppText.caption.copyWith(
-            color: color,
-            fontWeight: FontWeight.w700,
+      // Guarantee a comfortable (>=44dp) tap target without enlarging the text.
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.sm,
+            vertical: AppSpacing.xs,
+          ),
+          child: Center(
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: AppText.caption.copyWith(
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ),
         ),
       ),

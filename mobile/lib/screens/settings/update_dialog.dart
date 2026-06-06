@@ -141,6 +141,14 @@ class _UpdateDialogBodyState extends State<_UpdateDialogBody> {
             if (_isErrorStatus(event.status)) {
               _error = _errorMessage(event);
               _running = false;
+            } else if (event.status == OtaStatus.CANCELED) {
+              _error = 'Update cancelled.';
+              _running = false;
+            } else if (event.status == OtaStatus.INSTALLATION_DONE) {
+              // The system installer has been handed the APK; the OTA stream
+              // is finished. Clear `_running` so the Done button is tappable
+              // even if the user backs out of the installer and returns here.
+              _running = false;
             }
           });
         },
@@ -196,7 +204,9 @@ class _UpdateDialogBodyState extends State<_UpdateDialogBody> {
           const SizedBox(height: AppSpacing.sm),
           Text(
             installing
-                ? 'Launching installer…'
+                ? (_status == OtaStatus.INSTALLATION_DONE
+                    ? 'Installer launched — tap Done.'
+                    : 'Launching installer…')
                 : 'Downloading… ${(_progress * 100).round()}%',
             style: AppText.caption.copyWith(color: AppColors.textSecondary),
           ),

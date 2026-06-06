@@ -4,11 +4,14 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../models/note.dart';
 import '../providers/notes_provider.dart';
-// reachableProvider lives in tasks_provider (shared offline-first infra).
-import '../providers/tasks_provider.dart' show reachableProvider;
+// reachableProvider + dbHealthProvider live in tasks_provider (shared
+// offline-first infra).
+import '../providers/tasks_provider.dart'
+    show reachableProvider, dbHealthProvider;
 import 'notes/note_card.dart';
 import 'notes/note_create_sheet.dart';
 import 'notes/note_detail_screen.dart';
+import 'storage_banners.dart';
 
 export 'notes/note_detail_screen.dart' show NoteDetailScreen;
 
@@ -93,6 +96,7 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(notesProvider);
     final offline = !ref.watch(reachableProvider);
+    final degraded = ref.watch(dbHealthProvider).isDegraded;
 
     // Show snack-bar on error.
     ref.listen<NotesState>(notesProvider, (prev, next) {
@@ -124,7 +128,12 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
           ),
         ],
       ),
-      banner: offline ? const LzBanner.offline(safeAreaTop: false) : null,
+      banner: buildStorageBanners(
+        context,
+        offline: offline,
+        degraded: degraded,
+        onRetry: () => ref.read(notesProvider.notifier).load(),
+      ),
       body: Column(
         children: [
           // Search field pinned below the app bar.
@@ -157,14 +166,24 @@ class _NotesScreenState extends ConsumerState<NotesScreen> {
   }
 
   Widget _buildBody(NotesState state) {
-    // Loading skeleton.
-    if (state.isLoading && state.notes.isEmpty) {
+    // Loading skeleton — only on the first instant cache read (no items yet,
+    // nothing errored). Never strand here once an error has surfaced.
+    if (state.isLoading && state.notes.isEmpty && state.error == null) {
       return LzSkeleton.list(
         count: 5,
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.lg,
           vertical: AppSpacing.md,
         ),
+      );
+    }
+
+    // Error state — nothing cached to show + a load error. Beats the empty
+    // state so the screen offers a real Retry instead of a misleading "empty".
+    if (state.notes.isEmpty && state.error != null) {
+      return LzErrorState(
+        message: state.error!,
+        onRetry: () => ref.read(notesProvider.notifier).load(),
       );
     }
 

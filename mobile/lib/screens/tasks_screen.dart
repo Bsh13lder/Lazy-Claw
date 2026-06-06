@@ -4,6 +4,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../models/task.dart';
 import '../providers/tasks_provider.dart';
+import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
 import 'tasks/task_row.dart';
 
@@ -119,6 +120,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(tasksProvider);
     final reachable = ref.watch(reachableProvider);
+    final degraded = ref.watch(dbHealthProvider).isDegraded;
 
     // Show error snackbar on new errors.
     ref.listen<TasksState>(tasksProvider, (prev, next) {
@@ -151,7 +153,12 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           ),
         ],
       ),
-      banner: reachable ? null : const LzBanner.offline(safeAreaTop: false),
+      banner: buildStorageBanners(
+        context,
+        offline: !reachable,
+        degraded: degraded,
+        onRetry: () => ref.read(tasksProvider.notifier).load(),
+      ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: AppColors.accent,
         foregroundColor: AppColors.onAccent,
@@ -165,13 +172,24 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 
   Widget _buildBody(TasksState state) {
     // ── Loading skeleton ─────────────────────────────────────────────────────
-    if (state.isLoading && state.tasks.isEmpty) {
+    // Only on the first instant cache read (no items yet, nothing errored).
+    if (state.isLoading && state.tasks.isEmpty && state.error == null) {
       return LzSkeleton.list(
         count: 6,
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.lg,
           vertical: AppSpacing.md,
         ),
+      );
+    }
+
+    // ── Error state ──────────────────────────────────────────────────────────
+    // Nothing cached to show + a load error → offer a real Retry instead of
+    // a misleading "empty" or an infinite skeleton.
+    if (state.tasks.isEmpty && state.error != null) {
+      return LzErrorState(
+        message: state.error!,
+        onRetry: () => ref.read(tasksProvider.notifier).load(),
       );
     }
 

@@ -3,13 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/expense.dart';
 import '../providers/budgets_provider.dart';
-import '../providers/tasks_provider.dart' show reachableProvider;
+import '../providers/tasks_provider.dart'
+    show reachableProvider, dbHealthProvider;
 import '../ui/ui.dart';
 import 'expenses/add_expense_sheet.dart';
 import 'expenses/budget_summary_card.dart';
 import 'expenses/expense_row.dart';
 import 'expenses/money_helpers.dart';
 import 'expenses/project_card.dart';
+import 'storage_banners.dart';
 
 class ExpensesScreen extends ConsumerStatefulWidget {
   const ExpensesScreen({super.key});
@@ -75,6 +77,13 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
   Widget build(BuildContext context) {
     final state = ref.watch(budgetsProvider);
     final reachable = ref.watch(reachableProvider);
+    final degraded = ref.watch(dbHealthProvider).isDegraded;
+    final banners = buildStorageBanners(
+      context,
+      offline: !reachable,
+      degraded: degraded,
+      onRetry: () => ref.read(budgetsProvider.notifier).load(),
+    );
 
     // Show error snackbar on new errors.
     ref.listen<BudgetsState>(budgetsProvider, (prev, next) {
@@ -99,7 +108,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
       appBar: _buildAppBar(state),
       body: Column(
         children: [
-          if (!reachable) const LzBanner.offline(safeAreaTop: false),
+          ?banners,
           Expanded(child: _buildBody(state)),
         ],
       ),
@@ -162,8 +171,11 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
   }
 
   Widget _buildBody(BudgetsState state) {
-    // Loading skeleton.
-    if (state.isLoading && state.projects.isEmpty && state.expenses.isEmpty) {
+    final nothingCached = state.projects.isEmpty && state.expenses.isEmpty;
+
+    // Loading skeleton — only on the first instant cache read (nothing cached
+    // yet, nothing errored).
+    if (state.isLoading && nothingCached && state.error == null) {
       return LzSkeleton.list(
         count: 4,
         padding: const EdgeInsets.fromLTRB(
@@ -172,6 +184,15 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           AppSpacing.lg,
           AppSpacing.md,
         ),
+      );
+    }
+
+    // Error state — nothing cached to show + a load error → offer a real Retry
+    // instead of a misleading empty/zeroed dashboard or an infinite skeleton.
+    if (nothingCached && state.error != null) {
+      return LzErrorState(
+        message: state.error!,
+        onRetry: () => ref.read(budgetsProvider.notifier).load(),
       );
     }
 

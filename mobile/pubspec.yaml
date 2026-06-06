@@ -50,6 +50,13 @@ dependencies:
   connectivity_plus: ^6.1.0
   workmanager: ^0.7.0
   path: ^1.9.0
+  # In-app APK self-updater: download + sha256 verify + launch installer.
+  ota_update: ^7.1.0
+  # Real running version/build (PackageInfo); kAppVersion/kAppBuild = fallback.
+  # Pinned to ^9.0.1 (not ^10.x): package_info_plus 10 needs win32 ^6, which
+  # conflicts with flutter_secure_storage 9.2.2's win32 ^5 pin. v9 is the
+  # nearest compatible release and is API-identical for our usage.
+  package_info_plus: ^9.0.1
 
 dev_dependencies:
   flutter_test:

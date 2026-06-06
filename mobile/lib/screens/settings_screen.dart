@@ -7,6 +7,8 @@ import 'package:workmanager/workmanager.dart';
 
 import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
+import '../core/self_update.dart';
+import 'settings/update_dialog.dart';
 import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/notes_provider.dart';
@@ -125,6 +127,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _savingUrl = false;
   String? _urlError;
   bool _testingConnection = false;
+  bool _checkingUpdate = false;
 
   @override
   void initState() {
@@ -281,28 +284,34 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // ── Check for update ──────────────────────────────────────────────────────
 
   Future<void> _checkForUpdate() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
     try {
-      final client = ref.read(apiClientProvider);
-      final resp =
-          await client.get<Map<String, dynamic>>('/api/mobile/version');
-      final latest = resp['version']?.toString() ?? '';
+      final info = await ref.read(selfUpdateServiceProvider).checkForUpdate();
       if (!mounted) return;
-      if (latest.isEmpty || latest == kAppVersion) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('You are on the latest version.')),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Update available: v$latest')),
-        );
+      if (info != null) {
+        // Seed the shared provider so other surfaces can react, then offer the
+        // download/install flow.
+        ref.read(updateAvailableProvider.notifier).state = info;
+        await showUpdateDialog(context, ref, info);
+        return;
       }
-    } catch (_) {
+      // `checkForUpdate` collapses "up to date" and "unreachable" into null.
+      // Probe reachability once to pick the right message.
+      final reachable =
+          await ref.read(reachabilityProvider).refresh().catchError((_) => false);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not check for updates — server unreachable.'),
+        SnackBar(
+          content: Text(
+            reachable
+                ? 'You are on the latest version.'
+                : 'Could not check for updates — server unreachable.',
+          ),
         ),
       );
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
     }
   }
 
@@ -937,10 +946,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               leading: const Icon(Icons.system_update_alt,
                   size: 20, color: AppColors.textSecondary),
               title: 'Check for update',
-              subtitle: 'Pings /api/mobile/version',
-              onTap: _checkForUpdate,
-              trailing: const Icon(Icons.chevron_right,
-                  size: 18, color: AppColors.textMuted),
+              subtitle: _checkingUpdate
+                  ? 'Checking…'
+                  : 'Download & install a newer APK',
+              onTap: _checkingUpdate ? null : _checkForUpdate,
+              trailing: _checkingUpdate
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.chevron_right,
+                      size: 18, color: AppColors.textMuted),
             ),
           ],
         ),

@@ -17,8 +17,9 @@ This is **Phase 1 of a 4-phase Flutter polish initiative**:
 | 2 — Tasks polish | Advanced hybrid smart-add (multi-intent: task/expense/time/project), full task detail/edit panel, project CRUD wired into tasks. | Future |
 | 3 — Notes → Tasks | Move Notes into the Tasks tab (segmented `Tasks \| Notes`); "what is this note about" smart preview; in-note navigation. | Future |
 | 4 — Documents tab | Freed Notes slot becomes Documents (Sheets/Docs/PDF), **native** Flutter editing + ✨ AI. | Future |
+| 5 — Android widgets & quick actions | Home-screen widgets (quick-capture, today list, budget) + app-icon long-press quick actions, Todoist-style. | Future |
 
-Each phase gets its own spec → plan → build.
+Each phase gets its own spec → plan → build. (Phase 5's cheapest wins — the 4 app-icon quick actions + a quick-capture bar — reuse the existing add-sheets and could be pulled earlier as a standalone slice.)
 
 ---
 
@@ -192,3 +193,13 @@ No files outside `mobile/`.
   - This is a **visual** design area — when we brainstorm Phase 2 we'll likely use the Visual Companion to compare calendar layouts and the color/picker UX. Needs a calendar package decision (e.g. `table_calendar`) and a backend `projects.color` field (small additive change).
 - **Phase 3 — Notes → Tasks + smart preview** (segmented `Tasks | Notes`, "what is this note about" preview, in-note navigation, smart typing).
 - **Phase 4 — Documents tab** (native Flutter Sheets/Docs/PDF editing + ✨ AI, in the freed Notes slot).
+- **Phase 5 — Android home-screen widgets & quick actions (Todoist-style).** Researched 2026-06-06.
+  - **Package:** `home_widget` 0.9.2 (BSD-3 — license-clean). Widget UI is **native** (RemoteViews or Jetpack Glance), *not* Flutter-rendered.
+  - **Encrypted-DB pattern (the key insight):** a widget process can't open the SQLCipher DB, BUT the existing headless background-sync isolate (`sync/background_sync.dart`) proves a Dart isolate *can*. So: the widget **displays** from a small **plaintext snapshot** written to `home_widget`'s `HomeWidgetPreferences` (titles + due/done only — the single place data leaves the AES boundary; keep minimal, clear on logout); a widget **quick-add** runs a `@pragma('vm:entry-point')` background callback that opens `openAppDb()` + `TaskDao` + outbox (mirroring `runHeadlessSync`), with an app-launch deep-link fallback for free-text.
+  - **Refresh:** call `HomeWidget.updateWidget` on every task write/sync (the `updatePeriodMillis` self-refresh is floored at 30 min and throttled further on HyperOS — don't rely on it).
+  - **Styling decision (to make when speccing P5):** plain RemoteViews = "clean/functional"; **Jetpack Glance** (or `renderFlutterWidget`→PNG) = "designer-grade" matching the `Lz*` look. For the premium feel the user wants → lean **Glance**. (Note: RemoteViews can't use the bundled Inter font or the Dart `Lz*` kit — widget styling is re-expressed in XML/Glance.)
+  - **App-icon quick actions ("fast menu"):** `quick_actions` plugin (federated; `quick_actions_android` actively maintained). **Max ~4 visible** → recommend **Add task · Add expense · Chat · New note** (reuse existing `showAddTaskSheet` / add-expense sheet; route via `routerProvider.go(...)`). Gotchas: dynamic shortcuts only appear after first launch (re-register each start); cold-start race needs a one-shot `pendingAction` provider replayed once the router mounts; R8 can strip shortcut icon drawables in release builds.
+  - **Recommended widget suite (priority):** **P0** Quick-Capture bar (4×1: `+Task / +Expense / +Note / Chat`) · **P1** Today + overdue list (collection widget, per-row complete checkbox → toggle DB + queue sync) · **P2** Budget traffic-light widget (month spend-vs-budget, the differentiator vs Todoist) · P3 Quick-note · P4 Agent pulse (agenda + watcher/job counts).
+  - **Mi 15 / HyperOS reality (CRITICAL):** widgets + background quick-add die silently unless **Autostart = on** and **battery = No restrictions**; pin-widget is gated behind a Security-Center toggle. Ship an in-app one-time MIUI setup helper (same pattern as the existing cleartext/LAN-IP helper). Treat `updateWidget`-on-write as the source of truth, not self-refresh.
+  - **Effort:** medium for P0+P1 (~2–4 focused days); larger if adopting Glance for premium polish. Main risk = HyperOS background death.
+  - This is a **visual** area → use the Visual Companion when speccing P5.

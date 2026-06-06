@@ -6,6 +6,10 @@ import '../../models/task.dart';
 /// A single task row: priority chip, title, due chip, sync badge, and
 /// a checkbox affordance. Wrapped in a Dismissible so the parent list
 /// gets swipe-to-complete (startToEnd) and swipe-to-delete (endToStart).
+///
+/// Tapping the card body (anywhere outside the checkbox) fires [onTap] — the
+/// Tasks screen wires this to open the detail/edit sheet. The checkbox keeps
+/// its own tap (complete) and the swipe gestures are unchanged.
 class TaskRow extends StatelessWidget {
   const TaskRow({
     super.key,
@@ -13,12 +17,16 @@ class TaskRow extends StatelessWidget {
     required this.pendingSync,
     required this.onComplete,
     required this.onDelete,
+    this.onTap,
   });
 
   final Task task;
   final bool pendingSync;
   final VoidCallback onComplete;
   final VoidCallback onDelete;
+
+  /// Opens the task detail/edit sheet. Null leaves the row non-tappable.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -60,6 +68,7 @@ class TaskRow extends StatelessWidget {
       },
       onDismissed: (_) => onDelete(),
       child: LzCard(
+        onTap: onTap,
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.md,
           vertical: AppSpacing.md,

@@ -6,6 +6,7 @@ import '../models/task.dart';
 import '../providers/tasks_provider.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
+import 'tasks/task_detail_sheet.dart';
 import 'tasks/task_row.dart';
 
 // ── Sections ──────────────────────────────────────────────────────────────────
@@ -227,6 +228,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                   ref.read(tasksProvider.notifier).completeTask(id),
               onDelete: (id) =>
                   ref.read(tasksProvider.notifier).deleteTask(id),
+              onOpen: (task) => showTaskDetailSheet(context, ref, task),
             ),
         ],
       ),
@@ -243,6 +245,7 @@ class _TaskSection extends StatefulWidget {
     required this.dirtyIds,
     required this.onComplete,
     required this.onDelete,
+    required this.onOpen,
   });
 
   final _Section section;
@@ -250,6 +253,7 @@ class _TaskSection extends StatefulWidget {
   final Set<String> dirtyIds;
   final void Function(String id) onComplete;
   final void Function(String id) onDelete;
+  final void Function(Task task) onOpen;
 
   @override
   State<_TaskSection> createState() => _TaskSectionState();
@@ -331,6 +335,7 @@ class _TaskSectionState extends State<_TaskSection> {
                 widget.dirtyIds.contains(widget.tasks[i].id),
             onComplete: () => widget.onComplete(widget.tasks[i].id),
             onDelete: () => widget.onDelete(widget.tasks[i].id),
+            onTap: () => widget.onOpen(widget.tasks[i]),
           ),
           if (i < widget.tasks.length - 1)
             const SizedBox(height: AppSpacing.sm),

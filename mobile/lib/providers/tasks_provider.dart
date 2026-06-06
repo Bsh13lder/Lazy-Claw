@@ -167,6 +167,33 @@ class TasksNotifier extends StateNotifier<TasksState> {
     }
   }
 
+  /// Patch an existing task locally (title / notes / priority / due date /
+  /// category). Only the supplied fields change; the rest are preserved. Lands
+  /// optimistically in the cache + outbox, then best-effort syncs.
+  Future<void> updateTask(
+    String id, {
+    String? title,
+    String? description,
+    String? priority,
+    String? dueDate,
+    String? category,
+  }) async {
+    try {
+      await _dao.applyLocalUpdate(
+        id,
+        title: title,
+        description: description,
+        priority: priority,
+        dueDate: dueDate,
+        category: category,
+      );
+      await _refreshFromCache();
+      unawaited(_syncThenRefresh());
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
   Future<void> completeTask(String id) async {
     try {
       await _dao.applyLocalComplete(id);

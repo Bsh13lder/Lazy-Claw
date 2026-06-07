@@ -63,6 +63,36 @@ Color colorForTask(
   return parseHexColor(hex) ?? fallback;
 }
 
+/// Splits [dayTasks] into how many are still **open** vs already **done**.
+///
+/// "Done" is sourced from [Task.isDone] (`status == 'done'`), so this stays in
+/// lock-step with the rest of the app's completion semantics. Returns a record
+/// so the marker + header builders can render the two cohorts distinctly
+/// (filled dots for open, hollow for done) without re-scanning the list.
+({int open, int done}) dayTaskCounts(List<Task> dayTasks) {
+  var open = 0;
+  var done = 0;
+  for (final task in dayTasks) {
+    if (task.isDone) {
+      done++;
+    } else {
+      open++;
+    }
+  }
+  return (open: open, done: done);
+}
+
+/// Whether **every** task due on a day is done — the signal for the "fully
+/// cleared" day treatment (a check badge instead of dots).
+///
+/// Returns `true` only when there is at least one task and all of them are
+/// done. An empty day is `false` (nothing to clear), and any single open task
+/// keeps it `false`.
+bool isDayAllDone(List<Task> dayTasks) {
+  if (dayTasks.isEmpty) return false;
+  return dayTasks.every((task) => task.isDone);
+}
+
 /// Parses a `"#RRGGBB"` (or bare `"RRGGBB"` / `"#AARRGGBB"`) hex string into an
 /// opaque [Color]. Returns null when the string isn't a valid hex color.
 Color? parseHexColor(String hex) {

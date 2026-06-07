@@ -15,6 +15,7 @@ Task _task(
   String id, {
   String? dueDate,
   String? category,
+  String status = 'todo',
 }) =>
     Task(
       id: id,
@@ -22,7 +23,7 @@ Task _task(
       title: 'Task $id',
       category: category,
       priority: 'medium',
-      status: 'todo',
+      status: status,
       owner: 'user',
       dueDate: dueDate,
       nagCount: 0,
@@ -116,6 +117,60 @@ void main() {
 
     test('returns an empty map for no projects', () {
       expect(projectColorMap(const []), isEmpty);
+    });
+  });
+
+  group('dayTaskCounts', () {
+    test('splits open vs done by status', () {
+      final tasks = [
+        _task('a', status: 'todo'),
+        _task('b', status: 'in_progress'),
+        _task('c', status: 'done'),
+      ];
+
+      final counts = dayTaskCounts(tasks);
+
+      expect(counts.open, 2);
+      expect(counts.done, 1);
+    });
+
+    test('is all-zero for an empty day', () {
+      final counts = dayTaskCounts(const []);
+      expect(counts.open, 0);
+      expect(counts.done, 0);
+    });
+
+    test('counts every task as done when all done', () {
+      final counts = dayTaskCounts([
+        _task('a', status: 'done'),
+        _task('b', status: 'done'),
+      ]);
+      expect(counts.open, 0);
+      expect(counts.done, 2);
+    });
+  });
+
+  group('isDayAllDone', () {
+    test('true only when there is >=1 task and all are done', () {
+      expect(
+        isDayAllDone([_task('a', status: 'done'), _task('b', status: 'done')]),
+        isTrue,
+      );
+    });
+
+    test('false when at least one task is still open', () {
+      expect(
+        isDayAllDone([_task('a', status: 'done'), _task('b', status: 'todo')]),
+        isFalse,
+      );
+    });
+
+    test('false for an empty day (nothing to clear)', () {
+      expect(isDayAllDone(const []), isFalse);
+    });
+
+    test('false for a single open task', () {
+      expect(isDayAllDone([_task('a', status: 'todo')]), isFalse);
     });
   });
 

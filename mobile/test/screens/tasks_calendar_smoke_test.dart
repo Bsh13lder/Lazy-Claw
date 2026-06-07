@@ -148,13 +148,20 @@ String _isoForToday() {
   return '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 }
 
-Task _task(String id, String title, {String? dueDate, String? category}) => Task(
+Task _task(
+  String id,
+  String title, {
+  String? dueDate,
+  String? category,
+  String status = 'todo',
+}) =>
+    Task(
       id: id,
       userId: 'u1',
       title: title,
       category: category,
       priority: 'medium',
-      status: 'todo',
+      status: status,
       owner: 'user',
       dueDate: dueDate,
       nagCount: 0,
@@ -218,5 +225,51 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.byType(TableCalendar<Task>), findsOneWidget);
     expect(find.text('Pay rent'), findsOneWidget);
+  });
+
+  testWidgets('Calendar builds with a mix of done & open tasks on a day',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 1200);
+    addTearDown(tester.view.reset);
+
+    // Today carries one open + one done task → mixed-state day (filled +
+    // hollow dot row) and a "1 open · 1 done" summary pill.
+    final today = _isoForToday();
+    final tasksStub = _stubTasks([
+      _task('t1', 'Pay rent', dueDate: today, category: 'home'),
+      _task('t2', 'File taxes',
+          dueDate: today, category: 'home', status: 'done'),
+    ]);
+    final budgetsStub =
+        _stubBudgets([_project('p1', 'Home', color: '#FF0000')]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          tasksProvider.overrideWith((ref) => tasksStub),
+          budgetsProvider.overrideWith((ref) => budgetsStub),
+          reachabilityProvider.overrideWithValue(Reachability(_NopProbe())),
+        ],
+        child: MaterialApp(
+          theme: buildAppTheme(),
+          home: const TasksScreen(),
+        ),
+      ),
+    );
+
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    await tester.tap(find.text('Calendar'));
+    await tester.pumpAndSettle();
+
+    // Builds cleanly with both states present, and the day summary readout
+    // reflects the open/done split.
+    expect(tester.takeException(), isNull);
+    expect(find.byType(TableCalendar<Task>), findsOneWidget);
+    expect(find.text('Pay rent'), findsOneWidget);
+    expect(find.text('File taxes'), findsOneWidget);
+    expect(find.text('1 open · 1 done'), findsOneWidget);
   });
 }

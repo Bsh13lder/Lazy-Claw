@@ -141,16 +141,14 @@ class TaskCalendarView extends StatelessWidget {
               child: Text(
                 _formatDayHeader(selected),
                 style: AppText.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
-            if (dayTasks.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(right: AppSpacing.sm),
-                child: Text(
-                  dayTasks.length.toString(),
-                  style: AppText.caption.copyWith(color: AppColors.textMuted),
-                ),
-              ),
+            if (dayTasks.isNotEmpty) ...[
+              _DaySummaryPill(dayTasks: dayTasks),
+              const SizedBox(width: AppSpacing.sm),
+            ],
             LzIconButton(
               icon: Icons.add,
               tooltip: 'Add task on this day',
@@ -203,38 +201,61 @@ class TaskCalendarView extends StatelessWidget {
   String _formatDayShort(DateTime d) => '${_months[d.month - 1]} ${d.day}';
 }
 
-/// A compact row of up to [TaskCalendarView._maxDots] colored dots under a day
-/// cell, one per task colored by its project, collapsing the remainder into a
-/// muted "+N" label.
+/// The bottom-of-cell marker for a day that has tasks.
+///
+/// Three visual states, all bottom-aligned so they never sit on the centered
+/// day number:
+///  * **Fully cleared** (`isDayAllDone`) → a single emerald check badge — the
+///    whole day reads as "done" at a glance, distinct from any dot row.
+///  * **Mixed / open** → a neatly spaced row of up to
+///    [TaskCalendarView._maxDots] dots: open tasks lead as filled
+///    project-colored dots, done tasks trail as hollow dimmed rings, and the
+///    remainder collapses into a muted "+N". Each dot carries its own gap so
+///    no dot ever overlaps another.
 class _DayMarkers extends StatelessWidget {
   const _DayMarkers({required this.tasks, required this.colorByName});
 
   final List<Task> tasks;
   final Map<String, String> colorByName;
 
+  /// Half the inter-dot gap — applied as horizontal padding on each dot so the
+  /// row stays mathematically non-overlapping regardless of cell width.
+  static const double _dotGapHalf = 2;
+
   @override
   Widget build(BuildContext context) {
-    final shown = tasks.take(TaskCalendarView._maxDots).toList();
-    final overflow = tasks.length - shown.length;
+    // Everything due this day is finished → one clear "cleared" badge.
+    if (isDayAllDone(tasks)) {
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 4),
+        child: _AllDoneBadge(),
+      );
+    }
+
+    // Open work leads (most actionable); completed tasks trail as hollow rings.
+    final open = tasks.where((t) => !t.isDone);
+    final done = tasks.where((t) => t.isDone);
+    final ordered = [...open, ...done];
+    final shown = ordered.take(TaskCalendarView._maxDots).toList();
+    final overflow = ordered.length - shown.length;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.only(bottom: 4),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           for (final t in shown)
-            Container(
-              width: 6,
-              height: 6,
-              margin: const EdgeInsets.symmetric(horizontal: 1),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
+            Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: _dotGapHalf),
+              child: _TaskDot(
                 color: colorForTask(t, colorByName, AppColors.accent),
+                done: t.isDone,
               ),
             ),
           if (overflow > 0)
             Padding(
-              padding: const EdgeInsets.only(left: 2),
+              padding: const EdgeInsets.only(left: 3),
               child: Text(
                 '+$overflow',
                 style: AppText.caption.copyWith(
@@ -247,5 +268,79 @@ class _DayMarkers extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// A single day marker dot: a filled project-colored circle for an **open**
+/// task, or a hollow dimmed ring for a **done** one.
+class _TaskDot extends StatelessWidget {
+  const _TaskDot({required this.color, required this.done});
+
+  final Color color;
+  final bool done;
+
+  static const double _size = 7;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: _size,
+      height: _size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        // Open = solid fill; done = transparent with a faded ring.
+        color: done ? null : color,
+        border: done
+            ? Border.all(color: color.withValues(alpha: 0.55), width: 1.2)
+            : null,
+      ),
+    );
+  }
+}
+
+/// A subtle emerald check badge shown when every task due on a day is done.
+class _AllDoneBadge extends StatelessWidget {
+  const _AllDoneBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 13,
+      height: 13,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.success.withValues(alpha: 0.18),
+        shape: BoxShape.circle,
+      ),
+      child: const Icon(
+        Icons.check_rounded,
+        size: 9,
+        color: AppColors.success,
+      ),
+    );
+  }
+}
+
+/// The selected-day status readout in the list header: "All clear" (emerald)
+/// when the day is fully done, otherwise an open/done breakdown.
+class _DaySummaryPill extends StatelessWidget {
+  const _DaySummaryPill({required this.dayTasks});
+
+  final List<Task> dayTasks;
+
+  @override
+  Widget build(BuildContext context) {
+    if (isDayAllDone(dayTasks)) {
+      return const LzPill(
+        label: 'All clear',
+        icon: Icons.check_circle_outline,
+        color: AppColors.success,
+      );
+    }
+    final counts = dayTaskCounts(dayTasks);
+    final label = counts.done > 0
+        ? '${counts.open} open · ${counts.done} done'
+        : '${counts.open} open';
+    return LzPill(label: label, dotColor: AppColors.accent);
   }
 }

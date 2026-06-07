@@ -262,5 +262,35 @@ void main() {
       expect(json['description'], 'Round trip');
       expect(json['currency'], 'EUR');
     });
+
+    test('parses created_at into createdAt', () {
+      final e = Expense.fromJson({
+        'id': 'e10',
+        'project_id': 'p1',
+        'amount': 10.0,
+        'created_at': '2026-06-07T14:32:00Z',
+      });
+      expect(e.createdAt, '2026-06-07T14:32:00Z');
+    });
+
+    test('createdAt is null when created_at is absent', () {
+      final e =
+          Expense.fromJson({'id': 'e11', 'project_id': 'p1', 'amount': 10.0});
+      expect(e.createdAt, isNull);
+    });
+
+    test('toJson + copyWith round-trip created_at', () {
+      final e = Expense.fromJson({
+        'id': 'rt2',
+        'project_id': 'proj1',
+        'amount': 5.0,
+        'created_at': '2026-06-07T14:32:00Z',
+      });
+      expect(e.toJson()['created_at'], '2026-06-07T14:32:00Z');
+
+      final moved = e.copyWith(createdAt: '2026-06-08T00:00:00Z');
+      expect(moved.createdAt, '2026-06-08T00:00:00Z');
+      expect(e.createdAt, '2026-06-07T14:32:00Z'); // original unchanged
+    });
   });
 }

@@ -79,6 +79,12 @@ class ExpenseRow extends StatelessWidget {
     String vendor,
     String? projectName,
   ) {
+    // When the row was recorded. Prefer the server `created_at`; fall back to
+    // `spent_at` (a fresh local row stamps created_at, so this only matters for
+    // older/partial server payloads). Null → render nothing.
+    final savedLabel =
+        formatSavedAt(expense.createdAt) ?? formatSavedAt(expense.spentAt);
+
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.lg,
@@ -130,6 +136,31 @@ class ExpenseRow extends StatelessWidget {
                       label: projectName,
                       dense: true,
                       color: AppColors.accent,
+                    ),
+                  ),
+                if (savedLabel != null)
+                  Padding(
+                    key: ValueKey('expense-row-saved-${expense.id}'),
+                    padding: const EdgeInsets.only(top: AppSpacing.xs),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.schedule_outlined,
+                          size: 12,
+                          color: AppColors.textMuted,
+                        ),
+                        const SizedBox(width: AppSpacing.xs),
+                        Flexible(
+                          child: Text(
+                            'Saved $savedLabel',
+                            style: AppText.caption
+                                .copyWith(color: AppColors.textMuted),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
               ],

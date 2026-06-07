@@ -5,6 +5,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 import '../../models/expense.dart';
 import '../../models/project.dart';
 import '../../providers/budgets_provider.dart';
+import 'money_helpers.dart';
 
 /// An expense detail/edit bottom sheet. Pre-fills every field from [expense] and
 /// lets the user change the amount, description, vendor, project and date, then
@@ -48,6 +49,12 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
     _vendorController.dispose();
     super.dispose();
   }
+
+  /// When this expense was recorded — server `created_at`, falling back to
+  /// `spent_at`. Null when neither is set/parseable (render nothing).
+  String? get _savedLabel =>
+      formatSavedAt(widget.expense.createdAt) ??
+      formatSavedAt(widget.expense.spentAt);
 
   Future<void> _save() async {
     if (_saving || _deleting) return;
@@ -195,6 +202,23 @@ class _ExpenseDetailSheetState extends ConsumerState<ExpenseDetailSheet> {
                   'Spent $_spentAt',
                   style:
                       AppText.caption.copyWith(color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ],
+
+          // ── Saved (created) time ───────────────────────────────────────
+          if (_savedLabel != null) ...[
+            const SizedBox(height: AppSpacing.md),
+            Row(
+              key: const Key('expense-detail-saved'),
+              children: [
+                const Icon(Icons.schedule_outlined,
+                    size: 14, color: AppColors.textMuted),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  'Saved $_savedLabel',
+                  style: AppText.caption.copyWith(color: AppColors.textMuted),
                 ),
               ],
             ),

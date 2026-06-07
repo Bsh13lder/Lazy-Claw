@@ -11,6 +11,12 @@ class Expense {
   final String? vendor;
   final String? notes;
   final String? spentAt;
+
+  /// When the expense row was recorded (server `created_at`, ISO-8601, usually
+  /// UTC). Distinct from [spentAt] (the date the money was spent). Surfaced as a
+  /// "saved" caption on the ledger so the user sees when each entry landed.
+  final String? createdAt;
+
   final String status;
   final String? recurringExpenseId;
   final String? lazybrainNoteId;
@@ -28,6 +34,7 @@ class Expense {
     this.vendor,
     this.notes,
     this.spentAt,
+    this.createdAt,
     required this.status,
     this.recurringExpenseId,
     this.lazybrainNoteId,
@@ -54,6 +61,7 @@ class Expense {
       vendor: _str(json['vendor']),
       notes: _str(json['notes']),
       spentAt: _str(json['spent_at']),
+      createdAt: _str(json['created_at']),
       status: _str(json['status']) ?? 'posted',
       recurringExpenseId: _str(json['recurring_expense_id']),
       lazybrainNoteId: _str(json['lazybrain_note_id']),
@@ -71,6 +79,7 @@ class Expense {
         'vendor': vendor,
         'notes': notes,
         'spent_at': spentAt,
+        'created_at': createdAt,
         'status': status,
         'recurring_expense_id': recurringExpenseId,
         'lazybrain_note_id': lazybrainNoteId,
@@ -87,6 +96,7 @@ class Expense {
     String? vendor,
     String? notes,
     String? spentAt,
+    String? createdAt,
     String? status,
     String? recurringExpenseId,
     String? lazybrainNoteId,
@@ -102,6 +112,7 @@ class Expense {
         vendor: vendor ?? this.vendor,
         notes: notes ?? this.notes,
         spentAt: spentAt ?? this.spentAt,
+        createdAt: createdAt ?? this.createdAt,
         status: status ?? this.status,
         recurringExpenseId: recurringExpenseId ?? this.recurringExpenseId,
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,

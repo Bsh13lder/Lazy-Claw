@@ -194,6 +194,18 @@ void main() {
       expect(outbox.first.payload['vendor'], 'AWS');
     });
 
+    test('stamps created_at on the stored + returned expense', () async {
+      const fixedNow = '2026-06-07T14:32:00.000Z';
+      final dao = await _freshDao(now: () => fixedNow);
+      final exp = await dao.applyLocalExpenseCreate('p1', 7.0, 'Coffee');
+
+      // Returned model carries the stamped created_at (re-read from the row).
+      expect(exp.createdAt, fixedNow);
+      // And it survives a fresh read back out of the cache.
+      final stored = await dao.getExpense(exp.id);
+      expect(stored!.createdAt, fixedNow);
+    });
+
     test('listExpenses hides tombstoned + void expenses', () async {
       final dao = await _freshDao();
       final a = await dao.applyLocalExpenseCreate('p1', 5.0, 'A');
@@ -369,6 +381,16 @@ void main() {
       expect(await dao.dirtyExpenseIds(), isEmpty);
       final row = await dao.getExpenseRow('srv');
       expect(row!['updated_at'], '2026-06-05T11:00:00Z');
+    });
+
+    test('preserves the server created_at on a pull upsert', () async {
+      final dao = await _freshDao();
+      await dao.upsertExpenseFromServer(
+        _serverExpense(id: 'srv').copyWith(createdAt: '2026-06-01T08:00:00Z'),
+        serverUpdatedAt: '2026-06-05T11:00:00Z',
+      );
+      final stored = await dao.getExpense('srv');
+      expect(stored!.createdAt, '2026-06-01T08:00:00Z');
     });
 
     test('applyServerProjectDelete tombstones an existing row', () async {

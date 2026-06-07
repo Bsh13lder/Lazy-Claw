@@ -174,6 +174,8 @@ void main() {
         find.byKey(const Key('expense-detail-amount')), '20');
     await tester.enterText(
         find.byKey(const Key('expense-detail-desc')), 'Edited');
+    await tester.ensureVisible(find.byKey(const Key('expense-detail-save')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('expense-detail-save')));
     await tester.pumpAndSettle();
 
@@ -190,6 +192,8 @@ void main() {
     final stub = _stub();
     await openSheet(tester, stub);
 
+    await tester.ensureVisible(find.byKey(const Key('expense-detail-delete')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('expense-detail-delete')));
     await tester.pumpAndSettle();
 

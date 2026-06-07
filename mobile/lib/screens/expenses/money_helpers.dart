@@ -1,6 +1,8 @@
 /// Shared money/amount formatting helpers for the Expenses screen.
 library;
 
+import '../../core/due_date.dart';
+
 /// Format a currency amount with the appropriate symbol.
 /// Omits decimals when the value is a whole number.
 String fmtMoney(String currency, double v) {
@@ -74,4 +76,21 @@ String friendlyDate(String? isoString) {
   } catch (_) {
     return isoString.substring(0, 10);
   }
+}
+
+/// A compact "saved at" label for an expense's `created_at` timestamp, e.g.
+/// `Today · 2:32 PM`, `Yesterday · 9:05 AM`, or `Jan 15, 2024 · 2:32 PM`.
+///
+/// [iso] is an ISO-8601 timestamp (usually UTC, with a trailing `Z`). It is
+/// converted to the device's local time so the date + clock read naturally.
+/// Returns null for null/empty/unparseable input so callers can render nothing
+/// rather than crash. Pure (no Flutter) so it's trivially unit-testable.
+String? formatSavedAt(String? iso) {
+  if (iso == null || iso.isEmpty) return null;
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return null;
+  final local = parsed.toLocal();
+  final date = friendlyDate(local.toIso8601String());
+  final time = formatClock12(local.hour, local.minute);
+  return '$date · $time';
 }

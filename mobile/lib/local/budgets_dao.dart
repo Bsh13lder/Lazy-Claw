@@ -894,6 +894,7 @@ class BudgetsDao {
         vendor: row['vendor'] as String?,
         notes: row['notes'] as String?,
         spentAt: row['spent_at'] as String?,
+        createdAt: row['created_at'] as String?,
         status: row['status'] as String? ?? 'posted',
         recurringExpenseId: row['recurring_expense_id'] as String?,
         lazybrainNoteId: row['lazybrain_note_id'] as String?,
@@ -910,6 +911,10 @@ class BudgetsDao {
         'vendor': e.vendor,
         'notes': e.notes,
         'spent_at': e.spentAt,
+        // Server-authoritative created_at (preserved on pull upserts). On a
+        // local create the caller overrides this with `now`, so a freshly added
+        // row is always stamped even though the in-memory Expense had no value.
+        'created_at': e.createdAt,
         'status': e.status,
         'recurring_expense_id': e.recurringExpenseId,
         'lazybrain_note_id': e.lazybrainNoteId,

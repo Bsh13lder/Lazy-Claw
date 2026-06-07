@@ -12,6 +12,11 @@ const String _kNotifyTaskDone = 'settings.notify_task_done';
 const String _kNotifyApprovals = 'settings.notify_approvals';
 const String _kReminderLeadDefault = 'settings.reminder_lead_default';
 
+// Server-notification feed cursor + dedup ring + cached delivery channel.
+const String _kNotificationsSince = 'notifications.since';
+const String _kNotificationsSeenIds = 'notifications.seen_ids';
+const String _kNotificationChannel = 'notifications.channel';
+
 /// The lead applied to a new/edited task that GAINS a due time without an
 /// explicit reminder. "30 min before" by default.
 const ReminderLead kDefaultReminderLead = ReminderLead.min30;
@@ -102,6 +107,38 @@ class SettingsPrefs {
 
   static Future<void> saveReminderLeadDefault(ReminderLead v) =>
       _storage.write(key: _kReminderLeadDefault, value: reminderLeadToStored(v));
+
+  // ── Server-notification feed cursor ──────────────────────────────────────
+
+  /// The last server `now` we caught up to (ISO timestamp). Null = never
+  /// pulled, so the first pass requests the full window.
+  static Future<String?> loadNotificationsSince() =>
+      _storage.read(key: _kNotificationsSince);
+
+  static Future<void> saveNotificationsSince(String v) =>
+      _storage.write(key: _kNotificationsSince, value: v);
+
+  /// Bounded ring of recently-shown notification ids (newline-joined) used to
+  /// dedup across an inclusive `since` boundary. Empty when none stored.
+  static Future<List<String>> loadNotificationsSeenIds() async {
+    final raw = await _storage.read(key: _kNotificationsSeenIds);
+    if (raw == null || raw.isEmpty) return const [];
+    return raw.split('\n').where((e) => e.isNotEmpty).toList();
+  }
+
+  static Future<void> saveNotificationsSeenIds(List<String> ids) =>
+      _storage.write(key: _kNotificationsSeenIds, value: ids.join('\n'));
+
+  // ── Cached delivery channel (for instant Settings render) ────────────────
+
+  /// Locally-cached delivery-channel wire value. Optional optimisation so the
+  /// segmented control can render before the server round-trip completes; the
+  /// server remains the source of truth.
+  static Future<String?> loadNotificationChannelCache() =>
+      _storage.read(key: _kNotificationChannel);
+
+  static Future<void> saveNotificationChannelCache(String wire) =>
+      _storage.write(key: _kNotificationChannel, value: wire);
 }
 
 /// Serialise a default-lead pref: `none` or whole minutes (`0` = at time).

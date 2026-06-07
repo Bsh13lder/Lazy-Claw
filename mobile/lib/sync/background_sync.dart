@@ -7,6 +7,8 @@ import '../local/app_db.dart';
 import '../local/budgets_dao.dart';
 import '../local/note_dao.dart';
 import '../local/task_dao.dart';
+import '../notifications/local_notifications.dart';
+import '../notifications/notifications_service.dart';
 import '../repositories/budgets_repository.dart';
 import '../repositories/notes_repository.dart';
 import '../repositories/tasks_repository.dart';
@@ -78,6 +80,17 @@ Future<void> runHeadlessSync() async {
       ).sync();
     } catch (_) {
       // Budgets sync failure is non-fatal.
+    }
+
+    // Server-notification feed: surface watcher/background-job/escalation
+    // notifications missed while the app was closed. We are in a fresh isolate
+    // so the plugin must be (re)initialised before it can show anything.
+    // [pullNotificationsFeed] swallows its own errors.
+    try {
+      await LocalNotifications.init();
+      await pullNotificationsFeed(client);
+    } catch (_) {
+      // Notification catch-up is non-fatal.
     }
   } finally {
     await db.close();

@@ -19,6 +19,12 @@ class LocalNotifications {
   static bool _initialised = false;
   static bool _tzReady = false;
 
+  /// Invoked (on the main isolate) when the user TAPS a notification while the
+  /// app is running. Receives the notification's `payload`. Wired by the app
+  /// shell to deep-link into the relevant tab. Mutable + read at call time so
+  /// it can be set AFTER [init] (which binds the plugin callback once).
+  static void Function(String? payload)? onSelectNotification;
+
   /// The shared plugin instance. Other helpers (e.g. [TaskReminderService])
   /// REUSE this single instance rather than constructing a second plugin.
   static FlutterLocalNotificationsPlugin get plugin => _plugin;
@@ -52,7 +58,10 @@ class LocalNotifications {
     );
 
     try {
-      await _plugin.initialize(initSettings);
+      await _plugin.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: _onResponse,
+      );
       _initialised = true;
 
       // Request Android 13+ runtime POST_NOTIFICATIONS permission and the
@@ -122,6 +131,71 @@ class LocalNotifications {
       await _plugin.show(id, title, body, details);
     } catch (_) {
       // Silently ignore — permission denied, plugin not ready, etc.
+    }
+  }
+
+  /// Show a SERVER-originated notification (watcher fired, background job done,
+  /// escalation, …) on a dedicated "Notifications" channel so the user can mute
+  /// it independently of task reminders.
+  ///
+  /// [payload] is delivered to [onSelectNotification] when the user taps the
+  /// notification, enabling a best-effort deep-link (e.g. `'chat'`). Silently
+  /// no-ops when the plugin isn't initialised or permission was denied.
+  static Future<void> showServerNotification(
+    String title,
+    String body, {
+    String? payload,
+  }) async {
+    if (!_initialised) return;
+    try {
+      final id = DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF;
+      const androidDetails = AndroidNotificationDetails(
+        'lazyclaw_notifications',
+        'LazyClaw Notifications',
+        channelDescription:
+            'Watcher alerts, background-job results, and escalations',
+        importance: Importance.high,
+        priority: Priority.high,
+        showWhen: true,
+      );
+      const darwinDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      const details = NotificationDetails(
+        android: androidDetails,
+        iOS: darwinDetails,
+        macOS: darwinDetails,
+      );
+      await _plugin.show(id, title, body, details, payload: payload);
+    } catch (_) {
+      // Silently ignore — permission denied, plugin not ready, etc.
+    }
+  }
+
+  /// If the app was COLD-STARTED by tapping a notification, returns that
+  /// notification's payload (else null). Lets the shell deep-link on launch.
+  /// Never throws.
+  static Future<String?> consumeLaunchPayload() async {
+    try {
+      final details = await _plugin.getNotificationAppLaunchDetails();
+      if (details?.didNotificationLaunchApp == true) {
+        return details?.notificationResponse?.payload;
+      }
+    } catch (_) {
+      // Platform without launch details — ignore.
+    }
+    return null;
+  }
+
+  /// Plugin callback for a WARM tap. Forwards the payload to the app-set hook.
+  /// Top-level/static so it survives AOT; reads the mutable hook at call time.
+  static void _onResponse(NotificationResponse response) {
+    try {
+      onSelectNotification?.call(response.payload);
+    } catch (_) {
+      // A handler error must never crash the notification subsystem.
     }
   }
 }

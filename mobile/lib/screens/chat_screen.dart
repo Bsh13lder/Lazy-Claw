@@ -15,6 +15,8 @@
 /// Helper widgets live in `screens/chat/` to keep file size manageable.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../chat/chat_controller.dart';
@@ -22,6 +24,7 @@ import '../chat/chat_message.dart';
 import '../chat/chat_socket.dart';
 import '../core/config/server_config.dart';
 import '../notifications/local_notifications.dart';
+import '../notifications/notifications_service.dart';
 import '../providers/auth_provider.dart';
 import '../ui/ui.dart';
 import 'chat/bg_task_card.dart';
@@ -97,6 +100,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             cookie: 'session_id=$cookie',
           );
       if (mounted) setState(() => _connected = true);
+      // Catch up on any server notifications missed while the app was away.
+      // Best-effort + self-cancelling on error — never blocks the chat UI.
+      unawaited(pullNotificationsFeed(ref.read(apiClientProvider)));
     } catch (e) {
       if (mounted) {
         setState(() => _connectError = e.toString());

@@ -13,7 +13,9 @@ import 'settings/update_dialog.dart';
 import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/notes_provider.dart';
+import '../providers/notifications_channel_provider.dart';
 import '../providers/tasks_provider.dart';
+import '../repositories/notifications_repository.dart';
 import '../sync/background_sync.dart';
 import '../sync/budgets_sync.dart';
 import '../sync/note_sync.dart';
@@ -747,6 +749,90 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Delivery-channel segmented control (Telegram · App · Both) backed by
+  /// `GET/POST /api/settings/notifications`, plus a one-line HyperOS hint.
+  Widget _buildChannelTile() {
+    final channelState = ref.watch(notificationChannelProvider);
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.podcasts_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Delivery channel', style: AppText.body),
+                    Text(
+                      'Where watcher alerts, finished background jobs, and '
+                      'escalations are sent',
+                      style: AppText.caption,
+                    ),
+                  ],
+                ),
+              ),
+              if (channelState.saving) ...[
+                const SizedBox(width: AppSpacing.sm),
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          channelState.value.when(
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
+              child: LinearProgressIndicator(),
+            ),
+            error: (e, _) => Text(
+              'Could not load channel: $e',
+              style: AppText.caption.copyWith(color: AppColors.error),
+            ),
+            data: (channel) => Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: [
+                for (final c in NotificationChannel.values)
+                  LzChip(
+                    label: c.label,
+                    selected: channel == c,
+                    color: AppColors.accent,
+                    dense: true,
+                    onTap: channelState.saving || channel == c
+                        ? null
+                        : () async {
+                            final err = await ref
+                                .read(notificationChannelProvider.notifier)
+                                .setChannel(c);
+                            if (err != null && mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Notifications: $err')),
+                              );
+                            }
+                          },
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            'App delivery needs notifications allowed and — on HyperOS / MIUI — '
+            'Autostart on + battery set to "No restrictions".',
+            style: AppText.caption,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildNotificationsSection({required SettingsPrefsData prefs}) {
     return LzSection(
       title: 'Notifications',
@@ -754,6 +840,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         padding: EdgeInsets.zero,
         child: Column(
           children: [
+            // Delivery channel: where server-originated notifications (watchers,
+            // background-job done, escalations) are sent.
+            _buildChannelTile(),
+            const Divider(height: 1, color: AppColors.borderSubtle),
             _SwitchTile(
               icon: Icons.chat_bubble_outline,
               title: 'Chat replies',

@@ -7,6 +7,7 @@ import 'core/router/app_router.dart';
 import 'core/self_update.dart';
 import 'local/app_db.dart';
 import 'notifications/local_notifications.dart';
+import 'notifications/notifications_service.dart';
 import 'ui/app_theme.dart';
 import 'providers/auth_provider.dart';
 import 'providers/budgets_provider.dart';
@@ -85,12 +86,30 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
       _deepLinks?.init();
     });
 
+    // Deep-link a tapped server notification into the Chat tab. Reuses the
+    // pending-action plumbing: the listener in [build] navigates + clears it.
+    // The hook is set here (after init) so it has provider access; it is read
+    // at call time, so binding it after [LocalNotifications.init] is fine.
+    LocalNotifications.onSelectNotification = (_) {
+      if (!mounted) return;
+      ref.read(pendingActionProvider.notifier).state = AppAction.chat;
+    };
+    // Cold-start: app launched BY tapping a server notification.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final payload = await LocalNotifications.consumeLaunchPayload();
+      if (payload != null && mounted) {
+        ref.read(pendingActionProvider.notifier).state = AppAction.chat;
+      }
+    });
+
     // Keep offline-first data fresh while the app is in the foreground: every
     // ~30 min (and on each resume) push/pull all three offline-first domains.
     _fgSync = ForegroundSyncScheduler(onSync: () async {
       await ref.read(tasksProvider.notifier).syncNow();
       await ref.read(notesProvider.notifier).syncNow();
       await ref.read(budgetsProvider.notifier).syncNow();
+      // Catch up on server notifications on each resume + ~30-min tick.
+      await pullNotificationsFeed(ref.read(apiClientProvider));
     });
     _fgSync!.start();
 

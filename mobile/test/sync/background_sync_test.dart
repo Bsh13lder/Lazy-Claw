@@ -39,6 +39,8 @@ class _EmptyTasksTransport implements TasksTransport {
   @override
   Future<Map<String, dynamic>> patchJson(String path, Map<String, dynamic> body) async => {};
   @override
+  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body) async => {};
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async => {};
 }
 
@@ -95,6 +97,9 @@ class _FailingTasksTransport implements TasksTransport {
       throw Exception('tasks transport down');
   @override
   Future<Map<String, dynamic>> patchJson(String path, Map<String, dynamic> body) =>
+      throw Exception('tasks transport down');
+  @override
+  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body) =>
       throw Exception('tasks transport down');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) =>

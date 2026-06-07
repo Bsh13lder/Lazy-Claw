@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
@@ -79,6 +81,14 @@ class _FakeTransport implements TasksTransport {
       String path, Map<String, dynamic> body) async {
     _maybeFail(path);
     calls.add(_Call('PATCH', path, body: body));
+    return {'status': 'ok'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    _maybeFail(path);
+    calls.add(_Call('PUT', path, body: body));
     return {'status': 'ok'};
   }
 
@@ -437,6 +447,176 @@ void main() {
     });
   });
 
+  // ── sub-task steps (PUT /api/tasks/{id}/steps) ─────────────────────────────
+
+  group('TaskSync.push sub-task steps', () {
+    String stepsJson(List<Map<String, dynamic>> steps) => jsonEncode(steps);
+
+    test(
+        'an update carrying steps PUTs to /{id}/steps with {steps:[...]} AND '
+        'PATCHes the non-steps fields (steps stripped from the PATCH)', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Parent', id: 'st1');
+      // Drain the create so only the steps-bearing update remains queued.
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+
+      await dao.applyLocalUpdate(
+        t.id,
+        title: 'Parent v2',
+        steps: stepsJson([
+          {'id': 's-1', 'title': 'Sub one', 'done': false},
+          {'id': 's-2', 'title': 'Sub two', 'done': true},
+        ]),
+      );
+
+      final transport = _FakeTransport();
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+
+      // One outbox item → counted once even though it made two network calls.
+      expect(result.pushed, 1);
+      expect(await dao.readOutbox(), isEmpty);
+
+      // PATCH carries the plain field, never `steps`.
+      final patches =
+          transport.calls.where((c) => c.method == 'PATCH').toList();
+      expect(patches, hasLength(1));
+      expect(patches.first.path, '/api/tasks/st1');
+      expect(patches.first.body!['title'], 'Parent v2');
+      expect(patches.first.body!.containsKey('steps'), isFalse);
+
+      // PUT carries the checklist in the server's {steps:[...]} shape.
+      final puts = transport.calls.where((c) => c.method == 'PUT').toList();
+      expect(puts, hasLength(1));
+      expect(puts.first.path, '/api/tasks/st1/steps');
+      final sent = (puts.first.body!['steps'] as List).cast<Map>();
+      expect(sent, hasLength(2));
+      expect(sent[0]['id'], 's-1');
+      expect(sent[0]['title'], 'Sub one');
+      expect(sent[0]['done'], false);
+      expect(sent[1]['done'], true);
+    });
+
+    test(
+        'a steps-only update PUTs steps but sends NO PATCH (avoids the empty '
+        'UpdateTaskBody 400)', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Parent', id: 'st2');
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+
+      await dao.applyLocalUpdate(
+        t.id,
+        steps: stepsJson([
+          {'id': 's-1', 'title': 'Only sub', 'done': false},
+        ]),
+      );
+
+      final transport = _FakeTransport();
+      await TaskSync(dao, TasksRepository(transport)).push();
+
+      expect(transport.calls.where((c) => c.method == 'PATCH'), isEmpty);
+      final puts = transport.calls.where((c) => c.method == 'PUT').toList();
+      expect(puts, hasLength(1));
+      expect(puts.first.path, '/api/tasks/st2/steps');
+    });
+
+    test('an update WITHOUT steps makes NO PUT call (PATCH only)', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Parent', id: 'st3');
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+
+      await dao.applyLocalUpdate(t.id, title: 'No steps here');
+
+      final transport = _FakeTransport();
+      await TaskSync(dao, TasksRepository(transport)).push();
+
+      expect(transport.calls.where((c) => c.method == 'PUT'), isEmpty);
+      expect(transport.calls.where((c) => c.method == 'PATCH'), hasLength(1));
+    });
+
+    test(
+        'create-then-add-subtasks in ONE queue: create POST precedes the steps '
+        'PUT so the task exists server-side first', () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Parent', id: 'cs1');
+      // Subtasks added before the create has synced — both queued together.
+      await dao.applyLocalUpdate(
+        t.id,
+        steps: stepsJson([
+          {'id': 's-1', 'title': 'Sub', 'done': false},
+        ]),
+      );
+
+      final transport = _FakeTransport();
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+
+      expect(result.pushed, 2); // create + steps update
+      expect(await dao.readOutbox(), isEmpty);
+
+      final writes = transport.calls.where((c) => c.method != 'GET').toList();
+      final postIdx = writes.indexWhere(
+          (c) => c.method == 'POST' && c.path == '/api/tasks');
+      final putIdx = writes.indexWhere(
+          (c) => c.method == 'PUT' && c.path == '/api/tasks/cs1/steps');
+      expect(postIdx, isNonNegative);
+      expect(putIdx, greaterThan(postIdx));
+    });
+
+    test(
+        'a 5xx on the steps PUT is retryable: the update stays queued and its '
+        'attempt counter is bumped (same classifier as every other op)',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Parent', id: 'st5xx');
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+
+      await dao.applyLocalUpdate(
+        t.id,
+        title: 'v2',
+        steps: stepsJson([
+          {'id': 's-1', 'title': 'Sub', 'done': false},
+        ]),
+      );
+
+      // The non-steps PATCH (/api/tasks/st5xx) succeeds; only the /steps PUT 5xxs.
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/steps': () => _serverDio(500)},
+      );
+      final result = await TaskSync(dao, TasksRepository(transport)).push();
+
+      expect(result.pushInterrupted, isTrue);
+      expect(result.pushed, 0);
+      final remaining = await dao.readOutbox();
+      expect(remaining, hasLength(1));
+      expect(remaining.first.op, OutboxOp.update);
+      expect(remaining.first.attempts, 1);
+      // The PATCH did go out (idempotent on the eventual retry).
+      expect(transport.calls.where((c) => c.method == 'PATCH'), hasLength(1));
+    });
+
+    test('a 5xx on the steps PUT dead-letters after kMaxPushAttempts',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Parent', id: 'stpoison');
+      await TaskSync(dao, TasksRepository(_FakeTransport())).push();
+
+      await dao.applyLocalUpdate(
+        t.id,
+        steps: stepsJson([
+          {'id': 's-1', 'title': 'Sub', 'done': false},
+        ]),
+      );
+
+      final transport = _FakeTransport(
+        dioErrorOnPaths: {'/steps': () => _serverDio(503)},
+      );
+      for (var i = 0; i < TaskSync.kMaxPushAttempts; i++) {
+        await TaskSync(dao, TasksRepository(transport)).push();
+      }
+      // The poison steps-update is dead-lettered, never wedging the queue.
+      expect(await dao.readOutbox(), isEmpty);
+    });
+  });
+
   // ── PULL + LWW ──────────────────────────────────────────────────────────
 
   group('TaskSync.pull last-write-wins', () {
@@ -728,6 +908,10 @@ class _FailingGetTransport implements TasksTransport {
       {};
   @override
   Future<Map<String, dynamic>> patchJson(
+          String path, Map<String, dynamic> body) async =>
+      {};
+  @override
+  Future<Map<String, dynamic>> putJson(
           String path, Map<String, dynamic> body) async =>
       {};
   @override

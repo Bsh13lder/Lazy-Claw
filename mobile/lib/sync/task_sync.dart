@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 
 import '../core/api/api_exceptions.dart';
@@ -149,7 +151,7 @@ class TaskSync {
           );
           break;
         case OutboxOp.update:
-          await _repo.updateTask(item.entityId, _patchFrom(p));
+          await _pushUpdate(item.entityId, p);
           break;
         case OutboxOp.complete:
           await _repo.completeTask(item.entityId);
@@ -245,9 +247,64 @@ class TaskSync {
     );
   }
 
+  /// Push an `update` op. Plain task fields go via PATCH /api/tasks/{id}; the
+  /// sub-task checklist (when the payload carries `steps`) rides the dedicated
+  /// PUT /api/tasks/{id}/steps route, because PATCH's `UpdateTaskBody` does NOT
+  /// accept `steps` and would silently drop them.
+  ///
+  /// The create-then-add-subtasks flow is safe: the outbox drains in seq order,
+  /// so the entity's CREATE always pushes before any later steps-bearing update,
+  /// and the task exists server-side by the time this PUT runs.
+  ///
+  /// Either call may throw — it propagates to [_pushOne]'s catch, where the
+  /// shared classifier applies the SAME 5xx-retry / 4xx-drain / dead-letter
+  /// handling as every other op. Both calls are idempotent on replay (PATCH and
+  /// "replace-all" PUT), so a partial success (PATCH ok, PUT 5xx) safely re-runs.
+  Future<void> _pushUpdate(String id, Map<String, dynamic> payload) async {
+    final rawSteps = payload['steps'];
+    final patch = _patchFrom(payload)..remove('steps');
+
+    // Only PATCH when there is a real field to change. A steps-only edit leaves
+    // just the synthetic client `updated_at` behind, and an otherwise-empty
+    // UpdateTaskBody is rejected with a 400 — so skip the no-op PATCH entirely.
+    if (_hasRealPatchFields(patch)) {
+      await _repo.updateTask(id, patch);
+    }
+    if (rawSteps != null) {
+      await _repo.setSteps(id, _decodeSteps(rawSteps));
+    }
+  }
+
   Map<String, dynamic> _patchFrom(Map<String, dynamic> payload) {
     final out = Map<String, dynamic>.from(payload)..remove('id');
     return out;
+  }
+
+  /// True when [patch] carries at least one server-applicable field beyond the
+  /// synthetic `updated_at` LWW marker — i.e. the PATCH would actually change
+  /// something (the backend 400s an empty update).
+  static bool _hasRealPatchFields(Map<String, dynamic> patch) =>
+      patch.keys.any((k) => k != 'updated_at');
+
+  /// Decode the outbox `steps` payload into the `[{id?, title, done}]` list the
+  /// PUT /steps body expects. The DAO stores `steps` as a JSON-array STRING;
+  /// this also tolerates an already-decoded List. Null / malformed / empty
+  /// input yields `[]` (a deliberate "clear the checklist" PUT).
+  static List<Map<String, dynamic>> _decodeSteps(Object? raw) {
+    dynamic decoded = raw;
+    if (raw is String) {
+      if (raw.trim().isEmpty) return const [];
+      try {
+        decoded = jsonDecode(raw);
+      } catch (_) {
+        return const [];
+      }
+    }
+    if (decoded is! List) return const [];
+    return decoded
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
   }
 
   /// Replace an item's payload (used for the coalesced update head).

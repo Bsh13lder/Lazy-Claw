@@ -49,6 +49,17 @@ class _FakeTransport implements TasksTransport {
   }
 
   @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    lastMethod = 'PUT';
+    lastPath = path;
+    lastBody = body;
+    return response;
+  }
+
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async {
     lastMethod = 'DELETE';
     lastPath = path;
@@ -175,6 +186,22 @@ void main() {
       expect(t.lastPath, '/api/tasks/u1');
       expect(t.lastBody, containsPair('title', 'New'));
       expect(t.lastBody, containsPair('status', 'todo'));
+    });
+  });
+
+  group('TasksRepository.setSteps', () {
+    test('PUT /api/tasks/{id}/steps with the {steps:[...]} body', () async {
+      final t = _FakeTransport({'steps': []});
+      await TasksRepository(t).setSteps('u1', [
+        {'id': 's-1', 'title': 'Sub one', 'done': false},
+        {'id': 's-2', 'title': 'Sub two', 'done': true},
+      ]);
+      expect(t.lastMethod, 'PUT');
+      expect(t.lastPath, '/api/tasks/u1/steps');
+      final steps = (t.lastBody!['steps'] as List).cast<Map>();
+      expect(steps, hasLength(2));
+      expect(steps[0]['title'], 'Sub one');
+      expect(steps[1]['done'], true);
     });
   });
 

@@ -10,6 +10,7 @@ abstract class TasksTransport {
   Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body);
   Future<Map<String, dynamic>> patchJson(
       String path, Map<String, dynamic> body);
+  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body);
   Future<Map<String, dynamic>> deleteJson(String path);
 }
 
@@ -45,6 +46,17 @@ class DioTasksTransport implements TasksTransport {
     Map<String, dynamic> body,
   ) =>
       _client.patch<Map<String, dynamic>>(
+        path,
+        data: body,
+        fromJson: (d) => Map<String, dynamic>.from(d as Map),
+      );
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      _client.put<Map<String, dynamic>>(
         path,
         data: body,
         fromJson: (d) => Map<String, dynamic>.from(d as Map),
@@ -163,6 +175,15 @@ class TasksRepository {
   /// Patch a task via PATCH /api/tasks/{id}. [patch] holds snake_case fields.
   Future<void> updateTask(String id, Map<String, dynamic> patch) async {
     await _t.patchJson('/api/tasks/$id', patch);
+  }
+
+  /// Replace the full sub-task checklist via PUT /api/tasks/{id}/steps.
+  ///
+  /// PATCH /api/tasks/{id} (UpdateTaskBody) does NOT accept `steps`, so the
+  /// sub-task list rides this dedicated route instead. [steps] is the canonical
+  /// `[{id?, title, done}]` shape the server's `SetStepsBody` expects.
+  Future<void> setSteps(String id, List<Map<String, dynamic>> steps) async {
+    await _t.putJson('/api/tasks/$id/steps', {'steps': steps});
   }
 
   /// Mark a task done via POST /api/tasks/{id}/complete.

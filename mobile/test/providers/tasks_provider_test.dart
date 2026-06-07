@@ -23,6 +23,10 @@ class _OfflineTransport implements TasksTransport {
           String path, Map<String, dynamic> body) async =>
       throw ApiError(0, 'offline');
   @override
+  Future<Map<String, dynamic>> putJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
 }

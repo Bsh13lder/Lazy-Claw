@@ -144,6 +144,31 @@ void main() {
   });
 
   group('expenseRangeBounds', () {
+    test('today is a single day (start == end == the calendar date)', () {
+      final b = expenseRangeBounds(
+        ExpenseRange.today,
+        now: DateTime(2026, 6, 15, 14, 30),
+      );
+      expect(b.start, DateTime(2026, 6, 15));
+      expect(b.end, DateTime(2026, 6, 15));
+    });
+
+    test('all is a wide-open window (1970 → ref year + 100)', () {
+      final b = expenseRangeBounds(ExpenseRange.all, now: DateTime(2026, 6, 15));
+      expect(b.start, DateTime(1970, 1, 1));
+      expect(b.end, DateTime(2126, 12, 31));
+    });
+
+    test('month honors a positive/negative monthOffset', () {
+      final now = DateTime(2026, 6, 15);
+      final prev = expenseRangeBounds(ExpenseRange.month, now: now, monthOffset: -1);
+      expect(prev.start, DateTime(2026, 5, 1));
+      expect(prev.end, DateTime(2026, 5, 31));
+      final next = expenseRangeBounds(ExpenseRange.month, now: now, monthOffset: 1);
+      expect(next.start, DateTime(2026, 7, 1));
+      expect(next.end, DateTime(2026, 7, 31));
+    });
+
     test('week is today + the previous six days (inclusive)', () {
       final now = DateTime(2026, 6, 15, 14, 30); // Mon-ish, mid-month
       final b = expenseRangeBounds(ExpenseRange.week, now: now);
@@ -192,6 +217,52 @@ void main() {
     });
   });
 
+  group('monthBounds', () {
+    test('offset 0 is the reference month, 1st → last day', () {
+      final b = monthBounds(DateTime(2026, 6, 15));
+      expect(b.start, DateTime(2026, 6, 1));
+      expect(b.end, DateTime(2026, 6, 30));
+    });
+
+    test('negative offset steps to the previous month', () {
+      final b = monthBounds(DateTime(2026, 6, 15), monthOffset: -1);
+      expect(b.start, DateTime(2026, 5, 1));
+      expect(b.end, DateTime(2026, 5, 31));
+    });
+
+    test('positive offset steps to the next month', () {
+      final b = monthBounds(DateTime(2026, 6, 15), monthOffset: 1);
+      expect(b.start, DateTime(2026, 7, 1));
+      expect(b.end, DateTime(2026, 7, 31));
+    });
+
+    test('stepping back across the year boundary rolls into December', () {
+      final b = monthBounds(DateTime(2026, 1, 10), monthOffset: -1);
+      expect(b.start, DateTime(2025, 12, 1));
+      expect(b.end, DateTime(2025, 12, 31));
+    });
+
+    test('stepping forward across the year boundary rolls into January', () {
+      final b = monthBounds(DateTime(2026, 12, 10), monthOffset: 1);
+      expect(b.start, DateTime(2027, 1, 1));
+      expect(b.end, DateTime(2027, 1, 31));
+    });
+
+    test('leap February resolves to the 29th', () {
+      final direct = monthBounds(DateTime(2024, 2, 10));
+      expect(direct.start, DateTime(2024, 2, 1));
+      expect(direct.end, DateTime(2024, 2, 29));
+      // And the same via an offset from January.
+      final viaOffset = monthBounds(DateTime(2024, 1, 10), monthOffset: 1);
+      expect(viaOffset.end, DateTime(2024, 2, 29));
+    });
+
+    test('non-leap February resolves to the 28th', () {
+      final b = monthBounds(DateTime(2026, 2, 10));
+      expect(b.end, DateTime(2026, 2, 28));
+    });
+  });
+
   group('filterByRange', () {
     final now = DateTime(2026, 6, 15);
     final june1 = _expense('a', 'p1', 10, spentAt: '2026-06-01');
@@ -225,6 +296,29 @@ void main() {
       final end = _expense('t', 'p1', 1, spentAt: '2026-06-15');
       final out = filterByRange([start, end], ExpenseRange.week, now: now);
       expect(out.length, 2);
+    });
+
+    test('today keeps only rows dated on the current day', () {
+      final out = filterByRange(all, ExpenseRange.today, now: now);
+      expect(out.map((e) => e.id), ['c']); // only Jun 15
+    });
+
+    test('all keeps every dated row (past + future), dropping only undated', () {
+      final out = filterByRange(all, ExpenseRange.all, now: now);
+      expect(out.map((e) => e.id), containsAll(['a', 'b', 'c', 'd', 'e']));
+      expect(out.map((e) => e.id), isNot(contains('f'))); // undated still out
+      expect(out.length, 5);
+    });
+
+    test('month + monthOffset selects the shifted calendar month', () {
+      // Step back one month → May 2026 → only the May 31 row matches.
+      final out = filterByRange(
+        all,
+        ExpenseRange.month,
+        now: now,
+        monthOffset: -1,
+      );
+      expect(out.map((e) => e.id), ['d']);
     });
 
     test('custom filters to the picked window (inclusive)', () {
@@ -265,6 +359,33 @@ void main() {
       expect(expenseRangeLabel(ExpenseRange.week), 'Last 7 days');
       expect(expenseRangeLabel(ExpenseRange.month, now: DateTime(2026, 6, 1)),
           'June');
+    });
+
+    test('today and all have fixed labels', () {
+      expect(expenseRangeLabel(ExpenseRange.today), 'Today');
+      expect(expenseRangeLabel(ExpenseRange.all), 'All time');
+    });
+
+    test('month label shifts with monthOffset (year omitted in ref year)', () {
+      final now = DateTime(2026, 6, 15);
+      expect(expenseRangeLabel(ExpenseRange.month, now: now), 'June');
+      expect(expenseRangeLabel(ExpenseRange.month, now: now, monthOffset: -1),
+          'May');
+      // Forward within the same year stays year-less.
+      expect(expenseRangeLabel(ExpenseRange.month, now: now, monthOffset: 6),
+          'December');
+    });
+
+    test('month label adds the year when the step crosses the year boundary',
+        () {
+      final now = DateTime(2026, 6, 15);
+      expect(expenseRangeLabel(ExpenseRange.month, now: now, monthOffset: -6),
+          'December 2025');
+      expect(
+        expenseRangeLabel(ExpenseRange.month,
+            now: DateTime(2026, 1, 10), monthOffset: -1),
+        'December 2025',
+      );
     });
 
     test('custom shows the date span, with year only when it differs', () {

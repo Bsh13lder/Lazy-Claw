@@ -25,6 +25,7 @@ import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart'
     show appDatabaseProvider, reachabilityProvider;
 import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
+import 'package:lazyclaw_mobile/screens/expenses/budget_math.dart';
 import 'package:lazyclaw_mobile/screens/expenses_screen.dart';
 import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:lazyclaw_mobile/sync/reachability.dart';
@@ -176,18 +177,22 @@ void main() {
   setUpAll(sqfliteFfiInit);
 
   group('Expenses ledger time-range filter', () {
-    testWidgets('renders Week / Month / Custom chips, Month selected default',
+    testWidgets(
+        'renders Today / Week / Month / All / Custom chips, Month default',
         (tester) async {
       await tester.runAsync(() async {
         await tester.pumpWidget(_buildApp(await _seed()));
         await _pump(tester);
         await _openLedger(tester);
 
+        expect(find.text('Today'), findsOneWidget); // range chip
         expect(find.text('Week'), findsOneWidget);
         expect(find.text('Month'), findsOneWidget);
+        // 'All' appears twice: the range chip + the project-filter chip.
+        expect(find.text('All'), findsNWidgets(2));
         expect(find.text('Custom'), findsOneWidget);
-        // Default range = Month → its label is shown in the running-total row.
-        expect(find.textContaining('Today'), findsNothing); // sanity: not week
+        // Default range = Month → the Week label is NOT shown.
+        expect(find.text('Last 7 days'), findsNothing);
       });
     });
 
@@ -197,6 +202,25 @@ void main() {
         await _pump(tester);
         await _openLedger(tester);
         expect(find.text('Coffee today'), findsOneWidget);
+      });
+    });
+
+    testWidgets('Month range shows the one-tap month stepper with chevrons',
+        (tester) async {
+      await tester.runAsync(() async {
+        await tester.pumpWidget(_buildApp(await _seed()));
+        await _pump(tester);
+        await _openLedger(tester);
+
+        // Month is the default range → the stepper chevrons are present and the
+        // current-month label (from the pure helper) is shown.
+        expect(find.byTooltip('Previous month'), findsOneWidget);
+        expect(find.byTooltip('Next month'), findsOneWidget);
+        expect(find.text(expenseRangeLabel(ExpenseRange.month)), findsOneWidget);
+
+        // Switching to a non-month range hides the stepper.
+        await _tapAndAnimate(tester, find.text('Week'));
+        expect(find.byTooltip('Previous month'), findsNothing);
       });
     });
 

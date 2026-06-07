@@ -27,13 +27,24 @@ double remainingForProject(Project project, double spent) =>
 /// A time window for filtering the expense ledger. All windows are evaluated
 /// against each expense's `spent_at` calendar date (time-of-day is ignored), so
 /// boundaries are inclusive on both ends.
-enum ExpenseRange { week, month, custom }
+///
+/// - [today]: just the current calendar day.
+/// - [week]: the 7-day window ending today.
+/// - [month]: a calendar month, optionally shifted by a `monthOffset` so the UI
+///   can step `‹ June 2026 ›` one tap at a time.
+/// - [all]: everything — bounds are flung wide open so no dated row is excluded.
+/// - [custom]: an arbitrary user-picked span.
+enum ExpenseRange { today, week, month, all, custom }
 
 /// Inclusive, date-only bounds (both at local midnight) for [range].
 ///
+/// - [ExpenseRange.today]: just the current calendar day (start == end).
 /// - [ExpenseRange.week]: the 7-day window ending today (today + the previous
 ///   six days).
-/// - [ExpenseRange.month]: the current calendar month (1st → last day).
+/// - [ExpenseRange.month]: a calendar month (1st → last day), shifted by
+///   [monthOffset] (0 = current month, -1 = previous, +1 = next).
+/// - [ExpenseRange.all]: a deliberately enormous window so every dated row falls
+///   inside it ("everything" with no effective date filter).
 /// - [ExpenseRange.custom]: [customStart] → [customEnd] (date portions only).
 ///   Falls back to the current month when either bound is missing, and tolerates
 ///   a reversed pair by swapping — so a half-built custom range can never yield
@@ -43,22 +54,25 @@ enum ExpenseRange { week, month, custom }
 ({DateTime start, DateTime end}) expenseRangeBounds(
   ExpenseRange range, {
   DateTime? now,
+  int monthOffset = 0,
   DateTime? customStart,
   DateTime? customEnd,
 }) {
   final ref = now ?? DateTime.now();
   final today = DateTime(ref.year, ref.month, ref.day);
   switch (range) {
+    case ExpenseRange.today:
+      return (start: today, end: today);
     case ExpenseRange.week:
       // DateTime normalizes a day underflow into the previous month, so this is
       // DST/month-boundary safe (unlike subtracting a Duration).
       return (start: DateTime(ref.year, ref.month, ref.day - 6), end: today);
     case ExpenseRange.month:
-      // Day 0 of next month == last day of this month.
-      return (
-        start: DateTime(ref.year, ref.month, 1),
-        end: DateTime(ref.year, ref.month + 1, 0),
-      );
+      return monthBounds(ref, monthOffset: monthOffset);
+    case ExpenseRange.all:
+      // Wide-open: any plausible expense date sits inside. Years are clamped to
+      // DateTime-safe values rather than min/max sentinels.
+      return (start: DateTime(1970, 1, 1), end: DateTime(ref.year + 100, 12, 31));
     case ExpenseRange.custom:
       if (customStart == null || customEnd == null) {
         return expenseRangeBounds(ExpenseRange.month, now: ref);
@@ -74,23 +88,39 @@ enum ExpenseRange { week, month, custom }
   }
 }
 
+/// Inclusive, date-only bounds for the calendar month of [ref] shifted by
+/// [monthOffset] (0 = [ref]'s month, -1 = previous, +1 = next).
+///
+/// Relies on `DateTime`'s month normalization: `DateTime(y, m + offset, 1)`
+/// rolls the year over/under correctly (e.g. `DateTime(2026, 0, 1)` →
+/// Dec 2025, `DateTime(2026, 13, 1)` → Jan 2027), and `DateTime(y, m + 1, 0)`
+/// — day 0 of the next month — yields the last day of the target month
+/// (so leap-February resolves to the 29th). Pure + DST/year-boundary safe.
+({DateTime start, DateTime end}) monthBounds(DateTime ref, {int monthOffset = 0}) {
+  final m = ref.month + monthOffset;
+  return (start: DateTime(ref.year, m, 1), end: DateTime(ref.year, m + 1, 0));
+}
+
 /// The subset of [expenses] whose `spent_at` calendar date falls inside [range]
 /// (inclusive on both ends). Undated / unparseable rows are dropped — they can't
 /// be placed in a window. Void filtering is the caller's responsibility (this is
 /// purely a date filter), matching how the ledger passes an already non-void
 /// list.
 ///
-/// [now] / [customStart] / [customEnd] are forwarded to [expenseRangeBounds].
+/// [now] / [monthOffset] / [customStart] / [customEnd] are forwarded to
+/// [expenseRangeBounds].
 List<Expense> filterByRange(
   Iterable<Expense> expenses,
   ExpenseRange range, {
   DateTime? now,
+  int monthOffset = 0,
   DateTime? customStart,
   DateTime? customEnd,
 }) {
   final bounds = expenseRangeBounds(
     range,
     now: now,
+    monthOffset: monthOffset,
     customStart: customStart,
     customEnd: customEnd,
   );
@@ -114,20 +144,30 @@ double rangeTotal(Iterable<Expense> expenses) {
   return total;
 }
 
-/// Human-readable label for [range] (e.g. "Last 7 days", "June", "Jun 1 – 7").
-/// Pure + testable; [now] defaults to [DateTime.now].
+/// Human-readable label for [range] (e.g. "Today", "Last 7 days", "June 2026",
+/// "All time", "Jun 1 – Jun 7"). The month label includes the year only when the
+/// shifted month falls outside [now]'s calendar year (so "June" for the current
+/// year, "December 2025" when you step back across the boundary). Pure +
+/// testable; [now] defaults to [DateTime.now].
 String expenseRangeLabel(
   ExpenseRange range, {
   DateTime? now,
+  int monthOffset = 0,
   DateTime? customStart,
   DateTime? customEnd,
 }) {
   final ref = now ?? DateTime.now();
   switch (range) {
+    case ExpenseRange.today:
+      return 'Today';
     case ExpenseRange.week:
       return 'Last 7 days';
     case ExpenseRange.month:
-      return _monthFull[ref.month];
+      final m = DateTime(ref.year, ref.month + monthOffset, 1);
+      final base = _monthFull[m.month];
+      return m.year == ref.year ? base : '$base ${m.year}';
+    case ExpenseRange.all:
+      return 'All time';
     case ExpenseRange.custom:
       if (customStart == null || customEnd == null) return _monthFull[ref.month];
       final b = expenseRangeBounds(

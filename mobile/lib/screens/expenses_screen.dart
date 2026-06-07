@@ -326,18 +326,23 @@ class _OverviewTab extends StatelessWidget {
         children: [
           // Hero summary card.
           BudgetSummaryCard(totals: totals),
-          // Projects section.
+          // Projects section header — a slim label sitting directly above the
+          // cards (an empty LzSection here just wasted vertical space).
           if (state.projects.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 AppSpacing.lg,
+                AppSpacing.md,
                 AppSpacing.lg,
-                AppSpacing.lg,
-                AppSpacing.xs,
+                AppSpacing.sm,
               ),
-              child: LzSection(
-                title: 'Projects',
-                child: const SizedBox.shrink(),
+              child: Text(
+                'PROJECTS',
+                style: AppText.caption.copyWith(
+                  color: AppColors.textMuted,
+                  letterSpacing: 0.8,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
             ...state.projects.map((p) {
@@ -388,6 +393,11 @@ class _LedgerTabState extends State<_LedgerTab> {
   /// Time window the ledger is scoped to. Defaults to the current month.
   ExpenseRange _range = ExpenseRange.month;
 
+  /// Month displacement when [_range] is [ExpenseRange.month]: 0 = current
+  /// month, -1 = previous, etc. Driven by the `‹ month ›` stepper. Clamped so it
+  /// never steps past the current month (no empty future windows).
+  int _monthOffset = 0;
+
   /// The picked window when [_range] is [ExpenseRange.custom] (null otherwise).
   DateTimeRange? _customRange;
 
@@ -395,12 +405,17 @@ class _LedgerTabState extends State<_LedgerTab> {
   bool _hasUncategorized(List<Expense> visible, Set<String> liveIds) =>
       visible.any((e) => !liveIds.contains(e.projectId));
 
-  /// Switch the active time range. Week/Month apply immediately; Custom opens a
-  /// date-range picker and only switches once a range is chosen (or one already
-  /// exists), so a cancelled picker never strands the ledger on an empty range.
+  /// Switch the active time range. Today/Week/Month/All apply immediately;
+  /// Custom opens a date-range picker and only switches once a range is chosen
+  /// (or one already exists), so a cancelled picker never strands the ledger on
+  /// an empty range. Selecting Month always re-anchors the stepper to the
+  /// current month (offset 0).
   Future<void> _onRangeChanged(ExpenseRange range) async {
     if (range != ExpenseRange.custom) {
-      setState(() => _range = range);
+      setState(() {
+        _range = range;
+        if (range == ExpenseRange.month) _monthOffset = 0;
+      });
       return;
     }
     final now = DateTime.now();
@@ -421,6 +436,17 @@ class _LedgerTabState extends State<_LedgerTab> {
       setState(() => _range = ExpenseRange.custom);
     }
     // Otherwise (cancelled with no prior custom range) stay on the current range.
+  }
+
+  /// Step the month window by [delta] (−1 = older, +1 = newer). Forward steps
+  /// clamp at the current month (offset 0) so the user can't land on an empty
+  /// future window. Ensures Month is the active range.
+  void _stepMonth(int delta) {
+    setState(() {
+      final next = _monthOffset + delta;
+      _monthOffset = next > 0 ? 0 : next;
+      _range = ExpenseRange.month;
+    });
   }
 
   List<Expense> _applyFilter(List<Expense> visible, Set<String> liveIds) {
@@ -458,6 +484,7 @@ class _LedgerTabState extends State<_LedgerTab> {
     final ranged = filterByRange(
       visible,
       _range,
+      monthOffset: _monthOffset,
       customStart: _customRange?.start,
       customEnd: _customRange?.end,
     );
@@ -474,13 +501,17 @@ class _LedgerTabState extends State<_LedgerTab> {
       range: _range,
       rangeLabel: expenseRangeLabel(
         _range,
+        monthOffset: _monthOffset,
         customStart: _customRange?.start,
         customEnd: _customRange?.end,
       ),
       rangeTotalText: fmtMoney(currency, rangeTotal(filtered)),
+      // Forward (newer) month step is disabled once we're on the current month.
+      monthForwardEnabled: _monthOffset < 0,
       onProjectChanged: (id) => setState(() => _projectFilter = id),
       onSortChanged: (s) => setState(() => _sort = s),
       onRangeChanged: _onRangeChanged,
+      onMonthStep: _stepMonth,
     );
 
     return LzRefresh(
@@ -605,10 +636,16 @@ class _LedgerTabState extends State<_LedgerTab> {
   }
 }
 
-/// Filter + sort controls for the ledger: a time-range toggle (Week · Month ·
-/// Custom) with the range's running total, a horizontally scrollable project
-/// filter row (All · each project · Uncategorized), and a sort selector
-/// (Newest · Oldest · Largest).
+/// Compact filter + sort controls for the ledger, tightened to three slim rows:
+///
+/// 1. A horizontally-scrollable range toggle (Today · Week · Month · All ·
+///    Custom).
+/// 2. A single resolved-window line: when Month is active it IS the
+///    `‹ June 2026 ›` stepper (one-tap month selection), otherwise an icon +
+///    range label; the window's running total is bold-right, with a compact sort
+///    menu (Newest · Oldest · Largest) trailing.
+/// 3. A horizontally-scrollable project filter (All · each project ·
+///    Uncategorized).
 class _LedgerControls extends StatelessWidget {
   const _LedgerControls({
     required this.projects,
@@ -618,9 +655,11 @@ class _LedgerControls extends StatelessWidget {
     required this.range,
     required this.rangeLabel,
     required this.rangeTotalText,
+    required this.monthForwardEnabled,
     required this.onProjectChanged,
     required this.onSortChanged,
     required this.onRangeChanged,
+    required this.onMonthStep,
   });
 
   final List<Project> projects;
@@ -633,25 +672,41 @@ class _LedgerControls extends StatelessWidget {
   final ExpenseRange range;
   final String rangeLabel;
   final String rangeTotalText;
+
+  /// Whether the `›` (newer) month step is available (false on the current
+  /// month, where it dims to signal the clamp).
+  final bool monthForwardEnabled;
   final ValueChanged<String?> onProjectChanged;
   final ValueChanged<_LedgerSort> onSortChanged;
   final ValueChanged<ExpenseRange> onRangeChanged;
 
+  /// Step the month window by ±1 (the `‹ ›` chevrons).
+  final ValueChanged<int> onMonthStep;
+
   @override
   Widget build(BuildContext context) {
+    final isMonth = range == ExpenseRange.month;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Time-range toggle.
-        Padding(
+        // Row 1 — range toggle (scrolls if it overflows narrow screens).
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.lg,
             AppSpacing.md,
             AppSpacing.lg,
-            AppSpacing.xs,
+            AppSpacing.sm,
           ),
           child: Row(
             children: [
+              _RangeChip(
+                label: 'Today',
+                value: ExpenseRange.today,
+                current: range,
+                onTap: onRangeChanged,
+              ),
+              const SizedBox(width: AppSpacing.sm),
               _RangeChip(
                 label: 'Week',
                 value: ExpenseRange.week,
@@ -667,6 +722,13 @@ class _LedgerControls extends StatelessWidget {
               ),
               const SizedBox(width: AppSpacing.sm),
               _RangeChip(
+                label: 'All',
+                value: ExpenseRange.all,
+                current: range,
+                onTap: onRangeChanged,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              _RangeChip(
                 label: 'Custom',
                 value: ExpenseRange.custom,
                 current: range,
@@ -676,45 +738,62 @@ class _LedgerControls extends StatelessWidget {
             ],
           ),
         ),
-        // Resolved range label + running total for that window.
+        // Row 2 — resolved window (stepper when Month) + total + sort menu.
         Padding(
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.lg,
             0,
-            AppSpacing.lg,
+            AppSpacing.sm,
             AppSpacing.xs,
           ),
           child: Row(
             children: [
-              Icon(Icons.event_note_outlined,
-                  size: 14, color: AppColors.textMuted),
-              const SizedBox(width: AppSpacing.xs),
-              Expanded(
-                child: Text(
-                  rangeLabel,
-                  style: AppText.caption.copyWith(color: AppColors.textMuted),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+              if (isMonth) ...[
+                _MonthStepper(
+                  label: rangeLabel,
+                  forwardEnabled: monthForwardEnabled,
+                  onStep: onMonthStep,
                 ),
-              ),
+                const Spacer(),
+              ] else
+                Expanded(
+                  child: Row(
+                    children: [
+                      Icon(Icons.event_note_outlined,
+                          size: 14, color: AppColors.textMuted),
+                      const SizedBox(width: AppSpacing.xs),
+                      Flexible(
+                        child: Text(
+                          rangeLabel,
+                          style: AppText.caption
+                              .copyWith(color: AppColors.textMuted),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               Text(
                 rangeTotalText,
-                style: AppText.caption.copyWith(
-                  color: AppColors.textSecondary,
-                  fontWeight: FontWeight.w700,
+                style: AppText.body.copyWith(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
+              const SizedBox(width: AppSpacing.xs),
+              _SortMenu(sort: sort, onChanged: onSortChanged),
             ],
           ),
         ),
-        // Project filter.
+        // Row 3 — project filter.
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.lg,
-            AppSpacing.md,
-            AppSpacing.lg,
             AppSpacing.xs,
+            AppSpacing.lg,
+            AppSpacing.sm,
           ),
           child: Row(
             children: [
@@ -748,73 +827,135 @@ class _LedgerControls extends StatelessWidget {
             ],
           ),
         ),
-        // Sort selector.
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AppSpacing.lg,
-            AppSpacing.xs,
-            AppSpacing.lg,
-            AppSpacing.xs,
+      ],
+    );
+  }
+}
+
+/// A one-tap `‹ June 2026 ›` month stepper. The forward chevron dims when
+/// [forwardEnabled] is false (we're on the current month — no future windows).
+class _MonthStepper extends StatelessWidget {
+  const _MonthStepper({
+    required this.label,
+    required this.forwardEnabled,
+    required this.onStep,
+  });
+
+  final String label;
+  final bool forwardEnabled;
+  final ValueChanged<int> onStep;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        LzIconButton(
+          icon: Icons.chevron_left_rounded,
+          tooltip: 'Previous month',
+          size: 20,
+          color: AppColors.textSecondary,
+          onPressed: () => onStep(-1),
+        ),
+        Text(
+          label,
+          style: AppText.label.copyWith(
+            color: AppColors.textPrimary,
+            fontWeight: FontWeight.w700,
           ),
-          child: Row(
-            children: [
-              Icon(Icons.swap_vert_rounded,
-                  size: 16, color: AppColors.textMuted),
-              const SizedBox(width: AppSpacing.sm),
-              _SortChip(
-                label: 'Newest',
-                value: _LedgerSort.newest,
-                current: sort,
-                onTap: onSortChanged,
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              _SortChip(
-                label: 'Oldest',
-                value: _LedgerSort.oldest,
-                current: sort,
-                onTap: onSortChanged,
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              _SortChip(
-                label: 'Largest',
-                value: _LedgerSort.amount,
-                current: sort,
-                onTap: onSortChanged,
-              ),
-            ],
-          ),
+        ),
+        LzIconButton(
+          icon: Icons.chevron_right_rounded,
+          tooltip: 'Next month',
+          size: 20,
+          color: forwardEnabled ? AppColors.textSecondary : AppColors.textMuted,
+          onPressed: forwardEnabled ? () => onStep(1) : null,
         ),
       ],
     );
   }
 }
 
-class _SortChip extends StatelessWidget {
-  const _SortChip({
-    required this.label,
-    required this.value,
-    required this.current,
-    required this.onTap,
-  });
+/// Compact trailing sort control: a popup menu (Newest · Oldest · Largest) that
+/// shows the active option inline, replacing the old full sort-chip row.
+class _SortMenu extends StatelessWidget {
+  const _SortMenu({required this.sort, required this.onChanged});
 
-  final String label;
-  final _LedgerSort value;
-  final _LedgerSort current;
-  final ValueChanged<_LedgerSort> onTap;
+  final _LedgerSort sort;
+  final ValueChanged<_LedgerSort> onChanged;
+
+  static String _label(_LedgerSort s) => switch (s) {
+        _LedgerSort.newest => 'Newest',
+        _LedgerSort.oldest => 'Oldest',
+        _LedgerSort.amount => 'Largest',
+      };
 
   @override
   Widget build(BuildContext context) {
-    return LzChip(
-      label: label,
-      dense: true,
-      selected: current == value,
-      color: AppColors.info,
-      onTap: () => onTap(value),
+    return PopupMenuButton<_LedgerSort>(
+      initialValue: sort,
+      tooltip: 'Sort',
+      onSelected: onChanged,
+      color: AppColors.bgSurfaceElevated,
+      shape: const RoundedRectangleBorder(borderRadius: AppRadii.rMd),
+      itemBuilder: (_) => [
+        _item(_LedgerSort.newest),
+        _item(_LedgerSort.oldest),
+        _item(_LedgerSort.amount),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs + 1,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.swap_vert_rounded, size: 15, color: AppColors.textMuted),
+            const SizedBox(width: AppSpacing.xs),
+            Text(
+              _label(sort),
+              style: AppText.caption.copyWith(
+                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Icon(Icons.arrow_drop_down_rounded,
+                size: 16, color: AppColors.textMuted),
+          ],
+        ),
+      ),
+    );
+  }
+
+  PopupMenuItem<_LedgerSort> _item(_LedgerSort value) {
+    final selected = value == sort;
+    return PopupMenuItem<_LedgerSort>(
+      value: value,
+      height: 42,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 18,
+            child: selected
+                ? Icon(Icons.check_rounded, size: 16, color: AppColors.accent)
+                : null,
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          Text(
+            _label(value),
+            style: AppText.body.copyWith(
+              color: selected ? AppColors.accent : AppColors.textSecondary,
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// A segmented time-range option chip (Week · Month · Custom).
+/// A segmented time-range option chip (Today · Week · Month · All · Custom).
 class _RangeChip extends StatelessWidget {
   const _RangeChip({
     required this.label,

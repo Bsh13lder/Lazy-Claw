@@ -67,6 +67,10 @@ dependencies:
   pdfx: ^2.9.2
   # Documents tab: native file chooser for importing a PDF (MIT).
   file_picker: ^11.0.0
+  # Home-screen access (Phase 5): app-icon long-press quick actions + a native
+  # Quick-Capture home-screen widget. Permissive only (CLAUDE.md): both BSD-3.
+  quick_actions: ^1.1.0
+  home_widget: ^0.9.0
 
 dev_dependencies:
   flutter_test:

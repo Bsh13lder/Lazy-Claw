@@ -353,6 +353,53 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  // ── Home-screen widget / shortcut help (MIUI / HyperOS) ────────────────────
+
+  /// Doc-only dialog: how to surface the Quick-Capture home-screen widget and
+  /// the app-icon quick actions on Xiaomi/HyperOS, where aggressive battery
+  /// management silently kills widgets and clears dynamic shortcuts unless
+  /// Autostart is enabled and the battery policy is "No restrictions".
+  Future<void> _showWidgetHelp() => LzDialog.show<void>(
+        context,
+        title: 'Home-screen widgets (Xiaomi / HyperOS)',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: const [
+            _HelpStep(
+              n: '1',
+              text: 'Settings → Apps → LazyClaw → Autostart → Enable. '
+                  'HyperOS/MIUI clears widgets & long-press shortcuts otherwise.',
+            ),
+            SizedBox(height: AppSpacing.md),
+            _HelpStep(
+              n: '2',
+              text: 'Settings → Apps → LazyClaw → Battery saver → '
+                  'No restrictions.',
+            ),
+            SizedBox(height: AppSpacing.md),
+            _HelpStep(
+              n: '3',
+              text: 'Add the widget: long-press an empty spot on your home '
+                  'screen → Widgets → LazyClaw → drag "Quick Capture" '
+                  '(+ Task / + Expense / + Note / Chat).',
+            ),
+            SizedBox(height: AppSpacing.md),
+            _HelpStep(
+              n: '4',
+              text: 'App-icon shortcuts: long-press the LazyClaw icon for '
+                  'Add task · Add expense · Chat · New note.',
+            ),
+          ],
+        ),
+        actions: [
+          LzButton.primary(
+            label: 'Got it',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      );
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -787,6 +834,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   icon: Icons.play_circle_outline,
                   onPressed: _openAutostartSettings,
                 ),
+                LzButton.secondary(
+                  label: 'Home-screen widgets',
+                  icon: Icons.widgets_outlined,
+                  onPressed: _showWidgetHelp,
+                ),
               ],
             ),
           ],
@@ -1120,6 +1172,49 @@ class _EcoCaption extends StatelessWidget {
             value.isNotEmpty ? value : '—',
             style: AppText.caption.copyWith(color: AppColors.textSecondary),
             overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Home-screen widget help dialog step ───────────────────────────────────────
+
+/// A single numbered step row inside the [_showWidgetHelp] dialog: an accent
+/// number badge + wrapped instruction text.
+class _HelpStep extends StatelessWidget {
+  const _HelpStep({required this.n, required this.text});
+
+  final String n;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 22,
+          height: 22,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: AppColors.accent.withValues(alpha: 0.16),
+            borderRadius: AppRadii.rSm,
+          ),
+          child: Text(
+            n,
+            style: AppText.caption.copyWith(
+              color: AppColors.accent,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.md),
+        Expanded(
+          child: Text(
+            text,
+            style: AppText.caption.copyWith(color: AppColors.textSecondary),
           ),
         ),
       ],

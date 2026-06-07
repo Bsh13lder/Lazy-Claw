@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LazyClaw Quick-Capture home-screen widget (4x1). A horizontal bar of four
+     launcher buttons; each fires a `lazyclaw://<action>` deep link back into
+     the app via HomeWidgetLaunchIntent (wired in QuickCaptureWidget.kt).
+     RemoteViews-safe: LinearLayout + ImageView + TextView only. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:background="@drawable/quick_capture_bg"
+    android:padding="8dp"
+    android:baselineAligned="false">
+
+    <!-- + Task -->
+    <LinearLayout
+        android:id="@+id/qc_task"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:layout_margin="3dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@drawable/quick_capture_button_bg"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:src="@drawable/ic_shortcut_task"
+            android:contentDescription="@string/qc_task" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/qc_task"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="11sp"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <!-- + Expense -->
+    <LinearLayout
+        android:id="@+id/qc_expense"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:layout_margin="3dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@drawable/quick_capture_button_bg"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:src="@drawable/ic_shortcut_expense"
+            android:contentDescription="@string/qc_expense" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/qc_expense"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="11sp"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <!-- + Note -->
+    <LinearLayout
+        android:id="@+id/qc_note"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:layout_margin="3dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@drawable/quick_capture_button_bg"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:src="@drawable/ic_shortcut_note"
+            android:contentDescription="@string/qc_note" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/qc_note"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="11sp"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <!-- Chat -->
+    <LinearLayout
+        android:id="@+id/qc_chat"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:layout_margin="3dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:background="@drawable/quick_capture_button_bg"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:src="@drawable/ic_shortcut_chat"
+            android:contentDescription="@string/qc_chat" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/qc_chat"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="11sp"
+            android:maxLines="1" />
+    </LinearLayout>
+</LinearLayout>

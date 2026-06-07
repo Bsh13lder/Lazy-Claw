@@ -4,6 +4,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../core/actions/app_actions.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
@@ -140,6 +141,42 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     _selectedDay = _focusedDay;
     // Load tasks from the local cache on first render (offline-first).
     Future.microtask(() => ref.read(tasksProvider.notifier).load());
+
+    // Cold-start deep link: a `+ Task` / `+ Note` shortcut or widget button
+    // may have set a pending action BEFORE this screen mounted. ref.listen
+    // (in build) only fires on CHANGE, so replay any pre-existing one here.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final taken = takePendingAction(ref, _myActions);
+      if (taken != null && mounted) _handlePendingAction(taken);
+    });
+  }
+
+  /// The deep-link actions this screen owns (Tasks + the nested Notes segment).
+  static const Set<AppAction> _myActions = {
+    AppAction.addTask,
+    AppAction.newNote,
+  };
+
+  /// Replay a consumed deep-link action: open the add-task sheet, or switch to
+  /// the Notes segment and open the create-note flow.
+  void _handlePendingAction(AppAction action) {
+    switch (action) {
+      case AppAction.addTask:
+        if (_segment != _Segment.tasks) {
+          setState(() => _segment = _Segment.tasks);
+        }
+        _openAddSheet(initialDueDate: _contextualAddDate);
+        break;
+      case AppAction.newNote:
+        if (_segment != _Segment.notes) {
+          setState(() => _segment = _Segment.notes);
+        }
+        showCreateNoteFlow(context, ref);
+        break;
+      case AppAction.addExpense:
+      case AppAction.chat:
+        break; // not owned by this screen
+    }
   }
 
   /// Ensure the budgets store is loaded once (for per-project colors). Cheap,
@@ -177,6 +214,18 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     final reachable = ref.watch(reachableProvider);
     final degraded = ref.watch(dbHealthProvider).isDegraded;
     final notesMode = _segment == _Segment.notes;
+
+    // Warm deep link: a `+ Task` / `+ Note` shortcut/widget fired while this
+    // screen was already alive (indexedStack keeps it mounted). Consume + open.
+    ref.listen<AppAction?>(pendingActionProvider, (_, next) {
+      if (next == null) return;
+      final taken = takePendingAction(ref, _myActions);
+      if (taken != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _handlePendingAction(taken);
+        });
+      }
+    });
 
     // Show error snackbar on new task errors.
     ref.listen<TasksState>(tasksProvider, (prev, next) {

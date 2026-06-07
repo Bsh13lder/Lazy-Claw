@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/actions/app_actions.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../providers/budgets_provider.dart';
@@ -41,6 +42,16 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     Future.microtask(() => ref.read(budgetsProvider.notifier).load());
+
+    // Cold-start deep link: a `+ Expense` shortcut/widget button may have set a
+    // pending action before this screen mounted. ref.listen only fires on
+    // change, so replay any pre-existing pending action once after first build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final taken = takePendingAction(ref, const {AppAction.addExpense});
+      if (taken != null && mounted) {
+        _showAddExpense(ref.read(budgetsProvider));
+      }
+    });
   }
 
   @override
@@ -117,6 +128,18 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
       degraded: degraded,
       onRetry: () => ref.read(budgetsProvider.notifier).load(),
     );
+
+    // Warm deep link: a `+ Expense` shortcut/widget fired while this screen was
+    // already alive (indexedStack keeps it mounted). Consume + open the sheet.
+    ref.listen<AppAction?>(pendingActionProvider, (_, next) {
+      if (next == null) return;
+      final taken = takePendingAction(ref, const {AppAction.addExpense});
+      if (taken != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _showAddExpense(ref.read(budgetsProvider));
+        });
+      }
+    });
 
     // Show error snackbar on new errors.
     ref.listen<BudgetsState>(budgetsProvider, (prev, next) {

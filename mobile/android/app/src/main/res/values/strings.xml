@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Quick-Capture home-screen widget. -->
+    <string name="qc_widget_label">LazyClaw Quick Capture</string>
+    <string name="qc_widget_description">Add a task, expense or note, or open chat.</string>
+    <string name="qc_task">+ Task</string>
+    <string name="qc_expense">+ Expense</string>
+    <string name="qc_note">+ Note</string>
+    <string name="qc_chat">Chat</string>
+</resources>

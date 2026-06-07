@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'core/actions/app_actions.dart';
+import 'core/actions/deep_link_service.dart';
 import 'core/config/server_config.dart';
 import 'core/router/app_router.dart';
 import 'core/self_update.dart';
@@ -44,11 +46,25 @@ class LazyClawApp extends ConsumerStatefulWidget {
 
 class _LazyClawAppState extends ConsumerState<LazyClawApp> {
   ForegroundSyncScheduler? _fgSync;
+  DeepLinkService? _deepLinks;
 
   @override
   void initState() {
     super.initState();
     Future.microtask(() => ref.read(authProvider.notifier).checkSession());
+
+    // Home-screen access (Phase 5): wire the launcher long-press shortcuts and
+    // the home-screen Quick-Capture widget into [pendingActionProvider]. Done
+    // after the first frame so the router/provider graph exists; cold-start
+    // triggers (app launched BY a shortcut/widget) are stashed and replayed by
+    // the per-screen consumers + the navigation listener in [build].
+    _deepLinks = DeepLinkService((action) {
+      if (!mounted) return;
+      ref.read(pendingActionProvider.notifier).state = action;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _deepLinks?.init();
+    });
 
     // Keep offline-first data fresh while the app is in the foreground: every
     // ~30 min (and on each resume) push/pull all three offline-first domains.
@@ -72,12 +88,27 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
   @override
   void dispose() {
     _fgSync?.dispose();
+    _deepLinks?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
+
+    // Navigate to the right branch when a deep-link action is pending. The
+    // destination screen (Tasks / Expenses) consumes the action to open its
+    // sheet; `chat` has no sheet, so it's consumed here right after navigating.
+    ref.listen<AppAction?>(pendingActionProvider, (_, next) {
+      if (next == null) return;
+      router.go(routeForAction(next));
+      if (next == AppAction.chat) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) ref.read(pendingActionProvider.notifier).state = null;
+        });
+      }
+    });
+
     return MaterialApp.router(
       title: 'LazyClaw',
       theme: buildAppTheme(),

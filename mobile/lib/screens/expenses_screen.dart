@@ -9,6 +9,7 @@ import '../providers/tasks_provider.dart'
     show reachableProvider, dbHealthProvider;
 import '../ui/ui.dart';
 import 'expenses/add_expense_sheet.dart';
+import 'expenses/budget_log_sheet.dart';
 import 'expenses/budget_math.dart';
 import 'expenses/budget_summary_card.dart';
 import 'expenses/edit_project_sheet.dart';
@@ -114,6 +115,12 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           await notifier.deleteProject(project.id);
           return true;
         },
+        onOpenBudgetLog: () => showBudgetLogSheet(
+          context,
+          ref,
+          projectId: project.id,
+          currency: project.currency,
+        ),
       ),
     );
   }

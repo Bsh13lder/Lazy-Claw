@@ -21,6 +21,7 @@ class EditProjectSheet extends StatefulWidget {
     required this.onSetBudget,
     required this.onSetColor,
     required this.onDelete,
+    this.onOpenBudgetLog,
   });
 
   final Project project;
@@ -36,6 +37,10 @@ class EditProjectSheet extends StatefulWidget {
 
   /// Delete the project. Returns true on success.
   final Future<bool> Function() onDelete;
+
+  /// Opens the Budget ledger sheet (add-to-budget top-ups + the credits/debits
+  /// Log). When null the affordance is hidden.
+  final VoidCallback? onOpenBudgetLog;
 
   @override
   State<EditProjectSheet> createState() => _EditProjectSheetState();
@@ -181,6 +186,18 @@ class _EditProjectSheetState extends State<EditProjectSheet> {
           },
           onSubmitted: (_) => _busy ? null : _save(),
         ),
+        // Budget ledger — add-to-budget top-ups + the credits/debits Log. The
+        // field above sets the TOTAL directly; this opens the sourced-top-up
+        // ledger (mirrors the web "+ Add budget" / "📋 Log").
+        if (widget.onOpenBudgetLog != null) ...[
+          const SizedBox(height: AppSpacing.md),
+          LzButton.secondary(
+            label: 'Budget log & top-ups',
+            icon: Icons.receipt_long_outlined,
+            expand: true,
+            onPressed: _busy ? null : widget.onOpenBudgetLog,
+          ),
+        ],
         const SizedBox(height: AppSpacing.xl),
         Text(
           'Color',

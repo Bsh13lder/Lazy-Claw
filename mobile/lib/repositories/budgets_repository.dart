@@ -1,4 +1,5 @@
 import '../core/api/api_client.dart';
+import '../models/budget_entry.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 
@@ -236,5 +237,74 @@ class BudgetsRepository {
   /// tombstoned-but-unsynced (re-appearing on the next full pull).
   Future<void> deleteProject(String id) async {
     await _t.deleteJson('/api/budgets/projects/$id?cascade=true');
+  }
+
+  // ── Budget ledger (online-only — no offline cache) ─────────────────────────
+  //
+  // The `budget_entries` ledger mirrors the web "+ Add budget" / "📋 Log"
+  // controls. These hit the live backend directly (NOT the offline sync table):
+  // a sourced top-up bumps `projects.budget`, and an edit/delete adjusts the
+  // total by the amount delta. Callers refresh the budgets provider afterwards
+  // so the (offline-cached) project budget bar reflects the new total.
+
+  /// List a project's budget ledger entries (top-ups + edit audits), newest
+  /// first. Maps `GET /api/budgets/projects/{projectId}/budget-entries` →
+  /// `{entries: [...], count}`.
+  Future<List<BudgetEntry>> listBudgetEntries(String projectId) async {
+    final json = await _t.getJson(
+      '/api/budgets/projects/$projectId/budget-entries',
+    );
+    final rawList = json['entries'] as List? ?? [];
+    return rawList
+        .map((e) => BudgetEntry.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  /// Add money to a project's budget, recording WHERE it came from. The server
+  /// bumps `projects.budget` by [amount] and writes a `credit` ledger row.
+  /// [source] is the first comment (the answer to "where is this from?").
+  /// Maps `POST /api/budgets/projects/{projectId}/budget-entries` → `{entry}`.
+  Future<BudgetEntry> addBudgetEntry(
+    String projectId,
+    double amount, {
+    String? source,
+    String? currency,
+  }) async {
+    final body = <String, dynamic>{'amount': amount};
+    if (source != null) body['source'] = source;
+    if (currency != null) body['currency'] = currency;
+
+    final json = await _t.postJson(
+      '/api/budgets/projects/$projectId/budget-entries',
+      body,
+    );
+    final raw = json['entry'] as Map<String, dynamic>? ?? json;
+    return BudgetEntry.fromJson(raw);
+  }
+
+  /// Edit a ledger entry. The server adjusts `projects.budget` by the amount
+  /// delta so the total stays consistent (entry was +200, edit to +150 →
+  /// budget -= 50). Only supplied fields change. Maps
+  /// `PATCH /api/budgets/entries/{id}` → `{entry}`.
+  Future<BudgetEntry> updateBudgetEntry(
+    String id, {
+    double? amount,
+    String? source,
+    String? currency,
+  }) async {
+    final body = <String, dynamic>{};
+    if (amount != null) body['amount'] = amount;
+    if (source != null) body['source'] = source;
+    if (currency != null) body['currency'] = currency;
+
+    final json = await _t.patchJson('/api/budgets/entries/$id', body);
+    final raw = json['entry'] as Map<String, dynamic>? ?? json;
+    return BudgetEntry.fromJson(raw);
+  }
+
+  /// Delete a ledger entry, rolling back its effect on `projects.budget`.
+  /// Maps `DELETE /api/budgets/entries/{id}`.
+  Future<void> deleteBudgetEntry(String id) async {
+    await _t.deleteJson('/api/budgets/entries/$id');
   }
 }

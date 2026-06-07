@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
+import 'package:lazyclaw_mobile/models/budget_entry.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/expense.dart';
 
@@ -96,6 +97,24 @@ Map<String, dynamic> _expenseJson({
       'status': 'posted',
       'recurring_expense_id': null,
       'lazybrain_note_id': null,
+    };
+
+Map<String, dynamic> _entryJson({
+  String id = 'be1',
+  String projectId = 'proj1',
+  double amount = 100.0,
+  String currency = 'USD',
+  String? source,
+  String kind = 'credit',
+}) =>
+    {
+      'id': id,
+      'project_id': projectId,
+      'amount': amount,
+      'currency': currency,
+      'source': source,
+      'kind': kind,
+      'created_at': '2026-06-05T10:00:00Z',
     };
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -348,6 +367,99 @@ void main() {
       });
       await BudgetsRepository(t).fetchChanges();
       expect(t.lastQueryParams, isNull);
+    });
+  });
+
+  group('BudgetsRepository.listBudgetEntries', () {
+    test('GET /api/budgets/projects/{id}/budget-entries and parses entries',
+        () async {
+      final t = _FakeTransport({
+        'entries': [
+          _entryJson(id: 'be1', amount: 200.0, source: 'client deposit'),
+          _entryJson(id: 'be2', amount: -50.0, kind: 'edit'),
+        ],
+        'count': 2,
+      });
+      final entries = await BudgetsRepository(t).listBudgetEntries('proj1');
+      expect(t.lastMethod, 'GET');
+      expect(t.lastPath, '/api/budgets/projects/proj1/budget-entries');
+      expect(entries, hasLength(2));
+      expect(entries[0], isA<BudgetEntry>());
+      expect(entries[0].id, 'be1');
+      expect(entries[0].amount, 200.0);
+      expect(entries[0].source, 'client deposit');
+      expect(entries[1].kind, 'edit');
+      expect(entries[1].isEdit, isTrue);
+      expect(entries[1].amount, -50.0);
+    });
+
+    test('returns empty list when entries key is missing', () async {
+      final t = _FakeTransport({});
+      final entries = await BudgetsRepository(t).listBudgetEntries('proj1');
+      expect(entries, isEmpty);
+    });
+  });
+
+  group('BudgetsRepository.addBudgetEntry', () {
+    test('POST /api/budgets/projects/{id}/budget-entries with amount', () async {
+      final t = _FakeTransport({'entry': _entryJson(id: 'new1', amount: 300.0)});
+      final entry = await BudgetsRepository(t).addBudgetEntry('proj1', 300.0);
+      expect(t.lastMethod, 'POST');
+      expect(t.lastPath, '/api/budgets/projects/proj1/budget-entries');
+      expect(t.lastBody, containsPair('amount', 300.0));
+      expect(entry, isA<BudgetEntry>());
+      expect(entry.id, 'new1');
+    });
+
+    test('includes source + currency when provided', () async {
+      final t = _FakeTransport({'entry': _entryJson()});
+      await BudgetsRepository(t)
+          .addBudgetEntry('proj1', 100.0, source: 'grant', currency: 'GBP');
+      expect(t.lastBody, containsPair('source', 'grant'));
+      expect(t.lastBody, containsPair('currency', 'GBP'));
+    });
+
+    test('omits source + currency when null', () async {
+      final t = _FakeTransport({'entry': _entryJson()});
+      await BudgetsRepository(t).addBudgetEntry('proj1', 100.0);
+      expect(t.lastBody?.containsKey('source'), isFalse);
+      expect(t.lastBody?.containsKey('currency'), isFalse);
+    });
+  });
+
+  group('BudgetsRepository.updateBudgetEntry', () {
+    test('PATCH /api/budgets/entries/{id} with the supplied fields', () async {
+      final t = _FakeTransport({'entry': _entryJson(id: 'be9', amount: 150.0)});
+      await BudgetsRepository(t)
+          .updateBudgetEntry('be9', amount: 150.0, source: 'revised');
+      expect(t.lastMethod, 'PATCH');
+      expect(t.lastPath, '/api/budgets/entries/be9');
+      expect(t.lastBody, containsPair('amount', 150.0));
+      expect(t.lastBody, containsPair('source', 'revised'));
+    });
+
+    test('omits unspecified fields from the body', () async {
+      final t = _FakeTransport({'entry': _entryJson()});
+      await BudgetsRepository(t).updateBudgetEntry('be9', amount: 10.0);
+      expect(t.lastBody?.containsKey('amount'), isTrue);
+      expect(t.lastBody?.containsKey('source'), isFalse);
+      expect(t.lastBody?.containsKey('currency'), isFalse);
+    });
+
+    test('sends an empty-string source through (clears it server-side)',
+        () async {
+      final t = _FakeTransport({'entry': _entryJson()});
+      await BudgetsRepository(t).updateBudgetEntry('be9', source: '');
+      expect(t.lastBody, containsPair('source', ''));
+    });
+  });
+
+  group('BudgetsRepository.deleteBudgetEntry', () {
+    test('DELETE /api/budgets/entries/{id}', () async {
+      final t = _FakeTransport({'status': 'deleted'});
+      await BudgetsRepository(t).deleteBudgetEntry('be7');
+      expect(t.lastMethod, 'DELETE');
+      expect(t.lastPath, '/api/budgets/entries/be7');
     });
   });
 }

@@ -10,6 +10,7 @@ auto-associate without a migration. Expenses roll up via a plaintext
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -31,7 +32,12 @@ ENCRYPTED_BUDGET_ENTRY_FIELDS = frozenset({"source"})
 
 PROJECT_COLUMNS = [
     "id", "user_id", "name", "name_key", "budget", "currency",
-    "status", "description", "lazybrain_note_id", "created_at", "updated_at",
+    "status", "description",
+    # Per-project color (feat/flutter-mobile) — optional hex string like
+    # "#4F8AF4" (or NULL) so the mobile calendar can color-code projects +
+    # tasks. Plaintext like status/budget (not sensitive).
+    "color",
+    "lazybrain_note_id", "created_at", "updated_at",
     # Offline-sync column (feat/flutter-mobile) — soft-delete tombstone.
     # NULL = live; non-NULL = deleted. Exposed via /api/budgets/changes.
     "deleted_at",
@@ -70,6 +76,22 @@ def _name_key(name: str) -> str:
     """Casefold + collapse whitespace so a project resolves consistently and
     matches ``tasks.category`` regardless of casing."""
     return " ".join((name or "").strip().casefold().split())
+
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _clean_color(value: str | None) -> str | None:
+    """Normalize a project color to a 6-digit hex string like ``"#4F8AF4"``.
+
+    Lenient by design: anything that isn't a valid ``#RRGGBB`` string (bad
+    shape, empty, non-string) is cleared to ``None`` rather than raising — a
+    bad color must never 500 a project write. The original case is preserved.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if _HEX_COLOR_RE.match(candidate) else None
 
 
 def _now() -> str:
@@ -223,12 +245,16 @@ async def create_project(
     budget: float = 0.0,
     currency: str = "EUR",
     description: str | None = None,
+    color: str | None = None,
     project_id: str | None = None,
 ) -> dict:
     """Create or upsert a project by ``name_key``. Idempotent against
     category-typo duplicates (case/whitespace). If the project already exists,
-    its budget/currency/description are updated when explicitly provided.
+    its budget/currency/description/color are updated when explicitly provided.
     Creates the ``<Name> Project`` LazyBrain note on first insert.
+
+    ``color``: optional ``#RRGGBB`` hex string (or None) for calendar
+    color-coding. Invalid values are cleared to None (never raises).
 
     ``project_id``: optional client-minted id for offline-first idempotent
     replay. When provided, the server uses it as the project id. A second POST
@@ -239,6 +265,7 @@ async def create_project(
 
     key = await get_user_dek(config, user_id)
     name_key = _name_key(name)
+    color = _clean_color(color)
 
     # Idempotent replay: if the client-minted id already exists for this user,
     # return the existing row without inserting a duplicate.
@@ -261,6 +288,8 @@ async def create_project(
             updates["currency"] = currency
         if description is not None:
             updates["description"] = description
+        if color is not None:
+            updates["color"] = color
         if not existing.get("lazybrain_note_id"):
             note_id = await _ensure_project_note(
                 config, user_id, name, budget or existing.get("budget") or 0.0, currency,
@@ -280,11 +309,11 @@ async def create_project(
         await db.execute(
             "INSERT INTO projects "
             "(id, user_id, name, name_key, budget, currency, status, "
-            "description, lazybrain_note_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+            "description, color, lazybrain_note_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
             (
                 project_id, user_id, encrypt(name, key), name_key,
-                budget, currency, _enc(description, key), note_id, now, now,
+                budget, currency, _enc(description, key), color, note_id, now, now,
             ),
         )
         await db.commit()
@@ -293,7 +322,7 @@ async def create_project(
     return {
         "id": project_id, "user_id": user_id, "name": name, "name_key": name_key,
         "budget": budget, "currency": currency, "status": "active",
-        "description": description, "lazybrain_note_id": note_id,
+        "description": description, "color": color, "lazybrain_note_id": note_id,
         "created_at": now, "updated_at": now, "deleted_at": None,
     }
 
@@ -434,9 +463,16 @@ async def update_project(
     config: Config, user_id: str, project_id: str, **fields
 ) -> bool:
     """Update project fields. Recomputes ``name_key`` + renames the LazyBrain
-    note when ``name`` changes so wikilinks re-resolve via the new title."""
+    note when ``name`` changes so wikilinks re-resolve via the new title.
+
+    A ``color`` field is normalized to ``#RRGGBB`` (invalid → NULL) so a bad
+    color clears instead of 500-ing the update."""
     if not fields:
         return False
+
+    # Normalize color without mutating the caller's dict (immutable update).
+    if "color" in fields:
+        fields = {**fields, "color": _clean_color(fields["color"])}
 
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []

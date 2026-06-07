@@ -36,6 +36,9 @@ class CreateProjectBody(BaseModel):
     budget: float = 0.0
     currency: str = Field(default="EUR", max_length=8)
     description: str | None = Field(default=None, max_length=2000)
+    # Optional calendar color, e.g. "#4F8AF4". Validated lenient server-side:
+    # a non-#RRGGBB value is cleared to None (never 500s).
+    color: str | None = Field(default=None, max_length=16)
 
 
 class SetBudgetBody(BaseModel):
@@ -49,6 +52,9 @@ class UpdateProjectBody(BaseModel):
     currency: str | None = Field(default=None, max_length=8)
     description: str | None = Field(default=None, max_length=2000)
     status: Literal["active", "archived"] | None = None
+    # Optional calendar color, e.g. "#4F8AF4". Validated lenient server-side:
+    # a non-#RRGGBB value is cleared to None (never 500s).
+    color: str | None = Field(default=None, max_length=16)
 
 
 class CreateExpenseBody(BaseModel):
@@ -118,7 +124,7 @@ async def create_project_route(
     project = await store.create_project(
         _config, user.id, body.name,
         budget=body.budget, currency=body.currency, description=body.description,
-        project_id=body.id or None,
+        color=body.color, project_id=body.id or None,
     )
     return {"project": project}
 

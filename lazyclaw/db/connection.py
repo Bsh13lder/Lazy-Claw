@@ -204,6 +204,11 @@ async def init_db(config: Config) -> None:
             ("notes", "deleted_at", "ALTER TABLE notes ADD COLUMN deleted_at TEXT"),
             ("projects", "deleted_at", "ALTER TABLE projects ADD COLUMN deleted_at TEXT"),
             ("project_expenses", "deleted_at", "ALTER TABLE project_expenses ADD COLUMN deleted_at TEXT"),
+            # Per-project color (feat/flutter-mobile) — optional hex string like
+            # "#4F8AF4" so the mobile calendar can color-code projects + tasks.
+            # Plaintext like status/budget (not sensitive); NULL = no color.
+            # Exposed via list + /api/budgets/changes for the offline sync pull.
+            ("projects", "color", "ALTER TABLE projects ADD COLUMN color TEXT"),
         ]
         for table, column, sql in migrations:
             try:

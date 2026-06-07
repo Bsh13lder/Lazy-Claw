@@ -79,6 +79,10 @@ class TaskCalendarView extends StatelessWidget {
             calendarFormat: CalendarFormat.month,
             availableGestures: AvailableGestures.horizontalSwipe,
             startingDayOfWeek: StartingDayOfWeek.monday,
+            // Roomier rows give the day number + its today/selected circle the
+            // top of the cell and leave a clear band at the bottom for markers.
+            rowHeight: 62,
+            daysOfWeekHeight: 24,
             selectedDayPredicate: (day) => isSameDay(selectedDay, day),
             eventLoader: eventsFor,
             onDaySelected: onDaySelected,
@@ -86,31 +90,52 @@ class TaskCalendarView extends StatelessWidget {
             headerStyle: HeaderStyle(
               formatButtonVisible: false,
               titleCentered: true,
-              titleTextStyle: AppText.title,
-              leftChevronIcon: const Icon(Icons.chevron_left,
-                  color: AppColors.textSecondary),
-              rightChevronIcon: const Icon(Icons.chevron_right,
-                  color: AppColors.textSecondary),
+              headerPadding: const EdgeInsets.symmetric(
+                vertical: AppSpacing.sm,
+                horizontal: AppSpacing.xs,
+              ),
+              titleTextStyle: AppText.titleL,
+              leftChevronIcon: const _CalChevron(Icons.chevron_left_rounded),
+              rightChevronIcon: const _CalChevron(Icons.chevron_right_rounded),
+              leftChevronPadding: EdgeInsets.zero,
+              rightChevronPadding: EdgeInsets.zero,
+              leftChevronMargin: const EdgeInsets.only(left: AppSpacing.xs),
+              rightChevronMargin: const EdgeInsets.only(right: AppSpacing.xs),
             ),
             daysOfWeekStyle: DaysOfWeekStyle(
-              weekdayStyle:
-                  AppText.caption.copyWith(color: AppColors.textMuted),
-              weekendStyle:
-                  AppText.caption.copyWith(color: AppColors.textMuted),
+              weekdayStyle: AppText.caption.copyWith(
+                color: AppColors.textMuted,
+                fontWeight: FontWeight.w700,
+              ),
+              weekendStyle: AppText.caption.copyWith(
+                color: AppColors.textMuted,
+                fontWeight: FontWeight.w700,
+              ),
             ),
             calendarStyle: CalendarStyle(
               defaultTextStyle: AppText.body,
               weekendTextStyle: AppText.body,
               outsideTextStyle:
                   AppText.body.copyWith(color: AppColors.textMuted),
+              // Extra bottom inset shrinks + lifts the day-number circle so it
+              // can't reach the marker band below it (the headline overlap fix).
+              cellMargin: const EdgeInsets.fromLTRB(6, 6, 6, 14),
+              // Don't hard-clip the dot band: on a narrow phone a 3-dot + "+N"
+              // row can be a hair wider than the cell, and the 6px cellMargin
+              // gutter absorbs the spill far more gracefully than a clipped "+N".
+              canMarkersOverflow: true,
+              markersAlignment: Alignment.bottomCenter,
               todayDecoration: BoxDecoration(
                 color: AppColors.accent.withValues(alpha: 0.18),
                 shape: BoxShape.circle,
                 border: Border.all(color: AppColors.accent, width: 1),
               ),
-              todayTextStyle: AppText.body.copyWith(color: AppColors.accent),
-              selectedDecoration: const BoxDecoration(
+              todayTextStyle: AppText.body.copyWith(
                 color: AppColors.accent,
+                fontWeight: FontWeight.w700,
+              ),
+              selectedDecoration: const BoxDecoration(
+                gradient: AppColors.accentGradient,
                 shape: BoxShape.circle,
               ),
               selectedTextStyle: AppText.body.copyWith(
@@ -218,55 +243,75 @@ class _DayMarkers extends StatelessWidget {
   final List<Task> tasks;
   final Map<String, String> colorByName;
 
-  /// Half the inter-dot gap — applied as horizontal padding on each dot so the
-  /// row stays mathematically non-overlapping regardless of cell width.
-  static const double _dotGapHalf = 2;
+  /// Even gap between adjacent dots, as a fixed [SizedBox] so the row stays
+  /// mathematically non-overlapping and evenly spaced at any cell width.
+  static const double _dotGap = 4;
+
+  /// Bottom inset that keeps the marker band off the cell's bottom edge while
+  /// staying clear of the (lifted) day-number circle above it.
+  static const double _bandBottom = 6;
 
   @override
   Widget build(BuildContext context) {
     // Everything due this day is finished → one clear "cleared" badge.
     if (isDayAllDone(tasks)) {
       return const Padding(
-        padding: EdgeInsets.only(bottom: 4),
+        padding: EdgeInsets.only(bottom: _bandBottom),
         child: _AllDoneBadge(),
       );
     }
 
-    // Open work leads (most actionable); completed tasks trail as hollow rings.
-    final open = tasks.where((t) => !t.isDone);
-    final done = tasks.where((t) => t.isDone);
-    final ordered = [...open, ...done];
-    final shown = ordered.take(TaskCalendarView._maxDots).toList();
-    final overflow = ordered.length - shown.length;
+    // Open work leads as filled dots; done work trails as hollow rings.
+    final picked = pickDayMarkerTasks(tasks, maxDots: TaskCalendarView._maxDots);
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.only(bottom: _bandBottom),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          for (final t in shown)
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: _dotGapHalf),
-              child: _TaskDot(
-                color: colorForTask(t, colorByName, AppColors.accent),
-                done: t.isDone,
+          for (int i = 0; i < picked.shown.length; i++) ...[
+            if (i > 0) const SizedBox(width: _dotGap),
+            _TaskDot(
+              color:
+                  colorForTask(picked.shown[i], colorByName, AppColors.accent),
+              done: picked.shown[i].isDone,
+            ),
+          ],
+          if (picked.overflow > 0) ...[
+            const SizedBox(width: _dotGap),
+            Text(
+              '+${picked.overflow}',
+              style: AppText.caption.copyWith(
+                color: AppColors.textMuted,
+                fontSize: 9,
+                height: 1,
+                fontWeight: FontWeight.w700,
               ),
             ),
-          if (overflow > 0)
-            Padding(
-              padding: const EdgeInsets.only(left: 3),
-              child: Text(
-                '+$overflow',
-                style: AppText.caption.copyWith(
-                  color: AppColors.textMuted,
-                  fontSize: 8,
-                  height: 1,
-                ),
-              ),
-            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+/// A circular chevron button used in the month header (the "‹ June ›" affordance).
+class _CalChevron extends StatelessWidget {
+  const _CalChevron(this.icon);
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        color: AppColors.bgSurfaceElevated,
+        shape: BoxShape.circle,
+        border: Border.all(color: AppColors.borderSubtle),
+      ),
+      child: Icon(icon, size: 22, color: AppColors.textSecondary),
     );
   }
 }
@@ -279,7 +324,7 @@ class _TaskDot extends StatelessWidget {
   final Color color;
   final bool done;
 
-  static const double _size = 7;
+  static const double _size = 6;
 
   @override
   Widget build(BuildContext context) {

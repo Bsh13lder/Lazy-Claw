@@ -7,6 +7,7 @@ import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
 import 'chip_edit.dart';
+import 'task_calendar_utils.dart';
 import 'subtask_editor.dart';
 
 /// A full task card: a checkbox affordance, an (optionally inline-editable)
@@ -198,6 +199,11 @@ class _TaskRowState extends State<TaskRow> {
     final pColor = priorityColor(task.priority);
 
     final hasCategory = task.category != null && task.category!.isNotEmpty;
+    // Tie the project chip to the project's own color (the same hue the calendar
+    // dots use), falling back to the neutral "info" tone when the project has no
+    // color or isn't in the list.
+    final projectColor =
+        hasCategory ? _projectColor(task.category!) : null;
     final progress = subtaskProgressLabel(task.subtasks);
     final hasSubtasks = progress != null;
     final subtasksEditable = widget.onSubtasksChanged != null;
@@ -257,7 +263,7 @@ class _TaskRowState extends State<TaskRow> {
                         label: task.category!,
                         dense: true,
                         icon: Icons.folder_outlined,
-                        color: AppColors.info,
+                        color: projectColor ?? AppColors.info,
                         selected: !isDone,
                         onTap: widget.onCategoryChanged != null
                             ? _editProject
@@ -439,7 +445,9 @@ class _TaskRowState extends State<TaskRow> {
               decoration: TextDecoration.lineThrough,
               decorationColor: AppColors.textMuted,
             )
-          : AppText.body,
+          // A touch heavier than the caption-sized chips so the title clearly
+          // leads the card's hierarchy.
+          : AppText.body.copyWith(fontWeight: FontWeight.w600),
     );
 
     // Inline-edit hotspot: tapping the title text enters edit mode (when
@@ -452,6 +460,19 @@ class _TaskRowState extends State<TaskRow> {
       onTap: _beginEditTitle,
       child: text,
     );
+  }
+
+  /// The project's own color for [category] (case-insensitive name match), or
+  /// null when there's no matching project or it has no/invalid color.
+  Color? _projectColor(String category) {
+    final target = category.toLowerCase();
+    for (final p in widget.projects) {
+      if (p.name.toLowerCase() != target) continue;
+      final hex = p.color;
+      if (hex == null || hex.isEmpty) return null;
+      return parseHexColor(hex);
+    }
+    return null;
   }
 
   Color _dueDateColor(String dueDate) {

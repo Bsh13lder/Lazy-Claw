@@ -93,6 +93,28 @@ bool isDayAllDone(List<Task> dayTasks) {
   return dayTasks.every((task) => task.isDone);
 }
 
+/// Chooses which of a day's [tasks] render as marker dots, plus the overflow
+/// count for the trailing muted "+N".
+///
+/// Open tasks lead (the most actionable, drawn as filled project-colored dots);
+/// done tasks trail (drawn as hollow rings). At most [maxDots] dots are shown
+/// and the remainder collapses into [overflow]. Pure + immutable: the input is
+/// never mutated — a fresh ordered list is returned — so a provider-owned list
+/// can be passed straight in.
+({List<Task> shown, int overflow}) pickDayMarkerTasks(
+  List<Task> tasks, {
+  required int maxDots,
+}) {
+  final open = <Task>[];
+  final done = <Task>[];
+  for (final task in tasks) {
+    (task.isDone ? done : open).add(task);
+  }
+  final ordered = <Task>[...open, ...done];
+  final shown = ordered.take(maxDots).toList();
+  return (shown: shown, overflow: ordered.length - shown.length);
+}
+
 /// Parses a `"#RRGGBB"` (or bare `"RRGGBB"` / `"#AARRGGBB"`) hex string into an
 /// opaque [Color]. Returns null when the string isn't a valid hex color.
 Color? parseHexColor(String hex) {

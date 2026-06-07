@@ -155,6 +155,7 @@ class _ProjectBucket extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final counts = projectGroupCounts(tasks);
+    final allDone = counts.total > 0 && counts.open == 0;
 
     return LzCard(
       padding: EdgeInsets.zero,
@@ -176,7 +177,7 @@ class _ProjectBucket extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    ProjectColorDot(hex: project?.color, size: 12),
+                    ProjectColorDot(hex: project?.color, size: 10),
                     const SizedBox(width: AppSpacing.md),
                     Expanded(
                       child: Text(
@@ -189,19 +190,20 @@ class _ProjectBucket extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: AppSpacing.sm),
-                    Text(
-                      '${counts.open}/${counts.total}',
-                      style: AppText.caption.copyWith(
+                    _CountBadge(
+                      open: counts.open,
+                      total: counts.total,
+                      allDone: allDone,
+                    ),
+                    const SizedBox(width: AppSpacing.xs),
+                    AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: AppMotion.fast,
+                      child: const Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 20,
                         color: AppColors.textMuted,
                       ),
-                    ),
-                    const SizedBox(width: AppSpacing.sm),
-                    Icon(
-                      expanded
-                          ? Icons.keyboard_arrow_up
-                          : Icons.keyboard_arrow_down,
-                      size: 20,
-                      color: AppColors.textMuted,
                     ),
                   ],
                 ),
@@ -249,6 +251,52 @@ class _ProjectBucket extends StatelessWidget {
                       ],
                     ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A compact tonal `open/total` badge for a project bucket header. Reads emerald
+/// with a leading check when the bucket is fully cleared (every task done).
+class _CountBadge extends StatelessWidget {
+  const _CountBadge({
+    required this.open,
+    required this.total,
+    required this.allDone,
+  });
+
+  final int open;
+  final int total;
+  final bool allDone;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = allDone ? AppColors.success : AppColors.textSecondary;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.sm,
+        vertical: 2,
+      ),
+      decoration: BoxDecoration(
+        color: AppColors.bgSurfaceElevated,
+        borderRadius: AppRadii.rPill,
+        border: Border.all(color: AppColors.borderSubtle),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (allDone) ...[
+            const Icon(Icons.check_rounded, size: 12, color: AppColors.success),
+            const SizedBox(width: AppSpacing.xs),
+          ],
+          Text(
+            '$open/$total',
+            style: AppText.caption.copyWith(
+              color: fg,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
         ],
       ),
     );

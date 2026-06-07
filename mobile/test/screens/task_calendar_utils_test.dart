@@ -174,6 +174,67 @@ void main() {
     });
   });
 
+  group('pickDayMarkerTasks', () {
+    test('open tasks lead, done tasks trail', () {
+      final tasks = [
+        _task('done1', status: 'done'),
+        _task('open1', status: 'todo'),
+        _task('done2', status: 'done'),
+        _task('open2', status: 'in_progress'),
+      ];
+
+      final picked = pickDayMarkerTasks(tasks, maxDots: 4);
+
+      // Both open ids come before both done ids.
+      expect(picked.shown.map((t) => t.id), ['open1', 'open2', 'done1', 'done2']);
+      expect(picked.overflow, 0);
+    });
+
+    test('caps at maxDots and counts the remainder as overflow', () {
+      final tasks = [
+        for (var i = 0; i < 5; i++) _task('o$i', status: 'todo'),
+      ];
+
+      final picked = pickDayMarkerTasks(tasks, maxDots: 3);
+
+      expect(picked.shown.length, 3);
+      expect(picked.overflow, 2);
+    });
+
+    test('overflow respects open-first ordering (open shown before done)', () {
+      final tasks = [
+        _task('done1', status: 'done'),
+        _task('done2', status: 'done'),
+        _task('open1', status: 'todo'),
+      ];
+
+      final picked = pickDayMarkerTasks(tasks, maxDots: 2);
+
+      // The single open task is shown first; one done task overflows.
+      expect(picked.shown.map((t) => t.id), ['open1', 'done1']);
+      expect(picked.overflow, 1);
+    });
+
+    test('empty day yields no dots and no overflow', () {
+      final picked = pickDayMarkerTasks(const [], maxDots: 3);
+      expect(picked.shown, isEmpty);
+      expect(picked.overflow, 0);
+    });
+
+    test('does not mutate the input list', () {
+      final tasks = [
+        _task('done1', status: 'done'),
+        _task('open1', status: 'todo'),
+      ];
+      final before = List.of(tasks);
+
+      pickDayMarkerTasks(tasks, maxDots: 3);
+
+      // Input order is untouched (a fresh ordered list is returned).
+      expect(tasks.map((t) => t.id), before.map((t) => t.id));
+    });
+  });
+
   group('colorForTask', () {
     const fallback = Color(0xFF123456);
 

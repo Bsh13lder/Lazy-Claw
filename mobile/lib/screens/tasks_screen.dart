@@ -639,7 +639,7 @@ class _TaskSectionState extends State<_TaskSection> {
         : null;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
+      padding: const EdgeInsets.only(bottom: AppSpacing.lg),
       child: LzSection(
         title: widget.section.label,
         action: Row(

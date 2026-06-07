@@ -236,6 +236,8 @@ from lazyclaw.gateway.routes.goals import router as goals_router  # noqa: E402
 app.include_router(goals_router)
 app.include_router(mobile_apk_router)
 app.include_router(mobile_settings_router)
+from lazyclaw.gateway.routes.notifications import router as notifications_router  # noqa: E402
+app.include_router(notifications_router)
 
 
 class ChatRequest(BaseModel):

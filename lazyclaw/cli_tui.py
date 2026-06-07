@@ -1666,6 +1666,7 @@ class LazyClawApp(App):
                 self._telegram_notifier = TelegramNotifier(
                     bot=telegram._app.bot,
                     admin_chat_id_fn=lambda: telegram._admin_chat_id,
+                    config=self._config,
                 )
                 # Wire into TaskRunner so even tasks with no explicit callback
                 # (e.g. run_background skill) still notify Telegram
@@ -1717,6 +1718,7 @@ class LazyClawApp(App):
                         admin_chat_id_fn=lambda: _tg_ref._admin_chat_id,
                         prefix=prefix,
                         icon=icon,
+                        config=self._config,
                     )
 
                 notifier_factory = _make_prefixed_notifier

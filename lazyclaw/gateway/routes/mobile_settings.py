@@ -3,8 +3,10 @@
 Provides compact GET/POST endpoints for the LazyClaw mobile app to read and
 write the two most common settings:
 
-  GET  /api/settings/eco    → {mode, modes, brain, worker, fallback}
-  POST /api/settings/eco    → {mode: "HYBRID"} → same shape back
+  GET  /api/settings/eco           → {mode, modes, brain, worker, fallback}
+  POST /api/settings/eco           → {mode: "HYBRID"} → same shape back
+  GET  /api/settings/notifications → {channel}
+  POST /api/settings/notifications → {channel: "app"} → {channel} back
 
 These wrap the existing /api/eco/settings and /api/permissions/* machinery
 without duplicating any logic. The web app continues to use the richer
@@ -21,6 +23,11 @@ from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.llm.eco_router import VALID_MODES
 from lazyclaw.llm.eco_settings import get_eco_settings, update_eco_settings
 from lazyclaw.llm.model_registry import MODE_MODELS
+from lazyclaw.notifications.channel import (
+    VALID_CHANNELS,
+    get_notification_channel,
+    set_notification_channel,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["mobile-settings"])
 
@@ -116,3 +123,50 @@ async def set_eco_mode(
         return {"success": False, "error": str(exc)}
 
     return {"success": True, "data": _build_eco_summary(new_eco)}
+
+
+# ── Notification channel (telegram | app | both) ─────────────────────────
+
+
+class SetNotificationChannelRequest(BaseModel):
+    channel: str  # validated against VALID_CHANNELS
+
+
+@router.get("/notifications")
+async def get_notification_channel_route(
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Read the per-user notification delivery channel.
+
+    Returns:
+        {"success": true, "data": {"channel": "telegram"}}
+
+    ``channel`` ∈ {"telegram", "app", "both"} (default "telegram").
+    """
+    channel = await get_notification_channel(config, user.id)
+    return {"success": True, "data": {"channel": channel}}
+
+
+@router.post("/notifications")
+async def set_notification_channel_route(
+    body: SetNotificationChannelRequest,
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Set the notification delivery channel.
+
+    Accepts: {"channel": "app"}  (telegram | app | both, case-insensitive)
+    Rejects invalid values with 200 success=false + error message.
+    """
+    try:
+        channel = await set_notification_channel(config, user.id, body.channel)
+    except ValueError:
+        return {
+            "success": False,
+            "error": (
+                f"Invalid channel: {body.channel!r}. "
+                f"Valid channels: {', '.join(VALID_CHANNELS)}"
+            ),
+        }
+    return {"success": True, "data": {"channel": channel}}

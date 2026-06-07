@@ -267,6 +267,32 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("progress_templates table migration skipped", exc_info=True)
 
+        # ── In-app notification feed (feat/flutter-mobile) ────────────────
+        # Mirrors what is (or would have been) pushed to Telegram so the
+        # mobile app can pull server-originated notifications it hasn't seen
+        # yet via GET /api/notifications?since=. id/kind/created_at are
+        # PLAINTEXT (needed for the since-query + client type rendering);
+        # title/body are AES-256-GCM encrypted (user content). Created here
+        # (not schema.sql) so upgrading installs pick it up — same rationale
+        # as progress_templates above.
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS notifications ("
+                "id TEXT PRIMARY KEY, "
+                "user_id TEXT NOT NULL REFERENCES users(id), "
+                "kind TEXT NOT NULL DEFAULT 'info', "
+                "title TEXT, "
+                "body TEXT, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now'))"
+                ")"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notifications_user_created "
+                "ON notifications(user_id, created_at)"
+            )
+        except Exception:
+            logger.debug("notifications table migration skipped", exc_info=True)
+
         # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
         # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.
         # Phase G adds chunk-level embeddings + chunk-level BM25.

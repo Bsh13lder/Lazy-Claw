@@ -49,8 +49,10 @@ void main() {
   setUpAll(() => sqfliteFfiInit());
 
   group('DB schema version', () {
-    test('is bumped to 4 for the project color column', () {
-      expect(kAppDbVersion, 4);
+    test('is at least 4 (the version that added the project color column)', () {
+      // Color landed at v4; later migrations (e.g. v5 is_favorite) keep bumping
+      // the version, so assert the floor rather than an exact value.
+      expect(kAppDbVersion, greaterThanOrEqualTo(4));
     });
   });
 

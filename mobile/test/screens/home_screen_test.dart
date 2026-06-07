@@ -146,6 +146,10 @@ class _Fixture {
 Future<_Fixture> _mkFixture({
   List<Task> tasks = const [],
   List<({double budget, double? spent, String currency})> projects = const [],
+  // Favorited (starred) projects, inserted with is_favorite = 1 so the Home
+  // "Favorites" section renders them. Each carries its own display name.
+  List<({String name, double budget, String currency})> favoriteProjects =
+      const [],
 }) async {
   const now = '2026-01-01T00:00:00';
   final db = await _openMemDb();
@@ -176,6 +180,24 @@ Future<_Fixture> _mkFixture({
       'status': 'active',
       'spent': p.spent ?? 0.0,
       'remaining': p.budget - (p.spent ?? 0.0),
+      'created_at': now,
+      'updated_at': now,
+      'dirty': 0,
+      'deleted': 0,
+    });
+  }
+
+  for (var i = 0; i < favoriteProjects.length; i++) {
+    final p = favoriteProjects[i];
+    await db.insert('project_cache', {
+      'id': 'fav_$i',
+      'name': p.name,
+      'budget': p.budget,
+      'currency': p.currency,
+      'status': 'active',
+      'is_favorite': 1,
+      'spent': 0.0,
+      'remaining': p.budget,
       'created_at': now,
       'updated_at': now,
       'dirty': 0,
@@ -369,6 +391,35 @@ void main() {
         await tester.pumpWidget(_buildApp(f));
         await _pumpHome(tester);
         expect(find.byType(LzProgressBar), findsOneWidget);
+      });
+    });
+
+    testWidgets('hides the Favorites section when no project is starred',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(
+          projects: [(budget: 600, spent: 100.0, currency: 'EUR')],
+        );
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        // LzSection renders the title uppercased.
+        expect(find.text('FAVORITES'), findsNothing);
+      });
+    });
+
+    testWidgets('renders the Favorites section for a starred project',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(
+          favoriteProjects: [
+            (name: 'Nima Pinned', budget: 800, currency: 'EUR'),
+          ],
+        );
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        // LzSection renders the title uppercased.
+        expect(find.text('FAVORITES'), findsOneWidget);
+        expect(find.text('Nima Pinned'), findsOneWidget);
       });
     });
 

@@ -395,7 +395,8 @@ class BudgetsDao {
     return (await getProject(projectId))!;
   }
 
-  /// Patch an existing project locally (name/budget/description/status/color).
+  /// Patch an existing project locally
+  /// (name/budget/description/status/color/isFavorite).
   /// Bumps updated_at + dirty and enqueues an `update`.
   Future<Project?> applyLocalProjectUpdate(
     String id, {
@@ -404,6 +405,7 @@ class BudgetsDao {
     String? description,
     String? status,
     String? color,
+    bool? isFavorite,
   }) async {
     final existing = await getProject(id);
     if (existing == null) return null;
@@ -415,8 +417,11 @@ class BudgetsDao {
       description: description,
       status: status,
       color: color,
+      isFavorite: isFavorite,
     );
 
+    // Shared scalar fields (String/num) — safe verbatim in BOTH the SQLite
+    // cache row AND the JSON outbox payload.
     final patch = <String, dynamic>{
       'name': ?name,
       'budget': ?budget,
@@ -425,11 +430,23 @@ class BudgetsDao {
       'color': ?color,
     };
 
+    // is_favorite needs two shapes: the SQLite cache stores an INTEGER 0/1
+    // (sqflite rejects a raw Dart bool), while the server PATCH body wants a
+    // JSON bool. Build the two patches from the shared scalar base.
+    final cachePatch = <String, dynamic>{
+      ...patch,
+      if (isFavorite != null) 'is_favorite': isFavorite ? 1 : 0,
+    };
+    final outboxPatch = <String, dynamic>{
+      ...patch,
+      'is_favorite': ?isFavorite,
+    };
+
     await _db.transaction((txn) async {
       await txn.update(
         'project_cache',
         {
-          ...patch,
+          ...cachePatch,
           'updated_at': now,
           'dirty': 1,
         },
@@ -441,7 +458,7 @@ class BudgetsDao {
         BudgetsOutboxOp.update,
         kProjectEntity,
         id,
-        {'id': id, ...patch},
+        {'id': id, ...outboxPatch},
         now,
       );
     });
@@ -845,6 +862,8 @@ class BudgetsDao {
         description: row['description'] as String?,
         lazybrainNoteId: row['lazybrain_note_id'] as String?,
         color: row['color'] as String?,
+        // Stored as INTEGER 0/1; treat anything non-zero as favorited.
+        isFavorite: ((row['is_favorite'] as num?)?.toInt() ?? 0) != 0,
         spent: (row['spent'] as num?)?.toDouble(),
         remaining: (row['remaining'] as num?)?.toDouble(),
       );
@@ -859,6 +878,8 @@ class BudgetsDao {
         'description': p.description,
         'lazybrain_note_id': p.lazybrainNoteId,
         'color': p.color,
+        // sqflite has no bool column type — persist as INTEGER 0/1.
+        'is_favorite': p.isFavorite ? 1 : 0,
         'spent': p.spent,
         'remaining': p.remaining,
       };

@@ -209,6 +209,13 @@ async def init_db(config: Config) -> None:
             # Plaintext like status/budget (not sensitive); NULL = no color.
             # Exposed via list + /api/budgets/changes for the offline sync pull.
             ("projects", "color", "ALTER TABLE projects ADD COLUMN color TEXT"),
+            # Per-project favorite flag (feat/flutter-mobile) — pin important
+            # projects so they surface in the mobile Home "Favorites" section
+            # while the main Expenses list stays full. Stored PLAINTEXT as an
+            # INTEGER 0/1 (not sensitive); default 0 so pre-migration rows are
+            # un-favorited. Exposed via list + /api/budgets/changes for the
+            # offline sync pull, exactly like `color`.
+            ("projects", "is_favorite", "ALTER TABLE projects ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
         ]
         for table, column, sql in migrations:
             try:

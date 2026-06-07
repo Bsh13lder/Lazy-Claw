@@ -18,7 +18,9 @@ import 'uuid.dart';
 ///     are offline-first too (outbox/sync_state/conflicts are already generic).
 /// v4: adds `project_cache.color` (a `"#RRGGBB"` hex string, nullable) so a
 ///     user-chosen per-project accent round-trips through the budgets sync.
-const int kAppDbVersion = 4;
+/// v5: adds `project_cache.is_favorite` (INTEGER 0/1, default 0) so a pinned
+///     project surfaces in the Home "Favorites" section + round-trips sync.
+const int kAppDbVersion = 5;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -122,6 +124,7 @@ const List<String> kAppDbSchema = [
     description TEXT,
     lazybrain_note_id TEXT,
     color TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0,
     spent REAL,
     remaining REAL,
     created_at TEXT,
@@ -189,6 +192,17 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
     final hasColor = cols.any((c) => c['name'] == 'color');
     if (!hasColor) {
       await db.execute('ALTER TABLE project_cache ADD COLUMN color TEXT');
+    }
+  }
+  // v4 → v5: add the per-project favorite flag. Idempotent — only ALTER when the
+  // column is genuinely absent so re-running the migration can't throw.
+  if (oldVersion < 5) {
+    final cols = await db.rawQuery("PRAGMA table_info('project_cache')");
+    final hasFavorite = cols.any((c) => c['name'] == 'is_favorite');
+    if (!hasFavorite) {
+      await db.execute(
+        'ALTER TABLE project_cache ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0',
+      );
     }
   }
 }

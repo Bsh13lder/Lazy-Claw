@@ -169,6 +169,45 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
+  /// Set a project's total [budget] amount (optimistic). The web equivalent of
+  /// the project "edit budget" control — replays as a PATCH that overwrites the
+  /// project total. Returns true on success, false (with `state.error` set) on
+  /// a local throw.
+  Future<bool> setProjectBudget(String id, double budget) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectUpdate(id, budget: budget);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Flip a project's favorite flag (optimistic). Reads the current value from
+  /// the loaded state, writes the inverse through the DAO, and best-effort
+  /// syncs. A favorited project surfaces in the Home "Favorites" section.
+  /// Returns true on success, false (with `state.error` set) on a local throw.
+  Future<bool> toggleFavorite(String id) async {
+    final match = state.projects.where((p) => p.id == id).firstOrNull;
+    if (match == null) return false;
+    final next = !match.isFavorite;
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectUpdate(id, isFavorite: next);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
   Future<bool> addExpense(
     String projectId,
     double amount,

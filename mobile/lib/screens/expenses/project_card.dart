@@ -18,6 +18,7 @@ class ProjectCard extends StatefulWidget {
     required this.pendingSync,
     required this.onDelete,
     this.onEdit,
+    this.onToggleFavorite,
   });
 
   final Project project;
@@ -27,9 +28,12 @@ class ProjectCard extends StatefulWidget {
   final bool pendingSync;
   final VoidCallback onDelete;
 
-  /// Opens the manage-project sheet (rename / color / delete). When null the
-  /// edit affordance is hidden.
+  /// Opens the manage-project sheet (rename / budget / color / delete). When
+  /// null the edit affordance is hidden.
   final VoidCallback? onEdit;
+
+  /// Flips the project's favorite flag. When null the star affordance is hidden.
+  final VoidCallback? onToggleFavorite;
 
   @override
   State<ProjectCard> createState() => _ProjectCardState();
@@ -127,6 +131,28 @@ class _ProjectCardState extends State<ProjectCard> {
                                 : Icons.keyboard_arrow_down_rounded,
                             color: AppColors.textMuted,
                             size: 20,
+                          ),
+                        ],
+                        if (widget.onToggleFavorite != null) ...[
+                          const SizedBox(width: AppSpacing.xs),
+                          GestureDetector(
+                            onTap: widget.onToggleFavorite,
+                            behavior: HitTestBehavior.opaque,
+                            child: Padding(
+                              padding: const EdgeInsets.all(AppSpacing.xs),
+                              child: Icon(
+                                project.isFavorite
+                                    ? Icons.star_rounded
+                                    : Icons.star_outline_rounded,
+                                color: project.isFavorite
+                                    ? AppColors.warn
+                                    : AppColors.textMuted,
+                                size: 20,
+                                semanticLabel: project.isFavorite
+                                    ? 'Unfavorite project'
+                                    : 'Favorite project',
+                              ),
+                            ),
                           ),
                         ],
                         if (widget.onEdit != null) ...[

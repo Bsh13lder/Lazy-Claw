@@ -499,12 +499,16 @@ class BudgetsSync {
       'status',
       'description',
       'color',
+      'is_favorite',
     ];
     final serverJson = serverProject.toJson();
     var any = false;
     for (final col in fields) {
-      final localVal = localRow[col]?.toString();
-      final serverVal = serverJson[col]?.toString();
+      // Canonicalize so the local cache's INTEGER 0/1 for `is_favorite` never
+      // reads as a conflict against the server model's JSON bool ("1" vs
+      // "true"). Other fields pass through unchanged.
+      final localVal = _canonField(col, localRow[col]);
+      final serverVal = _canonField(col, serverJson[col]);
       if (localVal != serverVal) {
         any = true;
         await txn.logConflict(
@@ -517,6 +521,18 @@ class BudgetsSync {
       }
     }
     return any;
+  }
+
+  /// Normalize a field value for cross-shape comparison. `is_favorite` is stored
+  /// as INTEGER 0/1 locally but as a JSON bool on the server model, so reduce
+  /// both to a canonical `'true'`/`'false'`. Everything else stringifies as-is.
+  static String? _canonField(String col, Object? raw) {
+    if (raw == null) return null;
+    if (col == 'is_favorite') {
+      final s = raw.toString().toLowerCase();
+      return (s == '1' || s == 'true') ? 'true' : 'false';
+    }
+    return raw.toString();
   }
 
   // ── Expense merge (LWW) ────────────────────────────────────────────────────

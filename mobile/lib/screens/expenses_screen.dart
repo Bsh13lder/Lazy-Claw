@@ -108,6 +108,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
       builder: (_) => EditProjectSheet(
         project: project,
         onRename: (name) => notifier.renameProject(project.id, name),
+        onSetBudget: (budget) => notifier.setProjectBudget(project.id, budget),
         onSetColor: (color) => notifier.setProjectColor(project.id, color),
         onDelete: () async {
           await notifier.deleteProject(project.id);
@@ -176,7 +177,7 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
     return AppBar(
       backgroundColor: AppColors.bgBase,
       surfaceTintColor: Colors.transparent,
-      title: Text('Money', style: AppText.titleL),
+      title: Text('Expenses', style: AppText.titleL),
       actions: [
         IconButton(
           icon: const Icon(Icons.create_new_folder_outlined),
@@ -272,6 +273,8 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
           onDeleteProject: (id) =>
               ref.read(budgetsProvider.notifier).deleteProject(id),
           onEditProject: _showEditProject,
+          onToggleFavorite: (id) =>
+              ref.read(budgetsProvider.notifier).toggleFavorite(id),
           onRefresh: _refresh,
         ),
         _LedgerTab(
@@ -293,12 +296,14 @@ class _OverviewTab extends StatelessWidget {
     required this.state,
     required this.onDeleteProject,
     required this.onEditProject,
+    required this.onToggleFavorite,
     required this.onRefresh,
   });
 
   final BudgetsState state;
   final void Function(String id) onDeleteProject;
   final void Function(Project project) onEditProject;
+  final void Function(String id) onToggleFavorite;
   final Future<void> Function() onRefresh;
 
   @override
@@ -338,6 +343,7 @@ class _OverviewTab extends StatelessWidget {
                 pendingSync: state.dirtyProjectIds.contains(p.id),
                 onDelete: () => onDeleteProject(p.id),
                 onEdit: () => onEditProject(p),
+                onToggleFavorite: () => onToggleFavorite(p.id),
               );
             }),
             const SizedBox(height: AppSpacing.xxxl),

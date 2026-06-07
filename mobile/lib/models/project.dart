@@ -18,6 +18,11 @@ class Project {
   /// sync alongside the rest of the project fields.
   final String? color;
 
+  /// Whether the user pinned this project as a favorite. Favorited projects
+  /// surface in the Home "Favorites" section while the full list stays in the
+  /// Expenses tab. Round-trips through the budgets offline sync.
+  final bool isFavorite;
+
   /// Rolled-up totals — present on list/report responses, null otherwise.
   final double? spent;
   final double? remaining;
@@ -32,6 +37,7 @@ class Project {
     this.description,
     this.lazybrainNoteId,
     this.color,
+    this.isFavorite = false,
     this.spent,
     this.remaining,
   });
@@ -66,6 +72,7 @@ class Project {
       description: _str(json['description']),
       lazybrainNoteId: _str(json['lazybrain_note_id']),
       color: _str(json['color']),
+      isFavorite: _bool(json['is_favorite']),
       spent: _double(json['spent']),
       remaining: _double(json['remaining']),
     );
@@ -81,6 +88,7 @@ class Project {
         'description': description,
         'lazybrain_note_id': lazybrainNoteId,
         'color': color,
+        'is_favorite': isFavorite,
         'spent': spent,
         'remaining': remaining,
       };
@@ -95,6 +103,7 @@ class Project {
     String? description,
     String? lazybrainNoteId,
     String? color,
+    bool? isFavorite,
     double? spent,
     double? remaining,
   }) =>
@@ -108,6 +117,7 @@ class Project {
         description: description ?? this.description,
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,
         color: color ?? this.color,
+        isFavorite: isFavorite ?? this.isFavorite,
         spent: spent ?? this.spent,
         remaining: remaining ?? this.remaining,
       );
@@ -135,4 +145,15 @@ double? _double(dynamic v) {
   if (v is double) return v;
   if (v is int) return v.toDouble();
   return double.tryParse(v.toString());
+}
+
+/// Coerce a JSON/SQLite favorite flag to a bool. The server sends a JSON bool,
+/// the local cache stores an INTEGER 0/1, and a pre-migration row is null —
+/// all map cleanly to false unless explicitly truthy.
+bool _bool(dynamic v) {
+  if (v == null) return false;
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  final s = v.toString().toLowerCase();
+  return s == 'true' || s == '1';
 }

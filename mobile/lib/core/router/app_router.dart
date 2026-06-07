@@ -31,7 +31,7 @@ class _AuthListenable extends ChangeNotifier {
 
 // ── Tab configuration ──────────────────────────────────────────────────────
 //
-// 6 destinations: Home · Chat · Tasks(+Notes) · Money(expenses) · Documents ·
+// 6 destinations: Home · Chat · Tasks(+Notes) · Expenses · Documents ·
 // Settings. Notes now lives as a top segment INSIDE the Tasks tab; the freed
 // slot hosts the Documents tab (Sheets/Docs/PDF).
 // The branch order here MUST match the order of [StatefulShellBranch]es below
@@ -41,7 +41,7 @@ const _tabs = <_Tab>[
   _Tab(path: '/home', label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home),
   _Tab(path: '/chat', label: 'Chat', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble),
   _Tab(path: '/tasks', label: 'Tasks', icon: Icons.check_circle_outline, activeIcon: Icons.check_circle),
-  _Tab(path: '/expenses', label: 'Money', icon: Icons.account_balance_wallet_outlined, activeIcon: Icons.account_balance_wallet),
+  _Tab(path: '/expenses', label: 'Expenses', icon: Icons.account_balance_wallet_outlined, activeIcon: Icons.account_balance_wallet),
   _Tab(path: '/documents', label: 'Docs', icon: Icons.folder_outlined, activeIcon: Icons.folder),
   _Tab(path: '/settings', label: 'Settings', icon: Icons.settings_outlined, activeIcon: Icons.settings),
 ];

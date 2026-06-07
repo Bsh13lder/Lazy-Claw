@@ -4,11 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../chat/chat_message.dart';
+import '../models/expense.dart';
 import '../models/project.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../ui/ui.dart';
+import 'expenses/money_helpers.dart';
+import 'expenses/project_color_picker.dart';
 
 // The chat provider is defined in chat_screen.dart and kept alive by
 // StatefulShellRoute. We re-read it here (same ProviderScope) so the Home
@@ -123,6 +126,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               onTap: () => context.go('/expenses'),
             ),
             const SizedBox(height: AppSpacing.xl),
+
+            // ── FAVORITES section ─────────────────────────────────────────
+            // Hidden entirely when no project is starred, so the dashboard
+            // stays lean for users who don't use favorites.
+            _FavoritesSection(
+              budgetsState: budgetsState,
+              onTap: () => context.go('/expenses'),
+            ),
 
             // ── RECENT CHAT section ───────────────────────────────────────
             _RecentChatSection(
@@ -476,6 +487,173 @@ class _BudgetSection extends StatelessWidget {
 
   static String _fmt(double v) =>
       v >= 1000 ? '${(v / 1000).toStringAsFixed(1)}k' : v.toStringAsFixed(0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FAVORITES — starred projects with budget bar + recent expenses
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lists the user's favorited (starred) projects so the important ones stay
+/// glanceable on Home while the full set lives in the Expenses tab. Each entry
+/// shows a traffic-light budget bar (when a budget is set) plus the two most
+/// recent expenses. Renders nothing at all when no project is favorited.
+class _FavoritesSection extends StatelessWidget {
+  const _FavoritesSection({required this.budgetsState, required this.onTap});
+
+  final BudgetsState budgetsState;
+  final VoidCallback onTap;
+
+  static const int _maxExpenses = 2;
+
+  @override
+  Widget build(BuildContext context) {
+    final favorites = budgetsState.projects
+        .where((p) => p.isFavorite && !p.isArchived)
+        .toList();
+    if (favorites.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      children: [
+        LzSection(
+          title: 'Favorites',
+          action: GestureDetector(
+            onTap: onTap,
+            child: Text(
+              'See all →',
+              style: AppText.caption.copyWith(color: AppColors.accent),
+            ),
+          ),
+          child: Column(
+            children: [
+              for (var i = 0; i < favorites.length; i++) ...[
+                if (i > 0) const SizedBox(height: AppSpacing.sm),
+                _FavoriteProjectCard(
+                  project: favorites[i],
+                  expenses: budgetsState.expenses
+                      .where((e) =>
+                          e.projectId == favorites[i].id && !e.isVoid)
+                      .take(_maxExpenses)
+                      .toList(),
+                  onTap: onTap,
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xl),
+      ],
+    );
+  }
+}
+
+class _FavoriteProjectCard extends StatelessWidget {
+  const _FavoriteProjectCard({
+    required this.project,
+    required this.expenses,
+    required this.onTap,
+  });
+
+  final Project project;
+
+  /// Up to a couple of this project's most-recent expenses (newest first).
+  final List<Expense> expenses;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final budget = project.budget;
+    // Derive spend from the cached expense set so the bar agrees with the
+    // Expenses tab even offline. (`expenses` here is truncated for display, so
+    // pull the project's total from the project rollup when present.)
+    final spent = project.spent ?? 0.0;
+    final fraction = budget > 0 ? (spent / budget).clamp(0.0, 1.0) : 0.0;
+    final overBudget = budget > 0 && spent > budget;
+
+    return LzCard(
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              ProjectColorDot(hex: project.color),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  project.name,
+                  style: AppText.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const Icon(Icons.star_rounded, size: 16, color: AppColors.warn),
+            ],
+          ),
+          if (budget > 0) ...[
+            const SizedBox(height: AppSpacing.sm),
+            LzProgressBar(value: fraction, height: 6, trafficLight: true),
+            const SizedBox(height: AppSpacing.xs),
+            Row(
+              children: [
+                Text(
+                  fmtMoney(project.currency, spent),
+                  style: AppText.caption.copyWith(
+                    color: AppColors.trafficLight(fraction),
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  overBudget
+                      ? '${fmtMoney(project.currency, spent - budget)} over'
+                      : '${fmtMoney(project.currency, budget - spent)} left',
+                  style: AppText.caption.copyWith(
+                    color: overBudget
+                        ? AppColors.error
+                        : AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ] else ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              '${fmtMoney(project.currency, spent)} spent · no budget',
+              style: AppText.caption.copyWith(color: AppColors.textMuted),
+            ),
+          ],
+          if (expenses.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm),
+            for (final e in expenses)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        e.description?.trim().isNotEmpty == true
+                            ? e.description!.trim()
+                            : (e.vendor?.trim().isNotEmpty == true
+                                ? e.vendor!.trim()
+                                : 'Expense'),
+                        style: AppText.caption
+                            .copyWith(color: AppColors.textSecondary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    Text(
+                      fmtMoney(e.currency, e.amount),
+                      style: AppText.caption,
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

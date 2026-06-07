@@ -39,6 +39,9 @@ class CreateProjectBody(BaseModel):
     # Optional calendar color, e.g. "#4F8AF4". Validated lenient server-side:
     # a non-#RRGGBB value is cleared to None (never 500s).
     color: str | None = Field(default=None, max_length=16)
+    # Optional favorite flag — pins the project into the mobile Home
+    # "Favorites" section. None = leave as-is on an upsert.
+    is_favorite: bool | None = None
 
 
 class SetBudgetBody(BaseModel):
@@ -55,6 +58,9 @@ class UpdateProjectBody(BaseModel):
     # Optional calendar color, e.g. "#4F8AF4". Validated lenient server-side:
     # a non-#RRGGBB value is cleared to None (never 500s).
     color: str | None = Field(default=None, max_length=16)
+    # Optional favorite flag — toggled from the mobile star control. None means
+    # "leave unchanged" (dropped by the route's None-filter); True/False set it.
+    is_favorite: bool | None = None
 
 
 class CreateExpenseBody(BaseModel):
@@ -124,7 +130,7 @@ async def create_project_route(
     project = await store.create_project(
         _config, user.id, body.name,
         budget=body.budget, currency=body.currency, description=body.description,
-        color=body.color, project_id=body.id or None,
+        color=body.color, is_favorite=body.is_favorite, project_id=body.id or None,
     )
     return {"project": project}
 

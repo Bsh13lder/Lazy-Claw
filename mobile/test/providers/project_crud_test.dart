@@ -97,6 +97,7 @@ class _RecordingDao extends BudgetsDao {
     String? description,
     String? status,
     String? color,
+    bool? isFavorite,
   }) async {
     updateCalls.add({
       'id': id,
@@ -105,6 +106,7 @@ class _RecordingDao extends BudgetsDao {
       'description': description,
       'status': status,
       'color': color,
+      'isFavorite': isFavorite,
     });
     if (throwOnUpdate) throw StateError('update boom');
     return null;

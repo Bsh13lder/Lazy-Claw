@@ -37,6 +37,9 @@ PROJECT_COLUMNS = [
     # "#4F8AF4" (or NULL) so the mobile calendar can color-code projects +
     # tasks. Plaintext like status/budget (not sensitive).
     "color",
+    # Per-project favorite flag (feat/flutter-mobile) — INTEGER 0/1, plaintext.
+    # Pins a project into the mobile Home "Favorites" section. Default 0.
+    "is_favorite",
     "lazybrain_note_id", "created_at", "updated_at",
     # Offline-sync column (feat/flutter-mobile) — soft-delete tombstone.
     # NULL = live; non-NULL = deleted. Exposed via /api/budgets/changes.
@@ -94,6 +97,16 @@ def _clean_color(value: str | None) -> str | None:
     return candidate if _HEX_COLOR_RE.match(candidate) else None
 
 
+def _clean_favorite(value) -> int:
+    """Normalize a favorite flag to a stored INTEGER 0/1.
+
+    Lenient like ``_clean_color``: any truthy value → 1, anything else → 0, so a
+    bad payload can never 500 a project write. Stored as int (not bool) so the
+    column stays a plain SQLite INTEGER like ``status``/``budget``.
+    """
+    return 1 if value else 0
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -115,7 +128,12 @@ def _row_to_dict(row, columns: list[str], encrypted: frozenset[str], key: bytes)
 
 
 def _project_to_dict(row, key: bytes) -> dict:
-    return _row_to_dict(row, PROJECT_COLUMNS, ENCRYPTED_PROJECT_FIELDS, key)
+    result = _row_to_dict(row, PROJECT_COLUMNS, ENCRYPTED_PROJECT_FIELDS, key)
+    # Serialize the stored INTEGER 0/1 as a JSON boolean so the web/mobile
+    # clients get a real ``true``/``false`` (NULL on a pre-migration row → False).
+    if "is_favorite" in result:
+        result["is_favorite"] = bool(result["is_favorite"])
+    return result
 
 
 def _expense_to_dict(row, key: bytes) -> dict:
@@ -246,15 +264,21 @@ async def create_project(
     currency: str = "EUR",
     description: str | None = None,
     color: str | None = None,
+    is_favorite: bool | None = None,
     project_id: str | None = None,
 ) -> dict:
     """Create or upsert a project by ``name_key``. Idempotent against
     category-typo duplicates (case/whitespace). If the project already exists,
-    its budget/currency/description/color are updated when explicitly provided.
-    Creates the ``<Name> Project`` LazyBrain note on first insert.
+    its budget/currency/description/color/is_favorite are updated when
+    explicitly provided. Creates the ``<Name> Project`` LazyBrain note on first
+    insert.
 
     ``color``: optional ``#RRGGBB`` hex string (or None) for calendar
     color-coding. Invalid values are cleared to None (never raises).
+
+    ``is_favorite``: optional bool pinning the project into the mobile Home
+    "Favorites" section. ``None`` means "leave as-is" on an upsert; a fresh
+    insert defaults to un-favorited.
 
     ``project_id``: optional client-minted id for offline-first idempotent
     replay. When provided, the server uses it as the project id. A second POST
@@ -290,6 +314,8 @@ async def create_project(
             updates["description"] = description
         if color is not None:
             updates["color"] = color
+        if is_favorite is not None:
+            updates["is_favorite"] = is_favorite
         if not existing.get("lazybrain_note_id"):
             note_id = await _ensure_project_note(
                 config, user_id, name, budget or existing.get("budget") or 0.0, currency,
@@ -305,15 +331,18 @@ async def create_project(
     now = _now()
     note_id = await _ensure_project_note(config, user_id, name, budget, currency)
 
+    favorite_int = _clean_favorite(is_favorite)
     async with db_session(config) as db:
         await db.execute(
             "INSERT INTO projects "
             "(id, user_id, name, name_key, budget, currency, status, "
-            "description, color, lazybrain_note_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+            "description, color, is_favorite, lazybrain_note_id, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
             (
                 project_id, user_id, encrypt(name, key), name_key,
-                budget, currency, _enc(description, key), color, note_id, now, now,
+                budget, currency, _enc(description, key), color, favorite_int,
+                note_id, now, now,
             ),
         )
         await db.commit()
@@ -322,7 +351,8 @@ async def create_project(
     return {
         "id": project_id, "user_id": user_id, "name": name, "name_key": name_key,
         "budget": budget, "currency": currency, "status": "active",
-        "description": description, "color": color, "lazybrain_note_id": note_id,
+        "description": description, "color": color,
+        "is_favorite": bool(favorite_int), "lazybrain_note_id": note_id,
         "created_at": now, "updated_at": now, "deleted_at": None,
     }
 
@@ -466,13 +496,17 @@ async def update_project(
     note when ``name`` changes so wikilinks re-resolve via the new title.
 
     A ``color`` field is normalized to ``#RRGGBB`` (invalid → NULL) so a bad
-    color clears instead of 500-ing the update."""
+    color clears instead of 500-ing the update. An ``is_favorite`` field is
+    normalized to a stored INTEGER 0/1."""
     if not fields:
         return False
 
     # Normalize color without mutating the caller's dict (immutable update).
     if "color" in fields:
         fields = {**fields, "color": _clean_color(fields["color"])}
+    # Normalize the favorite flag to a stored INTEGER 0/1 (immutable update).
+    if "is_favorite" in fields:
+        fields = {**fields, "is_favorite": _clean_favorite(fields["is_favorite"])}
 
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []

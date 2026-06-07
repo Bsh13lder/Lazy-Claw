@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_quill/flutter_quill.dart' show FlutterQuillLocalizations;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/actions/app_actions.dart';
 import 'core/actions/deep_link_service.dart';
@@ -151,6 +152,10 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
       title: 'LazyClaw',
       theme: buildAppTheme(),
       routerConfig: router,
+      // flutter_quill (native Docs editor) needs its localization delegates +
+      // the Global* delegates it bundles for the editor/toolbar to render.
+      localizationsDelegates: FlutterQuillLocalizations.localizationsDelegates,
+      supportedLocales: FlutterQuillLocalizations.supportedLocales,
     );
   }
 }

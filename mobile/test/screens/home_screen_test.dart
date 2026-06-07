@@ -374,15 +374,57 @@ void main() {
       });
     });
 
-    testWidgets('shows "All clear" when no relevant tasks', (tester) async {
+    testWidgets('shows "All clear" only when there are zero open tasks',
+        (tester) async {
       await tester.runAsync(() async {
         final f = await _mkFixture(tasks: [
           _task(id: 'd1', status: 'done', dueDate: _today),
-          _task(id: 'f1', dueDate: _tomorrow),
+          _task(id: 'd2', status: 'done', dueDate: _yesterday),
         ]);
         await tester.pumpWidget(_buildApp(f));
         await _pumpHome(tester);
         expect(find.text('All clear'), findsOneWidget);
+      });
+    });
+
+    testWidgets('falls back to upcoming dated tasks when nothing is due now',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(tasks: [
+          _task(id: 'u1', title: 'Future thing', dueDate: _tomorrow),
+        ]);
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        // Not empty: the soonest upcoming task is surfaced under an "Upcoming"
+        // hint instead of "All clear".
+        expect(find.text('Future thing'), findsOneWidget);
+        expect(find.text('UPCOMING'), findsOneWidget);
+        expect(find.text('All clear'), findsNothing);
+      });
+    });
+
+    testWidgets('falls back to open undated tasks when none are dated',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(tasks: [
+          _task(id: 'n1', title: 'Someday task'), // no due date
+        ]);
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        expect(find.text('Someday task'), findsOneWidget);
+        expect(find.text('All clear'), findsNothing);
+      });
+    });
+
+    testWidgets('shows the time tag on a timed due-today task', (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(tasks: [
+          _task(id: 'tt1', title: 'Timed', dueDate: '${_today}T17:00:00'),
+        ]);
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        expect(find.text('Timed'), findsOneWidget);
+        expect(find.text('Today · 5:00 PM'), findsOneWidget);
       });
     });
 
@@ -409,10 +451,11 @@ void main() {
       });
     });
 
-    testWidgets('renders LzProgressBar for budget snapshot', (tester) async {
+    testWidgets('renders LzProgressBar for a favorite project budget',
+        (tester) async {
       await tester.runAsync(() async {
         final f = await _mkFixture(
-          projects: [(budget: 600, spent: 420.0, currency: 'EUR')],
+          favoriteProjects: [(name: 'Tracked', budget: 600, currency: 'EUR')],
         );
         await tester.pumpWidget(_buildApp(f));
         await _pumpHome(tester);
@@ -420,7 +463,7 @@ void main() {
       });
     });
 
-    testWidgets('hides the Favorites section when no project is starred',
+    testWidgets('shows a star-a-project prompt when no project is starred',
         (tester) async {
       await tester.runAsync(() async {
         final f = await _mkFixture(
@@ -428,8 +471,12 @@ void main() {
         );
         await tester.pumpWidget(_buildApp(f));
         await _pumpHome(tester);
+        // The Favorites section is the money surface and is ALWAYS present now.
         // LzSection renders the title uppercased.
-        expect(find.text('FAVORITES'), findsNothing);
+        expect(find.text('FAVORITES'), findsOneWidget);
+        // No grand total anywhere on Home — just a gentle nudge.
+        expect(find.text('Total spend'), findsNothing);
+        expect(find.textContaining('Star a project'), findsOneWidget);
       });
     });
 

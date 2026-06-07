@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../chat/chat_message.dart';
+import '../core/due_date.dart';
 import '../models/expense.dart';
 import '../models/project.dart';
 import '../models/task.dart';
@@ -23,8 +24,8 @@ import '../screens/chat_screen.dart' show chatControllerProvider;
 // Home dashboard
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The app's front door — a glanceable summary of today's tasks, this month's
-/// budget, the latest chat message, and quick-action buttons.
+/// The app's front door — a glanceable summary of today's tasks,
+/// favorite-project spend, the latest chat message, and quick-action buttons.
 ///
 /// Reads: [tasksProvider], [budgetsProvider], [reachableProvider],
 ///        [chatControllerProvider] (from chat_screen.dart).
@@ -121,16 +122,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: AppSpacing.xl),
 
-            // ── THIS MONTH section ────────────────────────────────────────
-            _BudgetSection(
-              budgetsState: budgetsState,
-              onTap: () => context.go('/expenses'),
-            ),
-            const SizedBox(height: AppSpacing.xl),
-
             // ── FAVORITES section ─────────────────────────────────────────
-            // Hidden entirely when no project is starred, so the dashboard
-            // stays lean for users who don't use favorites.
+            // The only money surface on Home: starred projects with their
+            // budget-vs-spend bar (no grand total). When nothing is starred it
+            // shows a gentle "star a project" prompt instead of a total.
             _FavoritesSection(
               budgetsState: budgetsState,
               onTap: () => context.go('/expenses'),
@@ -233,26 +228,57 @@ class _TodaySection extends StatelessWidget {
   }
 
   Widget _content() {
-    final relevant = _relevant(tasksState.tasks);
+    final tasks = tasksState.tasks;
 
-    if (relevant.isEmpty) {
-      return const LzCard(
-        child: LzEmptyState(
-          icon: Icons.check_circle_outline,
-          title: 'All clear',
-          hint: 'No overdue or due-today tasks.',
-        ),
-      );
-    }
+    // Tier 1 — the headline set: overdue + due today (overdue first).
+    final relevant = _relevant(tasks);
+    if (relevant.isNotEmpty) return _taskListCard(relevant);
 
-    final shown = relevant.take(_max).toList();
-    final extra = relevant.length - shown.length;
+    // Tier 2 — nothing due now: surface the soonest upcoming dated tasks so
+    // the card never looks empty for users who DO set due dates.
+    final upcoming = _upcoming(tasks);
+    if (upcoming.isNotEmpty) return _taskListCard(upcoming, hint: 'Upcoming');
+
+    // Tier 3 — no dated tasks at all: show a few open undated tasks so the
+    // card still has content for users who never set due dates.
+    final undated = _undatedOpen(tasks);
+    if (undated.isNotEmpty) return _taskListCard(undated);
+
+    // Tier 4 — literally zero open tasks: the only true "all clear" state.
+    return const LzCard(
+      child: LzEmptyState(
+        icon: Icons.check_circle_outline,
+        title: 'All clear',
+        hint: 'No open tasks right now.',
+      ),
+    );
+  }
+
+  /// A list card for [tasks] (capped at [_max], with a "+N more" footer). When
+  /// [hint] is set a muted label (e.g. "Upcoming") tops the card to signal the
+  /// rows aren't due today.
+  Widget _taskListCard(List<Task> tasks, {String? hint}) {
+    final shown = tasks.take(_max).toList();
+    final extra = tasks.length - shown.length;
 
     return LzCard(
       padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (hint != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
+              child: Text(
+                hint.toUpperCase(),
+                style: AppText.caption.copyWith(
+                  color: AppColors.textMuted,
+                  letterSpacing: 0.8,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
           for (var i = 0; i < shown.length; i++) ...[
             if (i > 0)
               const Divider(
@@ -296,6 +322,26 @@ class _TodaySection extends StatelessWidget {
     return [...overdue, ...dueToday];
   }
 
+  /// Open tasks due strictly after today, soonest first. Sorts a *copy* (the
+  /// `.where(...).toList()` result) so the provider's list is never mutated.
+  static List<Task> _upcoming(List<Task> tasks) {
+    final today = _iso();
+    final upcoming = tasks.where((t) {
+      if (t.isDone) return false;
+      final d = t.dueDate;
+      if (d == null) return false;
+      final date = d.length >= 10 ? d.substring(0, 10) : d;
+      return date.compareTo(today) > 0;
+    }).toList();
+    // ISO date/datetime strings sort lexicographically == chronologically.
+    upcoming.sort((a, b) => (a.dueDate ?? '').compareTo(b.dueDate ?? ''));
+    return upcoming;
+  }
+
+  /// Open tasks with no due date at all (fallback so the card has content).
+  static List<Task> _undatedOpen(List<Task> tasks) =>
+      tasks.where((t) => !t.isDone && t.dueDate == null).toList();
+
   static String _iso() {
     final n = DateTime.now();
     return '${n.year.toString().padLeft(4, '0')}-'
@@ -311,17 +357,14 @@ class _TaskRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final overdue = _isOverdue(task.dueDate);
+    final due = task.dueDate;
+    final overdue = _isOverdue(due);
     final (chipLabel, chipColor) = _chip(task.priority);
 
     return LzListTile(
       dense: true,
       title: task.title,
-      subtitle: overdue
-          ? 'Overdue'
-          : task.dueDate != null
-              ? _dueLine(task.dueDate!)
-              : null,
+      subtitle: due != null ? _subtitle(due) : null,
       leading: Icon(
         Icons.radio_button_unchecked,
         size: 18,
@@ -349,10 +392,28 @@ class _TaskRow extends StatelessWidget {
         '${n.day.toString().padLeft(2, '0')}';
   }
 
-  static String _dueLine(String due) {
-    final d = due.length >= 10 ? due.substring(0, 10) : due;
-    final parts = d.split('-');
-    if (parts.length != 3) return d;
+  /// The row subtitle: a relative-day prefix (Overdue / Today / Due Mon D)
+  /// plus the time-of-day when the [due] string carries one. Examples:
+  /// `Today · 5:00 PM`, `Overdue · 5:00 PM`, `Jun 9 · 5:00 PM`, `Due Jun 9`.
+  static String _subtitle(String due) {
+    final day = dueDateDayPart(due);
+    final today = _todayIso();
+    final timeLabel = formatDueTimeLabel(due); // null when date-only
+
+    if (day.compareTo(today) < 0) {
+      return timeLabel == null ? 'Overdue' : 'Overdue · $timeLabel';
+    }
+    if (day == today) {
+      return timeLabel == null ? 'Today' : 'Today · $timeLabel';
+    }
+    final monthDay = _monthDay(day);
+    return timeLabel == null ? 'Due $monthDay' : '$monthDay · $timeLabel';
+  }
+
+  /// `Mon D` (e.g. `Jun 9`) for a `yyyy-MM-dd` calendar date.
+  static String _monthDay(String dayIso) {
+    final parts = dayIso.split('-');
+    if (parts.length != 3) return dayIso;
     const months = [
       '',
       'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -361,7 +422,7 @@ class _TaskRow extends StatelessWidget {
     final mon = int.tryParse(parts[1]) ?? 0;
     final day = int.tryParse(parts[2]) ?? 0;
     final label = mon >= 1 && mon <= 12 ? months[mon] : parts[1];
-    return 'Due $label $day';
+    return '$label $day';
   }
 
   static (String, Color) _chip(String priority) {
@@ -379,126 +440,14 @@ class _TaskRow extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// THIS MONTH — budget snapshot
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _BudgetSection extends StatelessWidget {
-  const _BudgetSection({required this.budgetsState, required this.onTap});
-
-  final BudgetsState budgetsState;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return LzSection(
-      title: 'This month',
-      child: budgetsState.isLoading ? _skeleton() : _content(),
-    );
-  }
-
-  Widget _skeleton() {
-    return const LzCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: LzSkeleton(height: 13)),
-              SizedBox(width: AppSpacing.md),
-              LzSkeleton(width: 80, height: 13),
-            ],
-          ),
-          SizedBox(height: AppSpacing.md),
-          LzSkeleton(height: 8, borderRadius: AppRadii.rPill),
-          SizedBox(height: AppSpacing.sm),
-          LzSkeleton(width: 140, height: 11),
-        ],
-      ),
-    );
-  }
-
-  Widget _content() {
-    final (budget, spent) = _totals(budgetsState.projects);
-    final fraction =
-        budget > 0 ? (spent / budget).clamp(0.0, 1.0) : 0.0;
-    final pct = (fraction * 100).round();
-    final symbol = _symbol(budgetsState.projects);
-    final amountText = '$symbol${_fmt(spent)} / $symbol${_fmt(budget)}';
-
-    return LzCard(
-      onTap: onTap,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Total spend', style: AppText.body)),
-              Text(
-                amountText,
-                style: AppText.label.copyWith(
-                    color: AppColors.trafficLight(fraction)),
-              ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.md),
-          LzProgressBar(value: fraction, trafficLight: true),
-          const SizedBox(height: AppSpacing.sm),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  budget == 0
-                      ? 'No budget set — tap to add projects'
-                      : '$pct% of monthly budget used',
-                  style: AppText.caption,
-                ),
-              ),
-              const Icon(Icons.chevron_right,
-                  size: 15, color: AppColors.textMuted),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  static (double, double) _totals(List<Project> projects) {
-    var budget = 0.0, spent = 0.0;
-    for (final p in projects) {
-      if (p.isArchived) continue;
-      budget += p.budget;
-      spent += p.spent ?? 0.0;
-    }
-    return (budget, spent);
-  }
-
-  static String _symbol(List<Project> projects) {
-    for (final p in projects) {
-      switch (p.currency) {
-        case 'EUR':
-          return '€';
-        case 'GBP':
-          return '£';
-        case 'USD':
-          return r'$';
-      }
-    }
-    return '€';
-  }
-
-  static String _fmt(double v) =>
-      v >= 1000 ? '${(v / 1000).toStringAsFixed(1)}k' : v.toStringAsFixed(0);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // FAVORITES — starred projects with budget bar + recent expenses
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lists the user's favorited (starred) projects so the important ones stay
-/// glanceable on Home — the headline budget view, right under "This month".
-/// Each entry shows Budget vs Spent vs Remaining with a traffic-light bar (when
-/// a budget is set) plus its two most recent expenses. Renders nothing at all
-/// when no project is favorited (Home then falls back to the total-spend card).
+/// The money surface on Home: the user's favorited (starred) projects, each
+/// showing Budget vs Spent vs Remaining with a traffic-light bar (when a budget
+/// is set) plus its two most recent expenses. Spend is derived per-project via
+/// `spentForProject` — there is deliberately NO grand total anywhere. When no
+/// project is starred it shows a compact "star a project" prompt instead.
 class _FavoritesSection extends StatelessWidget {
   const _FavoritesSection({required this.budgetsState, required this.onTap});
 
@@ -510,41 +459,75 @@ class _FavoritesSection extends StatelessWidget {
     final favorites = budgetsState.projects
         .where((p) => p.isFavorite && !p.isArchived)
         .toList();
-    if (favorites.isEmpty) return const SizedBox.shrink();
 
     return Column(
       children: [
         LzSection(
           title: 'Favorites',
-          action: GestureDetector(
-            onTap: onTap,
-            child: Text(
-              'See all →',
-              style: AppText.caption.copyWith(color: AppColors.accent),
-            ),
-          ),
-          child: Column(
-            children: [
-              for (var i = 0; i < favorites.length; i++) ...[
-                if (i > 0) const SizedBox(height: AppSpacing.sm),
-                _FavoriteProjectCard(
-                  project: favorites[i],
-                  // Pass the FULL non-void expense set for this project so the
-                  // card derives spend via spentForProject (offline-correct +
-                  // consistent with the Expenses tab); it truncates internally
-                  // for the recent-expense preview.
-                  expenses: budgetsState.expenses
-                      .where((e) =>
-                          e.projectId == favorites[i].id && !e.isVoid)
-                      .toList(),
+          action: favorites.isEmpty
+              ? null
+              : GestureDetector(
                   onTap: onTap,
+                  child: Text(
+                    'See all →',
+                    style: AppText.caption.copyWith(color: AppColors.accent),
+                  ),
                 ),
-              ],
-            ],
-          ),
+          child: favorites.isEmpty
+              ? _emptyPrompt()
+              : Column(
+                  children: [
+                    for (var i = 0; i < favorites.length; i++) ...[
+                      if (i > 0) const SizedBox(height: AppSpacing.sm),
+                      _FavoriteProjectCard(
+                        project: favorites[i],
+                        // Pass the FULL non-void expense set for this project so
+                        // the card derives spend via spentForProject (offline-
+                        // correct + consistent with the Expenses tab); it
+                        // truncates internally for the recent-expense preview.
+                        expenses: budgetsState.expenses
+                            .where((e) =>
+                                e.projectId == favorites[i].id && !e.isVoid)
+                            .toList(),
+                        onTap: onTap,
+                      ),
+                    ],
+                  ],
+                ),
         ),
         const SizedBox(height: AppSpacing.xl),
       ],
+    );
+  }
+
+  /// Compact nudge shown when nothing is starred — taps through to Expenses so
+  /// the user can favorite a project. No grand-total fallback.
+  Widget _emptyPrompt() {
+    return LzCard(
+      onTap: onTap,
+      child: Row(
+        children: [
+          const Icon(Icons.star_outline_rounded,
+              size: 20, color: AppColors.textMuted),
+          const SizedBox(width: AppSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Star a project to track it here', style: AppText.body),
+                const SizedBox(height: 2),
+                Text(
+                  'Tap to pick favorites in Expenses',
+                  style: AppText.caption.copyWith(color: AppColors.textMuted),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          const Icon(Icons.chevron_right,
+              size: 16, color: AppColors.textMuted),
+        ],
+      ),
     );
   }
 }

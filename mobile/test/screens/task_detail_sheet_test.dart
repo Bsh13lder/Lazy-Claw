@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
+import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
@@ -114,7 +115,8 @@ const _sample = Task(
 );
 
 void main() {
-  Widget host(_StubTasksNotifier stub) => ProviderScope(
+  Widget host(_StubTasksNotifier stub, {List<Project> projects = const []}) =>
+      ProviderScope(
         overrides: [tasksProvider.overrideWith((ref) => stub)],
         child: MaterialApp(
           theme: buildAppTheme(),
@@ -122,7 +124,8 @@ void main() {
             builder: (ctx, ref, _) => Scaffold(
               body: Center(
                 child: ElevatedButton(
-                  onPressed: () => showTaskDetailSheet(ctx, ref, _sample),
+                  onPressed: () => showTaskDetailSheet(ctx, ref, _sample,
+                      projects: projects),
                   child: const Text('open'),
                 ),
               ),
@@ -131,11 +134,28 @@ void main() {
         ),
       );
 
-  Future<void> openSheet(WidgetTester tester, _StubTasksNotifier stub) async {
-    await tester.pumpWidget(host(stub));
+  Future<void> openSheet(WidgetTester tester, _StubTasksNotifier stub,
+      {List<Project> projects = const []}) async {
+    // The detail sheet (title + notes + priority + project + due + time +
+    // subtasks + footer) is taller than the 800×600 default, so give it a
+    // roomier surface to keep the footer buttons on-screen and tappable.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 1400);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(host(stub, projects: projects));
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
   }
+
+  Project project(String id, String name, {String? color}) => Project(
+        id: id,
+        name: name,
+        budget: 0,
+        currency: 'USD',
+        status: 'active',
+        color: color,
+      );
 
   testWidgets('pre-fills the title and notes from the task', (tester) async {
     final stub = _stub();
@@ -184,5 +204,30 @@ void main() {
 
     expect(stub.deleteCalls, ['task-42']);
     expect(find.byKey(const Key('task-detail-title')), findsNothing);
+  });
+
+  testWidgets('picking a project then Save commits the category',
+      (tester) async {
+    final stub = _stub();
+    await openSheet(tester, stub,
+        projects: [project('p1', 'Home', color: '#FF0000')]);
+
+    // The project control starts at "No project" (sample has no category).
+    expect(find.text('No project'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('task-detail-project')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('project-pick-p1')));
+    await tester.pumpAndSettle();
+
+    // The control now reflects the chosen project.
+    expect(find.text('Home'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('task-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(stub.updateCalls, hasLength(1));
+    expect(stub.updateCalls.single['category'], 'Home');
   });
 }

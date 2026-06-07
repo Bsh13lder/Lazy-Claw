@@ -6,6 +6,8 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../core/actions/app_actions.dart';
 import '../core/reminder_lead.dart';
+import '../models/project.dart';
+import '../models/subtask.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
@@ -13,9 +15,10 @@ import 'notes/notes_body.dart';
 import 'settings/settings_prefs.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
+import 'tasks/connected_task_row.dart';
 import 'tasks/task_calendar_view.dart';
 import 'tasks/task_detail_sheet.dart';
-import 'tasks/task_row.dart';
+import 'tasks/tasks_project_view.dart';
 
 // ── Top segment ─────────────────────────────────────────────────────────────
 
@@ -25,8 +28,8 @@ enum _Segment { tasks, notes }
 
 // ── View mode ─────────────────────────────────────────────────────────────────
 
-/// The two ways to view tasks (nested under the Tasks segment).
-enum _TasksView { list, calendar }
+/// The three ways to view tasks (nested under the Tasks segment).
+enum _TasksView { list, calendar, projects }
 
 // ── Sections ──────────────────────────────────────────────────────────────────
 
@@ -143,6 +146,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     _selectedDay = _focusedDay;
     // Load tasks from the local cache on first render (offline-first).
     Future.microtask(() => ref.read(tasksProvider.notifier).load());
+    // The list (tap-the-chip project picker + Projects view) all need the
+    // project list, so load the budgets store up front (cheap, offline-first).
+    _ensureBudgetsLoaded();
 
     // Cold-start deep link: a `+ Task` / `+ Note` shortcut or widget button
     // may have set a pending action BEFORE this screen mounted. ref.listen
@@ -221,9 +227,27 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         );
   }
 
+  // ── Tap-the-chip quick-edit commits (route through the provider) ───────────
+
+  void _commitPriority(String id, String priority) =>
+      ref.read(tasksProvider.notifier).updateTask(id, priority: priority);
+
+  void _commitDueDate(String id, String dueDate) =>
+      ref.read(tasksProvider.notifier).updateTask(id, dueDate: dueDate);
+
+  void _commitCategory(String id, String category) =>
+      ref.read(tasksProvider.notifier).updateTask(id, category: category);
+
+  void _commitSubtasks(String id, List<Subtask> subtasks) =>
+      ref.read(tasksProvider.notifier).setSubtasks(id, subtasks);
+
+  void _commitTitle(String id, String title) =>
+      ref.read(tasksProvider.notifier).updateTask(id, title: title);
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(tasksProvider);
+    final projects = ref.watch(budgetsProvider).projects;
     final reachable = ref.watch(reachableProvider);
     final degraded = ref.watch(dbHealthProvider).isDegraded;
     final notesMode = _segment == _Segment.notes;
@@ -310,19 +334,22 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             ),
           ),
           Expanded(
-            child: notesMode ? const NotesBody() : _buildTasksContent(state),
+            child: notesMode
+                ? const NotesBody()
+                : _buildTasksContent(state, projects),
           ),
         ],
       ),
     );
   }
 
-  /// The Tasks segment body: the List ⇄ Calendar toggle (nested) + content.
-  Widget _buildTasksContent(TasksState state) {
+  /// The Tasks segment body: the List · Calendar · Projects toggle (nested) +
+  /// content.
+  Widget _buildTasksContent(TasksState state, List<Project> projects) {
     return Column(
       children: [
-        // List ⇄ Calendar toggle — always visible so the user can switch
-        // even from an empty/error state.
+        // List · Calendar · Projects toggle — always visible so the user can
+        // switch even from an empty/error state.
         Padding(
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.lg,
@@ -335,24 +362,32 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             onChanged: (v) {
               if (v == _view) return;
               HapticFeedback.selectionClick();
-              if (v == _TasksView.calendar) _ensureBudgetsLoaded();
+              _ensureBudgetsLoaded();
               setState(() => _view = v);
             },
           ),
         ),
-        Expanded(
-          child: _view == _TasksView.list
-              ? _buildBody(state)
-              : _buildCalendarBody(state),
-        ),
+        Expanded(child: _buildViewBody(state, projects)),
       ],
     );
+  }
+
+  /// Routes to the active view's body.
+  Widget _buildViewBody(TasksState state, List<Project> projects) {
+    switch (_view) {
+      case _TasksView.list:
+        return _buildBody(state, projects);
+      case _TasksView.calendar:
+        return _buildCalendarBody(state, projects);
+      case _TasksView.projects:
+        return _buildProjectsBody(state, projects);
+    }
   }
 
   /// Calendar body: an error/skeleton guard around [TaskCalendarView]. The
   /// calendar itself is useful even with zero tasks, so we only short-circuit
   /// on the first instant load and on a hard error with nothing cached.
-  Widget _buildCalendarBody(TasksState state) {
+  Widget _buildCalendarBody(TasksState state, List<Project> projects) {
     if (state.isLoading && state.tasks.isEmpty && state.error == null) {
       return LzSkeleton.list(
         count: 4,
@@ -369,8 +404,6 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       );
     }
 
-    final projects = ref.watch(budgetsProvider).projects;
-
     return LzRefresh(
       onRefresh: _refresh,
       child: TaskCalendarView(
@@ -386,13 +419,60 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         onPageChanged: (focused) => setState(() => _focusedDay = focused),
         onComplete: (id) => ref.read(tasksProvider.notifier).completeTask(id),
         onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
-        onOpen: (task) => showTaskDetailSheet(context, ref, task, defaultLead: _defaultLead),
+        onOpen: (task) => _openDetail(task, projects),
         onAddOnDay: (day) => _openAddSheet(initialDueDate: day),
       ),
     );
   }
 
-  Widget _buildBody(TasksState state) {
+  /// Open the full detail sheet for [task], handing it the project list so its
+  /// project picker is populated.
+  void _openDetail(Task task, List<Project> projects) => showTaskDetailSheet(
+        context,
+        ref,
+        task,
+        projects: projects,
+        defaultLead: _defaultLead,
+      );
+
+  /// The Projects view: tasks grouped under their project (Money-tab projects +
+  /// an Uncategorized bucket), each bucket expandable to its tasks.
+  Widget _buildProjectsBody(TasksState state, List<Project> projects) {
+    if (state.isLoading && state.tasks.isEmpty && state.error == null) {
+      return LzSkeleton.list(
+        count: 5,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
+        ),
+      );
+    }
+    if (state.tasks.isEmpty && state.error != null) {
+      return LzErrorState(
+        message: state.error!,
+        onRetry: () => ref.read(tasksProvider.notifier).load(),
+      );
+    }
+
+    return LzRefresh(
+      onRefresh: _refresh,
+      child: TasksProjectView(
+        tasks: state.tasks,
+        projects: projects,
+        dirtyIds: state.dirtyIds,
+        onComplete: (id) => ref.read(tasksProvider.notifier).completeTask(id),
+        onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
+        onOpen: (task) => _openDetail(task, projects),
+        onRenameTitle: _commitTitle,
+        onPriorityChanged: _commitPriority,
+        onDueDateChanged: _commitDueDate,
+        onCategoryChanged: _commitCategory,
+        onSubtasksChanged: _commitSubtasks,
+      ),
+    );
+  }
+
+  Widget _buildBody(TasksState state, List<Project> projects) {
     // ── Loading skeleton ─────────────────────────────────────────────────────
     // Only on the first instant cache read (no items yet, nothing errored).
     if (state.isLoading && state.tasks.isEmpty && state.error == null) {
@@ -445,13 +525,17 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               section: section,
               tasks: grouped[section] ?? const [],
               dirtyIds: state.dirtyIds,
+              projects: projects,
               onComplete: (id) =>
                   ref.read(tasksProvider.notifier).completeTask(id),
               onDelete: (id) =>
                   ref.read(tasksProvider.notifier).deleteTask(id),
-              onOpen: (task) => showTaskDetailSheet(context, ref, task, defaultLead: _defaultLead),
-              onRenameTitle: (id, title) =>
-                  ref.read(tasksProvider.notifier).updateTask(id, title: title),
+              onOpen: (task) => _openDetail(task, projects),
+              onRenameTitle: _commitTitle,
+              onPriorityChanged: _commitPriority,
+              onDueDateChanged: _commitDueDate,
+              onCategoryChanged: _commitCategory,
+              onSubtasksChanged: _commitSubtasks,
             ),
         ],
       ),
@@ -466,19 +550,29 @@ class _TaskSection extends StatefulWidget {
     required this.section,
     required this.tasks,
     required this.dirtyIds,
+    required this.projects,
     required this.onComplete,
     required this.onDelete,
     required this.onOpen,
     required this.onRenameTitle,
+    required this.onPriorityChanged,
+    required this.onDueDateChanged,
+    required this.onCategoryChanged,
+    required this.onSubtasksChanged,
   });
 
   final _Section section;
   final List<Task> tasks;
   final Set<String> dirtyIds;
+  final List<Project> projects;
   final void Function(String id) onComplete;
   final void Function(String id) onDelete;
   final void Function(Task task) onOpen;
   final void Function(String id, String title) onRenameTitle;
+  final void Function(String id, String priority) onPriorityChanged;
+  final void Function(String id, String dueDate) onDueDateChanged;
+  final void Function(String id, String category) onCategoryChanged;
+  final void Function(String id, List<Subtask> subtasks) onSubtasksChanged;
 
   @override
   State<_TaskSection> createState() => _TaskSectionState();
@@ -590,15 +684,18 @@ class _TaskSectionState extends State<_TaskSection> {
           _entrance(
             index: i,
             last: last,
-            child: TaskRow(
+            child: ConnectedTaskRow(
               task: widget.tasks[i],
-              pendingSync:
-                  widget.dirtyIds.contains(widget.tasks[i].id),
-              onComplete: () => widget.onComplete(widget.tasks[i].id),
-              onDelete: () => widget.onDelete(widget.tasks[i].id),
-              onTap: () => widget.onOpen(widget.tasks[i]),
-              onTitleChanged: (title) =>
-                  widget.onRenameTitle(widget.tasks[i].id, title),
+              pendingSync: widget.dirtyIds.contains(widget.tasks[i].id),
+              projects: widget.projects,
+              onComplete: widget.onComplete,
+              onDelete: widget.onDelete,
+              onOpen: widget.onOpen,
+              onRenameTitle: widget.onRenameTitle,
+              onPriorityChanged: widget.onPriorityChanged,
+              onDueDateChanged: widget.onDueDateChanged,
+              onCategoryChanged: widget.onCategoryChanged,
+              onSubtasksChanged: widget.onSubtasksChanged,
             ),
           ),
           if (i < widget.tasks.length - 1)
@@ -654,9 +751,9 @@ class _SegmentToggle extends StatelessWidget {
 
 // ── View toggle ────────────────────────────────────────────────────────────────
 
-/// A compact two-segment toggle that swaps the Tasks body between the sectioned
-/// List and the month Calendar. Built from two [LzChip]s so it inherits the kit
-/// styling (no bespoke colors).
+/// A compact three-segment toggle that swaps the Tasks body between the
+/// sectioned List, the month Calendar, and the Projects breakdown. Built from
+/// [LzChip]s so it inherits the kit styling (no bespoke colors).
 class _ViewToggle extends StatelessWidget {
   const _ViewToggle({required this.view, required this.onChanged});
 
@@ -679,6 +776,13 @@ class _ViewToggle extends StatelessWidget {
           icon: Icons.calendar_month_outlined,
           selected: view == _TasksView.calendar,
           onTap: () => onChanged(_TasksView.calendar),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        LzChip(
+          label: 'Projects',
+          icon: Icons.folder_outlined,
+          selected: view == _TasksView.projects,
+          onTap: () => onChanged(_TasksView.projects),
         ),
       ],
     );

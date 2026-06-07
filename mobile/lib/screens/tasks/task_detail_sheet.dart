@@ -4,26 +4,34 @@ import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/tasks_provider.dart';
+import '../expenses/project_color_picker.dart';
 import '../settings/settings_prefs.dart';
+import 'chip_edit.dart';
 import 'reminder_lead_picker.dart';
 import 'subtask_editor.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
-/// the user change the title, notes, priority and due date, then Save (patch
-/// via [TasksNotifier.updateTask]) or Delete (confirm, then
+/// the user change the title, notes, priority, project and due date, then Save
+/// (patch via [TasksNotifier.updateTask]) or Delete (confirm, then
 /// [TasksNotifier.deleteTask]). Mirrors the add-task sheet's look so the two
 /// surfaces feel like one family.
 class TaskDetailSheet extends ConsumerStatefulWidget {
   const TaskDetailSheet({
     super.key,
     required this.task,
+    this.projects = const [],
     this.defaultLead = kDefaultReminderLead,
   });
 
   final Task task;
+
+  /// Known projects (name + color) for the project picker. Empty when the
+  /// caller doesn't surface project editing.
+  final List<Project> projects;
 
   /// Global default reminder lead, applied when the task has a due time but no
   /// explicit reminder yet (mirrors the add-task sheet).
@@ -58,6 +66,12 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   late List<Subtask> _subtasks;
   String? _originalSteps;
 
+  /// The selected project (`category`). Seeded from the task; null/blank means
+  /// "No project". [_categoryTouched] gates whether Save writes the column, so a
+  /// title-only edit never churns the category.
+  String? _category;
+  bool _categoryTouched = false;
+
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
 
   @override
@@ -77,6 +91,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
         hasReminder ? leadFromReminderAt(raw, t.reminderAt) : null;
     _subtasks = List.of(t.subtasks);
     _originalSteps = serializeSubtasks(_subtasks);
+    _category = (t.category == null || t.category!.isEmpty) ? null : t.category;
   }
 
   /// The effective reminder lead (explicit choice wins over the global default).
@@ -123,17 +138,36 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     // force-clears the column when every sub-task was removed.
     final nextSteps = serializeSubtasks(_subtasks);
     final stepsArg = nextSteps == _originalSteps ? null : (nextSteps ?? '');
+    // Only write `category` when the user touched the project. An empty string
+    // (not null) force-clears the column when "No project" was chosen.
+    final categoryArg = !_categoryTouched ? null : (_category ?? '');
     await ref.read(tasksProvider.notifier).updateTask(
           widget.task.id,
           title: title,
           description: _notesController.text.trim(),
           priority: _priority,
+          category: categoryArg,
           dueDate: _composedDue,
           steps: stepsArg,
           reminderAt: _composedReminderAt,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
+  }
+
+  Future<void> _pickProject() async {
+    final result = await showProjectPicker(
+      context,
+      projects: widget.projects,
+      current: _category,
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      _categoryTouched = true;
+      _category = (result.category == null || result.category!.isEmpty)
+          ? null
+          : result.category;
+    });
   }
 
   Future<void> _delete() async {
@@ -211,6 +245,20 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                 ),
               );
             }).toList(),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Project selector ───────────────────────────────────────────
+          _SectionLabel('PROJECT'),
+          const SizedBox(height: AppSpacing.sm),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _ProjectChip(
+              projects: widget.projects,
+              category: _category,
+              onTap: _pickProject,
+            ),
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -439,20 +487,97 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
+/// The tappable project control: a color dot + project name (or "No project"),
+/// opening the project picker.
+class _ProjectChip extends StatelessWidget {
+  const _ProjectChip({
+    required this.projects,
+    required this.category,
+    required this.onTap,
+  });
+
+  final List<Project> projects;
+  final String? category;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasCategory = category != null && category!.isNotEmpty;
+    String? colorHex;
+    if (hasCategory) {
+      for (final p in projects) {
+        if (p.name.toLowerCase() == category!.toLowerCase()) {
+          colorHex = p.color;
+          break;
+        }
+      }
+    }
+
+    return Material(
+      color: Colors.transparent,
+      borderRadius: AppRadii.rPill,
+      child: InkWell(
+        key: const Key('task-detail-project'),
+        onTap: onTap,
+        borderRadius: AppRadii.rPill,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.xs + 2,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.bgSurfaceElevated,
+            borderRadius: AppRadii.rPill,
+            border: Border.all(color: AppColors.borderDefault),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasCategory)
+                ProjectColorDot(hex: colorHex, size: 12)
+              else
+                Icon(Icons.folder_outlined,
+                    size: 15, color: AppColors.textMuted),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                hasCategory ? category! : 'No project',
+                style: AppText.caption.copyWith(
+                  color: hasCategory
+                      ? AppColors.textPrimary
+                      : AppColors.textMuted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Icon(Icons.expand_more, size: 16, color: AppColors.textMuted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Public helper ─────────────────────────────────────────────────────────────
 
 /// Open the task detail/edit sheet for [task]. The sheet reads
 /// [tasksProvider] for Save/Delete; [ref] is accepted so the call site (the
 /// Tasks screen, which already holds a [WidgetRef]) owns the invocation.
+/// [projects] populates the project picker.
 Future<void> showTaskDetailSheet(
   BuildContext context,
   WidgetRef ref,
   Task task, {
+  List<Project> projects = const [],
   ReminderLead defaultLead = kDefaultReminderLead,
 }) {
   return LzBottomSheet.show<void>(
     context,
     title: 'Edit Task',
-    builder: (_) => TaskDetailSheet(task: task, defaultLead: defaultLead),
+    builder: (_) => TaskDetailSheet(
+      task: task,
+      projects: projects,
+      defaultLead: defaultLead,
+    ),
   );
 }

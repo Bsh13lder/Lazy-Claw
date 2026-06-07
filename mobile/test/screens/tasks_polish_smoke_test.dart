@@ -5,11 +5,13 @@
 // tasksProvider holding two tasks, let the entrance animation settle, then
 // assert the screen builds without error and both task titles are on screen.
 //
-// Setup mirrors task_detail_sheet_test.dart: the stub TasksNotifier overrides
-// every method that would touch the DAO, so its TaskDao can be backed by a
+// Setup mirrors task_detail_sheet_test.dart: the stub notifiers override
+// every method that would touch the DAO, so their DAOs can be backed by a
 // noSuchMethod fake Database (no real sqflite isolate → no hung timers). The
 // reachability provider is overridden with a no-op probe so the
-// connectivity_plus platform channel is never hit.
+// connectivity_plus platform channel is never hit. The Tasks screen now reads
+// the projects list (for tap-the-chip project editing + the Projects view), so
+// a stub budgetsProvider is supplied too.
 
 import 'dart:async';
 
@@ -17,17 +19,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
+import 'package:lazyclaw_mobile/local/budgets_dao.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
+import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
+import 'package:lazyclaw_mobile/providers/budgets_provider.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
+import 'package:lazyclaw_mobile/repositories/budgets_repository.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
 import 'package:lazyclaw_mobile/screens/tasks_screen.dart';
+import 'package:lazyclaw_mobile/sync/budgets_sync.dart';
 import 'package:lazyclaw_mobile/sync/reachability.dart';
 import 'package:lazyclaw_mobile/sync/task_sync.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
-// ── Offline transport (never reached — sync is no-op'd) ───────────────────────
+// ── Offline transports (never reached — syncs are no-op'd) ────────────────────
 
 class _OfflineTransport implements TasksTransport {
   @override
@@ -51,10 +58,34 @@ class _OfflineTransport implements TasksTransport {
       throw ApiError(0, 'offline');
 }
 
+class _OfflineBudgetsTransport implements BudgetsTransport {
+  @override
+  Future<Map<String, dynamic>> getJson(String path,
+          {Map<String, dynamic>? queryParams}) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> postJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> patchJson(
+          String path, Map<String, dynamic> body) async =>
+      throw ApiError(0, 'offline');
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async =>
+      throw ApiError(0, 'offline');
+}
+
 class _NoopSync extends TaskSync {
   _NoopSync(super.dao, super.repo);
   @override
   Future<SyncResult> sync() async => const SyncResult();
+}
+
+class _NoopBudgetsSync extends BudgetsSync {
+  _NoopBudgetsSync(super.dao, super.repo);
+  @override
+  Future<BudgetsSyncResult> sync() async => const BudgetsSyncResult();
 }
 
 /// Seeds the screen with a fixed task list and neutralises every method that
@@ -74,6 +105,18 @@ class _StubTasksNotifier extends TasksNotifier {
   Future<void> completeTask(String id) async {}
   @override
   Future<void> deleteTask(String id) async {}
+}
+
+class _StubBudgetsNotifier extends BudgetsNotifier {
+  _StubBudgetsNotifier(super.dao, super.sync, List<Project> projects) {
+    state = BudgetsState(projects: projects);
+  }
+  @override
+  Future<void> load() async {}
+  @override
+  Future<void> refresh() async {}
+  @override
+  Future<void> syncNow() async {}
 }
 
 /// A Database that throws on any access — the stub never touches it.
@@ -103,6 +146,15 @@ _StubTasksNotifier _stub(List<Task> tasks) {
   );
 }
 
+_StubBudgetsNotifier _stubBudgets(List<Project> projects) {
+  final dao = BudgetsDao(_FakeDatabase());
+  return _StubBudgetsNotifier(
+    dao,
+    _NoopBudgetsSync(dao, BudgetsRepository(_OfflineBudgetsTransport())),
+    projects,
+  );
+}
+
 Task _task(String id, String title) => Task(
       id: id,
       userId: 'u1',
@@ -126,6 +178,7 @@ void main() {
       ProviderScope(
         overrides: [
           tasksProvider.overrideWith((ref) => stub),
+          budgetsProvider.overrideWith((ref) => _stubBudgets(const [])),
           reachabilityProvider.overrideWithValue(Reachability(_NopProbe())),
         ],
         child: MaterialApp(

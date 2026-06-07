@@ -276,4 +276,52 @@ void main() {
     expect(find.text('File taxes'), findsOneWidget);
     expect(find.text('1 open · 1 done'), findsOneWidget);
   });
+
+  testWidgets('Projects toggle shows project buckets that expand to tasks',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 1200);
+    addTearDown(tester.view.reset);
+
+    final tasksStub = _stubTasks([
+      _task('t1', 'Pay rent', category: 'Home'),
+      _task('t2', 'Loose end'), // → Uncategorized
+    ]);
+    final budgetsStub =
+        _stubBudgets([_project('p1', 'Home', color: '#FF0000')]);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          tasksProvider.overrideWith((ref) => tasksStub),
+          budgetsProvider.overrideWith((ref) => budgetsStub),
+          reachabilityProvider.overrideWithValue(Reachability(_NopProbe())),
+        ],
+        child: MaterialApp(
+          theme: buildAppTheme(),
+          home: const TasksScreen(),
+        ),
+      ),
+    );
+
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // The third toggle is present alongside List/Calendar.
+    expect(find.text('Projects'), findsOneWidget);
+
+    await tester.tap(find.text('Projects'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('project-bucket-Home')), findsOneWidget);
+    expect(find.byKey(const ValueKey('project-bucket-Uncategorized')),
+        findsOneWidget);
+
+    // Collapsed by default; expand the Home bucket to reveal its task.
+    expect(find.text('Pay rent'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('project-bucket-Home')));
+    await tester.pumpAndSettle();
+    expect(find.text('Pay rent'), findsOneWidget);
+  });
 }

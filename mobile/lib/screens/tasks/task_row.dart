@@ -3,8 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
+import 'chip_edit.dart';
+import 'subtask_editor.dart';
 
 /// A full task card: a checkbox affordance, an (optionally inline-editable)
 /// title, a row of chips (project · priority · due date · time · subtask
@@ -14,11 +17,17 @@ import '../../models/task.dart';
 /// ## Tap model (Todoist/Taskade-style)
 /// * **Tap the title text** → inline-edit the title (when [onTitleChanged] is
 ///   set); commits on submit or blur.
+/// * **Tap a chip** → quick-edit that one field in place (when its callback is
+///   wired): the **priority** chip opens a Low/Medium/High/Urgent menu, the
+///   **due-date** chip opens a date picker (time preserved), the **time** tag
+///   opens a time picker (day preserved), and the **project** chip opens a
+///   project picker. A project-less task shows a muted "Project" chip that opens
+///   the same picker.
+/// * **Tap the subtask chip** → fold/unfold the checklist inline (folded by
+///   default). Expanded, each row toggles done / inline-edits like the detail
+///   sheet.
 /// * **Single tap elsewhere on the card** → [onTap] (open the full detail /
-///   settings sheet), instantly. A **double tap** opens it too — the first tap
-///   already opens the sheet, so the user's "double-click → full settings"
-///   gesture works without burdening single tap with a 300 ms double-tap
-///   disambiguation delay. One destination, never surprising.
+///   settings sheet), instantly.
 /// * **Checkbox tap** / **swipe** → complete; **swipe** (endToStart) → delete.
 class TaskRow extends StatefulWidget {
   const TaskRow({
@@ -29,6 +38,11 @@ class TaskRow extends StatefulWidget {
     required this.onDelete,
     this.onTap,
     this.onTitleChanged,
+    this.projects = const [],
+    this.onPriorityChanged,
+    this.onDueDateChanged,
+    this.onCategoryChanged,
+    this.onSubtasksChanged,
   });
 
   final Task task;
@@ -44,6 +58,27 @@ class TaskRow extends StatefulWidget {
   /// title renders as plain, non-tappable text).
   final ValueChanged<String>? onTitleChanged;
 
+  /// Known projects (name + color) for the tap-the-chip project picker. Empty
+  /// when the caller doesn't surface project editing.
+  final List<Project> projects;
+
+  /// Commits a tap-the-chip priority change. Null → the priority chip is a
+  /// static label (no menu).
+  final ValueChanged<String>? onPriorityChanged;
+
+  /// Commits a tap-the-chip due-date / time change (the full recomposed
+  /// `dueDate` string). Null → the date/time chips are static labels.
+  final ValueChanged<String>? onDueDateChanged;
+
+  /// Commits a tap-the-chip project change. An empty string clears the project.
+  /// Null → the project chip is a static label and no "add project" affordance
+  /// is shown.
+  final ValueChanged<String>? onCategoryChanged;
+
+  /// Commits an inline subtask checklist edit (the full new list). Null → the
+  /// subtask chip is a static progress badge (no fold/checklist).
+  final ValueChanged<List<Subtask>>? onSubtasksChanged;
+
   @override
   State<TaskRow> createState() => _TaskRowState();
 }
@@ -52,6 +87,9 @@ class _TaskRowState extends State<TaskRow> {
   late final TextEditingController _titleCtrl;
   late final FocusNode _titleFocus;
   bool _editingTitle = false;
+
+  /// Whether the inline subtask checklist is unfolded. Folded by default.
+  bool _subtasksExpanded = false;
 
   @override
   void initState() {
@@ -97,12 +135,73 @@ class _TaskRowState extends State<TaskRow> {
     widget.onTitleChanged?.call(next);
   }
 
+  // ── Tap-the-chip quick edits ───────────────────────────────────────────────
+
+  Future<void> _editPriority(BuildContext chipCtx) async {
+    final cb = widget.onPriorityChanged;
+    if (cb == null) return;
+    final picked =
+        await showPriorityMenu(chipCtx, current: widget.task.priority);
+    if (picked == null || picked == widget.task.priority) return;
+    HapticFeedback.selectionClick();
+    cb(picked);
+  }
+
+  Future<void> _editDueDate() async {
+    final cb = widget.onDueDateChanged;
+    if (cb == null) return;
+    final raw = widget.task.dueDate;
+    DateTime? initial;
+    if (raw != null) {
+      final parsed = DateTime.tryParse(raw);
+      if (parsed != null) {
+        initial = DateTime(parsed.year, parsed.month, parsed.day);
+      }
+    }
+    final picked = await showThemedDatePicker(context, initial: initial);
+    if (picked == null) return;
+    HapticFeedback.selectionClick();
+    cb(withNewDueDay(raw, picked));
+  }
+
+  Future<void> _editDueTime() async {
+    final cb = widget.onDueDateChanged;
+    final raw = widget.task.dueDate;
+    if (cb == null || raw == null) return;
+    final parts = dueTimeParts(raw);
+    final initial = parts == null
+        ? null
+        : TimeOfDay(hour: parts.hour, minute: parts.minute);
+    final picked = await showThemedTimePicker(context, initial: initial);
+    if (picked == null) return;
+    HapticFeedback.selectionClick();
+    cb(withNewDueTime(raw, picked.hour, picked.minute));
+  }
+
+  Future<void> _editProject() async {
+    final cb = widget.onCategoryChanged;
+    if (cb == null) return;
+    final result = await showProjectPicker(
+      context,
+      projects: widget.projects,
+      current: widget.task.category,
+    );
+    if (result == null) return; // dismissed without a choice
+    HapticFeedback.selectionClick();
+    cb(result.category ?? '');
+  }
+
   @override
   Widget build(BuildContext context) {
     final task = widget.task;
     final isDone = task.isDone;
-    final priorityColor = _priorityColor(task.priority);
+    final pColor = priorityColor(task.priority);
+
+    final hasCategory = task.category != null && task.category!.isNotEmpty;
     final progress = subtaskProgressLabel(task.subtasks);
+    final hasSubtasks = progress != null;
+    final subtasksEditable = widget.onSubtasksChanged != null;
+    final showChecklist = hasSubtasks && subtasksEditable && _subtasksExpanded;
 
     final card = LzCard(
       // Single tap opens the detail sheet (with ink ripple).
@@ -152,7 +251,7 @@ class _TaskRowState extends State<TaskRow> {
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     // Project / category chip (colored) — leads the row.
-                    if (task.category != null && task.category!.isNotEmpty)
+                    if (hasCategory)
                       LzChip(
                         key: ValueKey('task-row-project-${task.id}'),
                         label: task.category!,
@@ -160,22 +259,46 @@ class _TaskRowState extends State<TaskRow> {
                         icon: Icons.folder_outlined,
                         color: AppColors.info,
                         selected: !isDone,
+                        onTap: widget.onCategoryChanged != null
+                            ? _editProject
+                            : null,
+                      )
+                    else if (widget.onCategoryChanged != null)
+                      // No project yet → a muted "add project" affordance.
+                      LzChip(
+                        key: ValueKey('task-row-project-add-${task.id}'),
+                        label: 'Project',
+                        dense: true,
+                        icon: Icons.create_new_folder_outlined,
+                        color: AppColors.textMuted,
+                        onTap: _editProject,
                       ),
-                    // Priority chip — always visible.
-                    LzChip(
-                      label: task.priority,
-                      dense: true,
-                      color: priorityColor,
-                      selected: !isDone,
+                    // Priority chip — always visible. Wrapped in a Builder so
+                    // its quick-edit menu anchors to the chip itself.
+                    Builder(
+                      builder: (chipCtx) => LzChip(
+                        key: ValueKey('task-row-priority-${task.id}'),
+                        label: task.priority,
+                        dense: true,
+                        color: pColor,
+                        selected: !isDone,
+                        onTap: widget.onPriorityChanged != null
+                            ? () => _editPriority(chipCtx)
+                            : null,
+                      ),
                     ),
                     // Due date chip (date only — the time gets its own tag).
                     if (task.dueDate != null)
                       LzChip(
+                        key: ValueKey('task-row-due-${task.id}'),
                         label: dueDateDayPart(task.dueDate!),
                         dense: true,
                         icon: Icons.calendar_today_outlined,
                         color: _dueDateColor(task.dueDate!),
                         selected: !isDone,
+                        onTap: widget.onDueDateChanged != null
+                            ? _editDueDate
+                            : null,
                       ),
                     // Time-of-day tag — only when the due date carries a time.
                     if (dueDateHasTime(task.dueDate))
@@ -186,9 +309,29 @@ class _TaskRowState extends State<TaskRow> {
                         icon: Icons.schedule_outlined,
                         color: _dueDateColor(task.dueDate!),
                         selected: !isDone,
+                        onTap: widget.onDueDateChanged != null
+                            ? _editDueTime
+                            : null,
                       ),
-                    // Subtask progress (done/total) — only when there are subs.
-                    if (progress != null)
+                    // Subtask progress — a fold toggle when editable, else a
+                    // static badge.
+                    if (hasSubtasks && subtasksEditable)
+                      LzChip(
+                        key: ValueKey('task-row-subtasks-${task.id}'),
+                        label: progress,
+                        dense: true,
+                        icon: _subtasksExpanded
+                            ? Icons.keyboard_arrow_down
+                            : Icons.chevron_right,
+                        color: AppColors.accent,
+                        selected: _subtasksExpanded && !isDone,
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                          setState(
+                              () => _subtasksExpanded = !_subtasksExpanded);
+                        },
+                      )
+                    else if (hasSubtasks)
                       LzChip(
                         key: ValueKey('task-row-subtasks-${task.id}'),
                         label: progress,
@@ -199,6 +342,19 @@ class _TaskRowState extends State<TaskRow> {
                       ),
                   ],
                 ),
+
+                // ── Inline checklist (folded by default) ───────────────────
+                if (showChecklist) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Padding(
+                    key: ValueKey('task-row-checklist-${task.id}'),
+                    padding: const EdgeInsets.only(right: AppSpacing.sm),
+                    child: SubtaskEditor(
+                      subtasks: task.subtasks,
+                      onChanged: widget.onSubtasksChanged!,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -296,19 +452,6 @@ class _TaskRowState extends State<TaskRow> {
       onTap: _beginEditTitle,
       child: text,
     );
-  }
-
-  Color _priorityColor(String priority) {
-    switch (priority) {
-      case 'urgent':
-        return AppColors.error;
-      case 'high':
-        return AppColors.warn;
-      case 'medium':
-        return AppColors.info;
-      default:
-        return AppColors.textMuted;
-    }
   }
 
   Color _dueDateColor(String dueDate) {

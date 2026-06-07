@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/task.dart';
@@ -23,7 +24,12 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   late final TextEditingController _titleController;
   late final TextEditingController _notesController;
   late String _priority;
-  String? _dueDate;
+
+  /// The due date is split into a date-only day string (`_dueDay`) and a
+  /// separate time-of-day (`_dueTime`), pre-filled from the task's stored
+  /// dueDate (which may be date-only or a full ISO datetime).
+  String? _dueDay;
+  TimeOfDay? _dueTime;
   bool _saving = false;
   bool _deleting = false;
 
@@ -36,7 +42,29 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     _titleController = TextEditingController(text: t.title);
     _notesController = TextEditingController(text: t.description ?? '');
     _priority = _priorities.contains(t.priority) ? t.priority : 'medium';
-    _dueDate = t.dueDate;
+    final raw = t.dueDate;
+    _dueDay = (raw == null || raw.isEmpty) ? null : dueDateDayPart(raw);
+    final parts = dueTimeParts(raw);
+    _dueTime =
+        parts == null ? null : TimeOfDay(hour: parts.hour, minute: parts.minute);
+  }
+
+  /// Combine the day + time into the persisted `dueDate` string: a datetime when
+  /// a time is set, a date-only string when only a day is set, today+time when
+  /// only a time is set, else null.
+  String? get _composedDue {
+    final day = _dueDay;
+    final time = _dueTime;
+    if (day == null) {
+      if (time == null) return null;
+      final n = DateTime.now();
+      return composeDueDate(DateTime(n.year, n.month, n.day),
+          hour: time.hour, minute: time.minute);
+    }
+    final d = DateTime.tryParse(day);
+    if (d == null) return day;
+    return composeDueDate(DateTime(d.year, d.month, d.day),
+        hour: time?.hour, minute: time?.minute);
   }
 
   @override
@@ -55,7 +83,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           title: title,
           description: _notesController.text.trim(),
           priority: _priority,
-          dueDate: _dueDate,
+          dueDate: _composedDue,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -148,36 +176,60 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               LzChip(
                 label: 'Today',
                 icon: Icons.today_outlined,
-                selected: _dueDate == _isoToday(),
+                selected: _dueDay == _isoToday(),
                 color: AppColors.warn,
                 onTap: () => setState(() {
-                  _dueDate = _dueDate == _isoToday() ? null : _isoToday();
+                  _dueDay = _dueDay == _isoToday() ? null : _isoToday();
                 }),
               ),
               const SizedBox(width: AppSpacing.sm),
               LzChip(
                 label: 'Tomorrow',
                 icon: Icons.event_outlined,
-                selected: _dueDate == _isoTomorrow(),
+                selected: _dueDay == _isoTomorrow(),
                 color: AppColors.accent,
                 onTap: () => setState(() {
-                  _dueDate = _dueDate == _isoTomorrow() ? null : _isoTomorrow();
+                  _dueDay = _dueDay == _isoTomorrow() ? null : _isoTomorrow();
                 }),
               ),
               const SizedBox(width: AppSpacing.sm),
               LzChip(
                 label: 'Pick…',
                 icon: Icons.calendar_month_outlined,
-                selected: _dueDate != null &&
-                    _dueDate != _isoToday() &&
-                    _dueDate != _isoTomorrow(),
+                selected: _dueDay != null &&
+                    _dueDay != _isoToday() &&
+                    _dueDay != _isoTomorrow(),
                 color: AppColors.info,
                 onTap: _pickDate,
               ),
             ],
           ),
 
-          if (_dueDate != null) ...[
+          // ── Time-of-day chip ──────────────────────────────────────────
+          const SizedBox(height: AppSpacing.sm),
+          Row(
+            children: [
+              LzChip(
+                label: _dueTime != null
+                    ? formatClock12(_dueTime!.hour, _dueTime!.minute)
+                    : 'Add time',
+                icon: Icons.schedule_outlined,
+                selected: _dueTime != null,
+                color: AppColors.accent,
+                onTap: _pickTime,
+              ),
+              if (_dueTime != null) ...[
+                const SizedBox(width: AppSpacing.sm),
+                GestureDetector(
+                  onTap: () => setState(() => _dueTime = null),
+                  child:
+                      Icon(Icons.close, size: 16, color: AppColors.textMuted),
+                ),
+              ],
+            ],
+          ),
+
+          if (_composedDue != null) ...[
             const SizedBox(height: AppSpacing.sm),
             Row(
               children: [
@@ -185,13 +237,16 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                     size: 14, color: AppColors.textMuted),
                 const SizedBox(width: AppSpacing.xs),
                 Text(
-                  'Due $_dueDate',
+                  'Due ${dueDateDisplay(_composedDue!)}',
                   style: AppText.caption
                       .copyWith(color: AppColors.textSecondary),
                 ),
                 const Spacer(),
                 GestureDetector(
-                  onTap: () => setState(() => _dueDate = null),
+                  onTap: () => setState(() {
+                    _dueDay = null;
+                    _dueTime = null;
+                  }),
                   child:
                       Icon(Icons.close, size: 14, color: AppColors.textMuted),
                 ),
@@ -232,10 +287,12 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   Future<void> _pickDate() async {
     final now = DateTime.now();
     DateTime initial = now.add(const Duration(days: 1));
-    if (_dueDate != null) {
+    if (_dueDay != null) {
       try {
-        final parsed = DateTime.parse(_dueDate!);
-        if (!parsed.isBefore(now)) initial = parsed;
+        final parsed = DateTime.parse(_dueDay!);
+        if (!parsed.isBefore(DateTime(now.year, now.month, now.day))) {
+          initial = parsed;
+        }
       } catch (_) {
         // Keep the default when the stored value isn't ISO-parseable.
       }
@@ -256,8 +313,25 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
       ),
     );
     if (picked != null) {
-      setState(() => _dueDate = _isoFor(picked));
+      setState(() => _dueDay = _isoFor(picked));
     }
+  }
+
+  Future<void> _pickTime() async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _dueTime ?? const TimeOfDay(hour: 9, minute: 0),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.dark(
+            primary: AppColors.accent,
+            surface: AppColors.bgSurfaceElevated,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) setState(() => _dueTime = picked);
   }
 
   String _isoFor(DateTime d) =>

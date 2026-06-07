@@ -106,22 +106,64 @@ void main() {
     expect(r.dueDate, '2026-06-09');
   });
 
-  test('bare time implies today (date only stored)', () {
+  test('bare 24h time implies today and keeps the time', () {
     final r = parse('meeting 17:00');
     expect(r.cleanTitle, 'meeting');
-    expect(r.dueDate, '2026-06-06');
+    expect(r.dueDate, '2026-06-06T17:00:00');
+    expect(r.hasTime, isTrue);
   });
 
-  test('am/pm time implies today', () {
+  test('am/pm time implies today and keeps the time', () {
     final r = parse('gym 6pm');
     expect(r.cleanTitle, 'gym');
-    expect(r.dueDate, '2026-06-06');
+    expect(r.dueDate, '2026-06-06T18:00:00');
+    expect(r.hasTime, isTrue);
   });
 
-  test('when a weekday and a time both appear, the date wins', () {
+  test('am/pm time with minutes resolves to today at that time', () {
+    final r = parse('call 9:30am');
+    expect(r.cleanTitle, 'call');
+    expect(r.dueDate, '2026-06-06T09:30:00');
+    expect(r.hasTime, isTrue);
+  });
+
+  test('a date + a time combine into a datetime', () {
+    final r = parse('meet tomorrow 5pm');
+    expect(r.cleanTitle, 'meet');
+    expect(r.dueDate, '2026-06-07T17:00:00');
+    expect(r.hasTime, isTrue);
+  });
+
+  test('weekday/date supplies the day, the time supplies the clock', () {
     final r = parse('dentist tomorrow 9am');
     expect(r.cleanTitle, 'dentist');
-    expect(r.dueDate, '2026-06-07'); // tomorrow, not today-from-9am
+    expect(r.dueDate, '2026-06-07T09:00:00'); // tomorrow at 9am
+    expect(r.hasTime, isTrue);
+  });
+
+  test('M/D date + am/pm time combine', () {
+    final r = parse('report 6/10 3pm');
+    expect(r.cleanTitle, 'report');
+    expect(r.dueDate, '2026-06-10T15:00:00');
+    expect(r.hasTime, isTrue);
+  });
+
+  test('12am / 12pm map to midnight / noon', () {
+    expect(parse('x 12am').dueDate, '2026-06-06T00:00:00');
+    expect(parse('x 12pm').dueDate, '2026-06-06T12:00:00');
+  });
+
+  test('a bare date has no time and stays date-only', () {
+    final r = parse('pay rent tomorrow');
+    expect(r.cleanTitle, 'pay rent');
+    expect(r.dueDate, '2026-06-07');
+    expect(r.hasTime, isFalse);
+  });
+
+  test('no date and no time leaves dueDate null and hasTime false', () {
+    final r = parse('pay rent');
+    expect(r.dueDate, isNull);
+    expect(r.hasTime, isFalse);
   });
 
   test('mid-word punctuation is never treated as a token', () {

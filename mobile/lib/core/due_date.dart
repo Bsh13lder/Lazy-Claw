@@ -1,0 +1,65 @@
+/// Helpers for the dual-shape `dueDate` string used throughout the Tasks UI.
+///
+/// A task's due date is stored as a nullable ISO string in two shapes:
+///   * **date-only** — `yyyy-MM-dd` (length 10, no time), e.g. `2026-06-08`.
+///   * **datetime**  — full local ISO-8601 `yyyy-MM-ddTHH:mm:ss` (carries a
+///     time-of-day), e.g. `2026-06-08T17:00:00`.
+///
+/// `DateTime.parse` accepts both, so day-grouping keeps working on the date
+/// part. These helpers are pure Dart (no Flutter, no intl) so they're trivially
+/// unit-testable and safe to share between the parser and the widgets.
+library;
+
+/// True when [due] carries a time-of-day (a `T`-bearing ISO datetime) rather
+/// than a bare `yyyy-MM-dd` calendar date.
+bool dueDateHasTime(String? due) =>
+    due != null && due.length > 10 && due.contains('T');
+
+/// The `yyyy-MM-dd` calendar-date portion of [due] (drops any time component).
+String dueDateDayPart(String due) =>
+    due.length >= 10 ? due.substring(0, 10) : due;
+
+/// The `(hour, minute)` of [due]'s time-of-day, or null when [due] is date-only
+/// or unparseable. Hour is 0-23.
+({int hour, int minute})? dueTimeParts(String? due) {
+  if (!dueDateHasTime(due)) return null;
+  final dt = DateTime.tryParse(due!);
+  if (dt == null) return null;
+  return (hour: dt.hour, minute: dt.minute);
+}
+
+/// Formats an (hour 0-23, minute 0-59) pair as a 12-hour `h:mm AM/PM` label,
+/// e.g. `5:00 PM`, `12:30 AM`. Intl-free so it's deterministic in tests.
+String formatClock12(int hour, int minute) {
+  final period = hour < 12 ? 'AM' : 'PM';
+  var h = hour % 12;
+  if (h == 0) h = 12;
+  final mm = minute.toString().padLeft(2, '0');
+  return '$h:$mm $period';
+}
+
+/// The `h:mm AM/PM` label for [due]'s time, or null when it has no time.
+String? formatDueTimeLabel(String? due) {
+  final parts = dueTimeParts(due);
+  if (parts == null) return null;
+  return formatClock12(parts.hour, parts.minute);
+}
+
+/// A human display for [due]: the date, plus ` · 5:00 PM` when a time is set.
+String dueDateDisplay(String due) {
+  final label = formatDueTimeLabel(due);
+  final day = dueDateDayPart(due);
+  return label == null ? day : '$day · $label';
+}
+
+/// Composes a `dueDate` string from a calendar [day] plus an optional
+/// time-of-day. With both [hour] and [minute] → a full local ISO datetime
+/// `yyyy-MM-ddTHH:mm:00`; otherwise a date-only `yyyy-MM-dd` string.
+String composeDueDate(DateTime day, {int? hour, int? minute}) {
+  final d = '${day.year.toString().padLeft(4, '0')}-'
+      '${day.month.toString().padLeft(2, '0')}-'
+      '${day.day.toString().padLeft(2, '0')}';
+  if (hour == null || minute == null) return d;
+  return '${d}T${hour.toString().padLeft(2, '0')}:'
+      '${minute.toString().padLeft(2, '0')}:00';
+}

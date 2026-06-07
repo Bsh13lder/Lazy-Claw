@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
@@ -27,10 +28,14 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
   /// the default selections for priority / due date.
   ParsedTask _parsed = const ParsedTask(cleanTitle: '');
 
-  /// Manual overrides. When set, they win over the parsed values.
+  /// Manual overrides. When set, they win over the parsed values. The due date
+  /// is split into a date-only day string (`_manualDueDate`) and a separate
+  /// time-of-day (`_manualTime`) so the two pickers are independent.
   String? _manualPriority;
   bool _dueDateTouched = false;
   String? _manualDueDate;
+  bool _timeTouched = false;
+  TimeOfDay? _manualTime;
 
   bool _submitting = false;
 
@@ -60,13 +65,44 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
   String get _effectivePriority =>
       _manualPriority ?? _parsed.priority ?? 'medium';
 
-  String? get _effectiveDueDate =>
-      _dueDateTouched ? _manualDueDate : _parsed.dueDate;
+  /// The parsed due date's date-only day part (`yyyy-MM-dd`), or null.
+  String? get _parsedDay {
+    final due = _parsed.dueDate;
+    return due == null ? null : dueDateDayPart(due);
+  }
+
+  /// The parsed due date's time-of-day, or null when it's date-only.
+  TimeOfDay? get _parsedTime {
+    final parts = dueTimeParts(_parsed.dueDate);
+    return parts == null ? null : TimeOfDay(hour: parts.hour, minute: parts.minute);
+  }
+
+  /// The effective day (manual override wins over the live parse).
+  String? get _effectiveDay => _dueDateTouched ? _manualDueDate : _parsedDay;
+
+  /// The effective time (manual override wins over the live parse).
+  TimeOfDay? get _effectiveTime => _timeTouched ? _manualTime : _parsedTime;
 
   bool get _hasDetection =>
       _parsed.dueDate != null ||
       _parsed.priority != null ||
       _parsed.project != null;
+
+  /// Combine a date-only [day] string with an optional [time] into the final
+  /// `dueDate` payload: a datetime when a time is set, a date-only string when
+  /// only a day is set, today+time when only a time is set, else null.
+  String? _compose(String? day, TimeOfDay? time) {
+    if (day == null) {
+      if (time == null) return null;
+      final n = DateTime.now();
+      return composeDueDate(DateTime(n.year, n.month, n.day),
+          hour: time.hour, minute: time.minute);
+    }
+    final d = DateTime.tryParse(day);
+    if (d == null) return day; // non-ISO fallback: leave as-is
+    return composeDueDate(DateTime(d.year, d.month, d.day),
+        hour: time?.hour, minute: time?.minute);
+  }
 
   void _onTitleChanged(String value) {
     setState(() => _parsed = parseSmartAdd(value));
@@ -81,7 +117,16 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     if (title.isEmpty) return;
 
     final priority = _manualPriority ?? parsed.priority ?? 'medium';
-    final dueDate = _dueDateTouched ? _manualDueDate : parsed.dueDate;
+
+    // Re-derive the effective day/time from this fresh parse so a keyboard
+    // submit can't race the onChanged callback, then compose them.
+    final parsedDay = parsed.dueDate == null ? null : dueDateDayPart(parsed.dueDate!);
+    final pt = dueTimeParts(parsed.dueDate);
+    final parsedTime =
+        pt == null ? null : TimeOfDay(hour: pt.hour, minute: pt.minute);
+    final day = _dueDateTouched ? _manualDueDate : parsedDay;
+    final time = _timeTouched ? _manualTime : parsedTime;
+    final dueDate = _compose(day, time);
 
     setState(() => _submitting = true);
     Navigator.of(context).pop(_AddTaskResult(
@@ -107,8 +152,10 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final effDue = _effectiveDueDate;
+    final effDay = _effectiveDay;
+    final effTime = _effectiveTime;
     final effPriority = _effectivePriority;
+    final composed = _compose(effDay, effTime);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -150,7 +197,7 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
             children: [
               if (_parsed.dueDate != null)
                 LzChip(
-                  label: _parsed.dueDate!,
+                  label: dueDateDisplay(_parsed.dueDate!),
                   icon: Icons.event_outlined,
                   selected: true,
                   color: AppColors.accent,
@@ -220,34 +267,57 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
             LzChip(
               label: 'Today',
               icon: Icons.today_outlined,
-              selected: effDue == _isoToday(),
+              selected: effDay == _isoToday(),
               color: AppColors.warn,
               onTap: () => _setDueDate(
-                  effDue == _isoToday() ? null : _isoToday()),
+                  effDay == _isoToday() ? null : _isoToday()),
             ),
             const SizedBox(width: AppSpacing.sm),
             LzChip(
               label: 'Tomorrow',
               icon: Icons.event_outlined,
-              selected: effDue == _isoTomorrow(),
+              selected: effDay == _isoTomorrow(),
               color: AppColors.accent,
               onTap: () => _setDueDate(
-                  effDue == _isoTomorrow() ? null : _isoTomorrow()),
+                  effDay == _isoTomorrow() ? null : _isoTomorrow()),
             ),
             const SizedBox(width: AppSpacing.sm),
             LzChip(
               label: 'Pick…',
               icon: Icons.calendar_month_outlined,
-              selected: effDue != null &&
-                  effDue != _isoToday() &&
-                  effDue != _isoTomorrow(),
+              selected: effDay != null &&
+                  effDay != _isoToday() &&
+                  effDay != _isoTomorrow(),
               color: AppColors.info,
               onTap: _pickDate,
             ),
           ],
         ),
 
-        if (effDue != null) ...[
+        // ── Time-of-day chip ───────────────────────────────────────────
+        const SizedBox(height: AppSpacing.sm),
+        Row(
+          children: [
+            LzChip(
+              label: effTime != null
+                  ? formatClock12(effTime.hour, effTime.minute)
+                  : 'Add time',
+              icon: Icons.schedule_outlined,
+              selected: effTime != null,
+              color: AppColors.accent,
+              onTap: _pickTime,
+            ),
+            if (effTime != null) ...[
+              const SizedBox(width: AppSpacing.sm),
+              GestureDetector(
+                onTap: () => _setTime(null),
+                child: Icon(Icons.close, size: 16, color: AppColors.textMuted),
+              ),
+            ],
+          ],
+        ),
+
+        if (composed != null) ...[
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
@@ -255,12 +325,12 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
                   size: 14, color: AppColors.textMuted),
               const SizedBox(width: AppSpacing.xs),
               Text(
-                'Due $effDue',
+                'Due ${dueDateDisplay(composed)}',
                 style: AppText.caption.copyWith(color: AppColors.textSecondary),
               ),
               const Spacer(),
               GestureDetector(
-                onTap: () => _setDueDate(null),
+                onTap: _clearDue,
                 child: Icon(Icons.close,
                     size: 14, color: AppColors.textMuted),
               ),
@@ -282,13 +352,49 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     );
   }
 
-  /// Apply a manual due-date selection (or clear). Marks the field as touched
-  /// so the parsed default no longer applies.
+  /// Apply a manual due-date (day) selection (or clear). Marks the field as
+  /// touched so the parsed default no longer applies.
   void _setDueDate(String? iso) {
     setState(() {
       _dueDateTouched = true;
       _manualDueDate = iso;
     });
+  }
+
+  /// Apply a manual time-of-day selection (or clear). Marks the field as
+  /// touched so the parsed default no longer applies.
+  void _setTime(TimeOfDay? time) {
+    setState(() {
+      _timeTouched = true;
+      _manualTime = time;
+    });
+  }
+
+  /// Clear both the day and the time in one tap (the "Due …" summary's ✕).
+  void _clearDue() {
+    setState(() {
+      _dueDateTouched = true;
+      _manualDueDate = null;
+      _timeTouched = true;
+      _manualTime = null;
+    });
+  }
+
+  Future<void> _pickTime() async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _effectiveTime ?? const TimeOfDay(hour: 9, minute: 0),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.dark(
+            primary: AppColors.accent,
+            surface: AppColors.bgSurfaceElevated,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) _setTime(picked);
   }
 
   Future<void> _pickDate() async {

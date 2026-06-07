@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/task.dart';
@@ -140,12 +141,22 @@ class TaskRow extends StatelessWidget {
                         color: priorityColor,
                         selected: true,
                       ),
-                      // Due date chip.
+                      // Due date chip (date only — the time gets its own tag).
                       if (task.dueDate != null)
                         LzChip(
-                          label: task.dueDate!,
+                          label: dueDateDayPart(task.dueDate!),
                           dense: true,
                           icon: Icons.calendar_today_outlined,
+                          color: _dueDateColor(task.dueDate!),
+                          selected: !isDone,
+                        ),
+                      // Time-of-day tag — only when the due date carries a time.
+                      if (dueDateHasTime(task.dueDate))
+                        LzChip(
+                          key: ValueKey('task-row-time-${task.id}'),
+                          label: formatDueTimeLabel(task.dueDate)!,
+                          dense: true,
+                          icon: Icons.schedule_outlined,
                           color: _dueDateColor(task.dueDate!),
                           selected: !isDone,
                         ),

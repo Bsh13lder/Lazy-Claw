@@ -8,13 +8,21 @@
 /// are simply left in the title.
 library;
 
+import 'due_date.dart';
+
 /// The structured result of parsing a smart-add title.
 class ParsedTask {
   /// The title with every recognized token removed and whitespace collapsed.
   final String cleanTitle;
 
-  /// ISO `yyyy-MM-dd`, or null when no date token was recognized.
+  /// Either a date-only `yyyy-MM-dd` string, or — when a time-of-day token was
+  /// recognized — a full local ISO datetime `yyyy-MM-ddTHH:mm:00`. Null when no
+  /// date or time token was found.
   final String? dueDate;
+
+  /// True when [dueDate] carries a time-of-day (an ISO datetime, not a bare
+  /// calendar date). A bare time like `5pm` resolves to today + that time.
+  final bool hasTime;
 
   /// One of `low | medium | high | urgent`, or null.
   final String? priority;
@@ -25,14 +33,16 @@ class ParsedTask {
   const ParsedTask({
     required this.cleanTitle,
     this.dueDate,
+    this.hasTime = false,
     this.priority,
     this.project,
   });
 }
 
 /// Parse [input] into a [ParsedTask]. [now] is injectable for deterministic
-/// tests; it defaults to [DateTime.now]. Only the date (not the time-of-day) is
-/// stored, so a bare time token resolves to today's calendar date.
+/// tests; it defaults to [DateTime.now]. A time-of-day token (`5pm`, `17:00`)
+/// is kept: it combines with any date token (or today, when only a time is
+/// given) into a full ISO datetime; otherwise the due date stays date-only.
 ParsedTask parseSmartAdd(String input, {DateTime? now}) {
   final ref = now ?? DateTime.now();
   final today = DateTime(ref.year, ref.month, ref.day);
@@ -53,6 +63,7 @@ ParsedTask parseSmartAdd(String input, {DateTime? now}) {
   return ParsedTask(
     cleanTitle: cleanTitle,
     dueDate: date.value,
+    hasTime: date.hasTime,
     priority: priority.value,
     project: project.value,
   );
@@ -148,7 +159,7 @@ final RegExp _clock12 = RegExp(
     caseSensitive: false);
 final RegExp _clock24 = RegExp(r'(^|\s)([01]?\d|2[0-3]):([0-5]\d)(?=\s|$)');
 
-/// A single accepted date/time hit within the working string.
+/// A single accepted calendar-date hit within the working string.
 class _DateHit {
   final int start;
   final int end;
@@ -156,61 +167,118 @@ class _DateHit {
   const _DateHit(this.start, this.end, this.date);
 }
 
-_Field _extractDate(String input, DateTime today) {
-  final calendar = <_DateHit>[];
-  final times = <_DateHit>[];
+/// A single accepted time-of-day hit. [hour] is 0-23.
+class _TimeHit {
+  final int start;
+  final int end;
+  final int hour;
+  final int minute;
+  const _TimeHit(this.start, this.end, this.hour, this.minute);
+}
 
-  void scan(RegExp re, List<_DateHit> bucket, DateTime? Function(RegExpMatch) f) {
+/// Result of date+time extraction: the composed due-date string, whether it
+/// carries a time, and the working title with all date/time tokens stripped.
+class _DateField {
+  final String? value;
+  final bool hasTime;
+  final String stripped;
+  const _DateField(this.value, this.hasTime, this.stripped);
+}
+
+_DateField _extractDate(String input, DateTime today) {
+  final calendar = <_DateHit>[];
+  final times = <_TimeHit>[];
+
+  void scanDate(RegExp re, DateTime? Function(RegExpMatch) f) {
     for (final m in re.allMatches(input)) {
       final d = f(m);
-      if (d != null) bucket.add(_DateHit(m.start, m.end, d));
+      if (d != null) calendar.add(_DateHit(m.start, m.end, d));
     }
   }
 
-  scan(_isoDate, calendar, (m) {
+  void scanTime(RegExp re, _TimeHit? Function(RegExpMatch) f) {
+    for (final m in re.allMatches(input)) {
+      final t = f(m);
+      if (t != null) times.add(t);
+    }
+  }
+
+  scanDate(_isoDate, (m) {
     final y = int.parse(m.group(2)!);
     final mo = int.parse(m.group(3)!);
     final da = int.parse(m.group(4)!);
     return _safeDate(y, mo, da);
   });
-  scan(_mdDate, calendar, (m) {
+  scanDate(_mdDate, (m) {
     final mo = int.parse(m.group(2)!);
     final da = int.parse(m.group(3)!);
     return _safeDate(today.year, mo, da);
   });
-  scan(_inNDays, calendar,
+  scanDate(_inNDays,
       (m) => today.add(Duration(days: int.parse(m.group(2)!))));
-  scan(_nextWeek, calendar, (_) => today.add(const Duration(days: 7)));
-  scan(_tomorrow, calendar, (_) => today.add(const Duration(days: 1)));
-  scan(_todayWord, calendar, (_) => today);
-  scan(_weekdayWord, calendar, (m) {
+  scanDate(_nextWeek, (_) => today.add(const Duration(days: 7)));
+  scanDate(_tomorrow, (_) => today.add(const Duration(days: 1)));
+  scanDate(_todayWord, (_) => today);
+  scanDate(_weekdayWord, (m) {
     final wd = _weekdays[m.group(2)!.toLowerCase()];
     if (wd == null) return null;
     final delta = (wd - today.weekday) % 7; // 0 when it's today
     return today.add(Duration(days: delta));
   });
 
-  scan(_clock12, times, (_) => today);
-  scan(_clock24, times, (_) => today);
+  scanTime(_clock12, (m) {
+    var h = int.parse(m.group(2)!);
+    if (h < 1 || h > 12) return null; // not a valid 12-hour clock
+    final min = m.group(3) != null ? int.parse(m.group(3)!.substring(1)) : 0;
+    if (min > 59) return null;
+    final pm = m.group(4)!.toLowerCase() == 'pm';
+    if (h == 12) h = 0; // 12am -> 0, 12pm handled by the +12 below
+    if (pm) h += 12;
+    return _TimeHit(m.start, m.end, h, min);
+  });
+  scanTime(_clock24, (m) {
+    final h = int.parse(m.group(2)!);
+    final min = int.parse(m.group(3)!);
+    return _TimeHit(m.start, m.end, h, min);
+  });
 
-  String? value;
+  // The earliest calendar token supplies the day; the earliest time token
+  // supplies the clock. A lone time resolves to today + that time.
+  _DateHit? day;
   if (calendar.isNotEmpty) {
     calendar.sort((a, b) => a.start.compareTo(b.start));
-    value = _iso(calendar.first.date);
-  } else if (times.isNotEmpty) {
-    value = _iso(today);
+    day = calendar.first;
+  }
+  _TimeHit? time;
+  if (times.isNotEmpty) {
+    times.sort((a, b) => a.start.compareTo(b.start));
+    time = times.first;
+  }
+
+  String? value;
+  var hasTime = false;
+  if (day != null) {
+    value = time != null
+        ? composeDueDate(day.date, hour: time.hour, minute: time.minute)
+        : composeDueDate(day.date);
+    hasTime = time != null;
+  } else if (time != null) {
+    value = composeDueDate(today, hour: time.hour, minute: time.minute);
+    hasTime = true;
   }
 
   // Strip every accepted token (calendar + time), right-to-left so earlier
   // removals don't shift later indices. Each removed span -> a single space.
-  final ranges = [...calendar, ...times]
-    ..sort((a, b) => b.start.compareTo(a.start));
+  final ranges = <({int start, int end})>[
+    for (final c in calendar) (start: c.start, end: c.end),
+    for (final t in times) (start: t.start, end: t.end),
+  ]..sort((a, b) => b.start.compareTo(a.start));
   var stripped = input;
   for (final r in ranges) {
     stripped = stripped.replaceRange(r.start, r.end, ' ');
   }
 
-  return _Field(value, stripped);
+  return _DateField(value, hasTime, stripped);
 }
 
 /// Build a date, returning null for out-of-range month/day rather than letting
@@ -221,8 +289,3 @@ DateTime? _safeDate(int year, int month, int day) {
   if (d.month != month || d.day != day) return null; // e.g. 2/30
   return d;
 }
-
-String _iso(DateTime d) =>
-    '${d.year.toString().padLeft(4, '0')}-'
-    '${d.month.toString().padLeft(2, '0')}-'
-    '${d.day.toString().padLeft(2, '0')}';

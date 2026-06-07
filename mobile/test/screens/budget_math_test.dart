@@ -143,6 +143,159 @@ void main() {
     });
   });
 
+  group('expenseRangeBounds', () {
+    test('week is today + the previous six days (inclusive)', () {
+      final now = DateTime(2026, 6, 15, 14, 30); // Mon-ish, mid-month
+      final b = expenseRangeBounds(ExpenseRange.week, now: now);
+      expect(b.start, DateTime(2026, 6, 9));
+      expect(b.end, DateTime(2026, 6, 15));
+    });
+
+    test('week underflow rolls into the previous month', () {
+      final now = DateTime(2026, 6, 3);
+      final b = expenseRangeBounds(ExpenseRange.week, now: now);
+      expect(b.start, DateTime(2026, 5, 28));
+      expect(b.end, DateTime(2026, 6, 3));
+    });
+
+    test('month is the 1st through the last day of the calendar month', () {
+      final b = expenseRangeBounds(ExpenseRange.month, now: DateTime(2026, 2, 9));
+      expect(b.start, DateTime(2026, 2, 1));
+      expect(b.end, DateTime(2026, 2, 28)); // 2026 is not a leap year
+    });
+
+    test('custom uses the date portions of the supplied bounds', () {
+      final b = expenseRangeBounds(
+        ExpenseRange.custom,
+        customStart: DateTime(2026, 6, 1, 9, 0),
+        customEnd: DateTime(2026, 6, 7, 23, 59),
+      );
+      expect(b.start, DateTime(2026, 6, 1));
+      expect(b.end, DateTime(2026, 6, 7));
+    });
+
+    test('custom tolerates a reversed pair by swapping', () {
+      final b = expenseRangeBounds(
+        ExpenseRange.custom,
+        customStart: DateTime(2026, 6, 7),
+        customEnd: DateTime(2026, 6, 1),
+      );
+      expect(b.start, DateTime(2026, 6, 1));
+      expect(b.end, DateTime(2026, 6, 7));
+    });
+
+    test('custom with a missing bound falls back to the current month', () {
+      final now = DateTime(2026, 6, 15);
+      final b = expenseRangeBounds(ExpenseRange.custom, now: now);
+      expect(b.start, DateTime(2026, 6, 1));
+      expect(b.end, DateTime(2026, 6, 30));
+    });
+  });
+
+  group('filterByRange', () {
+    final now = DateTime(2026, 6, 15);
+    final june1 = _expense('a', 'p1', 10, spentAt: '2026-06-01');
+    final june9 = _expense('b', 'p1', 20, spentAt: '2026-06-09');
+    final june15 = _expense('c', 'p1', 30, spentAt: '2026-06-15T08:00:00');
+    final may31 = _expense('d', 'p1', 40, spentAt: '2026-05-31');
+    final july1 = _expense('e', 'p1', 50, spentAt: '2026-07-01');
+    final undated = _expense('f', 'p1', 99); // no spent_at
+
+    final all = [june1, june9, june15, may31, july1, undated];
+
+    test('month keeps only the current calendar month', () {
+      final out = filterByRange(all, ExpenseRange.month, now: now);
+      expect(out.map((e) => e.id), containsAll(['a', 'b', 'c']));
+      expect(out.map((e) => e.id), isNot(contains('d'))); // May
+      expect(out.map((e) => e.id), isNot(contains('e'))); // July
+      expect(out.map((e) => e.id), isNot(contains('f'))); // undated
+    });
+
+    test('week keeps the 7-day window ending today (boundaries inclusive)', () {
+      final out = filterByRange(all, ExpenseRange.week, now: now);
+      // window: Jun 9 .. Jun 15 inclusive
+      expect(out.map((e) => e.id), containsAll(['b', 'c']));
+      expect(out.map((e) => e.id), isNot(contains('a'))); // Jun 1 < Jun 9
+      expect(out.map((e) => e.id), isNot(contains('d')));
+      expect(out.map((e) => e.id), isNot(contains('e')));
+    });
+
+    test('week includes both inclusive boundary days', () {
+      final start = _expense('s', 'p1', 1, spentAt: '2026-06-09');
+      final end = _expense('t', 'p1', 1, spentAt: '2026-06-15');
+      final out = filterByRange([start, end], ExpenseRange.week, now: now);
+      expect(out.length, 2);
+    });
+
+    test('custom filters to the picked window (inclusive)', () {
+      final out = filterByRange(
+        all,
+        ExpenseRange.custom,
+        customStart: DateTime(2026, 5, 31),
+        customEnd: DateTime(2026, 6, 1),
+      );
+      expect(out.map((e) => e.id), containsAll(['a', 'd']));
+      expect(out.length, 2);
+    });
+
+    test('undated rows are always excluded', () {
+      expect(filterByRange([undated], ExpenseRange.month, now: now), isEmpty);
+      expect(filterByRange([undated], ExpenseRange.week, now: now), isEmpty);
+    });
+
+    test('empty input yields empty output', () {
+      expect(filterByRange(const [], ExpenseRange.month, now: now), isEmpty);
+    });
+  });
+
+  group('rangeTotal', () {
+    test('sums live amounts and skips void rows', () {
+      final list = [
+        _expense('a', 'p1', 10),
+        _expense('b', 'p1', 5.5),
+        _expense('c', 'p1', 999, status: 'void'),
+      ];
+      expect(rangeTotal(list), closeTo(15.5, 0.001));
+      expect(rangeTotal(const []), 0);
+    });
+  });
+
+  group('expenseRangeLabel', () {
+    test('week and month produce readable labels', () {
+      expect(expenseRangeLabel(ExpenseRange.week), 'Last 7 days');
+      expect(expenseRangeLabel(ExpenseRange.month, now: DateTime(2026, 6, 1)),
+          'June');
+    });
+
+    test('custom shows the date span, with year only when it differs', () {
+      expect(
+        expenseRangeLabel(
+          ExpenseRange.custom,
+          now: DateTime(2026, 6, 15),
+          customStart: DateTime(2026, 6, 1),
+          customEnd: DateTime(2026, 6, 7),
+        ),
+        'Jun 1 – Jun 7',
+      );
+      expect(
+        expenseRangeLabel(
+          ExpenseRange.custom,
+          now: DateTime(2026, 6, 15),
+          customStart: DateTime(2025, 12, 30),
+          customEnd: DateTime(2026, 1, 2),
+        ),
+        'Dec 30, 2025 – Jan 2',
+      );
+    });
+
+    test('custom with a missing bound falls back to the month name', () {
+      expect(
+        expenseRangeLabel(ExpenseRange.custom, now: DateTime(2026, 6, 1)),
+        'June',
+      );
+    });
+  });
+
   group('AppColors.trafficLight buckets (the bar colors)', () {
     test('<70% is success, 70-90% is warn, >=90% is error', () {
       expect(AppColors.trafficLight(0.0), AppColors.success);

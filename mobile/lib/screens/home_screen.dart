@@ -10,6 +10,7 @@ import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../ui/ui.dart';
+import 'expenses/budget_math.dart';
 import 'expenses/money_helpers.dart';
 import 'expenses/project_color_picker.dart';
 
@@ -494,16 +495,15 @@ class _BudgetSection extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Lists the user's favorited (starred) projects so the important ones stay
-/// glanceable on Home while the full set lives in the Expenses tab. Each entry
-/// shows a traffic-light budget bar (when a budget is set) plus the two most
-/// recent expenses. Renders nothing at all when no project is favorited.
+/// glanceable on Home — the headline budget view, right under "This month".
+/// Each entry shows Budget vs Spent vs Remaining with a traffic-light bar (when
+/// a budget is set) plus its two most recent expenses. Renders nothing at all
+/// when no project is favorited (Home then falls back to the total-spend card).
 class _FavoritesSection extends StatelessWidget {
   const _FavoritesSection({required this.budgetsState, required this.onTap});
 
   final BudgetsState budgetsState;
   final VoidCallback onTap;
-
-  static const int _maxExpenses = 2;
 
   @override
   Widget build(BuildContext context) {
@@ -529,10 +529,13 @@ class _FavoritesSection extends StatelessWidget {
                 if (i > 0) const SizedBox(height: AppSpacing.sm),
                 _FavoriteProjectCard(
                   project: favorites[i],
+                  // Pass the FULL non-void expense set for this project so the
+                  // card derives spend via spentForProject (offline-correct +
+                  // consistent with the Expenses tab); it truncates internally
+                  // for the recent-expense preview.
                   expenses: budgetsState.expenses
                       .where((e) =>
                           e.projectId == favorites[i].id && !e.isVoid)
-                      .take(_maxExpenses)
                       .toList(),
                   onTap: onTap,
                 ),
@@ -555,19 +558,25 @@ class _FavoriteProjectCard extends StatelessWidget {
 
   final Project project;
 
-  /// Up to a couple of this project's most-recent expenses (newest first).
+  /// This project's full non-void expense set (newest first). Spend is derived
+  /// from it; only the first [_maxExpenses] are previewed.
   final List<Expense> expenses;
   final VoidCallback onTap;
+
+  static const int _maxExpenses = 2;
 
   @override
   Widget build(BuildContext context) {
     final budget = project.budget;
-    // Derive spend from the cached expense set so the bar agrees with the
-    // Expenses tab even offline. (`expenses` here is truncated for display, so
-    // pull the project's total from the project rollup when present.)
-    final spent = project.spent ?? 0.0;
+    // Derive spend from the cached expense set (via the shared budget math) so
+    // the bar always agrees with the Expenses tab — even offline, regardless of
+    // whether the project row carries a server rollup.
+    final spent = spentForProject(project.id, expenses);
+    final remaining = remainingForProject(project, spent);
     final fraction = budget > 0 ? (spent / budget).clamp(0.0, 1.0) : 0.0;
     final overBudget = budget > 0 && spent > budget;
+    final pctUsed = budget > 0 ? (fraction * 100).round() : 0;
+    final recent = expenses.take(_maxExpenses);
 
     return LzCard(
       onTap: onTap,
@@ -593,24 +602,36 @@ class _FavoriteProjectCard extends StatelessWidget {
             const SizedBox(height: AppSpacing.sm),
             LzProgressBar(value: fraction, height: 6, trafficLight: true),
             const SizedBox(height: AppSpacing.xs),
+            // Spent · % used   ……   {remaining} left/over of {budget}
             Row(
               children: [
                 Text(
                   fmtMoney(project.currency, spent),
                   style: AppText.caption.copyWith(
                     color: AppColors.trafficLight(fraction),
+                    fontWeight: FontWeight.w700,
                   ),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  'spent · $pctUsed%',
+                  style: AppText.caption.copyWith(color: AppColors.textMuted),
                 ),
                 const Spacer(),
                 Text(
                   overBudget
                       ? '${fmtMoney(project.currency, spent - budget)} over'
-                      : '${fmtMoney(project.currency, budget - spent)} left',
+                      : '${fmtMoney(project.currency, remaining)} left',
                   style: AppText.caption.copyWith(
                     color: overBudget
                         ? AppColors.error
                         : AppColors.textMuted,
                   ),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  '/ ${fmtMoney(project.currency, budget)}',
+                  style: AppText.caption.copyWith(color: AppColors.textMuted),
                 ),
               ],
             ),
@@ -621,9 +642,9 @@ class _FavoriteProjectCard extends StatelessWidget {
               style: AppText.caption.copyWith(color: AppColors.textMuted),
             ),
           ],
-          if (expenses.isNotEmpty) ...[
+          if (recent.isNotEmpty) ...[
             const SizedBox(height: AppSpacing.sm),
-            for (final e in expenses)
+            for (final e in recent)
               Padding(
                 padding: const EdgeInsets.only(top: 2),
                 child: Row(

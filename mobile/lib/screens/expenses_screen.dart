@@ -385,9 +385,43 @@ class _LedgerTabState extends State<_LedgerTab> {
   String? _projectFilter;
   _LedgerSort _sort = _LedgerSort.newest;
 
+  /// Time window the ledger is scoped to. Defaults to the current month.
+  ExpenseRange _range = ExpenseRange.month;
+
+  /// The picked window when [_range] is [ExpenseRange.custom] (null otherwise).
+  DateTimeRange? _customRange;
+
   /// Whether any visible expense no longer maps to a live project.
   bool _hasUncategorized(List<Expense> visible, Set<String> liveIds) =>
       visible.any((e) => !liveIds.contains(e.projectId));
+
+  /// Switch the active time range. Week/Month apply immediately; Custom opens a
+  /// date-range picker and only switches once a range is chosen (or one already
+  /// exists), so a cancelled picker never strands the ledger on an empty range.
+  Future<void> _onRangeChanged(ExpenseRange range) async {
+    if (range != ExpenseRange.custom) {
+      setState(() => _range = range);
+      return;
+    }
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 5),
+      lastDate: DateTime(now.year + 1, 12, 31),
+      initialDateRange: _customRange,
+    );
+    if (!mounted) return;
+    if (picked != null) {
+      setState(() {
+        _customRange = picked;
+        _range = ExpenseRange.custom;
+      });
+    } else if (_customRange != null) {
+      // Re-selecting Custom without changing the dates: keep the prior window.
+      setState(() => _range = ExpenseRange.custom);
+    }
+    // Otherwise (cancelled with no prior custom range) stay on the current range.
+  }
 
   List<Expense> _applyFilter(List<Expense> visible, Set<String> liveIds) {
     final filter = _projectFilter;
@@ -419,14 +453,34 @@ class _LedgerTabState extends State<_LedgerTab> {
       _projectFilter = null;
     }
 
-    final filtered = _applyFilter(visible, liveIds);
+    // Scope to the active time window first (offline, in-memory), then compose
+    // with the project filter. Sort happens in the sliver builders below.
+    final ranged = filterByRange(
+      visible,
+      _range,
+      customStart: _customRange?.start,
+      customEnd: _customRange?.end,
+    );
+    final filtered = _applyFilter(ranged, liveIds);
+
+    final currency = filtered.isNotEmpty
+        ? filtered.first.currency
+        : (visible.isNotEmpty ? visible.first.currency : 'USD');
     final controls = _LedgerControls(
       projects: state.projects,
       selectedProjectId: _projectFilter,
-      showUncategorized: _hasUncategorized(visible, liveIds),
+      showUncategorized: _hasUncategorized(ranged, liveIds),
       sort: _sort,
+      range: _range,
+      rangeLabel: expenseRangeLabel(
+        _range,
+        customStart: _customRange?.start,
+        customEnd: _customRange?.end,
+      ),
+      rangeTotalText: fmtMoney(currency, rangeTotal(filtered)),
       onProjectChanged: (id) => setState(() => _projectFilter = id),
       onSortChanged: (s) => setState(() => _sort = s),
+      onRangeChanged: _onRangeChanged,
     );
 
     return LzRefresh(
@@ -440,7 +494,7 @@ class _LedgerTabState extends State<_LedgerTab> {
               child: LzEmptyState(
                 icon: Icons.filter_alt_off_outlined,
                 title: 'No expenses match',
-                hint: 'Try a different project or clear the filter.',
+                hint: 'Try a different project or time range.',
               ),
             )
           else if (_sort == _LedgerSort.amount)
@@ -551,8 +605,9 @@ class _LedgerTabState extends State<_LedgerTab> {
   }
 }
 
-/// Filter + sort controls for the ledger: a horizontally scrollable project
-/// filter row (All · each project · Uncategorized) and a sort selector
+/// Filter + sort controls for the ledger: a time-range toggle (Week · Month ·
+/// Custom) with the range's running total, a horizontally scrollable project
+/// filter row (All · each project · Uncategorized), and a sort selector
 /// (Newest · Oldest · Largest).
 class _LedgerControls extends StatelessWidget {
   const _LedgerControls({
@@ -560,22 +615,98 @@ class _LedgerControls extends StatelessWidget {
     required this.selectedProjectId,
     required this.showUncategorized,
     required this.sort,
+    required this.range,
+    required this.rangeLabel,
+    required this.rangeTotalText,
     required this.onProjectChanged,
     required this.onSortChanged,
+    required this.onRangeChanged,
   });
 
   final List<Project> projects;
   final String? selectedProjectId;
   final bool showUncategorized;
   final _LedgerSort sort;
+
+  /// The active time window + its resolved label and running total (already
+  /// scoped to the shown project filter).
+  final ExpenseRange range;
+  final String rangeLabel;
+  final String rangeTotalText;
   final ValueChanged<String?> onProjectChanged;
   final ValueChanged<_LedgerSort> onSortChanged;
+  final ValueChanged<ExpenseRange> onRangeChanged;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Time-range toggle.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.md,
+            AppSpacing.lg,
+            AppSpacing.xs,
+          ),
+          child: Row(
+            children: [
+              _RangeChip(
+                label: 'Week',
+                value: ExpenseRange.week,
+                current: range,
+                onTap: onRangeChanged,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              _RangeChip(
+                label: 'Month',
+                value: ExpenseRange.month,
+                current: range,
+                onTap: onRangeChanged,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              _RangeChip(
+                label: 'Custom',
+                value: ExpenseRange.custom,
+                current: range,
+                icon: Icons.date_range_rounded,
+                onTap: onRangeChanged,
+              ),
+            ],
+          ),
+        ),
+        // Resolved range label + running total for that window.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            0,
+            AppSpacing.lg,
+            AppSpacing.xs,
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.event_note_outlined,
+                  size: 14, color: AppColors.textMuted),
+              const SizedBox(width: AppSpacing.xs),
+              Expanded(
+                child: Text(
+                  rangeLabel,
+                  style: AppText.caption.copyWith(color: AppColors.textMuted),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Text(
+                rangeTotalText,
+                style: AppText.caption.copyWith(
+                  color: AppColors.textSecondary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
         // Project filter.
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
@@ -678,6 +809,35 @@ class _SortChip extends StatelessWidget {
       dense: true,
       selected: current == value,
       color: AppColors.info,
+      onTap: () => onTap(value),
+    );
+  }
+}
+
+/// A segmented time-range option chip (Week · Month · Custom).
+class _RangeChip extends StatelessWidget {
+  const _RangeChip({
+    required this.label,
+    required this.value,
+    required this.current,
+    required this.onTap,
+    this.icon,
+  });
+
+  final String label;
+  final ExpenseRange value;
+  final ExpenseRange current;
+  final ValueChanged<ExpenseRange> onTap;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return LzChip(
+      label: label,
+      dense: true,
+      icon: icon,
+      selected: current == value,
+      color: AppColors.accent,
       onTap: () => onTap(value),
     );
   }

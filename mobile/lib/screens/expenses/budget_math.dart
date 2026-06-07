@@ -22,6 +22,171 @@ double spentForProject(String projectId, Iterable<Expense> expenses) {
 double remainingForProject(Project project, double spent) =>
     project.budget - spent;
 
+// ── Time-range filtering (Expenses ledger) ───────────────────────────────────
+
+/// A time window for filtering the expense ledger. All windows are evaluated
+/// against each expense's `spent_at` calendar date (time-of-day is ignored), so
+/// boundaries are inclusive on both ends.
+enum ExpenseRange { week, month, custom }
+
+/// Inclusive, date-only bounds (both at local midnight) for [range].
+///
+/// - [ExpenseRange.week]: the 7-day window ending today (today + the previous
+///   six days).
+/// - [ExpenseRange.month]: the current calendar month (1st → last day).
+/// - [ExpenseRange.custom]: [customStart] → [customEnd] (date portions only).
+///   Falls back to the current month when either bound is missing, and tolerates
+///   a reversed pair by swapping — so a half-built custom range can never yield
+///   a garbage/empty window.
+///
+/// [now] defaults to [DateTime.now] and is injectable for deterministic tests.
+({DateTime start, DateTime end}) expenseRangeBounds(
+  ExpenseRange range, {
+  DateTime? now,
+  DateTime? customStart,
+  DateTime? customEnd,
+}) {
+  final ref = now ?? DateTime.now();
+  final today = DateTime(ref.year, ref.month, ref.day);
+  switch (range) {
+    case ExpenseRange.week:
+      // DateTime normalizes a day underflow into the previous month, so this is
+      // DST/month-boundary safe (unlike subtracting a Duration).
+      return (start: DateTime(ref.year, ref.month, ref.day - 6), end: today);
+    case ExpenseRange.month:
+      // Day 0 of next month == last day of this month.
+      return (
+        start: DateTime(ref.year, ref.month, 1),
+        end: DateTime(ref.year, ref.month + 1, 0),
+      );
+    case ExpenseRange.custom:
+      if (customStart == null || customEnd == null) {
+        return expenseRangeBounds(ExpenseRange.month, now: ref);
+      }
+      var s = DateTime(customStart.year, customStart.month, customStart.day);
+      var e = DateTime(customEnd.year, customEnd.month, customEnd.day);
+      if (e.isBefore(s)) {
+        final tmp = s;
+        s = e;
+        e = tmp;
+      }
+      return (start: s, end: e);
+  }
+}
+
+/// The subset of [expenses] whose `spent_at` calendar date falls inside [range]
+/// (inclusive on both ends). Undated / unparseable rows are dropped — they can't
+/// be placed in a window. Void filtering is the caller's responsibility (this is
+/// purely a date filter), matching how the ledger passes an already non-void
+/// list.
+///
+/// [now] / [customStart] / [customEnd] are forwarded to [expenseRangeBounds].
+List<Expense> filterByRange(
+  Iterable<Expense> expenses,
+  ExpenseRange range, {
+  DateTime? now,
+  DateTime? customStart,
+  DateTime? customEnd,
+}) {
+  final bounds = expenseRangeBounds(
+    range,
+    now: now,
+    customStart: customStart,
+    customEnd: customEnd,
+  );
+  final out = <Expense>[];
+  for (final e in expenses) {
+    final d = _expenseDate(e.spentAt);
+    if (d == null) continue;
+    if (d.isBefore(bounds.start) || d.isAfter(bounds.end)) continue;
+    out.add(e);
+  }
+  return out;
+}
+
+/// Sum of the live (non-void) amounts in [expenses]. Mixed currencies are NOT
+/// reconciled — callers scope to a single display currency.
+double rangeTotal(Iterable<Expense> expenses) {
+  var total = 0.0;
+  for (final e in expenses) {
+    if (!e.isVoid) total += e.amount;
+  }
+  return total;
+}
+
+/// Human-readable label for [range] (e.g. "Last 7 days", "June", "Jun 1 – 7").
+/// Pure + testable; [now] defaults to [DateTime.now].
+String expenseRangeLabel(
+  ExpenseRange range, {
+  DateTime? now,
+  DateTime? customStart,
+  DateTime? customEnd,
+}) {
+  final ref = now ?? DateTime.now();
+  switch (range) {
+    case ExpenseRange.week:
+      return 'Last 7 days';
+    case ExpenseRange.month:
+      return _monthFull[ref.month];
+    case ExpenseRange.custom:
+      if (customStart == null || customEnd == null) return _monthFull[ref.month];
+      final b = expenseRangeBounds(
+        range,
+        now: ref,
+        customStart: customStart,
+        customEnd: customEnd,
+      );
+      return '${_shortDate(b.start, ref)} – ${_shortDate(b.end, ref)}';
+  }
+}
+
+/// The calendar date (date-only) of an ISO-8601 `spent_at`, or null when absent
+/// / unparseable. Components are read as-parsed (consistent with [_isInMonth]).
+DateTime? _expenseDate(String? spentAt) {
+  if (spentAt == null || spentAt.length < 7) return null;
+  final d = DateTime.tryParse(spentAt);
+  if (d == null) return null;
+  return DateTime(d.year, d.month, d.day);
+}
+
+/// "Jun 1" when [d] is in [ref]'s year, otherwise "Jun 1, 2025".
+String _shortDate(DateTime d, DateTime ref) {
+  final base = '${_monthShort[d.month]} ${d.day}';
+  return d.year == ref.year ? base : '$base, ${d.year}';
+}
+
+const List<String> _monthFull = [
+  '',
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+const List<String> _monthShort = [
+  '',
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
 /// Aggregate figures for the Money overview hero card, computed from the live
 /// expense + project sets.
 ///

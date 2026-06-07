@@ -154,6 +154,11 @@ Future<_Fixture> _mkFixture({
   // "Favorites" section renders them. Each carries its own display name.
   List<({String name, double budget, String currency})> favoriteProjects =
       const [],
+  // Expenses to seed (project_id → amount). Lets a test give a favorite real
+  // spend so the budget-vs-spend math can be asserted. Favorite ids are
+  // `fav_<index>`; regular project ids are `proj_<index>`.
+  List<({String projectId, double amount, String currency})> expenses =
+      const [],
 }) async {
   const now = '2026-01-01T00:00:00';
   final db = await _openMemDb();
@@ -202,6 +207,23 @@ Future<_Fixture> _mkFixture({
       'is_favorite': 1,
       'spent': 0.0,
       'remaining': p.budget,
+      'created_at': now,
+      'updated_at': now,
+      'dirty': 0,
+      'deleted': 0,
+    });
+  }
+
+  for (var i = 0; i < expenses.length; i++) {
+    final e = expenses[i];
+    await db.insert('expense_cache', {
+      'id': 'exp_$i',
+      'project_id': e.projectId,
+      'amount': e.amount,
+      'currency': e.currency,
+      'description': 'Seed expense $i',
+      'status': 'posted',
+      'spent_at': '2026-01-03',
       'created_at': now,
       'updated_at': now,
       'dirty': 0,
@@ -424,6 +446,45 @@ void main() {
         // LzSection renders the title uppercased.
         expect(find.text('FAVORITES'), findsOneWidget);
         expect(find.text('Nima Pinned'), findsOneWidget);
+      });
+    });
+
+    testWidgets('favorite card shows budget vs spent vs remaining + % used',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(
+          favoriteProjects: [
+            (name: 'Trip', budget: 1000, currency: 'EUR'),
+          ],
+          // 250 spent of a 1000 budget → 25% used, 750 remaining.
+          expenses: [(projectId: 'fav_0', amount: 250.0, currency: 'EUR')],
+        );
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+
+        expect(find.text('Trip'), findsOneWidget);
+        // Spent amount + percent used, derived from the cached expense set.
+        expect(find.text('spent · 25%'), findsOneWidget);
+        // Remaining + budget total.
+        expect(find.textContaining('€750 left'), findsOneWidget);
+        expect(find.text('/ €1000'), findsOneWidget);
+      });
+    });
+
+    testWidgets('favorite card flags an over-budget project', (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(
+          favoriteProjects: [
+            (name: 'Blown', budget: 100, currency: 'EUR'),
+          ],
+          // 150 spent of a 100 budget → over by 50.
+          expenses: [(projectId: 'fav_0', amount: 150.0, currency: 'EUR')],
+        );
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+
+        expect(find.text('Blown'), findsOneWidget);
+        expect(find.textContaining('€50 over'), findsOneWidget);
       });
     });
 

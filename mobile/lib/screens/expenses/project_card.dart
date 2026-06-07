@@ -52,6 +52,7 @@ class _ProjectCardState extends State<ProjectCard> {
     final spent = spentForProject(project.id, widget.expenses);
     final fraction = budget > 0 ? (spent / budget).clamp(0.0, 1.0) : 0.0;
     final overBudget = budget > 0 && spent > budget;
+    final pctUsed = budget > 0 ? (fraction * 100).round() : 0;
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -191,7 +192,7 @@ class _ProjectCardState extends State<ProjectCard> {
                           ),
                           const SizedBox(width: AppSpacing.xs),
                           Text(
-                            'spent',
+                            'spent · $pctUsed%',
                             style: AppText.caption,
                           ),
                           const Spacer(),

@@ -24,6 +24,7 @@
         android:paddingTop="8dp"
         android:paddingBottom="8dp">
         <ImageView
+            android:id="@+id/qc_task_icon"
             android:layout_width="22dp"
             android:layout_height="22dp"
             android:src="@drawable/ic_shortcut_task"
@@ -51,6 +52,7 @@
         android:paddingTop="8dp"
         android:paddingBottom="8dp">
         <ImageView
+            android:id="@+id/qc_expense_icon"
             android:layout_width="22dp"
             android:layout_height="22dp"
             android:src="@drawable/ic_shortcut_expense"
@@ -78,6 +80,7 @@
         android:paddingTop="8dp"
         android:paddingBottom="8dp">
         <ImageView
+            android:id="@+id/qc_note_icon"
             android:layout_width="22dp"
             android:layout_height="22dp"
             android:src="@drawable/ic_shortcut_note"
@@ -105,6 +108,7 @@
         android:paddingTop="8dp"
         android:paddingBottom="8dp">
         <ImageView
+            android:id="@+id/qc_chat_icon"
             android:layout_width="22dp"
             android:layout_height="22dp"
             android:src="@drawable/ic_shortcut_chat"

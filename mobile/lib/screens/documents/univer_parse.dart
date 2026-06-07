@@ -171,6 +171,187 @@ String parseDocText(Map<String, dynamic>? payload) =>
 String _stripRangeTokens(String s) =>
     s.replaceAll(_customRangeStart, '').replaceAll(_customRangeEnd, '');
 
+// ── Mutable workbook model (editor) ──────────────────────────────────────────
+
+/// One Univer `ICellData` cell: a cached display [value] and/or a [formula].
+/// Mirrors `lazyclaw/sheets/snapshot.py` (`v` = value, `f` = formula).
+class UniverCell {
+  const UniverCell({this.value, this.formula, this.style});
+
+  /// Cached value (`v`) — what the grid shows once computed.
+  final dynamic value;
+
+  /// Formula string (`f`), always stored with a leading `=`.
+  final String? formula;
+
+  /// Opaque style id (`s`) referencing the workbook `styles` registry.
+  final dynamic style;
+
+  /// What the user sees: the cached value, else the formula, else empty.
+  String get display {
+    if (value != null) return value.toString();
+    if (formula != null && formula!.isNotEmpty) return formula!;
+    return '';
+  }
+
+  /// The raw value to put in an editor field: the formula when present (so the
+  /// user edits the formula), else the literal value.
+  String get editText {
+    if (formula != null && formula!.isNotEmpty) return formula!;
+    if (value != null) return value.toString();
+    return '';
+  }
+
+  bool get isEmpty => value == null && (formula == null || formula!.isEmpty);
+
+  factory UniverCell.fromJson(dynamic raw) {
+    final m = _asMap(raw);
+    return UniverCell(value: m['v'], formula: m['f']?.toString(), style: m['s']);
+  }
+
+  Map<String, dynamic> toJson() {
+    final out = <String, dynamic>{};
+    if (formula != null && formula!.isNotEmpty) {
+      out['f'] = formula;
+      if (value != null) out['v'] = value;
+    } else if (value != null) {
+      out['v'] = value;
+    }
+    if (style != null) out['s'] = style;
+    return out;
+  }
+}
+
+/// A mutable, immutable-by-copy view over a Univer `IWorkbookData` snapshot for
+/// the native editor. Holds the whole workbook map plus the [activeIndex] of the
+/// worksheet being edited. Every edit returns a NEW [UniverSheet] (project
+/// immutability rule) so Riverpod/`setState` see a fresh reference.
+class UniverSheet {
+  const UniverSheet._(this._wb, this.activeIndex);
+
+  final Map<String, dynamic> _wb;
+
+  /// Index into [sheetNames] / `sheetOrder` of the worksheet being edited.
+  final int activeIndex;
+
+  factory UniverSheet.fromWorkbook(Map<String, dynamic>? payload, {int active = 0}) {
+    final wb = _deepCopyMap(payload ?? const {});
+    final order = _order(wb);
+    final clamped = order.isEmpty ? 0 : active.clamp(0, order.length - 1);
+    return UniverSheet._(wb, clamped);
+  }
+
+  static List<String> _order(Map<String, dynamic> wb) {
+    final sheets = _asMap(wb['sheets']);
+    final order = (wb['sheetOrder'] as List?)?.map((e) => e.toString()).toList();
+    if (order != null && order.isNotEmpty) return order;
+    return sheets.keys.toList();
+  }
+
+  /// Worksheet display names in tab order.
+  List<String> get sheetNames {
+    final sheets = _asMap(_wb['sheets']);
+    return _order(_wb)
+        .map((sid) => (_asMap(sheets[sid])['name'] ?? sid).toString())
+        .toList(growable: false);
+  }
+
+  String get _activeSheetId {
+    final order = _order(_wb);
+    if (order.isEmpty) return '';
+    return order[activeIndex.clamp(0, order.length - 1)];
+  }
+
+  Map<String, dynamic> get _activeCellData =>
+      _asMap(_asMap(_asMap(_wb['sheets'])[_activeSheetId])['cellData']);
+
+  /// The cell at (row, col) of the active worksheet (empty cell if unset).
+  UniverCell cellAt(int row, int col) {
+    final rowMap = _asMap(_activeCellData[row.toString()]);
+    final raw = rowMap[col.toString()];
+    return raw == null ? const UniverCell() : UniverCell.fromJson(raw);
+  }
+
+  /// Switch the active worksheet; returns a NEW [UniverSheet].
+  UniverSheet withActiveIndex(int index) {
+    final order = _order(_wb);
+    final clamped = order.isEmpty ? 0 : index.clamp(0, order.length - 1);
+    return UniverSheet._(_wb, clamped);
+  }
+
+  /// Set (or clear) a cell on the active worksheet; returns a NEW [UniverSheet].
+  ///
+  /// A non-null [formula] wins (a leading `=` is added if missing). Passing both
+  /// null clears the cell. Mirrors `_apply_cell` in `sheets/snapshot.py`.
+  UniverSheet setCell(int row, int col, {Object? value, String? formula}) {
+    final wb = _deepCopyMap(_wb);
+    final sheet = _asMap(_asMap(wb['sheets'])[_activeSheetId]);
+    final cellData = (sheet['cellData'] as Map?)?.cast<String, dynamic>() ??
+        (sheet['cellData'] = <String, dynamic>{}) as Map<String, dynamic>;
+    final rKey = row.toString();
+    final cKey = col.toString();
+
+    if (value == null && (formula == null || formula.isEmpty)) {
+      final rowMap = _asMap(cellData[rKey]);
+      rowMap.remove(cKey);
+      if (rowMap.isEmpty) {
+        cellData.remove(rKey);
+      } else {
+        cellData[rKey] = rowMap;
+      }
+      return UniverSheet._(wb, activeIndex);
+    }
+
+    final cell = <String, dynamic>{};
+    if (formula != null && formula.isNotEmpty) {
+      cell['f'] = formula.startsWith('=') ? formula : '=$formula';
+      if (value != null) cell['v'] = _coerce(value);
+    } else {
+      // Reachable only when value is non-null (the clear case returned above).
+      cell['v'] = _coerce(value!);
+    }
+    final rowMap = (cellData[rKey] as Map?)?.cast<String, dynamic>() ??
+        <String, dynamic>{};
+    rowMap[cKey] = cell;
+    cellData[rKey] = rowMap;
+    return UniverSheet._(wb, activeIndex);
+  }
+
+  /// `(maxRow, maxCol)` inclusive of populated cells on the active sheet; both
+  /// `-1` when the sheet is empty.
+  (int, int) usedBounds() {
+    var maxRow = -1;
+    var maxCol = -1;
+    _activeCellData.forEach((rKey, rowVal) {
+      final r = int.tryParse(rKey);
+      if (r == null) return;
+      _asMap(rowVal).forEach((cKey, cell) {
+        final c = int.tryParse(cKey);
+        if (c == null) return;
+        if (UniverCell.fromJson(cell).isEmpty) return;
+        if (r > maxRow) maxRow = r;
+        if (c > maxCol) maxCol = c;
+      });
+    });
+    return (maxRow, maxCol);
+  }
+
+  /// The underlying Univer workbook map (for save / recalc round-trips).
+  Map<String, dynamic> toWorkbook() => _deepCopyMap(_wb);
+
+  /// Best-effort numeric coercion mirroring `coerce_value` in snapshot.py.
+  static Object _coerce(Object value) {
+    if (value is num || value is bool) return value;
+    final s = value.toString().trim();
+    if (s.isEmpty) return '';
+    final i = int.tryParse(s);
+    if (i != null) return i;
+    final d = double.tryParse(s);
+    if (d != null) return d;
+    return value;
+  }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Coerce a dynamic JSON value to a `Map<String, dynamic>` (empty when not a
@@ -179,4 +360,18 @@ Map<String, dynamic> _asMap(dynamic v) {
   if (v is Map<String, dynamic>) return v;
   if (v is Map) return v.map((k, val) => MapEntry(k.toString(), val));
   return const {};
+}
+
+/// Recursively deep-copy a JSON-ish map so edits never mutate the source
+/// snapshot (immutability rule). Lists and nested maps are copied too.
+Map<String, dynamic> _deepCopyMap(Map<dynamic, dynamic> src) {
+  final out = <String, dynamic>{};
+  src.forEach((k, v) => out[k.toString()] = _deepCopyValue(v));
+  return out;
+}
+
+dynamic _deepCopyValue(dynamic v) {
+  if (v is Map) return _deepCopyMap(v);
+  if (v is List) return v.map(_deepCopyValue).toList();
+  return v;
 }

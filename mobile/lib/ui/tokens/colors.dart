@@ -2,69 +2,80 @@ import 'package:flutter/widgets.dart';
 
 /// Color tokens for the LazyClaw design system.
 ///
-/// Dark, layered surfaces with the amber-claw accent. These are the single
+/// Dark, layered surfaces with the emerald-claw accent. These are the single
 /// source of truth for every color in the app — no screen hard-codes a
 /// [Color]; everything references a token here (or a [ThemeData] value derived
-/// from one). Values come straight from the design spec (§1.1).
+/// from one). Values are kept in lock-step with the LazyClaw **web** palette
+/// (`web/src/styles/globals.css` `@theme`) so mobile and web read as the same
+/// product.
 ///
 /// Pure constants — no widget dependencies beyond [Color].
 abstract final class AppColors {
   AppColors._();
 
   // ── Surfaces (deepest → raised) ──────────────────────────────────────────
-  /// App background.
-  static const Color bgBase = Color(0xFF0B0B12);
+  /// App background. Web `--color-bg-primary`.
+  static const Color bgBase = Color(0xFF0D0D0D);
 
-  /// Cards, sheets.
-  static const Color bgSurface = Color(0xFF14141F);
+  /// Cards, sheets. Web `--color-bg-secondary`.
+  static const Color bgSurface = Color(0xFF171717);
 
-  /// Raised cards, app bar.
-  static const Color bgSurfaceElevated = Color(0xFF1C1C2B);
+  /// Raised cards, app bar. Web `--color-bg-tertiary`.
+  static const Color bgSurfaceElevated = Color(0xFF212121);
 
-  /// Pressed / hover surface.
-  static const Color bgSurfaceHover = Color(0xFF24243A);
+  /// Pressed / hover surface. Web `--color-bg-hover`.
+  static const Color bgSurfaceHover = Color(0xFF2A2A2A);
 
   // ── Borders (white at low opacity) ───────────────────────────────────────
-  /// Hairlines (white @ 6%).
+  /// Hairlines (white @ 6%). Matches the web glass-card border.
   static const Color borderSubtle = Color(0x0FFFFFFF);
 
-  /// Dividers, input borders (white @ 10%).
+  /// Dividers, input borders (white @ 10%). Matches the web glass-card hover
+  /// border; reads as the web `--color-border` (#2f2f2f) over a surface.
   static const Color borderDefault = Color(0x1AFFFFFF);
 
   // ── Text ─────────────────────────────────────────────────────────────────
-  /// Headings / body.
-  static const Color textPrimary = Color(0xFFF5F5FA);
+  /// Headings / body. Web `--color-text-primary`.
+  static const Color textPrimary = Color(0xFFECECEC);
 
-  /// Secondary text.
-  static const Color textSecondary = Color(0xFFA8A8B8);
+  /// Secondary text. Web `--color-text-secondary`.
+  static const Color textSecondary = Color(0xFFB4B4B4);
 
-  /// Captions, placeholders.
-  static const Color textMuted = Color(0xFF6E6E80);
+  /// Captions, placeholders. Web `--color-text-muted`.
+  static const Color textMuted = Color(0xFF767676);
 
-  // ── Accent (amber claw) ──────────────────────────────────────────────────
-  /// Primary actions, active state.
-  static const Color accent = Color(0xFFFF8A3D);
+  // ── Accent (emerald claw) ────────────────────────────────────────────────
+  /// Primary actions, active state. Web `--color-accent`.
+  static const Color accent = Color(0xFF10B981);
 
-  /// Pressed accent.
-  static const Color accentHover = Color(0xFFFF9F5C);
+  /// Pressed accent. Web `--color-accent-dim`.
+  static const Color accentHover = Color(0xFF059669);
 
-  /// Start of the 135° claw gradient.
-  static const Color accentGradientStart = Color(0xFFFF9F45);
+  /// Start of the 135° claw gradient. Web `--color-accent`.
+  static const Color accentGradientStart = Color(0xFF10B981);
 
-  /// End of the 135° claw gradient.
-  static const Color accentGradientEnd = Color(0xFFFF6B35);
+  /// End of the 135° claw gradient. Web `--color-accent-dim`.
+  static const Color accentGradientEnd = Color(0xFF059669);
 
-  /// Text / icons placed on top of the amber accent.
-  static const Color onAccent = Color(0xFF1A1208);
+  /// Text / icons placed on top of the emerald accent. Web puts
+  /// `text-bg-primary` (#0d0d0d) on accent surfaces.
+  static const Color onAccent = Color(0xFF0D0D0D);
 
   // ── Semantic ─────────────────────────────────────────────────────────────
-  static const Color success = Color(0xFF3DD68C);
-  static const Color warn = Color(0xFFFFB020);
-  static const Color error = Color(0xFFFF5C5C);
-  static const Color info = Color(0xFF5AA9FF);
+  /// Web traffic-light "good" (`bg-emerald-400`) / tip-callout ring (#34d399).
+  static const Color success = Color(0xFF34D399);
+
+  /// Web `--color-amber` (traffic-light "warning").
+  static const Color warn = Color(0xFFF59E0B);
+
+  /// Web `--color-error` (traffic-light "over").
+  static const Color error = Color(0xFFEF4444);
+
+  /// Web `--color-cyan` (info / links).
+  static const Color info = Color(0xFF06B6D4);
 
   // ── Gradients ────────────────────────────────────────────────────────────
-  /// The amber-claw hero gradient (135°, top-left → bottom-right).
+  /// The emerald-claw hero gradient (135°, top-left → bottom-right).
   static const Gradient accentGradient = LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,

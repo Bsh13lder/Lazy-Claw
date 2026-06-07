@@ -26,6 +26,14 @@ const String kDbKeyName = 'lazyclaw_db_key';
 /// File name of the encrypted local database.
 const String kAppDbFileName = 'lazyclaw_offline.db';
 
+/// How long a connection waits for a competing lock to clear before giving up
+/// with `SQLITE_BUSY`. The app opens this DB from TWO isolates — the foreground
+/// app AND the WorkManager headless sync isolate — so concurrent writes are
+/// expected; without a busy timeout the loser throws "database is locked"
+/// instantly (the "database load conflict"). 5s comfortably covers a normal
+/// sync transaction.
+const int kBusyTimeoutMs = 5000;
+
 /// The full DDL for every table in the offline cache. Kept in one place so the
 /// real (encrypted, on-device) DB and the in-memory test DB run identical
 /// schema — the sync/DAO logic is then verified against a real SQLite engine.
@@ -185,6 +193,31 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
   }
 }
 
+/// Per-connection PRAGMA setup applied to EVERY opened on-disk DB — in the
+/// foreground app AND in the WorkManager background isolate (both route through
+/// [openAppDb], so both get this). This is the core multi-isolate-safety fix:
+///
+/// * `busy_timeout = [kBusyTimeoutMs]` — when another connection (e.g. the
+///   headless sync isolate, or the new foreground 30-min resync) holds a write
+///   lock, WAIT for it to clear instead of throwing `SQLITE_BUSY` /
+///   "database is locked" immediately. This is THE fix for the "database load
+///   conflict" the two-isolate design otherwise hits.
+/// * `journal_mode = WAL` — write-ahead logging lets a reader and a writer run
+///   concurrently (readers no longer block on the writer's lock), shrinking the
+///   contention window between the app and the background sync. SQLCipher fully
+///   supports WAL.
+/// * `foreign_keys = ON` — unchanged; enforce referential integrity.
+///
+/// Order matters: `busy_timeout` is set FIRST so that the `journal_mode = WAL`
+/// switch (which itself needs a brief exclusive lock) can wait rather than fail
+/// when another isolate is mid-write. Exposed (not inlined) so tests can apply
+/// it to a plain ffi DB and assert the PRAGMAs took effect.
+Future<void> configureAppDb(Database db) async {
+  await db.rawQuery('PRAGMA busy_timeout = $kBusyTimeoutMs');
+  await db.rawQuery('PRAGMA journal_mode = WAL');
+  await db.execute('PRAGMA foreign_keys = ON');
+}
+
 /// Read the DB passphrase from secure storage, generating + persisting a fresh
 /// 256-bit random key on first run. The key NEVER leaves the device keychain.
 Future<String> loadOrCreateDbKey({
@@ -220,9 +253,7 @@ Future<Database> openAppDb({
     dbPath,
     password: key,
     version: kAppDbVersion,
-    onConfigure: (db) async {
-      await db.execute('PRAGMA foreign_keys = ON');
-    },
+    onConfigure: configureAppDb,
     onCreate: (db, version) async {
       await createAppDbSchema(db);
     },
@@ -277,6 +308,32 @@ class AppDbResult {
 /// Number of milliseconds to wait between failed file-DB open attempts.
 const Duration _kFallbackBackoff = Duration(milliseconds: 150);
 
+/// A transient lock deserves more runway than a hard failure (corruption /
+/// keychain error): we must NOT wipe-degrade to an empty in-memory DB just
+/// because the headless sync isolate briefly held the file. So on a lock error
+/// the open is retried these many EXTRA times, with a longer backoff, before
+/// ever falling back.
+const int _kLockExtraRetries = 4;
+const Duration _kLockBackoff = Duration(milliseconds: 400);
+
+/// True when [e] is a transient SQLite lock/contention error ("database is
+/// locked" / SQLITE_BUSY / SQLITE_LOCKED) — as opposed to genuine corruption or
+/// a keychain failure. A lock is transient: the correct response is to RETRY
+/// (the on-disk cache is perfectly healthy), never to discard the cache or
+/// degrade to an ephemeral in-memory DB. Matched on the message text because
+/// sqflite surfaces these as a `DatabaseException` whose `toString()` carries
+/// the SQLite token (e.g. "database is locked (code 5 SQLITE_BUSY)"). Kept
+/// deliberately specific so unrelated "...locked" errors (e.g. a locked
+/// keychain) are NOT misclassified.
+bool isDatabaseLockedError(Object? e) {
+  if (e == null) return false;
+  final msg = e.toString().toLowerCase();
+  return msg.contains('database is locked') ||
+      msg.contains('database table is locked') ||
+      msg.contains('sqlite_busy') ||
+      msg.contains('sqlite_locked');
+}
+
 /// Resilient open: retry the encrypted file DB [retries] times (short backoff
 /// between tries), then fall back to an in-memory DB. ALWAYS returns a usable
 /// [Database] so the provider graph can never crash on a DB-open failure.
@@ -296,22 +353,31 @@ Future<AppDbResult> openAppDbWithFallback({
   final openMem = openInMemory ?? _openInMemoryAppDb;
 
   Object? lastError;
-  // attempt 0..retries inclusive => (retries + 1) total tries.
-  for (var attempt = 0; attempt <= retries; attempt++) {
+  var attempt = 0;
+  while (true) {
     try {
       final db = await open();
       return AppDbResult(db, const DbHealth.ok());
     } catch (err, stack) {
       lastError = err;
+      // A transient lock (the other isolate held the file) gets EXTRA retries
+      // with a longer backoff — degrading to an empty in-memory DB on a lock
+      // would needlessly hide the user's healthy on-disk cache.
+      final locked = isDatabaseLockedError(err);
+      final budget = locked ? retries + _kLockExtraRetries : retries;
       // NEVER silently swallow — surface every failed attempt for diagnosis.
       debugPrint(
         'openAppDbWithFallback: file DB open attempt '
-        '${attempt + 1}/${retries + 1} failed: $err',
+        '${attempt + 1}/${budget + 1} failed'
+        '${locked ? ' (transient lock — will retry, not degrade)' : ''}: $err',
       );
       debugPrintStack(stackTrace: stack, label: 'openAppDbWithFallback');
-      if (attempt < retries) {
-        await Future<void>.delayed(_kFallbackBackoff);
+      if (attempt < budget) {
+        await Future<void>.delayed(locked ? _kLockBackoff : _kFallbackBackoff);
+        attempt++;
+        continue;
       }
+      break;
     }
   }
 

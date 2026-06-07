@@ -57,6 +57,10 @@ class AiEditBody(BaseModel):
     instruction: str = Field(min_length=1, max_length=2000)
 
 
+class RecalcBody(BaseModel):
+    payload: dict[str, Any]
+
+
 @router.get("")
 async def list_sheets_route(user: User = Depends(get_current_user)):
     """List the current user's sheets (index only, no payload)."""
@@ -116,6 +120,26 @@ async def ai_edit_sheet_route(
         "snapshot": result.snapshot,
         "error": result.error,
     }
+
+
+@router.post("/{sheet_id}/recalc")
+async def recalc_sheet_route(
+    sheet_id: str,
+    body: RecalcBody,
+    user: User = Depends(get_current_user),
+):
+    """Recompute formulas server-side for a client-edited snapshot.
+
+    The native mobile grid has no in-browser formula engine, so after a manual
+    formula edit it posts the snapshot here; we run xlcalculator (via
+    :func:`lazyclaw.sheets.recalc.recalc`) and return the snapshot with computed
+    ``v`` values filled in. Stateless (operates on the posted payload, reads no
+    stored sheet) and never 500s — unsupported formulas keep their prior value.
+    """
+    from lazyclaw.sheets.recalc import recalc as _recalc_snapshot
+
+    snapshot = _recalc_snapshot(body.payload)
+    return {"ok": True, "snapshot": snapshot}
 
 
 @router.delete("/{sheet_id}")

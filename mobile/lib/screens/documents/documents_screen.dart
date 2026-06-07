@@ -7,7 +7,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
-import 'doc_viewer_screen.dart';
+import 'doc_editor_screen.dart';
 import 'documents_list_view.dart';
 import 'pdf_viewer_screen.dart';
 import 'sheet_editor_screen.dart';
@@ -36,7 +36,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
       case DocKind.sheets:
         screen = SheetEditorScreen(id: meta.id, name: meta.name);
       case DocKind.docs:
-        screen = DocViewerScreen(id: meta.id, name: meta.name);
+        screen = DocEditorScreen(id: meta.id, name: meta.name);
       case DocKind.pdf:
         screen = PdfViewerScreen(id: meta.id, name: meta.name);
     }

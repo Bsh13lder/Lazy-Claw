@@ -50,6 +50,12 @@ dependencies:
   # event markers keyed by task due date.
   table_calendar: ^3.1.0
   flutter_local_notifications: ^18.0.0
+  # Scheduled task reminders need a tz-aware clock for zonedSchedule. `timezone`
+  # is already pulled in transitively by flutter_local_notifications; promoting
+  # it to a direct dep lets us call tz.* ourselves. `flutter_timezone` resolves
+  # the device's IANA zone name so the local location is correct.
+  timezone: ^0.10.0
+  flutter_timezone: ^4.0.0
   # Offline-first Tasks layer: encrypted local SQLite, reachability, bg sync.
   sqflite_sqlcipher: ^3.1.0
   connectivity_plus: ^6.1.0

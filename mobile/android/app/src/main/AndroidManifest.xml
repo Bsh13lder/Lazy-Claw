@@ -5,6 +5,15 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Required for local notifications on Android 13+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Scheduled task reminders (flutter_local_notifications zonedSchedule with
+         AndroidScheduleMode.exactAllowWhileIdle). SCHEDULE_EXACT_ALARM is the
+         user-revocable Android 12+ perm (requested at runtime); USE_EXACT_ALARM
+         is the auto-granted Android 13+ perm for alarm/reminder-class apps.
+         RECEIVE_BOOT_COMPLETED lets the plugin's boot receiver re-arm pending
+         reminders after a reboot. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <!-- In-app self-updater (ota_update): trigger the system package installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
@@ -29,6 +38,22 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="${applicationId}.ACTION_INSTALL_COMPLETE"/>
+            </intent-filter>
+        </receiver>
+        <!-- flutter_local_notifications: fires scheduled task reminders, and
+             re-arms still-pending reminders after a reboot / app update. Class
+             names verified against flutter_local_notifications 18.0.1. -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+            android:exported="false"/>
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
             </intent-filter>
         </receiver>
         <!-- Quick-Capture home-screen widget (4x1). Buttons deep-link into the

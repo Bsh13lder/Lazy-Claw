@@ -6,6 +6,7 @@ import 'core/config/server_config.dart';
 import 'core/router/app_router.dart';
 import 'core/self_update.dart';
 import 'local/app_db.dart';
+import 'notifications/local_notifications.dart';
 import 'ui/app_theme.dart';
 import 'providers/auth_provider.dart';
 import 'providers/budgets_provider.dart';
@@ -24,6 +25,11 @@ Future<void> main() async {
   // handle, so the provider graph can never crash on a DB-open failure. The
   // resulting [DbHealth] drives the degraded-mode banner in the UI.
   final result = await openAppDbWithFallback();
+
+  // Initialise local notifications + the timezone db up front so scheduled
+  // task reminders can be (re)scheduled at startup (see the syncAll below) and
+  // so zonedSchedule has a valid local location. Never throws.
+  await LocalNotifications.init();
 
   // Best-effort periodic background sync (~30 min). Never blocks startup.
   await registerBackgroundSync();
@@ -52,6 +58,19 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
   void initState() {
     super.initState();
     Future.microtask(() => ref.read(authProvider.notifier).checkSession());
+
+    // (Re)schedule local reminders for every cached task at app start, so
+    // due/reminder times survive an app restart and reboot even if the user
+    // never opens the Tasks tab. Reads straight from the encrypted local cache
+    // (no network). Best-effort — never throws, never blocks the UI.
+    Future.microtask(() async {
+      try {
+        final tasks = await ref.read(taskDaoProvider).list();
+        await ref.read(taskReminderServiceProvider).syncAll(tasks);
+      } catch (_) {
+        // Notifications are non-critical; a failure here must not affect boot.
+      }
+    });
 
     // Home-screen access (Phase 5): wire the launcher long-press shortcuts and
     // the home-screen Quick-Capture widget into [pendingActionProvider]. Done

@@ -786,8 +786,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             Padding(
               padding: const EdgeInsets.all(AppSpacing.md),
               child: Text(
-                'Toggles are stored locally. '
-                'Device-level permission must be granted in system settings.',
+                'Toggles are stored locally. Device-level permission must be '
+                'granted in system settings. Task reminders fire at a task\'s '
+                'due time / reminder time even when the app is closed — on '
+                'HyperOS / MIUI you must also allow notifications, enable '
+                '"Alarms & reminders" (exact alarms), and turn on Autostart, '
+                'or scheduled reminders are silently dropped.',
                 style: AppText.caption,
               ),
             ),

@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../core/notifications/task_reminder_service.dart';
 import '../local/app_db.dart' show DbHealth;
 import '../local/task_dao.dart';
 import '../models/task.dart';
+import '../notifications/local_notifications.dart';
 import '../repositories/tasks_repository.dart';
 import '../sync/reachability.dart';
 import '../sync/task_sync.dart';
@@ -39,6 +41,12 @@ final tasksRepositoryProvider = Provider<TasksRepository>((ref) {
 /// The offline-first sync engine.
 final taskSyncProvider = Provider<TaskSync>((ref) {
   return TaskSync(ref.watch(taskDaoProvider), ref.watch(tasksRepositoryProvider));
+});
+
+/// Schedules local notifications at each task's due / reminder time. Reuses the
+/// app's single [FlutterLocalNotificationsPlugin] instance.
+final taskReminderServiceProvider = Provider<TaskReminderScheduler>((ref) {
+  return TaskReminderService(LocalNotifications.plugin);
 });
 
 /// Reachability of the user's own backend (OS link + active host ping).
@@ -120,7 +128,13 @@ class TasksNotifier extends StateNotifier<TasksState> {
   final TaskDao _dao;
   final TaskSync _sync;
 
-  TasksNotifier(this._dao, this._sync) : super(const TasksState());
+  /// Optional local-notification scheduler. Null in tests / when notifications
+  /// aren't wired — every call site guards with `?.`, so scheduling is a no-op
+  /// rather than a failure.
+  final TaskReminderScheduler? _reminders;
+
+  TasksNotifier(this._dao, this._sync, [this._reminders])
+      : super(const TasksState());
 
   /// Load from the local cache immediately, then kick a background sync and
   /// refresh from cache again when it settles.
@@ -128,6 +142,10 @@ class TasksNotifier extends StateNotifier<TasksState> {
     state = state.copyWith(isLoading: true, error: null);
     try {
       await _refreshFromCache(loading: false);
+      // (Re)schedule reminders for everything already in the cache, so a fresh
+      // app start picks up due/reminder times for existing tasks and clears any
+      // stale schedules. Best-effort — never blocks the load.
+      unawaited(_reminders?.syncAll(state.tasks) ?? Future<void>.value());
     } catch (e) {
       // A degraded/corrupt cache must never strand the screen on the loading
       // skeleton — surface the error and let the UI recover.
@@ -154,13 +172,15 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? category,
   }) async {
     try {
-      await _dao.applyLocalCreate(
+      final created = await _dao.applyLocalCreate(
         title,
         priority: priority ?? 'medium',
         dueDate: dueDate,
         category: category,
       );
       await _refreshFromCache();
+      unawaited(
+          _reminders?.scheduleForTask(created) ?? Future<void>.value());
       unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
@@ -179,7 +199,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? category,
   }) async {
     try {
-      await _dao.applyLocalUpdate(
+      final updated = await _dao.applyLocalUpdate(
         id,
         title: title,
         description: description,
@@ -188,6 +208,14 @@ class TasksNotifier extends StateNotifier<TasksState> {
         category: category,
       );
       await _refreshFromCache();
+      // Reschedule against the new fields (cancels too, if the time was removed
+      // or the task is now done). Falls back to a cancel when the row vanished.
+      if (updated != null) {
+        unawaited(
+            _reminders?.scheduleForTask(updated) ?? Future<void>.value());
+      } else {
+        unawaited(_reminders?.cancelForTask(id) ?? Future<void>.value());
+      }
       unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
@@ -198,6 +226,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     try {
       await _dao.applyLocalComplete(id);
       await _refreshFromCache();
+      unawaited(_reminders?.cancelForTask(id) ?? Future<void>.value());
       unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
@@ -208,6 +237,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     try {
       await _dao.applyLocalDelete(id);
       await _refreshFromCache();
+      unawaited(_reminders?.cancelForTask(id) ?? Future<void>.value());
       unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
@@ -247,6 +277,7 @@ final tasksProvider =
   final notifier = TasksNotifier(
     ref.watch(taskDaoProvider),
     ref.watch(taskSyncProvider),
+    ref.watch(taskReminderServiceProvider),
   );
 
   // When the backend comes back online, drain the outbox + pull deltas.

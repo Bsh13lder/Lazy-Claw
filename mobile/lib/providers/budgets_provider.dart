@@ -177,17 +177,22 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   }) async {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
-      // Stamp the project name so the new local row renders before the next
-      // pull rehydrates it from the server.
+      // Stamp the project name + currency so the new local row renders with the
+      // right symbol BEFORE the next pull rehydrates it from the server.
+      // Without inheriting the project's currency the DAO default ("USD") would
+      // mislabel a non-USD project's expenses (and corrupt derived totals) until
+      // a sync round-trip.
       final match =
           state.projects.where((p) => p.id == projectId).firstOrNull;
       final projectName = match?.name;
+      final currency = match?.currency ?? 'USD';
       await _dao.applyLocalExpenseCreate(
         projectId,
         amount,
         description,
         vendor: vendor,
         projectName: projectName,
+        currency: currency,
       );
       await _refreshFromCache();
       state = state.copyWith(isSubmitting: false);

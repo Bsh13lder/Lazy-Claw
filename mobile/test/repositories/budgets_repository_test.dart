@@ -276,11 +276,14 @@ void main() {
       expect(t.lastBody, containsPair('name', 'Renamed'));
     });
 
-    test('DELETE /api/budgets/projects/{id}', () async {
+    test('DELETE /api/budgets/projects/{id} passes cascade=true', () async {
+      // The delete UX warns "and all its expenses will be removed", and the
+      // server 409s a non-cascade delete of a project that still has expenses,
+      // so the client must always cascade.
       final t = _FakeTransport({'status': 'deleted'});
       await BudgetsRepository(t).deleteProject('proj9');
       expect(t.lastMethod, 'DELETE');
-      expect(t.lastPath, '/api/budgets/projects/proj9');
+      expect(t.lastPath, '/api/budgets/projects/proj9?cascade=true');
     });
   });
 

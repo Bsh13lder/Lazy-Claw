@@ -228,8 +228,13 @@ class BudgetsRepository {
     await _t.patchJson('/api/budgets/projects/$id', patch);
   }
 
-  /// Delete a project (soft delete server-side).
+  /// Delete a project (soft delete server-side). Always passes `cascade=true`:
+  /// the server returns 409 for a delete of a project that still has expenses,
+  /// and the client's own delete UX already warns the user that the project
+  /// "and all its expenses will be removed". Without the flag a project-with-
+  /// expenses delete would 409, get drained from the outbox, and leave the row
+  /// tombstoned-but-unsynced (re-appearing on the next full pull).
   Future<void> deleteProject(String id) async {
-    await _t.deleteJson('/api/budgets/projects/$id');
+    await _t.deleteJson('/api/budgets/projects/$id?cascade=true');
   }
 }

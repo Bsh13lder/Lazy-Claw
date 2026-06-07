@@ -8,6 +8,7 @@ import '../providers/tasks_provider.dart'
     show reachableProvider, dbHealthProvider;
 import '../ui/ui.dart';
 import 'expenses/add_expense_sheet.dart';
+import 'expenses/budget_math.dart';
 import 'expenses/budget_summary_card.dart';
 import 'expenses/edit_project_sheet.dart';
 import 'expenses/expense_detail_sheet.dart';
@@ -15,6 +16,13 @@ import 'expenses/expense_row.dart';
 import 'expenses/money_helpers.dart';
 import 'expenses/project_card.dart';
 import 'storage_banners.dart';
+
+/// Sort order for the expense ledger.
+enum _LedgerSort { newest, oldest, amount }
+
+/// Sentinel filter value for expenses that no longer map to a live project
+/// (e.g. their project was deleted locally before the sync caught up).
+const String _kUncategorizedFilter = '__uncategorized__';
 
 class ExpensesScreen extends ConsumerStatefulWidget {
   const ExpensesScreen({super.key});
@@ -272,15 +280,9 @@ class _OverviewTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Aggregate totals.
-    final totalSpent = state.projects.fold<double>(
-      0,
-      (sum, p) => sum + (p.spent ?? 0),
-    );
-    final totalBudget =
-        state.projects.fold<double>(0, (sum, p) => sum + p.budget);
-    final currency =
-        state.projects.isNotEmpty ? state.projects.first.currency : 'USD';
+    // Aggregate totals — derived from the live expense set (not a stale/absent
+    // server rollup) and currency-aware so mixed currencies aren't summed.
+    final totals = BudgetTotals.from(state.projects, state.expenses);
 
     return LzRefresh(
       onRefresh: onRefresh,
@@ -288,11 +290,7 @@ class _OverviewTab extends StatelessWidget {
         padding: EdgeInsets.zero,
         children: [
           // Hero summary card.
-          BudgetSummaryCard(
-            totalSpent: totalSpent,
-            totalBudget: totalBudget,
-            currency: currency,
-          ),
+          BudgetSummaryCard(totals: totals),
           // Projects section.
           if (state.projects.isNotEmpty) ...[
             Padding(
@@ -329,7 +327,7 @@ class _OverviewTab extends StatelessWidget {
 
 // ── Ledger Tab ────────────────────────────────────────────────────────────────
 
-class _LedgerTab extends StatelessWidget {
+class _LedgerTab extends StatefulWidget {
   const _LedgerTab({
     required this.state,
     required this.onDeleteExpense,
@@ -343,7 +341,30 @@ class _LedgerTab extends StatelessWidget {
   final Future<void> Function() onRefresh;
 
   @override
+  State<_LedgerTab> createState() => _LedgerTabState();
+}
+
+class _LedgerTabState extends State<_LedgerTab> {
+  /// null = all projects; a project id; or [_kUncategorizedFilter].
+  String? _projectFilter;
+  _LedgerSort _sort = _LedgerSort.newest;
+
+  /// Whether any visible expense no longer maps to a live project.
+  bool _hasUncategorized(List<Expense> visible, Set<String> liveIds) =>
+      visible.any((e) => !liveIds.contains(e.projectId));
+
+  List<Expense> _applyFilter(List<Expense> visible, Set<String> liveIds) {
+    final filter = _projectFilter;
+    if (filter == null) return visible;
+    if (filter == _kUncategorizedFilter) {
+      return visible.where((e) => !liveIds.contains(e.projectId)).toList();
+    }
+    return visible.where((e) => e.projectId == filter).toList();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final state = widget.state;
     final visible = state.expenses.where((e) => !e.isVoid).toList();
 
     if (visible.isEmpty) {
@@ -354,76 +375,274 @@ class _LedgerTab extends StatelessWidget {
       );
     }
 
-    // Group by date.
-    final byDate = groupBy<Expense, String>(
-      visible,
-      (e) => dateLabel(e.spentAt),
+    final liveIds = state.projects.map((p) => p.id).toSet();
+    // A stale filter (its project was just deleted) collapses back to "All".
+    if (_projectFilter != null &&
+        _projectFilter != _kUncategorizedFilter &&
+        !liveIds.contains(_projectFilter)) {
+      _projectFilter = null;
+    }
+
+    final filtered = _applyFilter(visible, liveIds);
+    final controls = _LedgerControls(
+      projects: state.projects,
+      selectedProjectId: _projectFilter,
+      showUncategorized: _hasUncategorized(visible, liveIds),
+      sort: _sort,
+      onProjectChanged: (id) => setState(() => _projectFilter = id),
+      onSortChanged: (s) => setState(() => _sort = s),
     );
 
-    // Sort dates: most recent first.
-    final sortedDates = byDate.keys.toList()
-      ..sort((a, b) => b.compareTo(a));
-
     return LzRefresh(
-      onRefresh: onRefresh,
-      child: ListView.builder(
-        padding: const EdgeInsets.only(bottom: AppSpacing.xxxl),
-        itemCount: sortedDates.length,
-        itemBuilder: (context, i) {
-          final date = sortedDates[i];
-          final dayExpenses = byDate[date]!;
-          final dayTotal = dayExpenses.fold<double>(
-            0,
-            (sum, e) => sum + e.amount,
-          );
-          final currency =
-              dayExpenses.isNotEmpty ? dayExpenses.first.currency : 'USD';
-
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AppSpacing.lg,
-              AppSpacing.lg,
-              AppSpacing.lg,
-              0,
-            ),
-            child: LzSection(
-              title: friendlyDate(date),
-              action: Text(
-                fmtMoney(currency, dayTotal),
-                style: AppText.caption.copyWith(
-                  color: AppColors.textSecondary,
-                  fontWeight: FontWeight.w700,
-                ),
+      onRefresh: widget.onRefresh,
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(child: controls),
+          if (filtered.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: LzEmptyState(
+                icon: Icons.filter_alt_off_outlined,
+                title: 'No expenses match',
+                hint: 'Try a different project or clear the filter.',
               ),
-              child: LzCard(
-                padding: EdgeInsets.zero,
-                child: Column(
-                  children: [
-                    for (int j = 0; j < dayExpenses.length; j++) ...[
-                      ExpenseRow(
-                        expense: dayExpenses[j],
-                        projects: state.projects,
-                        pendingSync:
-                            state.dirtyExpenseIds.contains(dayExpenses[j].id),
-                        onDelete: () => onDeleteExpense(dayExpenses[j].id),
-                        onTap: () => onTapExpense(dayExpenses[j]),
-                        showProject: true,
-                      ),
-                      if (j < dayExpenses.length - 1)
-                        Divider(
-                          height: 0.5,
-                          thickness: 0.5,
-                          color: AppColors.borderSubtle,
-                          indent: AppSpacing.lg + 40 + AppSpacing.md,
-                        ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
+            )
+          else if (_sort == _LedgerSort.amount)
+            _amountSliver(filtered)
+          else
+            _dateGroupedSliver(filtered, newestFirst: _sort == _LedgerSort.newest),
+        ],
       ),
+    );
+  }
+
+  /// A flat, single-card list sorted by amount (largest first).
+  Widget _amountSliver(List<Expense> expenses) {
+    final sorted = [...expenses]..sort((a, b) => b.amount.compareTo(a.amount));
+    final total = sorted.fold<double>(0, (s, e) => s + e.amount);
+    final currency = sorted.isNotEmpty ? sorted.first.currency : 'USD';
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.lg,
+        AppSpacing.lg,
+        AppSpacing.xxxl,
+      ),
+      sliver: SliverToBoxAdapter(
+        child: LzSection(
+          title: 'By amount',
+          action: Text(
+            fmtMoney(currency, total),
+            style: AppText.caption.copyWith(
+              color: AppColors.textSecondary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          child: _expenseCard(sorted),
+        ),
+      ),
+    );
+  }
+
+  /// Date-grouped sections, ordered [newestFirst] (or oldest-first).
+  Widget _dateGroupedSliver(List<Expense> expenses, {required bool newestFirst}) {
+    final byDate = groupBy<Expense, String>(expenses, (e) => dateLabel(e.spentAt));
+    final sortedDates = byDate.keys.toList()
+      ..sort((a, b) => newestFirst ? b.compareTo(a) : a.compareTo(b));
+
+    return SliverPadding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xxxl),
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, i) {
+            final date = sortedDates[i];
+            final dayExpenses = byDate[date]!;
+            final dayTotal = dayExpenses.fold<double>(0, (s, e) => s + e.amount);
+            final currency =
+                dayExpenses.isNotEmpty ? dayExpenses.first.currency : 'USD';
+
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.lg,
+                AppSpacing.lg,
+                AppSpacing.lg,
+                0,
+              ),
+              child: LzSection(
+                title: friendlyDate(date),
+                action: Text(
+                  fmtMoney(currency, dayTotal),
+                  style: AppText.caption.copyWith(
+                    color: AppColors.textSecondary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                child: _expenseCard(dayExpenses),
+              ),
+            );
+          },
+          childCount: sortedDates.length,
+        ),
+      ),
+    );
+  }
+
+  Widget _expenseCard(List<Expense> expenses) {
+    return LzCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          for (int j = 0; j < expenses.length; j++) ...[
+            ExpenseRow(
+              expense: expenses[j],
+              projects: widget.state.projects,
+              pendingSync: widget.state.dirtyExpenseIds.contains(expenses[j].id),
+              onDelete: () => widget.onDeleteExpense(expenses[j].id),
+              onTap: () => widget.onTapExpense(expenses[j]),
+              showProject: true,
+            ),
+            if (j < expenses.length - 1)
+              Divider(
+                height: 0.5,
+                thickness: 0.5,
+                color: AppColors.borderSubtle,
+                indent: AppSpacing.lg + 40 + AppSpacing.md,
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Filter + sort controls for the ledger: a horizontally scrollable project
+/// filter row (All · each project · Uncategorized) and a sort selector
+/// (Newest · Oldest · Largest).
+class _LedgerControls extends StatelessWidget {
+  const _LedgerControls({
+    required this.projects,
+    required this.selectedProjectId,
+    required this.showUncategorized,
+    required this.sort,
+    required this.onProjectChanged,
+    required this.onSortChanged,
+  });
+
+  final List<Project> projects;
+  final String? selectedProjectId;
+  final bool showUncategorized;
+  final _LedgerSort sort;
+  final ValueChanged<String?> onProjectChanged;
+  final ValueChanged<_LedgerSort> onSortChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Project filter.
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.md,
+            AppSpacing.lg,
+            AppSpacing.xs,
+          ),
+          child: Row(
+            children: [
+              LzChip(
+                label: 'All',
+                dense: true,
+                selected: selectedProjectId == null,
+                color: AppColors.accent,
+                onTap: () => onProjectChanged(null),
+              ),
+              for (final p in projects) ...[
+                const SizedBox(width: AppSpacing.sm),
+                LzChip(
+                  label: p.name,
+                  dense: true,
+                  selected: selectedProjectId == p.id,
+                  color: AppColors.accent,
+                  onTap: () => onProjectChanged(p.id),
+                ),
+              ],
+              if (showUncategorized) ...[
+                const SizedBox(width: AppSpacing.sm),
+                LzChip(
+                  label: 'Uncategorized',
+                  dense: true,
+                  selected: selectedProjectId == _kUncategorizedFilter,
+                  color: AppColors.textMuted,
+                  onTap: () => onProjectChanged(_kUncategorizedFilter),
+                ),
+              ],
+            ],
+          ),
+        ),
+        // Sort selector.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.xs,
+            AppSpacing.lg,
+            AppSpacing.xs,
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.swap_vert_rounded,
+                  size: 16, color: AppColors.textMuted),
+              const SizedBox(width: AppSpacing.sm),
+              _SortChip(
+                label: 'Newest',
+                value: _LedgerSort.newest,
+                current: sort,
+                onTap: onSortChanged,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              _SortChip(
+                label: 'Oldest',
+                value: _LedgerSort.oldest,
+                current: sort,
+                onTap: onSortChanged,
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              _SortChip(
+                label: 'Largest',
+                value: _LedgerSort.amount,
+                current: sort,
+                onTap: onSortChanged,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SortChip extends StatelessWidget {
+  const _SortChip({
+    required this.label,
+    required this.value,
+    required this.current,
+    required this.onTap,
+  });
+
+  final String label;
+  final _LedgerSort value;
+  final _LedgerSort current;
+  final ValueChanged<_LedgerSort> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return LzChip(
+      label: label,
+      dense: true,
+      selected: current == value,
+      color: AppColors.info,
+      onTap: () => onTap(value),
     );
   }
 }

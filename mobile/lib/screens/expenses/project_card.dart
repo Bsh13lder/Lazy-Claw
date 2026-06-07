@@ -3,6 +3,7 @@ import 'package:lazyclaw_mobile/models/expense.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import 'budget_math.dart';
 import 'expense_row.dart';
 import 'money_helpers.dart';
 import 'project_color_picker.dart';
@@ -40,9 +41,12 @@ class _ProjectCardState extends State<ProjectCard> {
   @override
   Widget build(BuildContext context) {
     final project = widget.project;
-    final spent = project.spent ?? 0.0;
     final budget = project.budget;
-    final fraction = project.spentFraction;
+    // Derive spend from the very expenses this card renders, so the bar can
+    // never disagree with the inline ledger (and is correct offline regardless
+    // of whether the project row carries a server rollup).
+    final spent = spentForProject(project.id, widget.expenses);
+    final fraction = budget > 0 ? (spent / budget).clamp(0.0, 1.0) : 0.0;
     final overBudget = budget > 0 && spent > budget;
 
     return Padding(

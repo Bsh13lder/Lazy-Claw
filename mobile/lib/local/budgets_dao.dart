@@ -109,13 +109,46 @@ class BudgetsDao {
   // ── Reads: projects ───────────────────────────────────────────────────────
 
   /// All non-deleted projects, newest-created first (mirrors the server list).
+  ///
+  /// Each project's `spent`/`remaining` is DERIVED locally from the cached
+  /// expense set — NOT read from the row. The offline-first delta feed
+  /// (`GET /api/budgets/changes`) does not carry the per-project rollup the
+  /// `/projects` list endpoint computes, so a synced project would otherwise
+  /// arrive with `spent == null` and render as 0. Deriving here keeps the Money
+  /// tab correct offline AND makes the numbers update live after every local
+  /// add/edit/delete (every mutation re-reads through this method).
   Future<List<Project>> listProjects() async {
     final rows = await _db.query(
       'project_cache',
       where: 'deleted = 0',
       orderBy: 'created_at DESC, id ASC',
     );
-    return rows.map(_projectFromRow).toList();
+    final spentMap = await spentByProject();
+    return rows.map((row) {
+      final p = _projectFromRow(row);
+      final spent = spentMap[p.id] ?? 0.0;
+      return p.copyWith(spent: spent, remaining: p.budget - spent);
+    }).toList();
+  }
+
+  /// Grouped plaintext SUM of the live (non-deleted, non-void) expense amount
+  /// per project — the local mirror of the server's `_spent_by_project`. Used to
+  /// derive each project's `spent`/`remaining` so totals are correct offline and
+  /// recompute on every mutation. Returns `{project_id: spent}`.
+  Future<Map<String, double>> spentByProject() async {
+    final rows = await _db.rawQuery(
+      'SELECT project_id, COALESCE(SUM(amount), 0) AS spent '
+      'FROM expense_cache '
+      "WHERE deleted = 0 AND (status IS NULL OR status != 'void') "
+      'GROUP BY project_id',
+    );
+    final map = <String, double>{};
+    for (final r in rows) {
+      final pid = r['project_id'] as String? ?? '';
+      if (pid.isEmpty) continue;
+      map[pid] = (r['spent'] as num?)?.toDouble() ?? 0.0;
+    }
+    return map;
   }
 
   /// Ids of non-deleted projects with un-pushed local changes (dirty=1).

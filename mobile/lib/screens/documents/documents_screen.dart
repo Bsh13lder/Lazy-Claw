@@ -10,7 +10,7 @@ import '../../repositories/documents_repository.dart';
 import 'doc_viewer_screen.dart';
 import 'documents_list_view.dart';
 import 'pdf_viewer_screen.dart';
-import 'sheet_viewer_screen.dart';
+import 'sheet_editor_screen.dart';
 
 /// The Documents tab — mobile access to the user's encrypted office suite.
 ///
@@ -34,7 +34,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     final Widget screen;
     switch (_kind) {
       case DocKind.sheets:
-        screen = SheetViewerScreen(id: meta.id, name: meta.name);
+        screen = SheetEditorScreen(id: meta.id, name: meta.name);
       case DocKind.docs:
         screen = DocViewerScreen(id: meta.id, name: meta.name);
       case DocKind.pdf:

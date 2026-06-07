@@ -39,6 +39,8 @@ class _FakeTransport implements DocumentsTransport {
   @override
   Future<Map<String, dynamic>> postJson(String p, Map<String, dynamic> b) async => const {};
   @override
+  Future<Map<String, dynamic>> putJson(String p, Map<String, dynamic> b) async => const {};
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async => const {};
   @override
   Future<Map<String, dynamic>> uploadFile(String p, File f) async => const {};

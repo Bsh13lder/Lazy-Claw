@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:lazyclaw_mobile/models/project.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import 'project_color_picker.dart';
+
 /// Bottom sheet for adding a new expense.
 ///
 /// Calls [onSubmit] with (projectId, amount, description, vendor?).
@@ -234,7 +236,10 @@ class AddProjectSheet extends StatefulWidget {
     required this.onSubmit,
   });
 
-  final Future<bool> Function(String name, double? budget) onSubmit;
+  /// Called with (name, budget?, color?). The color is a `"#RRGGBB"` hex string
+  /// or null when the user left it unset.
+  final Future<bool> Function(String name, double? budget, String? color)
+      onSubmit;
 
   @override
   State<AddProjectSheet> createState() => _AddProjectSheetState();
@@ -243,6 +248,7 @@ class AddProjectSheet extends StatefulWidget {
 class _AddProjectSheetState extends State<AddProjectSheet> {
   final _nameCtrl = TextEditingController();
   final _budgetCtrl = TextEditingController();
+  String? _selectedColor;
   bool _loading = false;
   String? _nameError;
 
@@ -266,7 +272,7 @@ class _AddProjectSheetState extends State<AddProjectSheet> {
       _nameError = null;
     });
 
-    final ok = await widget.onSubmit(name, budget);
+    final ok = await widget.onSubmit(name, budget, _selectedColor);
     if (!mounted) return;
     if (ok) {
       Navigator.pop(context);
@@ -302,6 +308,16 @@ class _AddProjectSheetState extends State<AddProjectSheet> {
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           textInputAction: TextInputAction.done,
           onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: AppSpacing.lg),
+        Text(
+          'Color (optional)',
+          style: AppText.label.copyWith(color: AppColors.textSecondary),
+        ),
+        const SizedBox(height: AppSpacing.md),
+        ProjectColorSwatches(
+          selected: _selectedColor,
+          onSelected: (hex) => setState(() => _selectedColor = hex),
         ),
         const SizedBox(height: AppSpacing.xl),
         LzButton.primary(

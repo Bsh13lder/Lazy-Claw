@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/expense.dart';
+import '../models/project.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart'
     show reachableProvider, dbHealthProvider;
 import '../ui/ui.dart';
 import 'expenses/add_expense_sheet.dart';
 import 'expenses/budget_summary_card.dart';
+import 'expenses/edit_project_sheet.dart';
 import 'expenses/expense_detail_sheet.dart';
 import 'expenses/expense_row.dart';
 import 'expenses/money_helpers.dart';
@@ -72,8 +74,26 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
       context,
       title: 'New Project',
       builder: (_) => AddProjectSheet(
-        onSubmit: (name, budget) =>
-            ref.read(budgetsProvider.notifier).addProject(name, budget: budget),
+        onSubmit: (name, budget, color) => ref
+            .read(budgetsProvider.notifier)
+            .createProject(name, budget: budget, color: color),
+      ),
+    );
+  }
+
+  void _showEditProject(Project project) {
+    final notifier = ref.read(budgetsProvider.notifier);
+    LzBottomSheet.show<void>(
+      context,
+      title: 'Edit Project',
+      builder: (_) => EditProjectSheet(
+        project: project,
+        onRename: (name) => notifier.renameProject(project.id, name),
+        onSetColor: (color) => notifier.setProjectColor(project.id, color),
+        onDelete: () async {
+          await notifier.deleteProject(project.id);
+          return true;
+        },
       ),
     );
   }
@@ -219,7 +239,8 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
         _OverviewTab(
           state: state,
           onDeleteProject: (id) =>
-              ref.read(budgetsProvider.notifier).removeProject(id),
+              ref.read(budgetsProvider.notifier).deleteProject(id),
+          onEditProject: _showEditProject,
           onRefresh: _refresh,
         ),
         _LedgerTab(
@@ -240,11 +261,13 @@ class _OverviewTab extends StatelessWidget {
   const _OverviewTab({
     required this.state,
     required this.onDeleteProject,
+    required this.onEditProject,
     required this.onRefresh,
   });
 
   final BudgetsState state;
   final void Function(String id) onDeleteProject;
+  final void Function(Project project) onEditProject;
   final Future<void> Function() onRefresh;
 
   @override
@@ -293,6 +316,7 @@ class _OverviewTab extends StatelessWidget {
                 expenses: projectExpenses,
                 pendingSync: state.dirtyProjectIds.contains(p.id),
                 onDelete: () => onDeleteProject(p.id),
+                onEdit: () => onEditProject(p),
               );
             }),
             const SizedBox(height: AppSpacing.xxxl),

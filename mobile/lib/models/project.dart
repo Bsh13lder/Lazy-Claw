@@ -13,6 +13,11 @@ class Project {
   final String? description;
   final String? lazybrainNoteId;
 
+  /// User-chosen accent for the project, as a `"#RRGGBB"` hex string (or null
+  /// when no color has been picked). Round-trips through the budgets offline
+  /// sync alongside the rest of the project fields.
+  final String? color;
+
   /// Rolled-up totals — present on list/report responses, null otherwise.
   final double? spent;
   final double? remaining;
@@ -26,6 +31,7 @@ class Project {
     required this.status,
     this.description,
     this.lazybrainNoteId,
+    this.color,
     this.spent,
     this.remaining,
   });
@@ -59,6 +65,7 @@ class Project {
       status: _str(json['status']) ?? 'active',
       description: _str(json['description']),
       lazybrainNoteId: _str(json['lazybrain_note_id']),
+      color: _str(json['color']),
       spent: _double(json['spent']),
       remaining: _double(json['remaining']),
     );
@@ -73,6 +80,7 @@ class Project {
         'status': status,
         'description': description,
         'lazybrain_note_id': lazybrainNoteId,
+        'color': color,
         'spent': spent,
         'remaining': remaining,
       };
@@ -86,6 +94,7 @@ class Project {
     String? status,
     String? description,
     String? lazybrainNoteId,
+    String? color,
     double? spent,
     double? remaining,
   }) =>
@@ -98,6 +107,7 @@ class Project {
         status: status ?? this.status,
         description: description ?? this.description,
         lazybrainNoteId: lazybrainNoteId ?? this.lazybrainNoteId,
+        color: color ?? this.color,
         spent: spent ?? this.spent,
         remaining: remaining ?? this.remaining,
       );

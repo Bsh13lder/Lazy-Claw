@@ -115,10 +115,50 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
   /// Trigger a sync (e.g. when reachability flips to true) then refresh.
   Future<void> syncNow() => _syncThenRefresh();
 
-  Future<bool> addProject(String name, {double? budget}) async {
+  /// Create a project locally (optimistic) with an optional [budget] and an
+  /// optional [color] (a `"#RRGGBB"` hex string). Lands in the cache + outbox,
+  /// then best-effort syncs. Returns true on success, false (with `state.error`
+  /// set) when the local write throws.
+  Future<bool> createProject(
+    String name, {
+    double? budget,
+    String? color,
+  }) async {
     state = state.copyWith(isSubmitting: true, clearError: true);
     try {
-      await _dao.applyLocalProjectCreate(name, budget: budget);
+      await _dao.applyLocalProjectCreate(name, budget: budget, color: color);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Rename an existing project (optimistic). Returns true on success, false
+  /// (with `state.error` set) when the local write throws.
+  Future<bool> renameProject(String id, String name) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectUpdate(id, name: name);
+      await _refreshFromCache();
+      state = state.copyWith(isSubmitting: false);
+      unawaited(_syncThenRefresh());
+      return true;
+    } catch (e) {
+      state = state.copyWith(isSubmitting: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Set a project's accent [color] (a `"#RRGGBB"` hex string) (optimistic).
+  /// Returns true on success, false (with `state.error` set) on a local throw.
+  Future<bool> setProjectColor(String id, String color) async {
+    state = state.copyWith(isSubmitting: true, clearError: true);
+    try {
+      await _dao.applyLocalProjectUpdate(id, color: color);
       await _refreshFromCache();
       state = state.copyWith(isSubmitting: false);
       unawaited(_syncThenRefresh());
@@ -203,7 +243,7 @@ class BudgetsNotifier extends StateNotifier<BudgetsState> {
     }
   }
 
-  Future<void> removeProject(String id) async {
+  Future<void> deleteProject(String id) async {
     try {
       await _dao.applyLocalProjectDelete(id);
       await _refreshFromCache();

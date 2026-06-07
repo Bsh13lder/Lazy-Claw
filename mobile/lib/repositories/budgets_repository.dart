@@ -209,11 +209,13 @@ class BudgetsRepository {
     String? id,
     double? budget,
     String? description,
+    String? color,
   }) async {
     final body = <String, dynamic>{'name': name};
     if (id != null) body['id'] = id;
     if (budget != null) body['budget'] = budget;
     if (description != null) body['description'] = description;
+    if (color != null) body['color'] = color;
 
     final json = await _t.postJson('/api/budgets/projects', body);
     final raw = json['project'] as Map<String, dynamic>? ?? json;

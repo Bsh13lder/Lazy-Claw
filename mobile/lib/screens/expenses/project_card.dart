@@ -5,6 +5,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import 'expense_row.dart';
 import 'money_helpers.dart';
+import 'project_color_picker.dart';
 
 /// Expandable project card with per-project traffic-light budget bar and
 /// an inline expense list when expanded.
@@ -15,6 +16,7 @@ class ProjectCard extends StatefulWidget {
     required this.expenses,
     required this.pendingSync,
     required this.onDelete,
+    this.onEdit,
   });
 
   final Project project;
@@ -23,6 +25,10 @@ class ProjectCard extends StatefulWidget {
   final List<Expense> expenses;
   final bool pendingSync;
   final VoidCallback onDelete;
+
+  /// Opens the manage-project sheet (rename / color / delete). When null the
+  /// edit affordance is hidden.
+  final VoidCallback? onEdit;
 
   @override
   State<ProjectCard> createState() => _ProjectCardState();
@@ -84,9 +90,11 @@ class _ProjectCardState extends State<ProjectCard> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header row: name + badges.
+                    // Header row: color dot + name + badges + edit.
                     Row(
                       children: [
+                        ProjectColorDot(hex: project.color),
+                        const SizedBox(width: AppSpacing.sm),
                         Expanded(
                           child: Text(
                             project.name,
@@ -115,6 +123,21 @@ class _ProjectCardState extends State<ProjectCard> {
                                 : Icons.keyboard_arrow_down_rounded,
                             color: AppColors.textMuted,
                             size: 20,
+                          ),
+                        ],
+                        if (widget.onEdit != null) ...[
+                          const SizedBox(width: AppSpacing.xs),
+                          GestureDetector(
+                            onTap: widget.onEdit,
+                            behavior: HitTestBehavior.opaque,
+                            child: Padding(
+                              padding: const EdgeInsets.all(AppSpacing.xs),
+                              child: Icon(
+                                Icons.more_horiz_rounded,
+                                color: AppColors.textMuted,
+                                size: 20,
+                              ),
+                            ),
                           ),
                         ],
                       ],

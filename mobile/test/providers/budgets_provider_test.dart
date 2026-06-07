@@ -45,12 +45,12 @@ void main() {
   setUpAll(() => sqfliteFfiInit());
 
   group('BudgetsNotifier offline-first', () {
-    test('addProject writes to cache + marks dirty while offline', () async {
+    test('createProject writes to cache + marks dirty while offline', () async {
       final dao = await _freshDao();
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
       final n = BudgetsNotifier(dao, sync);
 
-      await n.addProject('Marketing', budget: 1000.0);
+      await n.createProject('Marketing', budget: 1000.0);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       expect(n.state.projects.map((p) => p.name), contains('Marketing'));
@@ -64,7 +64,7 @@ void main() {
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
       final n = BudgetsNotifier(dao, sync);
 
-      await n.addProject('Proj');
+      await n.createProject('Proj');
       await Future<void>.delayed(const Duration(milliseconds: 20));
       final projectId = n.state.projects.first.id;
 
@@ -83,7 +83,7 @@ void main() {
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
       final n = BudgetsNotifier(dao, sync);
 
-      await n.addProject('Proj');
+      await n.createProject('Proj');
       await Future<void>.delayed(const Duration(milliseconds: 20));
       await n.addExpense(n.state.projects.first.id, 5.0, 'Remove me');
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -95,16 +95,16 @@ void main() {
       expect(n.state.expenses.map((e) => e.id), isNot(contains(id)));
     });
 
-    test('removeProject drops it from the visible list offline', () async {
+    test('deleteProject drops it from the visible list offline', () async {
       final dao = await _freshDao();
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
       final n = BudgetsNotifier(dao, sync);
 
-      await n.addProject('Remove me');
+      await n.createProject('Remove me');
       await Future<void>.delayed(const Duration(milliseconds: 20));
       final id = n.state.projects.first.id;
 
-      await n.removeProject(id);
+      await n.deleteProject(id);
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       expect(n.state.projects.map((p) => p.id), isNot(contains(id)));
@@ -126,7 +126,7 @@ void main() {
       final sync = BudgetsSync(dao, BudgetsRepository(_OfflineTransport()));
       final n = BudgetsNotifier(dao, sync);
 
-      await n.addProject('A');
+      await n.createProject('A');
       await Future<void>.delayed(const Duration(milliseconds: 20));
       final id = n.state.projects.first.id;
       await n.addExpense(id, 9.0, 'E');

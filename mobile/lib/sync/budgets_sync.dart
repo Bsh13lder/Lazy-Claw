@@ -148,6 +148,7 @@ class BudgetsSync {
               id: p['id']?.toString() ?? item.entityId,
               budget: _asDouble(p['budget']),
               description: p['description']?.toString(),
+              color: p['color']?.toString(),
             );
             break;
           case BudgetsOutboxOp.update:
@@ -491,7 +492,14 @@ class BudgetsSync {
     Project serverProject, {
     required String at,
   }) async {
-    const fields = <String>['name', 'budget', 'currency', 'status', 'description'];
+    const fields = <String>[
+      'name',
+      'budget',
+      'currency',
+      'status',
+      'description',
+      'color',
+    ];
     final serverJson = serverProject.toJson();
     var any = false;
     for (final col in fields) {

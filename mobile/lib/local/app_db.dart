@@ -16,7 +16,9 @@ import 'uuid.dart';
 ///     and dead-letter a poison item instead of silently dropping it.
 /// v3: adds `note_cache`, `project_cache`, `expense_cache` so Notes + Budgets
 ///     are offline-first too (outbox/sync_state/conflicts are already generic).
-const int kAppDbVersion = 3;
+/// v4: adds `project_cache.color` (a `"#RRGGBB"` hex string, nullable) so a
+///     user-chosen per-project accent round-trips through the budgets sync.
+const int kAppDbVersion = 4;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -111,6 +113,7 @@ const List<String> kAppDbSchema = [
     status TEXT,
     description TEXT,
     lazybrain_note_id TEXT,
+    color TEXT,
     spent REAL,
     remaining REAL,
     created_at TEXT,
@@ -170,6 +173,15 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
   // three new tables and leaves existing ones (and their data) untouched.
   if (oldVersion < 3) {
     await createAppDbSchema(db);
+  }
+  // v3 → v4: add the per-project color column. Idempotent — only ALTER when the
+  // column is genuinely absent so re-running the migration can't throw.
+  if (oldVersion < 4) {
+    final cols = await db.rawQuery("PRAGMA table_info('project_cache')");
+    final hasColor = cols.any((c) => c['name'] == 'color');
+    if (!hasColor) {
+      await db.execute('ALTER TABLE project_cache ADD COLUMN color TEXT');
+    }
   }
 }
 

@@ -319,6 +319,7 @@ class BudgetsDao {
     double? budget,
     String currency = 'USD',
     String? description,
+    String? color,
   }) async {
     final projectId = id ?? newLocalId();
     final now = _now();
@@ -329,6 +330,7 @@ class BudgetsDao {
       currency: currency,
       status: 'active',
       description: description,
+      color: color,
       spent: 0.0,
       remaining: budget ?? 0.0,
     );
@@ -350,6 +352,7 @@ class BudgetsDao {
         'name': name,
         'budget': ?budget,
         'description': ?description,
+        'color': ?color,
       };
       await _enqueueTxn(
           txn, BudgetsOutboxOp.create, kProjectEntity, projectId, payload, now);
@@ -359,14 +362,15 @@ class BudgetsDao {
     return (await getProject(projectId))!;
   }
 
-  /// Patch an existing project locally (name/budget/description/status). Bumps
-  /// updated_at + dirty and enqueues an `update`.
+  /// Patch an existing project locally (name/budget/description/status/color).
+  /// Bumps updated_at + dirty and enqueues an `update`.
   Future<Project?> applyLocalProjectUpdate(
     String id, {
     String? name,
     double? budget,
     String? description,
     String? status,
+    String? color,
   }) async {
     final existing = await getProject(id);
     if (existing == null) return null;
@@ -377,6 +381,7 @@ class BudgetsDao {
       budget: budget,
       description: description,
       status: status,
+      color: color,
     );
 
     final patch = <String, dynamic>{
@@ -384,6 +389,7 @@ class BudgetsDao {
       'budget': ?budget,
       'description': ?description,
       'status': ?status,
+      'color': ?color,
     };
 
     await _db.transaction((txn) async {
@@ -805,6 +811,7 @@ class BudgetsDao {
         status: row['status'] as String? ?? 'active',
         description: row['description'] as String?,
         lazybrainNoteId: row['lazybrain_note_id'] as String?,
+        color: row['color'] as String?,
         spent: (row['spent'] as num?)?.toDouble(),
         remaining: (row['remaining'] as num?)?.toDouble(),
       );
@@ -818,6 +825,7 @@ class BudgetsDao {
         'status': p.status,
         'description': p.description,
         'lazybrain_note_id': p.lazybrainNoteId,
+        'color': p.color,
         'spent': p.spent,
         'remaining': p.remaining,
       };

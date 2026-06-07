@@ -173,6 +173,14 @@ Project _project(String id, String name, {String? color}) => Project(
 void main() {
   testWidgets('TasksScreen toggles to Calendar and renders the month grid',
       (tester) async {
+    // Tasks now carry a Tasks|Notes top segment above the List|Calendar toggle,
+    // so the calendar + selected-day list is one row taller. Use a roomier
+    // surface than the 800×600 default so the (lazily-built) selected-day task
+    // stays within the calendar list's cache extent for the assertion below.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 1200);
+    addTearDown(tester.view.reset);
+
     // A task due today so the selected-day (today) list has content.
     final tasksStub = _stubTasks([
       _task('t1', 'Pay rent', dueDate: _isoForToday(), category: 'home'),

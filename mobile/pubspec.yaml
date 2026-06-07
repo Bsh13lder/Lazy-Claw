@@ -62,6 +62,11 @@ dependencies:
   # conflicts with flutter_secure_storage 9.2.2's win32 ^5 pin. v9 is the
   # nearest compatible release and is API-identical for our usage.
   package_info_plus: ^9.0.1
+  # Documents tab: PDF rendering (MIT — pdfium-backed). License discipline
+  # (CLAUDE.md): permissive only, never Syncfusion/AGPL.
+  pdfx: ^2.9.2
+  # Documents tab: native file chooser for importing a PDF (MIT).
+  file_picker: ^11.0.0
 
 dev_dependencies:
   flutter_test:

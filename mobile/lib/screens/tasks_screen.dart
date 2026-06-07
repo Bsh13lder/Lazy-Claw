@@ -7,15 +7,22 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
+import 'notes/notes_body.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
 import 'tasks/task_calendar_view.dart';
 import 'tasks/task_detail_sheet.dart';
 import 'tasks/task_row.dart';
 
+// ── Top segment ─────────────────────────────────────────────────────────────
+
+/// The two top-level segments of this tab. Notes was promoted out of the bottom
+/// nav into this segment; the freed slot now hosts the Documents tab.
+enum _Segment { tasks, notes }
+
 // ── View mode ─────────────────────────────────────────────────────────────────
 
-/// The two ways to view tasks on this tab.
+/// The two ways to view tasks (nested under the Tasks segment).
 enum _TasksView { list, calendar }
 
 // ── Sections ──────────────────────────────────────────────────────────────────
@@ -107,6 +114,10 @@ class TasksScreen extends ConsumerStatefulWidget {
 }
 
 class _TasksScreenState extends ConsumerState<TasksScreen> {
+  /// Tasks vs Notes — the top segment. Notes lives here now (it was a bottom-nav
+  /// tab); selecting it renders the shared [NotesBody].
+  _Segment _segment = _Segment.tasks;
+
   /// List vs Calendar. Local-only — resets on tab rebuild, which is fine.
   _TasksView _view = _TasksView.list;
 
@@ -165,8 +176,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     final state = ref.watch(tasksProvider);
     final reachable = ref.watch(reachableProvider);
     final degraded = ref.watch(dbHealthProvider).isDegraded;
+    final notesMode = _segment == _Segment.notes;
 
-    // Show error snackbar on new errors.
+    // Show error snackbar on new task errors.
     ref.listen<TasksState>(tasksProvider, (prev, next) {
       if (next.error != null && next.error != prev?.error) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -186,17 +198,21 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
 
     return LzScaffold(
       appBar: LzAppBar(
-        title: 'Tasks',
+        title: notesMode ? 'Notes' : 'Tasks',
         large: true,
         gradientTitle: true,
         actions: [
           LzIconButton(
             icon: Icons.add,
-            tooltip: 'New task',
-            onPressed: () => _openAddSheet(initialDueDate: _contextualAddDate),
+            tooltip: notesMode ? 'New note' : 'New task',
+            onPressed: notesMode
+                ? () => showCreateNoteFlow(context, ref)
+                : () => _openAddSheet(initialDueDate: _contextualAddDate),
           ),
         ],
       ),
+      // Offline / degraded banners are global (shared infra) — they apply to
+      // both Tasks and Notes.
       banner: buildStorageBanners(
         context,
         offline: !reachable,
@@ -206,14 +222,15 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       floatingActionButton: FloatingActionButton(
         backgroundColor: AppColors.accent,
         foregroundColor: AppColors.onAccent,
-        tooltip: 'New task',
-        onPressed: () => _openAddSheet(initialDueDate: _contextualAddDate),
-        child: const Icon(Icons.add),
+        tooltip: notesMode ? 'New note' : 'New task',
+        onPressed: notesMode
+            ? () => showCreateNoteFlow(context, ref)
+            : () => _openAddSheet(initialDueDate: _contextualAddDate),
+        child: Icon(notesMode ? Icons.note_add_rounded : Icons.add),
       ),
       body: Column(
         children: [
-          // List ⇄ Calendar toggle — always visible so the user can switch
-          // even from an empty/error state.
+          // Tasks ⇄ Notes top segment — always visible.
           Padding(
             padding: const EdgeInsets.fromLTRB(
               AppSpacing.lg,
@@ -221,23 +238,52 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               AppSpacing.lg,
               0,
             ),
-            child: _ViewToggle(
-              view: _view,
-              onChanged: (v) {
-                if (v == _view) return;
+            child: _SegmentToggle(
+              segment: _segment,
+              onChanged: (s) {
+                if (s == _segment) return;
                 HapticFeedback.selectionClick();
-                if (v == _TasksView.calendar) _ensureBudgetsLoaded();
-                setState(() => _view = v);
+                setState(() => _segment = s);
               },
             ),
           ),
           Expanded(
-            child: _view == _TasksView.list
-                ? _buildBody(state)
-                : _buildCalendarBody(state),
+            child: notesMode ? const NotesBody() : _buildTasksContent(state),
           ),
         ],
       ),
+    );
+  }
+
+  /// The Tasks segment body: the List ⇄ Calendar toggle (nested) + content.
+  Widget _buildTasksContent(TasksState state) {
+    return Column(
+      children: [
+        // List ⇄ Calendar toggle — always visible so the user can switch
+        // even from an empty/error state.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.md,
+            AppSpacing.lg,
+            0,
+          ),
+          child: _ViewToggle(
+            view: _view,
+            onChanged: (v) {
+              if (v == _view) return;
+              HapticFeedback.selectionClick();
+              if (v == _TasksView.calendar) _ensureBudgetsLoaded();
+              setState(() => _view = v);
+            },
+          ),
+        ),
+        Expanded(
+          child: _view == _TasksView.list
+              ? _buildBody(state)
+              : _buildCalendarBody(state),
+        ),
+      ],
     );
   }
 
@@ -503,6 +549,38 @@ class _TaskSectionState extends State<_TaskSection> {
       default:
         return 'All clear';
     }
+  }
+}
+
+// ── Segment toggle (Tasks | Notes) ──────────────────────────────────────────
+
+/// The top-level Tasks ⇄ Notes toggle. Built from two [LzChip]s for kit
+/// consistency.
+class _SegmentToggle extends StatelessWidget {
+  const _SegmentToggle({required this.segment, required this.onChanged});
+
+  final _Segment segment;
+  final void Function(_Segment) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        LzChip(
+          label: 'Tasks',
+          icon: Icons.check_circle_outline,
+          selected: segment == _Segment.tasks,
+          onTap: () => onChanged(_Segment.tasks),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        LzChip(
+          label: 'Notes',
+          icon: Icons.notes_outlined,
+          selected: segment == _Segment.notes,
+          onTap: () => onChanged(_Segment.notes),
+        ),
+      ],
+    );
   }
 }
 

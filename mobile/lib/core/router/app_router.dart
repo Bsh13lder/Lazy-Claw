@@ -14,7 +14,7 @@ import '../../screens/more/more_hub.dart';
 import '../../screens/more/skills_screen.dart';
 import '../../screens/more/vault_screen.dart';
 import '../../screens/more/watchers_screen.dart';
-import '../../screens/notes_screen.dart';
+import '../../screens/documents/documents_screen.dart';
 import '../../screens/register_screen.dart';
 import '../../screens/settings_screen.dart';
 import '../../screens/tasks_screen.dart';
@@ -31,7 +31,9 @@ class _AuthListenable extends ChangeNotifier {
 
 // ── Tab configuration ──────────────────────────────────────────────────────
 //
-// 6 destinations: Home · Chat · Tasks · Money(expenses) · Notes · Settings.
+// 6 destinations: Home · Chat · Tasks(+Notes) · Money(expenses) · Documents ·
+// Settings. Notes now lives as a top segment INSIDE the Tasks tab; the freed
+// slot hosts the Documents tab (Sheets/Docs/PDF).
 // The branch order here MUST match the order of [StatefulShellBranch]es below
 // and the [LzNavDestination]s in [_ShellScaffold].
 
@@ -40,7 +42,7 @@ const _tabs = <_Tab>[
   _Tab(path: '/chat', label: 'Chat', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble),
   _Tab(path: '/tasks', label: 'Tasks', icon: Icons.check_circle_outline, activeIcon: Icons.check_circle),
   _Tab(path: '/expenses', label: 'Money', icon: Icons.account_balance_wallet_outlined, activeIcon: Icons.account_balance_wallet),
-  _Tab(path: '/notes', label: 'Notes', icon: Icons.notes_outlined, activeIcon: Icons.notes),
+  _Tab(path: '/documents', label: 'Docs', icon: Icons.folder_outlined, activeIcon: Icons.folder),
   _Tab(path: '/settings', label: 'Settings', icon: Icons.settings_outlined, activeIcon: Icons.settings),
 ];
 
@@ -160,8 +162,8 @@ final routerProvider = Provider<GoRouter>((ref) {
           StatefulShellBranch(
             routes: [
               GoRoute(
-                path: '/notes',
-                builder: (ctx, _) => const NotesScreen(),
+                path: '/documents',
+                builder: (ctx, _) => const DocumentsScreen(),
               ),
             ],
           ),

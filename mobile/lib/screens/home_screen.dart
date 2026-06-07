@@ -135,7 +135,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             _QuickActionsRow(
               onTask: () => context.go('/tasks'),
               onExpense: () => context.go('/expenses'),
-              onNote: () => context.go('/notes'),
+              // Notes now lives as a segment inside the Tasks tab.
+              onNote: () => context.go('/tasks'),
               onChat: () => context.go('/chat'),
             ),
           ],

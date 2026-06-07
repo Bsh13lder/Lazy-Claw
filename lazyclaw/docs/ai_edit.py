@@ -5,15 +5,18 @@ it works across every ECO mode) and applies it deterministically here. A plan:
 
     {
       "mode": "append" | "replace",
-      "paragraphs": [
-        {"runs": [{"text": "Visit "}, {"text": "my site", "url": "https://…"}]},
-        "plain paragraph, may contain [markdown](https://…) links"
+      "blocks": [
+        {"type": "heading", "level": 1, "text": "Setup"},
+        {"type": "number", "text": "Install **deps**"},
+        {"type": "paragraph", "text": "see [the site](https://…)"}
       ]
     }
 
-``paragraphs`` entries may be a ``{"runs": [...]}`` object, a plain string (with
-optional inline markdown links), or a bare run list — all are normalised. This
-is the single home for "add text with a link" from the web UI.
+Each block is ``{"type": heading|paragraph|bullet|number, "level"?: int,
+"text": "...with **bold**/*italic*/[links](…)"}`` — or a plain markdown string,
+or (legacy) ``{"runs": [...]}``. All forms are normalised into the structured
+blocks :mod:`lazyclaw.docs.snapshot` understands. This is the single home for
+formatted "write into the doc" edits from the web UI and the agent.
 """
 
 from __future__ import annotations
@@ -21,13 +24,17 @@ from __future__ import annotations
 from typing import Any
 
 from lazyclaw.docs import snapshot as D
+from lazyclaw.docs.markdown_blocks import parse_blocks, runs_from_inline
 from lazyclaw.docs.store import get_doc, save_doc
 from lazyclaw.llm.providers.base import LLMMessage
 
+_BLOCK_TYPES = ("heading", "paragraph", "bullet", "number")
+
 # Used in the system prompt and as a contract reference for tests.
 PLAN_SHAPE = (
-    '{"mode": "append"|"replace", "paragraphs": [ '
-    '{"runs": [{"text": "plain "}, {"text": "linked words", "url": "https://…"}]} ]}'
+    '{"mode": "append"|"replace", "blocks": [ '
+    '{"type": "heading"|"paragraph"|"bullet"|"number", "level": 1, '
+    '"text": "content with **bold**, *italic*, [link](https://…)"} ]}'
 )
 
 _SYSTEM = (
@@ -36,12 +43,15 @@ _SYSTEM = (
     "of this exact shape:\n"
     f"{PLAN_SHAPE}\n"
     "Rules:\n"
-    "- mode 'append' adds the paragraphs at the end; 'replace' replaces the "
-    "whole document body. Default to 'append' unless the user clearly wants a "
-    "full rewrite.\n"
-    "- To add a clickable link, give a run with a 'url'. A paragraph may also be "
-    "a plain string containing markdown links like [label](https://example.com).\n"
-    "- Keep it minimal: only the paragraphs the instruction asks for.\n"
+    "- mode 'append' adds the blocks at the end; 'replace' replaces the whole "
+    "document body. Default to 'append' unless the user clearly wants a full "
+    "rewrite.\n"
+    "- Use 'number' for an ORDERED sequence of steps, 'bullet' for an unordered "
+    "list, 'heading' (level 1-3) for section titles, 'paragraph' for prose.\n"
+    "- Put inline emphasis in the text with **bold**, *italic*, and links as "
+    "[label](https://example.com). NEVER write a literal '1.' or '- ' as text — "
+    "use the block 'type' instead.\n"
+    "- Keep it minimal: only the blocks the instruction asks for.\n"
     "- Write the actual content the user wants; never echo these instructions."
 )
 
@@ -83,24 +93,38 @@ def _normalize_runs(runs: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _normalize_paragraphs(paragraphs: Any) -> list[list[dict[str, Any]]]:
-    out: list[list[dict[str, Any]]] = []
-    if not isinstance(paragraphs, list):
+def _normalize_blocks(items: Any) -> list[dict[str, Any]]:
+    """Normalise plan ``blocks`` (or legacy ``paragraphs``) into block dicts.
+
+    Accepts: typed block dicts ``{"type", "level"?, "text"|"runs"}``, plain
+    markdown strings (parsed into blocks), legacy ``{"runs": [...]}`` objects,
+    and bare run lists. Anything unrecognised is dropped.
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(items, list):
         return out
-    for p in paragraphs:
-        if isinstance(p, str):
-            out.append(D.runs_from_markdown(p))
-        elif isinstance(p, dict):
-            if isinstance(p.get("runs"), list):
-                out.append(_normalize_runs(p["runs"]))
-            elif isinstance(p.get("text"), str):
-                out.append(D.runs_from_markdown(p["text"]))
-            else:
-                out.append([])
-        elif isinstance(p, list):
-            out.append(_normalize_runs(p))
-        else:
-            out.append([])
+    for it in items:
+        if isinstance(it, str):
+            out.extend(parse_blocks(it))
+        elif isinstance(it, dict):
+            btype = it.get("type")
+            if btype in _BLOCK_TYPES:
+                runs = (
+                    _normalize_runs(it["runs"])
+                    if isinstance(it.get("runs"), list)
+                    else runs_from_inline(str(it.get("text", "")))
+                )
+                out.append(
+                    {"type": btype, "level": int(it.get("level") or 0), "runs": runs}
+                )
+            elif isinstance(it.get("runs"), list):  # legacy {"runs": [...]}
+                out.append(
+                    {"type": "paragraph", "level": 0, "runs": _normalize_runs(it["runs"])}
+                )
+            elif isinstance(it.get("text"), str):
+                out.extend(parse_blocks(it["text"]))
+        elif isinstance(it, list):  # legacy bare run list
+            out.append({"type": "paragraph", "level": 0, "runs": _normalize_runs(it)})
     return out
 
 
@@ -108,26 +132,27 @@ async def apply(
     config: Any, user_id: str, doc_id: str, ctx: dict[str, Any], plan: dict[str, Any]
 ) -> dict[str, Any]:
     """Apply a docs edit plan, persist, and return the fresh snapshot."""
-    paragraphs = _normalize_paragraphs(plan.get("paragraphs"))
-    if not paragraphs:
-        raise ValueError("plan needs a non-empty 'paragraphs' list")
+    items = plan.get("blocks")
+    if items is None:
+        items = plan.get("paragraphs")  # legacy plan shape
+    blocks = _normalize_blocks(items)
+    if not blocks:
+        raise ValueError("plan needs a non-empty 'blocks' (or 'paragraphs') list")
     mode = "replace" if plan.get("mode") == "replace" else "append"
 
     snap = ctx["payload"]
     if mode == "replace":
-        updated = {**snap, "body": D.build_body_with_runs(paragraphs)}
+        updated = {**snap, "body": D.build_body_with_blocks(blocks)}
         verb = "Replaced the document with"
     else:
-        updated = snap
-        for runs in paragraphs:
-            updated = D.append_paragraph_with_runs(updated, runs)
+        updated = D.append_blocks(snap, blocks)
         verb = "Added"
 
     await save_doc(config, user_id, ctx["name"], updated, doc_id=doc_id)
     fresh = await get_doc(config, user_id, doc_id)
-    n = len(paragraphs)
+    n = len(blocks)
     return {
-        "summary": f"{verb} {n} paragraph(s).",
+        "summary": f"{verb} {n} block(s).",
         "snapshot": fresh["payload"] if fresh else updated,
         "new_id": None,
     }

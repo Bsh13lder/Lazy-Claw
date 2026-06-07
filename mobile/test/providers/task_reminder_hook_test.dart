@@ -145,6 +145,45 @@ void main() {
       expect(fake.syncAllCalls, greaterThanOrEqualTo(1));
     });
 
+    test('addTask plumbs an explicit reminderAt through to the schedule',
+        () async {
+      final dao = await _freshDao();
+      final fake = _FakeReminders();
+      final n = _notifier(dao, fake);
+
+      await n.addTask('Pay rent',
+          dueDate: '2099-01-01T17:00:00', reminderAt: '2099-01-01T16:30:00');
+      await _settle();
+
+      expect(fake.scheduled.single.reminderAt, '2099-01-01T16:30:00');
+    });
+
+    test('addTask normalises an empty reminderAt to null (no reminder)',
+        () async {
+      final dao = await _freshDao();
+      final fake = _FakeReminders();
+      final n = _notifier(dao, fake);
+
+      await n.addTask('Pay rent',
+          dueDate: '2099-01-01T17:00:00', reminderAt: '');
+      await _settle();
+
+      expect(fake.scheduled.single.reminderAt, isNull);
+    });
+
+    test('updateTask plumbs reminderAt through to the reschedule', () async {
+      final dao = await _freshDao();
+      final fake = _FakeReminders();
+      final n = _notifier(dao, fake);
+
+      final created =
+          await dao.applyLocalCreate('Call vet', dueDate: '2099-02-02T09:30:00');
+      await n.updateTask(created.id, reminderAt: '2099-02-02T09:00:00');
+      await _settle();
+
+      expect(fake.scheduled.last.reminderAt, '2099-02-02T09:00:00');
+    });
+
     test('a null scheduler is a no-op (legacy 2-arg construction still works)',
         () async {
       final dao = await _freshDao();

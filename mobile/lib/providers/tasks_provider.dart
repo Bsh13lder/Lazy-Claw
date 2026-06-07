@@ -171,13 +171,20 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? priority,
     String? dueDate,
     String? category,
+    String? reminderAt,
   }) async {
     try {
+      // An empty string means "no reminder" on create — normalise to null so
+      // we don't persist a blank reminder_at (empty is only meaningful as a
+      // *clear* on update).
+      final remAt =
+          (reminderAt != null && reminderAt.isEmpty) ? null : reminderAt;
       final created = await _dao.applyLocalCreate(
         title,
         priority: priority ?? 'medium',
         dueDate: dueDate,
         category: category,
+        reminderAt: remAt,
       );
       await _refreshFromCache();
       unawaited(
@@ -204,6 +211,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? dueDate,
     String? category,
     String? steps,
+    String? reminderAt,
   }) async {
     try {
       final updated = await _dao.applyLocalUpdate(
@@ -214,6 +222,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
         dueDate: dueDate,
         category: category,
         steps: steps,
+        reminderAt: reminderAt,
       );
       await _refreshFromCache();
       // Reschedule against the new fields (cancels too, if the time was removed

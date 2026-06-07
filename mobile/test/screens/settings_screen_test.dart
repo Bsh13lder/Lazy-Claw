@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
 
 void main() {
@@ -82,6 +83,45 @@ void main() {
       expect(copy.notifyChatReply, base.notifyChatReply);
       expect(copy.notifyTaskDone, base.notifyTaskDone);
       expect(copy.notifyApprovals, base.notifyApprovals);
+    });
+
+    test('defaults reminderLeadDefault to the built-in default', () {
+      expect(base.reminderLeadDefault, kDefaultReminderLead);
+    });
+
+    test('copyWith updates reminderLeadDefault in isolation', () {
+      final updated = base.copyWith(reminderLeadDefault: ReminderLead.hour1);
+      expect(updated.reminderLeadDefault, ReminderLead.hour1);
+      expect(updated.syncInterval, base.syncInterval);
+    });
+  });
+
+  // ── Reminder-lead-default serialisation ─────────────────────────────────────
+
+  group('reminderLeadToStored / reminderLeadFromStored', () {
+    test('round-trips each preset', () {
+      for (final lead in const [
+        ReminderLead.none,
+        ReminderLead.atTime,
+        ReminderLead.min10,
+        ReminderLead.min30,
+        ReminderLead.hour1,
+        ReminderLead.day1,
+      ]) {
+        expect(reminderLeadFromStored(reminderLeadToStored(lead)), lead);
+      }
+    });
+
+    test('None serialises to the "none" sentinel', () {
+      expect(reminderLeadToStored(ReminderLead.none), 'none');
+      expect(reminderLeadToStored(ReminderLead.atTime), '0');
+      expect(reminderLeadToStored(ReminderLead.hour1), '60');
+    });
+
+    test('absent / garbage / negative falls back to the default', () {
+      expect(reminderLeadFromStored(null), kDefaultReminderLead);
+      expect(reminderLeadFromStored('xyz'), kDefaultReminderLead);
+      expect(reminderLeadFromStored('-5'), kDefaultReminderLead);
     });
   });
 }

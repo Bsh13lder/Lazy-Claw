@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/tasks_provider.dart';
+import '../settings/settings_prefs.dart';
+import 'reminder_lead_picker.dart';
 import 'subtask_editor.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
@@ -14,9 +17,17 @@ import 'subtask_editor.dart';
 /// [TasksNotifier.deleteTask]). Mirrors the add-task sheet's look so the two
 /// surfaces feel like one family.
 class TaskDetailSheet extends ConsumerStatefulWidget {
-  const TaskDetailSheet({super.key, required this.task});
+  const TaskDetailSheet({
+    super.key,
+    required this.task,
+    this.defaultLead = kDefaultReminderLead,
+  });
 
   final Task task;
+
+  /// Global default reminder lead, applied when the task has a due time but no
+  /// explicit reminder yet (mirrors the add-task sheet).
+  final ReminderLead defaultLead;
 
   @override
   ConsumerState<TaskDetailSheet> createState() => _TaskDetailSheetState();
@@ -34,6 +45,11 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   TimeOfDay? _dueTime;
   bool _saving = false;
   bool _deleting = false;
+
+  /// The user's explicit reminder-lead choice. Seeded from the task's existing
+  /// reminderAt; null when the task has no reminder yet, so the global default
+  /// applies once a due time is present.
+  ReminderLead? _explicitLead;
 
   /// Working copy of the task's sub-tasks. Edited in-sheet and committed as part
   /// of Save (one atomic [TasksNotifier.updateTask] call). [_originalSteps]
@@ -56,9 +72,23 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final parts = dueTimeParts(raw);
     _dueTime =
         parts == null ? null : TimeOfDay(hour: parts.hour, minute: parts.minute);
+    final hasReminder = t.reminderAt != null && t.reminderAt!.isNotEmpty;
+    _explicitLead =
+        hasReminder ? leadFromReminderAt(raw, t.reminderAt) : null;
     _subtasks = List.of(t.subtasks);
     _originalSteps = serializeSubtasks(_subtasks);
   }
+
+  /// The effective reminder lead (explicit choice wins over the global default).
+  ReminderLead get _effectiveLead => _explicitLead ?? widget.defaultLead;
+
+  /// The reminderAt string to persist: `''` (clear) when there's no due time or
+  /// the lead is None, else the absolute `due − lead` instant.
+  String get _composedReminderAt => resolveReminderAt(
+        dueDate: _composedDue,
+        explicitLead: _explicitLead,
+        defaultLead: widget.defaultLead,
+      );
 
   /// Combine the day + time into the persisted `dueDate` string: a datetime when
   /// a time is set, a date-only string when only a day is set, today+time when
@@ -100,6 +130,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           priority: _priority,
           dueDate: _composedDue,
           steps: stepsArg,
+          reminderAt: _composedReminderAt,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -270,6 +301,17 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             ),
           ],
 
+          // ── Reminder lead-time (only when a due TIME exists) ───────────
+          if (dueDateHasTime(_composedDue)) ...[
+            const SizedBox(height: AppSpacing.xl),
+            _SectionLabel('REMIND'),
+            const SizedBox(height: AppSpacing.sm),
+            ReminderLeadPicker(
+              value: _effectiveLead,
+              onChanged: (lead) => setState(() => _explicitLead = lead),
+            ),
+          ],
+
           const SizedBox(height: AppSpacing.xl),
 
           // ── Sub-tasks ──────────────────────────────────────────────────
@@ -405,11 +447,12 @@ class _SectionLabel extends StatelessWidget {
 Future<void> showTaskDetailSheet(
   BuildContext context,
   WidgetRef ref,
-  Task task,
-) {
+  Task task, {
+  ReminderLead defaultLead = kDefaultReminderLead,
+}) {
   return LzBottomSheet.show<void>(
     context,
     title: 'Edit Task',
-    builder: (_) => TaskDetailSheet(task: task),
+    builder: (_) => TaskDetailSheet(task: task, defaultLead: defaultLead),
   );
 }

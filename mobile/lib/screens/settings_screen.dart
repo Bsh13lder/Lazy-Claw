@@ -7,6 +7,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
+import '../core/reminder_lead.dart';
 import '../core/self_update.dart';
 import 'settings/update_dialog.dart';
 import '../providers/auth_provider.dart';
@@ -783,13 +784,62 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   .setNotifyApprovals(v: v),
             ),
             const Divider(height: 1, color: AppColors.borderSubtle),
+
+            // Default reminder lead-time: applied automatically when a task
+            // gains a due time without an explicit reminder.
+            Padding(
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.notifications_active_outlined,
+                          size: 20, color: AppColors.textSecondary),
+                      const SizedBox(width: AppSpacing.md),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Default reminder', style: AppText.body),
+                            Text(
+                              'Applied when a task with a due time has no '
+                              'reminder set',
+                              style: AppText.caption,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Wrap(
+                    spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.sm,
+                    children: [
+                      for (final lead in _kLeadDefaultOptions)
+                        LzChip(
+                          label: lead.label,
+                          selected: prefs.reminderLeadDefault == lead,
+                          color: AppColors.accent,
+                          dense: true,
+                          onTap: () => ref
+                              .read(settingsPrefsProvider.notifier)
+                              .setReminderLeadDefault(lead),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
             Padding(
               padding: const EdgeInsets.all(AppSpacing.md),
               child: Text(
                 'Toggles are stored locally. Device-level permission must be '
                 'granted in system settings. Task reminders fire at a task\'s '
-                'due time / reminder time even when the app is closed — on '
-                'HyperOS / MIUI you must also allow notifications, enable '
+                'reminder time (or its due time) even when the app is closed — '
+                'on HyperOS / MIUI you must also allow notifications, enable '
                 '"Alarms & reminders" (exact alarms), and turn on Autostart, '
                 'or scheduled reminders are silently dropped.',
                 style: AppText.caption,
@@ -1229,6 +1279,16 @@ class _HelpStep extends StatelessWidget {
 // ── Permissions helper widget ─────────────────────────────────────────────────
 
 const _kPermLevels = ['allow', 'ask', 'deny'];
+
+/// The default-reminder-lead options offered in Settings → Notifications.
+const _kLeadDefaultOptions = <ReminderLead>[
+  ReminderLead.none,
+  ReminderLead.atTime,
+  ReminderLead.min10,
+  ReminderLead.min30,
+  ReminderLead.hour1,
+  ReminderLead.day1,
+];
 
 /// One permissions category row: label on the left, allow/ask/deny chips on the
 /// right. While [saving] is true the chips are disabled and a micro spinner

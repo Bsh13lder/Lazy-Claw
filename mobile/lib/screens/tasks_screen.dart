@@ -5,10 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../core/actions/app_actions.dart';
+import '../core/reminder_lead.dart';
 import '../models/task.dart';
 import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
 import 'notes/notes_body.dart';
+import 'settings/settings_prefs.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
 import 'tasks/task_calendar_view.dart';
@@ -194,17 +196,28 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   DateTime? get _contextualAddDate =>
       _view == _TasksView.calendar ? _selectedDay : null;
 
+  /// The global default reminder lead from settings (falls back to the built-in
+  /// default until the prefs have loaded).
+  ReminderLead get _defaultLead =>
+      ref.read(settingsPrefsProvider).valueOrNull?.reminderLeadDefault ??
+      kDefaultReminderLead;
+
   Future<void> _openAddSheet({DateTime? initialDueDate}) async {
     // Tactile tick when summoning the add sheet (FAB + app-bar + button +
     // calendar day-tap all route through here).
     HapticFeedback.selectionClick();
-    final result = await showAddTaskSheet(context, initialDueDate: initialDueDate);
+    final result = await showAddTaskSheet(
+      context,
+      initialDueDate: initialDueDate,
+      defaultLead: _defaultLead,
+    );
     if (result == null || !mounted) return;
     await ref.read(tasksProvider.notifier).addTask(
           result.title,
           priority: result.priority,
           dueDate: result.dueDate,
           category: result.category,
+          reminderAt: result.reminderAt,
         );
   }
 
@@ -373,7 +386,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         onPageChanged: (focused) => setState(() => _focusedDay = focused),
         onComplete: (id) => ref.read(tasksProvider.notifier).completeTask(id),
         onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
-        onOpen: (task) => showTaskDetailSheet(context, ref, task),
+        onOpen: (task) => showTaskDetailSheet(context, ref, task, defaultLead: _defaultLead),
         onAddOnDay: (day) => _openAddSheet(initialDueDate: day),
       ),
     );
@@ -436,7 +449,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
                   ref.read(tasksProvider.notifier).completeTask(id),
               onDelete: (id) =>
                   ref.read(tasksProvider.notifier).deleteTask(id),
-              onOpen: (task) => showTaskDetailSheet(context, ref, task),
+              onOpen: (task) => showTaskDetailSheet(context, ref, task, defaultLead: _defaultLead),
               onRenameTitle: (id, title) =>
                   ref.read(tasksProvider.notifier).updateTask(id, title: title),
             ),

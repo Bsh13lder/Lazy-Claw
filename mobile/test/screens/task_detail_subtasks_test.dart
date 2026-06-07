@@ -59,6 +59,7 @@ class _StubTasksNotifier extends TasksNotifier {
     String? dueDate,
     String? category,
     String? steps,
+    String? reminderAt,
   }) async {
     updateCalls.add({'id': id, 'title': title, 'steps': steps});
   }

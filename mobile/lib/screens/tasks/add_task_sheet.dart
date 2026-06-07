@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
+import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
+import 'package:lazyclaw_mobile/screens/tasks/reminder_lead_picker.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 /// A polished add-task bottom sheet with Todoist-style "smart add": as the user
@@ -11,11 +14,19 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 /// Returns the data to the caller via [Navigator.pop] so the screen can invoke
 /// the provider without knowing about UI internals.
 class AddTaskSheet extends StatefulWidget {
-  const AddTaskSheet({super.key, this.initialDueDate});
+  const AddTaskSheet({
+    super.key,
+    this.initialDueDate,
+    this.defaultLead = kDefaultReminderLead,
+  });
 
   /// When provided (e.g. tapping a day in the calendar view), the due date is
   /// pre-selected to this day so the new task lands on the chosen date.
   final DateTime? initialDueDate;
+
+  /// The global default reminder lead, applied automatically once the task
+  /// gains a due time and the user hasn't picked a lead explicitly.
+  final ReminderLead defaultLead;
 
   @override
   State<AddTaskSheet> createState() => _AddTaskSheetState();
@@ -36,6 +47,10 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
   String? _manualDueDate;
   bool _timeTouched = false;
   TimeOfDay? _manualTime;
+
+  /// The user's explicit reminder-lead choice. Null until they touch the
+  /// picker, so the global default applies automatically once a time is set.
+  ReminderLead? _explicitLead;
 
   bool _submitting = false;
 
@@ -83,6 +98,9 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
   /// The effective time (manual override wins over the live parse).
   TimeOfDay? get _effectiveTime => _timeTouched ? _manualTime : _parsedTime;
 
+  /// The effective reminder lead (explicit choice wins over the global default).
+  ReminderLead get _effectiveLead => _explicitLead ?? widget.defaultLead;
+
   bool get _hasDetection =>
       _parsed.dueDate != null ||
       _parsed.priority != null ||
@@ -128,12 +146,22 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     final time = _timeTouched ? _manualTime : parsedTime;
     final dueDate = _compose(day, time);
 
+    // Compute the absolute reminderAt from the effective lead. Empty when there
+    // is no due time or the lead is None — addTask normalises that to "no
+    // reminder".
+    final reminderAt = resolveReminderAt(
+      dueDate: dueDate,
+      explicitLead: _explicitLead,
+      defaultLead: widget.defaultLead,
+    );
+
     setState(() => _submitting = true);
     Navigator.of(context).pop(_AddTaskResult(
       title: title,
       priority: priority,
       dueDate: dueDate,
       category: parsed.project,
+      reminderAt: reminderAt.isEmpty ? null : reminderAt,
     ));
   }
 
@@ -338,6 +366,24 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
           ),
         ],
 
+        // ── Reminder lead-time (only when a due TIME exists) ───────────
+        if (dueDateHasTime(composed)) ...[
+          const SizedBox(height: AppSpacing.xl),
+          Text(
+            'REMIND',
+            style: AppText.caption.copyWith(
+              color: AppColors.textMuted,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          ReminderLeadPicker(
+            value: _effectiveLead,
+            onChanged: (lead) => setState(() => _explicitLead = lead),
+          ),
+        ],
+
         const SizedBox(height: AppSpacing.xl),
 
         // ── Submit button ──────────────────────────────────────────────
@@ -436,11 +482,15 @@ class _AddTaskResult {
     required this.priority,
     this.dueDate,
     this.category,
+    this.reminderAt,
   });
   final String title;
   final String priority;
   final String? dueDate;
   final String? category;
+
+  /// Absolute reminder instant (`due − lead`), or null for no reminder.
+  final String? reminderAt;
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────
@@ -450,16 +500,27 @@ class _AddTaskResult {
 ///
 /// Pass [initialDueDate] (e.g. from a calendar day-tap) to pre-select the due
 /// date so the new task lands on that day. Omitting it preserves the original
-/// behavior (no date pre-selected).
-Future<({String title, String priority, String? dueDate, String? category})?>
-    showAddTaskSheet(
+/// behavior (no date pre-selected). [defaultLead] is the global reminder-lead
+/// default applied once a due time is set without an explicit pick.
+Future<
+    ({
+      String title,
+      String priority,
+      String? dueDate,
+      String? category,
+      String? reminderAt,
+    })?> showAddTaskSheet(
   BuildContext context, {
   DateTime? initialDueDate,
+  ReminderLead defaultLead = kDefaultReminderLead,
 }) async {
   final result = await LzBottomSheet.show<_AddTaskResult>(
     context,
     title: 'New Task',
-    builder: (_) => AddTaskSheet(initialDueDate: initialDueDate),
+    builder: (_) => AddTaskSheet(
+      initialDueDate: initialDueDate,
+      defaultLead: defaultLead,
+    ),
   );
   if (result == null) return null;
   return (
@@ -467,5 +528,6 @@ Future<({String title, String priority, String? dueDate, String? category})?>
     priority: result.priority,
     dueDate: result.dueDate,
     category: result.category,
+    reminderAt: result.reminderAt,
   );
 }

@@ -9,5 +9,5 @@ const String kDefaultBaseUrl = 'http://BlckIt.local:18789';
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
 /// `version:` field in `pubspec.yaml`.
 const String kAppVersion = '1.8.1';
-const int kAppBuild = 24;
+const int kAppBuild = 25;
 const String kSecureBaseUrlKey = 'lazyclaw_base_url';

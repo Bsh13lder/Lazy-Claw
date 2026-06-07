@@ -287,7 +287,7 @@ class UniverSheet {
     final wb = _deepCopyMap(_wb);
     final sheet = _asMap(_asMap(wb['sheets'])[_activeSheetId]);
     final cellData = (sheet['cellData'] as Map?)?.cast<String, dynamic>() ??
-        (sheet['cellData'] = <String, dynamic>{}) as Map<String, dynamic>;
+        (sheet['cellData'] = <String, dynamic>{});
     final rKey = row.toString();
     final cKey = col.toString();
 

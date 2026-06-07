@@ -3,6 +3,41 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
+/// Android group keys so several notifications STACK under one expandable
+/// header instead of looking like a single replaced item.
+const String _kTasksGroupKey = 'lazyclaw_tasks_group';
+const String _kNotificationsGroupKey = 'lazyclaw_notifications_group';
+
+/// Per-process monotonic counter feeding [nextNotificationId]. Top-level (not a
+/// class field) so the id generator stays pure and trivially unit-testable.
+int _notifSeq = 0;
+
+/// A distinct, strictly-positive 31-bit notification id.
+///
+/// The old id was `DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF`, which
+/// COLLIDED when two notifications fired within the same millisecond — the
+/// second `_plugin.show(id, …)` then REPLACED the first, so only one was
+/// visible. (This is the "2 notifications, only one shows" bug.)
+///
+/// Composition (fits Android's 32-bit int id, masked to a positive 31-bit
+/// value):
+///   - high 21 bits: low bits of the current epoch-SECOND — distinguishes app
+///     sessions so a fresh launch doesn't immediately reuse (and overwrite)
+///     ids left in the shade by a prior session.
+///   - low 10 bits: an always-incrementing per-process counter — so up to 1024
+///     notifications fired within the SAME second still get distinct ids.
+///
+/// Distinctness for rapid successive calls depends only on the counter, so it
+/// is deterministic to unit-test without sleeping.
+int nextNotificationId() {
+  final clock = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final id = (((clock & 0x1FFFFF) << 10) | (_notifSeq & 0x3FF)) & 0x7FFFFFFF;
+  _notifSeq++;
+  // Guarantee strict positivity: a 0 clock-component AND a 0 counter is
+  // astronomically unlikely, but the id must never collapse to 0.
+  return id == 0 ? 1 : id;
+}
+
 /// Thin wrapper around flutter_local_notifications.
 ///
 /// Call [init] once at app startup (before any [showTaskNotification] or any
@@ -101,15 +136,65 @@ class LocalNotifications {
     }
   }
 
+  /// Whether the OS currently allows this app to post notifications.
+  ///
+  /// Best-effort: queries the Android plugin's [areNotificationsEnabled]; on
+  /// iOS/macOS (where there is no cheap synchronous check) it returns true,
+  /// since [init] already requested permission. Returns false on null/unknown
+  /// or any error — never throws.
+  static Future<bool> areNotificationsEnabled() async {
+    try {
+      final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl != null) {
+        final enabled = await androidImpl.areNotificationsEnabled();
+        return enabled ?? false;
+      }
+      // Non-Android platform — assume granted (init requested it). Best-effort.
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Re-request the runtime notification permission (and, on Android, the
+  /// exact-alarm permission). Returns whether notifications are granted
+  /// afterwards. Best-effort — never throws.
+  static Future<bool> requestPermissions() async {
+    try {
+      final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl != null) {
+        await androidImpl.requestNotificationsPermission();
+        await androidImpl.requestExactAlarmsPermission();
+      }
+      final iosImpl = _plugin.resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin>();
+      await iosImpl?.requestPermissions(alert: true, badge: true, sound: true);
+    } catch (_) {
+      // Permission API unavailable / denied — fall through to a status check.
+    }
+    return areNotificationsEnabled();
+  }
+
+  /// Fire an IMMEDIATE real notification on the existing notifications channel.
+  /// Used by Settings → "Send test notification" to prove the basic delivery
+  /// path end-to-end (bypasses scheduling). Best-effort — never throws.
+  static Future<void> showTest() => showServerNotification(
+        'LazyClaw test',
+        'If you can see this, notifications are working ✅',
+        payload: 'chat',
+      );
+
   /// Show a local notification with [title] and [body].
   ///
   /// Silently no-ops if the plugin was not initialised or if the user
-  /// denied permission. Each call increments the notification ID so
+  /// denied permission. Each call uses a fresh [nextNotificationId] so
   /// multiple concurrent notifications are preserved rather than replaced.
   static Future<void> showTaskNotification(String title, String body) async {
     if (!_initialised) return;
     try {
-      final id = DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF;
+      final id = nextNotificationId();
       const androidDetails = AndroidNotificationDetails(
         'lazyclaw_tasks',
         'LazyClaw Tasks',
@@ -117,6 +202,7 @@ class LocalNotifications {
         importance: Importance.high,
         priority: Priority.high,
         showWhen: true,
+        groupKey: _kTasksGroupKey,
       );
       const darwinDetails = DarwinNotificationDetails(
         presentAlert: true,
@@ -148,7 +234,7 @@ class LocalNotifications {
   }) async {
     if (!_initialised) return;
     try {
-      final id = DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF;
+      final id = nextNotificationId();
       const androidDetails = AndroidNotificationDetails(
         'lazyclaw_notifications',
         'LazyClaw Notifications',
@@ -157,6 +243,7 @@ class LocalNotifications {
         importance: Importance.high,
         priority: Priority.high,
         showWhen: true,
+        groupKey: _kNotificationsGroupKey,
       );
       const darwinDetails = DarwinNotificationDetails(
         presentAlert: true,

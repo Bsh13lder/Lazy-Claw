@@ -9,6 +9,7 @@ import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
 import '../core/reminder_lead.dart';
 import '../core/self_update.dart';
+import '../notifications/local_notifications.dart';
 import 'settings/update_dialog.dart';
 import '../providers/auth_provider.dart';
 import '../providers/budgets_provider.dart';
@@ -754,6 +755,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  // ── Notification test/enable actions ──────────────────────────────────────
+
+  /// Fire a REAL local notification to prove delivery. If notifications are
+  /// turned off at the OS level, the SnackBar instead nudges the user to enable
+  /// them (with an inline action that re-requests permission).
+  Future<void> _sendTestNotification() async {
+    final enabled = await LocalNotifications.areNotificationsEnabled();
+    if (!mounted) return;
+    if (!enabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Notifications are off — enable them first.'),
+          action: SnackBarAction(
+            label: 'Enable',
+            onPressed: () => LocalNotifications.requestPermissions(),
+          ),
+        ),
+      );
+      return;
+    }
+    await LocalNotifications.showTest();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Test notification sent — check your shade.')),
+    );
+  }
+
   /// Delivery-channel segmented control (Telegram · App · Both) backed by
   /// `GET/POST /api/settings/notifications`, plus a one-line HyperOS hint.
   Widget _buildChannelTile() {
@@ -845,6 +873,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         padding: EdgeInsets.zero,
         child: Column(
           children: [
+            // Permission status + one-tap enable (gates everything below).
+            const _NotificationStatusTile(),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+            // Fire a real notification right now to verify delivery.
+            LzListTile(
+              leading: const Icon(Icons.notifications_active_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              title: 'Send test notification',
+              subtitle: 'Fire a real notification now to verify delivery',
+              onTap: _sendTestNotification,
+              trailing: const Icon(Icons.chevron_right,
+                  size: 18, color: AppColors.textMuted),
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
             // Delivery channel: where server-originated notifications (watchers,
             // background-job done, escalations) are sent.
             _buildChannelTile(),
@@ -1292,6 +1334,108 @@ class SettingsUpdateTile extends ConsumerWidget {
             onPressed: open,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Notification permission status row: a colored dot + "Notifications: On/Off"
+/// and — when OFF — an "Enable" action that re-requests OS permission, plus a
+/// one-line HyperOS hint. Self-contained local state so it can refresh after a
+/// permission prompt without rebuilding the whole settings screen.
+class _NotificationStatusTile extends StatefulWidget {
+  const _NotificationStatusTile();
+
+  @override
+  State<_NotificationStatusTile> createState() =>
+      _NotificationStatusTileState();
+}
+
+class _NotificationStatusTileState extends State<_NotificationStatusTile> {
+  bool? _enabled; // null = still checking
+  bool _requesting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final enabled = await LocalNotifications.areNotificationsEnabled();
+    if (!mounted) return;
+    setState(() => _enabled = enabled);
+  }
+
+  Future<void> _enable() async {
+    setState(() => _requesting = true);
+    final granted = await LocalNotifications.requestPermissions();
+    if (!mounted) return;
+    setState(() {
+      _enabled = granted;
+      _requesting = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = _enabled;
+    final dot = enabled == null
+        ? const LzStatusDot.muted()
+        : enabled
+            ? const LzStatusDot.success(glow: true)
+            : const LzStatusDot.error();
+    final label = enabled == null
+        ? 'Notifications: checking…'
+        : enabled
+            ? 'Notifications: On'
+            : 'Notifications: Off';
+
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.notifications_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Row(
+                  children: [
+                    dot,
+                    const SizedBox(width: AppSpacing.sm),
+                    Flexible(
+                      child: Text(
+                        label,
+                        style: AppText.body,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (enabled == false) ...[
+                const SizedBox(width: AppSpacing.sm),
+                LzButton.secondary(
+                  label: _requesting ? 'Enabling…' : 'Enable',
+                  icon: Icons.notifications_active_outlined,
+                  loading: _requesting,
+                  onPressed: _requesting ? null : _enable,
+                ),
+              ],
+            ],
+          ),
+          if (enabled == false) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              'If still off: Settings → Apps → LazyClaw → Notifications → Allow '
+              '(HyperOS may also need Autostart + battery No-restrictions).',
+              style: AppText.caption,
+            ),
+          ],
+        ],
       ),
     );
   }

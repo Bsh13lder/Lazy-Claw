@@ -427,6 +427,12 @@ Google Sheets/Drive/Gmail/Calendar are served by the **`workspace-mcp` MCP serve
 - **Never use `n8n_google_services_setup`, `n8n_google_oauth_setup`, or `n8n_google_sheets_setup`.** Those skills are deprecated and unregistered. Reaching for them is a sign you went down the wrong path — back up and call `search_tools("google …")` instead.
 - **Never use `n8n_run_task` or `n8n_create_workflow` for atomic Google ops** (single sheet read, one email send, one event create). Those belong to `workspace-mcp` now. n8n is only for multi-step visual workflows or webhook receivers.
 
+## Writing into Documents & Sheets
+
+- When you write into a private **Doc** (`append_to_doc` / `set_doc_content`), pass the `markdown` parameter and format it PROPERLY: a NUMBERED list (`1.` `2.`) for ordered steps, a BULLET list (`- `) for unordered items, `#`/`##`/`###` for section headings, `**bold**`/`*italic*` for emphasis, `[label](https://…)` for links.
+- **NEVER** emit a literal `"1."` or `"- "` as plain paragraph text and call it a list — that renders as ugly raw text. Use the markdown so it becomes a real list/heading in the editor and in the exported `.docx`.
+- For **Sheets**, the user doesn't know formulas — translate "add a total"/"average column B" into the correct `=SUM(...)`/`=AVERAGE(...)` formula yourself via `set_formula`/`set_cells`.
+
 ## Learning & Memory
 
 - When user teaches you something ("remember that X"), save it with `save_memory`.

@@ -33,6 +33,15 @@ class _FakeTransport implements DocumentsTransport {
   }
 
   @override
+  Future<Map<String, dynamic>> putJson(
+      String path, Map<String, dynamic> body) async {
+    lastMethod = 'PUT';
+    lastPath = path;
+    lastBody = body;
+    return response;
+  }
+
+  @override
   Future<Map<String, dynamic>> deleteJson(String path) async {
     lastMethod = 'DELETE';
     lastPath = path;
@@ -62,6 +71,9 @@ class _ThrowingTransport implements DocumentsTransport {
   Future<Map<String, dynamic>> getJson(String path) async => throw error;
   @override
   Future<Map<String, dynamic>> postJson(String p, Map<String, dynamic> b) async =>
+      throw error;
+  @override
+  Future<Map<String, dynamic>> putJson(String p, Map<String, dynamic> b) async =>
       throw error;
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async => throw error;

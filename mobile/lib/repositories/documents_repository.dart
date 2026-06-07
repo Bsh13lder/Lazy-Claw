@@ -146,6 +146,7 @@ class AiEditResult {
 abstract class DocumentsTransport {
   Future<Map<String, dynamic>> getJson(String path);
   Future<Map<String, dynamic>> postJson(String path, Map<String, dynamic> body);
+  Future<Map<String, dynamic>> putJson(String path, Map<String, dynamic> body);
   Future<Map<String, dynamic>> deleteJson(String path);
 
   /// Multipart upload of [file] → decoded JSON (PDF import).
@@ -172,6 +173,13 @@ class DioDocumentsTransport implements DocumentsTransport {
     Map<String, dynamic> body,
   ) =>
       _client.post<Map<String, dynamic>>(path, data: body, fromJson: _map);
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      _client.put<Map<String, dynamic>>(path, data: body, fromJson: _map);
 
   @override
   Future<Map<String, dynamic>> deleteJson(String path) =>
@@ -262,6 +270,31 @@ class DocumentsRepository {
       {'instruction': instruction},
     );
     return AiEditResult.fromJson(json);
+  }
+
+  /// Server-side formula recompute for a client-edited [snapshot]. The native
+  /// grid has no JS engine, so after a formula edit it posts the snapshot here.
+  /// Maps `POST /api/sheets/<id>/recalc` with `{payload}` → `{ok, snapshot}`.
+  /// On a malformed response falls back to the snapshot it was given.
+  Future<Map<String, dynamic>> recalc(
+    String id,
+    Map<String, dynamic> snapshot,
+  ) async {
+    final json = await _t.postJson('/api/sheets/$id/recalc', {'payload': snapshot});
+    final snap = json['snapshot'];
+    return snap is Map ? Map<String, dynamic>.from(snap) : snapshot;
+  }
+
+  /// Persist an edited sheet/doc [payload]. Maps `PUT /api/<kind>/<id>` with
+  /// `{name, payload}` (autosave — mirrors the web editor).
+  Future<void> save(
+    DocKind kind,
+    String id,
+    String name,
+    Map<String, dynamic> payload,
+  ) async {
+    assert(kind != DocKind.pdf, 'PDFs are immutable; no snapshot save');
+    await _t.putJson('/api/${kind.api}/$id', {'name': name, 'payload': payload});
   }
 
   /// Delete a document. Maps `DELETE /api/<kind>/<id>` →

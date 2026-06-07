@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../../providers/tasks_provider.dart';
+import 'subtask_editor.dart';
 
 /// A task detail/edit bottom sheet. Pre-fills every field from [task] and lets
 /// the user change the title, notes, priority and due date, then Save (patch
@@ -33,6 +35,13 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   bool _saving = false;
   bool _deleting = false;
 
+  /// Working copy of the task's sub-tasks. Edited in-sheet and committed as part
+  /// of Save (one atomic [TasksNotifier.updateTask] call). [_originalSteps]
+  /// snapshots the on-open serialization so Save only writes `steps` when the
+  /// checklist actually changed (no churn on a title-only edit).
+  late List<Subtask> _subtasks;
+  String? _originalSteps;
+
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
 
   @override
@@ -47,6 +56,8 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final parts = dueTimeParts(raw);
     _dueTime =
         parts == null ? null : TimeOfDay(hour: parts.hour, minute: parts.minute);
+    _subtasks = List.of(t.subtasks);
+    _originalSteps = serializeSubtasks(_subtasks);
   }
 
   /// Combine the day + time into the persisted `dueDate` string: a datetime when
@@ -78,12 +89,17 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final title = _titleController.text.trim();
     if (title.isEmpty || _saving || _deleting) return;
     setState(() => _saving = true);
+    // Only write `steps` when the checklist changed. An empty string (not null)
+    // force-clears the column when every sub-task was removed.
+    final nextSteps = serializeSubtasks(_subtasks);
+    final stepsArg = nextSteps == _originalSteps ? null : (nextSteps ?? '');
     await ref.read(tasksProvider.notifier).updateTask(
           widget.task.id,
           title: title,
           description: _notesController.text.trim(),
           priority: _priority,
           dueDate: _composedDue,
+          steps: stepsArg,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -253,6 +269,27 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               ],
             ),
           ],
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Sub-tasks ──────────────────────────────────────────────────
+          Row(
+            children: [
+              _SectionLabel('SUBTASKS'),
+              const Spacer(),
+              if (subtaskProgressLabel(_subtasks) != null)
+                Text(
+                  subtaskProgressLabel(_subtasks)!,
+                  key: const Key('task-detail-subtask-progress'),
+                  style: AppText.caption.copyWith(color: AppColors.accent),
+                ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          SubtaskEditor(
+            subtasks: _subtasks,
+            onChanged: (next) => setState(() => _subtasks = next),
+          ),
 
           const SizedBox(height: AppSpacing.xxl),
 

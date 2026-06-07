@@ -1,3 +1,5 @@
+import 'subtask.dart';
+
 /// Immutable model mirroring the /api/tasks TaskItem shape from api.ts.
 /// All fields are nullable-tolerant: the server may omit optional fields or
 /// send integers instead of strings for legacy builds.
@@ -51,6 +53,10 @@ class Task {
   });
 
   bool get isDone => status == 'done';
+
+  /// The sub-tasks (checklist items) parsed from the `steps` JSON column.
+  /// Empty when there are none. See [Subtask] for the storage shape.
+  List<Subtask> get subtasks => parseSubtasks(steps);
 
   factory Task.fromJson(Map<String, dynamic> json) {
     return Task(

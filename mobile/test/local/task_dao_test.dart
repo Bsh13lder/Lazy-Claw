@@ -120,6 +120,29 @@ void main() {
       expect(updateItem.payload['id'], t.id);
     });
 
+    test('update persists sub-task steps + enqueues them in the patch',
+        () async {
+      final dao = await _freshDao();
+      final t = await dao.applyLocalCreate('Has subtasks');
+      const stepsJson =
+          '[{"id":"s1","title":"First","done":false},'
+          '{"id":"s2","title":"Second","done":true}]';
+
+      final updated = await dao.applyLocalUpdate(t.id, steps: stepsJson);
+      expect(updated!.steps, stepsJson);
+
+      // Round-trips back out of the cache verbatim.
+      final stored = await dao.getById(t.id);
+      expect(stored!.steps, stepsJson);
+      expect(stored.subtasks, hasLength(2));
+      expect(stored.subtasks.last.done, isTrue);
+
+      // The steps payload is queued for the server in the update op.
+      final outbox = await dao.readOutbox();
+      final updateItem = outbox.firstWhere((o) => o.op == OutboxOp.update);
+      expect(updateItem.payload['steps'], stepsJson);
+    });
+
     test('complete marks done + enqueues a complete', () async {
       final dao = await _freshDao();
       final t = await dao.applyLocalCreate('Finish me');

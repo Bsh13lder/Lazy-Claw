@@ -437,6 +437,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
               onDelete: (id) =>
                   ref.read(tasksProvider.notifier).deleteTask(id),
               onOpen: (task) => showTaskDetailSheet(context, ref, task),
+              onRenameTitle: (id, title) =>
+                  ref.read(tasksProvider.notifier).updateTask(id, title: title),
             ),
         ],
       ),
@@ -454,6 +456,7 @@ class _TaskSection extends StatefulWidget {
     required this.onComplete,
     required this.onDelete,
     required this.onOpen,
+    required this.onRenameTitle,
   });
 
   final _Section section;
@@ -462,6 +465,7 @@ class _TaskSection extends StatefulWidget {
   final void Function(String id) onComplete;
   final void Function(String id) onDelete;
   final void Function(Task task) onOpen;
+  final void Function(String id, String title) onRenameTitle;
 
   @override
   State<_TaskSection> createState() => _TaskSectionState();
@@ -580,6 +584,8 @@ class _TaskSectionState extends State<_TaskSection> {
               onComplete: () => widget.onComplete(widget.tasks[i].id),
               onDelete: () => widget.onDelete(widget.tasks[i].id),
               onTap: () => widget.onOpen(widget.tasks[i]),
+              onTitleChanged: (title) =>
+                  widget.onRenameTitle(widget.tasks[i].id, title),
             ),
           ),
           if (i < widget.tasks.length - 1)

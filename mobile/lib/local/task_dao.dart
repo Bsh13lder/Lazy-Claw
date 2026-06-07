@@ -284,6 +284,7 @@ class TaskDao {
     String? status,
     String? dueDate,
     String? reminderAt,
+    String? steps,
   }) async {
     final existing = await getById(id);
     if (existing == null) return null;
@@ -297,6 +298,7 @@ class TaskDao {
       status: status,
       dueDate: dueDate,
       reminderAt: reminderAt,
+      steps: steps,
     );
 
     final patch = <String, dynamic>{
@@ -307,6 +309,7 @@ class TaskDao {
       'status': ?status,
       'due_date': ?dueDate,
       'reminder_at': ?reminderAt,
+      'steps': ?steps,
     };
 
     await _db.transaction((txn) async {

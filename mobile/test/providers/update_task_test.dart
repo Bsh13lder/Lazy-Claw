@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
 import 'package:lazyclaw_mobile/local/app_db.dart';
 import 'package:lazyclaw_mobile/local/task_dao.dart';
+import 'package:lazyclaw_mobile/models/subtask.dart';
 import 'package:lazyclaw_mobile/models/task.dart';
 import 'package:lazyclaw_mobile/providers/tasks_provider.dart';
 import 'package:lazyclaw_mobile/repositories/tasks_repository.dart';
@@ -66,6 +67,7 @@ class _RecordingDao extends TaskDao {
     String? status,
     String? dueDate,
     String? reminderAt,
+    String? steps,
   }) async {
     updateCalls.add({
       'id': id,
@@ -74,6 +76,7 @@ class _RecordingDao extends TaskDao {
       'category': category,
       'priority': priority,
       'dueDate': dueDate,
+      'steps': steps,
     });
     if (throwOnUpdate) throw StateError('db boom');
     return null;
@@ -146,6 +149,50 @@ void main() {
       expect(call['description'], isNull);
       expect(call['priority'], isNull);
       expect(call['dueDate'], isNull);
+    });
+
+    test('forwards serialized steps to applyLocalUpdate', () async {
+      final dao = await _freshDao();
+      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+
+      await n.updateTask(
+        'task-steps',
+        steps: '[{"id":"s1","title":"One","done":false}]',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(dao.updateCalls.single['steps'],
+          '[{"id":"s1","title":"One","done":false}]');
+    });
+
+    test('setSubtasks serialises a typed list and persists via the DAO',
+        () async {
+      final dao = await _freshDao();
+      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+
+      await n.setSubtasks('task-typed', const [
+        Subtask(id: 's1', title: 'Alpha', done: true),
+        Subtask(id: 's2', title: 'Beta', done: false),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final steps = dao.updateCalls.single['steps'] as String;
+      // The canonical {id,title,done} shape lands in the DAO.
+      expect(parseSubtasks(steps), const [
+        Subtask(id: 's1', title: 'Alpha', done: true),
+        Subtask(id: 's2', title: 'Beta', done: false),
+      ]);
+    });
+
+    test('setSubtasks with an empty list clears the steps column', () async {
+      final dao = await _freshDao();
+      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+
+      await n.setSubtasks('task-clear', const []);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // Empty string (not null) so the DAO patch includes + clears the column.
+      expect(dao.updateCalls.single['steps'], '');
     });
 
     test('sets state.error when the DAO throws', () async {

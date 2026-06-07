@@ -6,6 +6,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../core/notifications/task_reminder_service.dart';
 import '../local/app_db.dart' show DbHealth;
 import '../local/task_dao.dart';
+import '../models/subtask.dart';
 import '../models/task.dart';
 import '../notifications/local_notifications.dart';
 import '../repositories/tasks_repository.dart';
@@ -188,8 +189,13 @@ class TasksNotifier extends StateNotifier<TasksState> {
   }
 
   /// Patch an existing task locally (title / notes / priority / due date /
-  /// category). Only the supplied fields change; the rest are preserved. Lands
-  /// optimistically in the cache + outbox, then best-effort syncs.
+  /// category / sub-task steps). Only the supplied fields change; the rest are
+  /// preserved. Lands optimistically in the cache + outbox, then best-effort
+  /// syncs.
+  ///
+  /// [steps] is the serialized `[{id,title,done}]` JSON string from
+  /// [serializeSubtasks] — pass it to persist sub-task edits (or via
+  /// [setSubtasks] for a typed list).
   Future<void> updateTask(
     String id, {
     String? title,
@@ -197,6 +203,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? priority,
     String? dueDate,
     String? category,
+    String? steps,
   }) async {
     try {
       final updated = await _dao.applyLocalUpdate(
@@ -206,6 +213,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
         priority: priority,
         dueDate: dueDate,
         category: category,
+        steps: steps,
       );
       await _refreshFromCache();
       // Reschedule against the new fields (cancels too, if the time was removed
@@ -221,6 +229,13 @@ class TasksNotifier extends StateNotifier<TasksState> {
       state = state.copyWith(error: e.toString());
     }
   }
+
+  /// Persist a typed list of sub-tasks for [id]. Serialises to the canonical
+  /// `[{id,title,done}]` JSON string and routes through [updateTask] so it
+  /// lands optimistically in the cache + outbox like any other field. An empty
+  /// list clears the `steps` column.
+  Future<void> setSubtasks(String id, List<Subtask> subtasks) =>
+      updateTask(id, steps: serializeSubtasks(subtasks) ?? '');
 
   Future<void> completeTask(String id) async {
     try {

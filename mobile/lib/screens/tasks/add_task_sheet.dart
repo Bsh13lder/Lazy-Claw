@@ -4,6 +4,7 @@ import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
 import 'package:lazyclaw_mobile/screens/tasks/reminder_lead_picker.dart';
+import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 /// A polished add-task bottom sheet with Todoist-style "smart add": as the user
@@ -33,7 +34,7 @@ class AddTaskSheet extends StatefulWidget {
 }
 
 class _AddTaskSheetState extends State<AddTaskSheet> {
-  final _titleController = TextEditingController();
+  final _titleController = SmartAddController();
 
   /// Live parse of the current title text. Drives the detected-token chips and
   /// the default selections for priority / due date.
@@ -123,7 +124,11 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
   }
 
   void _onTitleChanged(String value) {
-    setState(() => _parsed = parseSmartAdd(value));
+    final parsed = parseSmartAdd(value);
+    // Push the fresh spans into the controller so the field highlights the
+    // recognized tokens live; the chips below echo the resolved values.
+    _titleController.tokens = parsed.tokens;
+    setState(() => _parsed = parsed);
   }
 
   Future<void> _submit() async {
@@ -198,6 +203,13 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
           onChanged: _onTitleChanged,
           onSubmitted: (_) => _submit(),
           autofocus: true,
+        ),
+
+        // ── Syntax legend (discoverability) ────────────────────────────
+        const SizedBox(height: AppSpacing.xs),
+        Text(
+          'tom · fri 9am · in 2h · morning · !p1 · #project',
+          style: AppText.caption.copyWith(color: AppColors.textMuted),
         ),
 
         // ── Smart-detected tokens (live) ───────────────────────────────

@@ -193,4 +193,215 @@ void main() {
     expect(r.dueDate, isNull);
     expect(r.cleanTitle, 'mix 13/45 ratio');
   });
+
+  // ── Expanded vocabulary (abbreviations) ────────────────────────────────────
+
+  group('relative-day abbreviations', () {
+    test('tom / tmr / tmrw all resolve to tomorrow', () {
+      expect(parse('ship tom').dueDate, '2026-06-07');
+      expect(parse('ship tmr').dueDate, '2026-06-07');
+      expect(parse('ship tmrw').dueDate, '2026-06-07');
+      expect(parse('ship tom').cleanTitle, 'ship');
+    });
+
+    test('tod / tdy resolve to today', () {
+      expect(parse('standup tod').dueDate, '2026-06-06');
+      expect(parse('standup tdy').dueDate, '2026-06-06');
+    });
+
+    test('tn is today, date-only', () {
+      final r = parse('cook tn');
+      expect(r.dueDate, '2026-06-06');
+      expect(r.hasTime, isFalse);
+      expect(r.cleanTitle, 'cook');
+    });
+
+    test('yesterday is a negative offset', () {
+      expect(parse('log yesterday').dueDate, '2026-06-05');
+    });
+
+    test('eod is today, eow is the upcoming Sunday', () {
+      expect(parse('wrap eod').dueDate, '2026-06-06');
+      expect(parse('wrap eow').dueDate, '2026-06-07'); // Sun after Sat 06-06
+    });
+
+    test('abbreviations never match mid-word', () {
+      // "tomato" must not match "tom"; "today" not "tod"; "eodish" not "eod".
+      final r = parse('buy tomato for eodish stew tonightly');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'buy tomato for eodish stew tonightly');
+    });
+  });
+
+  group('next <unit>', () {
+    test('nxt week is +7', () {
+      expect(parse('sync nxt week').dueDate, '2026-06-13');
+    });
+
+    test('next month is the first of next month', () {
+      expect(parse('invoice next month').dueDate, '2026-07-01');
+      expect(parse('invoice nxt month').dueDate, '2026-07-01');
+    });
+
+    test('next year is Jan 1 of next year', () {
+      expect(parse('plan next year').dueDate, '2027-01-01');
+    });
+
+    test('next <weekday> is the following-week occurrence', () {
+      // Upcoming Fri after Sat 06-06 is 06-12; "next fri" is +7 -> 06-19.
+      expect(parse('demo next fri').dueDate, '2026-06-19');
+      expect(parse('demo nxt fri').dueDate, '2026-06-19');
+      // Upcoming Mon is 06-08; "next mon" -> 06-15.
+      expect(parse('demo next mon').dueDate, '2026-06-15');
+    });
+
+    test('next <weekday> swallows the bare weekday (no double token)', () {
+      final r = parse('demo next fri');
+      expect(r.cleanTitle, 'demo');
+      expect(r.tokens.length, 1);
+      expect(r.tokens.first.kind, SmartTokenKind.date);
+    });
+  });
+
+  group('weekend', () {
+    test('this weekend is the upcoming Saturday', () {
+      expect(parse('trip this weekend').dueDate, '2026-06-06'); // Sat today
+    });
+
+    test('next weekend is that Saturday + 7', () {
+      expect(parse('trip next weekend').dueDate, '2026-06-13');
+      expect(parse('trip nxt weekend').dueDate, '2026-06-13');
+    });
+  });
+
+  group('day-offset forms', () {
+    test('in N weeks offsets by N*7 days', () {
+      expect(parse('review in 2 weeks').dueDate, '2026-06-20');
+    });
+
+    test('+Nd and +N days both add days', () {
+      expect(parse('renew +3d').dueDate, '2026-06-09');
+      expect(parse('renew +2 days').dueDate, '2026-06-08');
+    });
+  });
+
+  group('single-letter am/pm clock', () {
+    test('9a -> 09:00, 9p -> 21:00', () {
+      expect(parse('gym 9a').dueDate, '2026-06-06T09:00:00');
+      expect(parse('gym 9p').dueDate, '2026-06-06T21:00:00');
+    });
+
+    test('12p -> noon, 12a -> midnight', () {
+      expect(parse('x 12p').dueDate, '2026-06-06T12:00:00');
+      expect(parse('x 12a').dueDate, '2026-06-06T00:00:00');
+    });
+
+    test('single letter never matches mid-word', () {
+      final r = parse('eat 9apples');
+      expect(r.dueDate, isNull);
+      expect(r.cleanTitle, 'eat 9apples');
+    });
+  });
+
+  group('time-of-day keywords', () {
+    test('each keyword maps to its wall-clock hour', () {
+      expect(parse('a morning').dueDate, '2026-06-06T09:00:00');
+      expect(parse('a afternoon').dueDate, '2026-06-06T13:00:00');
+      expect(parse('a evening').dueDate, '2026-06-06T18:00:00');
+      expect(parse('a night').dueDate, '2026-06-06T20:00:00');
+      expect(parse('a noon').dueDate, '2026-06-06T12:00:00');
+      expect(parse('a midnight').dueDate, '2026-06-06T00:00:00');
+    });
+
+    test('a day token + a keyword combine (tom morning = tomorrow 09:00)', () {
+      final r = parse('standup tom morning');
+      expect(r.cleanTitle, 'standup');
+      expect(r.dueDate, '2026-06-07T09:00:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test('"tonight" stays date-only (night keyword does not fire inside it)', () {
+      final r = parse('cook tonight');
+      expect(r.dueDate, '2026-06-06');
+      expect(r.hasTime, isFalse);
+    });
+  });
+
+  group('in N hours (duration -> time)', () {
+    test('sets a time of now + N hours', () {
+      final r = parseSmartAdd('ship in 2h', now: DateTime(2026, 6, 6, 14, 30));
+      expect(r.cleanTitle, 'ship');
+      expect(r.dueDate, '2026-06-06T16:30:00');
+      expect(r.hasTime, isTrue);
+    });
+
+    test('rolls the date forward when it crosses midnight', () {
+      final r = parseSmartAdd('call in 3 hours', now: DateTime(2026, 6, 6, 23, 0));
+      expect(r.dueDate, '2026-06-07T02:00:00');
+      expect(r.hasTime, isTrue);
+    });
+  });
+
+  group('bare priority codes', () {
+    test('p1..p4 map across the scale', () {
+      expect(parse('a p1').priority, 'urgent');
+      expect(parse('a p2').priority, 'high');
+      expect(parse('a p3').priority, 'medium');
+      expect(parse('a p4').priority, 'low');
+    });
+
+    test('bare priority is stripped from the title', () {
+      final r = parse('upgrade plan p2');
+      expect(r.cleanTitle, 'upgrade plan');
+      expect(r.priority, 'high');
+    });
+
+    test('case-insensitive', () {
+      expect(parse('a P3').priority, 'medium');
+    });
+  });
+
+  // ── Span correctness ───────────────────────────────────────────────────────
+
+  group('token spans', () {
+    test('spans index the ORIGINAL string and carry the right kinds', () {
+      const input = 'buy milk tomorrow !p1 #groceries';
+      final r = parse(input);
+      expect(r.tokens.length, 3);
+      // Each span's substring is exactly the token the user typed.
+      String sub(SmartToken t) => input.substring(t.start, t.end);
+      expect(sub(r.tokens[0]), 'tomorrow');
+      expect(r.tokens[0].kind, SmartTokenKind.date);
+      expect(sub(r.tokens[1]), '!p1');
+      expect(r.tokens[1].kind, SmartTokenKind.priority);
+      expect(sub(r.tokens[2]), '#groceries');
+      expect(r.tokens[2].kind, SmartTokenKind.project);
+    });
+
+    test('date + time produce two adjacent, ordered spans', () {
+      const input = 'meet tomorrow 5pm';
+      final r = parse(input);
+      expect(r.tokens.map((t) => input.substring(t.start, t.end)).toList(),
+          ['tomorrow', '5pm']);
+      expect(r.tokens.map((t) => t.kind).toList(),
+          [SmartTokenKind.date, SmartTokenKind.time]);
+    });
+
+    test('spans are sorted by start and never overlap', () {
+      final r = parse('plan next fri 9am p2 #work later #ignored');
+      for (var i = 1; i < r.tokens.length; i++) {
+        expect(r.tokens[i].start >= r.tokens[i - 1].end, isTrue,
+            reason: 'spans must be non-overlapping and sorted');
+      }
+      // Only the FIRST project token is recognized.
+      final projects =
+          r.tokens.where((t) => t.kind == SmartTokenKind.project).toList();
+      expect(projects.length, 1);
+      expect(r.project, 'work');
+    });
+
+    test('a bare title produces no spans', () {
+      expect(parse('just some text').tokens, isEmpty);
+    });
+  });
 }

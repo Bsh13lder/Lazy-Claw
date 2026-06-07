@@ -212,6 +212,127 @@ async def test_consolidator_factory_is_used_for_callback(tmp_path):
     assert lane_queue.enqueue.await_args.kwargs["callback"] is consolidator_cb_built
 
 
+# ── Web quiet-mode delivery rescue (2026-06-04 disappearing-reply bug) ──
+#
+# A Web-UI request that gets AUTO-PROMOTE'd to a background task is
+# consolidated by a synthetic turn enqueued on the LANE QUEUE — which
+# bypasses the WS request loop (`_run_agent_turn`) that normally flushes the
+# terminal "done" frame. With `bg_streaming` OFF the web callback buffers the
+# brain's tokens and never sends them, so the consolidated reply is produced
+# then SILENTLY DROPPED (and never falls back to Telegram, because the
+# origin-aware router picked the live web callback). `_consolidate` must
+# re-deliver the reply out-of-band via a `background_done` frame.
+
+
+class _FakeWebCallback:
+    """Duck-typed like ``gateway.routes.chat_ws.WebSocketCallback`` — owns a
+    live ``ws`` + ``streaming_state`` and is NOT closed, so
+    ``is_live_web_callback`` recognizes it."""
+
+    def __init__(self):
+        self.ws = MagicMock()
+        self.streaming_state = {"bg_streaming": False}
+        self.events: list[AgentEvent] = []
+
+    async def on_event(self, event: AgentEvent) -> None:
+        self.events.append(event)
+
+
+class _FakeTelegramNotifier:
+    """A non-web callback (no ``ws`` / ``streaming_state``) — must NOT be
+    treated as a live web socket by the rescue."""
+
+    def __init__(self):
+        self.events: list[AgentEvent] = []
+
+    async def on_event(self, event: AgentEvent) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_consolidate_web_quiet_mode_redelivers_reply(tmp_path, monkeypatch):
+    """Web origin + bg_streaming OFF: the synthetic turn's reply must be
+    re-delivered out-of-band via a ``background_done`` frame on the web
+    callback (otherwise it vanishes — the 2026-06-04 incident)."""
+    import lazyclaw.runtime.streaming_setting as ss
+
+    monkeypatch.setattr(ss, "get_bg_streaming", AsyncMock(return_value=False))
+
+    lane_queue = MagicMock()
+    lane_queue.enqueue = AsyncMock(
+        return_value="You have 3 sheets: Budget, Leads, Invoices.",
+    )
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
+
+    web_cb = _FakeWebCallback()
+    # ONE task — exactly the production shape ("read_all_sheets").
+    _seed_group(runner, "gw1", "u1", [], cb=web_cb)
+    runner._brain_groups["gw1"].results.append(_FanoutResult(
+        task_id="t1", name="read_all_sheets", success=True,
+        result="raw sheet dump", duration_ms=80_000,
+    ))
+
+    await runner._consolidate("gw1")
+
+    # The synthetic turn was enqueued AND its reply was re-delivered.
+    lane_queue.enqueue.assert_awaited_once()
+    assert len(web_cb.events) == 1
+    ev = web_cb.events[0]
+    assert ev.kind == "background_done"
+    assert ev.metadata["result"] == "You have 3 sheets: Budget, Leads, Invoices."
+
+
+@pytest.mark.asyncio
+async def test_consolidate_web_streaming_on_no_rescue(tmp_path, monkeypatch):
+    """Streaming ON: live tokens already reached the browser during the
+    synthetic turn — the rescue must NOT fire (would double-send)."""
+    import lazyclaw.runtime.streaming_setting as ss
+
+    monkeypatch.setattr(ss, "get_bg_streaming", AsyncMock(return_value=True))
+
+    lane_queue = MagicMock()
+    lane_queue.enqueue = AsyncMock(return_value="streamed live")
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
+
+    web_cb = _FakeWebCallback()
+    web_cb.streaming_state = {"bg_streaming": True}
+    _seed_group(runner, "gw2", "u1", [], cb=web_cb)
+    runner._brain_groups["gw2"].results.extend([
+        _FanoutResult(task_id="t1", name="A", success=True, result="r1"),
+        _FanoutResult(task_id="t2", name="B", success=True, result="r2"),
+    ])
+
+    await runner._consolidate("gw2")
+
+    lane_queue.enqueue.assert_awaited_once()
+    assert web_cb.events == []  # no out-of-band background_done rescue
+
+
+@pytest.mark.asyncio
+async def test_consolidate_telegram_cb_no_rescue(tmp_path, monkeypatch):
+    """Non-web (Telegram) callback in quiet mode: delivered during the turn
+    by its own notifier — the web rescue must NOT fire for it."""
+    import lazyclaw.runtime.streaming_setting as ss
+
+    monkeypatch.setattr(ss, "get_bg_streaming", AsyncMock(return_value=False))
+
+    lane_queue = MagicMock()
+    lane_queue.enqueue = AsyncMock(return_value="telegram reply")
+    runner = _make_runner(tmp_path, lane_queue=lane_queue)
+
+    tg_cb = _FakeTelegramNotifier()
+    _seed_group(runner, "gw3", "u1", [], cb=tg_cb)
+    runner._brain_groups["gw3"].results.extend([
+        _FanoutResult(task_id="t1", name="A", success=True, result="r1"),
+        _FanoutResult(task_id="t2", name="B", success=True, result="r2"),
+    ])
+
+    await runner._consolidate("gw3")
+
+    lane_queue.enqueue.assert_awaited_once()
+    assert tg_cb.events == []  # Telegram path unchanged, no rescue
+
+
 @pytest.mark.asyncio
 async def test_consolidate_without_lane_queue_does_not_crash(tmp_path):
     """Without lane_queue wired, consolidation must degrade gracefully —

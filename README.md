@@ -234,6 +234,19 @@ The backend serves its own APK:
 
 LazyClaw runs four parallel-agent surfaces in one runtime — `delegate` for in-turn specialists, `dispatch_subagents` for fire-and-forget fan-out, `run_background` for one long-running worker, and an optional **Critic** that adversarially reviews replies on HIGH/MAX-effort turns. Concurrency capped at 4 in-flight subagents (override via `LAZYCLAW_DISPATCH_CONCURRENCY`) so per-account LLM rate limits never trigger 429 bursts. Full breakdown in the **[Parallel Agents](#parallel-agents)** section below.
 
+### Specialists & Operating Modes *(specialist-first dispatch — ADR-0005)*
+
+Specialists are **declarative `.md` + YAML files** (name / tools / model / system-prompt) — the maintained unit is a small editable file, not a 277-tool registry. Builtins ship in-repo; you create/edit your own from the web or mobile **Specialists** page (custom ones encrypted in DB). Specialists **auto-improve** by accruing lessons from past runs (the LazyBrain skill-lesson loop), and a **research-first fan-out** can send read-only code + web research specialists ahead of any plan so the brain never works from memory.
+
+Four **operating modes** layer over the permission system — switch per chat (Telegram `/act`, web/mobile mode switch):
+
+| Mode | Behavior |
+|------|----------|
+| **Chat** | Conversation only — no tools fire |
+| **Ask** | Acts, but confirms each write (default) |
+| **Plan** | Read-only research → numbered plan → one **Execute** tap → then autonomous |
+| **Auto** | Fully autonomous |
+
 ### Background Tasks
 
 `run_background` skill spawns independent agent instances for long-running work. Max 10 global, 10 per user. Results pushed to Telegram on completion. **Auto-promote**: when a foreground turn exceeds its budget the runtime promotes the work to a background runner so the chat lane stays responsive. Background tasks carry a free-text **`project_tag`** (e.g. `upwork:job-X`, `gig:Y`, `reddit:dm`) so the Code Specialist Web UI page can group active runs by business workflow.

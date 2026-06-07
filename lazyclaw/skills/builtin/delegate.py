@@ -17,9 +17,7 @@ from lazyclaw.runtime.callbacks import AgentEvent, StepTrackingCallback
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.teams.learning import MIN_STEPS_FOR_LEARNING, save_browser_learnings
 from lazyclaw.teams.specialist import (
-    BROWSER_SPECIALIST,
-    CODE_SPECIALIST,
-    RESEARCH_SPECIALIST,
+    BUILTIN_SPECIALISTS,
     SpecialistConfig,
 )
 
@@ -35,12 +33,48 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Short name → specialist config
-_SPECIALIST_MAP: dict[str, SpecialistConfig] = {
-    "browser": BROWSER_SPECIALIST,
-    "research": RESEARCH_SPECIALIST,
-    "code": CODE_SPECIALIST,
+# Short name → builtin specialist (ADR-0005). Aliases route intent words to a
+# domain specialist; the full specialist name also resolves (added below). Built
+# from BUILTIN_SPECIALISTS so new `.md` specialists auto-register.
+_BUILTIN_BY_NAME: dict[str, SpecialistConfig] = {s.name: s for s in BUILTIN_SPECIALISTS}
+
+_SHORT_ALIASES: dict[str, str] = {
+    "browser": "browser_specialist",
+    "research": "research_specialist",
+    "code": "code_specialist",
+    "code_research": "code_research_specialist",
+    "web_research": "web_research_specialist",
+    "freelance": "freelance_specialist",
+    "upwork": "freelance_specialist",
+    "gig": "freelance_specialist",
+    "email": "email_specialist",
+    "messaging": "messaging_specialist",
+    "whatsapp": "messaging_specialist",
+    "instagram": "messaging_specialist",
+    "telegram": "messaging_specialist",
+    "notes": "notes_specialist",
+    "memory": "notes_specialist",
+    "lazybrain": "notes_specialist",
+    "tasks": "tasks_specialist",
+    "budget": "tasks_specialist",
+    "documents": "documents_specialist",
+    "docs": "documents_specialist",
+    "contacts": "contacts_specialist",
+    "pipeline": "contacts_specialist",
+    "automation": "automation_specialist",
+    "n8n": "automation_specialist",
+    "bounty": "bounty_specialist",
+    "system": "system_specialist",
 }
+
+_SPECIALIST_MAP: dict[str, SpecialistConfig] = {
+    short: _BUILTIN_BY_NAME[full]
+    for short, full in _SHORT_ALIASES.items()
+    if full in _BUILTIN_BY_NAME
+}
+# Allow addressing any builtin by its full name too (don't clobber aliases).
+for _s in BUILTIN_SPECIALISTS:
+    _SPECIALIST_MAP.setdefault(_s.name, _s)
 
 
 class DelegateSkill(BaseSkill):

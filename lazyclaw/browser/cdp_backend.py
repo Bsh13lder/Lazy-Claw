@@ -1132,8 +1132,25 @@ class CDPBackend:
             await asyncio.sleep(0.2)
         return False
 
+    def _tab_list_host(self) -> str:
+        """Host the CDP ``/json`` tab-list endpoint lives on.
+
+        In host-bridge mode (``_cdp_source == "host"``) the user's real Brave —
+        and therefore its tab list — is reachable only via the Docker host
+        gateway, NOT ``localhost`` (which inside the container resolves to the
+        container itself and reports zero tabs). The connect path already uses
+        the gateway (see :meth:`_ensure_connected`); ``tabs()`` and
+        ``switch_tab()`` MUST match it, or every anchored-tab lookup silently
+        misses and passive watchers re-create a parked tab on every poll.
+        """
+        if self._cdp_source == "host":
+            from lazyclaw.browser.host_bridge import HOST_GATEWAY_HOSTNAME
+
+            return HOST_GATEWAY_HOSTNAME
+        return "localhost"
+
     async def tabs(self) -> list[TabInfo]:
-        chrome_tabs = await list_chrome_tabs(self._port)
+        chrome_tabs = await list_chrome_tabs(self._port, host=self._tab_list_host())
         current_id = self._current_tab.id if self._current_tab else ""
         return [
             TabInfo(
@@ -1146,7 +1163,7 @@ class CDPBackend:
         ]
 
     async def switch_tab(self, tab_id: str, *, focus: bool = True) -> None:
-        chrome_tabs = await list_chrome_tabs(self._port)
+        chrome_tabs = await list_chrome_tabs(self._port, host=self._tab_list_host())
         target = next((t for t in chrome_tabs if t.id == tab_id), None)
         if not target:
             raise ValueError(f"Tab not found: {tab_id}")
@@ -1603,10 +1620,21 @@ class CDPBackend:
     # Tab management via CDP Target domain (for TabManager)
     # ------------------------------------------------------------------
 
-    async def new_tab(self, url: str = "about:blank") -> str:
-        """Create a new browser tab via CDP Target domain. Returns targetId."""
+    async def new_tab(
+        self, url: str = "about:blank", *, background: bool = False
+    ) -> str:
+        """Create a new browser tab via CDP Target domain. Returns targetId.
+
+        ``background=True`` sets Chromium's ``Target.createTarget`` background
+        flag so the new tab opens WITHOUT being brought to the foreground —
+        passive watchers use this for their dedicated parked tab so it never
+        steals the user's visible screen ("jumping on screen").
+        """
         conn = await self._ensure_connected()
-        result = await conn.send("Target.createTarget", {"url": url})
+        params: dict = {"url": url}
+        if background:
+            params["background"] = True
+        result = await conn.send("Target.createTarget", params)
         target_id = result.get("targetId", "")
         if not target_id:
             raise RuntimeError("Target.createTarget returned no targetId")

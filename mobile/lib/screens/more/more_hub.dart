@@ -29,6 +29,12 @@ const _kTools = <_PowerTool>[
     icon: Icons.auto_awesome_outlined,
   ),
   _PowerTool(
+    key: 'specialists',
+    label: 'Specialists',
+    description: 'Declarative agent specialists',
+    icon: Icons.smart_toy_outlined,
+  ),
+  _PowerTool(
     key: 'vault',
     label: 'Vault',
     description: 'Encrypted credential storage',

@@ -258,10 +258,34 @@ async def run_specialist(
             f"find the files on disk.\n"
         )
 
-    # System prompt = specialist prompt + workspace hint + task
+    # ── ADR-0005 Phase 6: auto-improving specialists ──────────────────
+    # Recall this specialist's own past lessons (success/failure shapes)
+    # via the ADR-0002 Skill-Lesson Learning Loop (scoped by specialist
+    # name) and prepend them so the specialist gets better the more it is
+    # used. Fire-and-forget: any failure degrades to an empty block, so a
+    # lesson-recall problem can never break a specialist run.
+    _lessons_block = ""
+    try:
+        from lazyclaw.runtime.specialist_lessons import (
+            recall_specialist_lessons,
+        )
+
+        _lessons_block = await recall_specialist_lessons(
+            _config, user_id, specialist.name, task,
+        )
+    except Exception:
+        logger.debug(
+            "specialist lesson recall failed for %s — continuing without",
+            specialist.name, exc_info=True,
+        )
+        _lessons_block = ""
+    _lessons_section = f"\n\n{_lessons_block}\n" if _lessons_block else ""
+
+    # System prompt = specialist prompt + workspace hint + learned lessons + task
     system_prompt = (
         f"{specialist.system_prompt}"
-        f"{_workspace_hint}\n\n"
+        f"{_workspace_hint}"
+        f"{_lessons_section}\n\n"
         f"---\n\n"
         f"Your task:\n{task}\n\n"
         f"Complete this task using your available tools. "

@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 VALID_SEARCH_PROVIDERS: frozenset[str] = frozenset({"auto", "brave", "scraper", "duckduckgo"})
 
+# Operating modes (ADR-0005). Kept in sync with lazyclaw.runtime.agent_mode —
+# hardcoded here to keep the settings layer independent of the runtime layer.
+VALID_AGENT_MODES: frozenset[str] = frozenset({"chat", "ask", "plan", "auto"})
+
 # Stale provider names that existed before the 2026-05-02 Brave rewrite.
 # Coerce to "auto" on read so old user rows don't break the Settings UI.
 _LEGACY_PROVIDERS: frozenset[str] = frozenset({"serper", "serpapi"})
@@ -28,6 +32,9 @@ _LEGACY_PROVIDERS: frozenset[str] = frozenset({"serper", "serpapi"})
 DEFAULT_GENERAL = {
     "search_provider": "auto",
     "show_cost_badges": True,
+    # Operating mode (ADR-0005): chat | ask | plan | auto. Default "ask" maps
+    # to the historical permission behavior, so existing users see no change.
+    "agent_mode": "ask",
     # Default lead-time offsets for advance reminders on important tasks
     # (priority high/urgent OR appointment-class title). Each entry is a
     # negative relative offset like "-2h", "-30m", "-1d" — applied to the
@@ -118,6 +125,15 @@ async def update_general_settings(
 
     if "show_cost_badges" in updates and updates["show_cost_badges"] is not None:
         clean["show_cost_badges"] = bool(updates["show_cost_badges"])
+
+    if "agent_mode" in updates and updates["agent_mode"] is not None:
+        mode_val = str(updates["agent_mode"]).lower().strip()
+        if mode_val not in VALID_AGENT_MODES:
+            raise ValueError(
+                f"Invalid agent_mode: {updates['agent_mode']}. "
+                f"Use one of: {sorted(VALID_AGENT_MODES)}"
+            )
+        clean["agent_mode"] = mode_val
 
     if "eod_summary" in updates and updates["eod_summary"] is not None:
         clean["eod_summary"] = bool(updates["eod_summary"])
@@ -242,6 +258,15 @@ async def update_general_settings(
             (json.dumps(new_settings), user_id),
         )
         await db.commit()
+
+    # Operating-mode changes must take effect on the very next tool check.
+    if "agent_mode" in clean:
+        try:
+            from lazyclaw.runtime.agent_mode import invalidate_mode_cache
+
+            invalidate_mode_cache(user_id)
+        except Exception:
+            logger.debug("agent_mode cache invalidation failed", exc_info=True)
 
     merged = dict(DEFAULT_GENERAL)
     merged.update(general)

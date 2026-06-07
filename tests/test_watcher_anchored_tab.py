@@ -31,6 +31,7 @@ class _FakeBackend:
         self._tabs = list(tabs_list)
         self._url = url
         self.new_tab_calls: list[str] = []
+        self.new_tab_bg: list[bool] = []
         self.switch_calls: list[tuple[str, bool]] = []
         self._next = 100
 
@@ -40,8 +41,9 @@ class _FakeBackend:
     async def tabs(self):
         return list(self._tabs)
 
-    async def new_tab(self, url: str = "about:blank") -> str:
+    async def new_tab(self, url: str = "about:blank", *, background: bool = False) -> str:
         self.new_tab_calls.append(url)
+        self.new_tab_bg.append(background)
         tid = f"NEW{self._next}"
         self._next += 1
         self._tabs.append(SimpleNamespace(id=tid, url=url))
@@ -82,8 +84,10 @@ async def test_first_run_creates_own_parked_tab():
     _changed, _notif, new_ctx = await check_watcher(
         b, ctx, passive=True, user_id="u1", job_id="job9",
     )
-    # Created its OWN tab at the watched URL, attached with focus=False.
+    # Created its OWN tab at the watched URL, in the BACKGROUND (no screen
+    # jump), attached with focus=False.
     assert b.new_tab_calls == [ctx["url"]]
+    assert b.new_tab_bg == [True]
     anchor = new_ctx["anchor_target_id"]
     assert anchor.startswith("NEW")
     assert b.switch_calls[-1] == (anchor, False)

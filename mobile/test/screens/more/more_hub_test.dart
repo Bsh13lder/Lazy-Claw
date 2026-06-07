@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/ui/app_theme.dart';
 import 'package:lazyclaw_mobile/screens/more/more_hub.dart';
 import 'package:lazyclaw_mobile/screens/more/skills_screen.dart';
+import 'package:lazyclaw_mobile/screens/more/specialists_screen.dart';
 import 'package:lazyclaw_mobile/screens/more/vault_screen.dart';
 import 'package:lazyclaw_mobile/screens/more/memory_screen.dart';
 import 'package:lazyclaw_mobile/screens/more/jobs_screen.dart';
@@ -22,10 +23,15 @@ void main() {
       expect(find.text('Power tools'), findsOneWidget);
     });
 
-    testWidgets('renders all 7 tile labels', (tester) async {
+    testWidgets('renders all 8 tile labels', (tester) async {
+      // Taller surface so all 8 tiles fit within the lazy ListView's viewport
+      // + cache extent (the 8th tile would otherwise be off-screen).
+      await tester.binding.setSurfaceSize(const Size(800, 1400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(const MoreHubScreen()));
       for (final label in [
         'Skills',
+        'Specialists',
         'Vault',
         'Memory',
         'Jobs',
@@ -41,6 +47,7 @@ void main() {
   group('Stub screens render without error', () {
     for (final pair in <(String, Widget)>[
       ('SkillsScreen', const SkillsScreen()),
+      ('SpecialistsScreen', const SpecialistsScreen()),
       ('VaultScreen', const VaultScreen()),
       ('MemoryScreen', const MemoryScreen()),
       ('JobsScreen', const JobsScreen()),

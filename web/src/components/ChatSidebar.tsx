@@ -7,8 +7,8 @@ import ThinkingCard from "./ThinkingCard";
 import BrowserCanvas from "./BrowserCanvas";
 import TemplateSavedToast from "./TemplateSavedToast";
 import PlanApprovalCard from "./PlanApprovalCard";
-import PlanModeToggle from "./PlanModeToggle";
 import StreamingToggle from "./StreamingToggle";
+import ModeSwitch from "./ModeSwitch";
 import BrainBadge from "./BrainBadge";
 
 interface ChatSidebarProps {
@@ -100,9 +100,6 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
 
         {/* Active brain model — matches what Telegram uses, visible drift check */}
         <BrainBadge />
-
-        {/* Plan mode toggle — quick switch between Plan ↔ Auto */}
-        <PlanModeToggle />
 
         {/* Streaming toggle — show/hide live bg-task progress in chat */}
         <StreamingToggle />
@@ -244,6 +241,11 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
       {isPageMode ? (
         <div className="border-t border-border bg-bg-secondary/40">
           <div className="mx-auto w-full max-w-3xl">
+            {/* Operating mode (ADR-0005) — sits above the composer, near the
+                chat, so it doesn't crowd/overflow the header. */}
+            <div className="flex justify-end px-4 pt-2">
+              <ModeSwitch />
+            </div>
             <ChatInput
               onSend={sendMessage}
               disabled={connectionStatus !== "connected"}
@@ -253,12 +255,18 @@ export default function ChatSidebar({ presentationMode = "sidebar" }: ChatSideba
           </div>
         </div>
       ) : (
-        <ChatInput
-          onSend={sendMessage}
-          disabled={connectionStatus !== "connected"}
-          isStreaming={isStreaming}
-          onCancel={cancelGeneration}
-        />
+        <div className="border-t border-border bg-bg-secondary/40">
+          {/* Operating mode above the composer (narrow sidebar) */}
+          <div className="flex justify-center px-2 pt-1.5">
+            <ModeSwitch />
+          </div>
+          <ChatInput
+            onSend={sendMessage}
+            disabled={connectionStatus !== "connected"}
+            isStreaming={isStreaming}
+            onCancel={cancelGeneration}
+          />
+        </div>
       )}
     </div>
   );

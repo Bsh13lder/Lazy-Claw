@@ -35,6 +35,47 @@ class EcoSettings {
       );
 }
 
+// ── Operating mode (general.agent_mode) ──────────────────────────────────────
+
+/// The four operating-mode options for `general.agent_mode` (ADR-0005 §D).
+///
+/// Maps the stored value → the label shown to the user. Insertion order is the
+/// display order (Chat → Ask → Plan → Execute).
+const Map<String, String> kAgentModeLabels = {
+  'chat': 'Chat',
+  'ask': 'Ask',
+  'plan': 'Plan',
+  'auto': 'Execute',
+};
+
+/// Default operating mode when the server has none stored yet.
+const String kDefaultAgentMode = 'ask';
+
+/// The operating-mode slice of a user's general settings.
+///
+/// We model only [agentMode] (not the whole general-settings dict) since that's
+/// the only field this client reads/writes. Unknown / missing values coerce to
+/// [kDefaultAgentMode] so a not-yet-migrated backend can't break the picker.
+class GeneralSettings {
+  final String agentMode;
+
+  const GeneralSettings({required this.agentMode});
+
+  factory GeneralSettings.fromJson(Map<String, dynamic> json) =>
+      GeneralSettings(agentMode: coerceAgentMode(json['agent_mode']));
+
+  GeneralSettings copyWith({String? agentMode}) =>
+      GeneralSettings(agentMode: agentMode ?? this.agentMode);
+
+  /// Normalizes any input to a known mode value, falling back to the default.
+  static String coerceAgentMode(dynamic v) {
+    final s = v?.toString().toLowerCase().trim();
+    return (s != null && kAgentModeLabels.containsKey(s))
+        ? s
+        : kDefaultAgentMode;
+  }
+}
+
 /// Snapshot of the permissions settings returned by
 /// `GET /api/permissions/settings`.
 class PermissionsSettings {
@@ -151,6 +192,34 @@ class SettingsRepository {
     final json = await _t.postJson('/api/settings/eco', {'mode': mode});
     _assertSuccess(json);
     return EcoSettings.fromJson(json['data'] as Map<String, dynamic>);
+  }
+
+  // ── Operating mode (general.agent_mode) ───────────────────────────────────
+
+  /// Returns the current operating mode from `GET /api/settings/general`.
+  ///
+  /// Uses the same `{success, data}` envelope as the ECO endpoints. A backend
+  /// that doesn't yet emit `agent_mode` simply yields [kDefaultAgentMode].
+  Future<GeneralSettings> getGeneral() async {
+    final json = await _t.getJson('/api/settings/general');
+    _assertSuccess(json);
+    return GeneralSettings.fromJson(
+        Map<String, dynamic>.from(json['data'] as Map));
+  }
+
+  /// Sets the operating mode via `PATCH /api/settings/general` with
+  /// `{ agent_mode: mode }` and returns the updated settings.
+  ///
+  /// Honors the server's echoed `agent_mode`; if the backend hasn't started
+  /// returning it yet, falls back to the requested [mode] so the UI reflects
+  /// the user's choice instead of snapping back to the default.
+  Future<GeneralSettings> setAgentMode(String mode) async {
+    final json =
+        await _t.patchJson('/api/settings/general', {'agent_mode': mode});
+    _assertSuccess(json);
+    final data = Map<String, dynamic>.from(json['data'] as Map);
+    data.putIfAbsent('agent_mode', () => mode);
+    return GeneralSettings.fromJson(data);
   }
 
   // ── Permissions ───────────────────────────────────────────────────────────

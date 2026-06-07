@@ -385,7 +385,13 @@ _HAND_TUNED_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = {
     # upworker works small projects" routed to core-only tools because
     # \bupwork\b doesn't match the "er" suffix, so the brain hallucinated
     # tool names from history instead of having them properly injected).
-    "upwork":    re.compile(r"\bupwork(?:er|ers|s)?\b|upwork\.com", re.IGNORECASE),
+    # Also the transposition typos "upwokr" / "upwrok" (verified live
+    # 2026-06-03 — "Find matching jobs on upwokr" matched NO channel keyword,
+    # so only `browser` got injected and the brain scrolled the search grid
+    # into a CDP timeout instead of calling search_jobs).
+    "upwork":    re.compile(
+        r"\bupw(?:ork|okr|rok)(?:er|ers|s)?\b|upwork\.com", re.IGNORECASE,
+    ),
 }
 
 # Manual aliases for multi-keyword MCPs whose name doesn't match the words
@@ -837,6 +843,38 @@ _SURVIVAL_TOOL_NAMES = frozenset({
     "set_skills_profile", "review_deliverable",
     "start_gig", "submit_deliverable", "invoice_client",
 })
+
+# "Find matching jobs on upwork", "show me 5 upwork jobs", "search jobs on
+# upwork" — bare "jobs" was pulled from _SURVIVAL_KEYWORDS (it overloaded with
+# cron-job intent), so these never injected `search_jobs`. With no job-search
+# tool in the set the brain fell back to the raw `browser` tool and tried to
+# scroll Upwork's search grid, where Input.dispatchMouseEvent times out on the
+# heavy DOM → the turn got AUTO-PROMOTE'd to a Telegram-bound background task
+# (2026-06-03 incident, recurred 10+ times that day).
+#
+# Disambiguation from cron "jobs": require BOTH the canonical upwork token
+# (typo-tolerant, shared with channel routing) AND a freelance-work token. The
+# upwork token is what separates "find jobs on upwork" (freelance search) from
+# "list my cron jobs" (scheduler). Route to the `search_jobs` skill — it wraps
+# upwork_search_jobs (NO browser scroll), is already read-only, so the turn
+# stays inline and answers in the channel it came from.
+_JOB_WORK_TOKEN_RE = re.compile(
+    r"\b(jobs?|work|gigs?|projects?|contracts?)\b", re.IGNORECASE,
+)
+
+
+def _is_upwork_job_search(text: str) -> bool:
+    """True when the message is an Upwork freelance job search.
+
+    Reuses the canonical (typo-tolerant) upwork matcher so "upwokr" etc. are
+    handled in exactly one place.
+    """
+    if not text:
+        return False
+    return bool(
+        _HAND_TUNED_CHANNEL_KEYWORDS["upwork"].search(text)
+        and _JOB_WORK_TOKEN_RE.search(text)
+    )
 
 # n8n workflow automation — TIGHT keywords only to avoid false positives
 # "watch for" removed — overlaps with watch_messages/watch_site in _BASE_TOOL_NAMES
@@ -1533,6 +1571,9 @@ class Agent:
         self.router = router
         self.eco_router = eco_router or EcoRouter(config, router)
         self.registry = registry
+        # Kept for the research-fan-out pre-plan pass (ADR-0005 Phase 4),
+        # which needs a checker to run read-only research specialists.
+        self._permission_checker = permission_checker
         self.executor = (
             ToolExecutor(
                 registry,
@@ -1605,6 +1646,37 @@ class Agent:
             )
         except Exception:
             logger.debug("plan_research pre-pass failed (non-fatal)", exc_info=True)
+
+        # Deep research-first fan-out (ADR-0005 Phase 4): read-only code +
+        # web research specialists run in parallel BEFORE the plan is drafted
+        # so the brain never plans from memory. Opt-in via
+        # LAZYCLAW_RESEARCH_FANOUT — each runs a full agent loop, so it adds
+        # latency; default-off keeps plan-gate timing unchanged.
+        import os as _os
+        if (
+            _os.environ.get("LAZYCLAW_RESEARCH_FANOUT", "").strip().lower()
+            in ("1", "true", "yes", "on")
+            and self.registry is not None
+            and self._permission_checker is not None
+        ):
+            try:
+                from lazyclaw.runtime.research_fanout import (
+                    gather_specialist_research,
+                )
+                deep = await gather_specialist_research(
+                    self.config, user_id, message,
+                    registry=self.registry,
+                    eco_router=self.eco_router,
+                    permission_checker=self._permission_checker,
+                )
+                if deep:
+                    research_findings = (
+                        f"{research_findings}\n\n{deep}".strip()
+                    )
+            except Exception:
+                logger.debug(
+                    "research_fanout pre-pass failed (non-fatal)", exc_info=True
+                )
 
         plan_instruction = make_user_facing_plan_prompt(
             message, tool_names,
@@ -2664,6 +2736,12 @@ class Agent:
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
             _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
+            # "find/show jobs on upwork" — route to search_jobs (no browser).
+            if not _wants_survival and _is_upwork_job_search(_msg_lower):
+                _wants_survival = True
+                logger.info(
+                    "Upwork job-search intent detected — injecting search_jobs",
+                )
             # Also trigger if recent history used survival tools
             if not _wants_survival and _history_tool_names & _SURVIVAL_TOOL_NAMES:
                 _wants_survival = True
@@ -3187,11 +3265,29 @@ class Agent:
         _plan_mode_used: bool = False
         _plan_text_approved: str | None = None
         _auto_plan_enabled = await _load_auto_plan_setting(user_id)
+        # Operating mode (ADR-0005) is now the primary control over the plan
+        # gate; the legacy users.auto_plan flag is the ASK-mode fallback so
+        # existing behavior is preserved. PLAN → always gate; AUTO/CHAT →
+        # never; ASK → legacy auto_plan setting.
+        _gate_wanted = _auto_plan_enabled
+        try:
+            from lazyclaw.runtime.agent_mode import AgentMode, get_agent_mode
+            _mode = await get_agent_mode(self.config, user_id)
+            if _mode is AgentMode.PLAN:
+                _gate_wanted = True
+            elif _mode in (AgentMode.AUTO, AgentMode.CHAT):
+                _gate_wanted = False
+            # ASK → keep legacy _auto_plan_enabled
+        except Exception:
+            logger.debug(
+                "agent_mode plan-gate resolution failed; using auto_plan",
+                exc_info=True,
+            )
         _bypassed_by_phrase = has_plan_bypass_phrase(message)
         if (
             _effort != EffortLevel.LOW
             and needs_tools
-            and _auto_plan_enabled
+            and _gate_wanted
             and not _bypassed_by_phrase
         ):
             try:
@@ -5694,6 +5790,15 @@ class Agent:
                         "upwork_last_conversation",
                         "upwork_inbox_check",
                         "upwork_contract_poll",
+                        # Job/proposal READS — "find me 5 upwork jobs" is a
+                        # pure fetch. Without these, a web job search that
+                        # reached for the raw MCP tool got AUTO-PROMOTE'd to a
+                        # Telegram-bound background task instead of answering
+                        # inline (2026-06-03). The `search_jobs` NL skill is
+                        # already covered by the startswith("search_") rule.
+                        "upwork_search_jobs",
+                        "upwork_get_job_details",
+                        "upwork_get_offers",
                         "find_contact",
                         "list_contacts",
                         "list_memories",
@@ -5721,9 +5826,23 @@ class Agent:
                         return True
                     return (
                         "_get_" in n
+                        # `search_jobs` matches startswith; `upwork_search_jobs`
+                        # and other `<service>_search_*` reads need the
+                        # mid-string form (the name starts with the service,
+                        # not "search_").
+                        or "_search_" in n
+                        # Document/sheet READS — `read_sheet`, `read_doc`,
+                        # `read_pdf` (native skills) and `<mcp>_read_sheet_
+                        # values` are pure fetches. Without these a Web-UI
+                        # "check sheet what we have there" that paged through
+                        # read_sheet_values got AUTO-PROMOTE'd to a background
+                        # task whose consolidated reply then vanished on web
+                        # (2026-06-04). Mirrors the get_/list_/search_ rules.
+                        or "_read_" in n
                         or n.startswith("get_")
                         or n.startswith("list_")
                         or n.startswith("search_")
+                        or n.startswith("read_")
                         or n.startswith("recall_")
                         or n.endswith("_get_messages")
                         or n.endswith("_get_conversation")

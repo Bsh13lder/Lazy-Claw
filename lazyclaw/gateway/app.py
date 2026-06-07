@@ -27,6 +27,7 @@ from lazyclaw.gateway.routes.jobs import router as jobs_router
 from lazyclaw.gateway.routes.eco import router as eco_router
 from lazyclaw.gateway.routes.permissions import router as permissions_router
 from lazyclaw.gateway.routes.teams import router as teams_router
+from lazyclaw.gateway.routes.specialists import router as specialists_router
 from lazyclaw.gateway.routes.compression import router as compression_router
 from lazyclaw.gateway.routes.replay import router as replay_router
 from lazyclaw.gateway.routes.recovery import router as recovery_router
@@ -214,6 +215,7 @@ app.include_router(jobs_router)
 app.include_router(eco_router)
 app.include_router(permissions_router)
 app.include_router(teams_router)
+app.include_router(specialists_router)
 app.include_router(compression_router)
 app.include_router(replay_router)
 app.include_router(recovery_router)

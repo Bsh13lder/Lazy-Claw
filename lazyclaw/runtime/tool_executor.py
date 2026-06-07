@@ -63,9 +63,13 @@ class ToolExecutor:
         if not skill:
             return f"Error: Unknown tool '{tool_call.name}'"
 
-        # Permission check (if checker is configured)
+        # Permission check (if checker is configured). Use the mode-aware
+        # resolver when available (ADR-0005 Phase 3) so Chat/Ask/Plan/Auto
+        # posture takes effect; fall back to plain check() for any
+        # checker-like object that predates it.
         if self._checker is not None:
-            resolved = await self._checker.check(user_id, tool_call.name)
+            check_fn = getattr(self._checker, "check_effective", self._checker.check)
+            resolved = await check_fn(user_id, tool_call.name)
             if resolved.level == DENY:
                 logger.info("Tool %s denied for user %s", tool_call.name, user_id)
                 return f"Error: Tool '{tool_call.name}' is not permitted. The user has denied this action."

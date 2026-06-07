@@ -130,6 +130,12 @@ lazyclaw-migrate-brain = "lazyclaw.cli_migrate_lazybrain:main"
 [tool.setuptools.packages.find]
 include = ["lazyclaw*"]
 
+[tool.setuptools.package-data]
+# Declarative specialist definitions (ADR-0005) ship as data files inside
+# the lazyclaw.teams package so they survive wheel/Docker installs, not just
+# editable source checkouts.
+"lazyclaw.teams" = ["specialists/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

@@ -34,6 +34,7 @@ _STARTED_AT = time.time()
 class UpdateGeneralRequest(BaseModel):
     search_provider: str | None = None
     show_cost_badges: bool | None = None
+    agent_mode: str | None = None  # ADR-0005: chat | ask | plan | auto
 
 
 @router.get("/api/settings/general")

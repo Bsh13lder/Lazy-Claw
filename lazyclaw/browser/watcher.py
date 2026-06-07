@@ -218,8 +218,11 @@ async def check_watcher(
             await backend.switch_tab(anchor_id, focus=False)
         elif url:
             # First run, or the parked tab was closed/stale → create our own.
+            # ``background=True`` keeps the parked tab off the user's screen —
+            # combined with ``focus=False`` on the attach, the watcher never
+            # steals foreground focus.
             try:
-                created_anchor = await backend.new_tab(url)
+                created_anchor = await backend.new_tab(url, background=True)
                 await backend.switch_tab(created_anchor, focus=False)
             except Exception:
                 logger.debug(

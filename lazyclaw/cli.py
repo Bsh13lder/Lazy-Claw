@@ -447,13 +447,23 @@ async def _run_headless(
         notifier_factory = _make_prefixed_notifier
 
         # Wire a consolidator-callback factory into TaskRunner so brain
-        # fan-out groups can post their merged reply to Telegram with a
-        # "🧠 Consolidated" prefix. The factory accepts (user_id, original_cb)
-        # and returns a fresh PrefixedTelegramNotifier — original_cb is
-        # ignored for Telegram (we always go through the bot adapter), but
-        # the signature stays open so a Web UI variant could be added.
+        # fan-out groups can deliver their merged reply. Delivery is
+        # ORIGIN-AWARE (2026-06-03 fix): a request made from the Web UI
+        # carries a live WebSocketCallback and MUST be answered on that
+        # socket — returning it streams the consolidated reply back to the
+        # browser. Only non-web origins (Telegram, headless, or a dropped
+        # socket) fall back to the "🧠 Consolidated" Telegram notifier.
+        # Previously this always returned Telegram, so a web job search was
+        # answered with a stray Telegram push while the web chat got nothing.
+        from lazyclaw.runtime.consolidator_routing import (
+            choose_consolidator_callback,
+        )
+
         def _consolidator_factory(user_id: str, original_cb):
-            return _make_prefixed_notifier("Consolidated", "🧠")
+            return choose_consolidator_callback(
+                original_cb,
+                lambda: _make_prefixed_notifier("Consolidated", "🧠"),
+            )
 
         task_runner._consolidator_factory = _consolidator_factory
 

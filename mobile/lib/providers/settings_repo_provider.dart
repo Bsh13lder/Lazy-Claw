@@ -66,6 +66,64 @@ final ecoProvider =
     StateNotifierProvider.autoDispose<EcoNotifier, EcoState>((ref) =>
         EcoNotifier(ref.watch(settingsRepositoryProvider)));
 
+// ── Operating-mode notifier (general.agent_mode) ───────────────────────────
+
+class AgentModeState {
+  /// The current operating-mode value ('chat' | 'ask' | 'plan' | 'auto').
+  final AsyncValue<String> value;
+  final bool saving;
+
+  const AgentModeState({required this.value, this.saving = false});
+
+  AgentModeState copyWith({AsyncValue<String>? value, bool? saving}) =>
+      AgentModeState(
+        value: value ?? this.value,
+        saving: saving ?? this.saving,
+      );
+}
+
+class AgentModeNotifier extends StateNotifier<AgentModeState> {
+  final SettingsRepository _repo;
+
+  AgentModeNotifier(this._repo)
+      : super(const AgentModeState(value: AsyncValue.loading())) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final general = await _repo.getGeneral();
+      state = state.copyWith(value: AsyncValue.data(general.agentMode));
+    } catch (e, st) {
+      state = state.copyWith(value: AsyncValue.error(e, st));
+    }
+  }
+
+  /// Persist a new operating mode. Returns an error message on failure, or
+  /// null on success.
+  Future<String?> setMode(String mode) async {
+    state = state.copyWith(saving: true);
+    try {
+      final general = await _repo.setAgentMode(mode);
+      state =
+          state.copyWith(value: AsyncValue.data(general.agentMode), saving: false);
+      return null;
+    } catch (e) {
+      state = state.copyWith(saving: false);
+      return e is SettingsException ? e.message : e.toString();
+    }
+  }
+
+  void reload() {
+    state = state.copyWith(value: const AsyncValue.loading());
+    _load();
+  }
+}
+
+final agentModeProvider =
+    StateNotifierProvider.autoDispose<AgentModeNotifier, AgentModeState>((ref) =>
+        AgentModeNotifier(ref.watch(settingsRepositoryProvider)));
+
 // ── Permissions notifier ───────────────────────────────────────────────────
 
 class PermState {

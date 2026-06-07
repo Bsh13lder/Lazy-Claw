@@ -30,6 +30,7 @@ BOT_COMMANDS = [
     BotCommand("tasks", "\u26a1 Background tasks"),
     BotCommand("usage", "\U0001f4b0 Token costs"),
     BotCommand("mode", "\u2699\ufe0f AI routing mode"),
+    BotCommand("act", "\U0001f3ad Operating mode: chat/ask/plan/auto"),
     BotCommand("model", "\U0001f9e0 Show/change models"),
     BotCommand("watch", "\U0001f514 Watchers (WhatsApp/Email)"),
     BotCommand("mcp", "\U0001f50c MCP servers"),
@@ -122,6 +123,7 @@ class TelegramCommands:
             "postpone": self._handle_postpone,
             "whenisdue": self._handle_whenisdue,
             "progress": self._handle_progress,
+            "act": self._handle_act,
         }
         for name, handler in cmds.items():
             app.add_handler(CommandHandler(name, handler))
@@ -165,6 +167,52 @@ class TelegramCommands:
         fire_and_forget(
             self._adapter._process_and_reply(update, chat_id, user_id, text),
             name=f"tg-cmd-{chat_id}-{id(text)}",
+        )
+
+    # -- /act (operating mode, ADR-0005) -----------------------------------
+
+    async def _handle_act(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show/set the operating mode (Chat/Ask/Plan/Execute).
+
+        Distinct from /mode, which sets the ECO routing mode (which models).
+        """
+        user_id = await self._auth(update)
+        if not user_id:
+            return
+        from lazyclaw.runtime.agent_mode import (
+            MODE_LABELS,
+            VALID_AGENT_MODES,
+            get_agent_mode,
+            parse_mode,
+        )
+
+        arg = context.args[0].strip().lower() if context.args else ""
+        if not arg:
+            current = await get_agent_mode(self._config, user_id)
+            await self._reply(
+                update,
+                f"⚙️ <b>Operating mode:</b> {MODE_LABELS[current]} "
+                f"(<code>{current.value}</code>)\n\n"
+                "<b>chat</b> — talk only, no tools\n"
+                "<b>ask</b> — act, confirm each write (default)\n"
+                "<b>plan</b> — research → plan → Execute, then autonomous\n"
+                "<b>auto</b> — fully autonomous\n\n"
+                "Change: <code>/act plan</code>",
+            )
+            return
+        if arg not in VALID_AGENT_MODES:
+            await self._reply(
+                update,
+                f"❌ Unknown mode <code>{arg}</code>. "
+                "Use chat / ask / plan / auto.",
+            )
+            return
+        from lazyclaw.settings.general import update_general_settings
+
+        await update_general_settings(self._config, user_id, {"agent_mode": arg})
+        await self._reply(
+            update,
+            f"✅ Operating mode set to <b>{MODE_LABELS[parse_mode(arg)]}</b>.",
         )
 
     # -- /start ------------------------------------------------------------
@@ -225,7 +273,8 @@ class TelegramCommands:
             "\u2699\ufe0f <b>Setup</b>\n"
             "/key \u2014 \U0001f511 API keys <i>(auto-deletes msg)</i>\n"
             "/model \u2014 \U0001f9e0 Show/change models\n"
-            "/mode \u2014 \u2699\ufe0f AI routing mode\n\n"
+            "/mode \u2014 \u2699\ufe0f AI routing mode\n"
+            "/act \u2014 \U0001f3ad Operating mode (chat/ask/plan/auto)\n\n"
             "\U0001f4ca <b>Daily</b>\n"
             "/status \u2014 Live status\n"
             "/tasks \u2014 \u26a1 Background tasks\n"

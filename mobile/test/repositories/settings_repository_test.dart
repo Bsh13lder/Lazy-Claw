@@ -159,6 +159,106 @@ void main() {
     });
   });
 
+  // ── getGeneral (operating mode) ───────────────────────────────────────────
+  group('SettingsRepository.getGeneral', () {
+    test('GETs /api/settings/general and parses agent_mode', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {'agent_mode': 'plan'},
+      });
+      final general = await SettingsRepository(t).getGeneral();
+      expect(t.lastMethod, 'GET');
+      expect(t.lastPath, '/api/settings/general');
+      expect(general.agentMode, 'plan');
+    });
+
+    test('defaults to "ask" when agent_mode is missing', () async {
+      final t = _FakeTransport({'success': true, 'data': {}});
+      final general = await SettingsRepository(t).getGeneral();
+      expect(general.agentMode, 'ask');
+    });
+
+    test('coerces an unknown agent_mode to the default', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {'agent_mode': 'bogus'},
+      });
+      final general = await SettingsRepository(t).getGeneral();
+      expect(general.agentMode, 'ask');
+    });
+
+    test('throws SettingsException on success:false', () async {
+      final t = _FakeTransport({'success': false, 'error': 'nope'});
+      expect(
+        () => SettingsRepository(t).getGeneral(),
+        throwsA(isA<SettingsException>()),
+      );
+    });
+  });
+
+  // ── setAgentMode (operating mode) ─────────────────────────────────────────
+  group('SettingsRepository.setAgentMode', () {
+    test('PATCHes {agent_mode} to /api/settings/general', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {'agent_mode': 'auto'},
+      });
+      final general = await SettingsRepository(t).setAgentMode('auto');
+      expect(t.lastMethod, 'PATCH');
+      expect(t.lastPath, '/api/settings/general');
+      expect(t.lastBody, {'agent_mode': 'auto'});
+      expect(general.agentMode, 'auto');
+    });
+
+    test('falls back to the requested mode when server omits agent_mode',
+        () async {
+      // Backend not yet emitting agent_mode → still reflect the user's choice.
+      final t = _FakeTransport({'success': true, 'data': {}});
+      final general = await SettingsRepository(t).setAgentMode('plan');
+      expect(general.agentMode, 'plan');
+    });
+
+    test('honors the server-echoed mode over the requested one', () async {
+      final t = _FakeTransport({
+        'success': true,
+        'data': {'agent_mode': 'ask'},
+      });
+      final general = await SettingsRepository(t).setAgentMode('chat');
+      expect(general.agentMode, 'ask');
+    });
+
+    test('throws SettingsException on success:false', () async {
+      final t = _FakeTransport({'success': false, 'error': 'No fields'});
+      expect(
+        () => SettingsRepository(t).setAgentMode('chat'),
+        throwsA(isA<SettingsException>().having(
+          (e) => e.message,
+          'message',
+          'No fields',
+        )),
+      );
+    });
+  });
+
+  // ── GeneralSettings model ─────────────────────────────────────────────────
+  group('GeneralSettings', () {
+    test('coerceAgentMode normalizes case and whitespace', () {
+      expect(GeneralSettings.coerceAgentMode('  PLAN '), 'plan');
+      expect(GeneralSettings.coerceAgentMode('Auto'), 'auto');
+    });
+
+    test('coerceAgentMode falls back to default on null / unknown', () {
+      expect(GeneralSettings.coerceAgentMode(null), 'ask');
+      expect(GeneralSettings.coerceAgentMode('xyz'), 'ask');
+    });
+
+    test('exposes the four contract modes in order', () {
+      expect(kAgentModeLabels.keys.toList(),
+          ['chat', 'ask', 'plan', 'auto']);
+      expect(kAgentModeLabels['auto'], 'Execute');
+    });
+  });
+
   // ── getPermissions ────────────────────────────────────────────────────────
   group('SettingsRepository.getPermissions', () {
     test('GETs /api/permissions/settings and parses PermissionsSettings',

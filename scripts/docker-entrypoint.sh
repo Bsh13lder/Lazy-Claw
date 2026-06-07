@@ -36,21 +36,24 @@ if [ -d "$RO_HOST" ]; then
         target="$CLAUDE_HOME/$name"
         # Never seed:
         #   - the credential file (claude owns it in the volume, atomic-renames on login)
-        #   - SESSION/MEMORY state — this is the host user's PERSONAL Claude Code
+        #   - SESSION/PLAN/MEMORY state — this is the host user's PERSONAL Claude Code
         #     data. Symlinking projects/ + memory/ exposed the user's personal
         #     transcripts + auto-memory to the in-container claude (inbound leak)
         #     and routed lazyclaw's own sessions back onto the host disk (outbound).
-        #     The agent's sessions live in the writable volume, fully isolated.
+        #     plans/ + sessions/ + session-data/ + session-env/ are the same class
+        #     of personal state (plans/ is the dir the retired `_ingest_claude_plans`
+        #     bridge used to mirror — keep it out of reach on principle). The agent's
+        #     sessions live in the writable volume, fully isolated.
         #     (Belt-and-braces: the provider also sets setting_sources=[] + an
         #     isolated cwd, so even an unexpected symlink wouldn't load/co-mingle.)
         case "$name" in
             .credentials.json) continue ;;
-            projects|memory|todos|shell-snapshots|history.jsonl|history)
+            projects|memory|plans|sessions|session-data|session-env|todos|shell-snapshots|history.jsonl|history)
                 # On an EXISTING volume from a prior boot (before this
                 # exclusion existed), $target may already be a STALE symlink
                 # into the read-only host mount. The seed guard below would
                 # never remove it. Remove it here so the host's personal
-                # session/memory state is unreachable and our own writes land
+                # session/plan/memory state is unreachable and our own writes land
                 # in the writable volume. Only remove symlinks pointing into
                 # $RO_HOST — never a real dir the volume legitimately owns.
                 if [ -L "$target" ]; then

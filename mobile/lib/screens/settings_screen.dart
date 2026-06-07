@@ -21,6 +21,7 @@ import '../sync/budgets_sync.dart';
 import '../sync/note_sync.dart';
 import '../sync/task_sync.dart';
 import '../providers/settings_repo_provider.dart';
+import '../repositories/settings_repository.dart';
 import '../ui/ui.dart';
 import 'settings/conflicts_sheet.dart';
 import 'settings/settings_prefs.dart';
@@ -477,6 +478,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
           // 7. Brain / ECO mode
           _buildEcoSection(),
+          AppSpacing.vGap(AppSpacing.xl),
+
+          // 7b. Operating mode (ADR-0005)
+          _buildOperatingModeSection(),
           AppSpacing.vGap(AppSpacing.xl),
 
           // 8. Permissions
@@ -1070,6 +1075,69 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               _EcoCaption(label: 'Worker', value: eco.worker),
               const SizedBox(height: AppSpacing.xs),
               _EcoCaption(label: 'Fallback', value: eco.fallback),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Operating mode section (ADR-0005) ─────────────────────────────────────
+
+  Widget _buildOperatingModeSection() {
+    final modeState = ref.watch(agentModeProvider);
+    return LzSection(
+      title: 'Operating mode',
+      child: modeState.value.when(
+        loading: () => const LzCard(
+          child: SizedBox(
+            height: 80,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
+        error: (e, _) => LzBanner.error(
+          message: e.toString(),
+          safeAreaTop: false,
+        ),
+        data: (current) => LzCard(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                children: kAgentModeLabels.entries.map((entry) {
+                  final selected = entry.key == current;
+                  return LzChip(
+                    label: entry.value,
+                    selected: selected,
+                    onTap: modeState.saving
+                        ? null
+                        : () async {
+                            if (selected) return;
+                            final err = await ref
+                                .read(agentModeProvider.notifier)
+                                .setMode(entry.key);
+                            if (err != null && mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Mode: $err')),
+                              );
+                            }
+                          },
+                  );
+                }).toList(),
+              ),
+              if (modeState.saving) ...[
+                const SizedBox(height: AppSpacing.sm),
+                const LinearProgressIndicator(),
+              ],
+              const SizedBox(height: AppSpacing.md),
+              Text(
+                'Chat = talk only · Ask = confirm each action · '
+                'Plan = research then Execute · Execute = autonomous',
+                style: AppText.caption.copyWith(color: AppColors.textSecondary),
+              ),
             ],
           ),
         ),

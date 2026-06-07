@@ -12,6 +12,7 @@ import '../../screens/more/mcp_screen.dart';
 import '../../screens/more/memory_screen.dart';
 import '../../screens/more/more_hub.dart';
 import '../../screens/more/skills_screen.dart';
+import '../../screens/more/specialists_screen.dart';
 import '../../screens/more/vault_screen.dart';
 import '../../screens/more/watchers_screen.dart';
 import '../../screens/documents/documents_screen.dart';
@@ -121,6 +122,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/more/watchers', builder: (ctx, _) => const WatchersScreen()),
       GoRoute(path: '/more/mcp', builder: (ctx, _) => const McpScreen()),
       GoRoute(path: '/more/audit', builder: (ctx, _) => const AuditScreen()),
+      GoRoute(path: '/more/specialists', builder: (ctx, _) => const SpecialistsScreen()),
 
       // Main shell — StatefulShellRoute.indexedStack keeps each branch alive
       // (the ChatScreen WebSocket connection survives tab switches).

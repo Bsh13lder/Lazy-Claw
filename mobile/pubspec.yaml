@@ -46,6 +46,9 @@ dependencies:
   lucide_icons: ^0.257.0
   # Subtle list-entrance motion (declarative, finite). Used on the Tasks list.
   flutter_animate: ^4.5.0
+  # Month calendar for the Tasks tab (List⇄Calendar toggle). Per-project-colored
+  # event markers keyed by task due date.
+  table_calendar: ^3.1.0
   flutter_local_notifications: ^18.0.0
   # Offline-first Tasks layer: encrypted local SQLite, reachability, bg sync.
   sqflite_sqlcipher: ^3.1.0

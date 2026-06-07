@@ -5,11 +5,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../models/task.dart';
+import '../providers/budgets_provider.dart';
 import '../providers/tasks_provider.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
+import 'tasks/task_calendar_view.dart';
 import 'tasks/task_detail_sheet.dart';
 import 'tasks/task_row.dart';
+
+// ── View mode ─────────────────────────────────────────────────────────────────
+
+/// The two ways to view tasks on this tab.
+enum _TasksView { list, calendar }
 
 // ── Sections ──────────────────────────────────────────────────────────────────
 
@@ -100,20 +107,50 @@ class TasksScreen extends ConsumerStatefulWidget {
 }
 
 class _TasksScreenState extends ConsumerState<TasksScreen> {
+  /// List vs Calendar. Local-only — resets on tab rebuild, which is fine.
+  _TasksView _view = _TasksView.list;
+
+  /// Calendar focus (the visible month) and the selected day. Seeded to today
+  /// so the calendar opens on the current month with today highlighted and the
+  /// FAB pre-fills today.
+  late DateTime _focusedDay;
+  late DateTime _selectedDay;
+
+  /// The calendar colors tasks by their project, so it needs the budgets store.
+  /// We load it lazily on the first switch to Calendar (kept out of the
+  /// list-only path so a list-only screen never builds the budgets provider).
+  bool _budgetsRequested = false;
+
   @override
   void initState() {
     super.initState();
+    final now = DateTime.now();
+    _focusedDay = DateTime(now.year, now.month, now.day);
+    _selectedDay = _focusedDay;
     // Load tasks from the local cache on first render (offline-first).
     Future.microtask(() => ref.read(tasksProvider.notifier).load());
   }
 
+  /// Ensure the budgets store is loaded once (for per-project colors). Cheap,
+  /// offline-first, idempotent.
+  void _ensureBudgetsLoaded() {
+    if (_budgetsRequested) return;
+    _budgetsRequested = true;
+    Future.microtask(() => ref.read(budgetsProvider.notifier).load());
+  }
+
   Future<void> _refresh() => ref.read(tasksProvider.notifier).refresh();
 
-  Future<void> _openAddSheet() async {
-    // Tactile tick when summoning the add sheet (FAB + app-bar + button both
-    // route through here).
+  /// The date the add-sheet should pre-select: the selected calendar day while
+  /// in Calendar view, otherwise none (list view = no implied date).
+  DateTime? get _contextualAddDate =>
+      _view == _TasksView.calendar ? _selectedDay : null;
+
+  Future<void> _openAddSheet({DateTime? initialDueDate}) async {
+    // Tactile tick when summoning the add sheet (FAB + app-bar + button +
+    // calendar day-tap all route through here).
     HapticFeedback.selectionClick();
-    final result = await showAddTaskSheet(context);
+    final result = await showAddTaskSheet(context, initialDueDate: initialDueDate);
     if (result == null || !mounted) return;
     await ref.read(tasksProvider.notifier).addTask(
           result.title,
@@ -156,7 +193,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           LzIconButton(
             icon: Icons.add,
             tooltip: 'New task',
-            onPressed: _openAddSheet,
+            onPressed: () => _openAddSheet(initialDueDate: _contextualAddDate),
           ),
         ],
       ),
@@ -170,10 +207,80 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         backgroundColor: AppColors.accent,
         foregroundColor: AppColors.onAccent,
         tooltip: 'New task',
-        onPressed: _openAddSheet,
+        onPressed: () => _openAddSheet(initialDueDate: _contextualAddDate),
         child: const Icon(Icons.add),
       ),
-      body: _buildBody(state),
+      body: Column(
+        children: [
+          // List ⇄ Calendar toggle — always visible so the user can switch
+          // even from an empty/error state.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.md,
+              AppSpacing.lg,
+              0,
+            ),
+            child: _ViewToggle(
+              view: _view,
+              onChanged: (v) {
+                if (v == _view) return;
+                HapticFeedback.selectionClick();
+                if (v == _TasksView.calendar) _ensureBudgetsLoaded();
+                setState(() => _view = v);
+              },
+            ),
+          ),
+          Expanded(
+            child: _view == _TasksView.list
+                ? _buildBody(state)
+                : _buildCalendarBody(state),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Calendar body: an error/skeleton guard around [TaskCalendarView]. The
+  /// calendar itself is useful even with zero tasks, so we only short-circuit
+  /// on the first instant load and on a hard error with nothing cached.
+  Widget _buildCalendarBody(TasksState state) {
+    if (state.isLoading && state.tasks.isEmpty && state.error == null) {
+      return LzSkeleton.list(
+        count: 4,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
+        ),
+      );
+    }
+    if (state.tasks.isEmpty && state.error != null) {
+      return LzErrorState(
+        message: state.error!,
+        onRetry: () => ref.read(tasksProvider.notifier).load(),
+      );
+    }
+
+    final projects = ref.watch(budgetsProvider).projects;
+
+    return LzRefresh(
+      onRefresh: _refresh,
+      child: TaskCalendarView(
+        tasks: state.tasks,
+        projects: projects,
+        dirtyIds: state.dirtyIds,
+        focusedDay: _focusedDay,
+        selectedDay: _selectedDay,
+        onDaySelected: (selected, focused) => setState(() {
+          _selectedDay = DateTime(selected.year, selected.month, selected.day);
+          _focusedDay = focused;
+        }),
+        onPageChanged: (focused) => setState(() => _focusedDay = focused),
+        onComplete: (id) => ref.read(tasksProvider.notifier).completeTask(id),
+        onDelete: (id) => ref.read(tasksProvider.notifier).deleteTask(id),
+        onOpen: (task) => showTaskDetailSheet(context, ref, task),
+        onAddOnDay: (day) => _openAddSheet(initialDueDate: day),
+      ),
     );
   }
 
@@ -396,5 +503,38 @@ class _TaskSectionState extends State<_TaskSection> {
       default:
         return 'All clear';
     }
+  }
+}
+
+// ── View toggle ────────────────────────────────────────────────────────────────
+
+/// A compact two-segment toggle that swaps the Tasks body between the sectioned
+/// List and the month Calendar. Built from two [LzChip]s so it inherits the kit
+/// styling (no bespoke colors).
+class _ViewToggle extends StatelessWidget {
+  const _ViewToggle({required this.view, required this.onChanged});
+
+  final _TasksView view;
+  final void Function(_TasksView) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        LzChip(
+          label: 'List',
+          icon: Icons.view_agenda_outlined,
+          selected: view == _TasksView.list,
+          onTap: () => onChanged(_TasksView.list),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        LzChip(
+          label: 'Calendar',
+          icon: Icons.calendar_month_outlined,
+          selected: view == _TasksView.calendar,
+          onTap: () => onChanged(_TasksView.calendar),
+        ),
+      ],
+    );
   }
 }

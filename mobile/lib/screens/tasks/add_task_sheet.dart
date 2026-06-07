@@ -10,7 +10,11 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 /// Returns the data to the caller via [Navigator.pop] so the screen can invoke
 /// the provider without knowing about UI internals.
 class AddTaskSheet extends StatefulWidget {
-  const AddTaskSheet({super.key});
+  const AddTaskSheet({super.key, this.initialDueDate});
+
+  /// When provided (e.g. tapping a day in the calendar view), the due date is
+  /// pre-selected to this day so the new task lands on the chosen date.
+  final DateTime? initialDueDate;
 
   @override
   State<AddTaskSheet> createState() => _AddTaskSheetState();
@@ -31,6 +35,19 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
   bool _submitting = false;
 
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
+
+  @override
+  void initState() {
+    super.initState();
+    // A caller-supplied date (calendar day-tap) pre-selects the due date. We
+    // mark the field as touched so it wins over any parsed default and stays
+    // put until the user explicitly changes it.
+    final initial = widget.initialDueDate;
+    if (initial != null) {
+      _dueDateTouched = true;
+      _manualDueDate = _isoFor(initial);
+    }
+  }
 
   @override
   void dispose() {
@@ -298,15 +315,12 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     }
   }
 
-  String _isoToday() {
-    final d = DateTime.now();
-    return '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-  }
+  String _isoFor(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-  String _isoTomorrow() {
-    final d = DateTime.now().add(const Duration(days: 1));
-    return '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-  }
+  String _isoToday() => _isoFor(DateTime.now());
+
+  String _isoTomorrow() => _isoFor(DateTime.now().add(const Duration(days: 1)));
 }
 
 /// Data returned by [AddTaskSheet] when the user taps "Add Task".
@@ -327,14 +341,19 @@ class _AddTaskResult {
 
 /// Show the add-task sheet and return the submitted result, or null if
 /// dismissed. Callers invoke the provider directly with the returned data.
+///
+/// Pass [initialDueDate] (e.g. from a calendar day-tap) to pre-select the due
+/// date so the new task lands on that day. Omitting it preserves the original
+/// behavior (no date pre-selected).
 Future<({String title, String priority, String? dueDate, String? category})?>
     showAddTaskSheet(
-  BuildContext context,
-) async {
+  BuildContext context, {
+  DateTime? initialDueDate,
+}) async {
   final result = await LzBottomSheet.show<_AddTaskResult>(
     context,
     title: 'New Task',
-    builder: (_) => const AddTaskSheet(),
+    builder: (_) => AddTaskSheet(initialDueDate: initialDueDate),
   );
   if (result == null) return null;
   return (

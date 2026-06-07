@@ -112,6 +112,10 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Sheets formula helper catalog (function name + signature + one-line help).
+  assets:
+    - assets/sheets/formula_catalog.json
+
   # Bundled fonts (offline-first — no runtime fetch).
   # Inter (SIL Open Font License 1.1) ships as the upstream variable .ttf which
   # exposes the full weight axis (Thin→Black). Flutter maps a requested

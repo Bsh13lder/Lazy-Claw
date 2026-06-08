@@ -26,19 +26,33 @@ abstract class TaskReminderScheduler {
 ///
 /// Precedence:
 ///   1. An explicit [Task.reminderAt] is authoritative when present.
-///   2. Otherwise the task's [Task.dueDate] is used ONLY when it carries a
-///      time-of-day (`…THH:mm:ss`). A bare date-only due (`yyyy-MM-dd`)
-///      schedules nothing — we don't invent a time-of-day.
+///   2. Otherwise the task's [Task.dueDate] WITH a time-of-day (`…THH:mm:ss`).
+///   3. Otherwise a DATE-ONLY due (`yyyy-MM-dd`) → that calendar date at the
+///      default reminder time-of-day ([defaultReminderHour]:[defaultReminderMinute],
+///      09:00 by default). This is what makes ordinary "due tomorrow" tasks —
+///      which carry no time — actually fire a reminder. We only invent a
+///      time-of-day for the *fallback*; an explicit `reminderAt` or a timed due
+///      always wins.
 ///
 /// Returns null when the chosen instant is in the past or exactly [now] (the
 /// moment already passed, so there's nothing to fire) or when no valid instant
 /// exists. `reminderAt`, being explicit, is authoritative: if it's set but
 /// already passed we schedule nothing — we do NOT silently fall back to the
 /// due time.
-DateTime? reminderFireTime(Task task, {DateTime? now}) {
+DateTime? reminderFireTime(
+  Task task, {
+  DateTime? now,
+  int defaultReminderHour = 9,
+  int defaultReminderMinute = 0,
+}) {
   final clock = now ?? DateTime.now();
-  final candidate =
-      _parseReminderAt(task.reminderAt) ?? _parseDueWithTime(task.dueDate);
+  final candidate = _parseReminderAt(task.reminderAt) ??
+      _parseDueWithTime(task.dueDate) ??
+      _parseDueDateOnlyAt(
+        task.dueDate,
+        defaultReminderHour,
+        defaultReminderMinute,
+      );
   if (candidate == null) return null;
   if (!candidate.isAfter(clock)) return null;
   return candidate;
@@ -52,6 +66,21 @@ DateTime? _parseReminderAt(String? reminderAt) {
 DateTime? _parseDueWithTime(String? due) {
   if (!dueDateHasTime(due)) return null;
   return DateTime.tryParse(due!);
+}
+
+/// Parse a DATE-ONLY due (`yyyy-MM-dd`, no time-of-day) and pin it to [h]:[m]
+/// local. Returns null unless [due] is present, has NO time component, and its
+/// date part parses — so a timed due or a missing due never reaches this path
+/// (those are handled by the earlier precedence steps). This is the fallback
+/// that lets ordinary date-only tasks ("due tomorrow") fire a reminder.
+DateTime? _parseDueDateOnlyAt(String? due, int h, int m) {
+  if (due == null || dueDateHasTime(due)) return null;
+  // Date-only is the canonical `yyyy-MM-dd` (length 10). Parse just the date
+  // part so a trailing stray character can't silently shift the day.
+  if (due.length != 10) return null;
+  final date = DateTime.tryParse(due);
+  if (date == null) return null;
+  return DateTime(date.year, date.month, date.day, h, m);
 }
 
 /// Derive a stable, positive 31-bit notification id from a task id.
@@ -77,9 +106,29 @@ int notificationIdForTask(String taskId) {
 /// Every method is best-effort and never throws — a denied permission, an
 /// uninitialised timezone db, or a missing plugin simply means no reminder.
 class TaskReminderService implements TaskReminderScheduler {
-  TaskReminderService(this._plugin);
+  TaskReminderService(this._plugin, {int defaultReminderMinutes = 540})
+      : _defaultReminderMinutes = _clampMinutes(defaultReminderMinutes);
 
   final FlutterLocalNotificationsPlugin _plugin;
+
+  /// Minutes-from-midnight time-of-day used when a task is DATE-ONLY (no
+  /// `THH:mm`). Defaults to 540 (09:00). Settable so the user's "Default
+  /// reminder time" pref flows in live via [taskReminderServiceProvider]; a
+  /// change takes effect on the next (re)schedule / [syncAll].
+  int _defaultReminderMinutes;
+
+  set defaultReminderMinutes(int minutes) =>
+      _defaultReminderMinutes = _clampMinutes(minutes);
+
+  int get defaultReminderMinutes => _defaultReminderMinutes;
+
+  int get _defaultHour => _defaultReminderMinutes ~/ 60;
+  int get _defaultMinute => _defaultReminderMinutes % 60;
+
+  /// Keep the configured time-of-day inside a valid day (0..1439). An absurd
+  /// value can't push the fallback onto another calendar day.
+  static int _clampMinutes(int minutes) =>
+      minutes < 0 ? 0 : (minutes > 1439 ? 1439 : minutes);
 
   /// Dedicated channel so task reminders are distinct from the background-task
   /// / approval notifications that go through `lazyclaw_tasks`.
@@ -118,7 +167,11 @@ class TaskReminderService implements TaskReminderScheduler {
       // the time can't leave a stale alarm behind.
       await _plugin.cancel(id);
       if (task.isDone) return;
-      final fire = reminderFireTime(task);
+      final fire = reminderFireTime(
+        task,
+        defaultReminderHour: _defaultHour,
+        defaultReminderMinute: _defaultMinute,
+      );
       if (fire == null) return;
 
       // tz.TZDateTime.from throws if the timezone db / local location is not
@@ -175,7 +228,14 @@ class TaskReminderService implements TaskReminderScheduler {
       final desired = <int, Task>{};
       for (final t in tasks) {
         if (t.isDone) continue;
-        if (reminderFireTime(t) == null) continue;
+        if (reminderFireTime(
+              t,
+              defaultReminderHour: _defaultHour,
+              defaultReminderMinute: _defaultMinute,
+            ) ==
+            null) {
+          continue;
+        }
         desired[notificationIdForTask(t.id)] = t;
       }
 
@@ -208,6 +268,11 @@ class TaskReminderService implements TaskReminderScheduler {
     final label = formatClock12(fire.hour, fire.minute);
     final reminderDriven =
         task.reminderAt != null && task.reminderAt!.isNotEmpty;
-    return reminderDriven ? 'Reminder · $label' : 'Due at $label';
+    if (reminderDriven) return 'Reminder · $label';
+    // A date-only due fires at the default time-of-day, but the task isn't
+    // literally "due at" that clock time — phrase it as a day reminder so the
+    // notification text doesn't claim a due time the task never had.
+    if (!dueDateHasTime(task.dueDate)) return 'Due today · reminder';
+    return 'Due at $label';
   }
 }

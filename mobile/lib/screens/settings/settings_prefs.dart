@@ -11,6 +11,7 @@ const String _kNotifyChatReply = 'settings.notify_chat_reply';
 const String _kNotifyTaskDone = 'settings.notify_task_done';
 const String _kNotifyApprovals = 'settings.notify_approvals';
 const String _kReminderLeadDefault = 'settings.reminder_lead_default';
+const String _kDefaultReminderMinutes = 'settings.default_reminder_minutes';
 
 // Server-notification feed cursor + dedup ring + cached delivery channel.
 const String _kNotificationsSince = 'notifications.since';
@@ -20,6 +21,10 @@ const String _kNotificationChannel = 'notifications.channel';
 /// The lead applied to a new/edited task that GAINS a due time without an
 /// explicit reminder. "30 min before" by default.
 const ReminderLead kDefaultReminderLead = ReminderLead.min30;
+
+/// Time-of-day (minutes-from-midnight) at which a DATE-ONLY task ("due
+/// tomorrow", no clock time) fires its local reminder. 540 = 09:00.
+const int kDefaultReminderMinutes = 540;
 
 // ── Sync interval ───────────────────────────────────────────────────────────
 
@@ -108,6 +113,21 @@ class SettingsPrefs {
   static Future<void> saveReminderLeadDefault(ReminderLead v) =>
       _storage.write(key: _kReminderLeadDefault, value: reminderLeadToStored(v));
 
+  // ── Default date-only reminder time-of-day ────────────────────────────────
+
+  /// Minutes-from-midnight at which DATE-ONLY tasks remind. Absent / invalid →
+  /// [kDefaultReminderMinutes] (09:00).
+  static Future<int> loadDefaultReminderMinutes() async {
+    final raw = await _storage.read(key: _kDefaultReminderMinutes);
+    return defaultReminderMinutesFromStored(raw);
+  }
+
+  static Future<void> saveDefaultReminderMinutes(int minutes) =>
+      _storage.write(
+        key: _kDefaultReminderMinutes,
+        value: clampReminderMinutes(minutes).toString(),
+      );
+
   // ── Server-notification feed cursor ──────────────────────────────────────
 
   /// The last server `now` we caught up to (ISO timestamp). Null = never
@@ -154,6 +174,18 @@ ReminderLead reminderLeadFromStored(String? raw) {
   return ReminderLead(Duration(minutes: mins));
 }
 
+/// Clamp a minutes-from-midnight value into a valid day (0..1439).
+int clampReminderMinutes(int minutes) =>
+    minutes < 0 ? 0 : (minutes > 1439 ? 1439 : minutes);
+
+/// Parse a stored default-reminder-time pref, falling back to
+/// [kDefaultReminderMinutes] (09:00) and clamping into a valid day.
+int defaultReminderMinutesFromStored(String? raw) {
+  final mins = int.tryParse(raw ?? '');
+  if (mins == null) return kDefaultReminderMinutes;
+  return clampReminderMinutes(mins);
+}
+
 // ── Riverpod providers ───────────────────────────────────────────────────────
 
 /// Async provider for all Settings prefs loaded from secure storage.
@@ -174,6 +206,10 @@ class SettingsPrefsData {
   /// explicit reminder. Defaults to [kDefaultReminderLead].
   final ReminderLead reminderLeadDefault;
 
+  /// Minutes-from-midnight at which DATE-ONLY tasks (no clock time) remind.
+  /// Defaults to [kDefaultReminderMinutes] (09:00).
+  final int defaultReminderMinutes;
+
   const SettingsPrefsData({
     required this.syncInterval,
     required this.wipeOnLogout,
@@ -181,6 +217,7 @@ class SettingsPrefsData {
     required this.notifyTaskDone,
     required this.notifyApprovals,
     this.reminderLeadDefault = kDefaultReminderLead,
+    this.defaultReminderMinutes = kDefaultReminderMinutes,
   });
 
   SettingsPrefsData copyWith({
@@ -190,6 +227,7 @@ class SettingsPrefsData {
     bool? notifyTaskDone,
     bool? notifyApprovals,
     ReminderLead? reminderLeadDefault,
+    int? defaultReminderMinutes,
   }) =>
       SettingsPrefsData(
         syncInterval: syncInterval ?? this.syncInterval,
@@ -198,6 +236,8 @@ class SettingsPrefsData {
         notifyTaskDone: notifyTaskDone ?? this.notifyTaskDone,
         notifyApprovals: notifyApprovals ?? this.notifyApprovals,
         reminderLeadDefault: reminderLeadDefault ?? this.reminderLeadDefault,
+        defaultReminderMinutes:
+            defaultReminderMinutes ?? this.defaultReminderMinutes,
       );
 }
 
@@ -213,6 +253,7 @@ class SettingsPrefsNotifier extends AsyncNotifier<SettingsPrefsData> {
       SettingsPrefs.loadNotifyTaskDone(),
       SettingsPrefs.loadNotifyApprovals(),
       SettingsPrefs.loadReminderLeadDefault(),
+      SettingsPrefs.loadDefaultReminderMinutes(),
     ]);
     return SettingsPrefsData(
       syncInterval: results[0] as SyncInterval,
@@ -221,6 +262,7 @@ class SettingsPrefsNotifier extends AsyncNotifier<SettingsPrefsData> {
       notifyTaskDone: results[3] as bool,
       notifyApprovals: results[4] as bool,
       reminderLeadDefault: results[5] as ReminderLead,
+      defaultReminderMinutes: results[6] as int,
     );
   }
 
@@ -263,6 +305,15 @@ class SettingsPrefsNotifier extends AsyncNotifier<SettingsPrefsData> {
     await SettingsPrefs.saveReminderLeadDefault(v);
     state = AsyncData(
       (state.valueOrNull ?? await _load()).copyWith(reminderLeadDefault: v),
+    );
+  }
+
+  Future<void> setDefaultReminderMinutes(int minutes) async {
+    final clamped = clampReminderMinutes(minutes);
+    await SettingsPrefs.saveDefaultReminderMinutes(clamped);
+    state = AsyncData(
+      (state.valueOrNull ?? await _load())
+          .copyWith(defaultReminderMinutes: clamped),
     );
   }
 }

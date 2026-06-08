@@ -10,6 +10,7 @@ import '../models/subtask.dart';
 import '../models/task.dart';
 import '../notifications/local_notifications.dart';
 import '../repositories/tasks_repository.dart';
+import '../screens/settings/settings_prefs.dart';
 import '../sync/reachability.dart';
 import '../sync/task_sync.dart';
 import 'auth_provider.dart';
@@ -46,8 +47,28 @@ final taskSyncProvider = Provider<TaskSync>((ref) {
 
 /// Schedules local notifications at each task's due / reminder time. Reuses the
 /// app's single [FlutterLocalNotificationsPlugin] instance.
+///
+/// The service is kept STABLE (constructed once) so it can't dispose the tasks
+/// notifier that watches it. The user's "Default reminder time" pref — the
+/// time-of-day at which DATE-ONLY tasks fire — is pushed into the existing
+/// instance in-place via `ref.listen`, seeded from the already-loaded pref so a
+/// date-only task ALWAYS gets a future reminder, even before the pref resolves
+/// (the service defaults to [kDefaultReminderMinutes] = 09:00 internally).
 final taskReminderServiceProvider = Provider<TaskReminderScheduler>((ref) {
-  return TaskReminderService(LocalNotifications.plugin);
+  final service = TaskReminderService(
+    LocalNotifications.plugin,
+    defaultReminderMinutes:
+        ref.read(settingsPrefsProvider).valueOrNull?.defaultReminderMinutes ??
+            kDefaultReminderMinutes,
+  );
+  // Keep the date-only fallback time-of-day in sync with the user's pref.
+  ref.listen<int>(
+    settingsPrefsProvider.select(
+      (s) => s.valueOrNull?.defaultReminderMinutes ?? kDefaultReminderMinutes,
+    ),
+    (_, next) => service.defaultReminderMinutes = next,
+  );
+  return service;
 });
 
 /// Reachability of the user's own backend (OS link + active host ping).

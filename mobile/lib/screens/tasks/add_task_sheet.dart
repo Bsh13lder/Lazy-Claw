@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
@@ -14,7 +15,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 ///
 /// Returns the data to the caller via [Navigator.pop] so the screen can invoke
 /// the provider without knowing about UI internals.
-class AddTaskSheet extends StatefulWidget {
+class AddTaskSheet extends ConsumerStatefulWidget {
   const AddTaskSheet({
     super.key,
     this.initialDueDate,
@@ -30,10 +31,10 @@ class AddTaskSheet extends StatefulWidget {
   final ReminderLead defaultLead;
 
   @override
-  State<AddTaskSheet> createState() => _AddTaskSheetState();
+  ConsumerState<AddTaskSheet> createState() => _AddTaskSheetState();
 }
 
-class _AddTaskSheetState extends State<AddTaskSheet> {
+class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   final _titleController = SmartAddController();
 
   /// Live parse of the current title text. Drives the detected-token chips and
@@ -189,6 +190,16 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
     final effTime = _effectiveTime;
     final effPriority = _effectivePriority;
     final composed = _compose(effDay, effTime);
+
+    // The configured time-of-day at which DATE-ONLY tasks remind (falls back to
+    // the built-in default until the prefs have loaded). Used only to LABEL the
+    // muted "Reminds at …" hint below — the actual scheduling reads the same
+    // pref in the reminder service.
+    final defaultReminderMinutes = ref
+            .watch(settingsPrefsProvider)
+            .valueOrNull
+            ?.defaultReminderMinutes ??
+        kDefaultReminderMinutes;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -393,6 +404,26 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
           ReminderLeadPicker(
             value: _effectiveLead,
             onChanged: (lead) => setState(() => _explicitLead = lead),
+          ),
+        ]
+        // ── Date-only due → reminds at the default time-of-day ─────────
+        // No clock time was set, so this task still gets a reminder (at the
+        // configured default time on its due date). Surface that so the user
+        // knows the reminder isn't silently skipped.
+        else if (composed != null) ...[
+          const SizedBox(height: AppSpacing.sm),
+          Row(
+            children: [
+              Icon(Icons.notifications_active_outlined,
+                  size: 13, color: AppColors.textMuted),
+              const SizedBox(width: AppSpacing.xs),
+              Text(
+                'Reminds at '
+                '${formatClock12(defaultReminderMinutes ~/ 60, defaultReminderMinutes % 60)}'
+                ' on the due date',
+                style: AppText.caption.copyWith(color: AppColors.textMuted),
+              ),
+            ],
           ),
         ],
 

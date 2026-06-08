@@ -9,6 +9,7 @@ import 'package:workmanager/workmanager.dart';
 import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
 import '../core/crash_log.dart';
+import '../core/due_date.dart';
 import '../core/reminder_lead.dart';
 import '../core/self_update.dart';
 import '../notifications/local_notifications.dart';
@@ -835,6 +836,46 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Pick the time-of-day at which DATE-ONLY tasks remind. Persists the pref
+  /// then reschedules every open task so the change takes effect immediately
+  /// (the reminder service reads the updated default on each (re)schedule).
+  Future<void> _pickDefaultReminderTime(int currentMinutes) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(
+        hour: currentMinutes ~/ 60,
+        minute: currentMinutes % 60,
+      ),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: ColorScheme.dark(
+            primary: AppColors.accent,
+            surface: AppColors.bgSurfaceElevated,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final minutes = picked.hour * 60 + picked.minute;
+    await ref.read(settingsPrefsProvider.notifier).setDefaultReminderMinutes(minutes);
+    if (!mounted) return;
+    // Reschedule existing tasks against the new default time-of-day. The
+    // service already has the new value pushed in via ref.listen; syncAll
+    // re-derives every fire time.
+    final tasks = ref.read(tasksProvider).tasks;
+    await ref.read(taskReminderServiceProvider).syncAll(tasks);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Date-only tasks now remind at '
+          '${formatClock12(picked.hour, picked.minute)}.',
+        ),
+      ),
+    );
+  }
+
   /// Delivery-channel segmented control (Telegram · App · Both) backed by
   /// `GET/POST /api/settings/notifications`, plus a one-line HyperOS hint.
   Widget _buildChannelTile() {
@@ -1032,6 +1073,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ),
                     ],
                   ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+
+            // Default reminder TIME-OF-DAY: when a task has a due DATE but no
+            // clock time ("due tomorrow"), its reminder fires at this time.
+            // This is what makes ordinary date-only tasks actually remind.
+            LzListTile(
+              leading: const Icon(Icons.schedule_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              title: 'Default reminder time',
+              subtitle: 'Time of day a task with no clock time reminds',
+              onTap: () => _pickDefaultReminderTime(prefs.defaultReminderMinutes),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    formatClock12(
+                      prefs.defaultReminderMinutes ~/ 60,
+                      prefs.defaultReminderMinutes % 60,
+                    ),
+                    style: AppText.body.copyWith(color: AppColors.textSecondary),
+                  ),
+                  const SizedBox(width: AppSpacing.xs),
+                  const Icon(Icons.chevron_right,
+                      size: 18, color: AppColors.textMuted),
                 ],
               ),
             ),

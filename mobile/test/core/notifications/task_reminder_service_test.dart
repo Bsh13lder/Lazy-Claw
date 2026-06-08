@@ -42,9 +42,48 @@ void main() {
       expect(reminderFireTime(t, now: now), isNull);
     });
 
-    test('date-only due (no time-of-day) → null', () {
+    test('future date-only due → that date at the default 09:00', () {
       final t = _task(dueDate: '2026-06-08');
+      expect(reminderFireTime(t, now: now), DateTime(2026, 6, 8, 9, 0, 0));
+    });
+
+    test('future date-only due → the configured default time when passed', () {
+      final t = _task(dueDate: '2026-06-08');
+      expect(
+        reminderFireTime(
+          t,
+          now: now,
+          defaultReminderHour: 14,
+          defaultReminderMinute: 30,
+        ),
+        DateTime(2026, 6, 8, 14, 30, 0),
+      );
+    });
+
+    test('a date-only due TODAY whose default time is still ahead → fires', () {
+      // now = 2026-06-07 12:00; default 18:00 is later today, so it schedules.
+      final t = _task(dueDate: '2026-06-07');
+      expect(
+        reminderFireTime(t, now: now, defaultReminderHour: 18),
+        DateTime(2026, 6, 7, 18, 0, 0),
+      );
+    });
+
+    test('a date-only due TODAY whose default time already passed → null', () {
+      // now = 2026-06-07 12:00; default 09:00 already passed today → no fire.
+      final t = _task(dueDate: '2026-06-07');
       expect(reminderFireTime(t, now: now), isNull);
+    });
+
+    test('a past date-only due → null', () {
+      final t = _task(dueDate: '2026-06-01');
+      expect(reminderFireTime(t, now: now), isNull);
+    });
+
+    test('reminderAt wins over a date-only due (explicit beats the fallback)',
+        () {
+      final t = _task(dueDate: '2026-06-08', reminderAt: '2026-06-08T07:15:00');
+      expect(reminderFireTime(t, now: now), DateTime(2026, 6, 8, 7, 15, 0));
     });
 
     test('no due and no reminderAt → null', () {

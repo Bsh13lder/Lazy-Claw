@@ -31,6 +31,8 @@ class _FakeTransport implements DocumentsTransport {
   Future<Map<String, dynamic>> uploadFile(String p, File f) async => {};
   @override
   Future<List<int>> getBytes(String path) async => const [];
+  @override
+  Future<List<int>> postBytes(String p, Map<String, dynamic> b) async => const [];
 }
 
 Widget _host() => ProviderScope(

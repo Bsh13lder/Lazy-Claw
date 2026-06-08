@@ -62,6 +62,14 @@ class _FakeTransport implements DocumentsTransport {
     lastPath = path;
     return bytes;
   }
+
+  @override
+  Future<List<int>> postBytes(String path, Map<String, dynamic> body) async {
+    lastMethod = 'POSTBYTES';
+    lastPath = path;
+    lastBody = body;
+    return bytes;
+  }
 }
 
 class _ThrowingTransport implements DocumentsTransport {
@@ -81,6 +89,8 @@ class _ThrowingTransport implements DocumentsTransport {
   Future<Map<String, dynamic>> uploadFile(String p, File f) async => throw error;
   @override
   Future<List<int>> getBytes(String path) async => throw error;
+  @override
+  Future<List<int>> postBytes(String p, Map<String, dynamic> b) async => throw error;
 }
 
 void main() {

@@ -9,6 +9,7 @@ import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
 import 'doc_share.dart';
+import 'export_password_dialog.dart';
 
 /// PDF viewer (pdfx — MIT, pdfium-backed) fed by `GET /api/pdf/{id}/raw`, plus
 /// the ✨ AI-edit box.
@@ -97,12 +98,19 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
   }
 
   Future<void> _downloadShare() async {
+    final pw = await promptExportPassword(context);
+    if (pw == null || !mounted) return;
+    final encrypted = pw.isNotEmpty;
     setState(() => _applying = true);
     try {
-      final bytes =
-          await ref.read(documentsRepositoryProvider).downloadPdf(_pdfId);
+      final bytes = await ref
+          .read(documentsRepositoryProvider)
+          .downloadPdf(_pdfId, password: encrypted ? pw : null);
       await shareDocumentBytes(
-        bytes: bytes, stem: widget.name, ext: 'pdf', mimeType: 'application/pdf',
+        bytes: bytes,
+        stem: widget.name,
+        ext: encrypted ? 'zip' : 'pdf',
+        mimeType: encrypted ? 'application/zip' : 'application/pdf',
       );
     } catch (_) {
       if (mounted) _snack('Download failed. Try again.', error: true);

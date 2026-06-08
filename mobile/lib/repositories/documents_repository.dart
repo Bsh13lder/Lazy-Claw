@@ -154,6 +154,9 @@ abstract class DocumentsTransport {
 
   /// Raw bytes (PDF `/raw` for the viewer).
   Future<List<int>> getBytes(String path);
+
+  /// POST a JSON [body] and receive a binary response (encrypted export).
+  Future<List<int>> postBytes(String path, Map<String, dynamic> body);
 }
 
 /// Dio-backed production transport over the shared [ApiClient].
@@ -194,6 +197,10 @@ class DioDocumentsTransport implements DocumentsTransport {
     final res = await _client.downloadFile(path);
     return List<int>.from(res.data as List);
   }
+
+  @override
+  Future<List<int>> postBytes(String path, Map<String, dynamic> body) =>
+      _client.postForBytes(path, data: body);
 }
 
 // ── Repository ───────────────────────────────────────────────────────────────
@@ -255,17 +262,33 @@ class DocumentsRepository {
     return DocMeta.fromJson(row is Map ? Map<String, dynamic>.from(row) : json);
   }
 
-  /// Fetch a sheet/doc rendered as [format] bytes for export/share.
-  /// Maps `GET /api/<kind>/<id>/export?format=<xlsx|csv|docx|pdf>`.
-  Future<List<int>> exportBytes(DocKind kind, String id, String format) {
+  /// Fetch a sheet/doc rendered as [format] bytes for export/share. With a
+  /// [password] the server returns an AES-256 encrypted .zip (POST, so the
+  /// password isn't in the URL); otherwise the plain file (GET).
+  Future<List<int>> exportBytes(
+    DocKind kind,
+    String id,
+    String format, {
+    String? password,
+  }) {
     assert(kind != DocKind.pdf, 'PDFs export via downloadPdf');
+    if (password != null && password.isNotEmpty) {
+      return _t.postBytes(
+        '/api/${kind.api}/$id/export',
+        {'format': format, 'password': password},
+      );
+    }
     return _t.getBytes('/api/${kind.api}/$id/export?format=$format');
   }
 
-  /// Fetch a PDF's bytes (attachment endpoint) for saving/sharing.
-  /// Maps `GET /api/pdf/<id>/download`.
-  Future<List<int>> downloadPdf(String id) =>
-      _t.getBytes('/api/pdf/$id/download');
+  /// Fetch a PDF's bytes for saving/sharing. With a [password] the server
+  /// returns an AES-256 encrypted .zip (POST); otherwise the plain PDF (GET).
+  Future<List<int>> downloadPdf(String id, {String? password}) {
+    if (password != null && password.isNotEmpty) {
+      return _t.postBytes('/api/pdf/$id/download', {'password': password});
+    }
+    return _t.getBytes('/api/pdf/$id/download');
+  }
 
   /// Fetch a sheet/doc with its decrypted Univer snapshot. Maps
   /// `GET /api/<kind>/<id>` → `{id, name, payload, ...}`.

@@ -41,6 +41,9 @@ class _RecordingTransport implements DocumentsTransport {
 
   @override
   Future<List<int>> getBytes(String path) async => const [];
+  @override
+  Future<List<int>> postBytes(String path, Map<String, dynamic> body) async =>
+      const [];
 }
 
 /// Throws the PRODUCTION exception shape (ApiError) on every verb — per the
@@ -60,6 +63,9 @@ class _ThrowingTransport implements DocumentsTransport {
   Future<Map<String, dynamic>> uploadFile(String p, File f) async => throw ApiError(500, 'x');
   @override
   Future<List<int>> getBytes(String path) async => throw ApiError(500, 'x');
+  @override
+  Future<List<int>> postBytes(String p, Map<String, dynamic> b) async =>
+      throw ApiError(500, 'x');
 }
 
 void main() {

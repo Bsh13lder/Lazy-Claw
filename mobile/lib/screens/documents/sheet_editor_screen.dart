@@ -8,6 +8,7 @@ import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
 import 'doc_share.dart';
+import 'export_password_dialog.dart';
 import 'formula_helper.dart';
 import 'univer_parse.dart';
 
@@ -155,13 +156,20 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
   Future<void> _export(String format, String ext, String mime) async {
+    final pw = await promptExportPassword(context);
+    if (pw == null || !mounted) return;
+    final encrypted = pw.isNotEmpty;
     setState(() => _saving = true);
     try {
-      final bytes = await ref
-          .read(documentsRepositoryProvider)
-          .exportBytes(DocKind.sheets, widget.id, format);
+      final bytes = await ref.read(documentsRepositoryProvider).exportBytes(
+            DocKind.sheets, widget.id, format,
+            password: encrypted ? pw : null,
+          );
       await shareDocumentBytes(
-        bytes: bytes, stem: widget.name, ext: ext, mimeType: mime,
+        bytes: bytes,
+        stem: widget.name,
+        ext: encrypted ? 'zip' : ext,
+        mimeType: encrypted ? 'application/zip' : mime,
       );
     } catch (_) {
       if (mounted) _snack('Export failed. Try again.', error: true);

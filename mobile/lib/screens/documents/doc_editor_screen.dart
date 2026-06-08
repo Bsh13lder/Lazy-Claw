@@ -10,6 +10,7 @@ import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
 import 'doc_share.dart';
+import 'export_password_dialog.dart';
 import 'univer_quill.dart';
 
 /// Full native rich-text editor for a single document.
@@ -117,13 +118,20 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
   Future<void> _export(String format, String ext, String mime) async {
+    final pw = await promptExportPassword(context);
+    if (pw == null || !mounted) return;
+    final encrypted = pw.isNotEmpty;
     setState(() => _saving = true);
     try {
-      final bytes = await ref
-          .read(documentsRepositoryProvider)
-          .exportBytes(DocKind.docs, widget.id, format);
+      final bytes = await ref.read(documentsRepositoryProvider).exportBytes(
+            DocKind.docs, widget.id, format,
+            password: encrypted ? pw : null,
+          );
       await shareDocumentBytes(
-        bytes: bytes, stem: widget.name, ext: ext, mimeType: mime,
+        bytes: bytes,
+        stem: widget.name,
+        ext: encrypted ? 'zip' : ext,
+        mimeType: encrypted ? 'application/zip' : mime,
       );
     } catch (_) {
       if (mounted) {

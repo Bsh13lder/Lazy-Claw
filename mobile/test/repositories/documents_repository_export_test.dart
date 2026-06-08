@@ -12,9 +12,18 @@ class _RecordingTransport implements DocumentsTransport {
 
   _RecordingTransport({this.bytes = const [1, 2, 3], this.json = const {}});
 
+  Map<String, dynamic>? lastBody;
+
   @override
   Future<List<int>> getBytes(String path) async {
     lastPath = path;
+    return bytes;
+  }
+
+  @override
+  Future<List<int>> postBytes(String path, Map<String, dynamic> body) async {
+    lastPath = path;
+    lastBody = body;
     return bytes;
   }
 
@@ -56,6 +65,22 @@ void main() {
     final repo = DocumentsRepository(t);
     await repo.downloadPdf('p-1');
     expect(t.lastPath, '/api/pdf/p-1/download');
+  });
+
+  test('exportBytes with password → POST /export with {format, password}', () async {
+    final t = _RecordingTransport();
+    final repo = DocumentsRepository(t);
+    await repo.exportBytes(DocKind.sheets, 'wb-1', 'xlsx', password: 'pw');
+    expect(t.lastPath, '/api/sheets/wb-1/export');
+    expect(t.lastBody, {'format': 'xlsx', 'password': 'pw'});
+  });
+
+  test('downloadPdf with password → POST /download with {password}', () async {
+    final t = _RecordingTransport();
+    final repo = DocumentsRepository(t);
+    await repo.downloadPdf('p-1', password: 'pw');
+    expect(t.lastPath, '/api/pdf/p-1/download');
+    expect(t.lastBody, {'password': 'pw'});
   });
 
   test('importSheet → POST /api/sheets/import, unwraps {sheet:row}', () async {

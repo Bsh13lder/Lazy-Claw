@@ -98,10 +98,19 @@ void main() {
       expect(reminderFireTime(t, now: now), DateTime(2026, 6, 7, 16, 30, 0));
     });
 
-    test('reminderAt is authoritative: past reminderAt → null (no fallback to '
-        'a future due)', () {
+    test('past reminderAt falls THROUGH to a still-future due time '
+        '(an auto-lead landing in the past must not suppress the reminder)', () {
       final t = _task(
         dueDate: '2026-06-07T17:00:00', // future
+        reminderAt: '2026-06-07T08:00:00', // past (e.g. due − a long lead)
+      );
+      // Was previously (wrongly) null — now it falls back to the due instant.
+      expect(reminderFireTime(t, now: now), DateTime(2026, 6, 7, 17, 0, 0));
+    });
+
+    test('past reminderAt AND past due → null (nothing future to fire)', () {
+      final t = _task(
+        dueDate: '2026-06-07T09:00:00', // past relative to `now`
         reminderAt: '2026-06-07T08:00:00', // past
       );
       expect(reminderFireTime(t, now: now), isNull);

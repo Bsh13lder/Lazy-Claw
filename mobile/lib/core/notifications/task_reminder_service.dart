@@ -24,21 +24,20 @@ abstract class TaskReminderScheduler {
 /// The instant a reminder should fire for [task], or null when nothing should
 /// be scheduled.
 ///
-/// Precedence:
-///   1. An explicit [Task.reminderAt] is authoritative when present.
-///   2. Otherwise the task's [Task.dueDate] WITH a time-of-day (`…THH:mm:ss`).
-///   3. Otherwise a DATE-ONLY due (`yyyy-MM-dd`) → that calendar date at the
-///      default reminder time-of-day ([defaultReminderHour]:[defaultReminderMinute],
-///      09:00 by default). This is what makes ordinary "due tomorrow" tasks —
-///      which carry no time — actually fire a reminder. We only invent a
-///      time-of-day for the *fallback*; an explicit `reminderAt` or a timed due
-///      always wins.
+/// Candidate sources, in precedence order — the FIRST one still in the future
+/// wins (a candidate that's already in the past is SKIPPED, not fatal):
+///   1. An explicit [Task.reminderAt].
+///   2. The task's [Task.dueDate] WITH a time-of-day (`…THH:mm:ss`).
+///   3. A DATE-ONLY due (`yyyy-MM-dd`) → that calendar date at the default
+///      reminder time-of-day ([defaultReminderHour]:[defaultReminderMinute],
+///      09:00 by default) — this is what makes ordinary "due tomorrow" tasks
+///      (which carry no time) fire a reminder.
 ///
-/// Returns null when the chosen instant is in the past or exactly [now] (the
-/// moment already passed, so there's nothing to fire) or when no valid instant
-/// exists. `reminderAt`, being explicit, is authoritative: if it's set but
-/// already passed we schedule nothing — we do NOT silently fall back to the
-/// due time.
+/// Falling THROUGH a past candidate is deliberate: the app auto-applies a 30-min
+/// lead, so a task created <30 min before it's due gets a `reminderAt` already
+/// in the past — that must NOT suppress the still-future due-time reminder, or
+/// the task would fire nothing at all. Returns null only when EVERY candidate is
+/// absent or already passed.
 DateTime? reminderFireTime(
   Task task, {
   DateTime? now,
@@ -46,16 +45,15 @@ DateTime? reminderFireTime(
   int defaultReminderMinute = 0,
 }) {
   final clock = now ?? DateTime.now();
-  final candidate = _parseReminderAt(task.reminderAt) ??
-      _parseDueWithTime(task.dueDate) ??
-      _parseDueDateOnlyAt(
-        task.dueDate,
-        defaultReminderHour,
-        defaultReminderMinute,
-      );
-  if (candidate == null) return null;
-  if (!candidate.isAfter(clock)) return null;
-  return candidate;
+  final candidates = <DateTime?>[
+    _parseReminderAt(task.reminderAt),
+    _parseDueWithTime(task.dueDate),
+    _parseDueDateOnlyAt(task.dueDate, defaultReminderHour, defaultReminderMinute),
+  ];
+  for (final candidate in candidates) {
+    if (candidate != null && candidate.isAfter(clock)) return candidate;
+  }
+  return null;
 }
 
 DateTime? _parseReminderAt(String? reminderAt) {
@@ -174,10 +172,20 @@ class TaskReminderService implements TaskReminderScheduler {
       );
       if (fire == null) return;
 
-      // tz.TZDateTime.from throws if the timezone db / local location is not
-      // initialised — the outer catch turns that into a silent no-op rather
-      // than crashing a write path.
-      final when = tz.TZDateTime.from(fire, tz.local);
+      // Build the instant from the fire time's wall-clock COMPONENTS in the
+      // local zone, so the zone's DST rules for THAT calendar date apply.
+      // tz.TZDateTime.from(naiveLocal) converts via the CURRENT utc offset, so a
+      // reminder straddling a DST boundary would land an hour off. (Throws if the
+      // tz db isn't initialised — the outer catch makes that a silent no-op.)
+      final when = tz.TZDateTime(
+        tz.local,
+        fire.year,
+        fire.month,
+        fire.day,
+        fire.hour,
+        fire.minute,
+        fire.second,
+      );
       final title = task.title.isEmpty ? 'Task reminder' : task.title;
       final body = _bodyFor(task, fire);
       try {
@@ -239,11 +247,13 @@ class TaskReminderService implements TaskReminderScheduler {
         desired[notificationIdForTask(t.id)] = t;
       }
 
-      // Cancel stale scheduled reminders (tasks deleted / completed / had their
-      // time removed). The only notifications this app ever *schedules* are
-      // task reminders, so any pending request not in [desired] is ours to
-      // clear. (Chat/approval notifications use show(), not zonedSchedule, so
-      // they never appear in pendingNotificationRequests.)
+      // Cancel ONLY stale TASK reminders — ids that are the FNV id of a task in
+      // [tasks] but are no longer wanted (completed / time removed). We must NOT
+      // blanket-cancel "every pending id not in desired": that would also nuke
+      // the Settings "Schedule test reminder" (a zonedSchedule with a non-task
+      // id) and any reminder a concurrent addTask just scheduled for a task not
+      // yet present in this (possibly stale) list.
+      final knownTaskIds = {for (final t in tasks) notificationIdForTask(t.id)};
       List<PendingNotificationRequest> pending;
       try {
         pending = await _plugin.pendingNotificationRequests();
@@ -251,7 +261,7 @@ class TaskReminderService implements TaskReminderScheduler {
         pending = const [];
       }
       for (final req in pending) {
-        if (!desired.containsKey(req.id)) {
+        if (knownTaskIds.contains(req.id) && !desired.containsKey(req.id)) {
           await _plugin.cancel(req.id);
         }
       }

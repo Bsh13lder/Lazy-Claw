@@ -74,8 +74,12 @@ dependencies:
   # Documents tab: PDF rendering (MIT — pdfium-backed). License discipline
   # (CLAUDE.md): permissive only, never Syncfusion/AGPL.
   pdfx: ^2.9.2
-  # Documents tab: native file chooser for importing a PDF (MIT).
+  # Documents tab: native file chooser for importing files (MIT).
   file_picker: ^11.0.0
+  # Documents tab: export/share — fetch the rendered file (xlsx/csv/docx/pdf)
+  # via the authed Dio client, write a temp file, hand it to the OS share sheet
+  # (Save to Files / Drive / send). Permissive (BSD-3).
+  share_plus: ^10.1.4
   # Documents tab: native rich-text editor (MIT). Bold/italic/underline,
   # headings, bullet & numbered lists, links — round-tripped to the Univer
   # IDocumentData snapshot via univer_quill.dart. License discipline (CLAUDE.md):

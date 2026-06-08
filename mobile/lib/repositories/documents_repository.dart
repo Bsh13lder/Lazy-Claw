@@ -239,6 +239,34 @@ class DocumentsRepository {
     );
   }
 
+  /// Import an `.xlsx` [file] as a new sheet. Maps `POST /api/sheets/import`
+  /// (multipart) → `{ sheet: meta }`.
+  Future<DocMeta> importSheet(File file) async {
+    final json = await _t.uploadFile('/api/sheets/import', file);
+    final row = json['sheet'];
+    return DocMeta.fromJson(row is Map ? Map<String, dynamic>.from(row) : json);
+  }
+
+  /// Import a `.docx` [file] as a new document. Maps `POST /api/docs/import`
+  /// (multipart) → `{ doc: meta }`.
+  Future<DocMeta> importDoc(File file) async {
+    final json = await _t.uploadFile('/api/docs/import', file);
+    final row = json['doc'];
+    return DocMeta.fromJson(row is Map ? Map<String, dynamic>.from(row) : json);
+  }
+
+  /// Fetch a sheet/doc rendered as [format] bytes for export/share.
+  /// Maps `GET /api/<kind>/<id>/export?format=<xlsx|csv|docx|pdf>`.
+  Future<List<int>> exportBytes(DocKind kind, String id, String format) {
+    assert(kind != DocKind.pdf, 'PDFs export via downloadPdf');
+    return _t.getBytes('/api/${kind.api}/$id/export?format=$format');
+  }
+
+  /// Fetch a PDF's bytes (attachment endpoint) for saving/sharing.
+  /// Maps `GET /api/pdf/<id>/download`.
+  Future<List<int>> downloadPdf(String id) =>
+      _t.getBytes('/api/pdf/$id/download');
+
   /// Fetch a sheet/doc with its decrypted Univer snapshot. Maps
   /// `GET /api/<kind>/<id>` → `{id, name, payload, ...}`.
   Future<DocPayload> getPayload(DocKind kind, String id) async {

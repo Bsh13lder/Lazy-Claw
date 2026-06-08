@@ -150,4 +150,112 @@ void main() {
       expect(counts.total, 0);
     });
   });
+
+  group('splitTasksByGroup', () {
+    test('a task matching a project lands in realProjects (case-insensitive)',
+        () {
+      final tasks = [
+        _task('a', category: 'home'),
+        _task('b', category: 'HOME'),
+      ];
+      final projects = [_project('p1', 'Home', color: '#FF0000')];
+
+      final split = splitTasksByGroup(tasks, projects);
+
+      expect(split.realProjects, hasLength(1));
+      final home = split.realProjects.single;
+      expect(home.name, 'Home'); // canonical project casing
+      expect(home.project.color, '#FF0000'); // carried for the color dot
+      expect(home.tasks.map((t) => t.id), containsAll(['a', 'b']));
+      expect(split.tags, isEmpty);
+      expect(split.inbox, isEmpty);
+    });
+
+    test('a task with an unknown category becomes a tag (not a project)', () {
+      final tasks = [
+        _task('a', category: 'Garden'),
+        _task('b', category: 'Garden'),
+      ];
+      final projects = [_project('p1', 'Home')];
+
+      final split = splitTasksByGroup(tasks, projects);
+
+      // Home is seeded (zero tasks) under realProjects, Garden is a tag.
+      expect(split.realProjects.map((b) => b.name), ['Home']);
+      expect(split.realProjects.single.tasks, isEmpty);
+      expect(split.tags, hasLength(1));
+      expect(split.tags.single.name, 'Garden');
+      expect(split.tags.single.tasks.map((t) => t.id), containsAll(['a', 'b']));
+      expect(split.inbox, isEmpty);
+    });
+
+    test('blank / null category lands in inbox', () {
+      final tasks = [
+        _task('a', category: null),
+        _task('b', category: ''),
+        _task('c', category: '   '),
+      ];
+
+      final split = splitTasksByGroup(tasks, const []);
+
+      expect(split.inbox.map((t) => t.id), containsAll(['a', 'b', 'c']));
+      expect(split.realProjects, isEmpty);
+      expect(split.tags, isEmpty);
+    });
+
+    test('zero-task projects are still seeded in realProjects', () {
+      final split = splitTasksByGroup(
+        const [],
+        [_project('p1', 'Home'), _project('p2', 'Work')],
+      );
+
+      expect(split.realProjects.map((b) => b.name), ['Home', 'Work']);
+      expect(split.realProjects.every((b) => b.tasks.isEmpty), isTrue);
+      expect(split.tags, isEmpty);
+      expect(split.inbox, isEmpty);
+      expect(split.hasRealProjects, isTrue);
+      expect(split.hasTags, isFalse);
+    });
+
+    test('realProjects preserves the projects-list order', () {
+      final split = splitTasksByGroup(
+        const [],
+        [_project('p1', 'Work'), _project('p2', 'Home'), _project('p3', 'Side')],
+      );
+
+      expect(split.realProjects.map((b) => b.name), ['Work', 'Home', 'Side']);
+    });
+
+    test('tags are sorted alphabetically (case-insensitively)', () {
+      final tasks = [
+        _task('z', category: 'Zebra'),
+        _task('a', category: 'apple'),
+        _task('m', category: 'Mango'),
+      ];
+
+      final split = splitTasksByGroup(tasks, const []);
+
+      expect(split.tags.map((b) => b.name), ['apple', 'Mango', 'Zebra']);
+    });
+
+    test('only tags with tasks appear (no empty tag buckets)', () {
+      final split = splitTasksByGroup(
+        [_task('a', category: 'Home')],
+        [_project('p1', 'Home')],
+      );
+
+      // Home matched → realProjects; nothing left over → no tags.
+      expect(split.tags, isEmpty);
+      expect(split.hasTags, isFalse);
+    });
+
+    test('hasTags / hasRealProjects reflect content', () {
+      final split = splitTasksByGroup(
+        [_task('a', category: 'Garden')],
+        const [],
+      );
+      expect(split.hasRealProjects, isFalse);
+      expect(split.hasTags, isTrue);
+    });
+  });
 }

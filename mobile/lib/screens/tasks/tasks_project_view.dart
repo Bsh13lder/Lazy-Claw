@@ -10,12 +10,16 @@ import 'ai_task_badge.dart';
 import 'connected_task_row.dart';
 import 'task_project_grouping.dart';
 
-/// The Tasks-tab "Projects" view: a collapsible list of project buckets, each
-/// showing a color dot, the project name and an open/total task count. Tapping
-/// a bucket expands its tasks inline (reusing [ConnectedTaskRow]). Tasks are
-/// matched to projects by a case-insensitive `category` → name match, with a
-/// first-class "Inbox" bucket (leading the list) holding every projectless task
-/// (see [groupTasksByProject]).
+/// The Tasks-tab "Projects" view. Buckets are split into three clearly-separated
+/// sections (see [splitTasksByGroup]):
+///   * **Projects** — real projects from the budgets/projects store, each with
+///     its color dot + open/total count, plus the neutral **Inbox** bucket
+///     leading the section as the projectless home.
+///   * **Tags** — `category` strings the user assigned that match no real
+///     project, rendered with a muted tag glyph instead of a color dot.
+///
+/// Tapping a bucket expands its tasks inline (reusing [ConnectedTaskRow]). Tasks
+/// match projects by a case-insensitive `category` → name match.
 ///
 /// Purely presentational — all mutating callbacks live in the parent
 /// [TasksScreen] so commits route through `tasksProvider`.
@@ -65,12 +69,10 @@ class _TasksProjectViewState extends State<TasksProjectView> {
 
   @override
   Widget build(BuildContext context) {
-    final groups = groupTasksByProject(widget.tasks, widget.projects);
-    final ordered = orderedProjectGroupNames(widget.projects, groups);
+    final split = splitTasksByGroup(widget.tasks, widget.projects);
 
-    // The Inbox bucket is always seeded, so [ordered] is never literally empty.
-    // Treat "no real projects AND no tasks at all" (only an empty Inbox) as the
-    // empty state — there's nothing meaningful to group yet.
+    // Treat "no real projects AND no tasks at all" as the empty state — there's
+    // nothing meaningful to group yet (the Inbox would be the only, empty bucket).
     final hasProjects = widget.projects.any((p) => p.name.trim().isNotEmpty);
     if (!hasProjects && widget.tasks.isEmpty) {
       return LzEmptyState(
@@ -78,12 +80,6 @@ class _TasksProjectViewState extends State<TasksProjectView> {
         title: 'No projects yet',
         hint: 'Add a project from the Money tab, or tag a task with one.',
       );
-    }
-
-    // A lowercased name → Project lookup so each bucket can show its accent dot.
-    final byName = <String, Project>{};
-    for (final p in widget.projects) {
-      byName[p.name.toLowerCase()] = p;
     }
 
     return ListView(
@@ -94,38 +90,112 @@ class _TasksProjectViewState extends State<TasksProjectView> {
         AppSpacing.xxxl, // leave room above the FAB
       ),
       children: [
-        for (final name in ordered)
-          Padding(
-            padding: const EdgeInsets.only(bottom: AppSpacing.md),
-            child: _ProjectBucket(
-              name: name,
-              project: byName[name.toLowerCase()],
-              tasks: groups[name] ?? const [],
-              expanded: _expanded.contains(name),
-              onToggle: () => _toggle(name),
-              dirtyIds: widget.dirtyIds,
-              projects: widget.projects,
-              onComplete: widget.onComplete,
-              onDelete: widget.onDelete,
-              onOpen: widget.onOpen,
-              onRenameTitle: widget.onRenameTitle,
-              onPriorityChanged: widget.onPriorityChanged,
-              onDueDateChanged: widget.onDueDateChanged,
-              onCategoryChanged: widget.onCategoryChanged,
-              onSubtasksChanged: widget.onSubtasksChanged,
+        // ── Projects (real projects + the Inbox home) ─────────────────────────
+        if (split.hasRealProjects || widget.tasks.isNotEmpty)
+          LzSection(
+            title: 'Projects',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Inbox leads as the neutral, projectless home.
+                _bucketPadding(
+                  _ProjectBucket(
+                    name: kInboxProjectLabel,
+                    project: null,
+                    isTag: false,
+                    tasks: split.inbox,
+                    expanded: _expanded.contains(kInboxProjectLabel),
+                    onToggle: () => _toggle(kInboxProjectLabel),
+                    dirtyIds: widget.dirtyIds,
+                    projects: widget.projects,
+                    onComplete: widget.onComplete,
+                    onDelete: widget.onDelete,
+                    onOpen: widget.onOpen,
+                    onRenameTitle: widget.onRenameTitle,
+                    onPriorityChanged: widget.onPriorityChanged,
+                    onDueDateChanged: widget.onDueDateChanged,
+                    onCategoryChanged: widget.onCategoryChanged,
+                    onSubtasksChanged: widget.onSubtasksChanged,
+                  ),
+                ),
+                for (final bucket in split.realProjects)
+                  _bucketPadding(
+                    _ProjectBucket(
+                      name: bucket.name,
+                      project: bucket.project,
+                      isTag: false,
+                      tasks: bucket.tasks,
+                      expanded: _expanded.contains(bucket.name),
+                      onToggle: () => _toggle(bucket.name),
+                      dirtyIds: widget.dirtyIds,
+                      projects: widget.projects,
+                      onComplete: widget.onComplete,
+                      onDelete: widget.onDelete,
+                      onOpen: widget.onOpen,
+                      onRenameTitle: widget.onRenameTitle,
+                      onPriorityChanged: widget.onPriorityChanged,
+                      onDueDateChanged: widget.onDueDateChanged,
+                      onCategoryChanged: widget.onCategoryChanged,
+                      onSubtasksChanged: widget.onSubtasksChanged,
+                    ),
+                  ),
+              ],
             ),
           ),
+
+        // ── Tags (category strings that are not real projects) ────────────────
+        if (split.hasTags) ...[
+          const SizedBox(height: AppSpacing.lg),
+          LzSection(
+            title: 'Tags',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final bucket in split.tags)
+                  _bucketPadding(
+                    _ProjectBucket(
+                      name: bucket.name,
+                      project: null,
+                      isTag: true,
+                      tasks: bucket.tasks,
+                      expanded: _expanded.contains(bucket.name),
+                      onToggle: () => _toggle(bucket.name),
+                      dirtyIds: widget.dirtyIds,
+                      projects: widget.projects,
+                      onComplete: widget.onComplete,
+                      onDelete: widget.onDelete,
+                      onOpen: widget.onOpen,
+                      onRenameTitle: widget.onRenameTitle,
+                      onPriorityChanged: widget.onPriorityChanged,
+                      onDueDateChanged: widget.onDueDateChanged,
+                      onCategoryChanged: widget.onCategoryChanged,
+                      onSubtasksChanged: widget.onSubtasksChanged,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
+
+  /// Bottom-spaces a bucket so consecutive cards don't touch.
+  Widget _bucketPadding(Widget child) => Padding(
+        padding: const EdgeInsets.only(bottom: AppSpacing.md),
+        child: child,
+      );
 }
 
-/// One project bucket: a tappable header (dot + name + count) that expands to
-/// reveal the bucket's tasks.
+/// One bucket: a tappable header that expands to reveal the bucket's tasks. The
+/// leading glyph adapts to the bucket kind — a project color dot for a real
+/// project, an inbox glyph for the projectless [kInboxProjectLabel] home, and a
+/// muted tag label glyph when [isTag] (a category that's not a real project).
 class _ProjectBucket extends StatelessWidget {
   const _ProjectBucket({
     required this.name,
     required this.project,
+    required this.isTag,
     required this.tasks,
     required this.expanded,
     required this.onToggle,
@@ -143,6 +213,10 @@ class _ProjectBucket extends StatelessWidget {
 
   final String name;
   final Project? project;
+
+  /// Whether this is a tag-only bucket (a category with no real project) — it
+  /// reads as a neutral tag rather than a colored project.
+  final bool isTag;
   final List<Task> tasks;
   final bool expanded;
   final VoidCallback onToggle;
@@ -160,7 +234,27 @@ class _ProjectBucket extends StatelessWidget {
 
   /// The Inbox bucket reads as a neutral, project-less home rather than a
   /// colored project — so it shows an inbox glyph instead of a color dot.
-  bool get _isInbox => name == kInboxProjectLabel;
+  bool get _isInbox => !isTag && project == null && name == kInboxProjectLabel;
+
+  /// The leading glyph for the header: a tag label for tag buckets, an inbox
+  /// glyph for the Inbox home, or the project's accent color dot.
+  Widget _leading() {
+    if (isTag) {
+      return const Icon(
+        Icons.label_outline,
+        size: 16,
+        color: AppColors.textMuted,
+      );
+    }
+    if (_isInbox) {
+      return const Icon(
+        Icons.inbox_outlined,
+        size: 16,
+        color: AppColors.textMuted,
+      );
+    }
+    return ProjectColorDot(hex: project?.color, size: 10);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -187,14 +281,7 @@ class _ProjectBucket extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    if (_isInbox)
-                      const Icon(
-                        Icons.inbox_outlined,
-                        size: 16,
-                        color: AppColors.textMuted,
-                      )
-                    else
-                      ProjectColorDot(hex: project?.color, size: 10),
+                    _leading(),
                     const SizedBox(width: AppSpacing.md),
                     Expanded(
                       child: Text(
@@ -241,7 +328,9 @@ class _ProjectBucket extends StatelessWidget {
                   ? Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'No tasks in this project',
+                        _isInbox
+                            ? 'No loose tasks'
+                            : 'No tasks in this project',
                         style: AppText.caption
                             .copyWith(color: AppColors.textMuted),
                       ),

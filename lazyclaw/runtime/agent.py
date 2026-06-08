@@ -174,6 +174,15 @@ _LOCAL_TOOL_NAMES = frozenset({
 # brain is MiniMax, the loaded tool list is trimmed to this cap below.
 _MINIMAX_MAX_TOOLS = 24
 
+# Thin-router (Phase 2): the meta-tools the brain may ALWAYS call. After one
+# inline non-meta (domain) tool call, the brain is narrowed to ONLY these so
+# it must delegate the rest. Used only when LAZYCLAW_THIN_ROUTER is set.
+_META_TOOLS = frozenset({
+    "delegate", "dispatch_subagents", "run_background",
+    "search_tools", "web_search", "recall_memories", "save_memory",
+    "get_agent_status",
+})
+
 
 def _trim_tools_for_minimax(
     tools: list[dict],
@@ -3436,6 +3445,14 @@ class Agent:
         # enough — MiniMax M2.7 ignored them and ran 22+ extra iters with
         # `browser` / `use_host_browser` calls (see 2026-05-04 Upwork debug).
         _force_dispatch_only = False
+        # Thin-router (LAZYCLAW_THIN_ROUTER): brain is a pure router — at most
+        # ONE inline domain (non-meta) tool call per turn, then tools narrow to
+        # meta-only so it MUST delegate. Default off → zero behavior change.
+        import os as _os
+        _thin_router = (
+            _os.environ.get("LAZYCLAW_THIN_ROUTER", "").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         _promote_iter: int | None = None
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
@@ -3631,6 +3648,34 @@ class Agent:
                             "TAOR Plan phase injected (effort=%s, retry=%s)",
                             _effort, _taor_retry_context is not None,
                         )
+
+                # THIN-ROUTER: at most ONE inline domain (non-meta) tool call
+                # per turn; once made, narrow to meta-only so a 2nd domain call
+                # is impossible and the brain MUST delegate. Default off.
+                if (
+                    _thin_router
+                    and not _force_dispatch_only
+                    and tools
+                    and any(n not in _META_TOOLS for n in _called_tool_names)
+                ):
+                    _meta_only = [
+                        t for t in tools
+                        if t.get("function", {}).get("name") in _META_TOOLS
+                    ]
+                    if _meta_only and len(_meta_only) != len(tools):
+                        logger.info(
+                            "THIN-ROUTER: tools narrowed %d → %d (meta-only) "
+                            "after 1 inline action — brain must delegate",
+                            len(tools), len(_meta_only),
+                        )
+                        _tr_other = {
+                            t.get("function", {}).get("name")
+                            for t in tools
+                            if t.get("function", {}).get("name") not in _META_TOOLS
+                        }
+                        _tr_other.discard(None)
+                        _suppressed_tool_names |= _tr_other  # type: ignore[arg-type]
+                        tools = _meta_only
 
                 # Hard-enforce AUTO-PROMOTE: previous iter set the flag, so
                 # this iter's tool list is restricted to ONLY run_background.
@@ -4307,6 +4352,9 @@ class Agent:
                         # _ACTION_CLAIM_RE so legit dispatch statuses survive.)
                         and "dispatch_subagents" not in _called_tool_names
                         and "run_background" not in _called_tool_names
+                        # delegate is a real fire-and-forget dispatch too —
+                        # a post-delegate "I've dispatched" is truthful.
+                        and "delegate" not in _called_tool_names
                     ):
                         _halluc_retries += 1
                         _matched_phrase = _claim_match.group(0)[:60]
@@ -4360,6 +4408,8 @@ class Agent:
                         # Already dispatched subagents → the status is true,
                         # do NOT force a redundant background task (RC2).
                         and "dispatch_subagents" not in _called_tool_names
+                        # Same for delegate — it already dispatched a worker.
+                        and "delegate" not in _called_tool_names
                         and not _is_meta_question(message)
                     ):
                         logger.warning(
@@ -5434,6 +5484,40 @@ class Agent:
                             "when done."
                         )
 
+                    # ── Hard stop: delegate dispatched — exit foreground ──
+                    # delegate is fire-and-forget (delegate.py:268): it
+                    # schedules run_specialist detached and returns a
+                    # "started" string. Continuing the loop is what let the
+                    # brain trip the action-claim retry, duplicate the work,
+                    # and get AUTO-PROMOTED (2026-06-08 14:18 triple-exec).
+                    # Hand off and return the delegate's own message, exactly
+                    # like the run_background hard-stop above. Only the
+                    # initial foreground turn exits — background sub-turns
+                    # keep iterating. Skip on error results so the brain can
+                    # correct (e.g. 'Unknown specialist').
+                    if (
+                        tc.name == "delegate"
+                        and not getattr(self, "is_background", False)
+                        and isinstance(result, str)
+                        and not result.startswith(("Error", "Unknown"))
+                    ):
+                        logger.info(
+                            "delegate dispatched — exiting foreground turn "
+                            "(was iter=%d)",
+                            iteration,
+                        )
+                        await cb.on_event(AgentEvent("done", "Delegated", {}))
+                        if _delegate_registered and self.registry:
+                            self.registry.unregister("delegate")
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.complete(
+                                _fg_task_id,
+                                "Delegated to a specialist — will report "
+                                "back when done.",
+                            )
+                            _fg_task_id = None
+                        return result
+
                     # ── Hard stop: OAuth credential not authorized ────
                     # n8n_management surfaces this with a STOP_OAUTH_CREDENTIAL
                     # marker when a workflow call fails because the user
@@ -5866,8 +5950,17 @@ class Agent:
                     # Let the dispatch_subagents consolidation turn deliver
                     # the results instead (task_runner brain-fanout).
                     and "dispatch_subagents" not in _called_tool_names
+                    # `delegate` is ALSO a fire-and-forget async dispatch
+                    # (delegate.py:268 schedules run_specialist detached and
+                    # returns immediately). Promoting a turn that delegated
+                    # to a background worker spawns a THIRD redundant
+                    # executor — the 2026-06-08 14:18 triple-execution bug.
+                    and "delegate" not in _called_tool_names
                     and iteration >= _PROMOTE_BG_AT_ITER
                     and not _only_readonly_so_far
+                    # THIN-ROUTER replaces AUTO-PROMOTE with the earlier
+                    # 1-inline-action cap; don't double-handle under the flag.
+                    and not _thin_router
                 ):
                     _promoted_to_bg = True
                     _force_dispatch_only = True

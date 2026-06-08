@@ -201,6 +201,28 @@ Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude subscription
 | | |
 |---|---|
 | `web/` | React 19 + TypeScript + Vite + Tailwind control panel (19 pages + chat sidebar with live BrowserCanvas) |
+| `mobile/` | Flutter (Android/iOS) client — offline-first, premium dark UI, self-served APK |
+
+## 📱 Mobile App (Flutter)
+
+A native Android/iOS client lives in [`mobile/`](mobile/) — a premium-dark, offline-first companion to the web control panel.
+
+- **6 tabs** — Home dashboard · Chat (live WebSocket streaming, tool-call & approval cards) · Tasks · Money (budgets/expenses) · Notes (LazyBrain, markdown) · Settings.
+- **Power tools** hub — Skills, Vault, Memory, Jobs, Watchers, MCP, Audit (the web's control surfaces, on mobile).
+- **Full control** — switch ECO mode (HYBRID/FULL/CLAUDE/MINIMAX) and permissions from the phone.
+- **Offline-first** — Tasks, Notes, and Budgets work with your computer off: an **encrypted local SQLite (SQLCipher)** cache + an outbox/sync engine (last-write-wins, conflicts logged) that syncs when the backend is reachable again. (The server still holds the master key and decrypts server-side — the device cache is encrypted with its own Keystore key.)
+- **Design system first** — a shared `lib/ui/` token + component kit (`Lz*`) keeps every screen coherent.
+
+### Install (sideload — no Play Store)
+
+The backend serves its own APK:
+
+1. Build it: `./scripts/build-mobile-apk.sh` (publishes `mobile/dist/app-release.apk` + `version.json`).
+   - One-time toolchain: Flutter 3.41+, JDK 17, Android SDK + cmdline-tools. Docker mounts `./mobile/dist` into the gateway automatically.
+2. In the web app → **Settings → Mobile App** → scan the **QR** (or hit **Download APK**). Open the web app via your computer's **LAN IP** (not `localhost`) so the QR is phone-reachable.
+3. On the phone, allow "Install unknown apps", install, then set the in-app **server** to your computer's **LAN IP** (e.g. `192.168.1.50:18789`) or its mDNS name (`<host>.local:18789`), and log in.
+
+> **Note:** the in-app server address must point at your self-hosted gateway's current LAN IP (or `.local` name) — `localhost`/`127.0.0.1` refers to the phone itself.
 
 ## Features
 
@@ -211,6 +233,19 @@ Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude subscription
 ### Multi-Agent Delegation
 
 LazyClaw runs four parallel-agent surfaces in one runtime — `delegate` for in-turn specialists, `dispatch_subagents` for fire-and-forget fan-out, `run_background` for one long-running worker, and an optional **Critic** that adversarially reviews replies on HIGH/MAX-effort turns. Concurrency capped at 4 in-flight subagents (override via `LAZYCLAW_DISPATCH_CONCURRENCY`) so per-account LLM rate limits never trigger 429 bursts. Full breakdown in the **[Parallel Agents](#parallel-agents)** section below.
+
+### Specialists & Operating Modes *(specialist-first dispatch — ADR-0005)*
+
+Specialists are **declarative `.md` + YAML files** (name / tools / model / system-prompt) — the maintained unit is a small editable file, not a 277-tool registry. Builtins ship in-repo; you create/edit your own from the web or mobile **Specialists** page (custom ones encrypted in DB). Specialists **auto-improve** by accruing lessons from past runs (the LazyBrain skill-lesson loop), and a **research-first fan-out** can send read-only code + web research specialists ahead of any plan so the brain never works from memory.
+
+Four **operating modes** layer over the permission system — switch per chat (Telegram `/act`, web/mobile mode switch):
+
+| Mode | Behavior |
+|------|----------|
+| **Chat** | Conversation only — no tools fire |
+| **Ask** | Acts, but confirms each write (default) |
+| **Plan** | Read-only research → numbered plan → one **Execute** tap → then autonomous |
+| **Auto** | Fully autonomous |
 
 ### Background Tasks
 

@@ -1,0 +1,133 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Release builds need INTERNET explicitly (Flutter only adds it to the
+         debug/profile manifests). Self-hosted LazyClaw is reached over plain
+         http on the LAN, so allow cleartext too (release blocks it by default). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Required for local notifications on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Scheduled task reminders (flutter_local_notifications zonedSchedule with
+         AndroidScheduleMode.exactAllowWhileIdle). SCHEDULE_EXACT_ALARM is the
+         user-revocable Android 12+ perm (requested at runtime); USE_EXACT_ALARM
+         is the auto-granted Android 13+ perm for alarm/reminder-class apps.
+         RECEIVE_BOOT_COMPLETED lets the plugin's boot receiver re-arm pending
+         reminders after a reboot. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- In-app self-updater (ota_update): trigger the system package installer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <application
+        android:label="LazyClaw"
+        android:name="${applicationName}"
+        android:usesCleartextTraffic="true"
+        android:icon="@mipmap/ic_launcher">
+        <!-- ota_update: FileProvider that serves the downloaded APK to the
+             installer, plus the receiver that reports PackageInstaller result.
+             Names/authority verified against ota_update 7.1.0 source. -->
+        <provider
+            android:name="sk.fourq.otaupdate.OtaUpdateFileProvider"
+            android:authorities="${applicationId}.ota_update_provider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/filepaths" />
+        </provider>
+        <receiver
+            android:name="sk.fourq.otaupdate.InstallResultReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="${applicationId}.ACTION_INSTALL_COMPLETE"/>
+            </intent-filter>
+        </receiver>
+        <!-- flutter_local_notifications: fires scheduled task reminders, and
+             re-arms still-pending reminders after a reboot / app update. Class
+             names verified against flutter_local_notifications 18.0.1. -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+            android:exported="false"/>
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+            </intent-filter>
+        </receiver>
+        <!-- flutter_local_notifications: REQUIRED for notification ACTION buttons
+             (the task-reminder "Done" button). The plugin sends an explicit-
+             component broadcast to this receiver, which spins up a background
+             isolate to run onDidReceiveBackgroundNotificationResponse even when
+             the app is killed. Verified against flutter_local_notifications
+             18.0.1 README — the plugin's own manifest does NOT declare it, so it
+             must be added here. -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
+            android:exported="false"/>
+        <!-- Quick-Capture home-screen widget (4x1). Buttons deep-link into the
+             app via home_widget's launch intent — see QuickCaptureWidget.kt. -->
+        <receiver
+            android:name=".QuickCaptureWidget"
+            android:exported="true"
+            android:label="@string/qc_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/quick_capture_widget_info"/>
+        </receiver>
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <!-- Disable Flutter's automatic intent-URI deep linking. The
+                 Quick-Capture widget launches the app with a `lazyclaw://<action>`
+                 URI that WE consume via home_widget's widgetClicked stream
+                 (DeepLinkService → pendingActionProvider → router.go('/tasks')).
+                 With Flutter's auto deep linking ON, the engine ALSO feeds that
+                 raw URI to GoRouter as a route on every (warm) widget tap →
+                 "no routes for location: lazyclaw://addTask" / a page-not-found
+                 screen. Turning it off leaves only our handler. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

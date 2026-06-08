@@ -507,6 +507,7 @@ export default function Tasks() {
           }
           onChanged={() => setReloadTick((n) => n + 1)}
           onDeleted={() => { setProjectFilter(null); setReloadTick((n) => n + 1); }}
+          onRenamed={(newKey) => { setProjectFilter(newKey); setReloadTick((n) => n + 1); }}
         />
       )}
 

@@ -10,8 +10,6 @@ import ChatPage from "./pages/ChatPage";
 import Tasks from "./pages/Tasks";
 import Replay from "./pages/Replay";
 import Audit from "./pages/Audit";
-import SkillHub from "./pages/SkillHub";
-import Skills from "./pages/Skills";
 import BrowserTemplates from "./pages/BrowserTemplates";
 import Jobs from "./pages/Jobs";
 import Watchers from "./pages/Watchers";
@@ -23,15 +21,28 @@ import Notes from "./pages/Notes";
 // It lazy-loads each type internally, so the heavy Univer (~10 MB) and pdf.js
 // chunks only load when their sub-tab is opened.
 const Documents = lazy(() => import("./pages/Documents"));
+// Consolidated Tools hub (ADR-0005) — Specialists / Skills / Discover as
+// sub-tabs. Lazy so the unified shell + its three panels stay out of the main
+// bundle. The three panels are ALSO lazy-imported below for their legacy
+// deep-link routes; Vite dedupes each into a single shared chunk.
+const SkillsHub = lazy(() => import("./pages/SkillsHub"));
+// Specialists CRUD (ADR-0005) — kept in its own lazy chunk so the editor +
+// list code stays out of the main bundle until the page is opened.
+const Specialists = lazy(() => import("./pages/Specialists"));
+// SkillHub (Discover) + Skills (registry) — lazy so they share the exact same
+// chunks as the SkillsHub tabs above, and only load when opened or deep-linked.
+const SkillHub = lazy(() => import("./pages/SkillHub"));
+const Skills = lazy(() => import("./pages/Skills"));
 import Vault from "./pages/Vault";
 import Settings from "./pages/Settings";
 import NavShell, { type Page } from "./components/NavShell";
 import InstallPrompt from "./components/InstallPrompt";
 
 const VALID_PAGES: readonly Page[] = [
-  "overview", "activity", "code-specialist", "chat", "tasks", "notes", "replay", "audit", "hub", "skills",
+  "overview", "activity", "code-specialist", "chat", "tasks", "notes", "replay", "audit",
+  "skills-hub", "hub", "skills",
   "templates", "jobs", "watchers", "mcp", "memory", "lazybrain", "docs", "docs-full",
-  "vault", "settings",
+  "specialists", "vault", "settings",
 ];
 
 function readPageFromUrl(): Page {
@@ -116,8 +127,12 @@ function AppContent() {
       case "notes": return <Notes />;
       case "replay": return <Replay />;
       case "audit": return <Audit />;
+      // Consolidated Tools entry — the only one shown in the nav rail.
+      case "skills-hub": return <SkillsHub />;
+      // Legacy routes — kept for deep links; render the original components.
       case "hub": return <SkillHub />;
       case "skills": return <Skills />;
+      case "specialists": return <Specialists />;
       case "templates": return <BrowserTemplates />;
       case "jobs": return <Jobs onNavigate={setPage} />;
       case "watchers": return <Watchers />;

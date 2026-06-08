@@ -28,10 +28,20 @@ router = APIRouter(prefix="/api/budgets", tags=["budgets"])
 
 
 class CreateProjectBody(BaseModel):
+    # Optional client-minted id for offline-first idempotent replay.
+    # When provided, the server uses it as the project id. A second POST
+    # with the same id returns the existing project without duplicating it.
+    id: str | None = Field(default=None, max_length=128)
     name: str = Field(min_length=1, max_length=200)
     budget: float = 0.0
     currency: str = Field(default="EUR", max_length=8)
     description: str | None = Field(default=None, max_length=2000)
+    # Optional calendar color, e.g. "#4F8AF4". Validated lenient server-side:
+    # a non-#RRGGBB value is cleared to None (never 500s).
+    color: str | None = Field(default=None, max_length=16)
+    # Optional favorite flag — pins the project into the mobile Home
+    # "Favorites" section. None = leave as-is on an upsert.
+    is_favorite: bool | None = None
 
 
 class SetBudgetBody(BaseModel):
@@ -45,9 +55,17 @@ class UpdateProjectBody(BaseModel):
     currency: str | None = Field(default=None, max_length=8)
     description: str | None = Field(default=None, max_length=2000)
     status: Literal["active", "archived"] | None = None
+    # Optional calendar color, e.g. "#4F8AF4". Validated lenient server-side:
+    # a non-#RRGGBB value is cleared to None (never 500s).
+    color: str | None = Field(default=None, max_length=16)
+    # Optional favorite flag — toggled from the mobile star control. None means
+    # "leave unchanged" (dropped by the route's None-filter); True/False set it.
+    is_favorite: bool | None = None
 
 
 class CreateExpenseBody(BaseModel):
+    # Optional client-minted id for offline-first idempotent replay.
+    id: str | None = Field(default=None, max_length=128)
     amount: float
     currency: str | None = Field(default=None, max_length=8)
     description: str | None = Field(default=None, max_length=2000)
@@ -112,6 +130,7 @@ async def create_project_route(
     project = await store.create_project(
         _config, user.id, body.name,
         budget=body.budget, currency=body.currency, description=body.description,
+        color=body.color, is_favorite=body.is_favorite, project_id=body.id or None,
     )
     return {"project": project}
 
@@ -173,6 +192,34 @@ async def delete_project_route(
     return {"status": "deleted"}
 
 
+@router.get("/changes")
+async def budget_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 datetime. Only projects/expenses updated after this "
+            "timestamp are returned. Omit to receive all rows (full sync). "
+            "Use the `now` field from the previous response as the next "
+            "`since` value."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients.
+
+    Returns:
+    - ``projects``: live (non-deleted) projects updated after ``since``
+    - ``expenses``: live (non-deleted) expenses updated after ``since``
+    - ``deleted_projects``: ids of projects soft-deleted after ``since``
+    - ``deleted_expenses``: ids of expenses soft-deleted after ``since``
+    - ``now``: server ISO timestamp — pass this as ``since`` next time
+
+    Clients should persist ``now`` locally and send it on the next pull.
+    Last-write-wins on ``updated_at`` resolves any conflicts.
+    """
+    return await store.get_budget_changes(_config, user.id, since=since)
+
+
 # ---------------------------------------------------------------------------
 # Expenses
 # ---------------------------------------------------------------------------
@@ -212,6 +259,7 @@ async def create_expense_route(
             amount=body.amount, currency=body.currency,
             description=body.description, vendor=body.vendor, notes=body.notes,
             task_id=body.task_id, spent_at=body.spent_at,
+            expense_id=body.id or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

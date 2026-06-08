@@ -25,6 +25,7 @@ from lazyclaw.tasks.store import (
     create_task,
     delete_task,
     get_task,
+    get_task_changes,
     list_tasks,
     set_steps,
     toggle_step,
@@ -48,6 +49,10 @@ class StepDraft(BaseModel):
 
 
 class CreateTaskBody(BaseModel):
+    # Optional client-minted id for offline-first idempotent replay.
+    # When provided, the server uses it as the task id. A second POST
+    # with the same id returns the existing task without duplicating it.
+    id: str | None = Field(default=None, max_length=128)
     title: str = Field(min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=5000)
     category: str | None = Field(default=None, max_length=100)
@@ -127,6 +132,7 @@ async def create_task_route(
         recurring=body.recurring,
         tags=body.tags,
         steps=steps_payload,
+        task_id=body.id or None,
     )
     return {"task": task}
 
@@ -170,6 +176,32 @@ async def delete_task_route(
     if not ok:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "deleted", "id": task_id}
+
+
+@router.get("/changes")
+async def task_changes_route(
+    user: User = Depends(get_current_user),
+    since: str | None = Query(
+        default=None,
+        description=(
+            "ISO-8601 datetime. Only tasks updated after this timestamp are "
+            "returned. Omit to receive all tasks (full sync). Use the `now` "
+            "field from the previous response as the next `since` value."
+        ),
+    ),
+):
+    """Delta feed for offline-first clients.
+
+    Returns:
+    - ``tasks``: live (non-deleted) tasks updated after ``since``
+    - ``deleted``: ids of tasks soft-deleted after ``since``
+    - ``now``: server ISO timestamp — pass this as ``since`` next time
+
+    Clients should persist ``now`` locally and send it on the next pull.
+    Last-write-wins on ``updated_at`` resolves any conflicts.
+    """
+    result = await get_task_changes(_config, user.id, since=since)
+    return result
 
 
 @router.post("/{task_id}/ai-describe")

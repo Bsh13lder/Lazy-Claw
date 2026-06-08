@@ -217,7 +217,23 @@ async def _maybe_refresh_title(
         if len(raw) < 4:
             return
         new_title = f"{iso_target} — {raw}"
-        await store.update_note(config, user_id, note_id, title=new_title)
+        # Preserve the canonical ``Journal — DATE`` name as an alias so inbound
+        # ``[[Journal — DATE]]`` backlinks keep resolving after the rename
+        # (FIX B — cross-user journal bug 2026-06-01). ``update_note`` also
+        # auto-preserves the old title on any title change; passing the alias
+        # explicitly makes the guarantee independent of that internal behaviour
+        # and survives even if the note was retitled more than once.
+        canonical = f"Journal — {iso_target}"
+        existing_aliases = list(note.get("aliases") or [])
+        if canonical not in existing_aliases:
+            existing_aliases.append(canonical)
+        await store.update_note(
+            config,
+            user_id,
+            note_id,
+            title=new_title,
+            aliases=existing_aliases,
+        )
         logger.info("Journal title refreshed for %s → %s", iso_target, new_title)
     except Exception:
         logger.debug("journal title refresh failed", exc_info=True)

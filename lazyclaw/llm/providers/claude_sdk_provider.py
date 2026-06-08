@@ -53,6 +53,11 @@ logger = logging.getLogger(__name__)
 # references (`_DISALLOWED_BUILT_INS`) unchanged.
 _DISALLOWED_BUILT_INS = DISALLOWED_BUILT_INS
 
+# Session isolation: pin the spawned claude process to a lazyclaw-owned cwd
+# so its transcripts don't co-mingle with the user's personal Claude Code
+# sessions. See _claude_home for the full leak rationale.
+from lazyclaw.llm.providers._claude_home import isolated_claude_cwd as _isolated_claude_cwd
+
 # MCP tool name pattern from lazyclaw's registry: `mcp_<uuid>_<tool_name>`.
 # We strip the UUID prefix when registering with the SDK (cleaner names +
 # tighter prompts) and reverse-map when dispatching the tool call back to
@@ -545,6 +550,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         prompt_text = _serialize_messages(_body_messages)
         options, name_map = self._build_options(
             tools_spec, create_sdk_mcp_server, system_prompt=_system_text or None,
+            user_id=kwargs.get("user_id"),
         )
 
         logger.info(
@@ -762,6 +768,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         prompt_text = _serialize_messages(_body_messages)
         options, name_map = self._build_options(
             tools_spec, create_sdk_mcp_server, system_prompt=_system_text or None,
+            user_id=kwargs.get("user_id"),
         )
 
         logger.info(
@@ -920,6 +927,7 @@ class ClaudeSDKProvider(BaseLLMProvider):
         tools_spec: list[dict],
         create_sdk_mcp_server,
         system_prompt: str | None = None,
+        user_id: str | None = None,
     ) -> tuple[Any, dict[str, str]]:
         """Construct ClaudeAgentOptions for one chat() call.
 
@@ -992,6 +1000,25 @@ class ClaudeSDKProvider(BaseLLMProvider):
             # strict_mcp_config=True locks the surface down to ONLY the
             # MCPs we explicitly pass in (the lazyclaw in-process server).
             "strict_mcp_config": True,
+            # CRITICAL (session isolation — inbound leak fix): with no
+            # setting_sources the SDK defaults to "all sources loaded"
+            # (CLI default), pulling the HOST USER's personal Claude Code
+            # state into lazyclaw's agent context — ~/.claude/settings.json,
+            # ~/.claude/CLAUDE.md, ~/.claude/rules/*, AND any personal hooks
+            # (SessionStart, etc.). [] = SDK isolation mode: the agent gets
+            # ONLY what lazyclaw passes (SOUL.md via system_prompt + the
+            # lazyclaw MCP tools). lazyclaw's own personality is SOUL.md,
+            # never the repo/user CLAUDE.md.
+            "setting_sources": [],
+            # CRITICAL (session isolation — outbound leak fix): pin cwd to a
+            # lazyclaw-owned dir so the SDK's auto-persisted .jsonl transcript
+            # (full decrypted conversation) lands in its OWN project bucket
+            # instead of co-mingling with the user's personal Claude Code
+            # sessions in the inherited process cwd. Credentials stay at
+            # ~/.claude/.credentials.json (CLAUDE_CONFIG_DIR untouched) so
+            # OAuth subscription auth is unaffected. Scoped per user_id so
+            # multi-tenant deployments don't co-mingle agent transcripts.
+            "cwd": _isolated_claude_cwd(user_id),
         }
         if mcp_servers:
             kw["mcp_servers"] = mcp_servers

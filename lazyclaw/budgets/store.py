@@ -10,6 +10,7 @@ auto-associate without a migration. Expenses roll up via a plaintext
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -31,13 +32,26 @@ ENCRYPTED_BUDGET_ENTRY_FIELDS = frozenset({"source"})
 
 PROJECT_COLUMNS = [
     "id", "user_id", "name", "name_key", "budget", "currency",
-    "status", "description", "lazybrain_note_id", "created_at", "updated_at",
+    "status", "description",
+    # Per-project color (feat/flutter-mobile) — optional hex string like
+    # "#4F8AF4" (or NULL) so the mobile calendar can color-code projects +
+    # tasks. Plaintext like status/budget (not sensitive).
+    "color",
+    # Per-project favorite flag (feat/flutter-mobile) — INTEGER 0/1, plaintext.
+    # Pins a project into the mobile Home "Favorites" section. Default 0.
+    "is_favorite",
+    "lazybrain_note_id", "created_at", "updated_at",
+    # Offline-sync column (feat/flutter-mobile) — soft-delete tombstone.
+    # NULL = live; non-NULL = deleted. Exposed via /api/budgets/changes.
+    "deleted_at",
 ]
 
 EXPENSE_COLUMNS = [
     "id", "user_id", "project_id", "task_id", "amount", "currency",
     "description", "vendor", "notes", "spent_at", "status",
     "recurring_expense_id", "lazybrain_note_id", "created_at", "updated_at",
+    # Offline-sync column (feat/flutter-mobile) — soft-delete tombstone.
+    "deleted_at",
 ]
 
 RECUR_COLUMNS = [
@@ -67,6 +81,32 @@ def _name_key(name: str) -> str:
     return " ".join((name or "").strip().casefold().split())
 
 
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _clean_color(value: str | None) -> str | None:
+    """Normalize a project color to a 6-digit hex string like ``"#4F8AF4"``.
+
+    Lenient by design: anything that isn't a valid ``#RRGGBB`` string (bad
+    shape, empty, non-string) is cleared to ``None`` rather than raising — a
+    bad color must never 500 a project write. The original case is preserved.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if _HEX_COLOR_RE.match(candidate) else None
+
+
+def _clean_favorite(value) -> int:
+    """Normalize a favorite flag to a stored INTEGER 0/1.
+
+    Lenient like ``_clean_color``: any truthy value → 1, anything else → 0, so a
+    bad payload can never 500 a project write. Stored as int (not bool) so the
+    column stays a plain SQLite INTEGER like ``status``/``budget``.
+    """
+    return 1 if value else 0
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -88,7 +128,12 @@ def _row_to_dict(row, columns: list[str], encrypted: frozenset[str], key: bytes)
 
 
 def _project_to_dict(row, key: bytes) -> dict:
-    return _row_to_dict(row, PROJECT_COLUMNS, ENCRYPTED_PROJECT_FIELDS, key)
+    result = _row_to_dict(row, PROJECT_COLUMNS, ENCRYPTED_PROJECT_FIELDS, key)
+    # Serialize the stored INTEGER 0/1 as a JSON boolean so the web/mobile
+    # clients get a real ``true``/``false`` (NULL on a pre-migration row → False).
+    if "is_favorite" in result:
+        result["is_favorite"] = bool(result["is_favorite"])
+    return result
 
 
 def _expense_to_dict(row, key: bytes) -> dict:
@@ -218,19 +263,48 @@ async def create_project(
     budget: float = 0.0,
     currency: str = "EUR",
     description: str | None = None,
+    color: str | None = None,
+    is_favorite: bool | None = None,
+    project_id: str | None = None,
 ) -> dict:
     """Create or upsert a project by ``name_key``. Idempotent against
     category-typo duplicates (case/whitespace). If the project already exists,
-    its budget/currency/description are updated when explicitly provided.
-    Creates the ``<Name> Project`` LazyBrain note on first insert."""
+    its budget/currency/description/color/is_favorite are updated when
+    explicitly provided. Creates the ``<Name> Project`` LazyBrain note on first
+    insert.
+
+    ``color``: optional ``#RRGGBB`` hex string (or None) for calendar
+    color-coding. Invalid values are cleared to None (never raises).
+
+    ``is_favorite``: optional bool pinning the project into the mobile Home
+    "Favorites" section. ``None`` means "leave as-is" on an upsert; a fresh
+    insert defaults to un-favorited.
+
+    ``project_id``: optional client-minted id for offline-first idempotent
+    replay. When provided, the server uses it as the project id. A second POST
+    with the same id returns the existing project without duplicating it.
+    """
     if not name or not name.strip():
         raise ValueError("project name required")
 
     key = await get_user_dek(config, user_id)
     name_key = _name_key(name)
+    color = _clean_color(color)
+
+    # Idempotent replay: if the client-minted id already exists for this user,
+    # return the existing row without inserting a duplicate.
+    if project_id:
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {PROJECT_SELECT} FROM projects WHERE id = ? AND user_id = ?",
+                (project_id, user_id),
+            )
+            existing_by_id = await cur.fetchone()
+        if existing_by_id is not None:
+            return _project_to_dict(existing_by_id, key)
 
     existing = await get_project_by_name(config, user_id, name)
-    if existing:
+    if existing and not project_id:
         updates: dict = {}
         if budget:
             updates["budget"] = budget
@@ -238,6 +312,10 @@ async def create_project(
             updates["currency"] = currency
         if description is not None:
             updates["description"] = description
+        if color is not None:
+            updates["color"] = color
+        if is_favorite is not None:
+            updates["is_favorite"] = is_favorite
         if not existing.get("lazybrain_note_id"):
             note_id = await _ensure_project_note(
                 config, user_id, name, budget or existing.get("budget") or 0.0, currency,
@@ -249,19 +327,22 @@ async def create_project(
             return {**existing, **updates}
         return existing
 
-    project_id = str(uuid4())
+    project_id = project_id or str(uuid4())
     now = _now()
     note_id = await _ensure_project_note(config, user_id, name, budget, currency)
 
+    favorite_int = _clean_favorite(is_favorite)
     async with db_session(config) as db:
         await db.execute(
             "INSERT INTO projects "
             "(id, user_id, name, name_key, budget, currency, status, "
-            "description, lazybrain_note_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+            "description, color, is_favorite, lazybrain_note_id, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
             (
                 project_id, user_id, encrypt(name, key), name_key,
-                budget, currency, _enc(description, key), note_id, now, now,
+                budget, currency, _enc(description, key), color, favorite_int,
+                note_id, now, now,
             ),
         )
         await db.commit()
@@ -270,8 +351,9 @@ async def create_project(
     return {
         "id": project_id, "user_id": user_id, "name": name, "name_key": name_key,
         "budget": budget, "currency": currency, "status": "active",
-        "description": description, "lazybrain_note_id": note_id,
-        "created_at": now, "updated_at": now,
+        "description": description, "color": color,
+        "is_favorite": bool(favorite_int), "lazybrain_note_id": note_id,
+        "created_at": now, "updated_at": now, "deleted_at": None,
     }
 
 
@@ -279,7 +361,8 @@ async def get_project(config: Config, user_id: str, project_id: str) -> dict | N
     key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         cursor = await db.execute(
-            f"SELECT {PROJECT_SELECT} FROM projects WHERE id = ? AND user_id = ?",
+            f"SELECT {PROJECT_SELECT} FROM projects "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
             (project_id, user_id),
         )
         row = await cursor.fetchone()
@@ -292,7 +375,7 @@ async def get_project_by_name(config: Config, user_id: str, name: str) -> dict |
     async with db_session(config) as db:
         cursor = await db.execute(
             f"SELECT {PROJECT_SELECT} FROM projects "
-            "WHERE user_id = ? AND name_key = ?",
+            "WHERE user_id = ? AND name_key = ? AND deleted_at IS NULL",
             (user_id, _name_key(name)),
         )
         row = await cursor.fetchone()
@@ -304,7 +387,8 @@ async def _spent_by_project(config: Config, user_id: str) -> dict[str, float]:
     async with db_session(config) as db:
         cursor = await db.execute(
             "SELECT project_id, COALESCE(SUM(amount), 0) FROM project_expenses "
-            "WHERE user_id = ? AND status = 'posted' GROUP BY project_id",
+            "WHERE user_id = ? AND status = 'posted' AND deleted_at IS NULL "
+            "GROUP BY project_id",
             (user_id,),
         )
         rows = await cursor.fetchall()
@@ -316,7 +400,7 @@ async def list_projects(
 ) -> list[dict]:
     """List projects with rolled-up ``spent`` + ``remaining`` (plaintext SUM)."""
     key = await get_user_dek(config, user_id)
-    where = "user_id = ?"
+    where = "user_id = ? AND deleted_at IS NULL"
     params: list = [user_id]
     if status:
         where += " AND status = ?"
@@ -409,9 +493,20 @@ async def update_project(
     config: Config, user_id: str, project_id: str, **fields
 ) -> bool:
     """Update project fields. Recomputes ``name_key`` + renames the LazyBrain
-    note when ``name`` changes so wikilinks re-resolve via the new title."""
+    note when ``name`` changes so wikilinks re-resolve via the new title.
+
+    A ``color`` field is normalized to ``#RRGGBB`` (invalid → NULL) so a bad
+    color clears instead of 500-ing the update. An ``is_favorite`` field is
+    normalized to a stored INTEGER 0/1."""
     if not fields:
         return False
+
+    # Normalize color without mutating the caller's dict (immutable update).
+    if "color" in fields:
+        fields = {**fields, "color": _clean_color(fields["color"])}
+    # Normalize the favorite flag to a stored INTEGER 0/1 (immutable update).
+    if "is_favorite" in fields:
+        fields = {**fields, "is_favorite": _clean_favorite(fields["is_favorite"])}
 
     key = await get_user_dek(config, user_id)
     set_clauses: list[str] = []
@@ -461,42 +556,42 @@ async def update_project(
 async def delete_project(
     config: Config, user_id: str, project_id: str, *, cascade: bool = False
 ) -> bool:
-    """Delete a project. Refuses (returns False) if it has expenses unless
-    ``cascade`` — then deletes expenses + their notes + recurring rules + jobs."""
+    """Soft-delete a project. Sets ``deleted_at`` on the project row instead of
+    removing it so offline clients can learn of the delete via /changes.
+
+    Refuses (returns False) if the project has live expenses unless
+    ``cascade=True`` — then soft-deletes all live expenses too. Recurring rules
+    and budget entries are left as-is (they carry no user-visible content in the
+    mobile client and cascade-delete there is handled server-side on compaction).
+    """
+    # Only look at live expenses for the guard + cascade.
     expenses = await list_expenses(config, user_id, project_id=project_id, status=None)
     if expenses and not cascade:
         return False
 
-    if cascade:
-        for exp in expenses:
-            await _delete_note(config, user_id, exp.get("lazybrain_note_id"))
-        recurs = await list_recurring(config, user_id, project_id=project_id)
-        for rule in recurs:
-            await _cancel_recurring_job(config, user_id, rule.get("job_id"))
+    now = _now()
 
+    # Verify the project exists (and is live) before doing anything.
     proj = await get_project(config, user_id, project_id)
+    if proj is None:
+        return False
+
     async with db_session(config) as db:
-        await db.execute(
-            "DELETE FROM project_expenses WHERE project_id = ? AND user_id = ?",
-            (project_id, user_id),
-        )
-        await db.execute(
-            "DELETE FROM recurring_expenses WHERE project_id = ? AND user_id = ?",
-            (project_id, user_id),
-        )
-        await db.execute(
-            "DELETE FROM budget_entries WHERE project_id = ? AND user_id = ?",
-            (project_id, user_id),
-        )
+        if cascade and expenses:
+            # Soft-delete all live expenses atomically with the project.
+            await db.execute(
+                "UPDATE project_expenses SET deleted_at = ? "
+                "WHERE project_id = ? AND user_id = ? AND deleted_at IS NULL",
+                (now, project_id, user_id),
+            )
         result = await db.execute(
-            "DELETE FROM projects WHERE id = ? AND user_id = ?",
-            (project_id, user_id),
+            "UPDATE projects SET deleted_at = ? "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            (now, project_id, user_id),
         )
         await db.commit()
         deleted = result.rowcount > 0
 
-    if deleted and cascade and proj:
-        await _delete_note(config, user_id, proj.get("lazybrain_note_id"))
     return deleted
 
 
@@ -518,15 +613,33 @@ async def create_expense(
     task_id: str | None = None,
     spent_at: str | None = None,
     recurring_expense_id: str | None = None,
+    expense_id: str | None = None,
 ) -> dict:
     """Log an expense against a project (optionally a task). Mirrors a
-    LazyBrain note wikilinking ``[[<Name> Project]]``."""
+    LazyBrain note wikilinking ``[[<Name> Project]]``.
+
+    ``expense_id``: optional client-minted id for offline-first idempotent
+    replay. A second call with the same id returns the existing row without
+    inserting a duplicate.
+    """
     project = await get_project(config, user_id, project_id)
     if project is None:
         raise ValueError(f"project not found: {project_id}")
 
     key = await get_user_dek(config, user_id)
-    expense_id = str(uuid4())
+
+    # Idempotent replay: if the client-minted id already exists, return it.
+    expense_id = expense_id or str(uuid4())
+    async with db_session(config) as db:
+        cur = await db.execute(
+            f"SELECT {EXPENSE_SELECT} FROM project_expenses "
+            "WHERE id = ? AND user_id = ?",
+            (expense_id, user_id),
+        )
+        existing_row = await cur.fetchone()
+    if existing_row is not None:
+        return _expense_to_dict(existing_row, key)
+
     now = _now()
     currency = currency or project.get("currency") or "EUR"
     spent_at = spent_at or now[:10]
@@ -562,6 +675,7 @@ async def create_expense(
         "spent_at": spent_at, "status": "posted",
         "recurring_expense_id": recurring_expense_id,
         "lazybrain_note_id": note_id, "created_at": now, "updated_at": now,
+        "deleted_at": None,
     }
 
 
@@ -574,7 +688,7 @@ async def list_expenses(
     status: str | None = "posted",
 ) -> list[dict]:
     key = await get_user_dek(config, user_id)
-    where = "user_id = ?"
+    where = "user_id = ? AND deleted_at IS NULL"
     params: list = [user_id]
     if project_id:
         where += " AND project_id = ?"
@@ -606,7 +720,7 @@ async def list_all_expenses(
     enriched with the (decrypted) ``project_name`` of its project. Powers the
     global Expenses view. User-scoped; ``status`` filters posted/void."""
     key = await get_user_dek(config, user_id)
-    where = "user_id = ?"
+    where = "user_id = ? AND deleted_at IS NULL"
     params: list = [user_id]
     if status:
         where += " AND status = ?"
@@ -658,23 +772,122 @@ async def update_expense(
 
 
 async def delete_expense(config: Config, user_id: str, expense_id: str) -> bool:
-    key = await get_user_dek(config, user_id)
+    """Soft-delete an expense by setting ``deleted_at``. The row is preserved so
+    offline clients can learn of the delete via /api/budgets/changes."""
+    now = _now()
     async with db_session(config) as db:
-        cursor = await db.execute(
-            "SELECT lazybrain_note_id FROM project_expenses "
-            "WHERE id = ? AND user_id = ?",
-            (expense_id, user_id),
-        )
-        row = await cursor.fetchone()
         result = await db.execute(
-            "DELETE FROM project_expenses WHERE id = ? AND user_id = ?",
-            (expense_id, user_id),
+            "UPDATE project_expenses SET deleted_at = ? "
+            "WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            (now, expense_id, user_id),
         )
         await db.commit()
         deleted = result.rowcount > 0
-    if deleted and row and row[0]:
-        await _delete_note(config, user_id, row[0])
     return deleted
+
+
+async def get_budget_changes(
+    config: Config,
+    user_id: str,
+    *,
+    since: str | None = None,
+) -> dict:
+    """Delta feed for offline-first clients.
+
+    Returns:
+    - ``projects``: live (non-deleted) projects with ``updated_at > since``
+    - ``expenses``: live (non-deleted) expenses with ``updated_at > since``
+    - ``deleted_projects``: ids of projects soft-deleted after ``since``
+    - ``deleted_expenses``: ids of expenses soft-deleted after ``since``
+    - ``now``: server ISO timestamp — pass this as ``since`` next time
+
+    When ``since`` is omitted, returns ALL live rows + ALL tombstones (full
+    sync). Clients should persist ``now`` and send it on the next pull.
+    """
+    key = await get_user_dek(config, user_id)
+    now_ts = _now()
+
+    if since:
+        # Live projects updated after since.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {PROJECT_SELECT} FROM projects "
+                "WHERE user_id = ? AND deleted_at IS NULL AND updated_at > ? "
+                "ORDER BY updated_at DESC",
+                (user_id, since),
+            )
+            proj_rows = await cur.fetchall()
+
+        # Deleted projects whose deleted_at > since.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM projects "
+                "WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at > ?",
+                (user_id, since),
+            )
+            deleted_proj_ids = [r[0] for r in await cur.fetchall()]
+
+        # Live expenses updated after since.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {EXPENSE_SELECT} FROM project_expenses "
+                "WHERE user_id = ? AND deleted_at IS NULL AND updated_at > ? "
+                "ORDER BY updated_at DESC",
+                (user_id, since),
+            )
+            exp_rows = await cur.fetchall()
+
+        # Deleted expenses whose deleted_at > since.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM project_expenses "
+                "WHERE user_id = ? AND deleted_at IS NOT NULL AND deleted_at > ?",
+                (user_id, since),
+            )
+            deleted_exp_ids = [r[0] for r in await cur.fetchall()]
+    else:
+        # Full sync: all live rows + all tombstones.
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {PROJECT_SELECT} FROM projects "
+                "WHERE user_id = ? AND deleted_at IS NULL "
+                "ORDER BY updated_at DESC",
+                (user_id,),
+            )
+            proj_rows = await cur.fetchall()
+
+        async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM projects "
+                "WHERE user_id = ? AND deleted_at IS NOT NULL",
+                (user_id,),
+            )
+            deleted_proj_ids = [r[0] for r in await cur.fetchall()]
+
+        async with db_session(config) as db:
+            cur = await db.execute(
+                f"SELECT {EXPENSE_SELECT} FROM project_expenses "
+                "WHERE user_id = ? AND deleted_at IS NULL "
+                "ORDER BY updated_at DESC",
+                (user_id,),
+            )
+            exp_rows = await cur.fetchall()
+
+        async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM project_expenses "
+                "WHERE user_id = ? AND deleted_at IS NOT NULL",
+                (user_id,),
+            )
+            deleted_exp_ids = [r[0] for r in await cur.fetchall()]
+
+    return {
+        "projects": [_project_to_dict(r, key) for r in proj_rows],
+        "expenses": [_expense_to_dict(r, key) for r in exp_rows],
+        "deleted_projects": deleted_proj_ids,
+        "deleted_expenses": deleted_exp_ids,
+        "now": now_ts,
+    }
 
 
 async def spending_report(

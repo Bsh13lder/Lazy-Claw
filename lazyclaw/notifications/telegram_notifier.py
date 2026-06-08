@@ -17,6 +17,20 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+# Human-friendly feed titles per event kind (the body carries the detail).
+_KIND_TITLES: dict[str, str] = {
+    "done": "Task complete",
+    "background_done": "Background task done",
+    "background_failed": "Background task failed",
+    "help_needed": "Agent needs help",
+}
+
+
+def _strip_html(text: str) -> str:
+    """Flatten the notifier's HTML payload to plain text for the in-app feed."""
+    no_tags = re.sub(r"<[^>]+>", "", text or "")
+    return html.unescape(no_tags).strip()
+
 
 def _strip_markdown(text: str) -> str:
     """Remove common markdown formatting for plain-text Telegram messages.
@@ -99,11 +113,16 @@ class TelegramNotifier:
         *,
         source_is_telegram: bool = False,
         verbose: bool = True,
+        config: Any | None = None,
     ) -> None:
         self._bot = bot
         self._get_chat_id = admin_chat_id_fn
         self._source_is_telegram = source_is_telegram
         self._verbose = verbose
+        # ``config`` enables per-user channel routing (telegram | app | both)
+        # + recording to the in-app notification feed. When ``None`` (legacy
+        # call sites), behaviour is unchanged: Telegram-only, no feed.
+        self._config = config
         self._work_summary: Any | None = None
 
     # ── AgentCallback interface ──────────────────────────────────────
@@ -112,12 +131,64 @@ class TelegramNotifier:
         if self._source_is_telegram:
             return
 
-        chat_id = self._get_chat_id()
-        if not chat_id or not self._bot:
-            return
-
+        # Format FIRST so the feed mirrors exactly what would have gone to
+        # Telegram (honours verbose / quiet / [SILENT] suppression in _format).
         text, parse_mode = self._format(event)
         if not text:
+            return
+
+        # Resolve the routing channel + record to the in-app feed for
+        # ``app`` / ``both``. No-config notifiers stay Telegram-only.
+        channel = "telegram"
+        admin_uid = None
+        if self._config is not None:
+            try:
+                from lazyclaw.notifications.channel import (
+                    get_notification_channel,
+                    resolve_admin_user_id,
+                )
+
+                admin_uid = await resolve_admin_user_id(self._config)
+                if admin_uid:
+                    channel = await get_notification_channel(
+                        self._config, admin_uid,
+                    )
+            except Exception:
+                logger.debug(
+                    "TelegramNotifier channel resolve failed", exc_info=True,
+                )
+
+        if admin_uid is not None:
+            try:
+                from lazyclaw.notifications.channel import should_record_feed
+
+                if should_record_feed(channel):
+                    from lazyclaw.notifications.feed_store import (
+                        record_notification,
+                    )
+
+                    kind = getattr(event, "kind", "info") or "info"
+                    await record_notification(
+                        self._config, admin_uid, kind,
+                        _KIND_TITLES.get(kind, "Notification"),
+                        _strip_html(text),
+                    )
+            except Exception:
+                logger.warning(
+                    "TelegramNotifier feed record failed", exc_info=True,
+                )
+
+        # Gate the Telegram send on the channel (app → skip).
+        try:
+            from lazyclaw.notifications.channel import should_send_telegram
+
+            if not should_send_telegram(channel):
+                return
+        except Exception:
+            pass  # default to sending on any resolver import failure
+
+        chat_id = self._get_chat_id()
+        if not chat_id or not self._bot:
             return
 
         try:
@@ -329,6 +400,7 @@ class PrefixedTelegramNotifier(TelegramNotifier):
         icon: str = "⏰",
         source_is_telegram: bool = False,
         verbose: bool = False,
+        config: Any | None = None,
     ) -> None:
         # Default verbose=False here: PrefixedTelegramNotifier is only
         # constructed by heartbeat-fired paths (cron / reminder / watcher
@@ -339,6 +411,7 @@ class PrefixedTelegramNotifier(TelegramNotifier):
             bot, admin_chat_id_fn,
             source_is_telegram=source_is_telegram,
             verbose=verbose,
+            config=config,
         )
         self._prefix = prefix
         self._icon = icon

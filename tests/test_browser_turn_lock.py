@@ -15,8 +15,11 @@ import pytest
 
 from lazyclaw.runtime import browser_turn_lock as btl
 from lazyclaw.runtime.browser_turn_lock import (
+    BACKGROUND_ROLE,
+    VISIBLE_ROLE,
     acquire_live_browser_if_needed,
     browser_turn_scope,
+    current_browser_role,
     tool_drives_live_browser,
 )
 
@@ -86,6 +89,86 @@ async def test_different_users_do_not_block():
     assert order[:2] == ["A:start", "B:start"], order
 
 
+# ── two-lane isolation: visible vs background never block each other ──
+
+
+@pytest.mark.asyncio
+async def test_visible_and_background_lanes_do_not_block():
+    """The whole point of the two-lane model: a foreground (visible) turn
+    holding the Brave must NOT block a background (watcher/cron) turn — they
+    hold different per-(user, role) locks and drive different tabs."""
+    order: list[str] = []
+
+    async def turn(role: str, name: str, hold: float):
+        async with browser_turn_scope(role):
+            await acquire_live_browser_if_needed("u1", "browser")
+            order.append(f"{name}:start")
+            await asyncio.sleep(hold)
+            order.append(f"{name}:end")
+
+    # Same user, DIFFERENT lanes → independent locks → they interleave (both
+    # start before either ends), unlike same-lane turns which serialize.
+    await asyncio.gather(
+        turn(VISIBLE_ROLE, "fg", 0.06),
+        _delayed(0.01, turn(BACKGROUND_ROLE, "bg", 0.06)),
+    )
+
+    assert order[:2] == ["fg:start", "bg:start"], order
+
+
+@pytest.mark.asyncio
+async def test_background_role_keys_separate_lock():
+    async with browser_turn_scope(BACKGROUND_ROLE):
+        await acquire_live_browser_if_needed("u1", "browser")
+        # The background lane lock is held; the visible lane is untouched.
+        assert btl._get_user_lock("u1", BACKGROUND_ROLE).locked()
+        assert not btl._get_user_lock("u1", VISIBLE_ROLE).locked()
+    assert not btl._get_user_lock("u1", BACKGROUND_ROLE).locked()
+
+
+@pytest.mark.asyncio
+async def test_background_turns_same_lane_serialize():
+    """Within the background lane, turns still serialize (one bg tab)."""
+    order: list[str] = []
+
+    async def turn(name: str, hold: float):
+        async with browser_turn_scope(BACKGROUND_ROLE):
+            await acquire_live_browser_if_needed("u1", "browser")
+            order.append(f"{name}:start")
+            await asyncio.sleep(hold)
+            order.append(f"{name}:end")
+
+    await asyncio.gather(turn("A", 0.10), _delayed(0.02, turn("B", 0.01)))
+    assert order == ["A:start", "A:end", "B:start", "B:end"], order
+
+
+@pytest.mark.asyncio
+async def test_current_browser_role_reflects_scope():
+    assert current_browser_role() == VISIBLE_ROLE  # default outside any scope
+    async with browser_turn_scope(BACKGROUND_ROLE):
+        assert current_browser_role() == BACKGROUND_ROLE
+    assert current_browser_role() == VISIBLE_ROLE  # reset on exit
+
+
+@pytest.mark.asyncio
+async def test_guard_background_role_does_not_block_visible_turn():
+    """A watcher poll guard on the background lane must NOT be blocked by a
+    foreground (visible) turn holding the visible lock — that was the
+    starvation bug."""
+    from lazyclaw.runtime.browser_turn_lock import live_browser_guard
+
+    # Foreground turn is holding the VISIBLE lane lock.
+    visible_lock = btl._get_user_lock("u1", VISIBLE_ROLE)
+    await visible_lock.acquire()
+    try:
+        async with live_browser_guard(
+            "u1", role=BACKGROUND_ROLE, timeout=0.5,
+        ) as got:
+            assert got is True  # background poll acquires despite fg holding
+    finally:
+        visible_lock.release()
+
+
 # ── re-entrancy: nested scope is a no-op, outer owns release ──────────
 
 
@@ -97,9 +180,9 @@ async def test_nested_scope_is_reentrant():
         async with browser_turn_scope():
             await acquire_live_browser_if_needed("u1", "browser")
         # Still inside outer scope — lock still held, so a fresh waiter blocks.
-        assert btl._per_user_locks["u1"].locked()
+        assert btl._get_user_lock("u1").locked()
     # Outer exited → released.
-    assert not btl._per_user_locks["u1"].locked()
+    assert not btl._get_user_lock("u1").locked()
 
 
 # ── child task CONTENDS (not treated as nested) — the #4 fix ─────────
@@ -131,6 +214,112 @@ async def test_child_task_contends_not_nested():
     assert order == ["parent:holding", "parent:releasing", "child:got-lock"], order
 
 
+# ── detached-child LEAK regression (delegate / dispatch_subagents) ────
+#
+# RED before the fix: ``delegate._run_delegate_bg`` and
+# ``dispatcher._run_and_publish`` spawn the worker as a DETACHED
+# ``asyncio.create_task`` that is never awaited. The parent foreground turn
+# (these skills are non-blocking) returns immediately, so the parent's
+# ``browser_turn_scope.finally`` runs and is the ONLY releaser. The detached
+# child inherits the parent's holder via the contextvars copy but never
+# re-enters ``browser_turn_scope``, so when it later acquires the per-user lock
+# — AFTER the parent's finally already ran — the lock is taken with NO surviving
+# releaser and leaks for the process lifetime (proven: lock held 20:37 → 21:53
+# with zero turn activity). The fix wraps each detached child BODY in its own
+# ``browser_turn_scope`` so the child gets a FRESH holder (its task identity
+# differs from the inherited holder's ``.task``) and releases the lock in its
+# own ``finally`` when it finishes.
+#
+# These tests drive the REAL source coroutines with ``run_specialist``
+# replaced by a stub that takes the live-Brave lock (simulating the worker's
+# first browser tool call). The simulated detached-task shape: a parent scope
+# that has ALREADY exited, then the child coroutine run as its own task.
+
+
+async def _run_child_as_detached_task(child_coro_factory) -> None:
+    """Mimic the delegate/dispatcher shape: hold the lock in a parent scope,
+    capture the parent context, exit the parent scope, then run the child in a
+    task spawned FROM the captured (parent) context — so the child inherits the
+    parent's holder exactly as ``asyncio.create_task`` does in production."""
+    import contextvars
+
+    captured: contextvars.Context | None = None
+    async with browser_turn_scope():
+        await acquire_live_browser_if_needed("u1", "browser")
+        captured = contextvars.copy_context()
+    # Parent scope released. Run the child in a task using the parent's context
+    # (this is what create_task does inside a still-holding parent turn).
+    assert captured is not None
+    task = captured.run(asyncio.create_task, child_coro_factory())
+    await asyncio.wait_for(task, timeout=3.0)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_run_and_publish_releases_lock(monkeypatch):
+    """``AgentDispatcher._run_and_publish`` must NOT leak the live-Brave lock.
+
+    With ``run_specialist`` stubbed to acquire the live-Brave lock (a worker
+    browser tool call), running ``_run_and_publish`` as a detached task after
+    the parent scope exited must leave the per-user lock UNLOCKED."""
+    from lazyclaw.runtime import dispatcher as disp_mod
+    from lazyclaw.runtime.dispatcher import (
+        AgentDispatcher, AgentType, SubagentConfig,
+    )
+    from lazyclaw.teams import runner as runner_mod
+    from lazyclaw.teams.runner import SpecialistResult
+
+    async def _fake_run_specialist(*args, **kwargs):
+        # Simulate the subagent's first browser tool call taking the lock.
+        await acquire_live_browser_if_needed("u1", "browser")
+        return SpecialistResult(
+            agent_name="explore_agent",
+            task="lookup X",
+            result="ok",
+            tools_used=(),
+            model_used="worker",
+            duration_ms=1,
+            success=True,
+            error=None,
+        )
+
+    monkeypatch.setattr(runner_mod, "run_specialist", _fake_run_specialist)
+    # task_event_bus.publish must be a harmless no-op for the test.
+    from lazyclaw.runtime import task_event_bus
+    monkeypatch.setattr(task_event_bus, "publish", lambda *a, **k: None)
+
+    dispatcher = AgentDispatcher(
+        config=None, eco_router=None, registry=None, permission_checker=None,
+        team_lead=None, callback=None,
+    )
+    cfg = SubagentConfig(agent_type=AgentType.EXPLORE, task="lookup X")
+
+    await _run_child_as_detached_task(
+        lambda: dispatcher._run_and_publish(cfg, "u1", "subagent-test"),
+    )
+
+    assert not btl._get_user_lock("u1").locked()
+
+
+@pytest.mark.asyncio
+async def test_delegate_run_specialist_under_scope_releases_lock():
+    """Mirror of ``delegate._run_delegate_bg``'s fixed shape: the detached
+    child wraps its ``run_specialist`` call in ``browser_turn_scope``, so the
+    lock taken on the worker's first browser tool call is released when the
+    worker finishes — no leak after the parent turn already exited."""
+    async def fixed_delegate_child() -> None:
+        # Same lazy-import + tight-wrap shape as the source fix.
+        from lazyclaw.runtime.browser_turn_lock import (
+            browser_turn_scope as scope,
+        )
+        async with scope():
+            # Stand-in for run_specialist taking the lock on a browser call.
+            await acquire_live_browser_if_needed("u1", "browser")
+
+    await _run_child_as_detached_task(fixed_delegate_child)
+
+    assert not btl._get_user_lock("u1").locked()
+
+
 # ── standalone guard for heartbeat watcher polls (#6) ────────────────
 
 
@@ -140,8 +329,8 @@ async def test_live_browser_guard_acquires_and_releases():
 
     async with live_browser_guard("u1", timeout=1.0) as got:
         assert got is True
-        assert btl._per_user_locks["u1"].locked()
-    assert not btl._per_user_locks["u1"].locked()
+        assert btl._get_user_lock("u1").locked()
+    assert not btl._get_user_lock("u1").locked()
 
 
 @pytest.mark.asyncio
@@ -170,7 +359,7 @@ async def test_double_acquire_same_turn_is_idempotent():
         await asyncio.wait_for(
             acquire_live_browser_if_needed("u1", "use_host_browser"), timeout=1.0,
         )
-        assert btl._per_user_locks["u1"].locked()
+        assert btl._get_user_lock("u1").locked()
 
 
 # ── non-browser tool never acquires ──────────────────────────────────
@@ -180,7 +369,7 @@ async def test_double_acquire_same_turn_is_idempotent():
 async def test_non_browser_tool_does_not_acquire():
     async with browser_turn_scope():
         await acquire_live_browser_if_needed("u1", "whatsapp_read")
-        assert "u1" not in btl._per_user_locks or not btl._per_user_locks["u1"].locked()
+        assert not btl._get_user_lock("u1").locked()
 
 
 # ── no active scope → no-op (direct skill call path) ─────────────────
@@ -190,7 +379,7 @@ async def test_non_browser_tool_does_not_acquire():
 async def test_no_scope_is_noop():
     # Calling outside any turn scope must not raise or create a held lock.
     await acquire_live_browser_if_needed("u1", "browser")
-    assert "u1" not in btl._per_user_locks or not btl._per_user_locks["u1"].locked()
+    assert not btl._get_user_lock("u1").locked()
 
 
 # ── timeout degrades to unlocked instead of hanging ──────────────────

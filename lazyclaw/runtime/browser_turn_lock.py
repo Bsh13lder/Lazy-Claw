@@ -43,10 +43,21 @@ logger = logging.getLogger(__name__)
 # hold the Brave for a couple of minutes (multi-step navigate/click/submit).
 ACQUIRE_TIMEOUT_S = 180.0
 
-# A heartbeat watcher poll is SKIPPABLE — if a real turn is driving the Brave
-# we'd rather skip this poll tick (it retries next interval) than queue behind
-# a multi-minute turn. So watcher polls wait only briefly, then skip.
+# A heartbeat watcher poll is SKIPPABLE — if a background brain turn is driving
+# the Brave we'd rather skip this poll tick (it retries next interval) than
+# queue behind a multi-minute turn. So watcher polls wait only briefly, then
+# skip.
 WATCHER_POLL_LOCK_TIMEOUT_S = 8.0
+
+# Browser "lanes" (2026-06-02). Foreground turns drive the VISIBLE tab; all
+# daemon-originated work (watcher polls + watcher/cron/reminder brain turns)
+# drives its OWN background tab(s). Each lane has its OWN per-user lock, so the
+# background lane can never block or steal the visible tab from the foreground.
+# get_backend (browser_actions/backends.py) reads the active role to route to
+# the visible vs background CDP backend.
+VISIBLE_ROLE = "visible"
+BACKGROUND_ROLE = "background"
+DEFAULT_ROLE = VISIBLE_ROLE
 
 # Tools that drive the user's single live host Brave. whatsapp / instagram /
 # email are MCP connectors (Baileys / instagrapi / IMAP) — NOT the shared
@@ -74,18 +85,38 @@ def tool_drives_live_browser(tool_name: str | None) -> bool:
     return "upwork" in name
 
 
-# Per-user locks. Module-global (one Brave per user) so that independently
-# constructed CDPBackend instances (the daemon builds fresh ones) still
-# serialize through the SAME lock, not a per-instance one.
+# Per-(user, role) locks. Module-global (one Brave per user) so that
+# independently constructed CDPBackend instances (the daemon builds fresh ones)
+# still serialize through the SAME lock, not a per-instance one. Keyed by
+# ``f"{user_id}:{role}"`` so the visible (foreground) lane and the background
+# (watcher/cron) lane hold DIFFERENT locks and never block each other.
 _per_user_locks: dict[str, asyncio.Lock] = {}
 
 
-def _get_user_lock(user_id: str) -> asyncio.Lock:
-    lock = _per_user_locks.get(user_id)
+def _lane_key(user_id: str, role: str) -> str:
+    return f"{user_id}:{role}"
+
+
+def _get_user_lock(user_id: str, role: str = DEFAULT_ROLE) -> asyncio.Lock:
+    key = _lane_key(user_id, role)
+    lock = _per_user_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _per_user_locks[user_id] = lock
+        _per_user_locks[key] = lock
     return lock
+
+
+# The active browser lane/role for the current turn. ``get_backend`` reads this
+# to route a turn's browser tool calls to the visible vs background CDP backend.
+# Set by ``browser_turn_scope`` and inherited by child tasks via contextvars.
+_role_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "browser_lane_role", default=DEFAULT_ROLE
+)
+
+
+def current_browser_role() -> str:
+    """The browser lane/role for the current turn (defaults to visible)."""
+    return _role_var.get()
 
 
 class _Holder:
@@ -97,10 +128,13 @@ class _Holder:
     self-deadlock — the first acquires, the rest see ``held`` and return.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, role: str = DEFAULT_ROLE) -> None:
         self.held = False
         self._lock: asyncio.Lock | None = None
         self._guard = asyncio.Lock()
+        # The lane/role this turn drives — the lock is taken on (user, role) so
+        # the visible and background lanes don't contend.
+        self.role = role
         # The asyncio task that owns this holder. Used to tell a TRUE same-task
         # nested scope (→ no-op, avoids self-deadlock) from a child task that
         # merely INHERITED this holder via contextvars copy-on-create_task
@@ -108,7 +142,7 @@ class _Holder:
         self.task: asyncio.Task | None = None
 
     async def acquire(self, user_id: str) -> bool:
-        """Acquire the per-user live-Brave lock for this turn (idempotent).
+        """Acquire the per-(user, role) live-Brave lock for this turn (idempotent).
 
         Returns True if the lock is held by this turn, False if acquisition
         timed out (caller proceeds unlocked — degraded, never blocked).
@@ -116,7 +150,7 @@ class _Holder:
         async with self._guard:
             if self.held:
                 return True
-            lock = _get_user_lock(user_id)
+            lock = _get_user_lock(user_id, self.role)
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=ACQUIRE_TIMEOUT_S)
             except asyncio.TimeoutError:
@@ -150,8 +184,13 @@ _holder_var: contextvars.ContextVar["_Holder | None"] = contextvars.ContextVar(
 
 
 @asynccontextmanager
-async def browser_turn_scope():
-    """Bracket one agent turn so its live-Brave access is serialized per user.
+async def browser_turn_scope(role: str = DEFAULT_ROLE):
+    """Bracket one agent turn so its live-Brave access is serialized per (user, role).
+
+    ``role`` selects the browser lane: ``VISIBLE_ROLE`` (foreground, the user's
+    visible tab) or ``BACKGROUND_ROLE`` (watcher/cron/reminder turns, their own
+    tab). The two lanes hold different per-user locks and route to different CDP
+    backends, so a background turn can't block or steal the visible tab.
 
     Re-entrant for TRUE same-task nesting only (same asyncio task → reuse the
     outer holder, no-op on exit) so it can't self-deadlock. A holder INHERITED
@@ -162,37 +201,45 @@ async def browser_turn_scope():
     ``Agent.process_message`` with this; the lock is taken lazily inside via
     ``acquire_live_browser_if_needed`` and always released here.
     """
-    existing = _holder_var.get()
-    current = asyncio.current_task()
-    if existing is not None and existing.task is current:
-        # Genuine same-task nesting — the outer scope owns holder + release.
-        yield
-        return
-    holder = _Holder()
-    holder.task = current
-    token = _holder_var.set(holder)
+    role_token = _role_var.set(role)
     try:
-        yield
+        existing = _holder_var.get()
+        current = asyncio.current_task()
+        if existing is not None and existing.task is current:
+            # Genuine same-task nesting — the outer scope owns holder + release.
+            yield
+            return
+        holder = _Holder(role=role)
+        holder.task = current
+        token = _holder_var.set(holder)
+        try:
+            yield
+        finally:
+            await holder.release()
+            _holder_var.reset(token)
     finally:
-        await holder.release()
-        _holder_var.reset(token)
+        _role_var.reset(role_token)
 
 
 @asynccontextmanager
-async def live_browser_guard(user_id: str, *, timeout: float = ACQUIRE_TIMEOUT_S):
-    """Standalone per-user live-Brave lock for callers OUTSIDE an agent turn.
+async def live_browser_guard(
+    user_id: str, *, role: str = DEFAULT_ROLE, timeout: float = ACQUIRE_TIMEOUT_S,
+):
+    """Standalone per-(user, role) live-Brave lock for callers OUTSIDE an agent turn.
 
     The heartbeat watcher polls (``daemon._check_watchers`` live path and the
     upwork MCP poll) drive the user's signed-in Brave directly from the tick
     loop — they don't funnel through ``process_message`` so the turn-scope
-    holder doesn't cover them. This bracket lets them take the SAME per-user
-    lock so a poll can't steal the tab from a foreground/background turn.
+    holder doesn't cover them. This bracket lets them take the per-(user, role)
+    lock. Pass ``role=BACKGROUND_ROLE`` so a poll serializes against background
+    brain turns but NEVER against the foreground (visible) lane — that's what
+    keeps a long foreground turn from starving the poll, and vice versa.
 
     Yields True if the lock was acquired, False if it timed out — callers
     should SKIP their poll when False (retry next interval) rather than drive
     the Brave unguarded.
     """
-    lock = _get_user_lock(user_id)
+    lock = _get_user_lock(user_id, role)
     acquired = False
     try:
         await asyncio.wait_for(lock.acquire(), timeout=timeout)

@@ -15,6 +15,60 @@ from typing import Any, Sequence
 logger = logging.getLogger(__name__)
 
 
+def _derive_push_title(text: str) -> str:
+    """Best-effort one-line title from a free-text push body."""
+    for line in (text or "").splitlines():
+        cleaned = line.strip().lstrip("*#-•> ").strip()
+        if cleaned:
+            return cleaned[:120]
+    return "Notification"
+
+
+async def _route_to_feed_or_skip(config: Any, text: str) -> tuple[bool, bool]:
+    """Resolve the notification channel and (best-effort) record to the feed.
+
+    Returns ``(send_telegram, delivered_as_app)``:
+      * ``send_telegram`` — proceed with the real Telegram send.
+      * ``delivered_as_app`` — channel is ``app``: treat the push as delivered
+        (return ``True`` from :func:`push_telegram`) even though Telegram was
+        skipped. Lets app-only mode work with Telegram fully unconfigured.
+
+    Any failure degrades to legacy Telegram-only behaviour.
+    """
+    try:
+        from lazyclaw.notifications.channel import (
+            get_notification_channel,
+            resolve_admin_user_id,
+            should_record_feed,
+            should_send_telegram,
+        )
+
+        admin_uid = await resolve_admin_user_id(config)
+        if not admin_uid:
+            return True, False  # can't resolve owner → legacy Telegram path
+        channel = await get_notification_channel(config, admin_uid)
+
+        if should_record_feed(channel):
+            try:
+                from lazyclaw.notifications.feed_store import record_notification
+
+                await record_notification(
+                    config, admin_uid, "push",
+                    _derive_push_title(text), text,
+                )
+            except Exception:
+                logger.warning("push_telegram feed record failed", exc_info=True)
+
+        send_tg = should_send_telegram(channel)
+        return send_tg, (not send_tg)
+    except Exception:
+        logger.debug(
+            "push_telegram channel routing failed; defaulting telegram",
+            exc_info=True,
+        )
+        return True, False
+
+
 async def push_telegram(
     config: Any,
     text: str,
@@ -33,7 +87,19 @@ async def push_telegram(
     ``{"text": "...", "callback_data": "..."}``. Used by the contract-
     intake watcher push to surface a one-tap ✅ Accept button alongside
     the alert text. Pass ``None`` for plain-text pushes.
+
+    Per-user channel routing (``telegram`` | ``app`` | ``both``) is applied
+    centrally here: ``app`` records the (full, untruncated) text to the in-app
+    notification feed and skips Telegram entirely (reporting delivered);
+    ``both`` records AND sends; ``telegram`` (default) is the legacy path.
     """
+    # Resolve the routing channel + record to the in-app feed BEFORE any
+    # truncation so the feed keeps the full body. Best-effort: failures fall
+    # back to the legacy Telegram-only path.
+    send_telegram, delivered_as_app = await _route_to_feed_or_skip(config, text)
+    if not send_telegram:
+        return delivered_as_app
+
     token = getattr(config, "telegram_bot_token", None) if config else None
     chat_id = os.environ.get("TELEGRAM_ADMIN_CHAT")
     if not token or not chat_id:

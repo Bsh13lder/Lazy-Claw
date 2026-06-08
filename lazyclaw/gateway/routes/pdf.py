@@ -26,6 +26,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
+from lazyclaw.export_crypto import protect_export
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.pdf import ops
 from lazyclaw.pdf.store import delete_pdf, get_pdf, list_pdfs, save_pdf
@@ -112,6 +113,11 @@ async def get_pdf_raw_route(
     )
 
 
+class DownloadBody(BaseModel):
+    # Optional — when set, the PDF is wrapped in an AES-256 encrypted .zip.
+    password: str | None = Field(default=None, max_length=256)
+
+
 @router.get("/{pdf_id}/download")
 async def download_pdf_route(
     pdf_id: str,
@@ -125,6 +131,31 @@ async def download_pdf_route(
     return Response(
         content=row["bytes"],
         media_type=_PDF_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.post("/{pdf_id}/download")
+async def download_pdf_post_route(
+    pdf_id: str,
+    body: DownloadBody,
+    user: User = Depends(get_current_user),
+):
+    """Download the PDF, optionally AES-256 encrypted in a password ``.zip``.
+
+    Password travels in the body (never a query string). Empty/absent → plain.
+    """
+    row = await get_pdf(_config, user.id, pdf_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    full = _safe_filename(row["name"])
+    base = full[:-4] if full.lower().endswith(".pdf") else full
+    data, fname, media = protect_export(
+        row["bytes"], base, "pdf", _PDF_MEDIA, body.password
+    )
+    return Response(
+        content=data,
+        media_type=media,
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 

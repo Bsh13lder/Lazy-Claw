@@ -17,11 +17,11 @@ prune them from the UI.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterable
 
 from lazyclaw.config import Config
@@ -288,6 +288,52 @@ def _dedupe(captures: Iterable[Capture]) -> list[Capture]:
 
 
 # ---------------------------------------------------------------------------
+# Content-addressable dedup key
+# ---------------------------------------------------------------------------
+#
+# The original writers inserted one note per occurrence. The only guard was
+# ``_is_recent_duplicate``, a 7-day window keyed on the *title* — which broke
+# whenever two distinct captures shared a title (``deadline: (no subject
+# captured)``) or when the same content recurred outside the window
+# (``visits: www.upwork.com`` ×6). The fix mirrors ``skill_lesson.py`` and
+# ``lesson_store.py``: a stable title derived from a hash of ``(kind, full
+# normalized content)`` so identical captures collapse onto ONE note via the
+# indexed ``title_key`` column, while genuinely different content keeps its
+# own row.
+
+_WS_RE = re.compile(r"\s+")
+_CONTENT_HASH_LEN = 12
+
+
+def _normalize_for_key(text: str) -> str:
+    """Collapse whitespace + lowercase so trivial formatting drift on the
+    same capture still maps to one key."""
+    return _WS_RE.sub(" ", (text or "").strip()).lower()
+
+
+def capture_content_key(kind: str, content: str) -> str:
+    """Deterministic short digest of ``(kind, normalized content)``.
+
+    Two captures with the same kind AND the same content (modulo whitespace
+    / case) share a key; anything else does not. Stable across processes —
+    unlike the old title-prefix slice."""
+    payload = f"{(kind or '').strip().lower()}\n{_normalize_for_key(content)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_CONTENT_HASH_LEN]
+
+
+def capture_canonical_title(kind: str, content: str, base_title: str | None) -> str:
+    """Content-addressable title for an auto-capture.
+
+    Keeps the human-readable ``base_title`` (or ``"{kind}:"`` when absent)
+    for the PKM list view, then appends ``[<hash>]``. The hash is the
+    load-bearing part: re-capturing the same fact yields the same title →
+    same ``title_key`` → upsert instead of a new row.
+    """
+    display = (base_title or f"{kind}:").strip()
+    return f"{display} [{capture_content_key(kind, content)}]"
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
@@ -409,43 +455,33 @@ async def capture_text_with_llm(
         return []
 
 
-# Re-saving the same auto-capture inside this window is treated as a
-# duplicate and skipped. 7 days is long enough to catch "I told you that
-# yesterday" but short enough that a real follow-up week later still gets
-# its own note.
-_DEDUP_WINDOW_DAYS = 7
+async def _find_note_by_title_key(
+    config: Config, user_id: str, title_key: str | None
+) -> dict | None:
+    """Return the existing note for ``title_key`` (decrypted) or None.
 
-
-async def _is_recent_duplicate(
-    config: Config, user_id: str, cap: Capture
-) -> bool:
-    """True if a note with the same title already exists in the last week.
-
-    Uses the indexed plaintext ``title_key`` column — no decrypt needed.
-    Cheap enough to run before every auto-capture insert. Skips the check
-    if the capture has no title (rare; falls through to the regular save).
+    Direct SELECT on the indexed plaintext ``title_key`` column → public
+    ``get_note``. Mirrors the lookup in ``lesson_store`` and
+    ``skill_lesson``. Never raises — a lookup failure degrades to "no
+    existing note" so the caller falls through to a normal insert.
     """
-    if not cap.title:
-        return False
+    if not title_key:
+        return None
     try:
-        existing = await store.find_by_title(config, user_id, cap.title)
+        from lazyclaw.db.connection import db_session
+
+        async with db_session(config) as db:
+            rows = await db.execute(
+                "SELECT id FROM notes WHERE user_id = ? AND title_key = ? LIMIT 1",
+                (user_id, title_key),
+            )
+            row = await rows.fetchone()
+        if not row:
+            return None
+        return await store.get_note(config, user_id, row[0])
     except Exception:
-        logger.debug("dedup lookup failed", exc_info=True)
-        return False
-    if not existing:
-        return False
-    created = existing.get("created_at")
-    if not created:
-        return True  # found a same-title note, no timestamp → conservative skip
-    try:
-        # created_at is "YYYY-MM-DD HH:MM:SS" UTC (see store._now)
-        ts = datetime.strptime(created, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=timezone.utc
-        )
-    except ValueError:
-        return True  # malformed timestamp → conservative skip
-    age = datetime.now(timezone.utc) - ts
-    return age.days < _DEDUP_WINDOW_DAYS
+        logger.debug("auto_capture find_by_title_key failed", exc_info=True)
+        return None
 
 
 async def _persist(
@@ -460,26 +496,54 @@ async def _persist(
     # auto_capture scans the user's own messages — origin is user, not agent.
     extra_tags = [f"source/{source}", "owner/user"]
     note_ids: list[str] = []
+    # Within-call dedup: two captures from the SAME message that hash to the
+    # same content key must not race each other into two rows.
+    seen_keys: set[str] = set()
     for cap in captures:
-        if await _is_recent_duplicate(config, user_id, cap):
-            logger.debug(
-                "auto_capture skipping recent duplicate: %s", cap.title,
-            )
+        canonical_title = capture_canonical_title(cap.kind, cap.content, cap.title)
+        title_key = store._title_key(canonical_title)
+        if title_key in seen_keys:
             continue
-        note = await store.save_note(
-            config,
-            user_id,
-            content=cap.content,
-            title=cap.title,
-            tags=list(cap.tags) + extra_tags,
-            importance=cap.importance,
-            trace_session_id=trace_session_id,
-        )
+        seen_keys.add(title_key)
+
+        tags = list(cap.tags) + extra_tags
+
+        # Content-addressable UPSERT: re-capturing the same (kind, content)
+        # refreshes the existing card instead of stacking a duplicate. The
+        # title carries the content hash, so the lookup is a cheap indexed
+        # title_key hit — no decrypt loop. Replaces the old brittle 7-day
+        # title-window guard (`_is_recent_duplicate`), which both missed
+        # cross-window repeats and over-collapsed distinct same-title
+        # captures.
+        existing = await _find_note_by_title_key(config, user_id, title_key)
+        if existing is not None:
+            merged_tags = list({*(existing.get("tags") or []), *tags})
+            note = await store.update_note(
+                config,
+                user_id,
+                existing["id"],
+                content=cap.content,
+                tags=merged_tags,
+                importance=cap.importance,
+            ) or existing
+            logger.debug(
+                "auto_capture upserted existing capture: %s", canonical_title,
+            )
+        else:
+            note = await store.save_note(
+                config,
+                user_id,
+                content=cap.content,
+                title=canonical_title,
+                tags=tags,
+                importance=cap.importance,
+                trace_session_id=trace_session_id,
+            )
         events.publish_note_saved(
             user_id,
             note["id"],
-            note["title"],
-            note["tags"],
+            note.get("title"),
+            note.get("tags"),
             source="auto",
         )
         note_ids.append(note["id"])

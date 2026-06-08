@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Quick-Capture shortcut icons are referenced by NAME at runtime
+     (quick_actions ShortcutItem.icon = "ic_shortcut_*"), not via @drawable in
+     any layout, so resource shrinking can't see those references. Keep them
+     (and the widget resources) explicitly so a future shrinkResources build
+     doesn't strip them. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_shortcut_task,@drawable/ic_shortcut_expense,@drawable/ic_shortcut_chat,@drawable/ic_shortcut_note,@layout/quick_capture_widget,@drawable/quick_capture_bg,@drawable/quick_capture_button_bg,@xml/quick_capture_widget_info" />

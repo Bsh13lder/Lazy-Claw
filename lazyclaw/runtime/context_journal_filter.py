@@ -321,3 +321,76 @@ def quarantine_polluted_history(
             logger.debug(log_msg)
 
     return out
+
+
+# ── Stale provider-error neutralization (2026-06-03) ──────────────────
+#
+# A tool that failed on a PRIOR turn (credit/billing, auth, rate-limit, 4xx/
+# 5xx) is persisted as a ``role="tool"`` result and replayed on later turns.
+# The brain reads it as a LIVE blocker and refuses to re-attempt even after
+# the cause is fixed (the "credit balance too low" / ``req_…`` refusal loop),
+# and it also gets baked into long-term summaries. Replacing the verbatim
+# error with a neutral marker — in raw history AND before summarization —
+# lets the brain re-attempt and judge from the live result.
+#
+# Canonical pattern + marker live here so ``agent.py`` (recent-window filter)
+# and ``compressor.py`` (pre-summarization filter) share one source of truth.
+STALE_PROVIDER_ERROR_RE = re.compile(
+    r"(Sorry, an error occurred|Error code: [45]\d{2}|"
+    r"authentication_error|invalid x-api-key|"
+    r"AuthenticationError|rate_limit_error|"
+    r"credit balance (?:is )?too low|Plans & Billing)",
+    re.IGNORECASE,
+)
+
+STALE_TOOL_ERROR_MARKER = (
+    "[a tool call errored on an EARLIER turn — that error is stale and may be "
+    "resolved now (credit/provider/login state changes between turns). "
+    "Re-attempt the tool and judge ONLY from the live result; do NOT cite this "
+    "as a current blocker.]"
+)
+
+
+def is_stale_provider_error(text: str | None) -> bool:
+    """True when *text* reads like a stale provider/credit/auth/rate-limit error."""
+    return bool(text) and STALE_PROVIDER_ERROR_RE.search(text) is not None
+
+
+def neutralize_stale_errors(messages: list) -> list:
+    """Replace stale provider-error content (assistant OR tool rows) with a
+    neutral marker so a PAST failure can't be read as a live blocker.
+
+    Replace-not-drop: preserves ``role`` + ``tool_call_id`` so tool_use↔
+    tool_result pairing and the compressor's tool-sequence split stay intact.
+    Pure: never mutates the input list and never raises.
+    """
+    out = list(messages)
+    for idx, msg in enumerate(out):
+        try:
+            content = getattr(msg, "content", None) or ""
+        except Exception:
+            continue
+        if not is_stale_provider_error(content):
+            continue
+        try:
+            replacement = type(msg)(
+                role=getattr(msg, "role", "tool"),
+                content=STALE_TOOL_ERROR_MARKER,
+                tool_call_id=getattr(msg, "tool_call_id", None),
+                tool_calls=None,
+            )
+        except TypeError:
+            # Test stand-ins that don't accept all kwargs.
+            try:
+                replacement = type(msg)(
+                    role=getattr(msg, "role", "tool"),
+                    content=STALE_TOOL_ERROR_MARKER,
+                )
+            except Exception:
+                continue
+        out[idx] = replacement
+        logger.debug(
+            "[history-filter] neutralized stale provider error at index=%d (role=%s)",
+            idx, getattr(msg, "role", "?"),
+        )
+    return out

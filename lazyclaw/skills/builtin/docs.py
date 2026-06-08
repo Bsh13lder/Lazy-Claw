@@ -204,10 +204,12 @@ class AppendToDocSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Append a paragraph to the end of a document (e.g. 'add a closing "
-            "paragraph to my cover letter'). To add a clickable hyperlink, pass "
-            "'link_url' (and optionally 'link_text' to choose which words link) "
-            "or write markdown links inline like '[my site](https://…)'. "
+            "Append content to the end of a document. For FORMATTED content "
+            "(numbered/bulleted lists, headings, bold/italic) pass 'markdown' — "
+            "use '#'/'##'/'###' for headings, '- ' for bullets, '1.' for "
+            "numbered steps, '**bold**'/'*italic*', and '[label](https://…)' for "
+            "links. NEVER hand-format a list as plain text. For a single plain "
+            "paragraph use 'text' (with optional 'link_url'/'link_text'). "
             "Identify the doc by id or name; omit to use the most recent one."
         )
 
@@ -224,11 +226,20 @@ class AppendToDocSkill(BaseSkill):
                     "type": "string",
                     "description": "Doc id or name (optional — defaults to most recent)",
                 },
+                "markdown": {
+                    "type": "string",
+                    "description": (
+                        "Formatted content to append: '#'/'##'/'###' headings, "
+                        "'- ' bullets, '1.' numbered steps, '**bold**'/'*italic*', "
+                        "'[label](https://…)' links. Use this for any list."
+                    ),
+                },
                 "text": {
                     "type": "string",
                     "description": (
-                        "The paragraph text to append. May contain inline "
-                        "markdown links '[label](https://…)'."
+                        "A single plain paragraph to append. May contain inline "
+                        "markdown links '[label](https://…)'. Prefer 'markdown' "
+                        "for formatted/multi-line content."
                     ),
                 },
                 "link_url": {
@@ -243,22 +254,33 @@ class AppendToDocSkill(BaseSkill):
                     ),
                 },
             },
-            "required": ["text"],
+            "required": [],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.docs import markdown_blocks as MB
         from lazyclaw.docs import snapshot as D
         from lazyclaw.docs.store import get_doc, save_doc
 
+        markdown = params.get("markdown")
         text = params.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return "Provide non-empty 'text' to append."
+        has_md = isinstance(markdown, str) and markdown.strip()
+        if not has_md and (not isinstance(text, str) or not text.strip()):
+            return "Provide 'markdown' (formatted) or 'text' (plain) to append."
         did, err = await _resolve_doc_id(self._config, user_id, params.get("doc_id"))
         if err:
             return err
         doc = await get_doc(self._config, user_id, did)
         if not doc:
             return "Doc not found."
+
+        # Formatted path: parse markdown into typed blocks (lists/headings/emphasis).
+        if has_md:
+            blocks = MB.parse_blocks(markdown)
+            updated = D.append_blocks(doc["payload"], blocks)
+            await save_doc(self._config, user_id, doc["name"], updated, doc_id=did)
+            n = len(blocks)
+            return f"Appended {n} formatted block(s) to **{doc['name']}**."
 
         # Decide whether this append carries a hyperlink: an explicit link_url,
         # or inline markdown links in the text. Otherwise stay on the plain path.
@@ -296,9 +318,11 @@ class SetDocContentSkill(BaseSkill):
     @property
     def description(self) -> str:
         return (
-            "Replace a document's entire body with new text (e.g. 'rewrite my "
-            "cover letter as follows…'). Newlines start new paragraphs. "
-            "Identify the doc by id or name; omit to use the most recent one."
+            "Replace a document's entire body. For FORMATTED content pass "
+            "'markdown' ('#' headings, '- ' bullets, '1.' numbered steps, "
+            "'**bold**'/'*italic*', '[label](https://…)' links — never hand-format "
+            "lists as plain text). For plain prose use 'text' (newlines start new "
+            "paragraphs). Identify the doc by id or name; omit for the most recent."
         )
 
     @property
@@ -314,25 +338,39 @@ class SetDocContentSkill(BaseSkill):
                     "type": "string",
                     "description": "Doc id or name (optional — defaults to most recent)",
                 },
-                "text": {"type": "string", "description": "The full new document text"},
+                "markdown": {
+                    "type": "string",
+                    "description": (
+                        "The full new document body as markdown (headings, "
+                        "bullet/numbered lists, bold/italic, links)."
+                    ),
+                },
+                "text": {"type": "string", "description": "The full new document body as plain text"},
             },
-            "required": ["text"],
+            "required": [],
         }
 
     async def execute(self, user_id: str, params: dict) -> str:
+        from lazyclaw.docs import markdown_blocks as MB
         from lazyclaw.docs import snapshot as D
         from lazyclaw.docs.store import get_doc, save_doc
 
+        markdown = params.get("markdown")
         text = params.get("text")
-        if not isinstance(text, str):
-            return "Provide 'text' (the new document body)."
+        has_md = isinstance(markdown, str) and markdown.strip()
+        if not has_md and not isinstance(text, str):
+            return "Provide 'markdown' (formatted) or 'text' (plain) document body."
         did, err = await _resolve_doc_id(self._config, user_id, params.get("doc_id"))
         if err:
             return err
         doc = await get_doc(self._config, user_id, did)
         if not doc:
             return "Doc not found."
-        updated = D.set_text(doc["payload"], text)
+        if has_md:
+            blocks = MB.parse_blocks(markdown)
+            updated = {**doc["payload"], "body": D.build_body_with_blocks(blocks)}
+        else:
+            updated = D.set_text(doc["payload"], text)
         await save_doc(self._config, user_id, doc["name"], updated, doc_id=did)
         n_paras = len(D.get_paragraphs(updated))
         return f"Replaced the contents of **{doc['name']}** ({n_paras} paragraph(s))."

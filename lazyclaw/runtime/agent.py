@@ -107,6 +107,37 @@ def _is_meta_question(text: str | None) -> bool:
     return _META_QUESTION_RE.match(text) is not None
 
 
+# Message prefixes the daemon stamps on heartbeat-lane turns. Such turns drive
+# the BACKGROUND browser lane (their own tab) instead of the user's visible
+# tab, so a watcher/cron browser action can't steal/block the foreground.
+_BACKGROUND_TURN_PREFIXES = ("[WATCHER:", "[JOB:", "[REMINDER")
+
+# Non-idempotent generators / actions that must NEVER be served from the
+# per-turn duplicate-call cache. Each call must re-read the live page or
+# re-generate; otherwise a stale prior result is silently replayed — e.g.
+# ``draft_freelance_proposal`` once cached a draft of the WRONG job and the
+# next call returned the same wrong draft (2026-06-03). The stuck-detector
+# still guards true loops.
+_NEVER_CACHE_TOOLS = frozenset({
+    "draft_freelance_proposal",
+    "apply_job",
+})
+
+
+def _infer_browser_role(message: str) -> str:
+    """Infer the browser lane for a turn from its message prefix.
+
+    Belt-and-suspenders with the explicit ``browser_role`` the daemon passes:
+    keeps daemon-originated turns on the background lane even if a caller
+    forgets the kwarg.
+    """
+    from lazyclaw.runtime.browser_turn_lock import BACKGROUND_ROLE, VISIBLE_ROLE
+
+    if isinstance(message, str) and message.startswith(_BACKGROUND_TURN_PREFIXES):
+        return BACKGROUND_ROLE
+    return VISIBLE_ROLE
+
+
 # ── Meta-Tool Pattern ─────────────────────────────────────────────────
 # Instead of regex-guessing which tools the LLM needs (brittle, 5K tokens),
 # send only 3-4 base tools. LLM discovers others via search_tools on demand.
@@ -142,6 +173,15 @@ _LOCAL_TOOL_NAMES = frozenset({
 # narration rate roughly doubles between 24 and 40 tools. When the resolved
 # brain is MiniMax, the loaded tool list is trimmed to this cap below.
 _MINIMAX_MAX_TOOLS = 24
+
+# Thin-router (Phase 2): the meta-tools the brain may ALWAYS call. After one
+# inline non-meta (domain) tool call, the brain is narrowed to ONLY these so
+# it must delegate the rest. Used only when LAZYCLAW_THIN_ROUTER is set.
+_META_TOOLS = frozenset({
+    "delegate", "dispatch_subagents", "run_background",
+    "search_tools", "web_search", "recall_memories", "save_memory",
+    "get_agent_status",
+})
 
 
 def _trim_tools_for_minimax(
@@ -354,7 +394,13 @@ _HAND_TUNED_CHANNEL_KEYWORDS: dict[str, re.Pattern[str]] = {
     # upworker works small projects" routed to core-only tools because
     # \bupwork\b doesn't match the "er" suffix, so the brain hallucinated
     # tool names from history instead of having them properly injected).
-    "upwork":    re.compile(r"\bupwork(?:er|ers|s)?\b|upwork\.com", re.IGNORECASE),
+    # Also the transposition typos "upwokr" / "upwrok" (verified live
+    # 2026-06-03 — "Find matching jobs on upwokr" matched NO channel keyword,
+    # so only `browser` got injected and the brain scrolled the search grid
+    # into a CDP timeout instead of calling search_jobs).
+    "upwork":    re.compile(
+        r"\bupw(?:ork|okr|rok)(?:er|ers|s)?\b|upwork\.com", re.IGNORECASE,
+    ),
 }
 
 # Manual aliases for multi-keyword MCPs whose name doesn't match the words
@@ -807,6 +853,38 @@ _SURVIVAL_TOOL_NAMES = frozenset({
     "start_gig", "submit_deliverable", "invoice_client",
 })
 
+# "Find matching jobs on upwork", "show me 5 upwork jobs", "search jobs on
+# upwork" — bare "jobs" was pulled from _SURVIVAL_KEYWORDS (it overloaded with
+# cron-job intent), so these never injected `search_jobs`. With no job-search
+# tool in the set the brain fell back to the raw `browser` tool and tried to
+# scroll Upwork's search grid, where Input.dispatchMouseEvent times out on the
+# heavy DOM → the turn got AUTO-PROMOTE'd to a Telegram-bound background task
+# (2026-06-03 incident, recurred 10+ times that day).
+#
+# Disambiguation from cron "jobs": require BOTH the canonical upwork token
+# (typo-tolerant, shared with channel routing) AND a freelance-work token. The
+# upwork token is what separates "find jobs on upwork" (freelance search) from
+# "list my cron jobs" (scheduler). Route to the `search_jobs` skill — it wraps
+# upwork_search_jobs (NO browser scroll), is already read-only, so the turn
+# stays inline and answers in the channel it came from.
+_JOB_WORK_TOKEN_RE = re.compile(
+    r"\b(jobs?|work|gigs?|projects?|contracts?)\b", re.IGNORECASE,
+)
+
+
+def _is_upwork_job_search(text: str) -> bool:
+    """True when the message is an Upwork freelance job search.
+
+    Reuses the canonical (typo-tolerant) upwork matcher so "upwokr" etc. are
+    handled in exactly one place.
+    """
+    if not text:
+        return False
+    return bool(
+        _HAND_TUNED_CHANNEL_KEYWORDS["upwork"].search(text)
+        and _JOB_WORK_TOKEN_RE.search(text)
+    )
+
 # n8n workflow automation — TIGHT keywords only to avoid false positives
 # "watch for" removed — overlaps with watch_messages/watch_site in _BASE_TOOL_NAMES
 _N8N_KEYWORDS = frozenset({
@@ -1068,14 +1146,12 @@ def _compact_history(
     return recent
 
 
-# Error patterns in assistant messages that should be stripped from history.
-# These cause the LLM to reference past errors ("looks like there were auth
-# errors earlier") instead of responding to the current message.
-_HISTORY_ERROR_RE = re.compile(
-    r"(Sorry, an error occurred|Error code: [45]\d{2}|"
-    r"authentication_error|invalid x-api-key|"
-    r"AuthenticationError|rate_limit_error)",
-    re.IGNORECASE,
+# Stale provider-error pattern + neutral marker. Canonical definitions live in
+# context_journal_filter so the recent-window filter (here) and the
+# pre-summarization filter (compressor) share ONE source of truth.
+from lazyclaw.runtime.context_journal_filter import (  # noqa: E402
+    STALE_PROVIDER_ERROR_RE as _HISTORY_ERROR_RE,
+    STALE_TOOL_ERROR_MARKER as _STALE_TOOL_ERROR_MARKER,
 )
 
 
@@ -1099,16 +1175,43 @@ def _is_rate_limit_exception(exc: BaseException) -> bool:
 
 
 def _filter_error_messages(history: list[LLMMessage]) -> list[LLMMessage]:
-    """Remove assistant messages that are just error dumps.
+    """Strip/neutralize stale error blobs from PRIOR turns.
 
-    Returns new list (immutable pattern).
+    Two shapes (the brain otherwise treats a past failure as live and either
+    references it or refuses to re-attempt):
+      * ``assistant`` message that is just an error dump  → DROP it.
+      * ``tool`` RESULT carrying a provider/credit/auth/rate-limit error
+        (matches :data:`_HISTORY_ERROR_RE`, e.g. ``Error code: 400 … credit
+        balance too low``) → keep the message so tool_use↔tool_result pairing
+        survives, but REPLACE its content with a neutral marker.
+
+    Operates only on loaded HISTORY (see call site in
+    ``_process_message_inner``); the current turn's live tool results are
+    appended later and are never touched here. Returns a new list (immutable).
     """
     result = []
-    skip_next_user = False
     for msg in history:
-        if msg.role == "assistant" and msg.content and _HISTORY_ERROR_RE.search(msg.content):
-            skip_next_user = False  # Don't skip user messages
+        content = msg.content or ""
+        if (
+            msg.role == "assistant"
+            and content
+            and _HISTORY_ERROR_RE.search(content)
+        ):
             continue  # Drop the error assistant message
+        if (
+            msg.role == "tool"
+            and content
+            and _HISTORY_ERROR_RE.search(content)
+        ):
+            result.append(
+                LLMMessage(
+                    role="tool",
+                    content=_STALE_TOOL_ERROR_MARKER,
+                    tool_call_id=msg.tool_call_id,
+                    tool_calls=msg.tool_calls,
+                )
+            )
+            continue
         result.append(msg)
     return result
 
@@ -1477,6 +1580,9 @@ class Agent:
         self.router = router
         self.eco_router = eco_router or EcoRouter(config, router)
         self.registry = registry
+        # Kept for the research-fan-out pre-plan pass (ADR-0005 Phase 4),
+        # which needs a checker to run read-only research specialists.
+        self._permission_checker = permission_checker
         self.executor = (
             ToolExecutor(
                 registry,
@@ -1549,6 +1655,37 @@ class Agent:
             )
         except Exception:
             logger.debug("plan_research pre-pass failed (non-fatal)", exc_info=True)
+
+        # Deep research-first fan-out (ADR-0005 Phase 4): read-only code +
+        # web research specialists run in parallel BEFORE the plan is drafted
+        # so the brain never plans from memory. Opt-in via
+        # LAZYCLAW_RESEARCH_FANOUT — each runs a full agent loop, so it adds
+        # latency; default-off keeps plan-gate timing unchanged.
+        import os as _os
+        if (
+            _os.environ.get("LAZYCLAW_RESEARCH_FANOUT", "").strip().lower()
+            in ("1", "true", "yes", "on")
+            and self.registry is not None
+            and self._permission_checker is not None
+        ):
+            try:
+                from lazyclaw.runtime.research_fanout import (
+                    gather_specialist_research,
+                )
+                deep = await gather_specialist_research(
+                    self.config, user_id, message,
+                    registry=self.registry,
+                    eco_router=self.eco_router,
+                    permission_checker=self._permission_checker,
+                )
+                if deep:
+                    research_findings = (
+                        f"{research_findings}\n\n{deep}".strip()
+                    )
+            except Exception:
+                logger.debug(
+                    "research_fanout pre-pass failed (non-fatal)", exc_info=True
+                )
 
         plan_instruction = make_user_facing_plan_prompt(
             message, tool_names,
@@ -1708,19 +1845,26 @@ class Agent:
         chat_session_id: str | None = None,
         callback=None,
         channel_context: str | None = None,
+        browser_role: str | None = None,
     ) -> str:
         """Public turn entry — serialize live-Brave access, then run the turn.
 
         Wrapping here covers EVERY caller uniformly (lane handler, gateway,
         web WS, Telegram, background TaskRunner) since they all funnel through
-        process_message. The per-user lock is taken lazily INSIDE the turn (only
-        when a browser-driving tool actually runs) and released when the turn
-        ends, so two turns can't drive the one live Brave at once and steal each
-        other's tab. See runtime/browser_turn_lock.py (2026-05-29).
+        process_message. The per-(user, role) lock is taken lazily INSIDE the
+        turn (only when a browser-driving tool actually runs) and released when
+        the turn ends. See runtime/browser_turn_lock.py.
+
+        ``browser_role`` selects the browser lane: ``"background"`` for
+        daemon-originated work (watcher/cron/reminder) so it drives its OWN tab
+        instead of the user's visible tab, ``"visible"`` for foreground turns.
+        The daemon passes it explicitly; when unset we infer it from the
+        message prefix so existing callers stay correct (2026-06-02).
         """
         from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
 
-        async with browser_turn_scope():
+        role = browser_role or _infer_browser_role(message)
+        async with browser_turn_scope(role):
             return await self._process_message_inner(
                 user_id,
                 message,
@@ -2601,6 +2745,12 @@ class Agent:
             # Survival/job keyword detection → inject survival tools
             _survival_tools: list = []
             _wants_survival = any(kw in _msg_lower for kw in _SURVIVAL_KEYWORDS)
+            # "find/show jobs on upwork" — route to search_jobs (no browser).
+            if not _wants_survival and _is_upwork_job_search(_msg_lower):
+                _wants_survival = True
+                logger.info(
+                    "Upwork job-search intent detected — injecting search_jobs",
+                )
             # Also trigger if recent history used survival tools
             if not _wants_survival and _history_tool_names & _SURVIVAL_TOOL_NAMES:
                 _wants_survival = True
@@ -3124,11 +3274,29 @@ class Agent:
         _plan_mode_used: bool = False
         _plan_text_approved: str | None = None
         _auto_plan_enabled = await _load_auto_plan_setting(user_id)
+        # Operating mode (ADR-0005) is now the primary control over the plan
+        # gate; the legacy users.auto_plan flag is the ASK-mode fallback so
+        # existing behavior is preserved. PLAN → always gate; AUTO/CHAT →
+        # never; ASK → legacy auto_plan setting.
+        _gate_wanted = _auto_plan_enabled
+        try:
+            from lazyclaw.runtime.agent_mode import AgentMode, get_agent_mode
+            _mode = await get_agent_mode(self.config, user_id)
+            if _mode is AgentMode.PLAN:
+                _gate_wanted = True
+            elif _mode in (AgentMode.AUTO, AgentMode.CHAT):
+                _gate_wanted = False
+            # ASK → keep legacy _auto_plan_enabled
+        except Exception:
+            logger.debug(
+                "agent_mode plan-gate resolution failed; using auto_plan",
+                exc_info=True,
+            )
         _bypassed_by_phrase = has_plan_bypass_phrase(message)
         if (
             _effort != EffortLevel.LOW
             and needs_tools
-            and _auto_plan_enabled
+            and _gate_wanted
             and not _bypassed_by_phrase
         ):
             try:
@@ -3277,6 +3445,14 @@ class Agent:
         # enough — MiniMax M2.7 ignored them and ran 22+ extra iters with
         # `browser` / `use_host_browser` calls (see 2026-05-04 Upwork debug).
         _force_dispatch_only = False
+        # Thin-router (LAZYCLAW_THIN_ROUTER): brain is a pure router — at most
+        # ONE inline domain (non-meta) tool call per turn, then tools narrow to
+        # meta-only so it MUST delegate. Default off → zero behavior change.
+        import os as _os
+        _thin_router = (
+            _os.environ.get("LAZYCLAW_THIN_ROUTER", "").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         _promote_iter: int | None = None
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
@@ -3472,6 +3648,34 @@ class Agent:
                             "TAOR Plan phase injected (effort=%s, retry=%s)",
                             _effort, _taor_retry_context is not None,
                         )
+
+                # THIN-ROUTER: at most ONE inline domain (non-meta) tool call
+                # per turn; once made, narrow to meta-only so a 2nd domain call
+                # is impossible and the brain MUST delegate. Default off.
+                if (
+                    _thin_router
+                    and not _force_dispatch_only
+                    and tools
+                    and any(n not in _META_TOOLS for n in _called_tool_names)
+                ):
+                    _meta_only = [
+                        t for t in tools
+                        if t.get("function", {}).get("name") in _META_TOOLS
+                    ]
+                    if _meta_only and len(_meta_only) != len(tools):
+                        logger.info(
+                            "THIN-ROUTER: tools narrowed %d → %d (meta-only) "
+                            "after 1 inline action — brain must delegate",
+                            len(tools), len(_meta_only),
+                        )
+                        _tr_other = {
+                            t.get("function", {}).get("name")
+                            for t in tools
+                            if t.get("function", {}).get("name") not in _META_TOOLS
+                        }
+                        _tr_other.discard(None)
+                        _suppressed_tool_names |= _tr_other  # type: ignore[arg-type]
+                        tools = _meta_only
 
                 # Hard-enforce AUTO-PROMOTE: previous iter set the flag, so
                 # this iter's tool list is restricted to ONLY run_background.
@@ -4148,6 +4352,9 @@ class Agent:
                         # _ACTION_CLAIM_RE so legit dispatch statuses survive.)
                         and "dispatch_subagents" not in _called_tool_names
                         and "run_background" not in _called_tool_names
+                        # delegate is a real fire-and-forget dispatch too —
+                        # a post-delegate "I've dispatched" is truthful.
+                        and "delegate" not in _called_tool_names
                     ):
                         _halluc_retries += 1
                         _matched_phrase = _claim_match.group(0)[:60]
@@ -4201,6 +4408,8 @@ class Agent:
                         # Already dispatched subagents → the status is true,
                         # do NOT force a redundant background task (RC2).
                         and "dispatch_subagents" not in _called_tool_names
+                        # Same for delegate — it already dispatched a worker.
+                        and "delegate" not in _called_tool_names
                         and not _is_meta_question(message)
                     ):
                         logger.warning(
@@ -4897,9 +5106,11 @@ class Agent:
                         )
                         _mcp_pre_snapshot = snapshot_mcp_tool_names(self.registry)
 
-                    # Duplicate call cache — skip re-executing identical tool calls
+                    # Duplicate call cache — skip re-executing identical tool calls.
+                    # Non-idempotent generators/actions are never cached (see
+                    # _NEVER_CACHE_TOOLS) so a stale prior result can't replay.
                     _cache_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True)}"
-                    if _cache_key in _tool_call_cache:
+                    if tc.name not in _NEVER_CACHE_TOOLS and _cache_key in _tool_call_cache:
                         _tool_call_hit_count[_cache_key] = _tool_call_hit_count.get(_cache_key, 0) + 1
                         _hits = _tool_call_hit_count[_cache_key]
                         if _hits >= 2:
@@ -4974,9 +5185,9 @@ class Agent:
                             )
                             head = result[:512]  # only check the head; results can be huge
                             _is_err_result = any(m in head for m in _err_status_markers)
-                        if not _is_err_result:
+                        if not _is_err_result and tc.name not in _NEVER_CACHE_TOOLS:
                             _tool_call_cache[_cache_key] = result
-                        else:
+                        elif _is_err_result:
                             logger.debug(
                                 "Skipping cache for error result on %s (len=%d)",
                                 tc.name, len(result),
@@ -5272,6 +5483,40 @@ class Agent:
                             "Continuing in background — will report back "
                             "when done."
                         )
+
+                    # ── Hard stop: delegate dispatched — exit foreground ──
+                    # delegate is fire-and-forget (delegate.py:268): it
+                    # schedules run_specialist detached and returns a
+                    # "started" string. Continuing the loop is what let the
+                    # brain trip the action-claim retry, duplicate the work,
+                    # and get AUTO-PROMOTED (2026-06-08 14:18 triple-exec).
+                    # Hand off and return the delegate's own message, exactly
+                    # like the run_background hard-stop above. Only the
+                    # initial foreground turn exits — background sub-turns
+                    # keep iterating. Skip on error results so the brain can
+                    # correct (e.g. 'Unknown specialist').
+                    if (
+                        tc.name == "delegate"
+                        and not getattr(self, "is_background", False)
+                        and isinstance(result, str)
+                        and not result.startswith(("Error", "Unknown"))
+                    ):
+                        logger.info(
+                            "delegate dispatched — exiting foreground turn "
+                            "(was iter=%d)",
+                            iteration,
+                        )
+                        await cb.on_event(AgentEvent("done", "Delegated", {}))
+                        if _delegate_registered and self.registry:
+                            self.registry.unregister("delegate")
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.complete(
+                                _fg_task_id,
+                                "Delegated to a specialist — will report "
+                                "back when done.",
+                            )
+                            _fg_task_id = None
+                        return result
 
                     # ── Hard stop: OAuth credential not authorized ────
                     # n8n_management surfaces this with a STOP_OAUTH_CREDENTIAL
@@ -5629,6 +5874,15 @@ class Agent:
                         "upwork_last_conversation",
                         "upwork_inbox_check",
                         "upwork_contract_poll",
+                        # Job/proposal READS — "find me 5 upwork jobs" is a
+                        # pure fetch. Without these, a web job search that
+                        # reached for the raw MCP tool got AUTO-PROMOTE'd to a
+                        # Telegram-bound background task instead of answering
+                        # inline (2026-06-03). The `search_jobs` NL skill is
+                        # already covered by the startswith("search_") rule.
+                        "upwork_search_jobs",
+                        "upwork_get_job_details",
+                        "upwork_get_offers",
                         "find_contact",
                         "list_contacts",
                         "list_memories",
@@ -5656,9 +5910,23 @@ class Agent:
                         return True
                     return (
                         "_get_" in n
+                        # `search_jobs` matches startswith; `upwork_search_jobs`
+                        # and other `<service>_search_*` reads need the
+                        # mid-string form (the name starts with the service,
+                        # not "search_").
+                        or "_search_" in n
+                        # Document/sheet READS — `read_sheet`, `read_doc`,
+                        # `read_pdf` (native skills) and `<mcp>_read_sheet_
+                        # values` are pure fetches. Without these a Web-UI
+                        # "check sheet what we have there" that paged through
+                        # read_sheet_values got AUTO-PROMOTE'd to a background
+                        # task whose consolidated reply then vanished on web
+                        # (2026-06-04). Mirrors the get_/list_/search_ rules.
+                        or "_read_" in n
                         or n.startswith("get_")
                         or n.startswith("list_")
                         or n.startswith("search_")
+                        or n.startswith("read_")
                         or n.startswith("recall_")
                         or n.endswith("_get_messages")
                         or n.endswith("_get_conversation")
@@ -5682,8 +5950,17 @@ class Agent:
                     # Let the dispatch_subagents consolidation turn deliver
                     # the results instead (task_runner brain-fanout).
                     and "dispatch_subagents" not in _called_tool_names
+                    # `delegate` is ALSO a fire-and-forget async dispatch
+                    # (delegate.py:268 schedules run_specialist detached and
+                    # returns immediately). Promoting a turn that delegated
+                    # to a background worker spawns a THIRD redundant
+                    # executor — the 2026-06-08 14:18 triple-execution bug.
+                    and "delegate" not in _called_tool_names
                     and iteration >= _PROMOTE_BG_AT_ITER
                     and not _only_readonly_so_far
+                    # THIN-ROUTER replaces AUTO-PROMOTE with the earlier
+                    # 1-inline-action cap; don't double-handle under the flag.
+                    and not _thin_router
                 ):
                     _promoted_to_bg = True
                     _force_dispatch_only = True

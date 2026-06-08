@@ -389,6 +389,273 @@ def append_paragraph_with_runs(
     return out
 
 
+# ───────────────────────── rich blocks (styles + lists) ─────────────
+#
+# A "block" is a paragraph with a type. Headings, bullet/numbered lists, and
+# bold/italic/underline runs round-trip through the same immutable model.
+#
+# Univer field shapes verified against @univerjs/core 0.24 (2026-06-08):
+#   heading → paragraphStyle.namedStyleType : NamedStyleType **numeric**
+#             (HEADING_1=4, HEADING_2=5, HEADING_3=6) — i-document-data.d.ts:571
+#   list    → bullet : {listType: PresetListType string, listId, nestingLevel}
+#             — i-document-data.d.ts:482-485 (BULLET_LIST / ORDER_LIST)
+#   run     → textRuns[].ts : IStyleBase {bl:1, it:1, ul:{s:1}} — i-style-data.d.ts:168
+_HEADING_NAMED_STYLE = {1: 4, 2: 5, 3: 6}
+_NAMED_STYLE_HEADING = {4: 1, 5: 2, 6: 3}
+_LIST_TYPE = {"bullet": "BULLET_LIST", "number": "ORDER_LIST"}
+
+
+def _run_style(run: dict[str, Any]) -> dict[str, Any]:
+    """Map a run's bold/italic/underline flags to a Univer ``ts`` style dict."""
+    ts: dict[str, Any] = {}
+    if run.get("bold"):
+        ts["bl"] = 1
+    if run.get("italic"):
+        ts["it"] = 1
+    if run.get("underline"):
+        ts["ul"] = {"s": 1}
+    return ts
+
+
+def build_body_with_blocks(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a Univer ``body`` from structured blocks (headings/lists/styles).
+
+    Each block is ``{"type": heading|paragraph|bullet|number, "level": int,
+    "runs": [run, ...]}``. Emits ``paragraphs[*].paragraphStyle`` for headings,
+    ``paragraphs[*].bullet`` for list items (consecutive same-type items share a
+    ``listId`` so ordered lists number continuously), ``textRuns`` for
+    bold/italic/underline spans, and hyperlink ``customRanges`` (same sentinel
+    convention as :func:`build_body_with_runs`). Empty input → one empty
+    paragraph.
+    """
+    if not blocks:
+        blocks = [{"type": "paragraph", "level": 0, "runs": [{"text": ""}]}]
+
+    stream_parts: list[str] = []
+    para_meta: list[dict[str, Any]] = []
+    custom_ranges: list[dict[str, Any]] = []
+    text_runs: list[dict[str, Any]] = []
+    cursor = 0
+    link_counter = 0
+    list_counter = 0
+    prev_list_kind: str | None = None
+    cur_list_id: str | None = None
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            block = {"type": "paragraph", "runs": []}
+        btype = block.get("type", "paragraph")
+        runs = block.get("runs") or []
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            text = _clean_run_text(run.get("text", ""))
+            url = run.get("url")
+            style = _run_style(run)
+            if url:
+                start_token = cursor
+                stream_parts.append(CUSTOM_RANGE_START)
+                cursor += 1
+                text_start = cursor
+                stream_parts.append(text)
+                cursor += len(text)
+                end_token = cursor
+                stream_parts.append(CUSTOM_RANGE_END)
+                cursor += 1
+                custom_ranges.append(
+                    {
+                        "startIndex": start_token,
+                        "endIndex": end_token,
+                        "rangeId": f"link-{link_counter}",
+                        "rangeType": _HYPERLINK,
+                        "properties": {"url": str(url)},
+                    }
+                )
+                link_counter += 1
+                if style and text:
+                    text_runs.append(
+                        {"st": text_start, "ed": text_start + len(text), "ts": style}
+                    )
+            else:
+                run_start = cursor
+                stream_parts.append(text)
+                cursor += len(text)
+                if style and text:
+                    text_runs.append(
+                        {"st": run_start, "ed": run_start + len(text), "ts": style}
+                    )
+
+        stream_parts.append(PARAGRAPH_BREAK)
+        meta: dict[str, Any] = {"startIndex": cursor}
+        if btype == "heading":
+            level = int(block.get("level") or 1)
+            meta["paragraphStyle"] = {
+                "namedStyleType": _HEADING_NAMED_STYLE.get(level, 4)
+            }
+            prev_list_kind = None
+        elif btype in ("bullet", "number"):
+            if prev_list_kind != btype:
+                cur_list_id = f"list-{list_counter}"
+                list_counter += 1
+            prev_list_kind = btype
+            meta["bullet"] = {
+                "listType": _LIST_TYPE[btype],
+                "listId": cur_list_id,
+                "nestingLevel": int(block.get("level") or 0),
+            }
+        else:
+            prev_list_kind = None
+        para_meta.append(meta)
+        cursor += 1
+
+    data_stream = "".join(stream_parts) + SECTION_BREAK
+    return {
+        "dataStream": data_stream,
+        "paragraphs": para_meta,
+        "textRuns": text_runs,
+        "customRanges": custom_ranges,
+        "sectionBreaks": [{"startIndex": len(data_stream) - 1}],
+    }
+
+
+def _index_styles(body: dict[str, Any]) -> dict[int, dict[str, bool]]:
+    """Map each styled char index → ``{bold?/italic?/underline?: True}``."""
+    out: dict[int, dict[str, bool]] = {}
+    for tr in body.get("textRuns") or []:
+        if not isinstance(tr, dict):
+            continue
+        st, ed, ts = tr.get("st"), tr.get("ed"), tr.get("ts")
+        if not (isinstance(st, int) and isinstance(ed, int) and isinstance(ts, dict)):
+            continue
+        flags: dict[str, bool] = {}
+        if ts.get("bl"):
+            flags["bold"] = True
+        if ts.get("it"):
+            flags["italic"] = True
+        ul = ts.get("ul")
+        if (isinstance(ul, dict) and ul.get("s")) or ul == 1:
+            flags["underline"] = True
+        if not flags:
+            continue
+        for i in range(st, ed):
+            out.setdefault(i, {}).update(flags)
+    return out
+
+
+def _block_type_from_meta(meta: Any) -> tuple[str, int]:
+    """Resolve a paragraph's block type + level from its Univer metadata."""
+    if not isinstance(meta, dict):
+        return "paragraph", 0
+    bullet = meta.get("bullet")
+    if isinstance(bullet, dict):
+        lt = str(bullet.get("listType", ""))
+        kind = "number" if lt.startswith("ORDER") else "bullet"
+        return kind, int(bullet.get("nestingLevel") or 0)
+    ps = meta.get("paragraphStyle")
+    if isinstance(ps, dict):
+        named = ps.get("namedStyleType")
+        if named in _NAMED_STYLE_HEADING:
+            return "heading", _NAMED_STYLE_HEADING[named]
+    return "paragraph", 0
+
+
+def get_blocks(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """Inverse of :func:`build_body_with_blocks`: paragraphs → typed blocks.
+
+    Reconstructs block type (heading/bullet/number/paragraph) from
+    ``paragraphStyle``/``bullet`` metadata and runs (carrying
+    bold/italic/underline/url) from ``textRuns`` + ``customRanges``. Robust to
+    missing metadata (degrades to a plain paragraph).
+    """
+    body = snap.get("body") if isinstance(snap, dict) else None
+    if not isinstance(body, dict):
+        return []
+    stream = body.get("dataStream")
+    if not isinstance(stream, str) or stream == "":
+        return []
+
+    start_map: dict[int, tuple[int, str]] = {}
+    for c in body.get("customRanges") or []:
+        if not isinstance(c, dict):
+            continue
+        s, e = c.get("startIndex"), c.get("endIndex")
+        props = c.get("properties")
+        url = props.get("url") if isinstance(props, dict) else None
+        if isinstance(s, int) and isinstance(e, int) and url:
+            start_map[s] = (e, str(url))
+
+    styles = _index_styles(body)
+    paras_meta = body.get("paragraphs") or []
+    blocks: list[dict[str, Any]] = []
+
+    for p_idx, (p_start, p_end) in enumerate(_paragraph_spans(stream)):
+        runs: list[dict[str, Any]] = []
+        cur_text: list[str] = []
+        cur_flags: tuple[str, ...] | None = None
+
+        def flush() -> None:
+            nonlocal cur_text, cur_flags
+            if cur_text:
+                run: dict[str, Any] = {"text": "".join(cur_text)}
+                for f in cur_flags or ():
+                    run[f] = True
+                runs.append(run)
+            cur_text = []
+            cur_flags = None
+
+        i = p_start
+        while i < p_end:
+            ch = stream[i]
+            if ch == CUSTOM_RANGE_START and i in start_map:
+                flush()
+                end_idx, url = start_map[i]
+                link_run: dict[str, Any] = {
+                    "text": _strip_tokens(stream[i + 1 : end_idx]),
+                    "url": url,
+                }
+                link_run.update(styles.get(i + 1, {}))
+                runs.append(link_run)
+                i = end_idx + 1
+            elif ch in (CUSTOM_RANGE_START, CUSTOM_RANGE_END):
+                i += 1
+            else:
+                fl = styles.get(i)
+                key = tuple(sorted(fl)) if fl else None
+                if key != cur_flags:
+                    flush()
+                    cur_flags = key
+                cur_text.append(ch)
+                i += 1
+        flush()
+
+        meta = paras_meta[p_idx] if p_idx < len(paras_meta) else {}
+        btype, level = _block_type_from_meta(meta)
+        blocks.append({"type": btype, "level": level, "runs": runs or [{"text": ""}]})
+    return blocks
+
+
+def append_blocks(
+    snap: dict[str, Any], blocks: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Return a NEW snapshot with ``blocks`` appended (existing content kept).
+
+    A blank document is replaced by the new blocks (matching
+    :func:`append_paragraph_with_runs`); existing headings/lists/styled runs are
+    preserved by re-deriving them via :func:`get_blocks`.
+    """
+    existing = get_blocks(snap) if isinstance(snap, dict) else []
+    if get_paragraphs(snap) in ([""], []):
+        new_blocks = list(blocks)
+    else:
+        new_blocks = [*existing, *blocks]
+    out = copy.deepcopy(snap) if isinstance(snap, dict) else {}
+    if "id" not in out:
+        out["id"] = f"doc-{uuid4().hex[:12]}"
+    out.setdefault("documentStyle", {})
+    out["body"] = build_body_with_blocks(new_blocks)
+    return out
+
+
 def runs_from_markdown(text: str) -> list[dict[str, Any]]:
     """Parse inline markdown ``[label](url)`` links into a run list."""
     text = str(text or "")

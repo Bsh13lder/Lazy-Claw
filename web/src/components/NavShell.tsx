@@ -9,7 +9,11 @@ import StatusBar from "./StatusBar";
 // "docs-full" is the standalone fullscreen Documents workspace — it renders
 // OUTSIDE NavShell (no nav rail / chat sidebar / status bar), so it never
 // appears in the nav rail; it's reached only via /?page=docs-full.
-export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "hub" | "skills" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "docs" | "docs-full" | "vault" | "settings";
+// "skills-hub" is the consolidated Tools entry — one page that hosts the three
+// formerly-separate surfaces (Specialists / Skills / Discover) as sub-tabs.
+// The legacy ids "hub", "skills", "specialists" stay in the Page union so old
+// deep links keep resolving, but they're no longer shown in the nav rail.
+export type Page = "overview" | "activity" | "code-specialist" | "chat" | "tasks" | "notes" | "replay" | "audit" | "skills-hub" | "hub" | "skills" | "specialists" | "templates" | "jobs" | "watchers" | "mcp" | "memory" | "lazybrain" | "docs" | "docs-full" | "vault" | "settings";
 
 interface NavShellProps {
   activePage: Page;
@@ -26,8 +30,10 @@ const PAGE_META: Record<Page, { label: string; description: string }> = {
   notes: { label: "Notes", description: "Quick notes, ideas, memory — capture from anywhere" },
   replay: { label: "Replay", description: "Session traces & debugging" },
   audit: { label: "Audit", description: "Action log & security" },
+  "skills-hub": { label: "Skills & Agents", description: "Specialists, skills & install" },
   hub: { label: "Skill Hub", description: "Discover & install skills" },
   skills: { label: "Skills", description: "Manage agent tools" },
+  specialists: { label: "Specialists", description: "Declarative agents the router delegates to" },
   templates: { label: "Templates", description: "Saved browser recipes" },
   jobs: { label: "Jobs", description: "Scheduled & cron tasks" },
   watchers: { label: "Watchers", description: "Zero-token site monitors" },
@@ -156,6 +162,23 @@ const ICONS: Record<Page, NavIcon> = {
       <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
     </svg>
   ),
+  specialists: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="8" width="16" height="11" rx="2" />
+      <path d="M12 8V4M9 4h6" />
+      <circle cx="9" cy="13" r="1" />
+      <circle cx="15" cy="13" r="1" />
+    </svg>
+  ),
+  // Consolidated Tools entry — mirrors the Specialists glyph (its default tab).
+  "skills-hub": (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="8" width="16" height="11" rx="2" />
+      <path d="M12 8V4M9 4h6" />
+      <circle cx="9" cy="13" r="1" />
+      <circle cx="15" cy="13" r="1" />
+    </svg>
+  ),
   replay: (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
       <polygon points="5 3 19 12 5 21 5 3" />
@@ -180,7 +203,7 @@ const NAV_GROUPS: { label: string; items: Page[] }[] = [
   { label: "Home",       items: ["overview", "activity", "code-specialist", "chat", "tasks"] },
   { label: "Knowledge",  items: ["lazybrain", "docs", "memory", "vault"] },
   { label: "Automation", items: ["jobs", "watchers", "templates"] },
-  { label: "Tools",      items: ["hub", "skills", "mcp"] },
+  { label: "Tools",      items: ["skills-hub", "mcp"] },
   { label: "Debug",      items: ["replay", "audit"] },
 ];
 

@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import {
   createSheet,
   deleteSheet,
+  downloadBlob,
+  exportSheetBlob,
   getSheet,
   listSheets,
   saveSheet,
+  uploadSheet,
   type SheetMeta,
   type UniverSnapshot,
 } from "../api";
@@ -35,6 +38,7 @@ const AUTOSAVE_MS = 800;
  */
 export default function Sheets() {
   const [sheets, setSheets] = useState<SheetMeta[]>([]);
+  const [exportPassword, setExportPassword] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeName, setActiveName] = useState("");
   const [loadingList, setLoadingList] = useState(true);
@@ -149,6 +153,30 @@ export default function Sheets() {
     await refreshList(created.id);
   }
 
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-importing the same file
+    if (!file) return;
+    try {
+      const created = await uploadSheet(file);
+      await refreshList(created.id);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Import failed");
+    }
+  }
+
+  async function handleExport(format: "xlsx" | "csv") {
+    if (!activeId) return;
+    const pw = exportPassword.trim();
+    try {
+      const blob = await exportSheetBlob(activeId, format, pw || null);
+      const ext = pw ? "zip" : format;
+      downloadBlob(blob, `${activeName || "sheet"}.${ext}`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Export failed");
+    }
+  }
+
   async function handleDelete(id: string) {
     if (!window.confirm("Delete this sheet? This cannot be undone.")) return;
     await deleteSheet(id);
@@ -184,13 +212,27 @@ export default function Sheets() {
       <aside className="w-60 shrink-0 border-r border-border bg-bg-secondary flex flex-col">
         <div className="flex items-center justify-between px-3 py-2.5 border-b border-border">
           <span className="text-sm font-semibold">Sheets</span>
-          <button
-            onClick={handleNew}
-            className="px-2 py-1 rounded-lg bg-accent text-bg-primary text-xs font-medium hover:opacity-90 transition-opacity"
-            title="New sheet"
-          >
-            + New
-          </button>
+          <div className="flex items-center gap-1.5">
+            <label
+              className="px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover cursor-pointer transition-colors"
+              title="Import a .xlsx spreadsheet"
+            >
+              Import
+              <input
+                type="file"
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="hidden"
+                onChange={handleImportFile}
+              />
+            </label>
+            <button
+              onClick={handleNew}
+              className="px-2 py-1 rounded-lg bg-accent text-bg-primary text-xs font-medium hover:opacity-90 transition-opacity"
+              title="New sheet"
+            >
+              + New
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto py-1">
@@ -261,7 +303,38 @@ export default function Sheets() {
                 aria-label="Sheet name"
               />
               <SaveBadge state={saveState} />
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-2">
+                <details className="relative">
+                  <summary className="list-none cursor-pointer select-none px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover transition-colors">
+                    Export ▾
+                  </summary>
+                  <div className="absolute right-0 mt-1 z-10 w-56 rounded-lg border border-border bg-bg-secondary shadow-lg p-2 space-y-1.5">
+                    <input
+                      type="password"
+                      value={exportPassword}
+                      onChange={(e) => setExportPassword(e.target.value)}
+                      placeholder="Password (optional)"
+                      className="w-full px-2 py-1 rounded-md bg-bg-primary border border-border text-xs outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={() => handleExport("xlsx")}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
+                    >
+                      Excel (.xlsx)
+                    </button>
+                    <button
+                      onClick={() => handleExport("csv")}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
+                    >
+                      CSV (.csv)
+                    </button>
+                    <p className="text-[10px] text-text-muted leading-snug px-1">
+                      {exportPassword.trim()
+                        ? "🔒 Downloads an AES-256 encrypted .zip."
+                        : "Set a password to encrypt the download."}
+                    </p>
+                  </div>
+                </details>
                 <DocAiPopover
                   kind="sheets"
                   docId={activeId}

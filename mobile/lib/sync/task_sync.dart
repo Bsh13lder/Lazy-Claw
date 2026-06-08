@@ -1,0 +1,668 @@
+import 'dart:convert';
+
+import 'package:dio/dio.dart';
+
+import '../core/api/api_exceptions.dart';
+import '../local/task_dao.dart';
+import '../models/task.dart';
+import '../repositories/tasks_repository.dart';
+
+/// Raised when a push stops early because the network/server is unreachable, or
+/// because a retryable server error (5xx) should keep the queue intact. The
+/// drained-so-far items are already removed from the outbox; the rest stay
+/// queued for the next sync.
+class _PushInterrupted implements Exception {
+  final Object cause;
+  _PushInterrupted(this.cause);
+}
+
+/// Outcome of one [TaskSync.sync] run — handy for tests + UI diagnostics.
+class SyncResult {
+  final int pushed;
+  final int pulled;
+  final int deletedApplied;
+  final int conflicts;
+  final bool pushInterrupted;
+  final bool pullFailed;
+  final Object? error;
+
+  const SyncResult({
+    this.pushed = 0,
+    this.pulled = 0,
+    this.deletedApplied = 0,
+    this.conflicts = 0,
+    this.pushInterrupted = false,
+    this.pullFailed = false,
+    this.error,
+  });
+}
+
+/// The offline-first sync engine for tasks.
+///
+/// * [push] drains the outbox in order, calling the matching `/api/tasks*`
+///   endpoint. On a network OR retryable-server failure it STOPS (the failed
+///   item stays queued); only a definitive 4xx is allowed to drain.
+/// * [pull] fetches `GET /api/tasks/changes?since=<cursor>` and merges with
+///   last-write-wins by `updated_at`; the loser of a real both-sides change is
+///   recorded in `conflicts` (never silently dropped).
+/// * [sync] = push() then pull(), guarded against concurrent runs.
+class TaskSync {
+  final TaskDao _dao;
+  final TasksRepository _repo;
+
+  /// A retryable (5xx) item is dead-lettered after this many failed attempts so
+  /// one poison row can't wedge the whole queue forever.
+  static const int kMaxPushAttempts = 5;
+
+  bool _running = false;
+
+  TaskSync(this._dao, this._repo);
+
+  bool get isRunning => _running;
+
+  /// push() then pull(). A second call while one is in flight is a no-op and
+  /// returns an empty result.
+  Future<SyncResult> sync() async {
+    if (_running) return const SyncResult();
+    _running = true;
+    try {
+      final pushResult = await push();
+      final pullResult = await pull();
+      return SyncResult(
+        pushed: pushResult.pushed,
+        pulled: pullResult.pulled,
+        deletedApplied: pullResult.deletedApplied,
+        conflicts: pullResult.conflicts,
+        pushInterrupted: pushResult.pushInterrupted,
+        pullFailed: pullResult.pullFailed,
+        error: pushResult.error ?? pullResult.error,
+      );
+    } finally {
+      _running = false;
+    }
+  }
+
+  // ── PUSH ────────────────────────────────────────────────────────────────
+
+  /// Drain the outbox in seq order. Returns how many items were pushed. On a
+  /// network OR retryable-server failure it stops early (remaining items retried
+  /// next sync). A 4xx (validation/conflict/404) is safe to drain.
+  Future<SyncResult> push() async {
+    final queue = await _dao.readOutbox();
+    // H3: coalesce consecutive `update` ops per entity so replays can't
+    // interleave with server-stamped times. The first update row of a run keeps
+    // the merged payload; the rest are no-op'd (just dequeued).
+    final coalesced = _coalesceUpdates(queue);
+
+    var pushed = 0;
+    for (final item in queue) {
+      try {
+        // Skipped duplicate update rows: just dequeue, no network call.
+        if (coalesced.skipSeqs.contains(item.seq)) {
+          await _dao.deleteOutboxItem(item.seq);
+          continue;
+        }
+        final effective = coalesced.payloads[item.seq] != null
+            ? _withPayload(item, coalesced.payloads[item.seq]!)
+            : item;
+
+        final committed = await _pushOne(effective);
+        if (committed) {
+          // C2: retire the pushed item atomically (delete outbox row + clear
+          // dirty / hard-remove tombstone) so a crash can't split the two writes.
+          await _dao.commitPush(item.seq, item.entityId);
+          pushed++;
+        }
+        // A drained-but-not-committed item (definitive 4xx, or a dead-lettered
+        // 5xx poison) has already had its outbox row removed inside the failure
+        // classifier; we leave its cache row dirty so the NEXT pull restores
+        // server truth — never silently dropping the user's edit.
+      } on _PushInterrupted catch (e) {
+        // Network down OR a retryable server error — stop, keep the rest queued.
+        return SyncResult(
+          pushed: pushed,
+          pushInterrupted: true,
+          error: e.cause,
+        );
+      }
+    }
+    return SyncResult(pushed: pushed);
+  }
+
+  /// Push one queued op. Returns true when the server accepted it (so the
+  /// caller commits the retire); false when the item was DRAINED on a definitive
+  /// client error or dead-lettered as a 5xx poison (the failure classifier has
+  /// already removed its outbox row, and the cache stays dirty for the next
+  /// pull). Throws [_PushInterrupted] to STOP the drain and keep the queue.
+  Future<bool> _pushOne(OutboxItem item) async {
+    final p = item.payload;
+    try {
+      switch (item.op) {
+        case OutboxOp.create:
+          await _repo.createTask(
+            (p['title'] ?? '').toString(),
+            id: p['id']?.toString() ?? item.entityId,
+            description: p['description']?.toString(),
+            category: p['category']?.toString(),
+            priority: p['priority']?.toString(),
+            dueDate: p['due_date']?.toString(),
+            reminderAt: p['reminder_at']?.toString(),
+            recurring: p['recurring']?.toString(),
+          );
+          break;
+        case OutboxOp.update:
+          await _pushUpdate(item.entityId, p);
+          break;
+        case OutboxOp.complete:
+          await _repo.completeTask(item.entityId);
+          break;
+        case OutboxOp.delete:
+          await _repo.deleteTask(item.entityId);
+          break;
+        default:
+          // Unknown op — drop it (deleting the outbox row happens in push()).
+          break;
+      }
+      // Server accepted the op → the caller commits the retire.
+      return true;
+    } catch (e) {
+      // Drained (returns false) or interrupting (throws).
+      return _classifyPushFailure(item, e);
+    }
+  }
+
+  /// Decide what a push failure means and act on it. NEVER silently drops a
+  /// queued edit on a transient failure (C1). Returns `true` ONLY for an
+  /// idempotent 404-on-complete/delete (treated as a success → caller commits
+  /// + counts it). For the other drain branches it removes THIS item's outbox
+  /// row here and returns `false`, leaving the cache row dirty so the next pull
+  /// re-establishes server truth. Throws [_PushInterrupted] to STOP the drain
+  /// and keep the queue.
+  ///   * network (timeout/connection/cancel, status 0, non-badResponse) →
+  ///     [_PushInterrupted] (stop draining, keep ALL queued items);
+  ///   * server 5xx → retryable: bump the attempt counter, dead-letter after
+  ///     [kMaxPushAttempts], otherwise [_PushInterrupted] (keep it queued);
+  ///   * 404 on complete/delete → idempotent success (return true → caller commits);
+  ///   * other 4xx → drain the outbox row (return false; next pull restores it).
+  Future<bool> _classifyPushFailure(OutboxItem item, Object e) async {
+    if (_isNetworkError(e)) {
+      throw _PushInterrupted(e);
+    }
+    final api = _asApiError(e);
+    final status = api?.status ?? _statusOf(e) ?? 0;
+
+    // 404 on complete/delete is idempotent success — the row is already gone
+    // server-side. Return true so the caller commits (removes the outbox row
+    // AND clears dirty) and counts it as pushed.
+    if (status == 404 &&
+        (item.op == OutboxOp.delete || item.op == OutboxOp.complete)) {
+      return true;
+    }
+
+    if (status >= 500) {
+      // Retryable. Count the attempt; dead-letter a poison item, else stop and
+      // keep it queued for the next sync — NEVER silently drop.
+      final attempts = await _dao.bumpOutboxAttempts(item.seq);
+      if (attempts >= kMaxPushAttempts) {
+        await _dao.deadLetterOutboxItem(item.seq);
+        return false; // drained the poison item; local stays dirty for next pull
+      }
+      throw _PushInterrupted(e);
+    }
+
+    if (status >= 400) {
+      // Definitive client error (validation/conflict). For an update/complete/
+      // delete this is safe to drain silently — the row exists server-side, so
+      // the next pull restores server truth. But a CREATE is client-originated:
+      // there is NO server truth to restore, so silently dropping the only
+      // queued record permanently strands the dirty cache row (an orphan the
+      // user can never re-sync). Log it as a visible conflict BEFORE draining
+      // so the UI / next sync can surface the rejection.
+      if (item.op == OutboxOp.create) {
+        await _logCreateRejected(item, status);
+      }
+      await _dao.deleteOutboxItem(item.seq);
+      return false; // drained
+    }
+
+    // Unknown shape with no usable status → treat as network-ish and keep it.
+    throw _PushInterrupted(e);
+  }
+
+  /// Record a rejected CREATE in the `conflicts` table so a definitive 4xx on a
+  /// client-originated row is never silent. The local cache row stays dirty (its
+  /// `dirty=1` flag is the UI's "un-synced" signal); this surfaces WHY it can't
+  /// sync. The conflict row's `server` value is null (the create never landed)
+  /// and the `local` value carries the entity label + rejecting status for
+  /// diagnosis.
+  Future<void> _logCreateRejected(OutboxItem item, int status) async {
+    final p = item.payload;
+    final label = p['title']?.toString() ?? '';
+    final descriptor = label.isEmpty ? item.entity : '${item.entity}: $label';
+    await _dao.logConflict(
+      id: item.entityId,
+      field: 'create_rejected',
+      local: 'HTTP $status — $descriptor',
+      server: null, // create never landed → no server value
+    );
+  }
+
+  /// Push an `update` op. Plain task fields go via PATCH /api/tasks/{id}; the
+  /// sub-task checklist (when the payload carries `steps`) rides the dedicated
+  /// PUT /api/tasks/{id}/steps route, because PATCH's `UpdateTaskBody` does NOT
+  /// accept `steps` and would silently drop them.
+  ///
+  /// The create-then-add-subtasks flow is safe: the outbox drains in seq order,
+  /// so the entity's CREATE always pushes before any later steps-bearing update,
+  /// and the task exists server-side by the time this PUT runs.
+  ///
+  /// Either call may throw — it propagates to [_pushOne]'s catch, where the
+  /// shared classifier applies the SAME 5xx-retry / 4xx-drain / dead-letter
+  /// handling as every other op. Both calls are idempotent on replay (PATCH and
+  /// "replace-all" PUT), so a partial success (PATCH ok, PUT 5xx) safely re-runs.
+  Future<void> _pushUpdate(String id, Map<String, dynamic> payload) async {
+    final rawSteps = payload['steps'];
+    final patch = _patchFrom(payload)..remove('steps');
+
+    // Only PATCH when there is a real field to change. A steps-only edit leaves
+    // just the synthetic client `updated_at` behind, and an otherwise-empty
+    // UpdateTaskBody is rejected with a 400 — so skip the no-op PATCH entirely.
+    if (_hasRealPatchFields(patch)) {
+      await _repo.updateTask(id, patch);
+    }
+    if (rawSteps != null) {
+      await _repo.setSteps(id, _decodeSteps(rawSteps));
+    }
+  }
+
+  Map<String, dynamic> _patchFrom(Map<String, dynamic> payload) {
+    final out = Map<String, dynamic>.from(payload)..remove('id');
+    return out;
+  }
+
+  /// True when [patch] carries at least one server-applicable field beyond the
+  /// synthetic `updated_at` LWW marker — i.e. the PATCH would actually change
+  /// something (the backend 400s an empty update).
+  static bool _hasRealPatchFields(Map<String, dynamic> patch) =>
+      patch.keys.any((k) => k != 'updated_at');
+
+  /// Decode the outbox `steps` payload into the `[{id?, title, done}]` list the
+  /// PUT /steps body expects. The DAO stores `steps` as a JSON-array STRING;
+  /// this also tolerates an already-decoded List. Null / malformed / empty
+  /// input yields `[]` (a deliberate "clear the checklist" PUT).
+  static List<Map<String, dynamic>> _decodeSteps(Object? raw) {
+    dynamic decoded = raw;
+    if (raw is String) {
+      if (raw.trim().isEmpty) return const [];
+      try {
+        decoded = jsonDecode(raw);
+      } catch (_) {
+        return const [];
+      }
+    }
+    if (decoded is! List) return const [];
+    return decoded
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  /// Replace an item's payload (used for the coalesced update head).
+  OutboxItem _withPayload(OutboxItem item, Map<String, dynamic> payload) =>
+      OutboxItem(
+        seq: item.seq,
+        op: item.op,
+        entity: item.entity,
+        entityId: item.entityId,
+        payload: payload,
+        createdAt: item.createdAt,
+        attempts: item.attempts,
+      );
+
+  // ── PULL ────────────────────────────────────────────────────────────────
+
+  /// Fetch the server delta and merge with last-write-wins. Advances the
+  /// cursor to the server's `now` on success. On a network failure it returns
+  /// `pullFailed: true` and leaves the cursor untouched.
+  Future<SyncResult> pull() async {
+    final cursor = await _dao.getCursor();
+    TaskChanges changes;
+    try {
+      changes = await _repo.fetchChanges(since: cursor);
+    } catch (e) {
+      return SyncResult(pullFailed: true, error: e);
+    }
+
+    var pulled = 0;
+    var conflicts = 0;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    for (final st in changes.tasks) {
+      final applied = await _mergeServerTask(st, syncedAt: nowIso);
+      if (applied.written) pulled++;
+      if (applied.conflict) conflicts++;
+    }
+
+    var deletedApplied = 0;
+    for (final id in changes.deleted) {
+      final logged = await _applyServerTombstone(id, syncedAt: nowIso);
+      if (logged) conflicts++;
+      deletedApplied++;
+    }
+
+    // M3: advance the cursor only when the server gave us a real clock. An
+    // empty `now` means we can't trust the page boundary — fall back to the max
+    // `updated_at` we actually observed; if even that is empty, treat the pull
+    // as FAILED so we don't silently skip the delta on the next run.
+    final nextCursor = _resolveCursor(changes);
+    if (nextCursor != null && nextCursor.isNotEmpty) {
+      await _dao.setCursor(nextCursor);
+    } else {
+      return SyncResult(
+        pulled: pulled,
+        deletedApplied: deletedApplied,
+        conflicts: conflicts,
+        pullFailed: true,
+        error: StateError('server returned empty `now` with no datable rows'),
+      );
+    }
+
+    return SyncResult(
+      pulled: pulled,
+      deletedApplied: deletedApplied,
+      conflicts: conflicts,
+    );
+  }
+
+  /// The cursor to advance to: the server `now` when present, else the newest
+  /// `updated_at` across the page's tasks (so we never re-fetch from scratch on
+  /// a server that omitted `now`). Null/empty → caller treats as a pull failure.
+  String? _resolveCursor(TaskChanges changes) {
+    if (changes.now.isNotEmpty) return changes.now;
+    String best = '';
+    for (final st in changes.tasks) {
+      final ua = st.updatedAt ?? '';
+      if (ua.isNotEmpty && ua.compareTo(best) > 0) best = ua;
+    }
+    return best.isEmpty ? null : best;
+  }
+
+  /// Apply a server tombstone with H1 safety: if the local row has an UNSYNCED
+  /// edit (dirty=1), log the server-delete-vs-local-values conflict BEFORE
+  /// applying, drop the now-moot queued outbox op, then apply the delete — all
+  /// in ONE transaction so a concurrent write can't slip in. Delete-wins is the
+  /// policy, but it is never silent. Returns true when a conflict was logged.
+  Future<bool> _applyServerTombstone(String id, {required String syncedAt}) {
+    return _dao.runInTransaction<bool>((txn) async {
+      final localRow = await txn.getRow(id);
+      var loggedConflict = false;
+
+      if (localRow != null) {
+        final dirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+        final alreadyDeleted = ((localRow['deleted'] as int?) ?? 0) == 1;
+        if (dirty && !alreadyDeleted) {
+          // The user has an un-pushed edit the server delete is about to clobber.
+          await _logTombstoneConflict(txn, localRow, at: syncedAt);
+          loggedConflict = true;
+        }
+        if (dirty) {
+          // Reconcile: the row is gone server-side, so replaying its queued ops
+          // is pointless (or would 404). Drop them.
+          await txn.deleteOutboxForEntity(id);
+        }
+      }
+
+      await txn.applyServerDelete(id, syncedAt: syncedAt);
+      return loggedConflict;
+    });
+  }
+
+  /// Record each non-empty local field as a conflict against the server delete
+  /// (server value is null — the row no longer exists).
+  Future<void> _logTombstoneConflict(
+    TaskTxn txn,
+    Map<String, Object?> localRow, {
+    required String at,
+  }) async {
+    const cols = <String>[
+      'title',
+      'description',
+      'status',
+      'priority',
+      'due_date',
+      'category',
+    ];
+    final id = (localRow['id'] as String?) ?? '';
+    for (final col in cols) {
+      final localVal = localRow[col]?.toString();
+      if (localVal == null || localVal.isEmpty) continue;
+      await txn.logConflict(
+        id: id,
+        field: col,
+        local: localVal,
+        server: null, // server-deleted → no server value
+        at: at,
+      );
+    }
+  }
+
+  /// Apply last-write-wins for a single server task against the local cache.
+  ///
+  /// The dirty-check + the upsert run in ONE transaction (H2) so a concurrent
+  /// local write can't land between the read and the server-write.
+  ///
+  /// * No local row → write the server copy.
+  /// * Local NOT dirty → server wins (write).
+  /// * Local dirty:
+  ///     - server `updated_at` >= local `updated_at` → server wins, and the
+  ///       overwritten local edit is logged to `conflicts` (both sides changed).
+  ///       Spurious "the server just echoed my own push" diffs are NOT logged.
+  ///     - local strictly newer → keep local (don't clobber the user's
+  ///       un-pushed edit; it will push on the next sync). No log needed.
+  Future<_MergeOutcome> _mergeServerTask(
+    ServerTask st, {
+    required String syncedAt,
+  }) {
+    final serverTask = st.task;
+    final serverUpdatedAt = st.updatedAt;
+
+    return _dao.runInTransaction<_MergeOutcome>((txn) async {
+      final localRow = await txn.getRow(serverTask.id);
+
+      if (localRow == null) {
+        await txn.upsertFromServer(
+          serverTask,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      final localDirty = ((localRow['dirty'] as int?) ?? 0) == 1;
+      if (!localDirty) {
+        await txn.upsertFromServer(
+          serverTask,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return const _MergeOutcome(written: true, conflict: false);
+      }
+
+      // Local is dirty — a genuine concurrent edit. Compare timestamps.
+      final localUpdatedAt = (localRow['updated_at'] as String?) ?? '';
+      final serverWins = _gte(serverUpdatedAt, localUpdatedAt);
+
+      if (serverWins) {
+        // Server wins; log the local edit we are about to overwrite. Only real
+        // divergences are logged (a server row that merely echoes our just-
+        // pushed values produces no diff → no spurious conflict — H3).
+        final logged =
+            await _logFieldConflicts(txn, localRow, serverTask, at: syncedAt);
+        await txn.upsertFromServer(
+          serverTask,
+          serverUpdatedAt: serverUpdatedAt,
+          syncedAt: syncedAt,
+        );
+        return _MergeOutcome(written: true, conflict: logged);
+      }
+
+      // Local strictly newer — keep it; it re-pushes next sync. Nothing logged.
+      return const _MergeOutcome(written: false, conflict: false);
+    });
+  }
+
+  /// Record each differing field as a conflict row so the loser is never lost.
+  /// Returns true when at least one field actually differed (so a server echo
+  /// of our own push logs nothing — H3 / M1).
+  Future<bool> _logFieldConflicts(
+    TaskTxn txn,
+    Map<String, Object?> localRow,
+    Task serverTask, {
+    required String at,
+  }) async {
+    const fields = <String>[
+      'title',
+      'description',
+      'status',
+      'priority',
+      'due_date',
+      'category',
+    ];
+    final serverJson = serverTask.toJson();
+    var any = false;
+    for (final col in fields) {
+      final localVal = localRow[col]?.toString();
+      final serverVal = serverJson[col]?.toString();
+      if (localVal != serverVal) {
+        any = true;
+        await txn.logConflict(
+          id: serverTask.id,
+          field: col,
+          local: localVal,
+          server: serverVal,
+          at: at,
+        );
+      }
+    }
+    return any;
+  }
+
+  // ── update coalescing (H3) ────────────────────────────────────────────────
+
+  /// Merge consecutive pending `update` ops for the same entity into one
+  /// payload carried by the FIRST update row; the later rows are marked to be
+  /// dequeued without a network call. Each merged head also carries the client
+  /// `updated_at` (latest local edit time) so the server can honor client LWW.
+  _Coalesced _coalesceUpdates(List<OutboxItem> queue) {
+    // entityId → seq of the head update row that will carry the merged payload.
+    final head = <String, int>{};
+    // head seq → merged payload (mutable while folding).
+    final merged = <int, Map<String, dynamic>>{};
+    final skip = <int>{};
+
+    for (final item in queue) {
+      if (item.op != OutboxOp.update) continue;
+      final id = item.entityId;
+      final headSeq = head[id];
+      if (headSeq == null) {
+        head[id] = item.seq;
+        merged[item.seq] = Map<String, dynamic>.from(item.payload);
+      } else {
+        // Fold this later update into the head; later values win (LWW).
+        final into = merged[headSeq]!;
+        for (final entry in item.payload.entries) {
+          if (entry.key == 'id') continue;
+          into[entry.key] = entry.value;
+        }
+        skip.add(item.seq);
+      }
+    }
+
+    // Stamp the client updated_at on each coalesced head so the server can LWW.
+    for (final entry in merged.entries) {
+      entry.value['updated_at'] = _lwwTimeFor(queue, entry.key);
+    }
+
+    return _Coalesced(payloads: merged, skipSeqs: skip);
+  }
+
+  /// The newest local edit time to advertise for the entity owning [headSeq] —
+  /// the createdAt of the LAST update row folded into the head (queue order is
+  /// chronological), falling back to the head's own createdAt.
+  String _lwwTimeFor(List<OutboxItem> queue, int headSeq) {
+    final headItem = queue.firstWhere((i) => i.seq == headSeq);
+    var best = headItem.createdAt;
+    for (final i in queue) {
+      if (i.op == OutboxOp.update &&
+          i.entityId == headItem.entityId &&
+          i.createdAt.compareTo(best) > 0) {
+        best = i.createdAt;
+      }
+    }
+    return best;
+  }
+
+  // ── helpers ──────────────────────────────────────────────────────────────
+
+  /// True when [a] >= [b] as ISO-8601 strings (lexicographic == chronological
+  /// for zero-padded ISO timestamps). Empty server time loses to any local time.
+  static bool _gte(String? a, String? b) {
+    final av = a ?? '';
+    final bv = b ?? '';
+    if (av.isEmpty) return false;
+    if (bv.isEmpty) return true;
+    return av.compareTo(bv) >= 0;
+  }
+
+  /// Unwrap an [ApiError] from either a bare throw or a [DioException] whose
+  /// `.error` carries the real [ApiError] (the production `_ErrorInterceptor`
+  /// shape). Returns null when [e] is neither.
+  static ApiError? _asApiError(Object e) => e is ApiError
+      ? e
+      : (e is DioException && e.error is ApiError
+          ? e.error as ApiError
+          : null);
+
+  /// Best-effort HTTP status for [e] across both error shapes.
+  static int? _statusOf(Object e) {
+    final api = _asApiError(e);
+    if (api != null) return api.status;
+    if (e is DioException) return e.response?.statusCode;
+    return null;
+  }
+
+  /// True when [e] is a transport-level failure that should STOP the drain and
+  /// keep the queue intact — robust to both the [ApiError] and the
+  /// [DioException] shapes thrown in production.
+  static bool _isNetworkError(Object e) {
+    final api = _asApiError(e);
+    if (api != null) {
+      // status 0 == no response reached us (DNS/connection/timeout).
+      return api.status == 0;
+    }
+    if (e is DioException) {
+      // Anything that isn't a real HTTP response is a transport failure.
+      if (e.type != DioExceptionType.badResponse) return true;
+      // A badResponse with no status code is also network-ish.
+      return e.response?.statusCode == null;
+    }
+    // A wholly unknown throw is not classifiable as a definitive server error;
+    // be conservative and DON'T treat it as network here — the caller will fall
+    // through to the unknown-shape branch and keep the item queued.
+    return false;
+  }
+}
+
+class _MergeOutcome {
+  final bool written;
+  final bool conflict;
+  const _MergeOutcome({required this.written, required this.conflict});
+}
+
+/// Result of folding pending `update` ops: per-head merged payloads + the set of
+/// later update rows to dequeue without a network call.
+class _Coalesced {
+  final Map<int, Map<String, dynamic>> payloads;
+  final Set<int> skipSeqs;
+  const _Coalesced({required this.payloads, required this.skipSeqs});
+}

@@ -33,12 +33,40 @@ if [ -d "$RO_HOST" ]; then
     for item in "$RO_HOST"/* "$RO_HOST"/.[!.]*; do
         [ -e "$item" ] || continue
         name="$(basename "$item")"
-        # Never seed the credential file from the host — claude owns
-        # this inside the volume and atomic-renames it on login.
+        target="$CLAUDE_HOME/$name"
+        # Never seed:
+        #   - the credential file (claude owns it in the volume, atomic-renames on login)
+        #   - SESSION/PLAN/MEMORY state — this is the host user's PERSONAL Claude Code
+        #     data. Symlinking projects/ + memory/ exposed the user's personal
+        #     transcripts + auto-memory to the in-container claude (inbound leak)
+        #     and routed lazyclaw's own sessions back onto the host disk (outbound).
+        #     plans/ + sessions/ + session-data/ + session-env/ are the same class
+        #     of personal state (plans/ is the dir the retired `_ingest_claude_plans`
+        #     bridge used to mirror — keep it out of reach on principle). The agent's
+        #     sessions live in the writable volume, fully isolated.
+        #     (Belt-and-braces: the provider also sets setting_sources=[] + an
+        #     isolated cwd, so even an unexpected symlink wouldn't load/co-mingle.)
         case "$name" in
             .credentials.json) continue ;;
+            projects|memory|plans|sessions|session-data|session-env|todos|shell-snapshots|history.jsonl|history)
+                # On an EXISTING volume from a prior boot (before this
+                # exclusion existed), $target may already be a STALE symlink
+                # into the read-only host mount. The seed guard below would
+                # never remove it. Remove it here so the host's personal
+                # session/plan/memory state is unreachable and our own writes land
+                # in the writable volume. Only remove symlinks pointing into
+                # $RO_HOST — never a real dir the volume legitimately owns.
+                if [ -L "$target" ]; then
+                    link_dest="$(readlink "$target" 2>/dev/null || echo '')"
+                    case "$link_dest" in
+                        "$RO_HOST"/*)
+                            rm -f "$target"
+                            echo "entrypoint: removed stale host symlink $target -> $link_dest" >&2
+                            ;;
+                    esac
+                fi
+                continue ;;
         esac
-        target="$CLAUDE_HOME/$name"
         # Only seed if nothing exists at this path. Honors prior writes,
         # claude-managed files, and dangling symlinks (-L catches those).
         if [ ! -e "$target" ] && [ ! -L "$target" ]; then

@@ -446,23 +446,6 @@ export const rejectPlan = (reason?: string) =>
     body: JSON.stringify({ reason }),
   });
 
-export interface PlanSettings {
-  auto_plan: boolean;
-  session_auto_approve: boolean;
-}
-
-export const getPlanSettings = () =>
-  request<PlanSettings>("/api/agent/plan/settings");
-
-export const setPlanSettings = (opts: {
-  auto_plan?: boolean;
-  clear_session_trust?: boolean;
-}) =>
-  request<PlanSettings>("/api/agent/plan/settings", {
-    method: "POST",
-    body: JSON.stringify(opts),
-  });
-
 // ── Streaming Settings (Fix J — bg progress on/off) ─────────────────────
 
 export interface StreamingSettings {
@@ -1009,6 +992,11 @@ export interface AwakeStatus {
   settings: AwakeSettings;
 }
 
+// Operating-mode posture (ADR-0005 specialist-first dispatch, Phase 3).
+// Stored at user settings general.agent_mode. UI labels: Chat / Ask / Plan /
+// Execute (the "auto" value is surfaced as "Execute"). Defaults to "ask".
+export type AgentMode = "chat" | "ask" | "plan" | "auto";
+
 export interface GeneralSettings {
   // "brave" + "scraper" added when the providers were wired in
   // gateway/routes/system.py. "auto" still picks the best available.
@@ -1022,6 +1010,8 @@ export interface GeneralSettings {
   show_cost_badges: boolean;
   auto_save_browser_templates?: boolean;
   awake?: AwakeSettings;
+  // Optional — older backends omit it; the UI falls back to "ask".
+  agent_mode?: AgentMode;
 }
 
 export interface SearchQuota {
@@ -1148,6 +1138,62 @@ export const createSpecialist = (body: {
 
 export const deleteSpecialist = (name: string) =>
   request<{ success: boolean }>(`/api/teams/specialists/${encodeURIComponent(name)}`, { method: "DELETE" });
+
+// ── Specialists (ADR-0005 specialist-first dispatch) ─────────────────────────
+//
+// Declarative specialist definitions over the .md loader + encrypted custom DB
+// table. Distinct from the legacy `/api/teams/specialists` surface above: this
+// is the maintained CRUD contract (Phases 2-3) with its own field shape
+// (`tools`, `model`, `include_scraper`) and `{ ok, specialists }` envelope.
+// Builtins are read-only; the backend returns `400 { ok:false, error }` on any
+// attempt to edit/delete a builtin or on an invalid body — `request` surfaces
+// that `error` string as `ApiError.message`.
+
+export interface SpecialistDef {
+  name: string;
+  display_name: string;
+  system_prompt: string;
+  tools: string[];
+  model: string | null;
+  include_scraper: boolean;
+  is_builtin: boolean;
+}
+
+export interface SpecialistDraft {
+  name: string;
+  display_name: string;
+  system_prompt: string;
+  tools: string[];
+  model: string | null;
+  include_scraper: boolean;
+}
+
+export const getSpecialists = () =>
+  request<{ ok: boolean; specialists: SpecialistDef[] }>("/api/specialists").then(
+    (r) => r.specialists,
+  );
+
+export const createSpecialistDef = (body: SpecialistDraft) =>
+  request<{ ok: boolean; error?: string }>("/api/specialists", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+// Name is the immutable slug/key — it travels in the path, not the body.
+export const updateSpecialistDef = (
+  name: string,
+  body: Omit<SpecialistDraft, "name">,
+) =>
+  request<{ ok: boolean; error?: string }>(
+    `/api/specialists/${encodeURIComponent(name)}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  );
+
+export const deleteSpecialistDef = (name: string) =>
+  request<{ ok: boolean; error?: string }>(
+    `/api/specialists/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
 
 // ── Permissions ────────────────────────────────────────────────────────────
 
@@ -1942,6 +1988,87 @@ export const deleteSheet = (id: string) =>
 export const sheetExportUrl = (id: string, format: "xlsx" | "csv" = "xlsx") =>
   `/api/sheets/${encodeURIComponent(id)}/export?format=${format}`;
 
+// Multipart upload helper for document import (xlsx → sheet, docx → doc). The
+// server nests the created row under `key` ("sheet" / "doc").
+async function uploadDocumentFile<T>(
+  path: string,
+  key: string,
+  file: File,
+): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) {
+    let message = `Import failed (${res.status})`;
+    try {
+      const body = await res.json();
+      message = body.detail || body.message || body.error || message;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  return (await res.json())[key] as T;
+}
+
+// Import a .xlsx file as a new sheet.
+export const uploadSheet = (file: File) =>
+  uploadDocumentFile<SheetMeta>("/api/sheets/import", "sheet", file);
+
+// POST an export request and return the file Blob. When `body.password` is set
+// the server returns an AES-256 encrypted .zip; otherwise the plain file. Used
+// for all exports so the password (when present) travels in the body, never the
+// URL.
+async function postExportBlob(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<Blob> {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let message = `Export failed (${res.status})`;
+    try {
+      const b = await res.json();
+      message = b.detail || b.message || b.error || message;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.blob();
+}
+
+// Trigger a browser download of an in-memory Blob.
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Export a sheet as xlsx/csv, optionally AES-256 encrypted (password → .zip).
+export const exportSheetBlob = (
+  id: string,
+  format: "xlsx" | "csv",
+  password: string | null,
+) =>
+  postExportBlob(`/api/sheets/${encodeURIComponent(id)}/export`, {
+    format,
+    password,
+  });
+
 // ── In-editor AI ("Document Specialist") ─────────────────────────────────
 // One synchronous turn that edits the open document from a NL instruction and
 // returns the fresh snapshot (sheets/docs) or the new file id (pdf).
@@ -2010,6 +2137,21 @@ export const deleteDoc = (id: string) =>
 export const docExportUrl = (id: string, format: "docx" | "pdf" = "docx") =>
   `/api/docs/${encodeURIComponent(id)}/export?format=${format}`;
 
+// Import a .docx file as a new document.
+export const uploadDoc = (file: File) =>
+  uploadDocumentFile<DocMeta>("/api/docs/import", "doc", file);
+
+// Export a doc as docx/pdf, optionally AES-256 encrypted (password → .zip).
+export const exportDocBlob = (
+  id: string,
+  format: "docx" | "pdf",
+  password: string | null,
+) =>
+  postExportBlob(`/api/docs/${encodeURIComponent(id)}/export`, {
+    format,
+    password,
+  });
+
 export const aiEditDoc = (id: string, instruction: string) =>
   request<AiEditResult>(`/api/docs/${encodeURIComponent(id)}/ai`, {
     method: "POST",
@@ -2070,8 +2212,21 @@ export const pdfRawUrl = (id: string) => `/api/pdf/${encodeURIComponent(id)}/raw
 export const pdfDownloadUrl = (id: string) =>
   `/api/pdf/${encodeURIComponent(id)}/download`;
 
+// Download a PDF as a Blob, optionally AES-256 encrypted (password → .zip).
+export const downloadPdfBlob = (id: string, password: string | null) =>
+  postExportBlob(`/api/pdf/${encodeURIComponent(id)}/download`, { password });
+
 export const aiEditPdf = (id: string, instruction: string) =>
   request<AiEditPdfResult>(`/api/pdf/${encodeURIComponent(id)}/ai`, {
     method: "POST",
     body: JSON.stringify({ instruction }),
   });
+
+export async function getMobileVersion(): Promise<
+  { version: string; build: number; sha256: string; built_at: string } | null
+> {
+  const r = await fetch("/api/mobile/version", { credentials: "include" });
+  if (!r.ok) return null;
+  return r.json();
+}
+export const MOBILE_APK_URL = "/api/mobile/apk";

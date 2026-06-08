@@ -28,6 +28,20 @@ logger = logging.getLogger(__name__)
 
 _MAX_SETUP_URLS = 5
 _MAX_EVENTS = 30
+
+
+def _as_eco(router, config):
+    """Normalize a possibly-raw LLMRouter to an EcoRouter.
+
+    Callers historically passed a raw ``LLMRouter`` here, which routes every
+    worker call straight to the paid API. Wrapping it in ``EcoRouter`` makes
+    these drafting calls honor the user's ECO mode (CLAUDE → SDK, HYBRID →
+    local worker, etc.) instead of the API key. Idempotent if already an
+    EcoRouter.
+    """
+    from lazyclaw.llm.eco_router import EcoRouter
+
+    return router if isinstance(router, EcoRouter) else EcoRouter(config, router)
 _DEFAULT_WINDOW_S = 600
 
 
@@ -202,7 +216,9 @@ async def _draft_playbook(
             LLMMessage(role="user", content=prompt),
         ]
         model = getattr(config, "worker_model", None)
-        response = await router.chat(messages, model=model, user_id=user_id)
+        response = await _as_eco(router, config).chat(
+            messages, model=model, user_id=user_id, role="worker",
+        )
         text = (response.content or "").strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -259,7 +275,9 @@ async def compact_playbook(
             LLMMessage(role="user", content=prompt),
         ]
         model = getattr(config, "worker_model", None)
-        response = await router.chat(messages, model=model, user_id=user_id)
+        response = await _as_eco(router, config).chat(
+            messages, model=model, user_id=user_id, role="worker",
+        )
         text = (response.content or "").strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -348,7 +366,9 @@ async def draft_template_from_prompt(
     ]
     model = getattr(config, "worker_model", None)
     try:
-        response = await router.chat(messages, model=model, user_id=user_id)
+        response = await _as_eco(router, config).chat(
+            messages, model=model, user_id=user_id, role="worker",
+        )
     except Exception as exc:
         logger.warning("from-prompt LLM call failed: %s", exc, exc_info=True)
         raise

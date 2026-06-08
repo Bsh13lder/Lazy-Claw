@@ -151,10 +151,13 @@ class DraftFreelanceProposalSkill(BaseSkill):
         # Draft via LLM router
         try:
             from lazyclaw.llm.providers.base import LLMMessage
+            from lazyclaw.llm.eco_router import EcoRouter
             from lazyclaw.llm.router import LLMRouter
-            router = LLMRouter(self._config)
+            # Route through ECO so CLAUDE mode uses the subscription/SDK and
+            # other modes use the configured worker — never the raw API key.
+            router = EcoRouter(self._config, LLMRouter(self._config))
         except Exception as exc:
-            logger.warning("LLMRouter unavailable: %s", exc)
+            logger.warning("LLM router unavailable: %s", exc)
             return f"Could not load LLM router: {exc}"
 
         prompt = _PROMPT_TEMPLATE.format(
@@ -172,6 +175,7 @@ class DraftFreelanceProposalSkill(BaseSkill):
             response = await router.chat(
                 messages=[LLMMessage(role="user", content=prompt)],
                 user_id=user_id,
+                role="worker",
                 max_tokens=1100,
                 temperature=0.7,
             )

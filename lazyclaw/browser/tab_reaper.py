@@ -148,6 +148,7 @@ async def sweep_stale_tabs(
     *,
     idle_seconds: float = 600.0,
     anchored_hosts: frozenset[str] | set[str] | None = None,
+    anchored_target_ids: frozenset[str] | set[str] | None = None,
 ) -> int:
     """Close tabs unfocused longer than ``idle_seconds``.
 
@@ -157,6 +158,8 @@ async def sweep_stale_tabs(
       - The active (focused) tab — user is using it
       - System / extension tabs (chrome://, brave://, etc.)
       - Tabs whose URL host is in ``anchored_hosts`` (a watcher needs them)
+      - Tabs whose ``id`` is in ``anchored_target_ids`` — a background lane
+        (watcher poll / bg brain turn) owns them, even on a non-anchored host
 
     This is the time-based complement to ``sweep_idle_tabs`` in
     navigation.py (which is count-based, fires on goto). Both can run
@@ -170,10 +173,13 @@ async def sweep_stale_tabs(
 
     record_tab_observation(tabs)
     anchored = anchored_hosts or frozenset()
+    anchored_ids = anchored_target_ids or frozenset()
 
     closed = 0
     for tab in tabs:
         if getattr(tab, "active", False):
+            continue
+        if getattr(tab, "id", None) in anchored_ids:
             continue
         url = getattr(tab, "url", "") or ""
         if _is_pinned_url(url):
@@ -206,13 +212,14 @@ async def enforce_tab_cap(
     *,
     max_tabs: int,
     anchored_hosts: frozenset[str] | set[str] | None = None,
+    anchored_target_ids: frozenset[str] | set[str] | None = None,
 ) -> int:
     """Close oldest non-active, non-anchored tabs until total <= max_tabs.
 
     Differs from ``navigation.sweep_idle_tabs``: this version respects
-    ``anchored_hosts`` (tabs the watcher needs stay open even if they
-    push total over the cap — better to be over-cap than break a paid
-    monitoring contract).
+    ``anchored_hosts`` AND ``anchored_target_ids`` (tabs the watcher / a
+    background lane needs stay open even if they push total over the cap —
+    better to be over-cap than break a paid monitoring contract).
 
     Returns the number closed.
     """
@@ -229,6 +236,7 @@ async def enforce_tab_cap(
         return 0
 
     anchored = anchored_hosts or frozenset()
+    anchored_ids = anchored_target_ids or frozenset()
     overflow = len(tabs) - max_tabs
 
     # Eligible to close: non-active, non-anchored, non-system. Ordered
@@ -237,6 +245,7 @@ async def enforce_tab_cap(
     candidates = [
         t for t in tabs
         if not getattr(t, "active", False)
+        and getattr(t, "id", None) not in anchored_ids
         and not _is_pinned_url(getattr(t, "url", ""))
         and _normalize_host(getattr(t, "url", "")) not in anchored
     ]
@@ -331,6 +340,7 @@ async def refresh_white_screens(
     *,
     max_checks: int = 8,
     anchored_hosts: frozenset[str] | set[str] | None = None,
+    anchored_target_ids: frozenset[str] | set[str] | None = None,
 ) -> int:
     """Scan up to ``max_checks`` tabs for white-screen state and reload
     any that match. Returns the number reloaded.
@@ -359,13 +369,17 @@ async def refresh_white_screens(
         return 0
 
     anchored = anchored_hosts or frozenset()
+    anchored_ids = anchored_target_ids or frozenset()
 
     # Active tab last; system tabs skipped entirely; anchored CF watcher
     # tabs skipped (a CF interstitial looks blank — never reload it).
+    # Background-lane-owned tabs (by id) are skipped too: reloading via
+    # switch_tab would yank a pinned background backend onto a foreign tab.
     ordered = sorted(
         [
             t for t in tabs
             if not _is_pinned_url(getattr(t, "url", ""))
+            and getattr(t, "id", None) not in anchored_ids
             and _normalize_host(getattr(t, "url", "")) not in anchored
         ],
         key=lambda t: 1 if getattr(t, "active", False) else 0,
@@ -433,6 +447,7 @@ async def run_tab_health_cycle(
     idle_seconds: float = 600.0,
     max_tabs: int = 8,
     anchored_urls: Iterable[str] | None = None,
+    anchored_target_ids: Iterable[str] | None = None,
     refresh_blanks: bool = True,
 ) -> dict:
     """One full health cycle: reap idle → enforce cap → refresh blanks.
@@ -460,6 +475,7 @@ async def run_tab_health_cycle(
     anchored_hosts = frozenset(
         _normalize_host(u) for u in (anchored_urls or []) if u
     )
+    anchored_ids = frozenset(t for t in (anchored_target_ids or []) if t)
 
     try:
         tabs = await backend.tabs()
@@ -471,14 +487,17 @@ async def run_tab_health_cycle(
 
     idle_closed = await sweep_stale_tabs(
         backend, idle_seconds=idle_seconds, anchored_hosts=anchored_hosts,
+        anchored_target_ids=anchored_ids,
     )
     cap_closed = await enforce_tab_cap(
         backend, max_tabs=max_tabs, anchored_hosts=anchored_hosts,
+        anchored_target_ids=anchored_ids,
     )
     blanks_refreshed = 0
     if refresh_blanks:
         blanks_refreshed = await refresh_white_screens(
             backend, anchored_hosts=anchored_hosts,
+            anchored_target_ids=anchored_ids,
         )
 
     return {
@@ -487,4 +506,5 @@ async def run_tab_health_cycle(
         "cap_closed": cap_closed,
         "blanks_refreshed": blanks_refreshed,
         "anchored_hosts": sorted(anchored_hosts),
+        "anchored_target_ids": sorted(anchored_ids),
     }

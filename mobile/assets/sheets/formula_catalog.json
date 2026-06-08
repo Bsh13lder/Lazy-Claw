@@ -1,0 +1,21 @@
+[
+  {"name": "SUM", "signature": "SUM(range)", "help": "Add all numbers in a range"},
+  {"name": "AVERAGE", "signature": "AVERAGE(range)", "help": "Mean of the numbers in a range"},
+  {"name": "COUNT", "signature": "COUNT(range)", "help": "Count cells that contain numbers"},
+  {"name": "COUNTA", "signature": "COUNTA(range)", "help": "Count cells that are not empty"},
+  {"name": "MIN", "signature": "MIN(range)", "help": "Smallest number in a range"},
+  {"name": "MAX", "signature": "MAX(range)", "help": "Largest number in a range"},
+  {"name": "IF", "signature": "IF(condition, value_if_true, value_if_false)", "help": "Return one value or another based on a test"},
+  {"name": "ROUND", "signature": "ROUND(number, digits)", "help": "Round a number to a set number of digits"},
+  {"name": "ABS", "signature": "ABS(number)", "help": "Absolute (positive) value"},
+  {"name": "SUMIF", "signature": "SUMIF(range, criteria, [sum_range])", "help": "Add cells that meet a condition"},
+  {"name": "COUNTIF", "signature": "COUNTIF(range, criteria)", "help": "Count cells that meet a condition"},
+  {"name": "VLOOKUP", "signature": "VLOOKUP(key, range, index, [exact])", "help": "Look up a value in the first column of a range"},
+  {"name": "CONCATENATE", "signature": "CONCATENATE(text1, text2, ...)", "help": "Join text from several cells"},
+  {"name": "LEFT", "signature": "LEFT(text, count)", "help": "First N characters of text"},
+  {"name": "RIGHT", "signature": "RIGHT(text, count)", "help": "Last N characters of text"},
+  {"name": "MID", "signature": "MID(text, start, count)", "help": "Characters from the middle of text"},
+  {"name": "LEN", "signature": "LEN(text)", "help": "Number of characters in text"},
+  {"name": "TODAY", "signature": "TODAY()", "help": "Today's date"},
+  {"name": "NOW", "signature": "NOW()", "help": "Current date and time"}
+]

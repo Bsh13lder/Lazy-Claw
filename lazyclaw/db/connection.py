@@ -188,6 +188,34 @@ async def init_db(config: Config) -> None:
             # → task tracks its own spent vs 500). Plaintext REAL like
             # projects.budget so totals SUM in SQL. Optional / nullable.
             ("tasks", "allocated_budget", "ALTER TABLE tasks ADD COLUMN allocated_budget REAL"),
+            # Offline-sync primitives (feat/flutter-mobile) ───────────────
+            # updated_at: last-write-wins timestamp bumped on every mutation.
+            # Backfill: existing rows get created_at so the column is never
+            # NULL; new rows are always stamped at insert time.
+            ("tasks", "updated_at", "ALTER TABLE tasks ADD COLUMN updated_at TEXT"),
+            # deleted_at: soft-delete tombstone. NULL = live; non-NULL = deleted.
+            # Clients learn of deletes via the /changes delta feed instead of
+            # rows silently disappearing from list responses.
+            ("tasks", "deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at TEXT"),
+            # Offline-sync tombstones for Notes + Budgets (feat/flutter-mobile).
+            # deleted_at: NULL = live, non-NULL = deleted; clients learn of
+            # deletes via each domain's /changes delta feed. updated_at already
+            # exists on notes/projects/project_expenses and is bumped on update.
+            ("notes", "deleted_at", "ALTER TABLE notes ADD COLUMN deleted_at TEXT"),
+            ("projects", "deleted_at", "ALTER TABLE projects ADD COLUMN deleted_at TEXT"),
+            ("project_expenses", "deleted_at", "ALTER TABLE project_expenses ADD COLUMN deleted_at TEXT"),
+            # Per-project color (feat/flutter-mobile) — optional hex string like
+            # "#4F8AF4" so the mobile calendar can color-code projects + tasks.
+            # Plaintext like status/budget (not sensitive); NULL = no color.
+            # Exposed via list + /api/budgets/changes for the offline sync pull.
+            ("projects", "color", "ALTER TABLE projects ADD COLUMN color TEXT"),
+            # Per-project favorite flag (feat/flutter-mobile) — pin important
+            # projects so they surface in the mobile Home "Favorites" section
+            # while the main Expenses list stays full. Stored PLAINTEXT as an
+            # INTEGER 0/1 (not sensitive); default 0 so pre-migration rows are
+            # un-favorited. Exposed via list + /api/budgets/changes for the
+            # offline sync pull, exactly like `color`.
+            ("projects", "is_favorite", "ALTER TABLE projects ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"),
         ]
         for table, column, sql in migrations:
             try:
@@ -197,6 +225,17 @@ async def init_db(config: Config) -> None:
                     await db.execute(sql)
             except Exception:
                 logger.debug("Migration %s.%s skipped (column may already exist)", table, column, exc_info=True)
+
+        # Backfill: set updated_at = created_at for rows that existed before
+        # the migration added the column. Safe to re-run on every init_db
+        # (the WHERE guard makes it a no-op once all rows are stamped).
+        try:
+            await db.execute(
+                "UPDATE tasks SET updated_at = created_at "
+                "WHERE updated_at IS NULL AND created_at IS NOT NULL"
+            )
+        except Exception:
+            logger.debug("tasks.updated_at backfill skipped", exc_info=True)
 
         # ── Progress templates — bundled function + learned skill ─────────
         # Schema cloned from browser_templates: name + playbook are encrypted,
@@ -227,6 +266,32 @@ async def init_db(config: Config) -> None:
             )
         except Exception:
             logger.debug("progress_templates table migration skipped", exc_info=True)
+
+        # ── In-app notification feed (feat/flutter-mobile) ────────────────
+        # Mirrors what is (or would have been) pushed to Telegram so the
+        # mobile app can pull server-originated notifications it hasn't seen
+        # yet via GET /api/notifications?since=. id/kind/created_at are
+        # PLAINTEXT (needed for the since-query + client type rendering);
+        # title/body are AES-256-GCM encrypted (user content). Created here
+        # (not schema.sql) so upgrading installs pick it up — same rationale
+        # as progress_templates above.
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS notifications ("
+                "id TEXT PRIMARY KEY, "
+                "user_id TEXT NOT NULL REFERENCES users(id), "
+                "kind TEXT NOT NULL DEFAULT 'info', "
+                "title TEXT, "
+                "body TEXT, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now'))"
+                ")"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notifications_user_created "
+                "ON notifications(user_id, created_at)"
+            )
+        except Exception:
+            logger.debug("notifications table migration skipped", exc_info=True)
 
         # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
         # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.

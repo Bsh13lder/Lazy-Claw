@@ -10,6 +10,43 @@ class LLMRouter:
     def __init__(self, config: Config) -> None:
         self._config = config
         self._providers: dict[str, BaseLLMProvider] = {}
+        # CLAUDE-mode safety net (2026-06-03). When a skill builds a RAW
+        # ``LLMRouter`` and calls ``.chat()`` directly (bypassing EcoRouter),
+        # we must still honor the user's CLAUDE subscription instead of hitting
+        # the (deliberately-unfunded) Anthropic API key. ``_eco_managed`` is
+        # set True by ``EcoRouter`` on its own internal transport so EcoRouter's
+        # last-resort fallback to this router does NOT re-trigger the reroute
+        # (no recursion; the genuine API last-resort still exists).
+        self._eco_managed = False
+        self._eco = None  # lazily-built EcoRouter used for the CLAUDE reroute
+
+    async def _is_claude_mode(self, user_id: str | None) -> bool:
+        """True when the user's ECO mode is CLAUDE (everything → SDK)."""
+        if not user_id:
+            return False
+        try:
+            from lazyclaw.llm.eco_router import MODE_CLAUDE, _load_eco_settings
+
+            settings = await _load_eco_settings(self._config, user_id)
+            return settings.mode == MODE_CLAUDE
+        except Exception:
+            # Never let the mode probe break a chat call — degrade to the
+            # normal provider path.
+            return False
+
+    def _eco_router(self):
+        """Lazily build the EcoRouter used to reroute raw calls in CLAUDE mode.
+
+        Its fallback transport is a SEPARATE raw ``LLMRouter`` (marked
+        ``_eco_managed`` by ``EcoRouter.__init__``), never ``self`` — so this
+        router keeps rerouting future direct calls while EcoRouter's own
+        SDK-down fallback can still reach the real provider without looping.
+        """
+        if self._eco is None:
+            from lazyclaw.llm.eco_router import EcoRouter
+
+            self._eco = EcoRouter(self._config, LLMRouter(self._config))
+        return self._eco
 
     def _infer_provider_name(self, model: str) -> str:
         if model.startswith(("gpt-", "o1-", "o3-", "o4-")):
@@ -111,6 +148,13 @@ class LLMRouter:
         user_id: str | None = None,
         **kwargs,
     ) -> LLMResponse:
+        # CLAUDE-mode safety net: a raw direct call from a skill that bypassed
+        # EcoRouter must still go through the user's subscription/SDK, never the
+        # dead API key. EcoRouter-managed transports skip this (no recursion).
+        if not self._eco_managed and await self._is_claude_mode(user_id):
+            return await self._eco_router().chat(
+                messages, user_id=user_id, model=model, role="worker", **kwargs,
+            )
         model = model or self._config.brain_model
         provider_name = self._infer_provider_name(model)
 

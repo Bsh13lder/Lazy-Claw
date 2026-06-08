@@ -45,6 +45,7 @@ from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import encrypt, decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.consolidator_routing import is_live_web_callback
 from lazyclaw.runtime import task_event_bus
 
 if TYPE_CHECKING:
@@ -1274,7 +1275,7 @@ class TaskRunner:
                 kwargs["callback"] = cb
             if group.chat_session_id:
                 kwargs["chat_session_id"] = group.chat_session_id
-            await self._lane_queue.enqueue(
+            result_text = await self._lane_queue.enqueue(
                 group.user_id, synthetic_msg, **kwargs,
             )
         except Exception:
@@ -1282,6 +1283,39 @@ class TaskRunner:
                 "Brain fan-out %s consolidation enqueue failed",
                 group_id, exc_info=True,
             )
+            return
+
+        # ── Web quiet-mode delivery rescue (2026-06-04) ──────────────────
+        # The synthetic turn above ran on the LANE QUEUE, NOT through the WS
+        # request loop (``gateway.routes.chat_ws._run_agent_turn``). A live
+        # ``WebSocketCallback`` with ``bg_streaming`` OFF buffers the brain's
+        # tokens (see chat_ws ``on_event``: quiet mode drops live ``token``
+        # frames) and relies on ``_run_agent_turn`` to flush the terminal
+        # ``{"type":"done","content":...}`` frame carrying the full reply.
+        # The lane-queue consolidation path never reaches that flush, so the
+        # consolidated reply is produced then SILENTLY DROPPED — and because
+        # the origin-aware router (consolidator_routing, 2026-06-03) picked
+        # the live web callback, it never falls back to Telegram either.
+        # Observed 2026-06-04: a Web-UI "check sheet" was answered with a
+        # 986-char reply that reached neither the browser nor Telegram.
+        #
+        # Deliver it out-of-band via the ``background_done`` frame the Web UI
+        # already renders (it is on quiet mode's always-allowed list). Gated
+        # to web + quiet so Telegram (delivered during the turn by its
+        # notifier) and web streaming-ON (live tokens already sent) never
+        # double-send.
+        if _quiet and result_text and is_live_web_callback(cb):
+            try:
+                await cb.on_event(AgentEvent(
+                    "background_done",
+                    "Consolidated reply",
+                    {"name": "Consolidated", "result": result_text},
+                ))
+            except Exception:
+                logger.debug(
+                    "web consolidation rescue delivery failed for %s",
+                    group_id, exc_info=True,
+                )
 
     def list_running(self, user_id: str | None = None) -> list[dict]:
         """List running background tasks."""

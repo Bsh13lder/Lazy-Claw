@@ -27,6 +27,7 @@ from lazyclaw.gateway.routes.jobs import router as jobs_router
 from lazyclaw.gateway.routes.eco import router as eco_router
 from lazyclaw.gateway.routes.permissions import router as permissions_router
 from lazyclaw.gateway.routes.teams import router as teams_router
+from lazyclaw.gateway.routes.specialists import router as specialists_router
 from lazyclaw.gateway.routes.compression import router as compression_router
 from lazyclaw.gateway.routes.replay import router as replay_router
 from lazyclaw.gateway.routes.recovery import router as recovery_router
@@ -45,6 +46,8 @@ from lazyclaw.gateway.routes.docs import router as docs_router
 from lazyclaw.gateway.routes.pdf import router as pdf_router
 from lazyclaw.gateway.routes.awake import router as awake_router
 from lazyclaw.gateway.routes.contacts import router as internal_contacts_router
+from lazyclaw.gateway.routes.mobile import router as mobile_apk_router
+from lazyclaw.gateway.routes.mobile_settings import router as mobile_settings_router
 from lazyclaw.llm.model_manager import seed_default_models
 
 logger = logging.getLogger(__name__)
@@ -212,6 +215,7 @@ app.include_router(jobs_router)
 app.include_router(eco_router)
 app.include_router(permissions_router)
 app.include_router(teams_router)
+app.include_router(specialists_router)
 app.include_router(compression_router)
 app.include_router(replay_router)
 app.include_router(recovery_router)
@@ -232,6 +236,10 @@ app.include_router(awake_router)
 app.include_router(internal_contacts_router)
 from lazyclaw.gateway.routes.goals import router as goals_router  # noqa: E402
 app.include_router(goals_router)
+app.include_router(mobile_apk_router)
+app.include_router(mobile_settings_router)
+from lazyclaw.gateway.routes.notifications import router as notifications_router  # noqa: E402
+app.include_router(notifications_router)
 
 
 class ChatRequest(BaseModel):

@@ -211,9 +211,10 @@ class SkillRegistry:
         # categories tasks already use.
         from lazyclaw.skills.builtin.budget_manager import (
             AddExpenseSkill, AddProjectBudgetSkill, AddRecurringExpenseSkill,
-            ExpenseReportSkill, ListExpensesSkill, SetDefaultExpenseProjectSkill,
-            SetProjectBudgetSkill,
+            CreateProjectSkill, ExpenseReportSkill, ListExpensesSkill,
+            SetDefaultExpenseProjectSkill, SetProjectBudgetSkill,
         )
+        self.register(CreateProjectSkill(config=config))
         self.register(SetProjectBudgetSkill(config=config))
         self.register(AddProjectBudgetSkill(config=config))
         self.register(AddExpenseSkill(config=config))

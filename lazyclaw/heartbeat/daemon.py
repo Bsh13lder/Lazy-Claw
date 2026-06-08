@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -26,6 +27,68 @@ from lazyclaw.runtime.browser_turn_lock import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _tags_from_raw(raw: object) -> list[str]:
+    """Decode a notes.tags JSON blob into a list of tag strings.
+
+    Defensive: returns ``[]`` for NULL / malformed JSON / non-list payloads
+    so the active-user predicate never raises on a bad row.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return []
+    return [str(t) for t in value] if isinstance(value, list) else []
+
+
+def _is_journal_only_note(tags_raw: object) -> bool:
+    """True iff the note carries a ``journal/<date>`` tag.
+
+    Journal pages are the ONLY notes the seeder itself mints, so a user
+    whose every note is a journal page has produced no real content — they
+    are a dead/test account and must not be seeded (FIX A).
+    """
+    return any(t.startswith("journal/") for t in _tags_from_raw(tags_raw))
+
+
+def _user_owns_non_journal_note(
+    user_id: str,
+    note_rows: list[tuple[str, object]],
+) -> bool:
+    """Pure predicate: does ``user_id`` own at least one non-journal note?
+
+    ``note_rows`` is an iterable of ``(owner_user_id, tags_json)`` tuples
+    (the plaintext columns are enough — no decryption needed). We deliberately
+    key activity off note ownership rather than ``agent_messages`` because the
+    journal cluster lives entirely in ``notes``; a user with real notes is the
+    only one whose ``[[Journal — DATE]]`` links need an anchor.
+    """
+    for owner, tags_raw in note_rows:
+        if owner == user_id and not _is_journal_only_note(tags_raw):
+            return True
+    return False
+
+
+def select_active_user_ids(
+    all_user_ids: list[str],
+    note_rows: list[tuple[str, object]],
+) -> list[str]:
+    """Filter ``all_user_ids`` down to users that own a non-journal note.
+
+    Pure function (no DB / IO) so it is unit-testable in isolation. Preserves
+    input order. See ``_seed_today_journals`` for the FIX A rationale.
+    """
+    return [
+        uid
+        for uid in all_user_ids
+        if _user_owns_non_journal_note(uid, note_rows)
+    ]
+
 
 # Hosts that MUST be polled through the user's live (signed-in) Brave on
 # the primary CDP port. A fresh headless instance with a copied profile
@@ -497,6 +560,13 @@ class HeartbeatDaemon:
             # Anchored hosts = URLs every active watcher targets, so
             # the reaper doesn't close the tab a watcher needs to poll.
             anchored_urls = await self._gather_watcher_urls(user_id)
+            # Anchored target ids = the exact tabs background lanes own
+            # (watcher parked tabs + bg brain-turn tab). Protects them even on
+            # a non-anchored host, and stops white-screen refresh from yanking
+            # a pinned background backend onto a foreign tab.
+            from lazyclaw.browser import owned_tabs as _owned_tabs
+
+            anchored_target_ids = _owned_tabs.all_owned_target_ids(user_id)
 
             backend = self._get_primary_cdp(user_id)
             try:
@@ -505,6 +575,7 @@ class HeartbeatDaemon:
                     idle_seconds=idle_seconds,
                     max_tabs=max_tabs,
                     anchored_urls=anchored_urls,
+                    anchored_target_ids=anchored_target_ids,
                     refresh_blanks=refresh_blanks,
                 )
                 if (
@@ -700,6 +771,7 @@ class HeartbeatDaemon:
                         user_id,
                         f"[JOB:{job_name}] {instruction}",
                         lane_key=f"{user_id}:heartbeat",
+                        browser_role="background",
                         **cb_kwargs,
                     )
                 except Exception as exc:
@@ -787,6 +859,7 @@ class HeartbeatDaemon:
                     user_id,
                     f"[REMINDER] {message}",
                     lane_key=f"{user_id}:heartbeat",
+                    browser_role="background",
                     **cb_kwargs,
                 )
 
@@ -1000,6 +1073,7 @@ class HeartbeatDaemon:
                             user_id,
                             f"[WATCHER] '{job_name}' has expired and stopped.",
                             lane_key=f"{user_id}:heartbeat",
+                            browser_role="background",
                             **cb_kwargs,
                         )
                         continue
@@ -1028,25 +1102,33 @@ class HeartbeatDaemon:
                     check_error: str | None = None
                     try:
                         if use_live:
-                            # The live Brave is shared with foreground/background
-                            # turns. Take the per-user lock so this poll can't
-                            # steal the tab mid-turn; skip the tick (retry next
-                            # interval) if a turn is holding it. (2026-05-29)
+                            # The live Brave is shared, but the watcher drives
+                            # its OWN parked tab — so take only the BACKGROUND
+                            # lane lock. That serializes against other
+                            # background browser work (other polls + bg brain
+                            # turns) but NEVER against the foreground (visible)
+                            # lane, so a long foreground turn can't starve the
+                            # poll and the poll can't steal the visible tab.
+                            # Skip the tick if another background job holds it.
+                            # (2026-06-02 two-lane model)
                             async with live_browser_guard(
-                                user_id, timeout=WATCHER_POLL_LOCK_TIMEOUT_S,
+                                user_id, role="background",
+                                timeout=WATCHER_POLL_LOCK_TIMEOUT_S,
                             ) as _got:
                                 if not _got:
                                     logger.debug(
-                                        "Watcher '%s' poll skipped — live Brave busy",
+                                        "Watcher '%s' poll skipped — background lane busy",
                                         job_name,
                                     )
                                     continue
                                 changed, notification, new_ctx = await check_watcher(
                                     active_backend, ctx, passive=use_live,
+                                    user_id=user_id, job_id=job_id,
                                 )
                         else:
                             changed, notification, new_ctx = await check_watcher(
                                 active_backend, ctx, passive=use_live,
+                                user_id=user_id, job_id=job_id,
                             )
                     except Exception as exc:
                         check_error = f"{type(exc).__name__}: {exc}"
@@ -1118,13 +1200,16 @@ class HeartbeatDaemon:
                         #     brain's reply IS the message
                         #   * otherwise → 🔔 raw push (no brain turn)
                         accept_slug = ctx.get("accept_template_slug")
-                        # Default is notification-only: the passive poll already
-                        # built a zero-token diff, so tell the user what changed
-                        # WITHOUT a brain turn that would drive the live Brave and
-                        # steal the active tab from a foreground/background task
-                        # (the 2026-05-29 tab-steal incident). A brain turn fires
-                        # ONLY when the watcher was created with an explicit
-                        # on_change_instruction (opt-in — mirrors the MCP watcher).
+                        # Default is a brain turn on change (restored 2026-05-30
+                        # — see watcher_dispatch.py). An explicit
+                        # on_change_instruction is a custom override; otherwise a
+                        # sensible DEFAULT instruction fires the brain turn so
+                        # every pre-existing watcher reacts again (commit 0509308
+                        # had silently downgraded them all to notify-only because
+                        # the brand-new on_change_instruction field was never set).
+                        # The tab-steal that motivated notify-only is now
+                        # prevented by the per-user live-Brave lock, so this is
+                        # safe. Notify-only remains only when no lane is running.
                         decision = decide_on_change_action(
                             ctx,
                             new_ctx,
@@ -1132,6 +1217,7 @@ class HeartbeatDaemon:
                             lane_running=bool(
                                 self._lane_queue and self._lane_queue._running
                             ),
+                            job_name=job_name,
                         )
                         will_fire_brain = decision.action == ACTION_BRAIN
 
@@ -1188,6 +1274,7 @@ class HeartbeatDaemon:
                                             user_id,
                                             f"[WATCHER:{job_name}] {instr}",
                                             lane_key=f"{user_id}:heartbeat",
+                                            browser_role="background",
                                         ),
                                         name=f"watcher-brain-{job_id[:8]}",
                                     )
@@ -1404,6 +1491,7 @@ class HeartbeatDaemon:
                             user_id,
                             f"[MCP_WATCHER] New {_svc} messages. {auto_reply}\n\n{notification}",
                             lane_key=f"{user_id}:heartbeat",
+                            browser_role="background",
                             **cb_kwargs,
                         )
 
@@ -2203,23 +2291,47 @@ class HeartbeatDaemon:
             )
 
     async def _seed_today_journals(self) -> None:
-        """Ensure each registered user has a journal note for today.
+        """Ensure each ACTIVE user has a journal note for today.
 
         Idempotent: keyed off ``self._last_journal_seed_iso[user_id]`` so we
         only call into LazyBrain once per user per day. The marker resets on
         restart, but ``ensure_today_journal`` itself looks up by tag before
         inserting, so a re-seed just re-finds the existing note — no dupes.
+
+        Active-user gate (FIX A — cross-user journal bug 2026-06-01): we used
+        to ``SELECT id FROM users`` and seed EVERY row, including a stale/dead
+        user and ``u-test``. Those accounts own nothing but journal stubs, so
+        each tick minted 2-3 duplicate journal pages per day and the real
+        user's ``[[Journal — DATE]]`` links resolved against journals owned by
+        the dead user → dangling backlinks. We now seed only users who own at
+        least one NON-journal note (see ``_user_owns_non_journal_note`` /
+        ``select_active_user_ids``). A user with zero real content has no
+        journal to anchor anyway.
         """
         from lazyclaw.lazybrain import journal as _journal
         from lazyclaw.lazybrain import timezone_util as _tzu
 
         try:
             async with db_session(self._config) as db:
+                cursor = await db.execute(
+                    "SELECT id, tags FROM notes"
+                )
+                note_rows = [
+                    (r[0], r[1]) for r in await cursor.fetchall()
+                ]
                 cursor = await db.execute("SELECT id FROM users")
-                users = [r[0] for r in await cursor.fetchall()]
+                all_users = [r[0] for r in await cursor.fetchall()]
         except Exception:
             logger.warning("Could not list users for journal seed", exc_info=True)
             return
+
+        users = select_active_user_ids(all_users, note_rows)
+        skipped = len(all_users) - len(users)
+        if skipped:
+            logger.debug(
+                "journal seed: skipping %d user(s) with no non-journal notes",
+                skipped,
+            )
 
         for user_id in users:
             today = _tzu.today_iso(user_id)
@@ -2330,8 +2442,26 @@ class HeartbeatDaemon:
             from lazyclaw.browser.cdp import find_chrome_cdp
 
             async with db_session(self._config) as db:
-                cursor = await db.execute("SELECT id FROM users LIMIT 10")
+                # Manage the browser for the user who ACTUALLY uses the system,
+                # most-recently-active first. A leftover seed/`default` account
+                # (rowid 1, zero activity) used to win because the loop below
+                # `return`s after the first non-off user — so the daemon drove
+                # `default`'s headless on the single CDP port and NEVER the real
+                # user's, colliding with the host Brave bridge (2026-06-03 bug).
+                cursor = await db.execute(
+                    "SELECT u.id FROM users u "
+                    "JOIN (SELECT user_id, MAX(created_at) AS last_at, "
+                    "             COUNT(*) AS n "
+                    "      FROM agent_messages GROUP BY user_id) m "
+                    "  ON m.user_id = u.id "
+                    "WHERE m.n > 0 "
+                    "ORDER BY m.last_at DESC LIMIT 10"
+                )
                 users = [r[0] for r in await cursor.fetchall()]
+                if not users:
+                    # Fresh install / no activity yet — fall back to all users.
+                    cursor = await db.execute("SELECT id FROM users LIMIT 10")
+                    users = [r[0] for r in await cursor.fetchall()]
 
             port = getattr(self._config, "cdp_port", 9222)
             browser_alive = bool(await find_chrome_cdp(port))

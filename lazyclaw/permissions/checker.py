@@ -72,9 +72,37 @@ class PermissionChecker:
             source="category_default",
         )
 
+    async def check_effective(
+        self, user_id: str, skill_name: str
+    ) -> ResolvedPermission:
+        """Resolve permission, then layer the operating-mode posture on top.
+
+        ``check()`` returns the BASE decision (used by the permissions UI);
+        execution goes through here so the Chat/Ask/Plan/Auto posture
+        (ADR-0005 Phase 3) takes effect. ASK mode (the default) is a no-op.
+        """
+        base = await self.check(user_id, skill_name)
+        try:
+            from lazyclaw.runtime.agent_mode import (
+                apply_mode_posture,
+                get_agent_mode,
+                is_readonly_skill,
+            )
+
+            mode = await get_agent_mode(self._config, user_id)
+            skill = self._registry.get(skill_name)
+            category = skill.category if skill else None
+            return apply_mode_posture(
+                mode, base, is_readonly=is_readonly_skill(skill_name, category)
+            )
+        except Exception:
+            # Never let mode resolution break tool execution — fall back to base.
+            logger.debug("mode posture failed; using base permission", exc_info=True)
+            return base
+
     async def is_allowed(self, user_id: str, skill_name: str) -> bool:
-        """Quick check: is this skill allowed without approval?"""
-        resolved = await self.check(user_id, skill_name)
+        """Quick check: is this skill allowed without approval (mode-aware)?"""
+        resolved = await self.check_effective(user_id, skill_name)
         return resolved.level == ALLOW
 
     async def resolve_all(self, user_id: str) -> list[ResolvedPermission]:

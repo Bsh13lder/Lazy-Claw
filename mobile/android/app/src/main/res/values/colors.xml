@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#121220</color>
+    <!-- Quick-Capture home-screen widget palette. Mirrors the app design-system
+         tokens (emerald accent on a deep surface) so the widget reads as part
+         of LazyClaw. -->
+    <color name="lz_widget_bg">#171727</color>
+    <color name="lz_widget_button_bg">#21213A</color>
+    <color name="lz_accent">#10B981</color>
+    <color name="lz_widget_label">#E6E6F0</color>
+</resources>

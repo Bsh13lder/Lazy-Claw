@@ -63,40 +63,73 @@ def _add_hyperlink(paragraph, text: str, url: str) -> None:
     paragraph._p.append(link)
 
 
-def snapshot_to_docx(snap: dict[str, Any]) -> bytes:
-    """Render a Univer document snapshot to ``.docx`` bytes.
+# Map a block type → python-docx paragraph style (present in the default
+# template). Headings use "Heading {level}".
+_LIST_STYLE = {"bullet": "List Bullet", "number": "List Number"}
 
-    The first non-empty all-plain paragraph is emitted as a Heading 1 (a
-    sensible title for an otherwise plain document); every remaining paragraph
-    becomes a body paragraph. Runs carrying a ``url`` are written as real
-    ``w:hyperlink`` elements. An empty document still produces a valid ``.docx``.
+
+def snapshot_to_docx(snap: dict[str, Any]) -> bytes:
+    """Render a Univer document snapshot to ``.docx`` bytes with real formatting.
+
+    Walks the typed blocks (:func:`lazyclaw.docs.snapshot.get_blocks`): headings
+    use the ``Heading N`` style, ordered/unordered lists use ``List Number`` /
+    ``List Bullet``, and runs carry bold/italic/underline. Runs with a ``url``
+    become real ``w:hyperlink`` elements. An empty document still produces a
+    valid ``.docx``.
     """
     document = Document()
-    paragraphs = D.get_paragraph_runs(snap)
-
-    heading_used = False
-    for runs in paragraphs:
-        has_link = any(r.get("url") for r in runs)
-        text = "".join(r.get("text", "") for r in runs)
-        if not heading_used and text.strip() and not has_link:
-            document.add_heading(text, level=1)
-            heading_used = True
-            continue
-        para = document.add_paragraph()
+    for block in D.get_blocks(snap):
+        btype = block.get("type", "paragraph")
+        runs = block.get("runs") or []
+        if btype == "heading":
+            level = max(1, min(3, int(block.get("level") or 1)))
+            para = document.add_paragraph(style=f"Heading {level}")
+        elif btype in _LIST_STYLE:
+            para = document.add_paragraph(style=_LIST_STYLE[btype])
+        else:
+            para = document.add_paragraph()
         for run in runs:
             url = run.get("url")
             if url:
                 _add_hyperlink(para, run.get("text", ""), str(url))
             else:
-                para.add_run(run.get("text", ""))
+                r = para.add_run(run.get("text", ""))
+                if run.get("bold"):
+                    r.bold = True
+                if run.get("italic"):
+                    r.italic = True
+                if run.get("underline"):
+                    r.underline = True
 
     buf = io.BytesIO()
     document.save(buf)
     return buf.getvalue()
 
 
+def _run_flags_from_rpr(rpr) -> dict[str, bool]:
+    """Read bold/italic/underline flags from a ``w:r``'s ``w:rPr`` element."""
+    flags: dict[str, bool] = {}
+    if rpr is None:
+        return flags
+
+    def _on(tag: str) -> bool:
+        el = rpr.find(qn(tag))
+        if el is None:
+            return False
+        val = el.get(qn("w:val"))
+        return val not in ("false", "0", "none")
+
+    if _on("w:b"):
+        flags["bold"] = True
+    if _on("w:i"):
+        flags["italic"] = True
+    if _on("w:u"):
+        flags["underline"] = True
+    return flags
+
+
 def _docx_paragraph_runs(paragraph) -> list[dict[str, Any]]:
-    """Extract ordered runs (plain + hyperlink) from a python-docx paragraph."""
+    """Extract ordered runs (plain + hyperlink, with emphasis) from a paragraph."""
     runs: list[dict[str, Any]] = []
     rels = paragraph.part.rels
     for child in paragraph._p:
@@ -104,32 +137,53 @@ def _docx_paragraph_runs(paragraph) -> list[dict[str, Any]]:
         if tag == qn("w:r"):
             text = "".join(node.text or "" for node in child.findall(qn("w:t")))
             if text:
-                runs.append({"text": text})
+                run: dict[str, Any] = {"text": text}
+                run.update(_run_flags_from_rpr(child.find(qn("w:rPr"))))
+                runs.append(run)
         elif tag == qn("w:hyperlink"):
             r_id = child.get(qn("r:id"))
             url = None
             if r_id and r_id in rels:
                 url = rels[r_id].target_ref
-            text = "".join(
-                node.text or "" for node in child.iter(qn("w:t"))
-            )
+            text = "".join(node.text or "" for node in child.iter(qn("w:t")))
             if text:
                 runs.append({"text": text, "url": url} if url else {"text": text})
     return runs
 
 
+def _block_type_from_style(style_name: str) -> tuple[str, int]:
+    """Map a python-docx paragraph style name → (block type, level)."""
+    name = style_name or ""
+    if name.startswith("List Number"):
+        return "number", 0
+    if name.startswith("List Bullet"):
+        return "bullet", 0
+    if name.startswith("Heading"):
+        digits = "".join(ch for ch in name if ch.isdigit())
+        level = int(digits) if digits else 1
+        return "heading", max(1, min(3, level))
+    return "paragraph", 0
+
+
 def docx_to_snapshot(data: bytes, name: str | None = None) -> dict[str, Any]:
-    """Parse ``.docx`` bytes into a Univer document snapshot (links preserved)."""
+    """Parse ``.docx`` bytes into a Univer snapshot (lists/headings/emphasis)."""
     document = Document(io.BytesIO(data))
-    paragraphs = [_docx_paragraph_runs(p) for p in document.paragraphs]
-    # Drop a single trailing empty paragraph python-docx often emits.
-    while paragraphs and not paragraphs[-1]:
-        paragraphs.pop()
+    blocks: list[dict[str, Any]] = []
+    for p in document.paragraphs:
+        runs = _docx_paragraph_runs(p)
+        try:
+            style_name = p.style.name if p.style else ""
+        except Exception:  # noqa: BLE001 — defensive against odd templates
+            style_name = ""
+        btype, level = _block_type_from_style(style_name)
+        blocks.append({"type": btype, "level": level, "runs": runs})
+    # Drop trailing empty paragraphs python-docx often emits.
+    while blocks and not blocks[-1]["runs"]:
+        blocks.pop()
     base = D.blank_document(name or "Imported")
-    if not paragraphs:
+    if not blocks:
         return base
-    out = {**base, "body": D.build_body_with_runs(paragraphs)}
-    return out
+    return {**base, "body": D.build_body_with_blocks(blocks)}
 
 
 # ───────────────────────── PDF (best-effort) ────────────────────────

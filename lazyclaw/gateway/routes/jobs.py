@@ -162,10 +162,12 @@ async def draft_job_from_prompt(
     if len(prompt) > 800:
         raise HTTPException(status_code=400, detail="prompt too long (max 800 chars)")
 
+    from lazyclaw.llm.eco_router import EcoRouter
     from lazyclaw.llm.providers.base import LLMMessage
     from lazyclaw.llm.router import LLMRouter
 
-    router_llm = LLMRouter(_config)
+    # Route through ECO (CLAUDE → SDK, never the raw API key).
+    router_llm = EcoRouter(_config, LLMRouter(_config))
     messages = [
         LLMMessage(role="system", content=_JOB_DRAFT_SYSTEM),
         LLMMessage(role="user", content=f"User's request: {prompt}\n\nReturn JSON."),
@@ -173,7 +175,9 @@ async def draft_job_from_prompt(
     model = getattr(_config, "worker_model", None)
 
     try:
-        response = await router_llm.chat(messages, model=model, user_id=user.id)
+        response = await router_llm.chat(
+            messages, model=model, user_id=user.id, role="worker",
+        )
     except Exception as exc:
         logger.warning("job from-prompt LLM call failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Draft failed: {exc}")

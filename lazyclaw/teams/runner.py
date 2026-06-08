@@ -133,6 +133,18 @@ class SpecialistResult:
     short_description: str = ""
 
 
+def _bare_tool_name(name: str) -> str:
+    """Strip the dynamic ``mcp_<server_uuid>_`` prefix so MCP tools can be
+    matched against a specialist's static allowlist. Server UUIDs use dashes
+    (no underscores), so the bare tool name is everything after the first two
+    underscores. Mirrors the same strip in runtime/agent.py."""
+    if name.startswith("mcp_"):
+        parts = name.split("_", 2)
+        if len(parts) == 3:
+            return parts[2]
+    return name
+
+
 def _filter_tools(
     registry: SkillRegistry,
     allowed: tuple[str, ...],
@@ -164,6 +176,21 @@ def _filter_tools(
             if "mcp-scraper" in desc and name not in seen:
                 out.append(t)
                 seen.add(name)
+    # Union in MCP tools whose BARE suffix (after stripping mcp_<uuid>_) is
+    # explicitly listed in the specialist's allowlist. MCP tool ids are
+    # dynamic (mcp_<uuid>_<name>) so the exact-name match above can never hit
+    # them — without this a specialist that lists e.g. `upwork_submit_proposal`
+    # can never reach it (2026-06-08 apply-loop regression).
+    try:
+        _all_mcp = registry.list_mcp_tools()
+    except Exception:
+        _all_mcp = []
+    _seen = {t["function"]["name"] for t in out}
+    for t in _all_mcp:
+        name = t.get("function", {}).get("name", "")
+        if name and name not in _seen and _bare_tool_name(name) in allowed_set:
+            out.append(t)
+            _seen.add(name)
     return out
 
 
@@ -258,10 +285,34 @@ async def run_specialist(
             f"find the files on disk.\n"
         )
 
-    # System prompt = specialist prompt + workspace hint + task
+    # ── ADR-0005 Phase 6: auto-improving specialists ──────────────────
+    # Recall this specialist's own past lessons (success/failure shapes)
+    # via the ADR-0002 Skill-Lesson Learning Loop (scoped by specialist
+    # name) and prepend them so the specialist gets better the more it is
+    # used. Fire-and-forget: any failure degrades to an empty block, so a
+    # lesson-recall problem can never break a specialist run.
+    _lessons_block = ""
+    try:
+        from lazyclaw.runtime.specialist_lessons import (
+            recall_specialist_lessons,
+        )
+
+        _lessons_block = await recall_specialist_lessons(
+            _config, user_id, specialist.name, task,
+        )
+    except Exception:
+        logger.debug(
+            "specialist lesson recall failed for %s — continuing without",
+            specialist.name, exc_info=True,
+        )
+        _lessons_block = ""
+    _lessons_section = f"\n\n{_lessons_block}\n" if _lessons_block else ""
+
+    # System prompt = specialist prompt + workspace hint + learned lessons + task
     system_prompt = (
         f"{specialist.system_prompt}"
-        f"{_workspace_hint}\n\n"
+        f"{_workspace_hint}"
+        f"{_lessons_section}\n\n"
         f"---\n\n"
         f"Your task:\n{task}\n\n"
         f"Complete this task using your available tools. "
@@ -477,8 +528,16 @@ async def run_specialist(
                         for t in filtered_tools
                     )
                 )
+                _is_allowed_mcp = (
+                    tc.name.startswith("mcp_")
+                    and _bare_tool_name(tc.name) in specialist.allowed_skills
+                )
                 _step_started = time.monotonic()
-                if tc.name not in specialist.allowed_skills and not _is_scraper_tool:
+                if (
+                    tc.name not in specialist.allowed_skills
+                    and not _is_scraper_tool
+                    and not _is_allowed_mcp
+                ):
                     tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
                 else:
                     # Inject TabContext for browser isolation (immutable — new ToolCall)

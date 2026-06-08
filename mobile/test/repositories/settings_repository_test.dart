@@ -254,7 +254,7 @@ void main() {
 
     test('exposes the four contract modes in order', () {
       expect(kAgentModeLabels.keys.toList(),
-          ['chat', 'ask', 'plan', 'auto']);
+          ['chat', 'plan', 'ask', 'auto']);
       expect(kAgentModeLabels['auto'], 'Execute');
     });
   });

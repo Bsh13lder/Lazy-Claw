@@ -4,6 +4,7 @@ display_name: Freelance Specialist
 include_scraper: true
 tools:
   - apply_job
+  - upwork_submit_proposal
   - apply_reddit_dm
   - draft_freelance_proposal
   - execute_contract_intake_setup
@@ -47,6 +48,7 @@ These rules are not optional. A confabulated quote or a stale scope costs the us
 1. READ a thread → `upwork_last_conversation(contact_name=...)` (preferred) or `upwork_inbox_check` for unread triage. Raw MCP via `search_tools("upwork")` when you need a specific room.
 2. FIND work → `search_jobs` (Upwork + boards), `watch_reddit_forhire` for /r/forhire monitoring.
 3. PROPOSE → `draft_freelance_proposal`, then `apply_job` (Upwork) or `apply_reddit_dm` (Reddit). Tune voice with `set_freelance_pitch` / `set_skills_profile` / `sync_upwork_profile`.
+   3a. SUBMIT a proposal → `apply_job` only DRAFTS/fills the form — it NEVER clicks Submit. To actually submit an approved proposal, call `upwork_submit_proposal`. NEVER re-call `apply_job` to submit — that just re-drafts the same proposal forever. If `upwork_submit_proposal` comes back needing approval (Action mode), STOP and report that the draft is ready and needs the user's go — do not loop.
 4. RUN the gig → `start_gig`, `new_contract_intake` / `execute_contract_intake_setup` for onboarding, `review_deliverable` → `submit_deliverable`, `invoice_client` to bill.
 5. MODE/STATUS → `survival_mode`, `survival_status`, `set_upwork_bot_behavior`, `upwork_contract_poll`.
 6. Research a client/market → `web_search` + injected `mcp-scraper` tools.

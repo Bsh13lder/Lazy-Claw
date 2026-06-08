@@ -133,6 +133,18 @@ class SpecialistResult:
     short_description: str = ""
 
 
+def _bare_tool_name(name: str) -> str:
+    """Strip the dynamic ``mcp_<server_uuid>_`` prefix so MCP tools can be
+    matched against a specialist's static allowlist. Server UUIDs use dashes
+    (no underscores), so the bare tool name is everything after the first two
+    underscores. Mirrors the same strip in runtime/agent.py."""
+    if name.startswith("mcp_"):
+        parts = name.split("_", 2)
+        if len(parts) == 3:
+            return parts[2]
+    return name
+
+
 def _filter_tools(
     registry: SkillRegistry,
     allowed: tuple[str, ...],
@@ -164,6 +176,21 @@ def _filter_tools(
             if "mcp-scraper" in desc and name not in seen:
                 out.append(t)
                 seen.add(name)
+    # Union in MCP tools whose BARE suffix (after stripping mcp_<uuid>_) is
+    # explicitly listed in the specialist's allowlist. MCP tool ids are
+    # dynamic (mcp_<uuid>_<name>) so the exact-name match above can never hit
+    # them — without this a specialist that lists e.g. `upwork_submit_proposal`
+    # can never reach it (2026-06-08 apply-loop regression).
+    try:
+        _all_mcp = registry.list_mcp_tools()
+    except Exception:
+        _all_mcp = []
+    _seen = {t["function"]["name"] for t in out}
+    for t in _all_mcp:
+        name = t.get("function", {}).get("name", "")
+        if name and name not in _seen and _bare_tool_name(name) in allowed_set:
+            out.append(t)
+            _seen.add(name)
     return out
 
 
@@ -501,8 +528,16 @@ async def run_specialist(
                         for t in filtered_tools
                     )
                 )
+                _is_allowed_mcp = (
+                    tc.name.startswith("mcp_")
+                    and _bare_tool_name(tc.name) in specialist.allowed_skills
+                )
                 _step_started = time.monotonic()
-                if tc.name not in specialist.allowed_skills and not _is_scraper_tool:
+                if (
+                    tc.name not in specialist.allowed_skills
+                    and not _is_scraper_tool
+                    and not _is_allowed_mcp
+                ):
                     tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
                 else:
                     # Inject TabContext for browser isolation (immutable — new ToolCall)

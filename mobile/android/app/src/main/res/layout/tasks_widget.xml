@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LazyClaw "Today tasks" home-screen widget (~4x2). A header (brand + Add
+     button) over a fixed 3-row task list. The whole body deep-links to the
+     Tasks page; the Add button deep-links to the add-task flow. Click intents
+     are wired in TasksWidget.kt.
+     RemoteViews-safe: LinearLayout + TextView + ImageView + Button only. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/tw_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@drawable/quick_capture_bg"
+    android:padding="12dp">
+
+    <!-- Header: title + "+ Add" -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:baselineAligned="false">
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/tw_title"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
+        <TextView
+            android:id="@+id/tw_add"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/tw_add"
+            android:textColor="@color/lz_widget_on_accent"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:background="@drawable/tasks_widget_add_bg"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:contentDescription="@string/tw_add" />
+    </LinearLayout>
+
+    <!-- Task rows (fixed 3). Each row is title + due label. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="10dp"
+        android:baselineAligned="false">
+        <TextView
+            android:id="@+id/tw_row0_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+        <TextView
+            android:id="@+id/tw_row0_due"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:textColor="@color/lz_accent"
+            android:textSize="12sp"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/tw_row1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp"
+        android:baselineAligned="false">
+        <TextView
+            android:id="@+id/tw_row1_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+        <TextView
+            android:id="@+id/tw_row1_due"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:textColor="@color/lz_accent"
+            android:textSize="12sp"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/tw_row2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp"
+        android:baselineAligned="false">
+        <TextView
+            android:id="@+id/tw_row2_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="@color/lz_widget_label"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+        <TextView
+            android:id="@+id/tw_row2_due"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:textColor="@color/lz_accent"
+            android:textSize="12sp"
+            android:maxLines="1" />
+    </LinearLayout>
+
+    <!-- Empty state — shown (and rows hidden) when there are no open tasks. -->
+    <TextView
+        android:id="@+id/tw_empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="@string/tw_empty"
+        android:textColor="@color/lz_widget_muted"
+        android:textSize="13sp"
+        android:visibility="gone" />
+</LinearLayout>

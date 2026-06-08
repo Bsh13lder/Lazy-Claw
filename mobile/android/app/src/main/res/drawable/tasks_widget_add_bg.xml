@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Emerald pill background for the "Today tasks" widget's "+ Add" button. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/lz_accent" />
+    <corners android:radius="12dp" />
+</shape>

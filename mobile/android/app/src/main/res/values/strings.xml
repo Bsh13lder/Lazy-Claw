@@ -7,4 +7,11 @@
     <string name="qc_expense">+ Expense</string>
     <string name="qc_note">+ Note</string>
     <string name="qc_chat">Chat</string>
+
+    <!-- "Today tasks" home-screen widget. -->
+    <string name="tw_widget_label">LazyClaw Today Tasks</string>
+    <string name="tw_widget_description">Your next few tasks, with a quick Add.</string>
+    <string name="tw_title">Today tasks</string>
+    <string name="tw_add">+ Add</string>
+    <string name="tw_empty">No tasks — tap + to add</string>
 </resources>

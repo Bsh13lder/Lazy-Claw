@@ -35,65 +35,86 @@ class BudgetSummaryCard extends StatelessWidget {
               children: [
                 Icon(
                   Icons.account_balance_wallet_outlined,
-                  color: AppColors.onAccent.withValues(alpha: 0.8),
-                  size: 18,
+                  color: AppColors.onAccent.withValues(alpha: 0.85),
+                  size: 16,
                 ),
                 const SizedBox(width: AppSpacing.sm),
                 Text(
-                  'Total Spent',
+                  'TOTAL SPENT',
                   style: AppText.caption.copyWith(
-                    color: AppColors.onAccent.withValues(alpha: 0.8),
+                    color: AppColors.onAccent.withValues(alpha: 0.85),
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 0.6,
+                    letterSpacing: 1.0,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: AppSpacing.md),
-            // Big spend number.
-            Text(
-              fmtMoney(currency, totals.totalSpent),
-              style: AppText.display.copyWith(
-                color: AppColors.onAccent,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -1,
-              ),
+            // Big spend number + budget line, baseline-aligned so the figure
+            // dominates and the "of X budget" reads as a quiet caption beside it.
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Flexible(
+                  child: Text(
+                    fmtMoney(currency, totals.totalSpent),
+                    style: AppText.display.copyWith(
+                      color: AppColors.onAccent,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -1,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (totals.hasBudget) ...[
+                  const SizedBox(width: AppSpacing.sm),
+                  Text(
+                    '/ ${fmtMoney(currency, totals.totalBudget)}',
+                    style: AppText.body.copyWith(
+                      color: AppColors.onAccent.withValues(alpha: 0.7),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ],
             ),
-            const SizedBox(height: AppSpacing.xs),
-            Text(
-              totals.hasBudget
-                  ? 'of ${fmtMoney(currency, totals.totalBudget)} budget'
-                  : 'No budget set',
-              style: AppText.body.copyWith(
-                color: AppColors.onAccent
-                    .withValues(alpha: totals.hasBudget ? 0.7 : 0.6),
+            if (!totals.hasBudget) ...[
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                'No budget set',
+                style: AppText.body.copyWith(
+                  color: AppColors.onAccent.withValues(alpha: 0.6),
+                ),
               ),
-            ),
+            ],
             if (totals.hasBudget) ...[
               const SizedBox(height: AppSpacing.lg),
-              // Traffic-light progress bar on accent gradient — white-ish track.
+              // Progress bar on the accent gradient — white-ish track + fill,
+              // flips to error red when over budget.
               ClipRRect(
                 borderRadius: AppRadii.rPill,
                 child: LzProgressBar(
                   value: totals.fraction,
-                  height: 10,
+                  height: 8,
                   trafficLight: false,
                   color: overBudget
                       ? AppColors.error
-                      : AppColors.onAccent.withValues(alpha: 0.9),
-                  trackColor: AppColors.onAccent.withValues(alpha: 0.2),
+                      : AppColors.onAccent.withValues(alpha: 0.92),
+                  trackColor: AppColors.onAccent.withValues(alpha: 0.18),
                 ),
               ),
-              const SizedBox(height: AppSpacing.sm),
+              const SizedBox(height: AppSpacing.md),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    overBudget ? 'Over budget!' : '${totals.percentUsed}% used',
-                    style: AppText.caption.copyWith(
+                    overBudget ? 'Over budget' : '${totals.percentUsed}% used',
+                    style: AppText.label.copyWith(
                       color: overBudget
                           ? AppColors.error
-                          : AppColors.onAccent.withValues(alpha: 0.75),
+                          : AppColors.onAccent,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -101,30 +122,45 @@ class BudgetSummaryCard extends StatelessWidget {
                     overBudget
                         ? '${fmtMoney(currency, totals.totalSpent - totals.totalBudget)} over'
                         : '${fmtMoney(currency, totals.remaining)} left',
-                    style: AppText.caption.copyWith(
+                    style: AppText.label.copyWith(
                       color: overBudget
                           ? AppColors.error
-                          : AppColors.onAccent.withValues(alpha: 0.7),
+                          : AppColors.onAccent.withValues(alpha: 0.85),
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
               ),
             ],
             const SizedBox(height: AppSpacing.lg),
+            // Hairline divider before the footer so the this-month figure reads
+            // as a distinct secondary stat, not part of the budget block.
+            Container(
+              height: 1,
+              color: AppColors.onAccent.withValues(alpha: 0.12),
+            ),
+            const SizedBox(height: AppSpacing.md),
             // Footer: real this-month spend + (optional) other-currency note.
             Row(
               children: [
                 Icon(
                   Icons.event_note_outlined,
                   size: 14,
-                  color: AppColors.onAccent.withValues(alpha: 0.7),
+                  color: AppColors.onAccent.withValues(alpha: 0.75),
                 ),
                 const SizedBox(width: AppSpacing.xs),
                 Text(
-                  'This month ${fmtMoney(currency, totals.monthSpent)}',
+                  'This month',
                   style: AppText.caption.copyWith(
-                    color: AppColors.onAccent.withValues(alpha: 0.8),
-                    fontWeight: FontWeight.w600,
+                    color: AppColors.onAccent.withValues(alpha: 0.75),
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  fmtMoney(currency, totals.monthSpent),
+                  style: AppText.caption.copyWith(
+                    color: AppColors.onAccent,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
                 if (totals.multiCurrency) ...[

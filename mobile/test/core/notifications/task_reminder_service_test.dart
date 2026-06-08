@@ -138,6 +138,62 @@ void main() {
     });
   });
 
+  group('bodyForReminder', () {
+    // A fixed "now" so day-relative wording is deterministic. now = Jun 7.
+    final now = DateTime(2026, 6, 7, 12, 0, 0);
+
+    test('timed due → "Due at <due clock time>", NOT the fire time', () {
+      // Even with a reminderAt lead landing earlier, the body reflects the DUE
+      // clock time (17:00), never the fire instant.
+      final t = _task(
+        dueDate: '2026-06-07T17:00:00',
+        reminderAt: '2026-06-07T16:30:00',
+      );
+      expect(bodyForReminder(t, now: now), 'Due at 5:00 PM');
+    });
+
+    test('timed due AM → 12-hour label', () {
+      final t = _task(dueDate: '2026-06-08T09:05:00');
+      expect(bodyForReminder(t, now: now), 'Due at 9:05 AM');
+    });
+
+    test('date-only due today → "Due today" (no invented clock time)', () {
+      final t = _task(dueDate: '2026-06-07');
+      expect(bodyForReminder(t, now: now), 'Due today');
+    });
+
+    test('date-only due tomorrow → "Due tomorrow"', () {
+      final t = _task(dueDate: '2026-06-08');
+      expect(bodyForReminder(t, now: now), 'Due tomorrow');
+    });
+
+    test('date-only due further out → "Due <Mon D>"', () {
+      final t = _task(dueDate: '2026-06-12');
+      expect(bodyForReminder(t, now: now), 'Due Jun 12');
+    });
+
+    test('date-only due in the past → "Due <Mon D>" (still a day phrase)', () {
+      final t = _task(dueDate: '2026-06-01');
+      expect(bodyForReminder(t, now: now), 'Due Jun 1');
+    });
+
+    test('no due but explicit reminderAt → generic "Reminder"', () {
+      final t = _task(reminderAt: '2026-06-07T20:15:00');
+      expect(bodyForReminder(t, now: now), 'Reminder');
+    });
+
+    test('no due and no reminderAt → generic "Reminder"', () {
+      expect(bodyForReminder(_task(), now: now), 'Reminder');
+    });
+
+    test('a T-bearing but unparseable due → generic (never invents a time)', () {
+      // Has a `T` and length > 10 (so it routes through the timed-due branch)
+      // but DateTime.tryParse returns null → no time is invented.
+      final t = _task(dueDate: 'not-a-real-dateThhmm');
+      expect(bodyForReminder(t, now: now), 'Reminder');
+    });
+  });
+
   group('notificationIdForTask', () {
     test('is deterministic for the same id', () {
       expect(notificationIdForTask('task-1'), notificationIdForTask('task-1'));

@@ -993,8 +993,8 @@ export interface AwakeStatus {
 }
 
 // Operating-mode posture (ADR-0005 specialist-first dispatch, Phase 3).
-// Stored at user settings general.agent_mode. UI labels: Chat / Ask / Plan /
-// Execute (the "auto" value is surfaced as "Execute"). Defaults to "ask".
+// Stored at user settings general.agent_mode. UI labels: Ask / Plan / Action /
+// Execute (value "chat"→Ask, "plan"→Plan, "ask"→Action, "auto"→Execute). Defaults to "ask".
 export type AgentMode = "chat" | "ask" | "plan" | "auto";
 
 export interface GeneralSettings {

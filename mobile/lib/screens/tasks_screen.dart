@@ -15,9 +15,11 @@ import 'notes/notes_body.dart';
 import 'settings/settings_prefs.dart';
 import 'storage_banners.dart';
 import 'tasks/add_task_sheet.dart';
+import 'tasks/ai_task_badge.dart';
 import 'tasks/connected_task_row.dart';
 import 'tasks/task_calendar_view.dart';
 import 'tasks/task_detail_sheet.dart';
+import 'tasks/task_owner_filter.dart';
 import 'tasks/tasks_project_view.dart';
 
 // ── Top segment ─────────────────────────────────────────────────────────────
@@ -127,6 +129,10 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
   /// List vs Calendar. Local-only — resets on tab rebuild, which is fine.
   _TasksView _view = _TasksView.list;
 
+  /// Owner filter (All · Mine · AI) — separates self-created from AI-created
+  /// tasks across all three views. Local-only; defaults to All.
+  TaskOwnerFilter _ownerFilter = TaskOwnerFilter.all;
+
   /// Calendar focus (the visible month) and the selected day. Seeded to today
   /// so the calendar opens on the current month with today highlighted and the
   /// FAB pre-fills today.
@@ -178,7 +184,8 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
         break;
       case AppAction.addExpense:
       case AppAction.chat:
-        break; // not owned by this screen
+      case AppAction.openTasks:
+        break; // not owned by this screen (openTasks self-clears in main.dart)
     }
   }
 
@@ -350,17 +357,43 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     );
   }
 
-  /// The Tasks segment body: the List · Calendar · Projects toggle (nested) +
-  /// content.
+  /// The Tasks segment body: the owner filter (All · Mine · AI) + the
+  /// List · Calendar · Projects toggle (nested) + content.
   Widget _buildTasksContent(TasksState state, List<Project> projects) {
+    // The owner filter is applied ONCE here; every view downstream renders the
+    // already-filtered list so List/Calendar/Projects stay in lockstep.
+    final visibleTasks = filterByOwner(state.tasks, _ownerFilter);
+    // The AI-chip badge counts the unfiltered set so it always reflects how
+    // many AI tasks exist, regardless of the active filter.
+    final aiCount = countAgentTasks(state.tasks);
+
     return Column(
       children: [
+        // Owner filter (All · Mine · AI) — always visible so the user can
+        // separate self-created from AI-created tasks from any state.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.md,
+            AppSpacing.lg,
+            0,
+          ),
+          child: _OwnerFilterRow(
+            filter: _ownerFilter,
+            aiCount: aiCount,
+            onChanged: (f) {
+              if (f == _ownerFilter) return;
+              HapticFeedback.selectionClick();
+              setState(() => _ownerFilter = f);
+            },
+          ),
+        ),
         // List · Calendar · Projects toggle — always visible so the user can
         // switch even from an empty/error state.
         Padding(
           padding: const EdgeInsets.fromLTRB(
             AppSpacing.lg,
-            AppSpacing.md,
+            AppSpacing.sm,
             AppSpacing.lg,
             0,
           ),
@@ -374,27 +407,36 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
             },
           ),
         ),
-        Expanded(child: _buildViewBody(state, projects)),
+        Expanded(child: _buildViewBody(state, visibleTasks, projects)),
       ],
     );
   }
 
-  /// Routes to the active view's body.
-  Widget _buildViewBody(TasksState state, List<Project> projects) {
+  /// Routes to the active view's body. [visibleTasks] is [TasksState.tasks]
+  /// already narrowed by the active owner filter.
+  Widget _buildViewBody(
+    TasksState state,
+    List<Task> visibleTasks,
+    List<Project> projects,
+  ) {
     switch (_view) {
       case _TasksView.list:
-        return _buildBody(state, projects);
+        return _buildBody(state, visibleTasks, projects);
       case _TasksView.calendar:
-        return _buildCalendarBody(state, projects);
+        return _buildCalendarBody(state, visibleTasks, projects);
       case _TasksView.projects:
-        return _buildProjectsBody(state, projects);
+        return _buildProjectsBody(state, visibleTasks, projects);
     }
   }
 
   /// Calendar body: an error/skeleton guard around [TaskCalendarView]. The
   /// calendar itself is useful even with zero tasks, so we only short-circuit
   /// on the first instant load and on a hard error with nothing cached.
-  Widget _buildCalendarBody(TasksState state, List<Project> projects) {
+  Widget _buildCalendarBody(
+    TasksState state,
+    List<Task> visibleTasks,
+    List<Project> projects,
+  ) {
     if (state.isLoading && state.tasks.isEmpty && state.error == null) {
       return LzSkeleton.list(
         count: 4,
@@ -414,7 +456,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     return LzRefresh(
       onRefresh: _refresh,
       child: TaskCalendarView(
-        tasks: state.tasks,
+        tasks: visibleTasks,
         projects: projects,
         dirtyIds: state.dirtyIds,
         focusedDay: _focusedDay,
@@ -443,8 +485,12 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       );
 
   /// The Projects view: tasks grouped under their project (Money-tab projects +
-  /// an Uncategorized bucket), each bucket expandable to its tasks.
-  Widget _buildProjectsBody(TasksState state, List<Project> projects) {
+  /// a first-class Inbox bucket), each bucket expandable to its tasks.
+  Widget _buildProjectsBody(
+    TasksState state,
+    List<Task> visibleTasks,
+    List<Project> projects,
+  ) {
     if (state.isLoading && state.tasks.isEmpty && state.error == null) {
       return LzSkeleton.list(
         count: 5,
@@ -464,7 +510,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     return LzRefresh(
       onRefresh: _refresh,
       child: TasksProjectView(
-        tasks: state.tasks,
+        tasks: visibleTasks,
         projects: projects,
         dirtyIds: state.dirtyIds,
         onComplete: (id) => ref.read(tasksProvider.notifier).completeTask(id),
@@ -479,7 +525,11 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     );
   }
 
-  Widget _buildBody(TasksState state, List<Project> projects) {
+  Widget _buildBody(
+    TasksState state,
+    List<Task> visibleTasks,
+    List<Project> projects,
+  ) {
     // ── Loading skeleton ─────────────────────────────────────────────────────
     // Only on the first instant cache read (no items yet, nothing errored).
     if (state.isLoading && state.tasks.isEmpty && state.error == null) {
@@ -514,8 +564,27 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
       );
     }
 
+    // ── Filtered-empty state ─────────────────────────────────────────────────
+    // There ARE tasks, but the active owner filter excludes them all (e.g. the
+    // "AI" filter with no AI-created tasks). Show a filter-specific empty state
+    // with a quick way back to "All" rather than an unexplained blank list.
+    if (visibleTasks.isEmpty) {
+      return LzEmptyState(
+        icon: _ownerFilter == TaskOwnerFilter.ai
+            ? Icons.auto_awesome_outlined
+            : Icons.person_outline,
+        title: _ownerFilter == TaskOwnerFilter.ai
+            ? 'No AI-created tasks'
+            : 'No tasks you created',
+        hint: 'Switch back to All to see every task.',
+        actionLabel: 'Show all',
+        actionIcon: Icons.clear_all,
+        onAction: () => setState(() => _ownerFilter = TaskOwnerFilter.all),
+      );
+    }
+
     // ── Sectioned list ───────────────────────────────────────────────────────
-    final grouped = _groupTasks(state.tasks);
+    final grouped = _groupTasks(visibleTasks);
 
     return LzRefresh(
       onRefresh: _refresh,
@@ -691,18 +760,21 @@ class _TaskSectionState extends State<_TaskSection> {
           _entrance(
             index: i,
             last: last,
-            child: ConnectedTaskRow(
+            child: AgentTaskBadged(
               task: widget.tasks[i],
-              pendingSync: widget.dirtyIds.contains(widget.tasks[i].id),
-              projects: widget.projects,
-              onComplete: widget.onComplete,
-              onDelete: widget.onDelete,
-              onOpen: widget.onOpen,
-              onRenameTitle: widget.onRenameTitle,
-              onPriorityChanged: widget.onPriorityChanged,
-              onDueDateChanged: widget.onDueDateChanged,
-              onCategoryChanged: widget.onCategoryChanged,
-              onSubtasksChanged: widget.onSubtasksChanged,
+              child: ConnectedTaskRow(
+                task: widget.tasks[i],
+                pendingSync: widget.dirtyIds.contains(widget.tasks[i].id),
+                projects: widget.projects,
+                onComplete: widget.onComplete,
+                onDelete: widget.onDelete,
+                onOpen: widget.onOpen,
+                onRenameTitle: widget.onRenameTitle,
+                onPriorityChanged: widget.onPriorityChanged,
+                onDueDateChanged: widget.onDueDateChanged,
+                onCategoryChanged: widget.onCategoryChanged,
+                onSubtasksChanged: widget.onSubtasksChanged,
+              ),
             ),
           ),
           if (i < widget.tasks.length - 1)
@@ -750,6 +822,63 @@ class _SegmentToggle extends StatelessWidget {
           icon: Icons.notes_outlined,
           selected: segment == _Segment.notes,
           onTap: () => onChanged(_Segment.notes),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Owner filter (All | Mine | AI) ──────────────────────────────────────────
+
+/// A three-chip filter row that separates self-created from AI-created tasks
+/// (All · Mine · AI). The AI chip carries a small count badge when the agent
+/// has queued tasks. Built from [LzChip]s + [LzBadge] for kit consistency.
+class _OwnerFilterRow extends StatelessWidget {
+  const _OwnerFilterRow({
+    required this.filter,
+    required this.aiCount,
+    required this.onChanged,
+  });
+
+  final TaskOwnerFilter filter;
+
+  /// Number of AI-created tasks (badges the "AI" chip; hidden when zero).
+  final int aiCount;
+  final void Function(TaskOwnerFilter) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        LzChip(
+          label: TaskOwnerFilter.all.label,
+          icon: Icons.all_inclusive,
+          selected: filter == TaskOwnerFilter.all,
+          onTap: () => onChanged(TaskOwnerFilter.all),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        LzChip(
+          label: TaskOwnerFilter.mine.label,
+          icon: Icons.person_outline,
+          selected: filter == TaskOwnerFilter.mine,
+          onTap: () => onChanged(TaskOwnerFilter.mine),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            LzChip(
+              label: TaskOwnerFilter.ai.label,
+              icon: Icons.auto_awesome,
+              color: AppColors.info,
+              selected: filter == TaskOwnerFilter.ai,
+              onTap: () => onChanged(TaskOwnerFilter.ai),
+            ),
+            if (aiCount > 0) ...[
+              const SizedBox(width: AppSpacing.xs),
+              LzBadge(count: aiCount, color: AppColors.info),
+            ],
+          ],
         ),
       ],
     );

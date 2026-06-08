@@ -6,14 +6,16 @@ import '../../models/project.dart';
 import '../../models/subtask.dart';
 import '../../models/task.dart';
 import '../expenses/project_color_picker.dart';
+import 'ai_task_badge.dart';
 import 'connected_task_row.dart';
 import 'task_project_grouping.dart';
 
 /// The Tasks-tab "Projects" view: a collapsible list of project buckets, each
 /// showing a color dot, the project name and an open/total task count. Tapping
 /// a bucket expands its tasks inline (reusing [ConnectedTaskRow]). Tasks are
-/// matched to projects by a case-insensitive `category` → name match, with an
-/// "Uncategorized" catch-all (see [groupTasksByProject]).
+/// matched to projects by a case-insensitive `category` → name match, with a
+/// first-class "Inbox" bucket (leading the list) holding every projectless task
+/// (see [groupTasksByProject]).
 ///
 /// Purely presentational — all mutating callbacks live in the parent
 /// [TasksScreen] so commits route through `tasksProvider`.
@@ -66,7 +68,11 @@ class _TasksProjectViewState extends State<TasksProjectView> {
     final groups = groupTasksByProject(widget.tasks, widget.projects);
     final ordered = orderedProjectGroupNames(widget.projects, groups);
 
-    if (ordered.isEmpty) {
+    // The Inbox bucket is always seeded, so [ordered] is never literally empty.
+    // Treat "no real projects AND no tasks at all" (only an empty Inbox) as the
+    // empty state — there's nothing meaningful to group yet.
+    final hasProjects = widget.projects.any((p) => p.name.trim().isNotEmpty);
+    if (!hasProjects && widget.tasks.isEmpty) {
       return LzEmptyState(
         icon: Icons.folder_open_outlined,
         title: 'No projects yet',
@@ -152,6 +158,10 @@ class _ProjectBucket extends StatelessWidget {
   final void Function(String id, String category)? onCategoryChanged;
   final void Function(String id, List<Subtask> subtasks)? onSubtasksChanged;
 
+  /// The Inbox bucket reads as a neutral, project-less home rather than a
+  /// colored project — so it shows an inbox glyph instead of a color dot.
+  bool get _isInbox => name == kInboxProjectLabel;
+
   @override
   Widget build(BuildContext context) {
     final counts = projectGroupCounts(tasks);
@@ -177,7 +187,14 @@ class _ProjectBucket extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    ProjectColorDot(hex: project?.color, size: 10),
+                    if (_isInbox)
+                      const Icon(
+                        Icons.inbox_outlined,
+                        size: 16,
+                        color: AppColors.textMuted,
+                      )
+                    else
+                      ProjectColorDot(hex: project?.color, size: 10),
                     const SizedBox(width: AppSpacing.md),
                     Expanded(
                       child: Text(
@@ -232,18 +249,21 @@ class _ProjectBucket extends StatelessWidget {
                   : Column(
                       children: [
                         for (int i = 0; i < tasks.length; i++) ...[
-                          ConnectedTaskRow(
+                          AgentTaskBadged(
                             task: tasks[i],
-                            pendingSync: dirtyIds.contains(tasks[i].id),
-                            projects: projects,
-                            onComplete: onComplete,
-                            onDelete: onDelete,
-                            onOpen: onOpen,
-                            onRenameTitle: onRenameTitle,
-                            onPriorityChanged: onPriorityChanged,
-                            onDueDateChanged: onDueDateChanged,
-                            onCategoryChanged: onCategoryChanged,
-                            onSubtasksChanged: onSubtasksChanged,
+                            child: ConnectedTaskRow(
+                              task: tasks[i],
+                              pendingSync: dirtyIds.contains(tasks[i].id),
+                              projects: projects,
+                              onComplete: onComplete,
+                              onDelete: onDelete,
+                              onOpen: onOpen,
+                              onRenameTitle: onRenameTitle,
+                              onPriorityChanged: onPriorityChanged,
+                              onDueDateChanged: onDueDateChanged,
+                              onCategoryChanged: onCategoryChanged,
+                              onSubtasksChanged: onSubtasksChanged,
+                            ),
                           ),
                           if (i < tasks.length - 1)
                             const SizedBox(height: AppSpacing.sm),

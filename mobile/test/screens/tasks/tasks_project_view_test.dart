@@ -60,21 +60,24 @@ void main() {
       tasks: [
         _task('a', 'Pay rent', category: 'Home'),
         _task('b', 'Fix sink', category: 'Home', status: 'done'),
-        _task('c', 'Loose task'), // → Uncategorized
+        _task('c', 'Loose task'), // → Inbox
       ],
       projects: [_project('p1', 'Home', color: '#FF0000'), _project('p2', 'Work')],
     ));
     await tester.pump();
 
-    // Buckets for both projects + Uncategorized are present.
+    // Buckets for both projects + the first-class Inbox bucket are present.
     expect(find.byKey(const ValueKey('project-bucket-Home')), findsOneWidget);
     expect(find.byKey(const ValueKey('project-bucket-Work')), findsOneWidget);
-    expect(find.byKey(const ValueKey('project-bucket-Uncategorized')),
-        findsOneWidget);
+    expect(find.byKey(const ValueKey('project-bucket-Inbox')), findsOneWidget);
 
-    // Home: 1 open of 2 total. Work: 0/0.
+    // Inbox leads the list (it's the home for loose tasks).
+    expect(find.text('Inbox'), findsOneWidget);
+
+    // Home: 1 open of 2 total. Work + Inbox (1 loose task): 0/0 and 1/1.
     expect(find.text('1/2'), findsOneWidget);
-    expect(find.text('0/0'), findsOneWidget);
+    expect(find.text('0/0'), findsOneWidget); // Work (zero tasks)
+    expect(find.text('1/1'), findsOneWidget); // Inbox (one loose task)
 
     // Collapsed by default: the bucket's tasks are not yet shown.
     expect(find.text('Pay rent'), findsNothing);

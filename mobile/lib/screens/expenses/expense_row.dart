@@ -84,13 +84,15 @@ class ExpenseRow extends StatelessWidget {
     // older/partial server payloads). Null → render nothing.
     final savedLabel =
         formatSavedAt(expense.createdAt) ?? formatSavedAt(expense.spentAt);
+    final metaText = _metaText(vendor, desc, savedLabel);
 
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.lg,
-        vertical: AppSpacing.sm,
+        vertical: AppSpacing.md,
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           // Leading receipt icon container.
           Container(
@@ -103,57 +105,61 @@ class ExpenseRow extends StatelessWidget {
               border: Border.all(color: AppColors.borderSubtle),
             ),
             child: const Icon(
-              Icons.receipt_outlined,
+              Icons.receipt_long_outlined,
               size: 18,
               color: AppColors.textMuted,
             ),
           ),
           const SizedBox(width: AppSpacing.md),
-          // Description + project tag.
+          // Description + muted metadata line (vendor · saved time).
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  desc.isEmpty ? '(no description)' : desc,
-                  style: AppText.body,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (vendor.isNotEmpty && vendor != desc) ...[
-                  const SizedBox(height: AppSpacing.xs),
-                  Text(
-                    vendor,
-                    style: AppText.caption,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-                if (showProject && projectName != null && projectName.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: AppSpacing.xs),
-                    child: LzChip(
-                      label: projectName,
-                      dense: true,
-                      color: AppColors.accent,
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        desc.isEmpty ? '(no description)' : desc,
+                        style: AppText.body.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
-                if (savedLabel != null)
+                    if (showProject &&
+                        projectName != null &&
+                        projectName.isNotEmpty) ...[
+                      const SizedBox(width: AppSpacing.sm),
+                      LzChip(
+                        label: projectName,
+                        dense: true,
+                        color: AppColors.accent,
+                      ),
+                    ],
+                  ],
+                ),
+                if (metaText != null)
                   Padding(
-                    key: ValueKey('expense-row-saved-${expense.id}'),
-                    padding: const EdgeInsets.only(top: AppSpacing.xs),
+                    key: savedLabel != null
+                        ? ValueKey('expense-row-saved-${expense.id}')
+                        : null,
+                    padding: const EdgeInsets.only(top: 3),
                     child: Row(
-                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(
-                          Icons.schedule_outlined,
+                        Icon(
+                          savedLabel != null
+                              ? Icons.schedule_outlined
+                              : Icons.storefront_outlined,
                           size: 12,
                           color: AppColors.textMuted,
                         ),
                         const SizedBox(width: AppSpacing.xs),
                         Flexible(
                           child: Text(
-                            'Saved $savedLabel',
+                            metaText,
                             style: AppText.caption
                                 .copyWith(color: AppColors.textMuted),
                             maxLines: 1,
@@ -166,14 +172,18 @@ class ExpenseRow extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(width: AppSpacing.sm),
-          // Amount + sync badge.
+          const SizedBox(width: AppSpacing.md),
+          // Amount + sync badge — the row's prominent figure.
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Text(
                 fmtMoney(expense.currency, expense.amount),
-                style: AppText.label.copyWith(color: AppColors.accent),
+                style: AppText.title.copyWith(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
               if (pendingSync) ...[
                 const SizedBox(height: AppSpacing.xs),
@@ -184,6 +194,22 @@ class ExpenseRow extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Composes the muted metadata line: vendor (when distinct from the
+  /// description) and the "Saved …" timestamp, joined with a thin dot. Returns
+  /// null when there's nothing to show so the row stays a clean single line.
+  ///
+  /// The leading icon in [_buildContent] keys off whether [savedLabel] is set
+  /// (clock when present, storefront otherwise) and the row carries the
+  /// `expense-row-saved-{id}` key only when a saved label is rendered — keeping
+  /// the saved-time test surface intact.
+  String? _metaText(String vendor, String desc, String? savedLabel) {
+    final parts = <String>[];
+    if (vendor.isNotEmpty && vendor != desc) parts.add(vendor);
+    if (savedLabel != null) parts.add('Saved $savedLabel');
+    if (parts.isEmpty) return null;
+    return parts.join('  ·  ');
   }
 
   String? _resolveProjectName() {

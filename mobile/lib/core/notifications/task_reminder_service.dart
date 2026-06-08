@@ -97,6 +97,64 @@ int notificationIdForTask(String taskId) {
   return hash & 0x7FFFFFFF; // positive 31-bit
 }
 
+/// The notification BODY text — it describes WHEN THE TASK IS DUE, never the
+/// instant the reminder pops. A reminder may fire ahead of the due time (an
+/// auto-applied lead) or at a default 09:00 for a date-only task, so the
+/// fire-time would be misleading; we derive the wording from [Task.dueDate]:
+///
+///   * timed due (`…THH:mm:ss`) → `Due at 5:00 PM` (the DUE clock time).
+///   * date-only due (`yyyy-MM-dd`) → `Due today` / `Due tomorrow` /
+///     `Due Jun 9` — a day phrase only, NEVER an invented clock time.
+///   * no due but an explicit [Task.reminderAt] → a generic `Reminder`.
+///   * nothing schedulable → `Reminder` (defensive; callers only schedule when
+///     [reminderFireTime] is non-null).
+///
+/// Pure — [now] is injected so day-relative wording ("today"/"tomorrow") is
+/// deterministic in tests.
+String bodyForReminder(Task task, {DateTime? now}) {
+  final due = task.dueDate;
+  // 1. Timed due → the task's own clock time (NOT the fire time).
+  if (dueDateHasTime(due)) {
+    final parts = dueTimeParts(due);
+    if (parts != null) {
+      return 'Due at ${formatClock12(parts.hour, parts.minute)}';
+    }
+    // A `T`-bearing but unparseable due falls through to the date / generic
+    // paths below rather than inventing a time.
+  }
+  // 2. Date-only due → a day phrase, never a clock time.
+  if (due != null && due.length == 10 && !dueDateHasTime(due)) {
+    final dayLabel = _dueDayLabel(due, now ?? DateTime.now());
+    if (dayLabel != null) return dayLabel;
+  }
+  // 3. No usable due, but an explicit reminder was set → generic.
+  // 4. Fallback (defensive) → generic.
+  return 'Reminder';
+}
+
+/// `Due today` / `Due tomorrow` / `Due Jun 9` for a `yyyy-MM-dd` [due], using
+/// the calendar day of [now] for the relative wording. Returns null when [due]
+/// doesn't parse as a date.
+String? _dueDayLabel(String due, DateTime now) {
+  final date = DateTime.tryParse(due);
+  if (date == null) return null;
+  final dueDay = DateTime(date.year, date.month, date.day);
+  final today = DateTime(now.year, now.month, now.day);
+  final deltaDays = dueDay.difference(today).inDays;
+  if (deltaDays == 0) return 'Due today';
+  if (deltaDays == 1) return 'Due tomorrow';
+  return 'Due ${_monthAbbrev(date.month)} ${date.day}';
+}
+
+const List<String> _kMonthAbbrev = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// `Jan`..`Dec` for a 1-12 [month]; intl-free so it's deterministic in tests.
+String _monthAbbrev(int month) =>
+    (month >= 1 && month <= 12) ? _kMonthAbbrev[month - 1] : '';
+
 // ── Production implementation ────────────────────────────────────────────────
 
 /// Schedules task reminders via the shared [FlutterLocalNotificationsPlugin].
@@ -204,7 +262,7 @@ class TaskReminderService implements TaskReminderScheduler {
         fire.second,
       );
       final title = task.title.isEmpty ? 'Task reminder' : task.title;
-      final body = _bodyFor(task, fire);
+      final body = bodyForReminder(task, now: DateTime.now());
       try {
         await _plugin.zonedSchedule(
           id,
@@ -289,17 +347,5 @@ class TaskReminderService implements TaskReminderScheduler {
     } catch (_) {
       // Best-effort.
     }
-  }
-
-  String _bodyFor(Task task, DateTime fire) {
-    final label = formatClock12(fire.hour, fire.minute);
-    final reminderDriven =
-        task.reminderAt != null && task.reminderAt!.isNotEmpty;
-    if (reminderDriven) return 'Reminder · $label';
-    // A date-only due fires at the default time-of-day, but the task isn't
-    // literally "due at" that clock time — phrase it as a day reminder so the
-    // notification text doesn't claim a due time the task never had.
-    if (!dueDateHasTime(task.dueDate)) return 'Due today · reminder';
-    return 'Due at $label';
   }
 }

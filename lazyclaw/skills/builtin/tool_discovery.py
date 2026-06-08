@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from lazyclaw.skills.base import BaseSkill
+from lazyclaw.skills.tool_namespace import dedupe_prefer_native
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,16 @@ class SearchToolsSkill(BaseSkill):
             return "No tools available."
 
         keywords = query.split()
-        all_tools = self._registry.list_core_tools() + self._registry.list_mcp_tools()
+        # Native-primacy: when a native tool and an MCP tool share a bare name
+        # (e.g. native `create_sheet` vs a Google Workspace MCP `create_sheet`),
+        # surface ONLY the native one so the model isn't biased toward the
+        # external tool. Distinct-name external tools (`create_google_sheet`)
+        # still appear, so the explicit-Google path is preserved.
+        core_tools = self._registry.list_core_tools()
+        native_names = {t.get("function", {}).get("name", "") for t in core_tools}
+        all_tools = dedupe_prefer_native(
+            core_tools + self._registry.list_mcp_tools(), native_names
+        )
 
         scored: list[tuple[int, str, str]] = []
         for tool in all_tools:

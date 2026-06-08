@@ -3454,6 +3454,16 @@ class Agent:
             in ("1", "true", "yes", "on")
         )
         _promote_iter: int | None = None
+        # Thin-router cap engagement tracking — mirrors AUTO-PROMOTE's
+        # (_force_dispatch_only, _promote_iter) pair. The cap only narrows
+        # `tools` to meta-only; it never sets _force_dispatch_only, so the
+        # AUTO-PROMOTE chat-responsiveness failsafes never fire under the
+        # flag. _thin_router_capped records that the cap actually engaged and
+        # _cap_iter records WHEN, so the cap-aware failsafe below can auto-
+        # submit to task_runner one iter later if the brain still refuses to
+        # delegate (guarantees the chat never freezes to max_iterations).
+        _thin_router_capped = False
+        _cap_iter: int | None = None
         # 3-strikes failure tracking — when the same MCP tool returns an
         # error 3 times this turn, break the loop with a deterministic user-
         # facing handoff (e.g. "log in at upwork.com/nx/find-work, reply
@@ -3676,6 +3686,9 @@ class Agent:
                         _tr_other.discard(None)
                         _suppressed_tool_names |= _tr_other  # type: ignore[arg-type]
                         tools = _meta_only
+                        if not _thin_router_capped:  # cap engaged (first time)
+                            _thin_router_capped = True
+                            _cap_iter = iteration  # anchor for failsafe below
 
                 # Hard-enforce AUTO-PROMOTE: previous iter set the flag, so
                 # this iter's tool list is restricted to ONLY run_background.
@@ -6040,6 +6053,66 @@ class Agent:
                     except Exception:
                         logger.exception(
                             "AUTO-PROMOTE failsafe failed; continuing inline",
+                        )
+
+                # Cap-aware responsiveness failsafe (THIN-ROUTER path): the
+                # cap only narrows `tools` to meta-only — it never sets
+                # _force_dispatch_only, so the AUTO-PROMOTE failsafes above
+                # never fire under the flag. Without this, a brain that
+                # ignores the narrowed list and keeps iterating without
+                # delegating runs to max_iterations (frozen chat). Mirrors the
+                # AUTO-PROMOTE failsafe exactly, but keys on the cap flags:
+                # one iter AFTER the cap engaged, if the brain still hasn't
+                # called any dispatch tool, auto-submit the original message
+                # to task_runner. The brain gets one capped iteration first to
+                # actually delegate (iteration > _cap_iter).
+                if (
+                    _thin_router
+                    and _thin_router_capped
+                    and _cap_iter is not None
+                    and iteration > _cap_iter
+                    and not getattr(self, "is_background", False)
+                    and self._task_runner is not None
+                    and user_id is not None
+                    and not any(
+                        d in _called_tool_names
+                        for d in ("delegate", "dispatch_subagents", "run_background")
+                    )
+                ):
+                    logger.warning(
+                        "THIN-ROUTER failsafe: brain refused to delegate even "
+                        "with meta-only tool list at iter=%d (cap_iter=%d) — "
+                        "runtime auto-submitting original message to task_runner",
+                        iteration, _cap_iter,
+                    )
+                    try:
+                        from lazyclaw.runtime.agent_settings import get_agent_settings
+                        _agent_settings = await get_agent_settings(self.config, user_id)
+                        _bg_task_id = await self._task_runner.submit(
+                            user_id=user_id,
+                            instruction=message,
+                            name=None,
+                            timeout=_agent_settings.get("specialist_timeout_s", 600),
+                            callback=callback,
+                            # Fix H — see hallucination-cap failsafe for rationale.
+                            source="brain",
+                            caller_depth=self._depth,
+                        )
+                        if self._team_lead and _fg_task_id:
+                            self._team_lead.cancel(_fg_task_id)
+                            _fg_task_id = None
+                        await cb.on_event(AgentEvent(
+                            FAST_DISPATCH,
+                            "Auto-promoted to background after THIN-ROUTER cap refusal",
+                            {"task_id": _bg_task_id},
+                        ))
+                        await cb.on_event(AgentEvent("done", "Dispatched", {}))
+                        if _delegate_registered and self.registry:
+                            self.registry.unregister("delegate")
+                        return "Continuing in background — will report back when done."
+                    except Exception:
+                        logger.exception(
+                            "THIN-ROUTER failsafe failed; continuing inline",
                         )
 
                 # ── Running-long nudge ──

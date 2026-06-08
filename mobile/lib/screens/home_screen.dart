@@ -1,5 +1,6 @@
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -14,6 +15,8 @@ import '../ui/ui.dart';
 import 'expenses/budget_math.dart';
 import 'expenses/money_helpers.dart';
 import 'expenses/project_color_picker.dart';
+import 'settings/settings_prefs.dart' show kDefaultReminderLead;
+import 'tasks/add_task_sheet.dart';
 
 // The chat provider is defined in chat_screen.dart and kept alive by
 // StatefulShellRoute. We re-read it here (same ProviderScope) so the Home
@@ -72,6 +75,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     ]);
   }
 
+  /// Mark a Today-row task done from Home. The provider state update flows back
+  /// into the watched [tasksProvider], so the row drops out on the next build.
+  Future<void> _completeTask(String id) async {
+    HapticFeedback.selectionClick();
+    if (!mounted) return;
+    await ref.read(tasksProvider.notifier).completeTask(id);
+  }
+
+  /// Open the shared add-task sheet and create the task — mirrors the Tasks tab.
+  /// Uses the built-in [kDefaultReminderLead] for the reminder lead (simple +
+  /// consistent with the sheet's own default).
+  Future<void> _openAddTask() async {
+    HapticFeedback.selectionClick();
+    final result = await showAddTaskSheet(
+      context,
+      defaultLead: kDefaultReminderLead,
+    );
+    if (result == null || !mounted) return;
+    await ref.read(tasksProvider.notifier).addTask(
+          result.title,
+          priority: result.priority,
+          dueDate: result.dueDate,
+          category: result.category,
+          reminderAt: result.reminderAt,
+        );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isReachable = ref.watch(reachableProvider);
@@ -113,12 +143,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               "Here's your day at a glance",
               style: AppText.body.copyWith(color: AppColors.textMuted),
             ),
+            const SizedBox(height: AppSpacing.xl),
+
+            // ── Quick actions ─────────────────────────────────────────────
+            // Moved to the top so the most common create-actions sit right
+            // under the greeting, above the glanceable sections.
+            _QuickActionsRow(
+              onTask: () => context.go('/tasks'),
+              onExpense: () => context.go('/expenses'),
+              // Notes now lives as a segment inside the Tasks tab.
+              onNote: () => context.go('/tasks'),
+              onChat: () => context.go('/chat'),
+            ),
             const SizedBox(height: AppSpacing.xxl),
 
             // ── TODAY section ─────────────────────────────────────────────
             _TodaySection(
               tasksState: tasksState,
               onSeeAll: () => context.go('/tasks'),
+              onAdd: _openAddTask,
+              onComplete: _completeTask,
+              onOpenTasks: () => context.go('/tasks'),
             ),
             const SizedBox(height: AppSpacing.xl),
 
@@ -135,16 +180,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             _RecentChatSection(
               messages: messages,
               onTap: () => context.go('/chat'),
-            ),
-            const SizedBox(height: AppSpacing.xl),
-
-            // ── Quick actions ─────────────────────────────────────────────
-            _QuickActionsRow(
-              onTask: () => context.go('/tasks'),
-              onExpense: () => context.go('/expenses'),
-              // Notes now lives as a segment inside the Tasks tab.
-              onNote: () => context.go('/tasks'),
-              onChat: () => context.go('/chat'),
             ),
           ],
         ),
@@ -166,10 +201,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _TodaySection extends StatelessWidget {
-  const _TodaySection({required this.tasksState, required this.onSeeAll});
+  const _TodaySection({
+    required this.tasksState,
+    required this.onSeeAll,
+    required this.onAdd,
+    required this.onComplete,
+    required this.onOpenTasks,
+  });
 
   final TasksState tasksState;
   final VoidCallback onSeeAll;
+
+  /// Opens the add-task sheet (from the section header "+ Add" affordance).
+  final VoidCallback onAdd;
+
+  /// Marks a task done by id (tapped checkbox on a row).
+  final ValueChanged<String> onComplete;
+
+  /// Navigates to the Tasks tab (tapping the body of a row).
+  final VoidCallback onOpenTasks;
 
   static const int _max = 3;
 
@@ -177,12 +227,27 @@ class _TodaySection extends StatelessWidget {
   Widget build(BuildContext context) {
     return LzSection(
       title: 'Today',
-      action: GestureDetector(
-        onTap: onSeeAll,
-        child: Text(
-          'See all →',
-          style: AppText.caption.copyWith(color: AppColors.accent),
-        ),
+      action: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            onTap: onAdd,
+            behavior: HitTestBehavior.opaque,
+            child: Text(
+              '+ Add',
+              style: AppText.caption.copyWith(color: AppColors.accent),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.md),
+          GestureDetector(
+            onTap: onSeeAll,
+            behavior: HitTestBehavior.opaque,
+            child: Text(
+              'See all →',
+              style: AppText.caption.copyWith(color: AppColors.accent),
+            ),
+          ),
+        ],
       ),
       child: tasksState.isLoading ? _skeleton() : _content(),
     );
@@ -286,7 +351,11 @@ class _TodaySection extends StatelessWidget {
                 indent: AppSpacing.lg,
                 color: AppColors.borderSubtle,
               ),
-            _TaskRow(task: shown[i]),
+            _TaskRow(
+              task: shown[i],
+              onComplete: onComplete,
+              onOpen: onOpenTasks,
+            ),
           ],
           if (extra > 0) ...[
             const Divider(height: 1, color: AppColors.borderSubtle),
@@ -351,9 +420,19 @@ class _TodaySection extends StatelessWidget {
 }
 
 class _TaskRow extends StatelessWidget {
-  const _TaskRow({required this.task});
+  const _TaskRow({
+    required this.task,
+    required this.onComplete,
+    required this.onOpen,
+  });
 
   final Task task;
+
+  /// Marks this task done (tapped leading checkbox). Receives the task id.
+  final ValueChanged<String> onComplete;
+
+  /// Opens the Tasks tab (tapped row body).
+  final VoidCallback onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -365,10 +444,22 @@ class _TaskRow extends StatelessWidget {
       dense: true,
       title: task.title,
       subtitle: due != null ? _subtitle(due) : null,
-      leading: Icon(
-        Icons.radio_button_unchecked,
-        size: 18,
-        color: overdue ? AppColors.error : AppColors.textMuted,
+      // Tapping the row body navigates to the Tasks tab. The leading checkbox
+      // (below) wins the hit-test arena for its own area, so completing a task
+      // does NOT also trigger navigation.
+      onTap: onOpen,
+      leading: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onComplete(task.id),
+        child: Padding(
+          // A little breathing room so the small icon stays an easy tap target.
+          padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+          child: Icon(
+            Icons.radio_button_unchecked,
+            size: 18,
+            color: overdue ? AppColors.error : AppColors.textMuted,
+          ),
+        ),
       ),
       trailing: LzChip(
         label: chipLabel,

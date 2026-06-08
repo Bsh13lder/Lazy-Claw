@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api/api_client.dart';
 import '../core/api/api_exceptions.dart';
+import '../core/home_widget_tasks.dart';
 import '../models/user.dart';
 import '../repositories/auth_repository.dart';
 
@@ -30,7 +33,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
   final AuthRepository _repo;
   AuthNotifier(this._repo) : super(AuthState.unauthenticated());
 
-  void handle401() => state = AuthState.unauthenticated();
+  void handle401() {
+    state = AuthState.unauthenticated();
+    // Wipe the plaintext home-screen task snapshot — a 401 means the session is
+    // gone; the widget must not keep showing the (now signed-out) user's tasks.
+    unawaited(clearTasksWidget());
+  }
 
   Future<String?> login(String username, String password) async {
     try {
@@ -69,6 +77,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     state = AuthState.unauthenticated();
+    // Clear the plaintext task snapshot so the home-screen widget doesn't leak
+    // the signed-out user's task titles.
+    await clearTasksWidget();
   }
 }
 

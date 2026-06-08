@@ -560,13 +560,7 @@ class _LedgerTabState extends State<_LedgerTab> {
       sliver: SliverToBoxAdapter(
         child: LzSection(
           title: 'By amount',
-          action: Text(
-            fmtMoney(currency, total),
-            style: AppText.caption.copyWith(
-              color: AppColors.textSecondary,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
+          action: _SectionTotal(text: fmtMoney(currency, total)),
           child: _expenseCard(sorted),
         ),
       ),
@@ -599,13 +593,7 @@ class _LedgerTabState extends State<_LedgerTab> {
               ),
               child: LzSection(
                 title: friendlyDate(date),
-                action: Text(
-                  fmtMoney(currency, dayTotal),
-                  style: AppText.caption.copyWith(
-                    color: AppColors.textSecondary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+                action: _SectionTotal(text: fmtMoney(currency, dayTotal)),
                 child: _expenseCard(dayExpenses),
               ),
             );
@@ -958,6 +946,36 @@ class _SortMenu extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A compact running-total badge for a ledger section header (a date group or
+/// the by-amount list). A subtle accent-tinted pill keeps the figure legible
+/// and consistent across sections without competing with the row amounts.
+class _SectionTotal extends StatelessWidget {
+  const _SectionTotal({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.sm,
+        vertical: 2,
+      ),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withValues(alpha: 0.10),
+        borderRadius: AppRadii.rPill,
+      ),
+      child: Text(
+        text,
+        style: AppText.caption.copyWith(
+          color: AppColors.accent,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../core/home_widget_tasks.dart';
 import '../core/notifications/task_reminder_service.dart';
 import '../local/app_db.dart' show DbHealth;
 import '../local/task_dao.dart';
@@ -297,6 +298,10 @@ class TasksNotifier extends StateNotifier<TasksState> {
     final tasks = await _dao.list();
     final dirty = await _dao.dirtyIds();
     state = TasksState(tasks: tasks, dirtyIds: dirty, isLoading: loading);
+    // Refresh the "Today tasks" home-screen widget snapshot off the same funnel
+    // every mutation (load / add / update / complete / delete) routes through.
+    // Fire-and-forget + internally guarded, so it never blocks or breaks a write.
+    unawaited(updateTasksWidget(tasks));
   }
 
   Future<void> _syncThenRefresh() async {

@@ -285,7 +285,7 @@ void main() {
 
     final tasksStub = _stubTasks([
       _task('t1', 'Pay rent', category: 'Home'),
-      _task('t2', 'Loose end'), // → Uncategorized
+      _task('t2', 'Loose end'), // → Inbox
     ]);
     final budgetsStub =
         _stubBudgets([_project('p1', 'Home', color: '#FF0000')]);
@@ -315,8 +315,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.byKey(const ValueKey('project-bucket-Home')), findsOneWidget);
-    expect(find.byKey(const ValueKey('project-bucket-Uncategorized')),
-        findsOneWidget);
+    expect(find.byKey(const ValueKey('project-bucket-Inbox')), findsOneWidget);
 
     // Collapsed by default; expand the Home bucket to reveal its task.
     expect(find.text('Pay rent'), findsNothing);

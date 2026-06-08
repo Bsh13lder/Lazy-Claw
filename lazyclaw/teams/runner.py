@@ -22,6 +22,12 @@ from lazyclaw.runtime.stuck_detector import detect_stuck
 from lazyclaw.runtime.tool_executor import APPROVAL_PREFIX, ToolExecutor
 from lazyclaw.skills.base import BaseSkill
 from lazyclaw.skills.registry import SkillRegistry
+from lazyclaw.skills.tool_namespace import (
+    bare_tool_name,
+    is_native_shadowed,
+    native_names_from_tools,
+    specialist_block_message,
+)
 from lazyclaw.teams.learning import StepEntry
 from lazyclaw.teams.specialist import (
     CODE_SPECIALIST,
@@ -85,6 +91,12 @@ def _scan_workspace_files(workspace_dir: str) -> tuple[str, ...]:
 MAX_ITERATIONS = 200
 _NUDGE_AT = 30  # Nudge after 30 iterations to wrap up
 
+# Max raw-data re-rolls the F1 grounding gate may force on the specialist's
+# final reply before shipping with a [grounding-degraded] marker. Matches
+# the brain's _F1_CONFAB_MAX_RETRIES posture — better one slightly imperfect
+# reply than an infinite retry loop on a wedged worker.
+_F1_GATE_MAX_RETRIES = 2
+
 
 @dataclass(frozen=True)
 class TranscriptStep:
@@ -133,16 +145,9 @@ class SpecialistResult:
     short_description: str = ""
 
 
-def _bare_tool_name(name: str) -> str:
-    """Strip the dynamic ``mcp_<server_uuid>_`` prefix so MCP tools can be
-    matched against a specialist's static allowlist. Server UUIDs use dashes
-    (no underscores), so the bare tool name is everything after the first two
-    underscores. Mirrors the same strip in runtime/agent.py."""
-    if name.startswith("mcp_"):
-        parts = name.split("_", 2)
-        if len(parts) == 3:
-            return parts[2]
-    return name
+# Single source of truth lives in skills/tool_namespace.py. Kept as a
+# module-local alias so existing references (and tests) resolve unchanged.
+_bare_tool_name = bare_tool_name
 
 
 def _filter_tools(
@@ -181,6 +186,13 @@ def _filter_tools(
     # dynamic (mcp_<uuid>_<name>) so the exact-name match above can never hit
     # them — without this a specialist that lists e.g. `upwork_submit_proposal`
     # can never reach it (2026-06-08 apply-loop regression).
+    #
+    # BUT native wins on a name collision: if a native tool already owns that
+    # bare name (e.g. the encrypted `create_sheet` vs a Google Workspace MCP
+    # `create_sheet`), do NOT union the MCP twin in — the exact-name match
+    # above already added the native one. Without this the documents_specialist
+    # chased the Google `create_sheet` and stuck-looped (2026-06-08 22:05).
+    native_names = native_names_from_tools(all_tools)
     try:
         _all_mcp = registry.list_mcp_tools()
     except Exception:
@@ -188,7 +200,8 @@ def _filter_tools(
     _seen = {t["function"]["name"] for t in out}
     for t in _all_mcp:
         name = t.get("function", {}).get("name", "")
-        if name and name not in _seen and _bare_tool_name(name) in allowed_set:
+        bare = _bare_tool_name(name)
+        if name and name not in _seen and bare in allowed_set and bare not in native_names:
             out.append(t)
             _seen.add(name)
     return out
@@ -260,6 +273,12 @@ async def run_specialist(
         specialist.allowed_skills,
         include_scraper=specialist.include_scraper,
     )
+    # Native tool names — used to enforce native-primacy on name collisions
+    # (a Google MCP `create_sheet` must never shadow the native one).
+    try:
+        native_names = native_names_from_tools(registry.list_tools())
+    except Exception:
+        native_names = frozenset()
 
     # Build executor (reuses same registry + permission checker).
     # Pass config so the auto-recorder in tool_executor can save lessons.
@@ -334,6 +353,14 @@ async def run_specialist(
     # Stuck detection state — tracks tool names and results across iterations
     _tool_history: list[str] = []
     _tool_results: list[str] = []
+    # F1 grounding gate state. On a channel-read turn the final reply is
+    # checked against the fresh tool data (composing the same detectors the
+    # brain uses). A violation re-rolls the worker with the raw data
+    # injected, bounded to ``_F1_GATE_MAX_RETRIES`` so a wedged worker can't
+    # loop forever — after that it ships with a ``[grounding-degraded]``
+    # prefix. The gate fails OPEN, so this only ever fires on a real
+    # confabulation, never on a detector crash.
+    _f1_retries: int = 0
     # One-shot rescue: when stuck looping on `browser`, inject a web_search hint
     # and let the worker try ONE more iteration before bailing. Strictly capped
     # at one rescue per task to prevent infinite cycles.
@@ -494,8 +521,75 @@ async def run_specialist(
                             )
 
             if not response.tool_calls:
-                # Final response — specialist is done
-                return _build_result(result=response.content or "")
+                # Final response — specialist is done.
+                #
+                # F1 grounding gate (specialist-path anti-confabulation).
+                # The brain runs a mechanical F1 backstop on every
+                # channel-read turn; the specialist path historically ran
+                # none and shipped the worker's reply raw. We close that
+                # gap here by composing the SAME detectors via
+                # ``f1_gate.evaluate_grounding``. On a non-channel-read
+                # turn the gate is observe-only (returns ok=True), so this
+                # is a no-op for research/code/web specialists.
+                #
+                # On a grounding violation with retry budget left, we
+                # inject the raw tool data and re-roll the worker once
+                # (bounded by ``_F1_GATE_MAX_RETRIES``). When the budget is
+                # exhausted we ship anyway with a ``[grounding-degraded]``
+                # prefix + a loud warning — better one imperfect reply than
+                # an infinite loop. The gate fails OPEN, so a detector
+                # crash can never block the specialist.
+                _final = response.content or ""
+                try:
+                    from lazyclaw.runtime.f1_gate import evaluate_grounding
+
+                    _verdict = evaluate_grounding(
+                        _final, _tool_history, _tool_results,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Specialist %s: F1 gate raised — shipping reply "
+                        "un-gated", specialist.name, exc_info=True,
+                    )
+                    _verdict = None
+
+                if (
+                    _verdict is not None
+                    and not _verdict.ok
+                    and _verdict.corrective_injection
+                    and _f1_retries < _F1_GATE_MAX_RETRIES
+                ):
+                    logger.warning(
+                        "specialist F1 gate: re-rolling on grounding "
+                        "violation (%s) — retry %d of %d for %s",
+                        _verdict.reason,
+                        _f1_retries + 1,
+                        _F1_GATE_MAX_RETRIES,
+                        specialist.name,
+                    )
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=_verdict.corrective_injection,
+                    ))
+                    _f1_retries += 1
+                    continue
+
+                if _verdict is not None and not _verdict.ok:
+                    # Retries exhausted — ship with a degraded marker + a
+                    # loud log so production can grep for residual leaks.
+                    logger.warning(
+                        "specialist F1 gate: retries exhausted (%d/%d) for "
+                        "%s — shipping [grounding-degraded]. reason=%s",
+                        _f1_retries,
+                        _F1_GATE_MAX_RETRIES,
+                        specialist.name,
+                        _verdict.reason,
+                    )
+                    return _build_result(
+                        result=f"[grounding-degraded] {_final}",
+                    )
+
+                return _build_result(result=_final)
 
             # Process tool calls
             assistant_msg = LLMMessage(
@@ -528,9 +622,15 @@ async def run_specialist(
                         for t in filtered_tools
                     )
                 )
+                # Native wins on a name collision: an MCP tool whose bare name
+                # matches a native tool (e.g. a Google `create_sheet`) is NOT
+                # accepted via the bare-suffix allowance — the worker is
+                # redirected to its native twin below instead of executing the
+                # external tool. Preserves genuine MCP-only allowlist entries.
                 _is_allowed_mcp = (
                     tc.name.startswith("mcp_")
                     and _bare_tool_name(tc.name) in specialist.allowed_skills
+                    and not is_native_shadowed(tc.name, native_names)
                 )
                 _step_started = time.monotonic()
                 if (
@@ -538,7 +638,12 @@ async def run_specialist(
                     and not _is_scraper_tool
                     and not _is_allowed_mcp
                 ):
-                    tool_result = f"Error: Tool '{tc.name}' is not available to {specialist.display_name}."
+                    tool_result = specialist_block_message(
+                        tc.name,
+                        specialist.display_name,
+                        native_names,
+                        specialist.allowed_skills,
+                    )
                 else:
                     # Inject TabContext for browser isolation (immutable — new ToolCall)
                     exec_tc = tc

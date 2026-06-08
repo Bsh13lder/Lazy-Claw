@@ -172,7 +172,7 @@ class TelegramCommands:
     # -- /act (operating mode, ADR-0005) -----------------------------------
 
     async def _handle_act(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show/set the operating mode (Chat/Ask/Plan/Execute).
+        """Show/set the operating mode (Ask/Plan/Action/Execute).
 
         Distinct from /mode, which sets the ECO routing mode (which models).
         """
@@ -181,9 +181,8 @@ class TelegramCommands:
             return
         from lazyclaw.runtime.agent_mode import (
             MODE_LABELS,
-            VALID_AGENT_MODES,
             get_agent_mode,
-            parse_mode,
+            parse_mode_label,
         )
 
         arg = context.args[0].strip().lower() if context.args else ""
@@ -193,26 +192,29 @@ class TelegramCommands:
                 update,
                 f"⚙️ <b>Operating mode:</b> {MODE_LABELS[current]} "
                 f"(<code>{current.value}</code>)\n\n"
-                "<b>chat</b> — talk only, no tools\n"
-                "<b>ask</b> — act, confirm each write (default)\n"
-                "<b>plan</b> — research → plan → Execute, then autonomous\n"
-                "<b>auto</b> — fully autonomous\n\n"
-                "Change: <code>/act plan</code>",
+                "<b>ask</b> — talk only, no tools\n"
+                "<b>plan</b> — read-only research + plan, gate before executing\n"
+                "<b>action</b> — act, confirm each write (default)\n"
+                "<b>execute</b> — fully autonomous\n\n"
+                "Change: <code>/act execute</code>",
             )
             return
-        if arg not in VALID_AGENT_MODES:
+        mode = parse_mode_label(arg)
+        if mode is None:
             await self._reply(
                 update,
                 f"❌ Unknown mode <code>{arg}</code>. "
-                "Use chat / ask / plan / auto.",
+                "Use ask / plan / action / execute.",
             )
             return
         from lazyclaw.settings.general import update_general_settings
 
-        await update_general_settings(self._config, user_id, {"agent_mode": arg})
+        await update_general_settings(
+            self._config, user_id, {"agent_mode": mode.value},
+        )
         await self._reply(
             update,
-            f"✅ Operating mode set to <b>{MODE_LABELS[parse_mode(arg)]}</b>.",
+            f"✅ Operating mode set to <b>{MODE_LABELS[mode]}</b>.",
         )
 
     # -- /start ------------------------------------------------------------

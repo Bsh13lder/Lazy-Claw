@@ -34,6 +34,11 @@ void main() {
       expect(appActionForUri(Uri.parse('lazyclaw://chat')), AppAction.chat);
     });
 
+    test('maps the Today-tasks widget host (lazyclaw://tasks) → openTasks', () {
+      expect(appActionForUri(Uri.parse('lazyclaw://tasks')),
+          AppAction.openTasks);
+    });
+
     test('matches snake_case hosts too', () {
       expect(appActionForUri(Uri.parse('lazyclaw://add_task')),
           AppAction.addTask);
@@ -55,17 +60,24 @@ void main() {
     test('routes each action to its branch', () {
       expect(routeForAction(AppAction.addTask), '/tasks');
       expect(routeForAction(AppAction.newNote), '/tasks');
+      expect(routeForAction(AppAction.openTasks), '/tasks');
       expect(routeForAction(AppAction.addExpense), '/expenses');
       expect(routeForAction(AppAction.chat), '/chat');
     });
   });
 
   group('kShortcutSpecs', () {
-    test('declares exactly the four actions, each round-trippable', () {
-      expect(kShortcutSpecs.length, AppAction.values.length);
+    test('declares the four LAUNCHER shortcut actions, each round-trippable',
+        () {
+      // The launcher long-press menu carries the four capture/chat shortcuts —
+      // NOT openTasks (that action only exists for the Today-tasks widget body
+      // tap), so the spec list is exactly AppAction.values minus openTasks.
+      final shortcutActions =
+          AppAction.values.where((a) => a != AppAction.openTasks).toSet();
+      expect(kShortcutSpecs.length, shortcutActions.length);
       final resolved =
           kShortcutSpecs.map((s) => appActionForShortcut(s.type)).toSet();
-      expect(resolved, AppAction.values.toSet());
+      expect(resolved, shortcutActions);
       // Every spec carries a non-empty drawable icon name.
       for (final spec in kShortcutSpecs) {
         expect(spec.icon, isNotEmpty);

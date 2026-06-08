@@ -3,10 +3,11 @@ import { getGeneralSettings, updateGeneralSettings, type AgentMode } from "../ap
 
 /** Segmented operating-mode switch for the chat header (ADR-0005, Phase 3).
  *
- * Four postures layered OVER the per-skill allow/ask/deny permission system:
- *   - Chat    → conversation only; no tools fire.
- *   - Ask     → acts, but confirms each write/dispatch (one-tap ✅/❌).
- *   - Plan    → read-only research → numbered plan → single Execute tap.
+ * Four postures layered OVER the per-skill allow/ask/deny permission system
+ * (label → stored value):
+ *   - Ask     → talk only; no tools fire. (value "chat")
+ *   - Plan    → read-only research → numbered plan → gate before executing. (value "plan")
+ *   - Action  → acts, but confirms each write/dispatch (one-tap ✅/❌). (value "ask", the default)
  *   - Execute → fully autonomous; fans agents and works, no asking. (value "auto")
  *
  * Persisted at user settings `general.agent_mode` via the same general-settings
@@ -24,18 +25,18 @@ interface ModeDef {
 const MODES: readonly ModeDef[] = [
   {
     value: "chat",
-    label: "Chat",
-    title: "Chat — conversation only; no tools fire.",
-  },
-  {
-    value: "ask",
     label: "Ask",
-    title: "Ask — acts, but confirms each write/dispatch (one-tap ✅/❌).",
+    title: "Ask — talk only; no tools fire.",
   },
   {
     value: "plan",
     label: "Plan",
-    title: "Plan — read-only research → numbered plan → single Execute tap → autonomous run.",
+    title: "Plan — read-only research → numbered plan → gate before executing.",
+  },
+  {
+    value: "ask",
+    label: "Action",
+    title: "Action — acts, but confirms each write/dispatch (one-tap ✅/❌).",
   },
   {
     value: "auto",

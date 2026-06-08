@@ -40,11 +40,12 @@ class EcoSettings {
 /// The four operating-mode options for `general.agent_mode` (ADR-0005 §D).
 ///
 /// Maps the stored value → the label shown to the user. Insertion order is the
-/// display order (Chat → Ask → Plan → Execute).
+/// display order (Ask → Plan → Action → Execute). Stored VALUES are unchanged:
+/// 'chat'→Ask, 'plan'→Plan, 'ask'→Action, 'auto'→Execute.
 const Map<String, String> kAgentModeLabels = {
-  'chat': 'Chat',
-  'ask': 'Ask',
+  'chat': 'Ask',
   'plan': 'Plan',
+  'ask': 'Action',
   'auto': 'Execute',
 };
 

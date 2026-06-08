@@ -326,6 +326,15 @@ Future<void> _pumpHome(WidgetTester tester) async {
   }
 }
 
+/// Drags the Home ListView up so the bottom sections (Favorites / Recent chat)
+/// enter the viewport and the lazy list builds them. Call inside runAsync().
+Future<void> _scrollToBottom(WidgetTester tester) async {
+  await tester.drag(find.byType(ListView).first, const Offset(0, -1200));
+  await tester.pump();
+  await Future<void>.delayed(const Duration(milliseconds: 30));
+  await tester.pump();
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 void main() {
@@ -451,6 +460,100 @@ void main() {
       });
     });
 
+    testWidgets('exposes a "+ Add" affordance in the Today header',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(tasks: [
+          _task(id: 'td1', title: 'Call James', dueDate: _today),
+        ]);
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        expect(find.text('+ Add'), findsOneWidget);
+      });
+    });
+
+    testWidgets('tapping the leading checkbox completes the task',
+        (tester) async {
+      await tester.runAsync(() async {
+        final f = await _mkFixture(tasks: [
+          _task(id: 'done_me', title: 'Finish me', dueDate: _today),
+        ]);
+        await tester.pumpWidget(_buildApp(f));
+        await _pumpHome(tester);
+        expect(find.text('Finish me'), findsOneWidget);
+
+        // The leading circle icon is the tap-to-complete checkbox.
+        await tester.tap(find.byIcon(Icons.radio_button_unchecked).first);
+        for (var i = 0; i < 10; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          await tester.pump();
+        }
+
+        // Task is now done → it drops out of the Today list. With no other open
+        // tasks the section falls back to the "All clear" empty state.
+        expect(find.text('Finish me'), findsNothing);
+        expect(find.text('All clear'), findsOneWidget);
+
+        // And it's persisted as done in the cache.
+        final rows = await f.db.query('task_cache',
+            where: 'id = ?', whereArgs: ['done_me']);
+        expect(rows.single['status'], equals('done'));
+      });
+    });
+
+    testWidgets('tapping a Today row body navigates to /tasks', (tester) async {
+      String? navigatedTo;
+      await tester.runAsync(() async {
+        final router = GoRouter(
+          initialLocation: '/home',
+          routes: [
+            GoRoute(path: '/home', builder: (_, __) => const HomeScreen()),
+            GoRoute(
+              path: '/tasks',
+              builder: (ctx, __) {
+                navigatedTo = '/tasks';
+                return const Scaffold();
+              },
+            ),
+            GoRoute(path: '/expenses', builder: (_, __) => const Scaffold()),
+            GoRoute(path: '/notes', builder: (_, __) => const Scaffold()),
+            GoRoute(path: '/chat', builder: (_, __) => const Scaffold()),
+          ],
+        );
+        final f = await _mkFixture(
+          tasks: [_task(id: 'open1', title: 'Open me', dueDate: _today)],
+        );
+        await tester.pumpWidget(ProviderScope(
+          overrides: [
+            appDatabaseProvider.overrideWithValue(f.db),
+            apiClientProvider
+                .overrideWithValue(ApiClient(baseUrl: 'http://localhost:18789')),
+            taskDaoProvider.overrideWithValue(f.taskDao),
+            taskSyncProvider.overrideWithValue(f.taskSync),
+            budgetsDaoProvider.overrideWithValue(f.budgetsDao),
+            budgetsSyncProvider.overrideWithValue(f.budgetsSync),
+            reachabilityProvider.overrideWithValue(f.reachability),
+            chatControllerProvider.overrideWith(
+              (_) => ChatController(_NopSocket())..state = [],
+            ),
+          ],
+          child: MaterialApp.router(
+            theme: buildAppTheme(),
+            routerConfig: router,
+          ),
+        ));
+        await _pumpHome(tester);
+        // Tap the row body (the title), NOT the leading checkbox.
+        await tester.tap(find.text('Open me'));
+        for (var i = 0; i < 10; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          await tester.pump();
+        }
+        expect(navigatedTo, equals('/tasks'),
+            reason: 'tapping a Today row must navigate to /tasks');
+      });
+    });
+
     testWidgets('renders LzProgressBar for a favorite project budget',
         (tester) async {
       await tester.runAsync(() async {
@@ -540,6 +643,10 @@ void main() {
         final f = await _mkFixture();
         await tester.pumpWidget(_buildApp(f, messages: const []));
         await _pumpHome(tester);
+        // Recent chat now sits at the bottom of the list (quick actions moved
+        // to the top) — scroll it into the viewport so the lazy ListView builds
+        // it.
+        await _scrollToBottom(tester);
         expect(find.text('No messages yet'), findsOneWidget);
       });
     });
@@ -553,6 +660,7 @@ void main() {
               role: 'assistant', content: "I've drafted the proposal."),
         ]));
         await _pumpHome(tester);
+        await _scrollToBottom(tester);
         expect(find.textContaining('drafted the proposal'), findsOneWidget);
       });
     });
@@ -562,11 +670,8 @@ void main() {
         final f = await _mkFixture();
         await tester.pumpWidget(_buildApp(f));
         await _pumpHome(tester);
-        // Scroll to end to force lazy ListView to build the quick-actions row.
-        await tester.drag(find.byType(ListView).first, const Offset(0, -1200));
-        await tester.pump();
-        await Future<void>.delayed(const Duration(milliseconds: 30));
-        await tester.pump();
+        // Quick actions now sit at the TOP (under the greeting), so they're in
+        // the initial viewport — no scrolling required.
         expect(find.text('+ Task'), findsOneWidget);
         expect(find.text('+ Expense'), findsOneWidget);
         expect(find.text('+ Note'), findsOneWidget);
@@ -671,11 +776,7 @@ void main() {
           ),
         ));
         await _pumpHome(tester);
-        // Scroll to bring the quick-actions row into viewport.
-        await tester.drag(find.byType(ListView).first, const Offset(0, -1200));
-        await tester.pump();
-        await Future<void>.delayed(const Duration(milliseconds: 30));
-        await tester.pump();
+        // Quick actions are at the top now — already in the viewport.
         await tester.tap(find.text('Chat').last);
         for (var i = 0; i < 10; i++) {
           await Future<void>.delayed(const Duration(milliseconds: 30));

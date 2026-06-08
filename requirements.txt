@@ -47,3 +47,5 @@ pypdf>=4.0.0
 reportlab>=4.0.0
 pdfplumber>=0.11.0
 pikepdf>=8.0.0
+# Password-protected export — AES-256 encrypted .zip wrapper (MIT).
+pyzipper>=0.3.6

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
 from lazyclaw.docs.docx_io import docx_to_snapshot, snapshot_to_docx, snapshot_to_pdf
+from lazyclaw.export_crypto import protect_export
 from lazyclaw.docs.store import (
     create_doc,
     delete_doc,
@@ -53,6 +54,12 @@ class SaveDocBody(BaseModel):
 
 class AiEditBody(BaseModel):
     instruction: str = Field(min_length=1, max_length=2000)
+
+
+class ExportBody(BaseModel):
+    format: Literal["docx", "pdf"] = "docx"
+    # Optional — when set, the export is wrapped in an AES-256 encrypted .zip.
+    password: str | None = Field(default=None, max_length=256)
 
 
 @router.get("")
@@ -149,6 +156,26 @@ async def import_doc_route(
     return {"doc": row}
 
 
+def _render_doc(snap: dict[str, Any], format: str) -> tuple[bytes, str, str]:
+    """Render a doc snapshot to ``(bytes, ext, media)``. Raises 503 if PDF needs
+    LibreOffice and it's unavailable."""
+    if format == "pdf":
+        content = snapshot_to_pdf(snap)
+        if content is None:
+            raise HTTPException(status_code=503, detail="PDF export needs LibreOffice")
+        return content, "pdf", _PDF_MEDIA
+    return snapshot_to_docx(snap), "docx", _DOCX_MEDIA
+
+
+def _export_response(content: bytes, base: str, ext: str, media: str, password):
+    data, fname, out_media = protect_export(content, base, ext, media, password)
+    return Response(
+        content=data,
+        media_type=out_media,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get("/{doc_id}/export")
 async def export_doc_route(
     doc_id: str,
@@ -159,20 +186,24 @@ async def export_doc_route(
     doc = await get_doc(_config, user.id, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Doc not found")
-    snap = doc["payload"]
-    fname = _safe_filename(doc["name"])
-    if format == "pdf":
-        content = snapshot_to_pdf(snap)
-        if content is None:
-            raise HTTPException(
-                status_code=503, detail="PDF export needs LibreOffice"
-            )
-        media, ext = _PDF_MEDIA, "pdf"
-    else:
-        content = snapshot_to_docx(snap)
-        media, ext = _DOCX_MEDIA, "docx"
-    return Response(
-        content=content,
-        media_type=media,
-        headers={"Content-Disposition": f'attachment; filename="{fname}.{ext}"'},
+    content, ext, media = _render_doc(doc["payload"], format)
+    return _export_response(content, _safe_filename(doc["name"]), ext, media, None)
+
+
+@router.post("/{doc_id}/export")
+async def export_doc_post_route(
+    doc_id: str,
+    body: ExportBody,
+    user: User = Depends(get_current_user),
+):
+    """Download a doc, optionally AES-256 encrypted in a password ``.zip``.
+
+    Password travels in the body (never a query string). Empty/absent → plain.
+    """
+    doc = await get_doc(_config, user.id, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    content, ext, media = _render_doc(doc["payload"], body.format)
+    return _export_response(
+        content, _safe_filename(doc["name"]), ext, media, body.password
     )

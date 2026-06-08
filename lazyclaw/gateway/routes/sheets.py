@@ -17,6 +17,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
+from lazyclaw.export_crypto import protect_export
 from lazyclaw.gateway.auth import User, get_current_user
 from lazyclaw.runtime.doc_specialist import ai_edit_document
 from lazyclaw.sheets.store import (
@@ -59,6 +60,12 @@ class AiEditBody(BaseModel):
 
 class RecalcBody(BaseModel):
     payload: dict[str, Any]
+
+
+class ExportBody(BaseModel):
+    format: Literal["xlsx", "csv"] = "xlsx"
+    # Optional — when set, the export is wrapped in an AES-256 encrypted .zip.
+    password: str | None = Field(default=None, max_length=256)
 
 
 @router.get("")
@@ -175,6 +182,22 @@ async def import_sheet_route(
     return {"sheet": row}
 
 
+def _render_sheet(snap: dict[str, Any], format: str) -> tuple[bytes, str, str]:
+    """Render a sheet snapshot to ``(bytes, ext, media)`` for the chosen format."""
+    if format == "csv":
+        return snapshot_to_csv(snap).encode("utf-8"), "csv", "text/csv"
+    return snapshot_to_xlsx(snap), "xlsx", _XLSX_MEDIA
+
+
+def _export_response(content: bytes, base: str, ext: str, media: str, password):
+    data, fname, out_media = protect_export(content, base, ext, media, password)
+    return Response(
+        content=data,
+        media_type=out_media,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get("/{sheet_id}/export")
 async def export_sheet_route(
     sheet_id: str,
@@ -185,16 +208,25 @@ async def export_sheet_route(
     sheet = await get_sheet(_config, user.id, sheet_id)
     if not sheet:
         raise HTTPException(status_code=404, detail="Sheet not found")
-    snap = sheet["payload"]
-    fname = _safe_filename(sheet["name"])
-    if format == "csv":
-        content: bytes = snapshot_to_csv(snap).encode("utf-8")
-        media, ext = "text/csv", "csv"
-    else:
-        content = snapshot_to_xlsx(snap)
-        media, ext = _XLSX_MEDIA, "xlsx"
-    return Response(
-        content=content,
-        media_type=media,
-        headers={"Content-Disposition": f'attachment; filename="{fname}.{ext}"'},
+    content, ext, media = _render_sheet(sheet["payload"], format)
+    return _export_response(content, _safe_filename(sheet["name"]), ext, media, None)
+
+
+@router.post("/{sheet_id}/export")
+async def export_sheet_post_route(
+    sheet_id: str,
+    body: ExportBody,
+    user: User = Depends(get_current_user),
+):
+    """Download a sheet, optionally AES-256 encrypted in a password ``.zip``.
+
+    Same formats as the GET route; the password travels in the body (never a
+    query string, so it isn't logged). Empty/absent password → plain file.
+    """
+    sheet = await get_sheet(_config, user.id, sheet_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+    content, ext, media = _render_sheet(sheet["payload"], body.format)
+    return _export_response(
+        content, _safe_filename(sheet["name"]), ext, media, body.password
     )

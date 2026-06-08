@@ -97,6 +97,9 @@ dependencies = [
     "reportlab>=4.0.0",
     "pdfplumber>=0.11.0",
     "pikepdf>=8.0.0",
+    # Password-protected EXPORT — wrap any exported file (xlsx/csv/docx/pdf) in a
+    # single AES-256 (WinZip AE-2) encrypted .zip. Pure-Python, permissive (MIT).
+    "pyzipper>=0.3.6",
 ]
 
 [project.optional-dependencies]

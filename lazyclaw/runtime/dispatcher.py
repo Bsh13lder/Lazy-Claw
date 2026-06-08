@@ -306,9 +306,14 @@ class AgentDispatcher:
         # for the process lifetime, and it also makes multiple dispatched
         # subagents correctly serialize on the per-user lock. Lazy import to
         # avoid a circular import.
-        from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
+        from lazyclaw.runtime.browser_turn_lock import (
+            BACKGROUND_ROLE,
+            browser_turn_scope,
+        )
 
-        async with browser_turn_scope():
+        # Subagents are background work → BACKGROUND browser lane, so they
+        # never block the user's VISIBLE foreground tab/lock. See ADR-0005.
+        async with browser_turn_scope(BACKGROUND_ROLE):
             result = await self._run_subagent(
                 cfg, user_id, task_id_override=task_id,
             )

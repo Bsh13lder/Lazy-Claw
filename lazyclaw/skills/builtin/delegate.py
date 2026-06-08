@@ -274,10 +274,16 @@ class DelegateSkill(BaseSkill):
             # per-user lock in its own finally when it finishes. Without this,
             # the lock acquired on the child's first browser tool call leaks
             # for the process lifetime. Lazy import to avoid a circular import.
-            from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
+            from lazyclaw.runtime.browser_turn_lock import (
+                BACKGROUND_ROLE,
+                browser_turn_scope,
+            )
 
             try:
-                async with browser_turn_scope():
+                # Background specialist → BACKGROUND browser lane so it never
+                # contends with the user's VISIBLE foreground tab/lock (which
+                # would freeze the next chat message). See ADR-0005.
+                async with browser_turn_scope(BACKGROUND_ROLE):
                     result = await run_specialist(
                         user_id=user_id,
                         specialist=spec,

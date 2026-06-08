@@ -4,10 +4,13 @@ Four postures, layered OVER the per-skill allow/ask/deny system — they do NOT
 replace it. The default is ASK, which maps to the historical behavior, so
 existing users see no change until they pick another mode.
 
-  CHAT  — conversation only; no tools execute.
-  ASK   — act, but every write still goes through the normal allow/ask/deny gate.
-  PLAN  — read-only tools run; writes are gated (forced to ASK) pending Execute.
-  AUTO  — autonomous; anything that would 'ask' is auto-allowed.
+  Ask     (value "chat") — conversation only; no tools execute.
+  Plan    (value "plan") — read-only tools run; writes are gated pending Execute.
+  Action  (value "ask")  — act, but every write goes through the allow/ask/deny gate (default).
+  Execute (value "auto") — autonomous; anything that would 'ask' is auto-allowed.
+
+  Display labels (MODE_LABELS) and input parsing (parse_mode_label) use the
+  canonical names; STORED values stay chat/ask/plan/auto (no migration).
 
 Stored at ``users.settings.general.agent_mode`` and read everywhere (Telegram
 ``/act``, web + mobile mode switch) via the same general-settings mechanism.
@@ -35,12 +38,17 @@ class AgentMode(str, enum.Enum):
 
 DEFAULT_MODE: AgentMode = AgentMode.ASK
 
-# UI-facing labels (the "Execute" label maps to AUTO per the founder's spec).
+# UI-facing labels — canonical names Ask / Plan / Action / Execute.
+# NOTE: this is a DISPLAY relabel only — internal enum values are UNCHANGED
+# (no stored-settings migration). The value→label mapping intentionally does
+# NOT match value names: CHAT shows as "Ask" (answer-only) and ASK shows as
+# "Action" (the per-write permission gate). Input is parsed via
+# parse_mode_label(); stored values remain chat/ask/plan/auto.
 MODE_LABELS: dict[AgentMode, str] = {
-    AgentMode.CHAT: "Chat",
-    AgentMode.ASK: "Ask",
-    AgentMode.PLAN: "Plan",
-    AgentMode.AUTO: "Execute",
+    AgentMode.CHAT: "Ask",       # answer-only, no tools
+    AgentMode.ASK: "Action",     # act, confirm each write (default)
+    AgentMode.PLAN: "Plan",      # read-only + plan, gate writes
+    AgentMode.AUTO: "Execute",   # fully autonomous
 }
 
 VALID_AGENT_MODES: frozenset[str] = frozenset(m.value for m in AgentMode)
@@ -54,6 +62,31 @@ def parse_mode(value: str | None) -> AgentMode:
         return AgentMode(str(value).strip().lower())
     except ValueError:
         return DEFAULT_MODE
+
+
+# Canonical UI name (or legacy typed value) → internal AgentMode. This is the
+# INPUT counterpart of MODE_LABELS: users type/click "Ask/Plan/Action/Execute"
+# but we store the unchanged internal values. The "ask" overlap resolves in
+# favor of the NEW label (Ask = answer-only = CHAT); the legacy internal value
+# "ask" (Action) is still reachable by typing "action".
+_LABEL_TO_MODE: dict[str, AgentMode] = {
+    "ask": AgentMode.CHAT,        # new "Ask" = answer-only
+    "action": AgentMode.ASK,      # new "Action" = per-write permission gate
+    "plan": AgentMode.PLAN,
+    "execute": AgentMode.AUTO,
+    # legacy typed values (back-compat)
+    "chat": AgentMode.CHAT,
+    "auto": AgentMode.AUTO,
+}
+
+
+def parse_mode_label(text: str | None) -> AgentMode | None:
+    """Map a user-typed/clicked canonical name (Ask/Plan/Action/Execute) or a
+    legacy value to an AgentMode. Returns None if unrecognized. Use this for
+    USER INPUT; use parse_mode() for reading the STORED value."""
+    if not text:
+        return None
+    return _LABEL_TO_MODE.get(str(text).strip().lower())
 
 
 # Read-only classification — drives PLAN posture (read-only runs, writes gate).
@@ -151,6 +184,7 @@ __all__ = [
     "MODE_LABELS",
     "VALID_AGENT_MODES",
     "parse_mode",
+    "parse_mode_label",
     "is_readonly_skill",
     "apply_mode_posture",
     "get_agent_mode",

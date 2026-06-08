@@ -803,16 +803,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
     final result = await LocalNotifications.scheduleTestReminder();
     if (!mounted) return;
-    if (result == null) {
+    if (!result.ok) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not schedule — enable notifications and try again.'),
+        SnackBar(
+          duration: const Duration(seconds: 12),
+          content: Text('Could not schedule: ${result.error ?? "unknown error"}'),
         ),
       );
       return;
     }
-    final hh = result.fire.hour.toString().padLeft(2, '0');
-    final mm = result.fire.minute.toString().padLeft(2, '0');
+    final hh = result.fire!.hour.toString().padLeft(2, '0');
+    final mm = result.fire!.minute.toString().padLeft(2, '0');
     final base = 'Reminder scheduled for $hh:$mm (~1 min). Lock your phone and wait.';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

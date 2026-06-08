@@ -38,6 +38,17 @@ int nextNotificationId() {
   return id == 0 ? 1 : id;
 }
 
+/// Outcome of [LocalNotifications.scheduleTestReminder]: a [fire] time (+ whether
+/// it was scheduled EXACTLY), or an [error] describing why nothing could be
+/// scheduled — surfaced in the UI so a "could not schedule" is never a mystery.
+class ScheduleTestResult {
+  final DateTime? fire;
+  final bool exact;
+  final String? error;
+  const ScheduleTestResult({this.fire, this.exact = false, this.error});
+  bool get ok => error == null && fire != null;
+}
+
 /// Thin wrapper around flutter_local_notifications.
 ///
 /// Call [init] once at app startup (before any [showTaskNotification] or any
@@ -211,12 +222,26 @@ class LocalNotifications {
   /// grant. Diagnostic: if the immediate [showTest] fires but NEITHER scheduled
   /// mode ever arrives, the app is being frozen in the background
   /// (HyperOS/MIUI Autostart + battery). Best-effort — never throws.
-  static Future<({DateTime fire, bool exact})?> scheduleTestReminder({
+  static Future<ScheduleTestResult> scheduleTestReminder({
     Duration after = const Duration(minutes: 1),
   }) async {
-    if (!_initialised || !_tzReady) return null;
-    final fire = DateTime.now().add(after);
-    final when = tz.TZDateTime.from(fire, tz.local);
+    if (!_initialised) {
+      return const ScheduleTestResult(error: 'Notifications not initialised');
+    }
+    // Self-heal: the immediate test works without a timezone, but scheduling
+    // needs one — (re)initialise it now if the startup attempt didn't stick.
+    if (!_tzReady) await _initTimezone();
+    if (!_tzReady) {
+      return const ScheduleTestResult(error: 'Timezone database unavailable');
+    }
+    final DateTime fire;
+    final tz.TZDateTime when;
+    try {
+      fire = DateTime.now().add(after);
+      when = tz.TZDateTime.from(fire, tz.local);
+    } catch (e) {
+      return ScheduleTestResult(error: 'Timezone error: $e');
+    }
     const androidDetails = AndroidNotificationDetails(
       'lazyclaw_task_reminders',
       'Task reminders',
@@ -252,14 +277,15 @@ class LocalNotifications {
     try {
       await sched(AndroidScheduleMode.exactAllowWhileIdle,
           'This fired on schedule ✅ — scheduled reminders work.');
-      return (fire: fire, exact: true);
+      return ScheduleTestResult(fire: fire, exact: true);
     } catch (_) {
+      // Exact alarms blocked → retry inexact (no special grant, still fires).
       try {
         await sched(AndroidScheduleMode.inexactAllowWhileIdle,
             'This fired on schedule (inexact — may be slightly late).');
-        return (fire: fire, exact: false);
-      } catch (_) {
-        return null;
+        return ScheduleTestResult(fire: fire, exact: false);
+      } catch (e) {
+        return ScheduleTestResult(error: 'Schedule failed: $e');
       }
     }
   }

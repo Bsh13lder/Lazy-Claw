@@ -8,6 +8,6 @@ const String kDefaultBaseUrl = 'http://BlckIt.local:18789';
 /// service ([SelfUpdateService]); these constants apply only when that read
 /// fails (e.g. a non-platform test harness). Keep them in sync with the
 /// `version:` field in `pubspec.yaml`.
-const String kAppVersion = '1.10.1';
-const int kAppBuild = 32;
+const String kAppVersion = '1.10.2';
+const int kAppBuild = 33;
 const String kSecureBaseUrlKey = 'lazyclaw_base_url';

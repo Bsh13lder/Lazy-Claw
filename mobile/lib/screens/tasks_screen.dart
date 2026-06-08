@@ -149,14 +149,9 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     // The list (tap-the-chip project picker + Projects view) all need the
     // project list, so load the budgets store up front (cheap, offline-first).
     _ensureBudgetsLoaded();
-
-    // Cold-start deep link: a `+ Task` / `+ Note` shortcut or widget button
-    // may have set a pending action BEFORE this screen mounted. ref.listen
-    // (in build) only fires on CHANGE, so replay any pre-existing one here.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final taken = takePendingAction(ref, _myActions);
-      if (taken != null && mounted) _handlePendingAction(taken);
-    });
+    // NOTE: the cold-start deep-link replay lives in [build] via
+    // [drainPendingAction] (not a one-shot here) so it survives whichever frame
+    // this screen first becomes visible on — see _myActions usage below.
   }
 
   /// The deep-link actions this screen owns (Tasks + the nested Notes segment).
@@ -252,16 +247,28 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
     final degraded = ref.watch(dbHealthProvider).isDegraded;
     final notesMode = _segment == _Segment.notes;
 
-    // Warm deep link: a `+ Task` / `+ Note` shortcut/widget fired while this
-    // screen was already alive (indexedStack keeps it mounted). Consume + open.
+    // Deep-link replay (cold start AND warm tap), made frame-order-proof: a
+    // `+ Task` / `+ Note` shortcut/widget may set the pending action BEFORE this
+    // screen mounts (cold) or WHILE it's already alive in the indexedStack
+    // (warm). A `ref.listen` only catches changes that happen after this screen
+    // subscribes, which misses the cold-start case where the action was set
+    // first. [drainPendingAction] re-arms on every build and consumes our
+    // action whenever this screen becomes visible — so it never strands.
+    drainPendingAction(
+      ref,
+      mine: _myActions,
+      isMounted: () => mounted,
+      onDrained: _handlePendingAction,
+    );
+    // Also react to a change that lands WHILE we're the visible tab — opening
+    // the sheet promptly without waiting for the next unrelated rebuild.
     ref.listen<AppAction?>(pendingActionProvider, (_, next) {
-      if (next == null) return;
-      final taken = takePendingAction(ref, _myActions);
-      if (taken != null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _handlePendingAction(taken);
-        });
-      }
+      drainPendingAction(
+        ref,
+        mine: _myActions,
+        isMounted: () => mounted,
+        onDrained: _handlePendingAction,
+      );
     });
 
     // Show error snackbar on new task errors.

@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Home-screen quick-capture actions that can be triggered from OUTSIDE the
@@ -114,4 +115,43 @@ AppAction? takePendingAction(WidgetRef ref, Set<AppAction> mine) {
     return pending;
   }
   return null;
+}
+
+/// Drains the pending deep-link action for a screen the moment it is visible —
+/// regardless of which frame the screen happens to mount on.
+///
+/// COLD-START PROBLEM this solves: a `+ Task` / `+ Expense` / `+ Note` widget
+/// button (or launcher shortcut) sets [pendingActionProvider] *before* the
+/// destination screen exists. The destination is then built as a *result* of
+/// the navigation listener, so:
+///   * a `build`-time `ref.listen` never fires (it only catches CHANGES, and
+///     the value was already set before the screen subscribed), and
+///   * a one-shot `initState` post-frame can mis-fire if auth-redirect churn
+///     (`unauthenticated → loading → authenticated`) rebuilds the shell or
+///     bounces the location, stranding the action.
+///
+/// [drainPendingAction] is **idempotent** and meant to be called from EVERY
+/// `build` of the owning screen: it schedules a single post-frame consume iff a
+/// matching action is currently pending and one isn't already in flight. Because
+/// it re-arms on each build, the screen drains its action no matter which frame
+/// it becomes visible on — cold start, warm tap, or a rebuild mid-redirect.
+///
+/// [onDrained] is invoked (post-frame, guarded by [isMounted]) with the consumed
+/// action so the screen can open its sheet / switch its segment.
+void drainPendingAction(
+  WidgetRef ref, {
+  required Set<AppAction> mine,
+  required bool Function() isMounted,
+  required void Function(AppAction action) onDrained,
+}) {
+  // Peek without consuming — only schedule work when one of OUR actions is up.
+  final pending = ref.read(pendingActionProvider);
+  if (pending == null || !mine.contains(pending)) return;
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!isMounted()) return;
+    // Re-check + consume atomically at drain time: another consumer (or a prior
+    // post-frame from this same screen) may have already taken it.
+    final taken = takePendingAction(ref, mine);
+    if (taken != null) onDrained(taken);
+  });
 }

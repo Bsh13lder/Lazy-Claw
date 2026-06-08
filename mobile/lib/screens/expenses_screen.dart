@@ -43,17 +43,16 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     Future.microtask(() => ref.read(budgetsProvider.notifier).load());
-
-    // Cold-start deep link: a `+ Expense` shortcut/widget button may have set a
-    // pending action before this screen mounted. ref.listen only fires on
-    // change, so replay any pre-existing pending action once after first build.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final taken = takePendingAction(ref, const {AppAction.addExpense});
-      if (taken != null && mounted) {
-        _showAddExpense(ref.read(budgetsProvider));
-      }
-    });
+    // NOTE: the cold-start deep-link replay lives in [build] via
+    // [drainPendingAction] (not a one-shot here) so it survives whichever frame
+    // this screen first becomes visible on.
   }
+
+  /// The deep-link actions this screen owns.
+  static const Set<AppAction> _myActions = {AppAction.addExpense};
+
+  void _openAddExpenseForAction(AppAction _) =>
+      _showAddExpense(ref.read(budgetsProvider));
 
   @override
   void dispose() {
@@ -137,16 +136,25 @@ class _ExpensesScreenState extends ConsumerState<ExpensesScreen>
       onRetry: () => ref.read(budgetsProvider.notifier).load(),
     );
 
-    // Warm deep link: a `+ Expense` shortcut/widget fired while this screen was
-    // already alive (indexedStack keeps it mounted). Consume + open the sheet.
+    // Deep-link replay (cold start AND warm tap), made frame-order-proof: a
+    // `+ Expense` shortcut/widget may set the pending action BEFORE this screen
+    // mounts (cold) or WHILE it's already alive in the indexedStack (warm).
+    // [drainPendingAction] re-arms on every build and consumes our action
+    // whenever this screen becomes visible — so it never strands.
+    drainPendingAction(
+      ref,
+      mine: _myActions,
+      isMounted: () => mounted,
+      onDrained: _openAddExpenseForAction,
+    );
+    // Also react to a change that lands WHILE we're the visible tab.
     ref.listen<AppAction?>(pendingActionProvider, (_, next) {
-      if (next == null) return;
-      final taken = takePendingAction(ref, const {AppAction.addExpense});
-      if (taken != null) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _showAddExpense(ref.read(budgetsProvider));
-        });
-      }
+      drainPendingAction(
+        ref,
+        mine: _myActions,
+        isMounted: () => mounted,
+        onDrained: _openAddExpenseForAction,
+      );
     });
 
     // Show error snackbar on new errors.

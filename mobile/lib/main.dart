@@ -3,6 +3,7 @@ import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart' show FlutterQuillLocalizations;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'core/actions/app_actions.dart';
 import 'core/actions/deep_link_service.dart';
 import 'core/crash_log.dart';
@@ -148,21 +149,47 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
     super.dispose();
   }
 
+  /// Navigate to the branch a pending [action] belongs to. The destination
+  /// screen (Tasks / Expenses) then DRAINS the action to open its sheet; `chat`
+  /// has no sheet, so it's consumed here right after navigating.
+  void _navigateForAction(GoRouter router, AppAction action) {
+    router.go(routeForAction(action));
+    if (action == AppAction.chat) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(pendingActionProvider.notifier).state = null;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
 
-    // Navigate to the right branch when a deep-link action is pending. The
-    // destination screen (Tasks / Expenses) consumes the action to open its
-    // sheet; `chat` has no sheet, so it's consumed here right after navigating.
+    // Navigate to the right branch when a deep-link action is pending.
     ref.listen<AppAction?>(pendingActionProvider, (_, next) {
       if (next == null) return;
-      router.go(routeForAction(next));
-      if (next == AppAction.chat) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) ref.read(pendingActionProvider.notifier).state = null;
-        });
-      }
+      _navigateForAction(router, next);
+    });
+
+    // COLD-START SAFETY NET: a widget/shortcut can fire the deep link while auth
+    // is still `loading`/`unauthenticated` (the `checkSession` round-trip hasn't
+    // resolved yet). The first `router.go('/tasks')` above can then be undone by
+    // the auth redirect (→ `/login` → `/home`) before the destination screen
+    // ever mounts, stranding a still-set pending action. When auth settles to
+    // `authenticated`, RE-DRIVE the navigation for any non-chat action that is
+    // still pending so the destination finally mounts and drains it. (`chat`
+    // self-clears above; a leftover non-chat action means it never landed.)
+    ref.listen<AuthState>(authProvider, (prev, next) {
+      if (prev?.status == AuthStatus.authenticated) return;
+      if (next.status != AuthStatus.authenticated) return;
+      final pending = ref.read(pendingActionProvider);
+      if (pending == null) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        // Re-read: the screen may have drained it between settle and post-frame.
+        final still = ref.read(pendingActionProvider);
+        if (still != null) _navigateForAction(router, still);
+      });
     });
 
     return MaterialApp.router(

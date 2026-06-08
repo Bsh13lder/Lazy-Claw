@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   deletePdf,
+  downloadBlob,
+  downloadPdfBlob,
   extractPdfText,
   listPdfs,
-  pdfDownloadUrl,
   pdfRawUrl,
   uploadPdf,
   type PdfMeta,
@@ -43,6 +44,7 @@ export default function Pdf() {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [extract, setExtract] = useState<ExtractState>({ phase: "idle" });
+  const [exportPassword, setExportPassword] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -104,6 +106,18 @@ export default function Pdf() {
     const remaining = files.filter((f) => f.id !== id);
     setFiles(remaining);
     if (activeId === id) setActiveId(remaining[0]?.id ?? null);
+  }
+
+  async function handleDownload() {
+    if (!activeId) return;
+    const pw = exportPassword.trim();
+    try {
+      const blob = await downloadPdfBlob(activeId, pw || null);
+      const stem = (activeFile?.name || "document").replace(/\.pdf$/i, "");
+      downloadBlob(blob, pw ? `${stem}.zip` : `${stem}.pdf`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Download failed");
+    }
   }
 
   async function handleExtract() {
@@ -226,13 +240,31 @@ export default function Pdf() {
                 >
                   {extract.phase === "loading" ? "Extracting…" : "Extract text"}
                 </button>
-                <a
-                  href={pdfDownloadUrl(activeId)}
-                  className="text-xs text-text-muted hover:text-accent transition-colors"
-                  title="Download this PDF"
-                >
-                  Download
-                </a>
+                <details className="relative">
+                  <summary className="list-none cursor-pointer select-none text-xs text-text-muted hover:text-accent transition-colors">
+                    Download ▾
+                  </summary>
+                  <div className="absolute right-0 mt-1 z-10 w-56 rounded-lg border border-border bg-bg-secondary shadow-lg p-2 space-y-1.5">
+                    <input
+                      type="password"
+                      value={exportPassword}
+                      onChange={(e) => setExportPassword(e.target.value)}
+                      placeholder="Password (optional)"
+                      className="w-full px-2 py-1 rounded-md bg-bg-primary border border-border text-xs outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={handleDownload}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
+                    >
+                      Download PDF
+                    </button>
+                    <p className="text-[10px] text-text-muted leading-snug px-1">
+                      {exportPassword.trim()
+                        ? "🔒 Downloads an AES-256 encrypted .zip."
+                        : "Set a password to encrypt the download."}
+                    </p>
+                  </div>
+                </details>
               </div>
             </div>
 

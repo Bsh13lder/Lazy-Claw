@@ -2019,6 +2019,56 @@ async function uploadDocumentFile<T>(
 export const uploadSheet = (file: File) =>
   uploadDocumentFile<SheetMeta>("/api/sheets/import", "sheet", file);
 
+// POST an export request and return the file Blob. When `body.password` is set
+// the server returns an AES-256 encrypted .zip; otherwise the plain file. Used
+// for all exports so the password (when present) travels in the body, never the
+// URL.
+async function postExportBlob(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<Blob> {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let message = `Export failed (${res.status})`;
+    try {
+      const b = await res.json();
+      message = b.detail || b.message || b.error || message;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.blob();
+}
+
+// Trigger a browser download of an in-memory Blob.
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Export a sheet as xlsx/csv, optionally AES-256 encrypted (password → .zip).
+export const exportSheetBlob = (
+  id: string,
+  format: "xlsx" | "csv",
+  password: string | null,
+) =>
+  postExportBlob(`/api/sheets/${encodeURIComponent(id)}/export`, {
+    format,
+    password,
+  });
+
 // ── In-editor AI ("Document Specialist") ─────────────────────────────────
 // One synchronous turn that edits the open document from a NL instruction and
 // returns the fresh snapshot (sheets/docs) or the new file id (pdf).
@@ -2091,6 +2141,17 @@ export const docExportUrl = (id: string, format: "docx" | "pdf" = "docx") =>
 export const uploadDoc = (file: File) =>
   uploadDocumentFile<DocMeta>("/api/docs/import", "doc", file);
 
+// Export a doc as docx/pdf, optionally AES-256 encrypted (password → .zip).
+export const exportDocBlob = (
+  id: string,
+  format: "docx" | "pdf",
+  password: string | null,
+) =>
+  postExportBlob(`/api/docs/${encodeURIComponent(id)}/export`, {
+    format,
+    password,
+  });
+
 export const aiEditDoc = (id: string, instruction: string) =>
   request<AiEditResult>(`/api/docs/${encodeURIComponent(id)}/ai`, {
     method: "POST",
@@ -2150,6 +2211,10 @@ export const pdfRawUrl = (id: string) => `/api/pdf/${encodeURIComponent(id)}/raw
 // Download as an attachment.
 export const pdfDownloadUrl = (id: string) =>
   `/api/pdf/${encodeURIComponent(id)}/download`;
+
+// Download a PDF as a Blob, optionally AES-256 encrypted (password → .zip).
+export const downloadPdfBlob = (id: string, password: string | null) =>
+  postExportBlob(`/api/pdf/${encodeURIComponent(id)}/download`, { password });
 
 export const aiEditPdf = (id: string, instruction: string) =>
   request<AiEditPdfResult>(`/api/pdf/${encodeURIComponent(id)}/ai`, {

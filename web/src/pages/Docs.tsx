@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   createDoc,
   deleteDoc,
-  docExportUrl,
+  downloadBlob,
+  exportDocBlob,
   getDoc,
   listDocs,
   saveDoc,
@@ -54,6 +55,7 @@ export default function Docs() {
   const [docs, setDocs] = useState<DocMeta[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeName, setActiveName] = useState("");
+  const [exportPassword, setExportPassword] = useState("");
   const [loadingList, setLoadingList] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
@@ -186,6 +188,18 @@ export default function Docs() {
       await refreshList(created.id);
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "Import failed");
+    }
+  }
+
+  async function handleExport(format: "docx" | "pdf") {
+    if (!activeId) return;
+    const pw = exportPassword.trim();
+    try {
+      const blob = await exportDocBlob(activeId, format, pw || null);
+      const ext = pw ? "zip" : format;
+      downloadBlob(blob, `${activeName || "document"}.${ext}`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Export failed");
     }
   }
 
@@ -335,21 +349,31 @@ export default function Docs() {
                   <summary className="list-none cursor-pointer select-none px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover transition-colors">
                     Export ▾
                   </summary>
-                  <div className="absolute right-0 mt-1 z-10 w-36 rounded-lg border border-border bg-bg-secondary shadow-lg py-1">
-                    <a
-                      href={docExportUrl(activeId, "docx")}
-                      download
-                      className="block px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover"
+                  <div className="absolute right-0 mt-1 z-10 w-56 rounded-lg border border-border bg-bg-secondary shadow-lg p-2 space-y-1.5">
+                    <input
+                      type="password"
+                      value={exportPassword}
+                      onChange={(e) => setExportPassword(e.target.value)}
+                      placeholder="Password (optional)"
+                      className="w-full px-2 py-1 rounded-md bg-bg-primary border border-border text-xs outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={() => handleExport("docx")}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
                     >
                       Word (.docx)
-                    </a>
-                    <a
-                      href={docExportUrl(activeId, "pdf")}
-                      download
-                      className="block px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover"
+                    </button>
+                    <button
+                      onClick={() => handleExport("pdf")}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
                     >
                       PDF (.pdf)
-                    </a>
+                    </button>
+                    <p className="text-[10px] text-text-muted leading-snug px-1">
+                      {exportPassword.trim()
+                        ? "🔒 Downloads an AES-256 encrypted .zip."
+                        : "Set a password to encrypt the download."}
+                    </p>
                   </div>
                 </details>
               </div>

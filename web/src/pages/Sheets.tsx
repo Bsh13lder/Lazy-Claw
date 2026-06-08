@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   createSheet,
   deleteSheet,
+  downloadBlob,
+  exportSheetBlob,
   getSheet,
   listSheets,
   saveSheet,
-  sheetExportUrl,
   uploadSheet,
   type SheetMeta,
   type UniverSnapshot,
@@ -37,6 +38,7 @@ const AUTOSAVE_MS = 800;
  */
 export default function Sheets() {
   const [sheets, setSheets] = useState<SheetMeta[]>([]);
+  const [exportPassword, setExportPassword] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeName, setActiveName] = useState("");
   const [loadingList, setLoadingList] = useState(true);
@@ -160,6 +162,18 @@ export default function Sheets() {
       await refreshList(created.id);
     } catch (err) {
       window.alert(err instanceof Error ? err.message : "Import failed");
+    }
+  }
+
+  async function handleExport(format: "xlsx" | "csv") {
+    if (!activeId) return;
+    const pw = exportPassword.trim();
+    try {
+      const blob = await exportSheetBlob(activeId, format, pw || null);
+      const ext = pw ? "zip" : format;
+      downloadBlob(blob, `${activeName || "sheet"}.${ext}`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Export failed");
     }
   }
 
@@ -294,21 +308,31 @@ export default function Sheets() {
                   <summary className="list-none cursor-pointer select-none px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover transition-colors">
                     Export ▾
                   </summary>
-                  <div className="absolute right-0 mt-1 z-10 w-36 rounded-lg border border-border bg-bg-secondary shadow-lg py-1">
-                    <a
-                      href={sheetExportUrl(activeId, "xlsx")}
-                      download
-                      className="block px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover"
+                  <div className="absolute right-0 mt-1 z-10 w-56 rounded-lg border border-border bg-bg-secondary shadow-lg p-2 space-y-1.5">
+                    <input
+                      type="password"
+                      value={exportPassword}
+                      onChange={(e) => setExportPassword(e.target.value)}
+                      placeholder="Password (optional)"
+                      className="w-full px-2 py-1 rounded-md bg-bg-primary border border-border text-xs outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={() => handleExport("xlsx")}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
                     >
                       Excel (.xlsx)
-                    </a>
-                    <a
-                      href={sheetExportUrl(activeId, "csv")}
-                      download
-                      className="block px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover"
+                    </button>
+                    <button
+                      onClick={() => handleExport("csv")}
+                      className="block w-full text-left px-2 py-1.5 rounded-md text-xs text-text-secondary hover:bg-bg-hover"
                     >
                       CSV (.csv)
-                    </a>
+                    </button>
+                    <p className="text-[10px] text-text-muted leading-snug px-1">
+                      {exportPassword.trim()
+                        ? "🔒 Downloads an AES-256 encrypted .zip."
+                        : "Set a password to encrypt the download."}
+                    </p>
                   </div>
                 </details>
                 <DocAiPopover

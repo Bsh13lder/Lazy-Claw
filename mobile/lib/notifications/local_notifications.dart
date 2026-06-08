@@ -3,6 +3,8 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
+import 'notification_actions.dart';
+
 /// Android group keys so several notifications STACK under one expandable
 /// header instead of looking like a single replaced item.
 const String _kTasksGroupKey = 'lazyclaw_tasks_group';
@@ -90,8 +92,12 @@ class LocalNotifications {
     // Prime the timezone database first so zonedSchedule has a local location.
     await _initTimezone();
 
+    // Small icon = a WHITE silhouette of the LazyClaw claw mark on transparent
+    // (`ic_stat_lazyclaw`), which Android tints per-channel. The full-colour
+    // `@mipmap/ic_launcher` would render as a white blob in the status bar, so
+    // it is used only as the LARGE icon on each notification instead.
     const androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
+        AndroidInitializationSettings('ic_stat_lazyclaw');
     const darwinSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
@@ -107,6 +113,9 @@ class LocalNotifications {
       await _plugin.initialize(
         initSettings,
         onDidReceiveNotificationResponse: _onResponse,
+        // Handles a "Done" action tap while the app is killed/backgrounded —
+        // a separate background isolate calls this top-level entry point.
+        onDidReceiveBackgroundNotificationResponse: notificationBackgroundHandler,
       );
       _initialised = true;
 
@@ -251,6 +260,8 @@ class LocalNotifications {
       priority: Priority.high,
       category: AndroidNotificationCategory.reminder,
       showWhen: true,
+      icon: 'ic_stat_lazyclaw',
+      largeIcon: DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
     );
     const darwinDetails = DarwinNotificationDetails(
       presentAlert: true,
@@ -320,6 +331,8 @@ class LocalNotifications {
         priority: Priority.high,
         showWhen: true,
         groupKey: _kTasksGroupKey,
+        icon: 'ic_stat_lazyclaw',
+        largeIcon: DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
       );
       const darwinDetails = DarwinNotificationDetails(
         presentAlert: true,
@@ -361,6 +374,8 @@ class LocalNotifications {
         priority: Priority.high,
         showWhen: true,
         groupKey: _kNotificationsGroupKey,
+        icon: 'ic_stat_lazyclaw',
+        largeIcon: DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
       );
       const darwinDetails = DarwinNotificationDetails(
         presentAlert: true,
@@ -393,10 +408,23 @@ class LocalNotifications {
     return null;
   }
 
-  /// Plugin callback for a WARM tap. Forwards the payload to the app-set hook.
-  /// Top-level/static so it survives AOT; reads the mutable hook at call time.
+  /// Plugin callback for a WARM tap (app in the foreground).
+  ///
+  /// A "Done" ACTION tap on a task reminder completes the task in-place (same
+  /// local mutation + outbox enqueue as the in-app complete) and does NOT
+  /// deep-link anywhere. Any OTHER tap (a plain body tap, or a server
+  /// notification) forwards the payload to the app-set [onSelectNotification]
+  /// hook for deep-linking. Static so it survives AOT; reads the mutable hook at
+  /// call time.
   static void _onResponse(NotificationResponse response) {
     try {
+      if (isTaskDoneAction(response)) {
+        // Best-effort: completeTaskFromPayload swallows its own errors. We do
+        // NOT forward to onSelectNotification — completing a task shouldn't also
+        // navigate the user away from where they are.
+        completeTaskFromPayload(response.payload);
+        return;
+      }
       onSelectNotification?.call(response.payload);
     } catch (_) {
       // A handler error must never crash the notification subsystem.

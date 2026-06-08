@@ -56,6 +56,16 @@
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
             </intent-filter>
         </receiver>
+        <!-- flutter_local_notifications: REQUIRED for notification ACTION buttons
+             (the task-reminder "Done" button). The plugin sends an explicit-
+             component broadcast to this receiver, which spins up a background
+             isolate to run onDidReceiveBackgroundNotificationResponse even when
+             the app is killed. Verified against flutter_local_notifications
+             18.0.1 README — the plugin's own manifest does NOT declare it, so it
+             must be added here. -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
+            android:exported="false"/>
         <!-- Quick-Capture home-screen widget (4x1). Buttons deep-link into the
              app via home_widget's launch intent — see QuickCaptureWidget.kt. -->
         <receiver

@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 
 import '../../models/task.dart';
+import '../../notifications/notification_actions.dart';
 import '../due_date.dart';
 
 /// Abstract seam the tasks provider depends on, so scheduling can be wired in
@@ -144,6 +145,22 @@ class TaskReminderService implements TaskReminderScheduler {
       priority: Priority.high,
       category: AndroidNotificationCategory.reminder,
       showWhen: true,
+      // White claw silhouette (system-tinted) + full-colour logo as the big icon.
+      icon: 'ic_stat_lazyclaw',
+      largeIcon: DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+      // "Done" button completes the task straight from the shade — handled by
+      // [notificationBackgroundHandler] (killed app) or [_onResponse] (warm).
+      // `showsUserInterface: false` keeps it a background action (no app launch);
+      // `cancelNotification: true` dismisses the reminder on tap. The reminder's
+      // `payload: 'task:<id>'` carries the id the handler completes.
+      actions: <AndroidNotificationAction>[
+        AndroidNotificationAction(
+          kTaskDoneActionId,
+          'Done',
+          showsUserInterface: false,
+          cancelNotification: true,
+        ),
+      ],
     ),
     iOS: DarwinNotificationDetails(
       presentAlert: true,

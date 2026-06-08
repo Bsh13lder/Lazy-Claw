@@ -63,6 +63,21 @@ android {
                 signingConfigs.getByName("release")
             else
                 signingConfigs.getByName("debug")
+
+            // Flutter 3.41's `flutter build apk --release` enables R8 shrinking by
+            // default, which strips the generic type signatures Gson relies on →
+            // flutter_local_notifications' scheduled-notification store throws
+            // "TypeToken must be created with a type argument" on EVERY
+            // zonedSchedule, breaking all scheduled reminders (and crashing the
+            // startup reschedule). Disable shrinking for this self-hosted app —
+            // reliability over a few MB. proguard-rules.pro is still wired so the
+            // keep rules apply if shrinking is ever turned back on.
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

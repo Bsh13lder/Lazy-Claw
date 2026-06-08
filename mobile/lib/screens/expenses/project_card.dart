@@ -99,10 +99,10 @@ class _ProjectCardState extends State<ProjectCard> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header row: color dot + name + badges + edit.
+                    // Header row: color dot + name + badges + favorite/edit.
                     Row(
                       children: [
-                        ProjectColorDot(hex: project.color),
+                        ProjectColorDot(hex: project.color, size: 11),
                         const SizedBox(width: AppSpacing.sm),
                         Expanded(
                           child: Text(
@@ -119,13 +119,14 @@ class _ProjectCardState extends State<ProjectCard> {
                           ),
                           const SizedBox(width: AppSpacing.sm),
                         ],
-                        if (project.isArchived)
+                        if (project.isArchived) ...[
                           LzChip(
                             label: 'Archived',
                             dense: true,
                             color: AppColors.textMuted,
-                          )
-                        else if (widget.expenses.isNotEmpty) ...[
+                          ),
+                          const SizedBox(width: AppSpacing.xs),
+                        ] else if (widget.expenses.isNotEmpty) ...[
                           Icon(
                             _expanded
                                 ? Icons.keyboard_arrow_up_rounded
@@ -134,8 +135,7 @@ class _ProjectCardState extends State<ProjectCard> {
                             size: 20,
                           ),
                         ],
-                        if (widget.onToggleFavorite != null) ...[
-                          const SizedBox(width: AppSpacing.xs),
+                        if (widget.onToggleFavorite != null)
                           GestureDetector(
                             onTap: widget.onToggleFavorite,
                             behavior: HitTestBehavior.opaque,
@@ -155,14 +155,12 @@ class _ProjectCardState extends State<ProjectCard> {
                               ),
                             ),
                           ),
-                        ],
-                        if (widget.onEdit != null) ...[
-                          const SizedBox(width: AppSpacing.xs),
+                        if (widget.onEdit != null)
                           GestureDetector(
                             onTap: widget.onEdit,
                             behavior: HitTestBehavior.opaque,
-                            child: Padding(
-                              padding: const EdgeInsets.all(AppSpacing.xs),
+                            child: const Padding(
+                              padding: EdgeInsets.all(AppSpacing.xs),
                               child: Icon(
                                 Icons.more_horiz_rounded,
                                 color: AppColors.textMuted,
@@ -170,30 +168,33 @@ class _ProjectCardState extends State<ProjectCard> {
                               ),
                             ),
                           ),
-                        ],
                       ],
                     ),
                     const SizedBox(height: AppSpacing.md),
-                    // Budget bar.
+                    // Budget block: traffic-light bar + spent/remaining stats.
                     if (budget > 0) ...[
                       LzProgressBar(
                         value: fraction,
-                        height: 8,
+                        height: 6,
                         trafficLight: true,
                       ),
                       const SizedBox(height: AppSpacing.sm),
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
                         children: [
                           Text(
                             fmtMoney(project.currency, spent),
                             style: AppText.label.copyWith(
                               color: AppColors.trafficLight(fraction),
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                           const SizedBox(width: AppSpacing.xs),
                           Text(
-                            'spent · $pctUsed%',
-                            style: AppText.caption,
+                            'of ${fmtMoney(project.currency, budget)} · $pctUsed%',
+                            style: AppText.caption
+                                .copyWith(color: AppColors.textMuted),
                           ),
                           const Spacer(),
                           Text(
@@ -203,36 +204,38 @@ class _ProjectCardState extends State<ProjectCard> {
                             style: AppText.caption.copyWith(
                               color: overBudget
                                   ? AppColors.error
-                                  : AppColors.textMuted,
-                            ),
-                          ),
-                          const SizedBox(width: AppSpacing.xs),
-                          Text(
-                            '/ ${fmtMoney(project.currency, budget)}',
-                            style: AppText.caption.copyWith(
-                              color: AppColors.textMuted,
+                                  : AppColors.textSecondary,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
                         ],
                       ),
                     ] else ...[
+                      // No-budget state: a quiet, balanced "spent / no budget"
+                      // line with a subtle neutral rule so it doesn't read as an
+                      // empty/broken card.
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
                         children: [
                           Text(
                             fmtMoney(project.currency, spent),
-                            style: AppText.label
-                                .copyWith(color: AppColors.accent),
+                            style: AppText.label.copyWith(
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                           const SizedBox(width: AppSpacing.xs),
                           Text(
                             'total spend',
-                            style: AppText.caption,
-                          ),
-                          const Spacer(),
-                          Text(
-                            'No budget',
                             style: AppText.caption
                                 .copyWith(color: AppColors.textMuted),
+                          ),
+                          const Spacer(),
+                          LzChip(
+                            label: 'No budget',
+                            dense: true,
+                            color: AppColors.textMuted,
                           ),
                         ],
                       ),
@@ -240,29 +243,51 @@ class _ProjectCardState extends State<ProjectCard> {
                   ],
                 ),
               ),
-              // Inline expense list (expanded state).
-              if (_expanded && widget.expenses.isNotEmpty) ...[
-                Container(
-                  height: 0.5,
-                  color: AppColors.borderSubtle,
+              // Inline expense list (expanded state) — a subtly recessed
+              // nested ledger so it reads as a child of the card.
+              if (_expanded) ...[
+                Container(height: 0.5, color: AppColors.borderSubtle),
+                ColoredBox(
+                  color: AppColors.bgBase.withValues(alpha: 0.35),
+                  child: Column(
+                    children: _buildExpandedRows(),
+                  ),
                 ),
-                ...widget.expenses
-                    .where((e) => !e.isVoid)
-                    .map(
-                      (e) => ExpenseRow(
-                        expense: e,
-                        projects: const [],
-                        showProject: false,
-                        pendingSync: false,
-                        onDelete: null,
-                      ),
-                    ),
               ],
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// Non-void expense rows for the expanded ledger, separated by hairline
+  /// dividers indented past the leading icon (matching the main ledger card).
+  List<Widget> _buildExpandedRows() {
+    final rows = widget.expenses.where((e) => !e.isVoid).toList();
+    final out = <Widget>[];
+    for (var i = 0; i < rows.length; i++) {
+      out.add(
+        ExpenseRow(
+          expense: rows[i],
+          projects: const [],
+          showProject: false,
+          pendingSync: false,
+          onDelete: null,
+        ),
+      );
+      if (i < rows.length - 1) {
+        out.add(
+          Divider(
+            height: 0.5,
+            thickness: 0.5,
+            color: AppColors.borderSubtle,
+            indent: AppSpacing.lg + 40 + AppSpacing.md,
+          ),
+        );
+      }
+    }
+    return out;
   }
 
   Future<bool> _confirmDelete(BuildContext context, String name) async {

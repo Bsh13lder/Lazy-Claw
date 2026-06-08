@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/core/smart_add_parser.dart';
 import 'package:lazyclaw_mobile/screens/settings/settings_prefs.dart';
+import 'package:lazyclaw_mobile/screens/tasks/recurrence_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/reminder_lead_picker.dart';
 import 'package:lazyclaw_mobile/screens/tasks/smart_add_controller.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
@@ -54,6 +56,11 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   /// picker, so the global default applies automatically once a time is set.
   ReminderLead? _explicitLead;
 
+  /// Manual recurrence override. Null until the user taps the repeat picker, so
+  /// the parsed recurrence (from "every day" etc.) applies until then.
+  Recurrence? _manualRecurrence;
+  bool _recurrenceTouched = false;
+
   bool _submitting = false;
 
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
@@ -91,7 +98,9 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   /// The parsed due date's time-of-day, or null when it's date-only.
   TimeOfDay? get _parsedTime {
     final parts = dueTimeParts(_parsed.dueDate);
-    return parts == null ? null : TimeOfDay(hour: parts.hour, minute: parts.minute);
+    return parts == null
+        ? null
+        : TimeOfDay(hour: parts.hour, minute: parts.minute);
   }
 
   /// The effective day (manual override wins over the live parse).
@@ -103,10 +112,17 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
   /// The effective reminder lead (explicit choice wins over the global default).
   ReminderLead get _effectiveLead => _explicitLead ?? widget.defaultLead;
 
+  /// The effective recurrence (manual pick wins over the live parse; never
+  /// null — defaults to "does not repeat").
+  Recurrence get _effectiveRecurrence => _recurrenceTouched
+      ? (_manualRecurrence ?? Recurrence.none)
+      : (_parsed.recurrence ?? Recurrence.none);
+
   bool get _hasDetection =>
       _parsed.dueDate != null ||
       _parsed.priority != null ||
-      _parsed.project != null;
+      _parsed.project != null ||
+      _parsed.recurrence != null;
 
   /// Combine a date-only [day] string with an optional [time] into the final
   /// `dueDate` payload: a datetime when a time is set, a date-only string when
@@ -115,13 +131,19 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     if (day == null) {
       if (time == null) return null;
       final n = DateTime.now();
-      return composeDueDate(DateTime(n.year, n.month, n.day),
-          hour: time.hour, minute: time.minute);
+      return composeDueDate(
+        DateTime(n.year, n.month, n.day),
+        hour: time.hour,
+        minute: time.minute,
+      );
     }
     final d = DateTime.tryParse(day);
     if (d == null) return day; // non-ISO fallback: leave as-is
-    return composeDueDate(DateTime(d.year, d.month, d.day),
-        hour: time?.hour, minute: time?.minute);
+    return composeDueDate(
+      DateTime(d.year, d.month, d.day),
+      hour: time?.hour,
+      minute: time?.minute,
+    );
   }
 
   void _onTitleChanged(String value) {
@@ -144,10 +166,13 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
 
     // Re-derive the effective day/time from this fresh parse so a keyboard
     // submit can't race the onChanged callback, then compose them.
-    final parsedDay = parsed.dueDate == null ? null : dueDateDayPart(parsed.dueDate!);
+    final parsedDay = parsed.dueDate == null
+        ? null
+        : dueDateDayPart(parsed.dueDate!);
     final pt = dueTimeParts(parsed.dueDate);
-    final parsedTime =
-        pt == null ? null : TimeOfDay(hour: pt.hour, minute: pt.minute);
+    final parsedTime = pt == null
+        ? null
+        : TimeOfDay(hour: pt.hour, minute: pt.minute);
     final day = _dueDateTouched ? _manualDueDate : parsedDay;
     final time = _timeTouched ? _manualTime : parsedTime;
     final dueDate = _compose(day, time);
@@ -161,14 +186,28 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
       defaultLead: widget.defaultLead,
     );
 
+    // Resolve the recurrence (manual pick wins over the fresh parse) and convert
+    // it to a standard 5-field cron, anchored to the composed due date so the
+    // clock + day-of-month / weekday come from when the task is actually due.
+    final recurrence = _recurrenceTouched
+        ? (_manualRecurrence ?? Recurrence.none)
+        : (parsed.recurrence ?? Recurrence.none);
+    final recurring = recurrenceToCron(
+      recurrence,
+      dueAnchor: recurrenceAnchorFromDue(dueDate),
+    );
+
     setState(() => _submitting = true);
-    Navigator.of(context).pop(_AddTaskResult(
-      title: title,
-      priority: priority,
-      dueDate: dueDate,
-      category: parsed.project,
-      reminderAt: reminderAt.isEmpty ? null : reminderAt,
-    ));
+    Navigator.of(context).pop(
+      _AddTaskResult(
+        title: title,
+        priority: priority,
+        dueDate: dueDate,
+        category: parsed.project,
+        reminderAt: reminderAt.isEmpty ? null : reminderAt,
+        recurring: recurring,
+      ),
+    );
   }
 
   Color _priorityColor(String p) {
@@ -195,205 +234,100 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
     // the built-in default until the prefs have loaded). Used only to LABEL the
     // muted "Reminds at …" hint below — the actual scheduling reads the same
     // pref in the reminder service.
-    final defaultReminderMinutes = ref
-            .watch(settingsPrefsProvider)
-            .valueOrNull
-            ?.defaultReminderMinutes ??
+    final defaultReminderMinutes =
+        ref.watch(settingsPrefsProvider).valueOrNull?.defaultReminderMinutes ??
         kDefaultReminderMinutes;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // ── Title input ────────────────────────────────────────────────
-        LzTextField(
-          controller: _titleController,
-          hint: 'e.g. "Pay rent tomorrow !p1 #home"',
-          prefixIcon: Icons.task_alt_outlined,
-          textInputAction: TextInputAction.done,
-          onChanged: _onTitleChanged,
-          onSubmitted: (_) => _submit(),
-          autofocus: true,
-        ),
-
-        // ── Syntax legend (discoverability) ────────────────────────────
-        const SizedBox(height: AppSpacing.xs),
-        Text(
-          'tom · fri 9am · in 2h · morning · !p1 · #project',
-          style: AppText.caption.copyWith(color: AppColors.textMuted),
-        ),
-
-        // ── Smart-detected tokens (live) ───────────────────────────────
-        if (_hasDetection) ...[
-          const SizedBox(height: AppSpacing.md),
-          Row(
-            children: [
-              Icon(Icons.auto_awesome_outlined,
-                  size: 13, color: AppColors.accent),
-              const SizedBox(width: AppSpacing.xs),
-              Text(
-                'SMART DETECTED',
-                style: AppText.caption.copyWith(
-                  color: AppColors.accent,
-                  letterSpacing: 0.8,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── Title input ────────────────────────────────────────────────
+          LzTextField(
+            controller: _titleController,
+            hint: 'e.g. "Pay rent tomorrow !p1 #home"',
+            prefixIcon: Icons.task_alt_outlined,
+            textInputAction: TextInputAction.done,
+            onChanged: _onTitleChanged,
+            onSubmitted: (_) => _submit(),
+            autofocus: true,
           ),
-          const SizedBox(height: AppSpacing.sm),
-          Wrap(
-            spacing: AppSpacing.sm,
-            runSpacing: AppSpacing.sm,
-            children: [
-              if (_parsed.dueDate != null)
-                LzChip(
-                  label: dueDateDisplay(_parsed.dueDate!),
-                  icon: Icons.event_outlined,
-                  selected: true,
-                  color: AppColors.accent,
-                  dense: true,
-                ),
-              if (_parsed.priority != null)
-                LzChip(
-                  label: _parsed.priority!,
-                  icon: Icons.flag_outlined,
-                  selected: true,
-                  color: _priorityColor(_parsed.priority!),
-                  dense: true,
-                ),
-              if (_parsed.project != null)
-                LzChip(
-                  label: '#${_parsed.project!}',
-                  icon: Icons.folder_outlined,
-                  selected: true,
-                  color: AppColors.info,
-                  dense: true,
-                ),
-            ],
-          ),
-        ],
 
-        const SizedBox(height: AppSpacing.xl),
-
-        // ── Priority selector ──────────────────────────────────────────
-        Text(
-          'PRIORITY',
-          style: AppText.caption.copyWith(
-            color: AppColors.textMuted,
-            letterSpacing: 0.8,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        Row(
-          children: _priorities.map((p) {
-            final selected = p == effPriority;
-            return Padding(
-              padding: const EdgeInsets.only(right: AppSpacing.sm),
-              child: LzChip(
-                label: p,
-                selected: selected,
-                color: _priorityColor(p),
-                onTap: () => setState(() => _manualPriority = p),
-              ),
-            );
-          }).toList(),
-        ),
-
-        const SizedBox(height: AppSpacing.xl),
-
-        // ── Due date quick-pick ────────────────────────────────────────
-        Text(
-          'DUE DATE',
-          style: AppText.caption.copyWith(
-            color: AppColors.textMuted,
-            letterSpacing: 0.8,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        Row(
-          children: [
-            LzChip(
-              label: 'Today',
-              icon: Icons.today_outlined,
-              selected: effDay == _isoToday(),
-              color: AppColors.warn,
-              onTap: () => _setDueDate(
-                  effDay == _isoToday() ? null : _isoToday()),
-            ),
-            const SizedBox(width: AppSpacing.sm),
-            LzChip(
-              label: 'Tomorrow',
-              icon: Icons.event_outlined,
-              selected: effDay == _isoTomorrow(),
-              color: AppColors.accent,
-              onTap: () => _setDueDate(
-                  effDay == _isoTomorrow() ? null : _isoTomorrow()),
-            ),
-            const SizedBox(width: AppSpacing.sm),
-            LzChip(
-              label: 'Pick…',
-              icon: Icons.calendar_month_outlined,
-              selected: effDay != null &&
-                  effDay != _isoToday() &&
-                  effDay != _isoTomorrow(),
-              color: AppColors.info,
-              onTap: _pickDate,
-            ),
-          ],
-        ),
-
-        // ── Time-of-day chip ───────────────────────────────────────────
-        const SizedBox(height: AppSpacing.sm),
-        Row(
-          children: [
-            LzChip(
-              label: effTime != null
-                  ? formatClock12(effTime.hour, effTime.minute)
-                  : 'Add time',
-              icon: Icons.schedule_outlined,
-              selected: effTime != null,
-              color: AppColors.accent,
-              onTap: _pickTime,
-            ),
-            if (effTime != null) ...[
-              const SizedBox(width: AppSpacing.sm),
-              GestureDetector(
-                onTap: () => _setTime(null),
-                child: Icon(Icons.close, size: 16, color: AppColors.textMuted),
-              ),
-            ],
-          ],
-        ),
-
-        if (composed != null) ...[
-          const SizedBox(height: AppSpacing.sm),
-          Row(
-            children: [
-              Icon(Icons.event_available_outlined,
-                  size: 14, color: AppColors.textMuted),
-              const SizedBox(width: AppSpacing.xs),
-              Text(
-                'Due ${dueDateDisplay(composed)}',
-                style: AppText.caption.copyWith(color: AppColors.textSecondary),
-              ),
-              const Spacer(),
-              GestureDetector(
-                onTap: _clearDue,
-                child: Icon(Icons.close,
-                    size: 14, color: AppColors.textMuted),
-              ),
-            ],
-          ),
-        ],
-
-        // ── Reminder lead-time (only when a due TIME exists) ───────────
-        if (dueDateHasTime(composed)) ...[
-          const SizedBox(height: AppSpacing.xl),
+          // ── Syntax legend (discoverability) ────────────────────────────
+          const SizedBox(height: AppSpacing.xs),
           Text(
-            'REMIND',
+            'tom · fri 9am · in 2h · morning · !p1 · #project',
+            style: AppText.caption.copyWith(color: AppColors.textMuted),
+          ),
+
+          // ── Smart-detected tokens (live) ───────────────────────────────
+          if (_hasDetection) ...[
+            const SizedBox(height: AppSpacing.md),
+            Row(
+              children: [
+                Icon(
+                  Icons.auto_awesome_outlined,
+                  size: 13,
+                  color: AppColors.accent,
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  'SMART DETECTED',
+                  style: AppText.caption.copyWith(
+                    color: AppColors.accent,
+                    letterSpacing: 0.8,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: [
+                if (_parsed.dueDate != null)
+                  LzChip(
+                    label: dueDateDisplay(_parsed.dueDate!),
+                    icon: Icons.event_outlined,
+                    selected: true,
+                    color: AppColors.accent,
+                    dense: true,
+                  ),
+                if (_parsed.priority != null)
+                  LzChip(
+                    label: _parsed.priority!,
+                    icon: Icons.flag_outlined,
+                    selected: true,
+                    color: _priorityColor(_parsed.priority!),
+                    dense: true,
+                  ),
+                if (_parsed.project != null)
+                  LzChip(
+                    label: '#${_parsed.project!}',
+                    icon: Icons.folder_outlined,
+                    selected: true,
+                    color: AppColors.info,
+                    dense: true,
+                  ),
+                if (_parsed.recurrence != null)
+                  LzChip(
+                    label: recurrenceLabel(_parsed.recurrence!),
+                    icon: Icons.repeat,
+                    selected: true,
+                    color: AppColors.accent,
+                    dense: true,
+                  ),
+              ],
+            ),
+          ],
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Priority selector ──────────────────────────────────────────
+          Text(
+            'PRIORITY',
             style: AppText.caption.copyWith(
               color: AppColors.textMuted,
               letterSpacing: 0.8,
@@ -401,43 +335,198 @@ class _AddTaskSheetState extends ConsumerState<AddTaskSheet> {
             ),
           ),
           const SizedBox(height: AppSpacing.sm),
-          ReminderLeadPicker(
-            value: _effectiveLead,
-            onChanged: (lead) => setState(() => _explicitLead = lead),
+          Row(
+            children: _priorities.map((p) {
+              final selected = p == effPriority;
+              return Padding(
+                padding: const EdgeInsets.only(right: AppSpacing.sm),
+                child: LzChip(
+                  label: p,
+                  selected: selected,
+                  color: _priorityColor(p),
+                  onTap: () => setState(() => _manualPriority = p),
+                ),
+              );
+            }).toList(),
           ),
-        ]
-        // ── Date-only due → reminds at the default time-of-day ─────────
-        // No clock time was set, so this task still gets a reminder (at the
-        // configured default time on its due date). Surface that so the user
-        // knows the reminder isn't silently skipped.
-        else if (composed != null) ...[
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Due date quick-pick ────────────────────────────────────────
+          Text(
+            'DUE DATE',
+            style: AppText.caption.copyWith(
+              color: AppColors.textMuted,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
           const SizedBox(height: AppSpacing.sm),
           Row(
             children: [
-              Icon(Icons.notifications_active_outlined,
-                  size: 13, color: AppColors.textMuted),
-              const SizedBox(width: AppSpacing.xs),
-              Text(
-                'Reminds at '
-                '${formatClock12(defaultReminderMinutes ~/ 60, defaultReminderMinutes % 60)}'
-                ' on the due date',
-                style: AppText.caption.copyWith(color: AppColors.textMuted),
+              LzChip(
+                label: 'Today',
+                icon: Icons.today_outlined,
+                selected: effDay == _isoToday(),
+                color: AppColors.warn,
+                onTap: () =>
+                    _setDueDate(effDay == _isoToday() ? null : _isoToday()),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              LzChip(
+                label: 'Tomorrow',
+                icon: Icons.event_outlined,
+                selected: effDay == _isoTomorrow(),
+                color: AppColors.accent,
+                onTap: () => _setDueDate(
+                  effDay == _isoTomorrow() ? null : _isoTomorrow(),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              LzChip(
+                label: 'Pick…',
+                icon: Icons.calendar_month_outlined,
+                selected:
+                    effDay != null &&
+                    effDay != _isoToday() &&
+                    effDay != _isoTomorrow(),
+                color: AppColors.info,
+                onTap: _pickDate,
               ),
             ],
           ),
+
+          // ── Time-of-day chip ───────────────────────────────────────────
+          const SizedBox(height: AppSpacing.sm),
+          Row(
+            children: [
+              LzChip(
+                label: effTime != null
+                    ? formatClock12(effTime.hour, effTime.minute)
+                    : 'Add time',
+                icon: Icons.schedule_outlined,
+                selected: effTime != null,
+                color: AppColors.accent,
+                onTap: _pickTime,
+              ),
+              if (effTime != null) ...[
+                const SizedBox(width: AppSpacing.sm),
+                GestureDetector(
+                  onTap: () => _setTime(null),
+                  child: Icon(
+                    Icons.close,
+                    size: 16,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ],
+          ),
+
+          if (composed != null) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                Icon(
+                  Icons.event_available_outlined,
+                  size: 14,
+                  color: AppColors.textMuted,
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  'Due ${dueDateDisplay(composed)}',
+                  style: AppText.caption.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: _clearDue,
+                  child: Icon(
+                    Icons.close,
+                    size: 14,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // ── Reminder lead-time (only when a due TIME exists) ───────────
+          if (dueDateHasTime(composed)) ...[
+            const SizedBox(height: AppSpacing.xl),
+            Text(
+              'REMIND',
+              style: AppText.caption.copyWith(
+                color: AppColors.textMuted,
+                letterSpacing: 0.8,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            ReminderLeadPicker(
+              value: _effectiveLead,
+              onChanged: (lead) => setState(() => _explicitLead = lead),
+            ),
+          ]
+          // ── Date-only due → reminds at the default time-of-day ─────────
+          // No clock time was set, so this task still gets a reminder (at the
+          // configured default time on its due date). Surface that so the user
+          // knows the reminder isn't silently skipped.
+          else if (composed != null) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                Icon(
+                  Icons.notifications_active_outlined,
+                  size: 13,
+                  color: AppColors.textMuted,
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                Text(
+                  'Reminds at '
+                  '${formatClock12(defaultReminderMinutes ~/ 60, defaultReminderMinutes % 60)}'
+                  ' on the due date',
+                  style: AppText.caption.copyWith(color: AppColors.textMuted),
+                ),
+              ],
+            ),
+          ],
+
+          // ── Recurrence (repeat) ────────────────────────────────────────
+          const SizedBox(height: AppSpacing.xl),
+          Text(
+            'REPEAT',
+            style: AppText.caption.copyWith(
+              color: AppColors.textMuted,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          RecurrencePicker(
+            value: _effectiveRecurrence,
+            anchorWeekday: composed == null
+                ? null
+                : DateTime.tryParse(composed)?.weekday,
+            onChanged: (r) => setState(() {
+              _recurrenceTouched = true;
+              _manualRecurrence = r;
+            }),
+          ),
+
+          const SizedBox(height: AppSpacing.xl),
+
+          // ── Submit button ──────────────────────────────────────────────
+          LzButton.primary(
+            label: 'Add Task',
+            icon: Icons.add,
+            loading: _submitting,
+            expand: true,
+            onPressed: _submit,
+          ),
         ],
-
-        const SizedBox(height: AppSpacing.xl),
-
-        // ── Submit button ──────────────────────────────────────────────
-        LzButton.primary(
-          label: 'Add Task',
-          icon: Icons.add,
-          loading: _submitting,
-          expand: true,
-          onPressed: _submit,
-        ),
-      ],
+      ),
     );
   }
 
@@ -526,6 +615,7 @@ class _AddTaskResult {
     this.dueDate,
     this.category,
     this.reminderAt,
+    this.recurring,
   });
   final String title;
   final String priority;
@@ -534,6 +624,9 @@ class _AddTaskResult {
 
   /// Absolute reminder instant (`due − lead`), or null for no reminder.
   final String? reminderAt;
+
+  /// A standard 5-field cron expression when the task repeats, else null.
+  final String? recurring;
 }
 
 // ── Public helper ─────────────────────────────────────────────────────────────
@@ -546,13 +639,16 @@ class _AddTaskResult {
 /// behavior (no date pre-selected). [defaultLead] is the global reminder-lead
 /// default applied once a due time is set without an explicit pick.
 Future<
-    ({
-      String title,
-      String priority,
-      String? dueDate,
-      String? category,
-      String? reminderAt,
-    })?> showAddTaskSheet(
+  ({
+    String title,
+    String priority,
+    String? dueDate,
+    String? category,
+    String? reminderAt,
+    String? recurring,
+  })?
+>
+showAddTaskSheet(
   BuildContext context, {
   DateTime? initialDueDate,
   ReminderLead defaultLead = kDefaultReminderLead,
@@ -560,10 +656,8 @@ Future<
   final result = await LzBottomSheet.show<_AddTaskResult>(
     context,
     title: 'New Task',
-    builder: (_) => AddTaskSheet(
-      initialDueDate: initialDueDate,
-      defaultLead: defaultLead,
-    ),
+    builder: (_) =>
+        AddTaskSheet(initialDueDate: initialDueDate, defaultLead: defaultLead),
   );
   if (result == null) return null;
   return (
@@ -572,5 +666,6 @@ Future<
     dueDate: result.dueDate,
     category: result.category,
     reminderAt: result.reminderAt,
+    recurring: result.recurring,
   );
 }

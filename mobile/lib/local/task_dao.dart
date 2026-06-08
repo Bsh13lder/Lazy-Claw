@@ -40,14 +40,14 @@ class OutboxItem {
   });
 
   factory OutboxItem.fromRow(Map<String, Object?> row) => OutboxItem(
-        seq: row['seq'] as int,
-        op: row['op'] as String,
-        entity: row['entity'] as String,
-        entityId: row['entity_id'] as String,
-        payload: _decodePayload(row['payload'] as String?),
-        createdAt: row['created_at'] as String? ?? '',
-        attempts: (row['attempts'] as int?) ?? 0,
-      );
+    seq: row['seq'] as int,
+    op: row['op'] as String,
+    entity: row['entity'] as String,
+    entityId: row['entity_id'] as String,
+    payload: _decodePayload(row['payload'] as String?),
+    createdAt: row['created_at'] as String? ?? '',
+    attempts: (row['attempts'] as int?) ?? 0,
+  );
 
   static Map<String, dynamic> _decodePayload(String? raw) {
     if (raw == null || raw.isEmpty) return <String, dynamic>{};
@@ -85,8 +85,7 @@ class TaskDao {
   /// pin deterministic timestamps for last-write-wins assertions.
   final String Function() _now;
 
-  TaskDao(this._db, {String Function()? now})
-      : _now = now ?? _defaultNowIso;
+  TaskDao(this._db, {String Function()? now}) : _now = now ?? _defaultNowIso;
 
   static String _defaultNowIso() => DateTime.now().toUtc().toIso8601String();
 
@@ -162,9 +161,12 @@ class TaskDao {
     Task task, {
     String? serverUpdatedAt,
     String? syncedAt,
-  }) =>
-      _upsertFromServerOn(_db, task,
-          serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
+  }) => _upsertFromServerOn(
+    _db,
+    task,
+    serverUpdatedAt: serverUpdatedAt,
+    syncedAt: syncedAt,
+  );
 
   Future<void> _upsertFromServerOn(
     DatabaseExecutor exec,
@@ -173,8 +175,8 @@ class TaskDao {
     String? syncedAt,
   }) async {
     final now = syncedAt ?? _now();
-    final updatedAt = serverUpdatedAt ??
-        (task.createdAt.isNotEmpty ? task.createdAt : now);
+    final updatedAt =
+        serverUpdatedAt ?? (task.createdAt.isNotEmpty ? task.createdAt : now);
     final row = _rowFromTask(task)
       ..['updated_at'] = updatedAt
       ..['dirty'] = 0
@@ -200,12 +202,7 @@ class TaskDao {
     final now = syncedAt ?? _now();
     await exec.update(
       'task_cache',
-      {
-        'deleted': 1,
-        'dirty': 0,
-        'updated_at': now,
-        'last_synced_at': now,
-      },
+      {'deleted': 1, 'dirty': 0, 'updated_at': now, 'last_synced_at': now},
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -285,6 +282,7 @@ class TaskDao {
     String? dueDate,
     String? reminderAt,
     String? steps,
+    String? recurring,
   }) async {
     final existing = await getById(id);
     if (existing == null) return null;
@@ -299,6 +297,7 @@ class TaskDao {
       dueDate: dueDate,
       reminderAt: reminderAt,
       steps: steps,
+      recurring: recurring,
     );
 
     final patch = <String, dynamic>{
@@ -310,26 +309,17 @@ class TaskDao {
       'due_date': ?dueDate,
       'reminder_at': ?reminderAt,
       'steps': ?steps,
+      'recurring': ?recurring,
     };
 
     await _db.transaction((txn) async {
       await txn.update(
         'task_cache',
-        {
-          ..._fieldUpdates(patch),
-          'updated_at': now,
-          'dirty': 1,
-        },
+        {..._fieldUpdates(patch), 'updated_at': now, 'dirty': 1},
         where: 'id = ?',
         whereArgs: [id],
       );
-      await _enqueueTxn(
-        txn,
-        OutboxOp.update,
-        id,
-        {'id': id, ...patch},
-        now,
-      );
+      await _enqueueTxn(txn, OutboxOp.update, id, {'id': id, ...patch}, now);
     });
 
     return updated;
@@ -344,22 +334,14 @@ class TaskDao {
     await _db.transaction((txn) async {
       await txn.update(
         'task_cache',
-        {
-          'status': 'done',
-          'completed_at': now,
-          'updated_at': now,
-          'dirty': 1,
-        },
+        {'status': 'done', 'completed_at': now, 'updated_at': now, 'dirty': 1},
         where: 'id = ?',
         whereArgs: [id],
       );
       await _enqueueTxn(txn, OutboxOp.complete, id, {'id': id}, now);
     });
 
-    return existing.copyWith(
-      status: 'done',
-      completedAt: now,
-    );
+    return existing.copyWith(status: 'done', completedAt: now);
   }
 
   /// Tombstone a task locally (deleted=1) + enqueue a `delete`. The row stays
@@ -372,11 +354,7 @@ class TaskDao {
     await _db.transaction((txn) async {
       await txn.update(
         'task_cache',
-        {
-          'deleted': 1,
-          'updated_at': now,
-          'dirty': 1,
-        },
+        {'deleted': 1, 'updated_at': now, 'dirty': 1},
         where: 'id = ?',
         whereArgs: [id],
       );
@@ -476,11 +454,7 @@ class TaskDao {
   /// makes a pending local op moot (the row is gone server-side, so replaying
   /// create/update/complete/delete against it is pointless or 404s).
   Future<int> deleteOutboxForEntity(String entityId) async {
-    return _db.delete(
-      'outbox',
-      where: 'entity_id = ?',
-      whereArgs: [entityId],
-    );
+    return _db.delete('outbox', where: 'entity_id = ?', whereArgs: [entityId]);
   }
 
   Future<int> outboxCount() async {
@@ -502,11 +476,10 @@ class TaskDao {
   }
 
   Future<void> setCursor(String? cursor, {String entity = kTaskEntity}) async {
-    await _db.insert(
-      'sync_state',
-      {'entity': entity, 'cursor': cursor},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _db.insert('sync_state', {
+      'entity': entity,
+      'cursor': cursor,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   // ── Conflicts ────────────────────────────────────────────────────────────
@@ -520,8 +493,14 @@ class TaskDao {
     String? local,
     String? server,
     String? at,
-  }) =>
-      _logConflictOn(_db, id: id, field: field, local: local, server: server, at: at);
+  }) => _logConflictOn(
+    _db,
+    id: id,
+    field: field,
+    local: local,
+    server: server,
+    at: at,
+  );
 
   Future<void> _logConflictOn(
     DatabaseExecutor exec, {
@@ -567,13 +546,15 @@ class TaskDao {
   Future<List<ConflictRow>> readConflicts() async {
     final rows = await _db.query('conflicts', orderBy: 'at ASC');
     return rows
-        .map((r) => ConflictRow(
-              id: r['id'] as String? ?? '',
-              field: r['field'] as String? ?? '',
-              local: r['local'] as String?,
-              server: r['server'] as String?,
-              at: r['at'] as String? ?? '',
-            ))
+        .map(
+          (r) => ConflictRow(
+            id: r['id'] as String? ?? '',
+            field: r['field'] as String? ?? '',
+            local: r['local'] as String?,
+            server: r['server'] as String?,
+            at: r['at'] as String? ?? '',
+          ),
+        )
         .toList();
   }
 
@@ -606,54 +587,54 @@ class TaskDao {
   }
 
   Task _taskFromRow(Map<String, Object?> row) => Task(
-        id: row['id'] as String? ?? '',
-        userId: row['user_id'] as String? ?? '',
-        title: row['title'] as String? ?? '',
-        description: row['description'] as String?,
-        category: row['category'] as String?,
-        priority: row['priority'] as String? ?? 'medium',
-        status: row['status'] as String? ?? 'todo',
-        owner: row['owner'] as String? ?? 'user',
-        dueDate: row['due_date'] as String?,
-        reminderAt: row['reminder_at'] as String?,
-        recurring: row['recurring'] as String?,
-        tags: row['tags'] as String?,
-        nagCount: (row['nag_count'] as int?) ?? 0,
-        createdAt: row['created_at'] as String? ?? '',
-        completedAt: row['completed_at'] as String?,
-        lastError: row['last_error'] as String?,
-        attemptCount: row['attempt_count'] as int?,
-        lastAttemptedAt: row['last_attempted_at'] as String?,
-        traceSessionId: row['trace_session_id'] as String?,
-        lazybrainNoteId: row['lazybrain_note_id'] as String?,
-        steps: row['steps'] as String?,
-        allocatedBudget: (row['allocated_budget'] as num?)?.toDouble(),
-      );
+    id: row['id'] as String? ?? '',
+    userId: row['user_id'] as String? ?? '',
+    title: row['title'] as String? ?? '',
+    description: row['description'] as String?,
+    category: row['category'] as String?,
+    priority: row['priority'] as String? ?? 'medium',
+    status: row['status'] as String? ?? 'todo',
+    owner: row['owner'] as String? ?? 'user',
+    dueDate: row['due_date'] as String?,
+    reminderAt: row['reminder_at'] as String?,
+    recurring: row['recurring'] as String?,
+    tags: row['tags'] as String?,
+    nagCount: (row['nag_count'] as int?) ?? 0,
+    createdAt: row['created_at'] as String? ?? '',
+    completedAt: row['completed_at'] as String?,
+    lastError: row['last_error'] as String?,
+    attemptCount: row['attempt_count'] as int?,
+    lastAttemptedAt: row['last_attempted_at'] as String?,
+    traceSessionId: row['trace_session_id'] as String?,
+    lazybrainNoteId: row['lazybrain_note_id'] as String?,
+    steps: row['steps'] as String?,
+    allocatedBudget: (row['allocated_budget'] as num?)?.toDouble(),
+  );
 
   Map<String, Object?> _rowFromTask(Task t) => {
-        'id': t.id,
-        'user_id': t.userId,
-        'title': t.title,
-        'description': t.description,
-        'category': t.category,
-        'priority': t.priority,
-        'status': t.status,
-        'owner': t.owner,
-        'due_date': t.dueDate,
-        'reminder_at': t.reminderAt,
-        'recurring': t.recurring,
-        'tags': t.tags,
-        'nag_count': t.nagCount,
-        'created_at': t.createdAt,
-        'completed_at': t.completedAt,
-        'last_error': t.lastError,
-        'attempt_count': t.attemptCount,
-        'last_attempted_at': t.lastAttemptedAt,
-        'trace_session_id': t.traceSessionId,
-        'lazybrain_note_id': t.lazybrainNoteId,
-        'steps': t.steps,
-        'allocated_budget': t.allocatedBudget,
-      };
+    'id': t.id,
+    'user_id': t.userId,
+    'title': t.title,
+    'description': t.description,
+    'category': t.category,
+    'priority': t.priority,
+    'status': t.status,
+    'owner': t.owner,
+    'due_date': t.dueDate,
+    'reminder_at': t.reminderAt,
+    'recurring': t.recurring,
+    'tags': t.tags,
+    'nag_count': t.nagCount,
+    'created_at': t.createdAt,
+    'completed_at': t.completedAt,
+    'last_error': t.lastError,
+    'attempt_count': t.attemptCount,
+    'last_attempted_at': t.lastAttemptedAt,
+    'trace_session_id': t.traceSessionId,
+    'lazybrain_note_id': t.lazybrainNoteId,
+    'steps': t.steps,
+    'allocated_budget': t.allocatedBudget,
+  };
 }
 
 /// Transaction-scoped façade over a [TaskDao] handed out by
@@ -666,17 +647,19 @@ class TaskTxn {
   const TaskTxn._(this._dao, this._txn);
 
   /// Raw cache row for [id] on this transaction (null when absent).
-  Future<Map<String, Object?>?> getRow(String id) =>
-      _dao._getRowOn(_txn, id);
+  Future<Map<String, Object?>?> getRow(String id) => _dao._getRowOn(_txn, id);
 
   /// Write the server-authoritative copy on this transaction.
   Future<void> upsertFromServer(
     Task task, {
     String? serverUpdatedAt,
     String? syncedAt,
-  }) =>
-      _dao._upsertFromServerOn(_txn, task,
-          serverUpdatedAt: serverUpdatedAt, syncedAt: syncedAt);
+  }) => _dao._upsertFromServerOn(
+    _txn,
+    task,
+    serverUpdatedAt: serverUpdatedAt,
+    syncedAt: syncedAt,
+  );
 
   /// Apply a server tombstone on this transaction.
   Future<void> applyServerDelete(String id, {String? syncedAt}) =>
@@ -689,15 +672,17 @@ class TaskTxn {
     String? local,
     String? server,
     String? at,
-  }) =>
-      _dao._logConflictOn(_txn,
-          id: id, field: field, local: local, server: server, at: at);
+  }) => _dao._logConflictOn(
+    _txn,
+    id: id,
+    field: field,
+    local: local,
+    server: server,
+    at: at,
+  );
 
   /// Drop every queued outbox op for [entityId] on this transaction (used when
   /// a server tombstone makes pending local ops moot).
-  Future<int> deleteOutboxForEntity(String entityId) => _txn.delete(
-        'outbox',
-        where: 'entity_id = ?',
-        whereArgs: [entityId],
-      );
+  Future<int> deleteOutboxForEntity(String entityId) =>
+      _txn.delete('outbox', where: 'entity_id = ?', whereArgs: [entityId]);
 }

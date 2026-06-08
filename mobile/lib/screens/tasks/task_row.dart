@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 import '../../models/project.dart';
@@ -141,8 +142,10 @@ class _TaskRowState extends State<TaskRow> {
   Future<void> _editPriority(BuildContext chipCtx) async {
     final cb = widget.onPriorityChanged;
     if (cb == null) return;
-    final picked =
-        await showPriorityMenu(chipCtx, current: widget.task.priority);
+    final picked = await showPriorityMenu(
+      chipCtx,
+      current: widget.task.priority,
+    );
     if (picked == null || picked == widget.task.priority) return;
     HapticFeedback.selectionClick();
     cb(picked);
@@ -202,10 +205,12 @@ class _TaskRowState extends State<TaskRow> {
     // Tie the project chip to the project's own color (the same hue the calendar
     // dots use), falling back to the neutral "info" tone when the project has no
     // color or isn't in the list.
-    final projectColor =
-        hasCategory ? _projectColor(task.category!) : null;
+    final projectColor = hasCategory ? _projectColor(task.category!) : null;
     final progress = subtaskProgressLabel(task.subtasks);
     final hasSubtasks = progress != null;
+    // A subtle "🔁 <label>" chip when the task repeats (the recurrence cron
+    // parses to a known kind, or a generic "Repeats" for a custom cron).
+    final recurLabel = cronChipLabel(task.recurring);
     final subtasksEditable = widget.onSubtasksChanged != null;
     final showChecklist = hasSubtasks && subtasksEditable && _subtasksExpanded;
 
@@ -319,6 +324,17 @@ class _TaskRowState extends State<TaskRow> {
                             ? _editDueTime
                             : null,
                       ),
+                    // Recurrence chip — subtle, static (editing happens in the
+                    // detail sheet's REPEAT picker).
+                    if (recurLabel != null)
+                      LzChip(
+                        key: ValueKey('task-row-recurrence-${task.id}'),
+                        label: recurLabel,
+                        dense: true,
+                        icon: Icons.repeat,
+                        color: AppColors.info,
+                        selected: !isDone,
+                      ),
                     // Subtask progress — a fold toggle when editable, else a
                     // static badge.
                     if (hasSubtasks && subtasksEditable)
@@ -334,7 +350,8 @@ class _TaskRowState extends State<TaskRow> {
                         onTap: () {
                           HapticFeedback.selectionClick();
                           setState(
-                              () => _subtasksExpanded = !_subtasksExpanded);
+                            () => _subtasksExpanded = !_subtasksExpanded,
+                          );
                         },
                       )
                     else if (hasSubtasks)
@@ -377,8 +394,9 @@ class _TaskRowState extends State<TaskRow> {
     return Dismissible(
       key: ValueKey('task-row-${task.id}'),
       // Done tasks only allow delete (endToStart). Active tasks allow both.
-      direction:
-          isDone ? DismissDirection.endToStart : DismissDirection.horizontal,
+      direction: isDone
+          ? DismissDirection.endToStart
+          : DismissDirection.horizontal,
       background: _swipeBg(
         alignment: Alignment.centerLeft,
         color: AppColors.success.withValues(alpha: 0.18),

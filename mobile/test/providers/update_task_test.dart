@@ -24,21 +24,25 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 /// Transport that always fails — keeps the fire-and-forget sync fully offline.
 class _OfflineTransport implements TasksTransport {
   @override
-  Future<Map<String, dynamic>> getJson(String path,
-          {Map<String, dynamic>? queryParams}) async =>
-      throw ApiError(0, 'offline');
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> postJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> patchJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> putJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
@@ -72,6 +76,7 @@ class _RecordingDao extends TaskDao {
     String? dueDate,
     String? reminderAt,
     String? steps,
+    String? recurring,
   }) async {
     updateCalls.add({
       'id': id,
@@ -81,6 +86,7 @@ class _RecordingDao extends TaskDao {
       'priority': priority,
       'dueDate': dueDate,
       'steps': steps,
+      'recurring': recurring,
     });
     if (throwOnUpdate) throw StateError('db boom');
     return null;
@@ -114,36 +120,44 @@ void main() {
   setUpAll(() => sqfliteFfiInit());
 
   group('TasksNotifier.updateTask', () {
-    test('forwards the supplied fields to applyLocalUpdate and refreshes',
-        () async {
-      final dao = await _freshDao();
-      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+    test(
+      'forwards the supplied fields to applyLocalUpdate and refreshes',
+      () async {
+        final dao = await _freshDao();
+        final n = TasksNotifier(
+          dao,
+          _NoopSync(dao, TasksRepository(_OfflineTransport())),
+        );
 
-      await n.updateTask(
-        'task-1',
-        title: 'new title',
-        description: 'new notes',
-        priority: 'high',
-        dueDate: '2026-06-09',
-      );
-      // Let the unawaited best-effort sync settle.
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+        await n.updateTask(
+          'task-1',
+          title: 'new title',
+          description: 'new notes',
+          priority: 'high',
+          dueDate: '2026-06-09',
+        );
+        // Let the unawaited best-effort sync settle.
+        await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(dao.updateCalls, hasLength(1));
-      final call = dao.updateCalls.single;
-      expect(call['id'], 'task-1');
-      expect(call['title'], 'new title');
-      expect(call['description'], 'new notes');
-      expect(call['priority'], 'high');
-      expect(call['dueDate'], '2026-06-09');
-      // The list was re-read at least once (refresh ran).
-      expect(dao.listCalls, greaterThanOrEqualTo(1));
-      expect(n.state.error, isNull);
-    });
+        expect(dao.updateCalls, hasLength(1));
+        final call = dao.updateCalls.single;
+        expect(call['id'], 'task-1');
+        expect(call['title'], 'new title');
+        expect(call['description'], 'new notes');
+        expect(call['priority'], 'high');
+        expect(call['dueDate'], '2026-06-09');
+        // The list was re-read at least once (refresh ran).
+        expect(dao.listCalls, greaterThanOrEqualTo(1));
+        expect(n.state.error, isNull);
+      },
+    );
 
     test('only forwards the fields that were passed', () async {
       final dao = await _freshDao();
-      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+      final n = TasksNotifier(
+        dao,
+        _NoopSync(dao, TasksRepository(_OfflineTransport())),
+      );
 
       await n.updateTask('task-2', title: 'just the title');
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -157,7 +171,10 @@ void main() {
 
     test('forwards serialized steps to applyLocalUpdate', () async {
       final dao = await _freshDao();
-      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+      final n = TasksNotifier(
+        dao,
+        _NoopSync(dao, TasksRepository(_OfflineTransport())),
+      );
 
       await n.updateTask(
         'task-steps',
@@ -165,32 +182,42 @@ void main() {
       );
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(dao.updateCalls.single['steps'],
-          '[{"id":"s1","title":"One","done":false}]');
+      expect(
+        dao.updateCalls.single['steps'],
+        '[{"id":"s1","title":"One","done":false}]',
+      );
     });
 
-    test('setSubtasks serialises a typed list and persists via the DAO',
-        () async {
-      final dao = await _freshDao();
-      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+    test(
+      'setSubtasks serialises a typed list and persists via the DAO',
+      () async {
+        final dao = await _freshDao();
+        final n = TasksNotifier(
+          dao,
+          _NoopSync(dao, TasksRepository(_OfflineTransport())),
+        );
 
-      await n.setSubtasks('task-typed', const [
-        Subtask(id: 's1', title: 'Alpha', done: true),
-        Subtask(id: 's2', title: 'Beta', done: false),
-      ]);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+        await n.setSubtasks('task-typed', const [
+          Subtask(id: 's1', title: 'Alpha', done: true),
+          Subtask(id: 's2', title: 'Beta', done: false),
+        ]);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      final steps = dao.updateCalls.single['steps'] as String;
-      // The canonical {id,title,done} shape lands in the DAO.
-      expect(parseSubtasks(steps), const [
-        Subtask(id: 's1', title: 'Alpha', done: true),
-        Subtask(id: 's2', title: 'Beta', done: false),
-      ]);
-    });
+        final steps = dao.updateCalls.single['steps'] as String;
+        // The canonical {id,title,done} shape lands in the DAO.
+        expect(parseSubtasks(steps), const [
+          Subtask(id: 's1', title: 'Alpha', done: true),
+          Subtask(id: 's2', title: 'Beta', done: false),
+        ]);
+      },
+    );
 
     test('setSubtasks with an empty list clears the steps column', () async {
       final dao = await _freshDao();
-      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+      final n = TasksNotifier(
+        dao,
+        _NoopSync(dao, TasksRepository(_OfflineTransport())),
+      );
 
       await n.setSubtasks('task-clear', const []);
       await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -202,7 +229,10 @@ void main() {
     test('sets state.error when the DAO throws', () async {
       final dao = await _freshDao()
         ..throwOnUpdate = true;
-      final n = TasksNotifier(dao, _NoopSync(dao, TasksRepository(_OfflineTransport())));
+      final n = TasksNotifier(
+        dao,
+        _NoopSync(dao, TasksRepository(_OfflineTransport())),
+      );
 
       await n.updateTask('task-3', title: 'boom');
       await Future<void>.delayed(const Duration(milliseconds: 20));

@@ -72,6 +72,11 @@ class UpdateTaskBody(BaseModel):
     status: Literal["todo", "in_progress", "done"] | None = None
     due_date: str | None = None
     reminder_at: str | None = None
+    # Standard 5-field cron expression for a recurring task (the mobile/web
+    # repeat picker authors it; the backend respawns the next occurrence on
+    # complete via get_next_run). An empty string clears the recurrence — it is
+    # falsy, so the respawn path treats it as "does not repeat".
+    recurring: str | None = None
     tags: list[str] | None = None
     # Per-task budget allocation — a slice of the parent project's budget.
     # `None` leaves it alone; `0` clears it.

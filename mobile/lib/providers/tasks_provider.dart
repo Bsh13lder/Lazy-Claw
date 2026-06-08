@@ -43,7 +43,10 @@ final tasksRepositoryProvider = Provider<TasksRepository>((ref) {
 
 /// The offline-first sync engine.
 final taskSyncProvider = Provider<TaskSync>((ref) {
-  return TaskSync(ref.watch(taskDaoProvider), ref.watch(tasksRepositoryProvider));
+  return TaskSync(
+    ref.watch(taskDaoProvider),
+    ref.watch(tasksRepositoryProvider),
+  );
 });
 
 /// Schedules local notifications at each task's due / reminder time. Reuses the
@@ -60,7 +63,7 @@ final taskReminderServiceProvider = Provider<TaskReminderScheduler>((ref) {
     LocalNotifications.plugin,
     defaultReminderMinutes:
         ref.read(settingsPrefsProvider).valueOrNull?.defaultReminderMinutes ??
-            kDefaultReminderMinutes,
+        kDefaultReminderMinutes,
   );
   // Keep the date-only fallback time-of-day in sync with the user's pref.
   ref.listen<int>(
@@ -83,7 +86,9 @@ final reachabilityProvider = Provider<Reachability>((ref) {
 
 /// Whether the backend is reachable right now, as a reactive bool. The Tasks
 /// screen watches this to drive the offline banner.
-final reachableProvider = StateNotifierProvider<_ReachableNotifier, bool>((ref) {
+final reachableProvider = StateNotifierProvider<_ReachableNotifier, bool>((
+  ref,
+) {
   final reach = ref.watch(reachabilityProvider);
   return _ReachableNotifier(reach);
 });
@@ -131,13 +136,12 @@ class TasksState {
     Set<String>? dirtyIds,
     bool? isLoading,
     String? error,
-  }) =>
-      TasksState(
-        tasks: tasks ?? this.tasks,
-        dirtyIds: dirtyIds ?? this.dirtyIds,
-        isLoading: isLoading ?? this.isLoading,
-        error: error,
-      );
+  }) => TasksState(
+    tasks: tasks ?? this.tasks,
+    dirtyIds: dirtyIds ?? this.dirtyIds,
+    isLoading: isLoading ?? this.isLoading,
+    error: error,
+  );
 }
 
 // ── Notifier ───────────────────────────────────────────────────────────────
@@ -157,7 +161,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
   final TaskReminderScheduler? _reminders;
 
   TasksNotifier(this._dao, this._sync, [this._reminders])
-      : super(const TasksState());
+    : super(const TasksState());
 
   /// Load from the local cache immediately, then kick a background sync and
   /// refresh from cache again when it settles.
@@ -194,23 +198,27 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? dueDate,
     String? category,
     String? reminderAt,
+    String? recurring,
   }) async {
     try {
       // An empty string means "no reminder" on create — normalise to null so
       // we don't persist a blank reminder_at (empty is only meaningful as a
       // *clear* on update).
-      final remAt =
-          (reminderAt != null && reminderAt.isEmpty) ? null : reminderAt;
+      final remAt = (reminderAt != null && reminderAt.isEmpty)
+          ? null
+          : reminderAt;
+      // Likewise an empty cron means "does not repeat" — normalise to null.
+      final recur = (recurring != null && recurring.isEmpty) ? null : recurring;
       final created = await _dao.applyLocalCreate(
         title,
         priority: priority ?? 'medium',
         dueDate: dueDate,
         category: category,
         reminderAt: remAt,
+        recurring: recur,
       );
       await _refreshFromCache();
-      unawaited(
-          _reminders?.scheduleForTask(created) ?? Future<void>.value());
+      unawaited(_reminders?.scheduleForTask(created) ?? Future<void>.value());
       unawaited(_syncThenRefresh());
     } catch (e) {
       state = state.copyWith(error: e.toString());
@@ -234,6 +242,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
     String? category,
     String? steps,
     String? reminderAt,
+    String? recurring,
   }) async {
     try {
       final updated = await _dao.applyLocalUpdate(
@@ -245,13 +254,13 @@ class TasksNotifier extends StateNotifier<TasksState> {
         category: category,
         steps: steps,
         reminderAt: reminderAt,
+        recurring: recurring,
       );
       await _refreshFromCache();
       // Reschedule against the new fields (cancels too, if the time was removed
       // or the task is now done). Falls back to a cancel when the row vanished.
       if (updated != null) {
-        unawaited(
-            _reminders?.scheduleForTask(updated) ?? Future<void>.value());
+        unawaited(_reminders?.scheduleForTask(updated) ?? Future<void>.value());
       } else {
         unawaited(_reminders?.cancelForTask(id) ?? Future<void>.value());
       }
@@ -322,8 +331,7 @@ class TasksNotifier extends StateNotifier<TasksState> {
 
 // ── Provider ───────────────────────────────────────────────────────────────
 
-final tasksProvider =
-    StateNotifierProvider<TasksNotifier, TasksState>((ref) {
+final tasksProvider = StateNotifierProvider<TasksNotifier, TasksState>((ref) {
   final notifier = TasksNotifier(
     ref.watch(taskDaoProvider),
     ref.watch(taskSyncProvider),

@@ -1310,8 +1310,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ],
               const SizedBox(height: AppSpacing.md),
               Text(
-                'Chat = talk only · Ask = confirm each action · '
-                'Plan = research then Execute · Execute = autonomous',
+                'Ask = talk only · Plan = research then gate · '
+                'Action = confirm each write · Execute = autonomous',
                 style: AppText.caption.copyWith(color: AppColors.textSecondary),
               ),
             ],

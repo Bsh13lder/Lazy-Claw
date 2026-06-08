@@ -334,6 +334,15 @@ def _is_read_only_list_tool(name: str) -> bool:
     return False
 
 
+# Tool-DISCOVERY calls (finding tools by keyword) add nothing after the first
+# few in a single turn — distinct-query spam is a panic signal, not real work.
+# Capped per assistant turn inside _dedup_tool_calls (both brain + worker go
+# through this provider). 2026-06-08: documents_specialist emitted ~19
+# `search_tools` in one turn while thrashing a Google-Sheet task.
+_DISCOVERY_TOOL_NAMES: frozenset[str] = frozenset({"search_tools"})
+_DISCOVERY_TOOLS_CAP = 3
+
+
 def _dedup_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
     """Remove duplicate tool calls within one assistant turn.
 
@@ -371,6 +380,7 @@ def _dedup_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
 
     seen_args: set[tuple[str, str]] = set()
     seen_listing_names: set[str] = set()
+    discovery_count = 0
     deduped: list[ToolCall] = []
     for tc in tool_calls:
         # Pass 1: read-only listing — collapse by name regardless of args
@@ -378,6 +388,18 @@ def _dedup_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
             if tc.name in seen_listing_names:
                 continue
             seen_listing_names.add(tc.name)
+            deduped.append(tc)
+            continue
+
+        # Pass 1.5: cap tool-DISCOVERY spam per turn. Distinct queries survive
+        # the exact-args dedup below, so a panicking model can emit ~19
+        # `search_tools` in ONE turn. Keep the first _DISCOVERY_TOOLS_CAP; drop
+        # the rest — a few searches are plenty to act on, and more only burn
+        # tokens + trip the stuck detector. Brain AND worker hit this path.
+        if tc.name in _DISCOVERY_TOOL_NAMES:
+            if discovery_count >= _DISCOVERY_TOOLS_CAP:
+                continue
+            discovery_count += 1
             deduped.append(tc)
             continue
 

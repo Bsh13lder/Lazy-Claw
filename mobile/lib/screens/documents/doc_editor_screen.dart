@@ -9,6 +9,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
+import 'doc_share.dart';
 import 'univer_quill.dart';
 
 /// Full native rich-text editor for a single document.
@@ -112,6 +113,28 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
     }
   }
 
+  static const _docxMime =
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+  Future<void> _export(String format, String ext, String mime) async {
+    setState(() => _saving = true);
+    try {
+      final bytes = await ref
+          .read(documentsRepositoryProvider)
+          .exportBytes(DocKind.docs, widget.id, format);
+      await shareDocumentBytes(
+        bytes: bytes, stem: widget.name, ext: ext, mimeType: mime,
+      );
+    } catch (_) {
+      if (mounted) {
+        _snack('Export failed (PDF needs LibreOffice on the server).',
+            error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   Future<void> _openAi() async {
     final instruction = await DocAiBox.show(context, kindLabel: 'document');
     if (instruction == null || !mounted) return;
@@ -174,6 +197,22 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
                 ),
               ),
             ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.ios_share, color: AppColors.textSecondary),
+            tooltip: 'Export / share',
+            color: AppColors.bgSurfaceElevated,
+            onSelected: (v) {
+              if (v == 'docx') {
+                _export('docx', 'docx', _docxMime);
+              } else if (v == 'pdf') {
+                _export('pdf', 'pdf', 'application/pdf');
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'docx', child: Text('Export as Word (.docx)')),
+              PopupMenuItem(value: 'pdf', child: Text('Export as PDF (.pdf)')),
+            ],
+          ),
           LzIconButton(
             icon: Icons.auto_awesome,
             tooltip: 'Ask AI to edit',

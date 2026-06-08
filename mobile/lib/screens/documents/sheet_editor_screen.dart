@@ -7,6 +7,7 @@ import 'package:lazyclaw_mobile/ui/ui.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
+import 'doc_share.dart';
 import 'formula_helper.dart';
 import 'univer_parse.dart';
 
@@ -150,6 +151,25 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     }
   }
 
+  static const _xlsxMime =
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+  Future<void> _export(String format, String ext, String mime) async {
+    setState(() => _saving = true);
+    try {
+      final bytes = await ref
+          .read(documentsRepositoryProvider)
+          .exportBytes(DocKind.sheets, widget.id, format);
+      await shareDocumentBytes(
+        bytes: bytes, stem: widget.name, ext: ext, mimeType: mime,
+      );
+    } catch (_) {
+      if (mounted) _snack('Export failed. Try again.', error: true);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   Future<void> _openAi() async {
     final instruction = await DocAiBox.show(context, kindLabel: 'sheet');
     if (instruction == null || !mounted) return;
@@ -215,6 +235,22 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
                 ),
               ),
             ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.ios_share, color: AppColors.textSecondary),
+            tooltip: 'Export / share',
+            color: AppColors.bgSurfaceElevated,
+            onSelected: (v) {
+              if (v == 'xlsx') {
+                _export('xlsx', 'xlsx', _xlsxMime);
+              } else if (v == 'csv') {
+                _export('csv', 'csv', 'text/csv');
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'xlsx', child: Text('Export as Excel (.xlsx)')),
+              PopupMenuItem(value: 'csv', child: Text('Export as CSV (.csv)')),
+            ],
+          ),
           LzIconButton(
             icon: Icons.auto_awesome,
             tooltip: 'Ask AI to edit',

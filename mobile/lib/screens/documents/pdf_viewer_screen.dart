@@ -8,6 +8,7 @@ import 'package:pdfx/pdfx.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
+import 'doc_share.dart';
 
 /// PDF viewer (pdfx — MIT, pdfium-backed) fed by `GET /api/pdf/{id}/raw`, plus
 /// the ✨ AI-edit box.
@@ -95,6 +96,21 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
     }
   }
 
+  Future<void> _downloadShare() async {
+    setState(() => _applying = true);
+    try {
+      final bytes =
+          await ref.read(documentsRepositoryProvider).downloadPdf(_pdfId);
+      await shareDocumentBytes(
+        bytes: bytes, stem: widget.name, ext: 'pdf', mimeType: 'application/pdf',
+      );
+    } catch (_) {
+      if (mounted) _snack('Download failed. Try again.', error: true);
+    } finally {
+      if (mounted) setState(() => _applying = false);
+    }
+  }
+
   void _snack(String msg, {bool error = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -115,6 +131,11 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
       appBar: LzAppBar(
         title: widget.name,
         actions: [
+          LzIconButton(
+            icon: Icons.ios_share,
+            tooltip: 'Download / share',
+            onPressed: _applying ? null : _downloadShare,
+          ),
           LzIconButton(
             icon: Icons.auto_awesome,
             tooltip: 'Ask AI to edit',

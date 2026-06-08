@@ -109,6 +109,25 @@ class DocumentsListNotifier extends StateNotifier<DocumentsListState> {
     }
   }
 
+  /// Import a file as a new document, routing to the right endpoint by kind
+  /// (xlsx → sheets, docx → docs, pdf → pdf). Prepends the new meta; null on
+  /// failure (the error is surfaced in state).
+  Future<DocMeta?> import(File file) async {
+    state = state.copyWith(clearError: true);
+    try {
+      final meta = switch (_kind) {
+        DocKind.sheets => await _repo.importSheet(file),
+        DocKind.docs => await _repo.importDoc(file),
+        DocKind.pdf => await _repo.importPdf(file),
+      };
+      state = state.copyWith(items: [meta, ...state.items]);
+      return meta;
+    } catch (e) {
+      state = state.copyWith(error: _friendlyError(e));
+      return null;
+    }
+  }
+
   /// Delete [id] then drop it from the list.
   Future<void> delete(String id) async {
     state = state.copyWith(deletingId: id, clearError: true);

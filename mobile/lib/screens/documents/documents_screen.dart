@@ -45,7 +45,7 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
 
   Future<void> _create() async {
     if (_kind == DocKind.pdf) {
-      await _importPdf();
+      await _import(DocKind.pdf);
     } else {
       await _createBlank(_kind);
     }
@@ -59,12 +59,19 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     if (meta != null && mounted) _open(meta);
   }
 
-  Future<void> _importPdf() async {
+  /// The upload extension for each kind's import.
+  static String _importExt(DocKind kind) => switch (kind) {
+        DocKind.sheets => 'xlsx',
+        DocKind.docs => 'docx',
+        DocKind.pdf => 'pdf',
+      };
+
+  Future<void> _import(DocKind kind) async {
     final FilePickerResult? result;
     try {
       result = await FilePicker.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['pdf'],
+        allowedExtensions: [_importExt(kind)],
         withData: false,
       );
     } catch (_) {
@@ -73,10 +80,13 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
     }
     final path = result?.files.singleOrNull?.path;
     if (path == null || !mounted) return;
-    final meta = await ref
-        .read(documentsListProvider(DocKind.pdf).notifier)
-        .importPdf(File(path));
-    if (meta != null && mounted) _open(meta);
+    final meta =
+        await ref.read(documentsListProvider(kind).notifier).import(File(path));
+    if (meta != null && mounted) {
+      _open(meta);
+    } else if (mounted) {
+      _snack('Could not import that .${_importExt(kind)} file.', error: true);
+    }
   }
 
   Future<String?> _promptName(DocKind kind) {
@@ -127,10 +137,20 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
   @override
   Widget build(BuildContext context) {
     return LzScaffold(
-      appBar: const LzAppBar(
+      appBar: LzAppBar(
         title: 'Documents',
         large: true,
         gradientTitle: true,
+        actions: [
+          // Sheets/Docs import lives here (PDF import is the FAB). xlsx → sheet,
+          // docx → doc.
+          if (_kind != DocKind.pdf)
+            LzIconButton(
+              icon: Icons.file_upload_outlined,
+              tooltip: 'Import .${_importExt(_kind)}',
+              onPressed: () => _import(_kind),
+            ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: AppColors.accent,

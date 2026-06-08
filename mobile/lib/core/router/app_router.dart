@@ -98,6 +98,12 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: '/home',
     refreshListenable: listenable,
+    // Defense-in-depth: an unmatched location (e.g. a stray `lazyclaw://…`
+    // widget URI that slipped past Flutter's disabled auto-deep-linking) must
+    // never surface GoRouter's "no routes for location" page-not-found screen —
+    // fall back to Home. Widget/shortcut actions are routed separately via
+    // pendingActionProvider, so nothing legitimate depends on URI routing here.
+    onException: (context, state, router) => router.go('/home'),
     redirect: (context, state) {
       final status = ref.read(authProvider).status;
       final loggingIn = state.matchedLocation == '/login' ||

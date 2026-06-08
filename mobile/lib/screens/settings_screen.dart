@@ -782,6 +782,50 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// SCHEDULE a real reminder ~1 minute out (the same path task reminders use).
+  /// This is the diagnostic for "the manual test works but my reminders never
+  /// fire": if the immediate test arrives but this one doesn't, the OS is
+  /// blocking exact alarms / killing the app in the background.
+  Future<void> _scheduleTestReminder() async {
+    final enabled = await LocalNotifications.areNotificationsEnabled();
+    if (!mounted) return;
+    if (!enabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Notifications are off — enable them first.'),
+          action: SnackBarAction(
+            label: 'Enable',
+            onPressed: () => LocalNotifications.requestPermissions(),
+          ),
+        ),
+      );
+      return;
+    }
+    final exact = await LocalNotifications.canScheduleExact();
+    final fire = await LocalNotifications.scheduleTestReminder();
+    if (!mounted) return;
+    if (fire == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not schedule — try again after enabling notifications.'),
+        ),
+      );
+      return;
+    }
+    final hh = fire.hour.toString().padLeft(2, '0');
+    final mm = fire.minute.toString().padLeft(2, '0');
+    final base = 'Reminder scheduled for $hh:$mm (~1 min). Lock your phone and wait.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text(exact
+            ? base
+            : '$base\n⚠ Exact alarms are OFF — it may be delayed. Grant '
+                '"Alarms & reminders" + Autostart for reliable reminders.'),
+      ),
+    );
+  }
+
   /// Delivery-channel segmented control (Telegram · App · Both) backed by
   /// `GET/POST /api/settings/notifications`, plus a one-line HyperOS hint.
   Widget _buildChannelTile() {
@@ -883,6 +927,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               title: 'Send test notification',
               subtitle: 'Fire a real notification now to verify delivery',
               onTap: _sendTestNotification,
+              trailing: const Icon(Icons.chevron_right,
+                  size: 18, color: AppColors.textMuted),
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+            // Schedule a real reminder ~1 min out — the SAME path task reminders
+            // use. Diagnoses "manual test works but my reminders never fire":
+            // if this one doesn't arrive, exact alarms / autostart are blocked.
+            LzListTile(
+              leading: const Icon(Icons.alarm_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              title: 'Schedule test reminder',
+              subtitle: 'Fires in ~1 min — verifies scheduled reminders work',
+              onTap: _scheduleTestReminder,
               trailing: const Icon(Icons.chevron_right,
                   size: 18, color: AppColors.textMuted),
             ),

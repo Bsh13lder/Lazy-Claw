@@ -86,6 +86,18 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Disable Flutter's automatic intent-URI deep linking. The
+                 Quick-Capture widget launches the app with a `lazyclaw://<action>`
+                 URI that WE consume via home_widget's widgetClicked stream
+                 (DeepLinkService → pendingActionProvider → router.go('/tasks')).
+                 With Flutter's auto deep linking ON, the engine ALSO feeds that
+                 raw URI to GoRouter as a route on every (warm) widget tap →
+                 "no routes for location: lazyclaw://addTask" / a page-not-found
+                 screen. Turning it off leaves only our handler. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"
+              />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>

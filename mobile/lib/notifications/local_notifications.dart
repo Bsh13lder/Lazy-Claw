@@ -186,6 +186,74 @@ class LocalNotifications {
         payload: 'chat',
       );
 
+  /// Whether the OS currently allows EXACT alarms (Android 12+). When false,
+  /// scheduled reminders (`zonedSchedule` with exactAllowWhileIdle) get delayed
+  /// or dropped until the user grants "Alarms & reminders". Returns true on
+  /// non-Android / unknown so we don't nag where it doesn't apply. Never throws.
+  static Future<bool> canScheduleExact() async {
+    try {
+      final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl == null) return true;
+      return (await androidImpl.canScheduleExactNotifications()) ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// SCHEDULE a real reminder [after] from now via the SAME `zonedSchedule` /
+  /// exact-alarm path as task reminders. Returns the fire time on success, or
+  /// null if scheduling couldn't be set up (plugin/timezone not ready).
+  ///
+  /// This is the diagnostic that separates a broken SCHEDULED path (exact-alarm
+  /// blocked, or the app killed by HyperOS/MIUI battery management) from the
+  /// immediate delivery that [showTest] already proves: if the immediate test
+  /// fires but THIS one never arrives, the problem is exact alarms / autostart.
+  /// Best-effort — never throws.
+  static Future<DateTime?> scheduleTestReminder({
+    Duration after = const Duration(minutes: 1),
+  }) async {
+    if (!_initialised || !_tzReady) return null;
+    try {
+      final fire = DateTime.now().add(after);
+      final when = tz.TZDateTime.from(fire, tz.local);
+      const androidDetails = AndroidNotificationDetails(
+        'lazyclaw_task_reminders',
+        'Task reminders',
+        channelDescription:
+            'Scheduled reminders for your tasks at their due / reminder time',
+        importance: Importance.high,
+        priority: Priority.high,
+        category: AndroidNotificationCategory.reminder,
+        showWhen: true,
+      );
+      const darwinDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      const details = NotificationDetails(
+        android: androidDetails,
+        iOS: darwinDetails,
+        macOS: darwinDetails,
+      );
+      await _plugin.zonedSchedule(
+        nextNotificationId(),
+        'LazyClaw scheduled test',
+        'This fired on schedule ✅ — scheduled reminders work.',
+        when,
+        details,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        payload: 'chat',
+      );
+      return fire;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Show a local notification with [title] and [body].
   ///
   /// Silently no-ops if the plugin was not initialised or if the user

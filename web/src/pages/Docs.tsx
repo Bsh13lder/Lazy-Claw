@@ -6,6 +6,7 @@ import {
   getDoc,
   listDocs,
   saveDoc,
+  uploadDoc,
   type DocMeta,
   type UniverDocSnapshot,
 } from "../api";
@@ -176,6 +177,18 @@ export default function Docs() {
     await refreshList(created.id);
   }
 
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-importing the same file
+    if (!file) return;
+    try {
+      const created = await uploadDoc(file);
+      await refreshList(created.id);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Import failed");
+    }
+  }
+
   async function handleDelete(id: string) {
     if (!window.confirm("Delete this document? This cannot be undone.")) return;
     await deleteDoc(id);
@@ -212,13 +225,27 @@ export default function Docs() {
       <aside className="w-60 shrink-0 border-r border-border bg-bg-secondary flex flex-col">
         <div className="flex items-center justify-between px-3 py-2.5 border-b border-border">
           <span className="text-sm font-semibold">Docs</span>
-          <button
-            onClick={handleNew}
-            className="px-2 py-1 rounded-lg bg-accent text-bg-primary text-xs font-medium hover:opacity-90 transition-opacity"
-            title="New document"
-          >
-            + New
-          </button>
+          <div className="flex items-center gap-1.5">
+            <label
+              className="px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover cursor-pointer transition-colors"
+              title="Import a .docx document"
+            >
+              Import
+              <input
+                type="file"
+                accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                className="hidden"
+                onChange={handleImportFile}
+              />
+            </label>
+            <button
+              onClick={handleNew}
+              className="px-2 py-1 rounded-lg bg-accent text-bg-primary text-xs font-medium hover:opacity-90 transition-opacity"
+              title="New document"
+            >
+              + New
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto py-1">
@@ -304,13 +331,27 @@ export default function Docs() {
                     setReloadToken((t) => t + 1);
                   }}
                 />
-                <a
-                  href={docExportUrl(activeId, "docx")}
-                  className="text-xs text-text-muted hover:text-accent transition-colors"
-                  title="Download as .docx"
-                >
-                  Download .docx
-                </a>
+                <details className="relative">
+                  <summary className="list-none cursor-pointer select-none px-2 py-1 rounded-lg border border-border text-text-secondary text-xs font-medium hover:bg-bg-hover transition-colors">
+                    Export ▾
+                  </summary>
+                  <div className="absolute right-0 mt-1 z-10 w-36 rounded-lg border border-border bg-bg-secondary shadow-lg py-1">
+                    <a
+                      href={docExportUrl(activeId, "docx")}
+                      download
+                      className="block px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover"
+                    >
+                      Word (.docx)
+                    </a>
+                    <a
+                      href={docExportUrl(activeId, "pdf")}
+                      download
+                      className="block px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover"
+                    >
+                      PDF (.pdf)
+                    </a>
+                  </div>
+                </details>
               </div>
             </div>
             {/* Univer mounts here — needs a real pixel height */}

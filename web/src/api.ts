@@ -1988,6 +1988,37 @@ export const deleteSheet = (id: string) =>
 export const sheetExportUrl = (id: string, format: "xlsx" | "csv" = "xlsx") =>
   `/api/sheets/${encodeURIComponent(id)}/export?format=${format}`;
 
+// Multipart upload helper for document import (xlsx → sheet, docx → doc). The
+// server nests the created row under `key` ("sheet" / "doc").
+async function uploadDocumentFile<T>(
+  path: string,
+  key: string,
+  file: File,
+): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) {
+    let message = `Import failed (${res.status})`;
+    try {
+      const body = await res.json();
+      message = body.detail || body.message || body.error || message;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(message, res.status);
+  }
+  return (await res.json())[key] as T;
+}
+
+// Import a .xlsx file as a new sheet.
+export const uploadSheet = (file: File) =>
+  uploadDocumentFile<SheetMeta>("/api/sheets/import", "sheet", file);
+
 // ── In-editor AI ("Document Specialist") ─────────────────────────────────
 // One synchronous turn that edits the open document from a NL instruction and
 // returns the fresh snapshot (sheets/docs) or the new file id (pdf).
@@ -2055,6 +2086,10 @@ export const deleteDoc = (id: string) =>
 // Server-side export (docx; pdf when LibreOffice is available).
 export const docExportUrl = (id: string, format: "docx" | "pdf" = "docx") =>
   `/api/docs/${encodeURIComponent(id)}/export?format=${format}`;
+
+// Import a .docx file as a new document.
+export const uploadDoc = (file: File) =>
+  uploadDocumentFile<DocMeta>("/api/docs/import", "doc", file);
 
 export const aiEditDoc = (id: string, instruction: string) =>
   request<AiEditResult>(`/api/docs/${encodeURIComponent(id)}/ai`, {

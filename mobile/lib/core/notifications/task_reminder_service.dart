@@ -125,17 +125,36 @@ class TaskReminderService implements TaskReminderScheduler {
       // initialised — the outer catch turns that into a silent no-op rather
       // than crashing a write path.
       final when = tz.TZDateTime.from(fire, tz.local);
-      await _plugin.zonedSchedule(
-        id,
-        task.title.isEmpty ? 'Task reminder' : task.title,
-        _bodyFor(task, fire),
-        when,
-        _details,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        payload: 'task:${task.id}',
-      );
+      final title = task.title.isEmpty ? 'Task reminder' : task.title;
+      final body = _bodyFor(task, fire);
+      try {
+        await _plugin.zonedSchedule(
+          id,
+          title,
+          body,
+          when,
+          _details,
+          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+          payload: 'task:${task.id}',
+        );
+      } on Exception {
+        // Exact alarms blocked (Android 12+ without "Alarms & reminders") → fall
+        // back to an inexact alarm so the reminder still fires (slightly late)
+        // instead of being dropped entirely.
+        await _plugin.zonedSchedule(
+          id,
+          title,
+          body,
+          when,
+          _details,
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+          payload: 'task:${task.id}',
+        );
+      }
     } catch (_) {
       // Best-effort: never let a scheduling failure break the task write.
     }

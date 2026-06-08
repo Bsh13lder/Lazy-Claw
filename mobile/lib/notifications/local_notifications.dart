@@ -202,55 +202,78 @@ class LocalNotifications {
   }
 
   /// SCHEDULE a real reminder [after] from now via the SAME `zonedSchedule` /
-  /// exact-alarm path as task reminders. Returns the fire time on success, or
-  /// null if scheduling couldn't be set up (plugin/timezone not ready).
+  /// exact-alarm path as task reminders. Returns the fire time + whether it was
+  /// scheduled EXACTLY, or null if scheduling couldn't be set up at all.
   ///
-  /// This is the diagnostic that separates a broken SCHEDULED path (exact-alarm
-  /// blocked, or the app killed by HyperOS/MIUI battery management) from the
-  /// immediate delivery that [showTest] already proves: if the immediate test
-  /// fires but THIS one never arrives, the problem is exact alarms / autostart.
-  /// Best-effort — never throws.
-  static Future<DateTime?> scheduleTestReminder({
+  /// Tries an EXACT alarm first; if the OS forbids exact alarms (Android 12+
+  /// without the "Alarms & reminders" grant) that call throws, so we retry an
+  /// INEXACT alarm — which still fires (a little late) and needs no special
+  /// grant. Diagnostic: if the immediate [showTest] fires but NEITHER scheduled
+  /// mode ever arrives, the app is being frozen in the background
+  /// (HyperOS/MIUI Autostart + battery). Best-effort — never throws.
+  static Future<({DateTime fire, bool exact})?> scheduleTestReminder({
     Duration after = const Duration(minutes: 1),
   }) async {
     if (!_initialised || !_tzReady) return null;
+    final fire = DateTime.now().add(after);
+    final when = tz.TZDateTime.from(fire, tz.local);
+    const androidDetails = AndroidNotificationDetails(
+      'lazyclaw_task_reminders',
+      'Task reminders',
+      channelDescription:
+          'Scheduled reminders for your tasks at their due / reminder time',
+      importance: Importance.high,
+      priority: Priority.high,
+      category: AndroidNotificationCategory.reminder,
+      showWhen: true,
+    );
+    const darwinDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+    const details = NotificationDetails(
+      android: androidDetails,
+      iOS: darwinDetails,
+      macOS: darwinDetails,
+    );
+    Future<void> sched(AndroidScheduleMode mode, String body) =>
+        _plugin.zonedSchedule(
+          nextNotificationId(),
+          'LazyClaw scheduled test',
+          body,
+          when,
+          details,
+          androidScheduleMode: mode,
+          uiLocalNotificationDateInterpretation:
+              UILocalNotificationDateInterpretation.absoluteTime,
+          payload: 'chat',
+        );
     try {
-      final fire = DateTime.now().add(after);
-      final when = tz.TZDateTime.from(fire, tz.local);
-      const androidDetails = AndroidNotificationDetails(
-        'lazyclaw_task_reminders',
-        'Task reminders',
-        channelDescription:
-            'Scheduled reminders for your tasks at their due / reminder time',
-        importance: Importance.high,
-        priority: Priority.high,
-        category: AndroidNotificationCategory.reminder,
-        showWhen: true,
-      );
-      const darwinDetails = DarwinNotificationDetails(
-        presentAlert: true,
-        presentBadge: true,
-        presentSound: true,
-      );
-      const details = NotificationDetails(
-        android: androidDetails,
-        iOS: darwinDetails,
-        macOS: darwinDetails,
-      );
-      await _plugin.zonedSchedule(
-        nextNotificationId(),
-        'LazyClaw scheduled test',
-        'This fired on schedule ✅ — scheduled reminders work.',
-        when,
-        details,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        payload: 'chat',
-      );
-      return fire;
+      await sched(AndroidScheduleMode.exactAllowWhileIdle,
+          'This fired on schedule ✅ — scheduled reminders work.');
+      return (fire: fire, exact: true);
     } catch (_) {
-      return null;
+      try {
+        await sched(AndroidScheduleMode.inexactAllowWhileIdle,
+            'This fired on schedule (inexact — may be slightly late).');
+        return (fire: fire, exact: false);
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  /// Open the Android "Alarms & reminders" system screen so the user can allow
+  /// exact alarms (Android 12+ — needed for on-time scheduled reminders).
+  /// No-op where it doesn't apply. Never throws.
+  static Future<void> openExactAlarmSettings() async {
+    try {
+      final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      await androidImpl?.requestExactAlarmsPermission();
+    } catch (_) {
+      // Settings screen unavailable on this version — ignore.
     }
   }
 

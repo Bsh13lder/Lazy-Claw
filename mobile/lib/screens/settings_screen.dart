@@ -801,27 +801,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       );
       return;
     }
-    final exact = await LocalNotifications.canScheduleExact();
-    final fire = await LocalNotifications.scheduleTestReminder();
+    final result = await LocalNotifications.scheduleTestReminder();
     if (!mounted) return;
-    if (fire == null) {
+    if (result == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Could not schedule — try again after enabling notifications.'),
+          content: Text('Could not schedule — enable notifications and try again.'),
         ),
       );
       return;
     }
-    final hh = fire.hour.toString().padLeft(2, '0');
-    final mm = fire.minute.toString().padLeft(2, '0');
+    final hh = result.fire.hour.toString().padLeft(2, '0');
+    final mm = result.fire.minute.toString().padLeft(2, '0');
     final base = 'Reminder scheduled for $hh:$mm (~1 min). Lock your phone and wait.';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        duration: const Duration(seconds: 8),
-        content: Text(exact
+        duration: const Duration(seconds: 10),
+        content: Text(result.exact
             ? base
-            : '$base\n⚠ Exact alarms are OFF — it may be delayed. Grant '
-                '"Alarms & reminders" + Autostart for reliable reminders.'),
+            : '$base\n⚠ Exact alarms are OFF — scheduled inexactly (may be late). '
+                'Tap Fix to allow them; HyperOS also needs Autostart + battery '
+                'No-restrictions.'),
+        action: result.exact
+            ? null
+            : SnackBarAction(
+                label: 'Fix',
+                onPressed: LocalNotifications.openExactAlarmSettings,
+              ),
       ),
     );
   }

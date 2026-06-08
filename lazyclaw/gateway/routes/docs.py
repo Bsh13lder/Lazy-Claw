@@ -12,12 +12,12 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from lazyclaw.config import load_config
-from lazyclaw.docs.docx_io import snapshot_to_docx, snapshot_to_pdf
+from lazyclaw.docs.docx_io import docx_to_snapshot, snapshot_to_docx, snapshot_to_pdf
 from lazyclaw.docs.store import (
     create_doc,
     delete_doc,
@@ -126,6 +126,27 @@ async def delete_doc_route(
     if not ok:
         raise HTTPException(status_code=404, detail="Doc not found")
     return {"status": "deleted", "id": doc_id}
+
+
+@router.post("/import")
+async def import_doc_route(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+):
+    """Import a ``.docx`` upload as a new document (lists/headings preserved)."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    stem = (file.filename or "Imported").rsplit("/", 1)[-1]
+    if stem.lower().endswith(".docx"):
+        stem = stem[:-5]
+    stem = stem or "Imported"
+    try:
+        snap = docx_to_snapshot(data, name=stem)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not parse .docx file")
+    row = await save_doc(_config, user.id, stem, snap)
+    return {"doc": row}
 
 
 @router.get("/{doc_id}/export")

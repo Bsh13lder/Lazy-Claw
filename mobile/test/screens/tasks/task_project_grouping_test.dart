@@ -1,7 +1,7 @@
 // Unit tests for the pure helpers backing the Tasks "Projects" view.
 //
 // Framework-light (no widget pump): bucketing tasks under their project by a
-// case-insensitive category→name match, an Uncategorized catch-all, ordering
+// case-insensitive category→name match, a first-class Inbox catch-all, ordering
 // the group keys, and open/total counts.
 
 import 'package:flutter_test/flutter_test.dart';
@@ -47,8 +47,10 @@ void main() {
 
       final groups = groupTasksByProject(tasks, projects);
 
-      expect(groups.keys, ['Home']);
+      // Home + the always-seeded Inbox bucket.
+      expect(groups.keys, containsAll(['Home', kInboxProjectLabel]));
       expect(groups['Home']!.map((t) => t.id), containsAll(['a', 'b', 'c']));
+      expect(groups[kInboxProjectLabel], isEmpty);
     });
 
     test('seeds an empty group for every project (zero-task projects appear)',
@@ -63,7 +65,7 @@ void main() {
       expect(groups['Work'], isEmpty);
     });
 
-    test('null / blank category → Uncategorized bucket', () {
+    test('null / blank category → Inbox bucket', () {
       final tasks = [
         _task('a', category: null),
         _task('b', category: ''),
@@ -72,9 +74,21 @@ void main() {
 
       final groups = groupTasksByProject(tasks, const []);
 
-      expect(groups.keys, [kUncategorizedProjectLabel]);
-      expect(groups[kUncategorizedProjectLabel]!.map((t) => t.id),
+      // Inbox is the only bucket here (no projects).
+      expect(groups.keys, [kInboxProjectLabel]);
+      expect(groups[kInboxProjectLabel]!.map((t) => t.id),
           containsAll(['a', 'b', 'c']));
+    });
+
+    test('Inbox bucket is always seeded, even with no projectless tasks', () {
+      final groups = groupTasksByProject(
+        [_task('a', category: 'Home')],
+        [_project('p1', 'Home')],
+      );
+
+      // Inbox is present (and empty) so it's a permanent home for loose tasks.
+      expect(groups.containsKey(kInboxProjectLabel), isTrue);
+      expect(groups[kInboxProjectLabel], isEmpty);
     });
 
     test('a category with no matching project gets its own group', () {
@@ -83,34 +97,39 @@ void main() {
 
       final groups = groupTasksByProject(tasks, projects);
 
-      // Home (seeded, empty) + Garden (category-only).
-      expect(groups.keys, containsAll(['Home', 'Garden']));
+      // Home (seeded, empty) + Garden (category-only) + Inbox (seeded, empty).
+      expect(groups.keys, containsAll(['Home', 'Garden', kInboxProjectLabel]));
       expect(groups['Home'], isEmpty);
       expect(groups['Garden']!.map((t) => t.id), ['a']);
     });
   });
 
   group('orderedProjectGroupNames', () {
-    test('projects first (in order), extras sorted, Uncategorized last', () {
+    test('Inbox first, then projects (in order), then extras sorted', () {
       final projects = [_project('p1', 'Work'), _project('p2', 'Home')];
       final groups = {
+        kInboxProjectLabel: <Task>[_task('u')],
         'Home': <Task>[],
         'Work': <Task>[],
         'Zebra': <Task>[_task('z', category: 'Zebra')],
         'Apple': <Task>[_task('a', category: 'Apple')],
-        kUncategorizedProjectLabel: <Task>[_task('u')],
       };
 
       final ordered = orderedProjectGroupNames(projects, groups);
 
-      expect(ordered, ['Work', 'Home', 'Apple', 'Zebra', 'Uncategorized']);
+      expect(ordered, ['Inbox', 'Work', 'Home', 'Apple', 'Zebra']);
     });
 
-    test('omits Uncategorized when there is no such bucket', () {
+    test('omits Inbox when there is no such bucket', () {
       final projects = [_project('p1', 'Home')];
       final groups = {'Home': <Task>[]};
 
       expect(orderedProjectGroupNames(projects, groups), ['Home']);
+    });
+
+    test('Inbox leads even when it is the only bucket', () {
+      final groups = {kInboxProjectLabel: <Task>[_task('u')]};
+      expect(orderedProjectGroupNames(const [], groups), ['Inbox']);
     });
   });
 

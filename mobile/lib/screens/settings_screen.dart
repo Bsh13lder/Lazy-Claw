@@ -1,12 +1,14 @@
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../core/config/server_config.dart';
 import '../core/constants/app_constants.dart';
+import '../core/crash_log.dart';
 import '../core/reminder_lead.dart';
 import '../core/self_update.dart';
 import '../notifications/local_notifications.dart';
@@ -1313,6 +1315,63 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Show the on-device captured uncaught-error log so a "random crash" trace
+  /// can be read + copied to share. Empty = nothing crashed in Dart (a native
+  /// crash or an OS force-kill leaves no Dart trace).
+  Future<void> _showRecentErrors() async {
+    final entries = await CrashLog.readAll();
+    if (!mounted) return;
+    final text = entries.isEmpty
+        ? 'No errors captured. (A native plugin crash or an OS force-kill '
+            'leaves no Dart trace — capture it with: adb logcat.)'
+        : entries.map((e) => e.formatted).join('\n\n');
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.bgSurfaceElevated,
+        title: Text('Recent errors (${entries.length})', style: AppText.title),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: AppText.caption.copyWith(
+                color: AppColors.textSecondary,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          if (entries.isNotEmpty)
+            TextButton(
+              onPressed: () async {
+                await CrashLog.clear();
+                if (ctx.mounted) Navigator.of(ctx).pop();
+              },
+              child: Text('Clear', style: TextStyle(color: AppColors.error)),
+            ),
+          if (entries.isNotEmpty)
+            TextButton(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: text));
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Copied — paste it to share.')),
+                );
+              },
+              child: Text('Copy', style: TextStyle(color: AppColors.accent)),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('Close',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildAboutSection() {
     return LzSection(
       title: 'About',
@@ -1346,6 +1405,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     )
                   : const Icon(Icons.chevron_right,
                       size: 18, color: AppColors.textMuted),
+            ),
+            const Divider(height: 1, color: AppColors.borderSubtle),
+            LzListTile(
+              leading: const Icon(Icons.bug_report_outlined,
+                  size: 20, color: AppColors.textSecondary),
+              title: 'Recent errors',
+              subtitle: 'Captured crash traces — tap to view & copy',
+              onTap: _showRecentErrors,
+              trailing: const Icon(Icons.chevron_right,
+                  size: 18, color: AppColors.textMuted),
             ),
           ],
         ),

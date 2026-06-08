@@ -1,8 +1,11 @@
+import 'dart:ui' show PlatformDispatcher;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart' show FlutterQuillLocalizations;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/actions/app_actions.dart';
 import 'core/actions/deep_link_service.dart';
+import 'core/crash_log.dart';
 import 'core/config/server_config.dart';
 import 'core/router/app_router.dart';
 import 'core/self_update.dart';
@@ -19,6 +22,20 @@ import 'sync/foreground_sync.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Capture uncaught Dart errors so a "random crash" leaves a trace the user can
+  // read + share (Settings → Recent errors) instead of vanishing — AND so an
+  // uncaught async error doesn't hard-crash the whole app. (Native plugin
+  // crashes / OS force-kills bypass these handlers and need `adb logcat`.)
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    CrashLog.record(details.exception, details.stack);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    CrashLog.record(error, stack);
+    return true; // handled — keep the app alive
+  };
+
   final baseUrl = await ServerConfig.load();
 
   // Open the encrypted offline DB up front so the Tasks tab is instant and

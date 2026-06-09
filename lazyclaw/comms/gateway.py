@@ -19,9 +19,42 @@ _DISPATCH = {
 }
 
 
+def _parse_messages(result: object) -> list[Msg]:
+    """Normalize varied per-channel message shapes into a list of Msg objects."""
+    if not isinstance(result, dict):
+        return []
+    raw = result.get("messages") or result.get("items") or result.get("emails") or []
+    out: list[Msg] = []
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        out.append(Msg(
+            sender=str(m.get("sender") or m.get("from") or m.get("author") or ""),
+            text=str(m.get("content") or m.get("body") or m.get("text") or ""),
+            timestamp=str(m.get("timestamp") or m.get("ts") or m.get("date") or ""),
+            is_mine=bool(m.get("is_mine", False)),
+        ))
+    return out
+
+
 class ChannelGateway:
     def __init__(self, mcp_call: McpCall):
         self._call = mcp_call
+
+    async def read_thread(self, channel: str, contact: str, *, limit: int = 30) -> list[Msg]:
+        """Live-read a thread via the per-channel read MCP tool.
+
+        Returns an empty list for unknown channels or any MCP error — never raises.
+        """
+        spec = _DISPATCH.get(channel)
+        if not spec:
+            return []
+        read_tool = spec[0]
+        try:
+            result = await self._call(read_tool, {"contact": contact, "limit": limit})
+        except Exception:
+            return []
+        return _parse_messages(result)
 
     async def send(self, channel: str, contact: str, text: str) -> SendResult:
         spec = _DISPATCH.get(channel)

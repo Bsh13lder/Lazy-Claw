@@ -375,13 +375,13 @@ async def _run_headless(
 
     uvi_config = uvicorn.Config(
         "lazyclaw.gateway.app:app",
-        host="0.0.0.0",
+        host=config.host,
         port=config.port,
         log_level="warning",
     )
     server = uvicorn.Server(uvi_config)
     console.print(
-        f"[green]✓[/green] API on http://0.0.0.0:{config.port}"
+        f"[green]✓[/green] API on http://{config.host}:{config.port}"
     )
 
     telegram = None

@@ -1633,7 +1633,7 @@ class LazyClawApp(App):
             # Uvicorn
             uvi_config = uvicorn.Config(
                 "lazyclaw.gateway.app:app",
-                host="0.0.0.0",
+                host=self._config.host,
                 port=self._config.port,
                 log_level="warning",
             )

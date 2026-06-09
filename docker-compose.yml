@@ -12,9 +12,13 @@ services:
     memswap_limit: 4g
     shm_size: '1gb'
     ports:
-      - "18789:18789"
-      - "6080:6080"    # noVNC remote takeover (browser control from phone)
-      - "8000:8000"    # workspace-mcp OAuth callback (MinimalOAuthServer, stdio mode)
+      # SECURITY: published on the host's localhost only — the gateway is NOT
+      # reachable from your LAN or the internet by default. To use the mobile
+      # app / reach it from another device, change this to "0.0.0.0:18789:18789"
+      # (ideally only behind a reverse proxy + TLS on a trusted network).
+      - "127.0.0.1:18789:18789"
+      - "127.0.0.1:8000:8000"    # workspace-mcp OAuth callback — host-browser only, keep localhost
+      - "6080:6080"    # noVNC remote takeover (browser control from phone — LAN-reachable by design)
     # host.docker.internal lets the container reach services on the host Mac/Linux
     # box (the user's real Brave running with --remote-debugging-port=9222 for
     # the host-browser bridge). Docker Desktop for Mac/Windows sets this

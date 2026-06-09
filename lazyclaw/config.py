@@ -21,6 +21,12 @@ class Config:
     server_secret: str = ""
     database_dir: Path = field(default_factory=lambda: Path("./data"))
     port: int = 18789
+    # Bind address for the HTTP gateway. SECURITY: localhost by default so the
+    # server is NOT reachable from the LAN/internet unless you opt in (set
+    # LAZYCLAW_HOST=0.0.0.0). Auto-set to 0.0.0.0 inside Docker — the container
+    # must bind all interfaces so the host's published port forwards in; real
+    # host exposure is then controlled by docker-compose's `ports:` mapping.
+    host: str = "127.0.0.1"
     brain_model: str = "gpt-5"       # Main agent, team lead, complex fallback
     worker_model: str = "gpt-5-mini"  # Specialists, background jobs, summaries
     cors_origin: str = "http://localhost:3000"
@@ -81,10 +87,23 @@ def load_config() -> Config:
     else:
         worker_model = "gpt-5-mini"
 
+    # Bind address. SECURITY: localhost by default (not reachable off-box).
+    # Inside Docker the container must bind all interfaces so the host's
+    # published port forwards in; the host-side exposure is controlled by
+    # docker-compose's `ports:` mapping. An explicit LAZYCLAW_HOST always wins.
+    explicit_host = os.getenv("LAZYCLAW_HOST")
+    if explicit_host:
+        host = explicit_host.strip()
+    elif Path("/.dockerenv").exists():
+        host = "0.0.0.0"  # noqa: S104 — intentional: container needs all-ifaces; host publish gates exposure
+    else:
+        host = "127.0.0.1"
+
     return Config(
         server_secret=os.getenv("SERVER_SECRET", ""),
         database_dir=Path(os.getenv("DATABASE_DIR", "./data")),
         port=int(os.getenv("PORT", "18789")),
+        host=host,
         brain_model=brain_model,
         worker_model=worker_model,
         cors_origin=os.getenv("CORS_ORIGIN", "http://localhost:3000"),

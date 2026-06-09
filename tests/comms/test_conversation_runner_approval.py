@@ -82,3 +82,14 @@ async def test_on_approval_send_failure_fails(config, user_id):
          patch.object(cr, "deliver", new=AsyncMock()):
         updated = await cr.on_approval(config, deps, conv, True)
     assert updated["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_on_approval_no_draft_fails(config, user_id):
+    # awaiting_approval but transcript has NO draft entry
+    conv = await cr.start(config, user_id, channel="whatsapp", contact="+1", goal="g")
+    conv = await cs.update_conversation(config, user_id, conv["id"], status="awaiting_approval", next_poll_at=None)
+    deps = SimpleNamespace(registry=object(), eco_router=None, permission_checker=None)
+    with patch.object(cr, "deliver", new=AsyncMock()):
+        updated = await cr.on_approval(config, deps, conv, True)
+    assert updated["status"] == "failed"

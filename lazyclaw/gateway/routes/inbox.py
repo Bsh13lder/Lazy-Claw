@@ -18,6 +18,7 @@ SkillRegistry so the route is always importable / testable without a live runtim
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -197,7 +198,6 @@ async def reply_to_thread(
 
 def _conversation_deps():
     """Build a minimal deps object for on_approval (only registry is used by the send path)."""
-    from types import SimpleNamespace
     return SimpleNamespace(registry=_get_registry(), eco_router=None, permission_checker=None)
 
 

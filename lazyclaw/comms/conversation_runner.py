@@ -205,8 +205,10 @@ async def on_approval(config: Config, deps: RunnerDeps, conv: dict, approved: bo
     if not approved:
         return await _fail(config, conv, "aborted", error="you cancelled the first message")
     draft = next((t["text"] for t in reversed(conv["transcript"]) if t.get("dir") == "draft"), None)
+    if not draft:
+        return await _fail(config, conv, "failed", error="no draft found in transcript")
     gw = build_gateway(deps.registry, user_id)
-    res = await gw.send(conv["channel"], conv["contact_handle"], draft or "")
+    res = await gw.send(conv["channel"], conv["contact_handle"], draft)
     if not res.ok:
         return await _fail(config, conv, "failed", error=res.error or "send failed")
     return await cs.update_conversation(

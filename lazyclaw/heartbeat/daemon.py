@@ -26,6 +26,7 @@ from lazyclaw.runtime.browser_turn_lock import (
     live_browser_guard,
 )
 from lazyclaw.notifications.dispatch import deliver
+from lazyclaw.comms import conversation_runner, conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -446,6 +447,12 @@ class HeartbeatDaemon:
             await self._sweep_eod_summary()
         except Exception:
             logger.debug("EOD summary sweep failed", exc_info=True)
+
+        # Advance any autonomous channel conversations that are due.
+        try:
+            await self._check_conversations()
+        except Exception:
+            logger.debug("conversation tick sweep failed", exc_info=True)
 
         # Awake mode reconcile — re-assert caffeinate + pmset if they drifted
         # (container restart, post-nap wake, etc.). Cheap HTTP probe; fails
@@ -2618,6 +2625,41 @@ class HeartbeatDaemon:
             logger.info("Persistent browser running (CDP port %d)", port)
         else:
             logger.warning("Failed to launch persistent browser")
+
+    def _conversation_deps(self, user_id: str):
+        """Build a SimpleNamespace of runtime deps for conversation_runner.step.
+
+        The HeartbeatDaemon does not hold a skill registry, eco_router, or
+        permission_checker — those live on the LaneQueue / runtime layer which
+        is not wired into the daemon.  We pass None for all three; the runner's
+        _draft_message / _evaluate_goal / _read_new_contact_messages already
+        guard ``if deps.registry is None`` and short-circuit cleanly.
+
+        DONE_WITH_CONCERNS: for conversations to actually run a messaging
+        specialist in production the daemon would need to be given the registry
+        and eco_router at construction time (see gateway/app.py where those
+        objects are created).  The plumbing is intentionally deferred — the
+        None path is safe and tested.
+        """
+        import types
+        return types.SimpleNamespace(
+            registry=None,
+            eco_router=None,
+            permission_checker=None,
+        )
+
+    async def _check_conversations(self) -> None:
+        """Advance every due autonomous conversation by one step."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        due = await conversation_store.list_due(self._config, now_iso)
+        for conv in due:
+            try:
+                deps = self._conversation_deps(conv["user_id"])
+                await conversation_runner.step(self._config, deps, conv)
+            except Exception:
+                logger.exception(
+                    "conversation step failed for %s", conv.get("id")
+                )
 
     async def _load_heartbeat_md(self) -> str:
         """Load the HEARTBEAT.md personality file content."""

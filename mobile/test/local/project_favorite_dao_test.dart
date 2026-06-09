@@ -49,8 +49,9 @@ void main() {
   setUpAll(() => sqfliteFfiInit());
 
   group('DB schema version', () {
-    test('is bumped to 5 for the project is_favorite column', () {
-      expect(kAppDbVersion, 5);
+    test('is at least 5 so the project is_favorite column exists', () {
+      // >= (not ==) so later schema bumps don't break this guard.
+      expect(kAppDbVersion, greaterThanOrEqualTo(5));
     });
   });
 

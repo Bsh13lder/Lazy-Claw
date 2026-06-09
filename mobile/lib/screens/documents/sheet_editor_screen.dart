@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../local/document_cache_dao.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
@@ -67,10 +69,26 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
   }
 
   Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    final cache = ref.read(documentCacheDaoProvider);
+    // 1. Paint the cached copy instantly (no spinner) if we have one.
+    CachedDoc? cached;
+    if (cache != null) {
+      cached = await cache.getDoc(DocKind.sheets.api, widget.id);
+      if (cached != null && mounted) {
+        setState(() {
+          _sheet = UniverSheet.fromWorkbook(cached!.payload);
+          _loading = false;
+          _error = null;
+        });
+      }
+    }
+    if (cached == null) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    // 2. Revalidate over the network; refresh the view + cache when it lands.
     try {
       final repo = ref.read(documentsRepositoryProvider);
       final detail = await repo.getPayload(DocKind.sheets, widget.id);
@@ -78,13 +96,33 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
       setState(() {
         _sheet = UniverSheet.fromWorkbook(detail.payload);
         _loading = false;
+        _error = null;
       });
+      await _cacheWorkbook(detail.payload, detail.name);
     } catch (_) {
       if (!mounted) return;
-      setState(() {
-        _error = 'Could not open this sheet. Pull to retry.';
-        _loading = false;
-      });
+      // Keep showing the cached copy when offline; only error on a cold miss.
+      if (cached == null) {
+        setState(() {
+          _error = 'Could not open this sheet. Pull to retry.';
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  /// Best-effort write of the current workbook into the on-device cache so the
+  /// next open is instant. Never throws into the editor.
+  Future<void> _cacheWorkbook(Map<String, dynamic> workbook, String name) async {
+    try {
+      await ref.read(documentCacheDaoProvider)?.putDoc(
+            kind: DocKind.sheets.api,
+            id: widget.id,
+            name: name,
+            payloadJson: jsonEncode(workbook),
+          );
+    } catch (_) {
+      // Caching is best-effort.
     }
   }
 
@@ -141,9 +179,11 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
     if (sheet == null) return;
     setState(() => _saving = true);
     try {
+      final workbook = sheet.toWorkbook();
       await ref
           .read(documentsRepositoryProvider)
-          .save(DocKind.sheets, widget.id, widget.name, sheet.toWorkbook());
+          .save(DocKind.sheets, widget.id, widget.name, workbook);
+      await _cacheWorkbook(workbook, widget.name);
       ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
     } catch (_) {
       // Autosave is best-effort; the next edit reschedules another save.
@@ -195,6 +235,7 @@ class _SheetEditorScreenState extends ConsumerState<SheetEditorScreen> {
         }
       });
       if (result.ok && result.snapshot != null) {
+        await _cacheWorkbook(result.snapshot!, widget.name);
         ref.read(documentsListProvider(DocKind.sheets).notifier).refresh();
         _snack(result.summary ?? 'Sheet updated.');
       } else {

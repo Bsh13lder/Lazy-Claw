@@ -90,6 +90,15 @@ class DocMeta {
             ? json['pages'] as int
             : int.tryParse(json['pages']?.toString() ?? ''),
       );
+
+  /// Round-trips through [DocMeta.fromJson] — used to persist the list cache.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        if (createdAt != null) 'created_at': createdAt,
+        if (updatedAt != null) 'updated_at': updatedAt,
+        if (pages != null) 'pages': pages,
+      };
 }
 
 /// A sheet/doc opened for viewing: metadata + its decrypted Univer snapshot.
@@ -205,12 +214,14 @@ class DioDocumentsTransport implements DocumentsTransport {
 
 // ── Repository ───────────────────────────────────────────────────────────────
 
-/// Network-only repository for the encrypted office suite (sheets / docs / pdf).
+/// Network transport for the encrypted office suite (sheets / docs / pdf).
 ///
-/// These files are server-owned and decrypted server-side per request, so —
-/// like Chat and the power surfaces — the Documents tab is online-only (no
-/// offline cache). One facade covers all three kinds; the [DocKind] selects the
-/// `/api/<kind>` prefix and the wrapper keys.
+/// These files are server-owned and decrypted server-side per request. This
+/// repository itself is pure network I/O; an on-device read-through cache
+/// ([DocumentCacheDao], wired at the provider/screen layer) sits in front so a
+/// document paints instantly from disk while this revalidates over the wire.
+/// One facade covers all three kinds; the [DocKind] selects the `/api/<kind>`
+/// prefix and the wrapper keys.
 class DocumentsRepository {
   final DocumentsTransport _t;
   DocumentsRepository(this._t);

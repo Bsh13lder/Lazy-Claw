@@ -2,14 +2,27 @@ import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../local/document_cache_dao.dart';
 import '../repositories/documents_repository.dart';
 import 'auth_provider.dart';
+import 'tasks_provider.dart' show appDatabaseProvider;
 
 // ── Infrastructure ─────────────────────────────────────────────────────────
 
 /// Dio-backed [DocumentsRepository] wired to the shared [ApiClient].
 final documentsRepositoryProvider = Provider<DocumentsRepository>((ref) {
   return DocumentsRepository(DioDocumentsTransport(ref.watch(apiClientProvider)));
+});
+
+/// On-device read-through cache for the office suite. Null when the local DB
+/// isn't available (e.g. provider not overridden in a widget test) so the
+/// Documents tab degrades gracefully to network-only.
+final documentCacheDaoProvider = Provider<DocumentCacheDao?>((ref) {
+  try {
+    return DocumentCacheDao(ref.watch(appDatabaseProvider));
+  } catch (_) {
+    return null;
+  }
 });
 
 // ── List state ─────────────────────────────────────────────────────────────
@@ -48,35 +61,69 @@ class DocumentsListState {
 
 // ── List notifier ──────────────────────────────────────────────────────────
 
-/// Drives one kind's document list — network-first (no offline cache; the
-/// office suite is decrypted server-side per request).
+/// Drives one kind's document list — cache-first (stale-while-revalidate): paint
+/// the on-device cached index instantly, then refresh over the network. The
+/// documents themselves are still server-owned and edited online.
 class DocumentsListNotifier extends StateNotifier<DocumentsListState> {
   final DocumentsRepository _repo;
   final DocKind _kind;
+  final DocumentCacheDao? _cache;
 
-  DocumentsListNotifier(this._repo, this._kind)
-      : super(const DocumentsListState());
+  DocumentsListNotifier(this._repo, this._kind, {DocumentCacheDao? cache})
+      : _cache = cache,
+        super(const DocumentsListState());
 
-  /// Load (or reload) the list with the full-screen loading flag.
+  /// Load: paint the cached index immediately (no spinner), then revalidate.
   Future<void> load() async {
-    state = state.copyWith(isLoading: true, clearError: true);
-    try {
-      final items = await _repo.list(_kind);
-      state = state.copyWith(items: items, isLoading: false);
-    } catch (e) {
-      state = state.copyWith(isLoading: false, error: _friendlyError(e));
+    final cached = await _readCachedList();
+    if (cached != null && cached.isNotEmpty) {
+      state = state.copyWith(items: cached, isLoading: false, clearError: true);
+    } else {
+      state = state.copyWith(isLoading: true, clearError: true);
     }
+    await _revalidate(coldMiss: cached == null || cached.isEmpty);
   }
 
   /// Pull-to-refresh: re-fetch without the full-screen loader so the existing
   /// list stays visible.
   Future<void> refresh() async {
     state = state.copyWith(clearError: true);
+    await _revalidate(coldMiss: false);
+  }
+
+  /// Network revalidation shared by [load] and [refresh]. On failure, keep any
+  /// list already on screen and only surface an error when there's nothing to
+  /// show (a true cold miss).
+  Future<void> _revalidate({required bool coldMiss}) async {
     try {
       final items = await _repo.list(_kind);
-      state = state.copyWith(items: items);
+      state = state.copyWith(items: items, isLoading: false);
+      await _writeCachedList(items);
     } catch (e) {
-      state = state.copyWith(error: _friendlyError(e));
+      if (coldMiss && state.items.isEmpty) {
+        state = state.copyWith(isLoading: false, error: _friendlyError(e));
+      } else {
+        state = state.copyWith(isLoading: false);
+      }
+    }
+  }
+
+  Future<List<DocMeta>?> _readCachedList() async {
+    final cache = _cache;
+    if (cache == null) return null;
+    try {
+      final raw = await cache.getList(_kind.api);
+      return raw?.map(DocMeta.fromJson).toList();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeCachedList(List<DocMeta> items) async {
+    try {
+      await _cache?.putList(_kind.api, items.map((m) => m.toJson()).toList());
+    } catch (_) {
+      // Cache write is best-effort — never let it break the list.
     }
   }
 
@@ -128,15 +175,19 @@ class DocumentsListNotifier extends StateNotifier<DocumentsListState> {
     }
   }
 
-  /// Delete [id] then drop it from the list.
+  /// Delete [id] then drop it from the list (and from the on-device cache).
   Future<void> delete(String id) async {
     state = state.copyWith(deletingId: id, clearError: true);
     try {
       await _repo.delete(_kind, id);
-      state = state.copyWith(
-        items: state.items.where((d) => d.id != id).toList(),
-        clearDeleting: true,
-      );
+      final next = state.items.where((d) => d.id != id).toList();
+      state = state.copyWith(items: next, clearDeleting: true);
+      try {
+        await _cache?.deleteDoc(_kind.api, id);
+        await _cache?.putList(_kind.api, next.map((m) => m.toJson()).toList());
+      } catch (_) {
+        // Cache eviction is best-effort.
+      }
     } catch (e) {
       state = state.copyWith(clearDeleting: true, error: _friendlyError(e));
     }
@@ -160,5 +211,9 @@ class DocumentsListNotifier extends StateNotifier<DocumentsListState> {
 /// independent and alive while the Documents screen is mounted.
 final documentsListProvider = StateNotifierProvider.family<
     DocumentsListNotifier, DocumentsListState, DocKind>((ref, kind) {
-  return DocumentsListNotifier(ref.watch(documentsRepositoryProvider), kind);
+  return DocumentsListNotifier(
+    ref.watch(documentsRepositoryProvider),
+    kind,
+    cache: ref.watch(documentCacheDaoProvider),
+  );
 });

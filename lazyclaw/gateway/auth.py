@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import time as _time
 from collections import defaultdict
@@ -13,7 +14,7 @@ from uuid import uuid4
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from lazyclaw.config import Config, load_config
 from lazyclaw.crypto.key_manager import clear_user_dek, create_user_dek
@@ -406,14 +407,54 @@ class _RateLimiter:
 
 
 _login_limiter = _RateLimiter(max_requests=5, window_seconds=60)
+# Per-username cap so rotating source IPs (a botnet) can't brute-force one
+# account by spreading guesses across many IPs — the per-IP limit misses that.
+_login_username_limiter = _RateLimiter(max_requests=10, window_seconds=3600)
 _register_limiter = _RateLimiter(max_requests=3, window_seconds=3600)
+
+
+# Tiny denylist of the most-guessed passwords. Not exhaustive — the strength
+# check + PBKDF2 + rate limiting are the real defenses; this just rejects the
+# laziest choices that still pass a naive complexity rule (e.g. "Password1!").
+_COMMON_PASSWORDS = frozenset({
+    "password", "password1", "password123", "passw0rd", "password1!",
+    "123456", "12345678", "123456789", "1234567890", "qwerty", "qwerty123",
+    "abc123", "iloveyou", "admin", "administrator", "letmein", "welcome",
+    "welcome1", "monkey", "dragon", "sunshine", "princess", "football",
+    "baseball", "trustno1", "superman", "master", "hello123", "changeme",
+    "lazyclaw", "lazyclaw1",
+})
 
 
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
     display_name: str | None = Field(default=None, max_length=128)
     invite_token: str | None = None
+
+    @field_validator("password")
+    @classmethod
+    def _password_strength(cls, v: str) -> str:
+        """Raise the entropy floor so a stolen hash resists offline cracking.
+
+        One of three independent layers (strength here, PBKDF2 iterations in
+        the KDF, rate limiting at the endpoint). ``min_length=8`` with no
+        complexity is the same weakness class that let OpenClaw accept "a".
+        """
+        if v.lower() in _COMMON_PASSWORDS:
+            raise ValueError("Password is too common — choose a less guessable one.")
+        classes = sum((
+            bool(re.search(r"[a-z]", v)),
+            bool(re.search(r"[A-Z]", v)),
+            bool(re.search(r"\d", v)),
+            bool(re.search(r"[^A-Za-z0-9]", v)),
+        ))
+        if classes < 3:
+            raise ValueError(
+                "Password must mix at least 3 of: lowercase, uppercase, "
+                "digits, symbols."
+            )
+        return v
 
 
 class LoginRequest(BaseModel):
@@ -478,6 +519,8 @@ async def login(body: LoginRequest, request: Request, response: Response):
     client_ip = request.client.host if request.client else "unknown"
     if not _login_limiter.check(client_ip):
         raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+    if not _login_username_limiter.check(body.username.lower()):
+        raise HTTPException(status_code=429, detail="Too many login attempts for this account. Try again later.")
 
     user = await authenticate_user(_config, body.username, body.password)
     if not user:

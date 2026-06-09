@@ -90,7 +90,7 @@ async def get_notifications_since(
 
         {
             "notifications": [
-                {"id", "kind", "title", "body", "created_at"}, ...
+                {"id", "kind", "title", "body", "meta", "created_at"}, ...
             ],
             "now": "<server iso>",   # use as next `since`
         }
@@ -121,7 +121,13 @@ async def get_notifications_since(
         if raw is None:
             return None
         decrypted = decrypt_field(raw, key)
-        return json.loads(decrypted) if decrypted else None
+        if not decrypted:
+            return None
+        try:
+            return json.loads(decrypted)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("notification meta could not be decoded; returning None")
+            return None
 
     notifications = [
         {

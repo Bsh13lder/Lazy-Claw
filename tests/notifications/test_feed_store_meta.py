@@ -60,9 +60,10 @@ async def test_meta_defaults_none(cfg):
 
 async def test_meta_encrypted_at_rest(cfg):
     """meta must be stored as an enc:v1 blob, not plaintext JSON."""
+    user_id = "u1"
     await feed_store.record_notification(
         cfg,
-        "u1",
+        user_id,
         "channel_message",
         "title",
         "body",
@@ -70,8 +71,35 @@ async def test_meta_encrypted_at_rest(cfg):
     )
     async with db_session(cfg) as db:
         cur = await db.execute(
-            "SELECT meta FROM notifications WHERE user_id = 'u1'"
+            "SELECT meta FROM notifications WHERE user_id = ?", (user_id,)
         )
         row = await cur.fetchone()
     assert row is not None
     assert row[0].startswith("enc:"), "meta must be AES-encrypted at rest"
+
+
+async def test_corrupt_meta_returns_none_not_raise(cfg):
+    """get_notifications_since must not raise when stored meta is corrupt/undecodable."""
+    user_id = "u1"
+    rec = await feed_store.record_notification(
+        cfg,
+        user_id,
+        "channel_message",
+        "title",
+        "body",
+        meta={"thread_ref": {"channel": "telegram"}},
+    )
+
+    # Corrupt the stored meta blob with an invalid enc:v1 value.
+    async with db_session(cfg) as db:
+        await db.execute(
+            "UPDATE notifications SET meta = ? WHERE id = ?",
+            ("enc:v1:AAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", rec["id"]),
+        )
+        await db.commit()
+
+    # Must not raise; the item should come back with meta=None.
+    feed = await feed_store.get_notifications_since(cfg, user_id, None)
+    matching = [n for n in feed["notifications"] if n["id"] == rec["id"]]
+    assert len(matching) == 1
+    assert matching[0]["meta"] is None

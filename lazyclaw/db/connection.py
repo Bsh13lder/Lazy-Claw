@@ -293,6 +293,16 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("notifications table migration skipped", exc_info=True)
 
+        # meta: encrypted JSON sidecar for feed entries (thread_ref for
+        # tap-to-open deep links on channel_message notifications).
+        try:
+            cols = await db.execute("PRAGMA table_info(notifications)")
+            names = [r[1] for r in await cols.fetchall()]
+            if "meta" not in names:
+                await db.execute("ALTER TABLE notifications ADD COLUMN meta TEXT")
+        except Exception:
+            logger.debug("notifications.meta migration skipped", exc_info=True)
+
         # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
         # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.
         # Phase G adds chunk-level embeddings + chunk-level BM25.

@@ -76,7 +76,7 @@ async def test_feed_route_returns_raw_changes_shape(cfg):
     assert set(resp.keys()) == {"notifications", "now"}
     assert len(resp["notifications"]) == 1
     item = resp["notifications"][0]
-    assert set(item.keys()) == {"id", "kind", "title", "body", "created_at"}
+    assert set(item.keys()) == {"id", "kind", "title", "body", "meta", "created_at"}
 
 
 async def test_feed_route_since_filter(cfg):

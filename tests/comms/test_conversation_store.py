@@ -80,3 +80,24 @@ async def test_list_due_excludes_future_and_done(config, user_id):
     due = await cs.list_due(config, "2030-01-01T00:00:00+00:00")
     ids = {t["id"] for t in due}
     assert c1["id"] not in ids and c2["id"] not in ids
+
+
+@pytest.mark.asyncio
+async def test_fresh_conversation_not_due(config, user_id):
+    c = await cs.create_conversation(
+        config, user_id, channel="whatsapp", contact_handle="+1",
+        contact_name="A", goal="g",
+    )
+    assert c["next_poll_at"] is None
+    due = await cs.list_due(config, "2030-01-01T00:00:00+00:00")
+    assert all(t["id"] != c["id"] for t in due)
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_unknown_column(config, user_id):
+    c = await cs.create_conversation(
+        config, user_id, channel="whatsapp", contact_handle="+1",
+        contact_name="A", goal="g",
+    )
+    with __import__("pytest").raises(ValueError):
+        await cs.update_conversation(config, user_id, c["id"], bogus_col="x")

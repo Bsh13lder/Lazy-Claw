@@ -13,6 +13,15 @@ from lazyclaw.db.connection import db_session
 # Fields that must be encrypted at rest (including transcript_json)
 _ENC = {"contact_name", "goal", "completion_criteria", "transcript_json", "result", "error"}
 
+# Columns that callers are permitted to pass to update_conversation.
+# Any key NOT in this set raises ValueError — prevents SQL injection via
+# caller-controlled column names.
+_UPDATABLE = frozenset({
+    "channel", "contact_handle", "contact_name", "goal", "completion_criteria",
+    "status", "transcript_json", "iteration", "max_iterations", "poll_interval",
+    "next_poll_at", "expires_at", "result", "error", "approval_id",
+})
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -67,20 +76,21 @@ async def create_conversation(
             "(id,user_id,channel,contact_handle,contact_name,goal,completion_criteria,"
             "status,transcript_json,iteration,max_iterations,poll_interval,next_poll_at,"
             "created_at,last_activity_at,expires_at,result,error,approval_id) "
-            "VALUES (?,?,?,?,?,?,?,'drafting',?,0,?,?,?,?,?,?,NULL,NULL,NULL)",
+            "VALUES (?,?,?,?,?,?,?,'drafting',?,0,?,?,NULL,?,?,?,NULL,NULL,NULL)",
             (
                 cid, user_id, channel, contact_handle,
                 encrypt_field(contact_name, key),
                 encrypt_field(goal, key),
                 encrypt_field(completion_criteria, key),
                 empty_transcript,
-                max_iterations, poll_interval, now,
+                max_iterations, poll_interval,
                 now, now, expires_at,
             ),
         )
         await db.commit()
     result = await get_conversation(config, user_id, cid)
-    assert result is not None  # just inserted
+    if result is None:
+        raise RuntimeError("conversation_tasks insert did not persist")
     return result
 
 
@@ -114,6 +124,10 @@ async def update_conversation(
     current = await get_conversation(config, user_id, cid)
     if current is None:
         return None
+
+    for col in fields:
+        if col not in _UPDATABLE:
+            raise ValueError(f"not an updatable conversation column: {col!r}")
 
     sets: list[str] = []
     params: list = []

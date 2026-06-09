@@ -44,28 +44,32 @@
 
 **LazyClaw is an open-source AI agent that encrypts every byte of your data before it touches disk.** Conversations, memories, skills, API keys, scheduled jobs — all AES-256-GCM encrypted with a key only you hold. The server stores ciphertext and cannot read your data, even if the database is stolen.
 
-Most agent platforms store everything in plaintext. LazyClaw doesn't. It's Python-native (the largest AI ecosystem), MCP-native (client *and* server), runs across your messengers (Telegram, WhatsApp, Instagram, Email — text or voice), and ships a 19-page React control panel.
+Most agent platforms store everything in plaintext. LazyClaw doesn't. It's Python-native (home to the dominant AI/ML ecosystem — PyTorch, Hugging Face, scikit-learn), MCP-native (client *and* server), runs across your messengers (Telegram, WhatsApp, Instagram, Email — text or voice), and ships a React control panel **plus** a native Flutter mobile app.
 
 <p align="center">
-  <strong>~125K LOC</strong> across 381 modules · <strong>247 builtin skills</strong> · <strong>13 bundled MCP servers</strong> · <strong>1,489+ tests</strong> · AES-256-GCM by default
+  <strong>~225K LOC</strong> first-party · <strong>436 Python modules</strong> · <strong>~280 builtin skills</strong> · <strong>13 bundled MCP servers</strong> · <strong>2,450+ tests</strong> · AES-256-GCM by default
 </p>
 
 ## How LazyClaw compares
 
-The defining difference: **your data is encrypted at rest by default.** Across the self-hosted-agent space, that's rare — most projects treat "self-hosted" as a synonym for "private," but plaintext on your disk is still readable by anyone (or any malware) that reaches the disk. [42,000 exposed instances](https://www.bitsight.com/blog/openclaw-ai-security-risks-exposed-instances) of the leading platform were found with no auth and full plaintext access.
+LazyClaw is the **encrypted answer to [OpenClaw](https://openclaw.ai/)** — the viral open-source personal-AI agent (LazyClaw even shares OpenClaw's default port, `18789`). OpenClaw is excellent and far broader on channels, but by its own documentation it stores your memory as **plaintext Markdown on disk** — and in February 2026 security firm BitSight found [more than 30,000 OpenClaw instances exposed online](https://www.bitsight.com/blog/openclaw-ai-security-risks-exposed-instances) with weak-or-no auth and full access to users' keys, files, and conversations.
 
-| | **LazyClaw** | Typical OSS agent |
-|---|---|---|
-| **Data at rest** | 🔐 AES-256-GCM encrypted, per-user key | 📄 Plaintext files / DB |
-| **API keys** | Encrypted vault, AAD-bound to owner | `.env` plaintext |
-| **Account recovery** | BIP-39 12-word phrase | none / reset = data loss |
-| **MCP** | Native client **and** server | client-only (if any) |
-| **Channels** | Telegram native + WhatsApp / Instagram / Email | browser/web only for most |
-| **Built-in second brain** | LazyBrain — encrypted Obsidian-grade PKM | separate app, plaintext |
-| **Cost routing** | 4-mode brain/worker split, $0 local worker option | manual model config |
-| **Language** | Python | mostly TypeScript |
+That's the gap LazyClaw closes. Across the self-hosted-agent space, "self-hosted" is treated as a synonym for "private" — but plaintext on your disk is readable by anyone (or any malware) that reaches it. **LazyClaw encrypts every byte of your content at rest with a key only you hold.**
 
-**Being honest about where we're behind:** LazyClaw is a young, solo-built project. The large incumbents (OpenClaw, Open WebUI, LibreChat, AnythingLLM) beat us today on community size, UI polish, breadth of native channels, and ecosystem. What we offer that they don't is encryption-by-default and a Python-native, MCP-native stack. If your data living in plaintext doesn't bother you, those projects are more mature. If it does, this is built for you.
+| | **LazyClaw** | OpenClaw | Open WebUI | LibreChat | AnythingLLM |
+|---|---|---|---|---|---|
+| **Conversations at rest** | 🔐 AES-256-GCM, per-user key | 📄 plaintext `.md` | 📄 plaintext | 📄 plaintext (Mongo) | 📄 plaintext |
+| **API keys / secrets** | 🔐 encrypted vault, AAD-bound | 📄 plaintext | 📄 plaintext | 🔐 AES-256 (creds only) | 📄 plaintext |
+| **Account recovery** | BIP-39 12-word phrase | — | — | — | — |
+| **MCP** | client **and** server | client | client (via MCPO) | client | client |
+| **Messaging channels** | Telegram native + WhatsApp / Instagram / Email | 25+ channels | — | — | Telegram |
+| **Built-in second brain** | LazyBrain — encrypted Obsidian-grade PKM | plaintext `.md` notes | — | — | — |
+| **Language** | Python | TypeScript | Python / Svelte | TypeScript | JavaScript |
+| **License** | MIT | MIT | BSD-style | MIT | MIT |
+
+<sub>Competitor facts verified against each project's own repo/docs, June 2026. Features and star counts move fast — corrections welcome via Issues.</sub>
+
+**Being honest about where we're behind:** LazyClaw is a young, solo-built project. The large incumbents (OpenClaw, Open WebUI, LibreChat, AnythingLLM) — several with 100K+ stars — beat us today on community size, UI polish, breadth of native channels, and ecosystem maturity. What we offer that they don't is **encryption-by-default** and a Python-native, MCP-native stack. (LibreChat is the closest on privacy — it mandates AES-256 encryption of API keys — but its conversations still sit in plaintext at rest.) If your data living in plaintext doesn't bother you, those projects are more mature. If it does, this is built for you.
 
 ## Quickstart
 
@@ -125,7 +129,7 @@ LazyClaw encrypts **every byte of your content** before it touches disk. The ser
 **Built on standard, well-known primitives — not homemade crypto:**
 
 - **AES-256-GCM** (via Python's `cryptography` / `hazmat`, 96-bit nonce) for all content
-- **PBKDF2-HMAC-SHA256, 600,000 iterations** (OWASP 2024 guidance) for key derivation
+- **PBKDF2-HMAC-SHA256, 600,000 iterations** (current OWASP Password Storage guidance) for key derivation
 - **Envelope encryption** — your per-user data-encryption key (DEK) is itself AES-GCM-wrapped under a server master key that never leaves memory
 - **BIP-39 recovery** — a 12-word mnemonic re-derives your key if you forget your password; the server never stores the plaintext key
 - **AAD-bound credential vault** — API keys are encrypted *and* cryptographically bound to their owner + key name, so a stolen ciphertext can't be replayed under another account
@@ -167,7 +171,7 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
                               ┌──────────────┼──────────────┐
                               ▼              ▼              ▼
                         Skill Registry   Browser (CDP)   MCP Bridge
-                        247 skills       Brave/Chrome    13 MCP servers
+                        ~280 skills      Brave/Chrome    13 MCP servers
                               │              │              │
                               ▼              ▼              ▼
                         Code Sandbox    Shared Profile   External Tools
@@ -178,10 +182,10 @@ User ──→ Channel (Telegram/CLI/API) ──→ Lane Queue (serial per-user)
 
 | Module | Purpose |
 |--------|---------|
-| `gateway/` | FastAPI HTTP + WebSocket entry point (31 route files, 174 endpoints) |
+| `gateway/` | FastAPI HTTP + WebSocket entry point (34 route files, 240 endpoints) |
 | `runtime/` | TAOR agent loop, context builder, tool dispatch, task runner |
 | `queue/` | FIFO serial execution per user |
-| `skills/` | 247 builtin skills — Instruction, Code (sandboxed), Plugin, Survival, Browser templates |
+| `skills/` | ~280 builtin skills — Instruction, Code (sandboxed), Plugin, Survival, Browser templates |
 | `channels/` | Telegram native adapter + WhatsApp/Instagram/Email via MCP |
 | `browser/` | CDP browser control, page reader, site memory, DOM click engine |
 | `computer/` | Native subprocess + remote WebSocket connector |
@@ -200,17 +204,17 @@ Supporting: `llm/` (multi-provider router, ECO mode, Ollama, Claude subscription
 
 | | |
 |---|---|
-| `web/` | React 19 + TypeScript + Vite + Tailwind control panel (19 pages + chat sidebar with live BrowserCanvas) |
+| `web/` | React 19 + TypeScript + Vite + Tailwind control panel (20+ pages + chat sidebar with live BrowserCanvas) |
 | `mobile/` | Flutter (Android/iOS) client — offline-first, premium dark UI, self-served APK |
 
 ## 📱 Mobile App (Flutter)
 
 A native Android/iOS client lives in [`mobile/`](mobile/) — a premium-dark, offline-first companion to the web control panel.
 
-- **6 tabs** — Home dashboard · Chat (live WebSocket streaming, tool-call & approval cards) · Tasks · Money (budgets/expenses) · Notes (LazyBrain, markdown) · Settings.
+- **6 tabs** — Home dashboard · Chat (live WebSocket streaming, tool-call & approval cards) · Tasks (with a **Notes / LazyBrain** segment) · Expenses (budgets + spend) · Docs (encrypted Sheets / Documents / PDF) · Settings.
 - **Power tools** hub — Skills, Vault, Memory, Jobs, Watchers, MCP, Audit (the web's control surfaces, on mobile).
 - **Full control** — switch ECO mode (HYBRID/FULL/CLAUDE/MINIMAX) and permissions from the phone.
-- **Offline-first** — Tasks, Notes, and Budgets work with your computer off: an **encrypted local SQLite (SQLCipher)** cache + an outbox/sync engine (last-write-wins, conflicts logged) that syncs when the backend is reachable again. (The server still holds the master key and decrypts server-side — the device cache is encrypted with its own Keystore key.)
+- **Offline-first** — Tasks, Notes, Budgets, **and Documents** work with your computer off: an **encrypted local SQLite (SQLCipher)** cache + an outbox/sync engine (last-write-wins, conflicts logged) that syncs when the backend is reachable again. Docs use a read-through cache (Univer snapshots + PDF bytes, 64 MB budget with LRU eviction) so your sheets, docs, and PDFs open instantly and survive going offline. (The server still holds the master key and decrypts server-side — the device cache is encrypted with its own Keystore key.)
 - **Design system first** — a shared `lib/ui/` token + component kit (`Lz*`) keeps every screen coherent.
 
 ### Install (sideload — no Play Store)
@@ -228,7 +232,7 @@ The backend serves its own APK:
 
 ### Smart Tool Selection
 
-247 builtin skills + dozens of MCP-bridged tools registered, but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
+~280 builtin skills + dozens of MCP-bridged tools registered, but the agent sends only 4 base tools (search_tools, recall_memories, save_memory, delegate). The LLM discovers additional tools on demand via `search_tools` — no upfront schema bloat. **~95% token savings** vs sending all tool schemas every message.
 
 ### Multi-Agent Delegation
 
@@ -488,7 +492,7 @@ Bot: You have 3 unread messages from Alex, Mom, and the team group...
 
 ## Web UI
 
-React 19 + TypeScript + Vite + Tailwind control panel with **19 pages**, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
+React 19 + TypeScript + Vite + Tailwind control panel with **20+ pages**, a persistent chat sidebar with live BrowserCanvas, and real-time WebSocket streaming:
 
 **Chat** (full-width conversation + collapsible AgentConsole + mic input) · **Overview** · **Activity** · **Code Specialist** (live runs grouped by `project_tag`) · **Replay** · **Audit** · **Skill Hub** · **Skills** · **Templates** · **Watchers** · **Tasks** · **Notes (LazyBrain)** · **Jobs** (cron management) · **MCP** · **Memory** · **Vault** · **Settings** · plus the persistent chat sidebar with live BrowserCanvas on every page.
 
@@ -515,7 +519,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 |-------------|--------|
 | PBKDF2 LRU cache | 420ms → 0ms per message (4+ derivations/msg) |
 | DB connection pool | 14ms → 0.2ms per query |
-| search_tools meta-tool | ~95% token reduction (4 tools upfront vs 247) |
+| search_tools meta-tool | ~95% token reduction (4 tools upfront vs ~280) |
 | Ref-ID browser snapshots | 90-95% reduction on browser output |
 | Tool result pruning | Old results compressed |
 | Fast chat path | Simple messages skip full context build |
@@ -530,7 +534,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] **ECO mode** — HYBRID (Sonnet + local Ollama), FULL, CLAUDE (subscription, $0), MINIMAX (M2.7 Token Plan)
 - [x] **Multi-agent runtime** — in-turn specialists, fire-and-forget subagents, background workers, adversarial Critic
 - [x] **Browser automation** — CDP + shared profiles + DOM click engine + multi-account + per-domain cadence + OCR + checkpoints + saved templates + zero-token canvas
-- [x] **247 builtin skills** discoverable at runtime via search_tools
+- [x] **~280 builtin skills** discoverable at runtime via search_tools
 - [x] **13 bundled MCP servers** + native client/server + remote OAuth flow (Canva, GitHub, Google)
 - [x] **LazyBrain** — encrypted Obsidian-grade PKM with galaxy graph, semantic search, RAG, persistent positions
 - [x] **Goal Executor** — autonomous objectives, batch-asks every input upfront
@@ -539,7 +543,7 @@ Type while the agent works — messages get queued. Double Ctrl+C for force quit
 - [x] **Direct Google Workspace API** (Gmail/Calendar/Drive/Sheets/Docs) — atomic ops, no n8n round-trip
 - [x] **Encrypted office suite** — private Sheets / Docs / PDF, agent-editable; in-editor ✨ AI box ("add a Total column", "add a line with a link") — full NL control, no formulas needed; real `.docx` hyperlinks
 - [x] **Authenticated Bug Bounty toolkit** — forked claude-bug-bounty + 6 NL skills
-- [x] **React Web UI** — 19 pages + chat sidebar + live BrowserCanvas + WebSocket streaming
+- [x] **React Web UI** — 20+ pages + chat sidebar + live BrowserCanvas + WebSocket streaming
 - [x] **Docker + Docker Compose** (Dockerfile, docker-compose.yml, web/Dockerfile, host Brave bridge)
 - [ ] Skill Hub — universal cross-framework skill/MCP registry
 - [ ] More channels (Discord, Signal, SimpleX)

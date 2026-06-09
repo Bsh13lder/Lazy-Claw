@@ -97,7 +97,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 | **Gateway** | `gateway/` | FastAPI HTTP+WS entry point. Session auth, CORS, routing |
 | **Agent Runtime** | `runtime/` | TAOR agent loop, context builder, tool dispatch, task runner, team lead, goal executor |
 | **Lane Queue** | `queue/` | FIFO serial execution per user session |
-| **Skills** | `skills/` | Instruction (NL), Code (sandboxed), Plugin (pip). 37 builtin + 9 survival skills |
+| **Skills** | `skills/` | Instruction (NL), Code (sandboxed), Plugin (pip). ~280 builtin skills (registry.py) incl. survival/bounty/goal/lazybrain/browser sub-packages |
 | **Channels** | `channels/` | Telegram native adapter + WhatsApp/Instagram/Email via MCP servers |
 | **Browser** | `browser/` | CDP-only browser control, JS extractors, site memory, multi-account profiles, per-domain cadence |
 | **Computer** | `computer/` | Native subprocess + WebSocket connector (remote) |

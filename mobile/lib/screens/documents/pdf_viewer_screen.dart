@@ -48,6 +48,22 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
   }
 
   Future<void> _load() async {
+    final cache = ref.read(documentCacheDaoProvider);
+    // PDFs are immutable per id (an edit mints a NEW id), so a cached copy is
+    // always fresh — render it and skip the network entirely (also = offline).
+    if (cache != null) {
+      final cached = await cache.getDoc(DocKind.pdf.api, _pdfId);
+      final cbytes = cached?.bytes;
+      if (cbytes != null && cbytes.isNotEmpty) {
+        if (!mounted) return;
+        _renderBytes(cbytes);
+        setState(() {
+          _loading = false;
+          _error = null;
+        });
+        return;
+      }
+    }
     setState(() {
       _loading = true;
       _error = null;
@@ -56,19 +72,33 @@ class _PdfViewerScreenState extends ConsumerState<PdfViewerScreen> {
       final repo = ref.read(documentsRepositoryProvider);
       final bytes = await repo.getPdfBytes(_pdfId);
       if (!mounted) return;
-      final doc = PdfDocument.openData(Uint8List.fromList(bytes));
-      if (_controller == null) {
-        _controller = PdfControllerPinch(document: doc);
-      } else {
-        _controller!.loadDocument(doc);
-      }
+      _renderBytes(bytes);
       setState(() => _loading = false);
+      try {
+        await cache?.putDoc(
+          kind: DocKind.pdf.api,
+          id: _pdfId,
+          name: widget.name,
+          bytes: bytes,
+        );
+      } catch (_) {
+        // Caching is best-effort.
+      }
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _error = 'Could not open this PDF. Pull to retry.';
         _loading = false;
       });
+    }
+  }
+
+  void _renderBytes(List<int> bytes) {
+    final doc = PdfDocument.openData(Uint8List.fromList(bytes));
+    if (_controller == null) {
+      _controller = PdfControllerPinch(document: doc);
+    } else {
+      _controller!.loadDocument(doc);
     }
   }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
@@ -6,6 +7,7 @@ import 'package:flutter_quill/quill_delta.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+import '../../local/document_cache_dao.dart';
 import '../../providers/documents_provider.dart';
 import '../../repositories/documents_repository.dart';
 import 'doc_ai_box.dart';
@@ -57,23 +59,61 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
   }
 
   Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    final cache = ref.read(documentCacheDaoProvider);
+    // 1. Paint the cached copy instantly (no spinner) if we have one.
+    CachedDoc? cached;
+    if (cache != null) {
+      cached = await cache.getDoc(DocKind.docs.api, widget.id);
+      if (cached != null && mounted) {
+        _basePayload = cached.payload;
+        _installController(deltaFromUniver(cached.payload));
+        setState(() {
+          _loading = false;
+          _error = null;
+        });
+      }
+    }
+    if (cached == null) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    // 2. Revalidate over the network; refresh the view + cache when it lands.
     try {
       final repo = ref.read(documentsRepositoryProvider);
       final detail = await repo.getPayload(DocKind.docs, widget.id);
       if (!mounted) return;
       _basePayload = detail.payload;
       _installController(deltaFromUniver(detail.payload));
-      setState(() => _loading = false);
+      setState(() {
+        _loading = false;
+        _error = null;
+      });
+      await _cachePayload(detail.payload, detail.name);
     } catch (_) {
       if (!mounted) return;
-      setState(() {
-        _error = 'Could not open this document. Pull to retry.';
-        _loading = false;
-      });
+      // Keep showing the cached copy when offline; only error on a cold miss.
+      if (cached == null) {
+        setState(() {
+          _error = 'Could not open this document. Pull to retry.';
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  /// Best-effort write of the current document payload into the on-device cache.
+  Future<void> _cachePayload(Map<String, dynamic> payload, String name) async {
+    try {
+      await ref.read(documentCacheDaoProvider)?.putDoc(
+            kind: DocKind.docs.api,
+            id: widget.id,
+            name: name,
+            payloadJson: jsonEncode(payload),
+          );
+    } catch (_) {
+      // Caching is best-effort.
     }
   }
 
@@ -106,6 +146,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
       await ref
           .read(documentsRepositoryProvider)
           .save(DocKind.docs, widget.id, widget.name, payload);
+      await _cachePayload(payload, widget.name);
       ref.read(documentsListProvider(DocKind.docs).notifier).refresh();
     } catch (_) {
       // Best-effort autosave; the next edit reschedules.
@@ -159,6 +200,7 @@ class _DocEditorScreenState extends ConsumerState<DocEditorScreen> {
         }
       });
       if (result.ok && result.snapshot != null) {
+        await _cachePayload(result.snapshot!, widget.name);
         ref.read(documentsListProvider(DocKind.docs).notifier).refresh();
         _snack(result.summary ?? 'Document updated.');
       } else {

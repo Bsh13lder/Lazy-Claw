@@ -20,7 +20,12 @@ import 'uuid.dart';
 ///     user-chosen per-project accent round-trips through the budgets sync.
 /// v5: adds `project_cache.is_favorite` (INTEGER 0/1, default 0) so a pinned
 ///     project surfaces in the Home "Favorites" section + round-trips sync.
-const int kAppDbVersion = 5;
+/// v6: adds `document_cache` + `document_list_cache` — a read-through cache for
+///     the office suite (Sheets/Docs/PDF) so a document opens INSTANTLY from
+///     disk while it revalidates over the network (stale-while-revalidate).
+///     This is a CACHE, not a sync source: no outbox, no dirty/tombstone — the
+///     files stay server-owned and edits still go straight to the server.
+const int kAppDbVersion = 6;
 
 /// Secure-storage key under which the 256-bit DB passphrase is kept.
 const String kDbKeyName = 'lazyclaw_db_key';
@@ -156,6 +161,32 @@ const List<String> kAppDbSchema = [
     last_synced_at TEXT
   )
   ''',
+  // Read-through cache for the office suite. `payload` holds the Univer JSON
+  // for sheets/docs; `bytes` holds raw PDF bytes. `byte_size` drives LRU
+  // eviction; `cached_at` is the recency key. PK is (kind, id) because ids are
+  // only unique within a kind.
+  '''
+  CREATE TABLE IF NOT EXISTS document_cache (
+    kind TEXT NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT,
+    payload TEXT,
+    bytes BLOB,
+    updated_at TEXT,
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    cached_at TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
+  )
+  ''',
+  // Cached document index per kind (the list view), so the list paints
+  // instantly while it refreshes. One row per kind; `items` is a JSON array.
+  '''
+  CREATE TABLE IF NOT EXISTS document_list_cache (
+    kind TEXT PRIMARY KEY,
+    items TEXT NOT NULL,
+    cached_at TEXT NOT NULL
+  )
+  ''',
 ];
 
 /// Apply the full schema to [db]. Used by both [openAppDb] (via onCreate) and
@@ -204,6 +235,12 @@ Future<void> migrateAppDb(Database db, int oldVersion, int newVersion) async {
         'ALTER TABLE project_cache ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0',
       );
     }
+  }
+  // v5 → v6: add the document read-through cache tables. Both are
+  // CREATE TABLE IF NOT EXISTS, so re-running the schema only creates the two
+  // new tables and leaves existing data untouched.
+  if (oldVersion < 6) {
+    await createAppDbSchema(db);
   }
 }
 

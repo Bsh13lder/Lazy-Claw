@@ -95,6 +95,18 @@ class NotificationsFeedService {
   }
 }
 
+/// Pure routing helper: maps a notification [kind] to the local-notification
+/// payload string that determines which channel is used and where a tap
+/// deep-links.
+///
+/// - `'channel_message'` → `'inbox'`  (opens the Inbox list)
+/// - everything else     → `'chat'`   (opens the chat tab)
+///
+/// Kept as a top-level pure function with no I/O so the routing decision is
+/// trivially unit-testable without touching the real plugin.
+String notificationPayloadForKind(String kind) =>
+    kind == 'channel_message' ? 'inbox' : 'chat';
+
 /// Dispatch a single [ServerNotification] to the appropriate local-notification
 /// channel based on its [kind].
 ///
@@ -104,10 +116,11 @@ class NotificationsFeedService {
 Future<void> _showFeedEntry(ServerNotification n) {
   final title = n.title.isNotEmpty ? n.title : 'LazyClaw';
   final body = n.body.isNotEmpty ? n.body : n.title;
-  if (n.kind == 'channel_message') {
+  final payload = notificationPayloadForKind(n.kind);
+  if (payload == 'inbox') {
     return LocalNotifications.showInboxNotification(title, body);
   }
-  return LocalNotifications.showServerNotification(title, body, payload: 'chat');
+  return LocalNotifications.showServerNotification(title, body, payload: payload);
 }
 
 /// Single reusable entry point wired to the real repository, prefs cursor, and

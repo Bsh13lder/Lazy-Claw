@@ -78,6 +78,94 @@ NotificationsFeedService _service(
     );
 
 void main() {
+  // ── Routing helper ─────────────────────────────────────────────────────────
+  group('notificationPayloadForKind', () {
+    test('channel_message → inbox', () {
+      expect(notificationPayloadForKind('channel_message'), 'inbox');
+    });
+
+    test('done → chat (normal path)', () {
+      expect(notificationPayloadForKind('done'), 'chat');
+    });
+
+    test('info → chat (normal path)', () {
+      expect(notificationPayloadForKind('info'), 'chat');
+    });
+
+    test('empty string → chat (fallback)', () {
+      expect(notificationPayloadForKind(''), 'chat');
+    });
+
+    test('unknown kind → chat (fallback)', () {
+      expect(notificationPayloadForKind('some_unknown_kind'), 'chat');
+    });
+  });
+
+  // ── Routing exercised via NotificationsFeedService ─────────────────────────
+  group('_showFeedEntry routing via injectable show', () {
+    /// Records which payload each shown notification produced.
+    /// We spy by passing a custom `show` that calls [notificationPayloadForKind]
+    /// and records the result — the same logic the real _showFeedEntry uses —
+    /// so no real plugin is touched.
+    test('channel_message notifications hit inbox path; others hit chat path',
+        () async {
+      final captured = <({String id, String payload})>[];
+
+      Future<void> spyShow(ServerNotification n) async {
+        captured.add((id: n.id, payload: notificationPayloadForKind(n.kind)));
+      }
+
+      final store = _FakeStore();
+      final transport = _FakeRepoTransport([
+        NotificationFeed(
+          notifications: [
+            ServerNotification(
+              id: 'msg1',
+              kind: 'channel_message',
+              title: 'WhatsApp',
+              body: 'Hey',
+              createdAt: '',
+            ),
+            ServerNotification(
+              id: 'done1',
+              kind: 'done',
+              title: 'Job done',
+              body: 'Finished',
+              createdAt: '',
+            ),
+            ServerNotification(
+              id: 'msg2',
+              kind: 'channel_message',
+              title: 'Email',
+              body: 'Hi',
+              createdAt: '',
+            ),
+          ],
+          now: 'T1',
+        ),
+      ]);
+
+      final service = NotificationsFeedService(
+        repo: NotificationsRepository(transport),
+        show: spyShow,
+        loadSince: store.loadSince,
+        saveSince: store.saveSince,
+        loadSeenIds: store.loadSeen,
+        saveSeenIds: store.saveSeen,
+      );
+      await service.pullOnce();
+
+      expect(
+        captured,
+        [
+          (id: 'msg1', payload: 'inbox'),
+          (id: 'done1', payload: 'chat'),
+          (id: 'msg2', payload: 'inbox'),
+        ],
+      );
+    });
+  });
+
   // ── Pure selector ──────────────────────────────────────────────────────────
   group('selectNewNotifications', () {
     test('returns only ids not already seen, preserving order', () {

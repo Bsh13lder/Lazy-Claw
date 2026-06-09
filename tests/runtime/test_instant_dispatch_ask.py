@@ -45,6 +45,12 @@ def test_no_match_plain_message():
     assert match_ask_conversation("ask me later") is None  # no channel anchor
 
 
+def test_pronoun_who_is_rejected():
+    """Pronouns captured as 'who' must not trigger a conversation — Fix 1."""
+    assert match_ask_conversation("ask me on whatsapp to remind John") is None
+    assert match_ask_conversation("ask them via email about it") is None
+
+
 # ── start_ask_conversation ────────────────────────────────────────────────────
 
 def _make_contact(name: str, whatsapp_jid: str | None = None, handles: dict | None = None):

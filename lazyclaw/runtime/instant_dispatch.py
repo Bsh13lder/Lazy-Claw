@@ -252,13 +252,22 @@ _ASK_RE = re.compile(
 )
 
 # Maps channel name → handle key in ContactRecord.handles (and fallback helper).
+# Note: "whatsapp" is NOT listed here because _extract_handle has an early-return
+# for whatsapp that calls record.whatsapp_jid() directly.
 _CHANNEL_HANDLE_KEY: dict[str, str] = {
     "email": "email",
     "instagram": "instagram",
     "telegram": "telegram",
-    # whatsapp uses whatsapp_jid or derived from phone; handled via method.
-    "whatsapp": "whatsapp",
 }
+
+# Pronouns and generic nouns that are never valid contact names. If the regex
+# captures one of these as ``who``, the "ask" pattern matched a phrase like
+# "ask me on whatsapp to remind John" or "ask them via email about it" — not a
+# real conversation target. Returning None lets the brain handle it normally.
+_ASK_WHO_DENYLIST = frozenset({
+    "me", "them", "us", "you", "it", "him", "her",
+    "someone", "anyone", "somebody", "anybody",
+})
 
 
 def match_ask_conversation(text: str) -> dict | None:
@@ -267,12 +276,18 @@ def match_ask_conversation(text: str) -> dict | None:
     Returns a dict with keys ``who``, ``channel`` (lowercased), ``goal``,
     or None if the text doesn't match the pattern.  The ``on/via <channel>``
     anchor prevents false-triggers on plain chat messages.
+
+    Returns None when ``who`` is a pronoun/non-name (e.g. "me", "them") to
+    avoid triggering a bogus conversation against a non-contact.
     """
     m = _ASK_RE.search(text or "")
     if not m:
         return None
+    who = m.group("who").strip()
+    if who.lower() in _ASK_WHO_DENYLIST:
+        return None
     return {
-        "who": m.group("who").strip(),
+        "who": who,
         "channel": m.group("channel").lower(),
         "goal": m.group("goal").strip(),
     }

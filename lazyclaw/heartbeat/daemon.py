@@ -25,6 +25,7 @@ from lazyclaw.runtime.browser_turn_lock import (
     WATCHER_POLL_LOCK_TIMEOUT_S,
     live_browser_guard,
 )
+from lazyclaw.notifications.dispatch import deliver
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,27 @@ class HeartbeatDaemon:
         # Last day we fired the end-of-day progress summary per user.
         # Same pattern as _last_journal_seed_iso — bounds tick cost.
         self._last_eod_summary_iso: dict[str, str] = {}
+
+    async def _notify_channel_message(
+        self,
+        user_id: str,
+        *,
+        service: str,
+        notification: str,
+        contact: str | None = None,
+        inline_keyboard: list[list[dict]] | None = None,
+    ) -> None:
+        """Deliver a new-channel-message alert via the unified funnel so it
+        reaches the in-app feed (Flutter), plus Telegram if enabled."""
+        await deliver(
+            self._config,
+            user_id,
+            title=notification.lstrip("\U0001f514 ").strip()[:80] or "New message",
+            body=notification,
+            kind="channel_message",
+            inline_keyboard=inline_keyboard,
+            thread_ref={"channel": service, "contact": contact} if contact else None,
+        )
 
     async def start(self) -> None:
         """Launch the heartbeat loop as a background task."""
@@ -1458,17 +1480,16 @@ class HeartbeatDaemon:
                     _notified = new_ctx.get("_notified_items", [])
                     _service = ctx.get("service", "")
                     keyboard = self._build_watcher_keyboard(job_id, _service, _notified)
-                    if self._config and (self._telegram_push or True):
-                        try:
-                            from lazyclaw.notifications.push import push_telegram
-                            await push_telegram(
-                                self._config,
-                                f"\U0001f514 {notification}",
-                                parse_mode=None,
-                                inline_keyboard=keyboard,
-                            )
-                        except Exception as exc:
-                            logger.warning("Telegram watcher push failed: %s", exc)
+                    try:
+                        await self._notify_channel_message(
+                            user_id,
+                            service=_service,
+                            notification=notification,
+                            contact=new_ctx.get("_latest_contact"),
+                            inline_keyboard=keyboard,
+                        )
+                    except Exception as exc:
+                        logger.warning("Channel message notify failed: %s", exc)
 
                     # Store last notification so agent has context for user replies
                     # Extract chat names from notified items for instant mute

@@ -17,6 +17,8 @@ import '../../screens/more/vault_screen.dart';
 import '../../screens/more/watchers_screen.dart';
 import '../../screens/activity/activity_screen.dart';
 import '../../screens/documents/documents_screen.dart';
+import '../../screens/inbox/inbox_screen.dart';
+import '../../screens/inbox/inbox_thread_screen.dart';
 import '../../screens/register_screen.dart';
 import '../../screens/settings_screen.dart';
 import '../../screens/tasks_screen.dart';
@@ -42,6 +44,7 @@ class _AuthListenable extends ChangeNotifier {
 const _tabs = <_Tab>[
   _Tab(path: '/home', label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home),
   _Tab(path: '/chat', label: 'Chat', icon: Icons.chat_bubble_outline, activeIcon: Icons.chat_bubble),
+  _Tab(path: '/inbox', label: 'Inbox', icon: Icons.mail_outline, activeIcon: Icons.mail),
   _Tab(path: '/tasks', label: 'Tasks', icon: Icons.check_circle_outline, activeIcon: Icons.check_circle),
   _Tab(path: '/expenses', label: 'Expenses', icon: Icons.account_balance_wallet_outlined, activeIcon: Icons.account_balance_wallet),
   _Tab(path: '/documents', label: 'Docs', icon: Icons.folder_outlined, activeIcon: Icons.folder),
@@ -153,6 +156,23 @@ final routerProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: '/chat',
                 builder: (ctx, _) => const ChatScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/inbox',
+                builder: (ctx, _) => const InboxScreen(),
+                routes: [
+                  GoRoute(
+                    path: ':threadId',
+                    builder: (ctx, state) => InboxThreadScreen(
+                      threadId: state.pathParameters['threadId']!,
+                      title: state.uri.queryParameters['title'] ?? 'Conversation',
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

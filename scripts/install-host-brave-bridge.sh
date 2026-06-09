@@ -5,8 +5,10 @@
 #
 #   BRAVE_CDP_PORT       — port Brave listens on for CDP (default 9222, what
 #                          the container expects via host.docker.internal)
-#   BRAVE_CDP_ADDRESS    — bind address (default 0.0.0.0 so the container can
-#                          reach it via the Docker bridge interface)
+#   BRAVE_CDP_ADDRESS    — bind address (default 127.0.0.1, loopback only).
+#                          Chromium 126+ enforces loopback regardless of this
+#                          flag; Docker container access goes through
+#                          scripts/cdp-forwarder.py, NOT a 0.0.0.0 Brave bind.
 #   BRAVE_PROFILE_DIR    — Brave profile dir (default: user's regular Brave
 #                          profile so existing Upwork/etc. logins are reused)
 #   BRAVE_ORIGIN_TOKEN   — shared --remote-allow-origins token. Preserved
@@ -170,7 +172,7 @@ load_or_default() {
 }
 
 BRAVE_CDP_PORT="$(load_or_default BRAVE_CDP_PORT 9222)"
-BRAVE_CDP_ADDRESS="$(load_or_default BRAVE_CDP_ADDRESS 0.0.0.0)"
+BRAVE_CDP_ADDRESS="$(load_or_default BRAVE_CDP_ADDRESS 127.0.0.1)"
 BRAVE_PROFILE_DIR="$(load_or_default BRAVE_PROFILE_DIR "$DEFAULT_PROFILE_DIR")"
 HEAL_ENDPOINT_PORT="$(load_or_default HEAL_ENDPOINT_PORT 9224)"
 

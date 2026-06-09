@@ -8,20 +8,23 @@ live session access to the agent.
 
 Security model
 --------------
-CDP exposes arbitrary-file-read and remote-code-execution-class primitives.
-To reach the host Brave from the container, Brave has to bind the debugging
-port to something the container can reach via ``host.docker.internal`` —
-i.e. not just ``127.0.0.1``. That's a real risk on untrusted networks.
+CDP exposes arbitrary-file-read and remote-code-execution-class primitives,
+and CDP has NO authentication of its own — anyone who can reach the debugging
+port controls the browser (cookies, live sessions, file read). So we bind it to
+``127.0.0.1`` (loopback only); it must never be reachable from the LAN/internet.
 
-Mitigation: we use Chromium's ``--remote-allow-origins=http://lazyclaw-<token>``
-flag. The container sends the matching ``Origin`` header on the WS handshake;
-clients that reach the port without the token are rejected by Chromium at
-the protocol layer. The token is generated per user, stored encrypted in
-``users.settings``, and only ever travels inside the Docker network.
+Modern Chromium/Brave (126+) enforces this regardless — it ignores
+``--remote-debugging-address=0.0.0.0`` and always binds loopback. To reach the
+host browser from the Docker container (which connects via
+``host.docker.internal``, a non-loopback gateway IP), use the localhost-only
+``scripts/cdp-forwarder.py`` rather than exposing Brave on all interfaces.
 
-This is not bulletproof (a network-capable attacker can still enumerate the
-``/json/version`` HTTP endpoint), but it blocks the most common LAN-JS
-drive-by. Users get a clear warning on first setup.
+Defense in depth: we still pass ``--remote-allow-origins=http://lazyclaw-<token>``
+so the container sends a matching ``Origin`` header on the WS handshake and
+clients without the token are rejected by Chromium at the protocol layer. The
+token is generated per user, stored encrypted in ``users.settings``, and only
+ever travels inside the Docker network. (The ``/json/version`` HTTP endpoint is
+NOT Origin-gated — another reason loopback-only binding is the real control.)
 
 The probe / launch-command utilities live here so the skill, HTTP route,
 Telegram handler, and CDP backend all use the same seam.
@@ -175,16 +178,20 @@ def build_launch_command(token: str, browser: str = "brave") -> str:
         app_name = "Brave Browser"
         profile_dir = "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
 
-    # NB: --remote-debugging-address=0.0.0.0 is required so the container can
-    # reach the port via host.docker.internal. --remote-allow-origins scopes
-    # WS access to the token-bearing origin.
+    # SECURITY: bind CDP to loopback only. CDP has NO authentication, so a
+    # network-reachable debugging port = full browser + cookie takeover. Modern
+    # Chromium/Brave (126+) already ignores --remote-debugging-address=0.0.0.0
+    # and forces 127.0.0.1, so this is both correct and explicit (and protects
+    # the rare older Chromium). Docker containers reach host Brave through
+    # scripts/cdp-forwarder.py (host-only), NOT a 0.0.0.0 Brave bind.
+    # --remote-allow-origins still scopes WS access to the token-bearing origin.
     return (
         "# 1. Quit Brave completely first (Cmd+Q, not just close the window)\n"
         f'osascript -e \'quit app "{app_name}"\' 2>/dev/null; sleep 1\n'
         "# 2. Relaunch with remote debugging enabled (your tabs/logins stay)\n"
         f'open -na "{app_name}" --args \\\n'
         "  --remote-debugging-port=9222 \\\n"
-        "  --remote-debugging-address=0.0.0.0 \\\n"
+        "  --remote-debugging-address=127.0.0.1 \\\n"
         f"  --remote-allow-origins={origin} \\\n"
         f'  --user-data-dir="{profile_dir}"'
     )

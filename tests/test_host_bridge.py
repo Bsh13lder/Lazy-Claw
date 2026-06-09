@@ -26,7 +26,7 @@ def test_build_launch_command_contains_critical_flags():
     token = "TOK"
     cmd = host_bridge.build_launch_command(token)
     assert "--remote-debugging-port=9222" in cmd
-    assert "--remote-debugging-address=0.0.0.0" in cmd
+    assert "--remote-debugging-address=127.0.0.1" in cmd
     assert "--remote-allow-origins=http://lazyclaw-TOK" in cmd
     assert "Cmd+Q" in cmd  # quit-first reminder
     assert "Brave Browser" in cmd  # default app

@@ -239,3 +239,120 @@ async def try_instant_dispatch(
             route_description=route.description,
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# NL "ask <who> on <channel> <goal>" → autonomous conversation task
+# ---------------------------------------------------------------------------
+
+_ASK_RE = re.compile(
+    r"\bask\s+(?P<who>[A-Za-z0-9 ._-]+?)\s+(?:on|via|through)\s+"
+    r"(?P<channel>whatsapp|email|instagram|telegram)\b[,:]?\s+(?P<goal>.+)",
+    re.IGNORECASE,
+)
+
+# Maps channel name → handle key in ContactRecord.handles (and fallback helper).
+_CHANNEL_HANDLE_KEY: dict[str, str] = {
+    "email": "email",
+    "instagram": "instagram",
+    "telegram": "telegram",
+    # whatsapp uses whatsapp_jid or derived from phone; handled via method.
+    "whatsapp": "whatsapp",
+}
+
+
+def match_ask_conversation(text: str) -> dict | None:
+    """Detect 'ask <who> on <channel> <goal>' → conversation task params.
+
+    Returns a dict with keys ``who``, ``channel`` (lowercased), ``goal``,
+    or None if the text doesn't match the pattern.  The ``on/via <channel>``
+    anchor prevents false-triggers on plain chat messages.
+    """
+    m = _ASK_RE.search(text or "")
+    if not m:
+        return None
+    return {
+        "who": m.group("who").strip(),
+        "channel": m.group("channel").lower(),
+        "goal": m.group("goal").strip(),
+    }
+
+
+def _extract_handle(record, channel: str) -> str | None:
+    """Extract the best channel handle from a ContactRecord for the given channel."""
+    if channel == "whatsapp":
+        return record.whatsapp_jid()
+    key = _CHANNEL_HANDLE_KEY.get(channel)
+    if key is None:
+        return None
+    val = record.handles.get(key)
+    if not val:
+        return None
+    # handles may store a list (e.g. email: [...]) or a scalar string
+    if isinstance(val, list):
+        return val[0] if val else None
+    return str(val)
+
+
+async def start_ask_conversation(config, user_id: str, match: dict) -> str:
+    """Resolve contact + start an autonomous conversation for an ask-trigger match.
+
+    ``match`` is the dict returned by :func:`match_ask_conversation`.
+
+    Returns a short user-facing confirmation string.  Never raises — any
+    failure (contact not found, conversation_runner import error, etc.) is
+    caught and surfaced as a human-readable error string so the caller can
+    return it directly rather than falling through to the brain.
+    """
+    who: str = match["who"]
+    channel: str = match["channel"]
+    goal: str = match["goal"]
+
+    # Resolve the contact handle via the unified contact store.
+    contact_handle: str = who  # graceful fallback: raw name string
+    try:
+        from lazyclaw.contacts.store import find_contact as _find_contact
+
+        matches = await _find_contact(config, user_id, who, limit=1)
+        if matches:
+            resolved = _extract_handle(matches[0], channel)
+            if resolved:
+                contact_handle = resolved
+            else:
+                # Contact found but no handle for this channel; use canonical name.
+                contact_handle = matches[0].name_canonical or who
+    except Exception:
+        logger.warning(
+            "start_ask_conversation: find_contact failed for %r — using raw name",
+            who, exc_info=True,
+        )
+
+    # Import conversation_runner lazily to avoid import-order surprises.
+    try:
+        from lazyclaw.comms import conversation_runner
+    except ImportError:
+        logger.warning("start_ask_conversation: conversation_runner not importable")
+        return (
+            f"Sorry, the conversation runner isn't available yet. "
+            f"I can't start the conversation with {who} on {channel} right now."
+        )
+
+    try:
+        await conversation_runner.start(
+            config,
+            user_id,
+            channel=channel,
+            contact=contact_handle,
+            goal=goal,
+        )
+    except Exception:
+        logger.exception(
+            "start_ask_conversation: conversation_runner.start raised for who=%r channel=%r",
+            who, channel,
+        )
+        return (
+            f"Something went wrong scheduling the conversation with {who} on {channel}. "
+            f"Please try again or start it manually."
+        )
+
+    return f"On it — I'll ask {who} on {channel} and report back."

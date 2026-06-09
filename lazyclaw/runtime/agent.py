@@ -1864,7 +1864,7 @@ class Agent:
         from lazyclaw.runtime.browser_turn_lock import browser_turn_scope
 
         role = browser_role or _infer_browser_role(message)
-        async with browser_turn_scope(role):
+        async with browser_turn_scope(role, user_id=user_id):
             return await self._process_message_inner(
                 user_id,
                 message,

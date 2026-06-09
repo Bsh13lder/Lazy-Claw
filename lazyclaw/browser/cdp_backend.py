@@ -131,6 +131,12 @@ class CDPBackend:
         # :meth:`set_cadence_overrides`).
         self._current_domain: str | None = None
         self._cadence_overrides: dict[str, dict[str, float]] = {}
+        # Target ids this backend CREATED via ``_create_tab`` (cold-connect with
+        # zero open page tabs). Consumed once by ``_pick_preferred_tab`` to mark
+        # the pinned agent tab as agent-CREATED (→ eligible for turn-end
+        # auto-close) rather than BORROWED. A fresh empty-Brave tab is the
+        # agent's own — closing it at turn-end is safe. (2026-06-09)
+        self._just_created_ids: set[str] = set()
 
     def set_user_id(self, user_id: str | None) -> None:
         """Late-bind user_id (used by the shared singleton when user switches)."""
@@ -358,26 +364,127 @@ class CDPBackend:
         return result
 
     def _pick_preferred_tab(self, page_tabs: list["CDPTab"]) -> "CDPTab":
-        """Pick the MRU page tab, EXCLUDING tabs owned by a background lane.
+        """Pick the foreground agent's tab, EXCLUDING tabs a background lane owns.
 
-        Background watcher/cron lanes park on their OWN tabs (tracked in
-        :mod:`lazyclaw.browser.owned_tabs`). The visible/foreground backend
-        must never land on one of those — otherwise the foreground would
-        steal or clobber a background tab and we'd be back to the single-tab
-        collision. Falls back to the raw MRU tab when EVERY open tab is owned
-        (correctness over isolation — the foreground still works). A
-        background backend transiently runs this too, but it immediately
+        Resolution order (VISIBLE/foreground lane):
+          1. REUSE the pinned ``"agent"`` tab if it's still open AND a
+             watcher/background lane hasn't since claimed it — so the agent
+             always returns to ITS tab turn-to-turn and a stray tab can't
+             shuffle it onto the wrong page (the reported collision).
+          2. Otherwise pick the MRU page tab, excluding any tab a background
+             watcher/cron lane owns (those are parked tabs — the foreground
+             must never clobber one). This freshly-picked tab is a BORROWED
+             user tab; the caller pins it as the ``"agent"`` tab WITHOUT marking
+             it created, so the turn-end auto-close never closes a tab the agent
+             didn't create.
+          3. Fall back to the raw MRU tab when EVERY open tab is owned
+             (correctness over isolation — the foreground still works).
+
+        A background backend transiently runs this too, but it immediately
         re-pins to its own tab via ``switch_tab`` after connecting, so the
-        transient pick is harmless.
+        transient pick is harmless — the agent-pin path below is gated to the
+        visible lane only.
         """
         from lazyclaw.browser import owned_tabs
 
+        # Tabs a watcher/background lane owns (EXCLUDING the agent key). The
+        # foreground must never land on one of these — even if it was once the
+        # agent tab and a watcher has since claimed the same id.
+        bg_anchored = owned_tabs.anchored_target_ids_excluding_agent(
+            self._user_id
+        )
+
+        # 1. Reuse the pinned agent tab when it's still open and NOT now
+        # background/watcher-owned (visible lane only).
+        if self._is_visible_lane():
+            agent_id = owned_tabs.get_owned(self._user_id, owned_tabs.AGENT_KEY)
+            if agent_id and agent_id not in bg_anchored:
+                for t in page_tabs:
+                    if t.id == agent_id:
+                        return t
+
         anchored = owned_tabs.all_owned_target_ids(self._user_id)
+        picked: "CDPTab" | None = None
         if anchored:
             preferred = [t for t in page_tabs if t.id not in anchored]
             if preferred:
-                return preferred[0]
-        return page_tabs[0]
+                picked = preferred[0]
+        if picked is None:
+            picked = page_tabs[0]
+
+        # 2. Pin the freshly-picked tab as the agent's tab (visible lane only,
+        # and only when it isn't a background-owned tab — the all-owned
+        # fallback above can land on one). A tab this backend just CREATED
+        # (cold-connect on an empty Brave) is agent-created → closeable; any
+        # pre-existing tab is BORROWED → never auto-closed.
+        if self._is_visible_lane() and picked.id not in anchored:
+            created = picked.id in self._just_created_ids
+            self._just_created_ids.discard(picked.id)
+            self._pin_agent_tab(picked.id, created=created)
+        return picked
+
+    def _is_visible_lane(self) -> bool:
+        """True when this backend is serving the VISIBLE/foreground lane.
+
+        The pinning logic must apply ONLY to the foreground agent — never to a
+        background watcher/cron backend (which owns its own parked tab). We're
+        permissive on import failure (treat as visible) so a missing import
+        can never break tab selection; the background backend re-pins itself
+        anyway via ``switch_tab``.
+        """
+        try:
+            from lazyclaw.runtime.browser_turn_lock import (
+                BACKGROUND_ROLE,
+                current_browser_role,
+            )
+        except Exception:
+            return True
+        return current_browser_role() != BACKGROUND_ROLE
+
+    def _pin_agent_tab(self, target_id: str, *, created: bool) -> None:
+        """Register *target_id* as the foreground agent's owned tab.
+
+        ``created=True`` records it as agent-CREATED (eligible for turn-end
+        auto-close); ``created=False`` marks it BORROWED (never auto-closed).
+        Best-effort — a registry hiccup must never break tab selection.
+        """
+        try:
+            from lazyclaw.browser import owned_tabs
+
+            owned_tabs.set_owned(self._user_id, owned_tabs.AGENT_KEY, target_id)
+            if created:
+                owned_tabs.mark_agent_created(self._user_id, target_id)
+        except Exception:
+            logger.debug("pin agent tab failed (non-fatal)", exc_info=True)
+
+    # Cosmetic prefix so ``tabs()`` (and the user's tab strip) shows which tab
+    # the foreground agent is driving. Idempotent — never double-prefixes.
+    _AGENT_TITLE_MARKER = "lazyclaw-agent"
+
+    async def _mark_agent_tab_title(self) -> None:
+        """Best-effort: prefix the visible agent tab's title with a marker.
+
+        Purely cosmetic so ``tabs()`` surfaces the agent's tab. ALWAYS wrapped
+        — a title-set failure must NEVER fail the action. No-op off the visible
+        lane or when no connection is live.
+        """
+        if not self._is_visible_lane() or self._conn is None:
+            return
+        try:
+            marker = _js_str(self._AGENT_TITLE_MARKER)
+            expr = (
+                "(() => { const m = " + marker + "; "
+                "const t = document.title || ''; "
+                "if (!t.startsWith('[' + m + '] ')) "
+                "{ document.title = '[' + m + '] ' + t; } "
+                "return document.title; })()"
+            )
+            await self._conn.send(
+                "Runtime.evaluate",
+                {"expression": expr, "returnByValue": True},
+            )
+        except Exception:
+            logger.debug("agent tab title marker failed (non-fatal)", exc_info=True)
 
     async def _ensure_connected(
         self, target_url: str | None = None,
@@ -815,6 +922,10 @@ class CDPBackend:
                     )
                     if tab.ws_url:
                         logger.info("Created new tab: %s", tab.url)
+                        if tab.id:
+                            # Mark as agent-created so the visible-lane pin in
+                            # _pick_preferred_tab records it created (closeable).
+                            self._just_created_ids.add(tab.id)
                         return [tab]
         except Exception as exc:
             logger.warning("Failed to create tab: %s", exc)
@@ -873,6 +984,8 @@ class CDPBackend:
         # Update the active domain so subsequent click/type/scroll calls
         # sample from the right per-domain cadence profile.
         self._set_current_domain_from_url(final_url)
+        # Cosmetic agent-tab marker (visible lane only, fully best-effort).
+        await self._mark_agent_tab_title()
         if not self._user_id:
             return
         try:

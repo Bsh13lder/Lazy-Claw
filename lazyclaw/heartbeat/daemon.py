@@ -564,9 +564,16 @@ class HeartbeatDaemon:
             # (watcher parked tabs + bg brain-turn tab). Protects them even on
             # a non-anchored host, and stops white-screen refresh from yanking
             # a pinned background backend onto a foreign tab.
+            #
+            # IMPORTANT (2026-06-09): the FOREGROUND agent's tab (owned_tabs key
+            # "agent") is EXCLUDED here — it must stay idle-reapable so a tab the
+            # turn-end auto-close missed (crash/timeout/degrade) still gets
+            # cleaned up. Watcher (watch:*) + background tabs stay anchored.
             from lazyclaw.browser import owned_tabs as _owned_tabs
 
-            anchored_target_ids = _owned_tabs.all_owned_target_ids(user_id)
+            anchored_target_ids = _owned_tabs.anchored_target_ids_excluding_agent(
+                user_id
+            )
 
             backend = self._get_primary_cdp(user_id)
             try:

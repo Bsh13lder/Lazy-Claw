@@ -5,6 +5,12 @@ import 'package:lazyclaw_mobile/comms/inbox_models.dart';
 import 'package:lazyclaw_mobile/comms/inbox_providers.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Icon size for the per-channel leading icon.
+/// Matches [AppSpacing.xl] (24 pt) so it aligns with the kit's icon scale.
+const _kChannelIconSize = AppSpacing.xl;
+
 // ── Channel filter chips ───────────────────────────────────────────────────────
 
 /// Ordered list of channel filter entries: (key, label, icon).
@@ -45,7 +51,6 @@ class InboxScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final filter = ref.watch(inboxChannelFilterProvider);
     final threadsAsync = ref.watch(inboxThreadsProvider);
 
     return LzScaffold(
@@ -53,7 +58,7 @@ class InboxScreen extends ConsumerWidget {
       body: Column(
         children: [
           // ── Channel filter chip row ──────────────────────────────────────
-          _ChannelFilterRow(activeFilter: filter, ref: ref),
+          const _ChannelFilterRow(),
           // ── Threads list / loading / empty ───────────────────────────────
           Expanded(
             child: threadsAsync.when(
@@ -63,10 +68,10 @@ class InboxScreen extends ConsumerWidget {
                   color: AppColors.accent,
                 ),
               ),
-              error: (e, st) => const LzEmptyState(
+              error: (e, st) => LzErrorState(
                 icon: Icons.error_outline,
-                title: 'Could not load messages',
-                hint: 'Check your connection and try again.',
+                message: 'Could not load messages. Check your connection and try again.',
+                onRetry: () => ref.invalidate(inboxThreadsProvider),
               ),
               data: (threads) {
                 if (threads.isEmpty) {
@@ -96,19 +101,19 @@ class InboxScreen extends ConsumerWidget {
 
 // ── Channel filter row ─────────────────────────────────────────────────────────
 
-class _ChannelFilterRow extends StatelessWidget {
-  const _ChannelFilterRow({
-    required this.activeFilter,
-    required this.ref,
-  });
-
-  final String? activeFilter;
-  final WidgetRef ref;
+/// Scrollable row of [LzChip] filters, one per channel.
+///
+/// Converted to [ConsumerWidget] so it owns its own [ref] — never receives
+/// [WidgetRef] as a constructor argument.
+class _ChannelFilterRow extends ConsumerWidget {
+  const _ChannelFilterRow();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeFilter = ref.watch(inboxChannelFilterProvider);
+
     return SizedBox(
-      height: 48,
+      height: AppSpacing.xxxl, // 48 pt — matches the chip bar spec
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: AppSpacing.listH,
@@ -149,7 +154,7 @@ class _ThreadRow extends StatelessWidget {
         LzListTile(
           leading: Icon(
             _channelIcon(thread.channel),
-            size: 22,
+            size: _kChannelIconSize,
             color: AppColors.accent,
           ),
           title: displayName,
@@ -161,9 +166,8 @@ class _ThreadRow extends StatelessWidget {
         ),
         const Divider(
           height: 1,
-          thickness: 1,
           color: AppColors.borderSubtle,
-          indent: AppSpacing.lg + 22 + AppSpacing.md, // align under title
+          indent: AppSpacing.lg + _kChannelIconSize + AppSpacing.md, // align under title
         ),
       ],
     );

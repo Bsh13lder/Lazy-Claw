@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
-from lazyclaw.comms.models import Contact, Msg, SendResult
+from lazyclaw.comms.models import Msg, SendResult
 
 McpCall = Callable[[str, dict], Awaitable[dict]]
 
@@ -57,6 +57,7 @@ class ChannelGateway:
         return _parse_messages(result)
 
     async def send(self, channel: str, contact: str, text: str) -> SendResult:
+        """Dispatch a send via the per-channel MCP tool. Never raises; returns ok=False on any failure."""
         spec = _DISPATCH.get(channel)
         if not spec:
             return SendResult(ok=False, error=f"unsupported channel: {channel}")

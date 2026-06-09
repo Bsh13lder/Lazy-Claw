@@ -27,3 +27,13 @@ async def test_read_thread_unknown_channel_empty():
 async def test_read_thread_swallows_errors():
     gw = ChannelGateway(mcp_call=AsyncMock(side_effect=RuntimeError("down")))
     assert await gw.read_thread("whatsapp", "+1") == []
+
+def test_parse_messages_alt_list_keys():
+    from lazyclaw.comms.gateway import _parse_messages
+    assert _parse_messages({"items": [{"sender": "A", "content": "x", "timestamp": "1"}]})[0].sender == "A"
+    assert _parse_messages({"emails": [{"from": "B", "body": "y", "date": "2"}]})[0].text == "y"
+
+def test_parse_messages_skips_non_dict_items():
+    from lazyclaw.comms.gateway import _parse_messages
+    msgs = _parse_messages({"messages": ["garbage", {"sender": "A", "content": "ok", "timestamp": "1"}]})
+    assert len(msgs) == 1 and msgs[0].text == "ok"

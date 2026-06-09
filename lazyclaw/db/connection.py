@@ -340,6 +340,49 @@ async def init_db(config: Config) -> None:
         except Exception:
             logger.debug("channel_threads migration skipped", exc_info=True)
 
+        # ── Autonomous conversation runner: task state ────────────────────
+        # One row per in-flight or completed conversation task. The agent
+        # runs a back-and-forth exchange on behalf of the user (e.g. "ask
+        # Alice on WhatsApp if she's coming") and writes outcomes here.
+        #
+        # Plaintext columns (needed for scheduler / status queries):
+        #   id, user_id, channel, contact_handle, status, iteration,
+        #   max_iterations, poll_interval, next_poll_at, created_at,
+        #   last_activity_at, expires_at, approval_id
+        # Encrypted columns (user-visible content, AES-256-GCM):
+        #   contact_name, goal, completion_criteria, transcript_json,
+        #   result, error
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS conversation_tasks ("
+                "id TEXT PRIMARY KEY, "
+                "user_id TEXT NOT NULL REFERENCES users(id), "
+                "channel TEXT NOT NULL, "
+                "contact_handle TEXT NOT NULL, "
+                "contact_name TEXT, "
+                "goal TEXT, "
+                "completion_criteria TEXT, "
+                "status TEXT NOT NULL DEFAULT 'drafting', "
+                "transcript_json TEXT, "
+                "iteration INTEGER NOT NULL DEFAULT 0, "
+                "max_iterations INTEGER NOT NULL DEFAULT 20, "
+                "poll_interval INTEGER NOT NULL DEFAULT 60, "
+                "next_poll_at TEXT, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "last_activity_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "expires_at TEXT, "
+                "result TEXT, "
+                "error TEXT, "
+                "approval_id TEXT"
+                ")"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversation_due "
+                "ON conversation_tasks(status, next_poll_at)"
+            )
+        except Exception:
+            logger.debug("conversation_tasks migration skipped", exc_info=True)
+
         # ── LazyBrain Phase A: hybrid retrieval substrate ──────────────────
         # Phase F adds BM25 (FTS5) ranking that fuses with cosine via RRF.
         # Phase G adds chunk-level embeddings + chunk-level BM25.

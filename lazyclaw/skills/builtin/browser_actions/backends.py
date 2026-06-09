@@ -12,6 +12,8 @@ import re
 import sys
 from pathlib import Path
 
+from lazyclaw.browser.ssrf_guard import is_metadata_or_linklocal
+
 logger = logging.getLogger(__name__)
 
 # Shared VISIBLE CDP backend instance (lazy-initialized, on-demand). This is
@@ -37,15 +39,27 @@ SHORTCUTS = {
 
 
 def query_to_url(query: str) -> str:
-    """Convert a target like 'twitter' to a URL."""
+    """Convert a target like 'twitter' to a URL.
+
+    SSRF guard: user-driven navigation may legitimately reach localhost / a LAN
+    dev server, so we only refuse cloud-metadata + link-local targets here (a
+    page that redirects the agent to ``169.254.169.254`` is an attack, not a
+    user intent). Returns "" on a blocked target — callers treat empty as
+    "could not navigate".
+    """
     q = query.lower().strip()
     if q in SHORTCUTS:
         return SHORTCUTS[q]
     if q.startswith("http"):
-        return q
-    if "." in q:
-        return f"https://{q}"
-    return ""
+        url = q
+    elif "." in q:
+        url = f"https://{q}"
+    else:
+        return ""
+    if is_metadata_or_linklocal(url):
+        logger.warning("query_to_url refused SSRF target: %s", url)
+        return ""
+    return url
 
 
 # ── CDP backend helpers ─────────────────────────────────────────────────

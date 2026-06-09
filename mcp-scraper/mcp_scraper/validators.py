@@ -4,10 +4,51 @@ This module provides validation functions for various input parameters
 used in MCP tools.
 """
 
+import ipaddress
 import re
+import socket
 from pathlib import Path
 from typing import Any, Optional, Dict, List
 from urllib.parse import urlparse, unquote
+
+
+# Cloud metadata services + always-local names. Reaching the metadata endpoint
+# leaks instance IAM credentials; loopback/private reach internal services.
+_SSRF_METADATA_HOSTS = frozenset(
+    {"169.254.169.254", "metadata.google.internal", "100.100.100.200"}
+)
+_SSRF_BLOCKED_HOSTNAMES = frozenset({"localhost", "host.docker.internal"})
+
+
+def is_blocked_ssrf_target(url: str) -> bool:
+    """Block SSRF targets: loopback / private / link-local / reserved /
+    multicast IPs + cloud-metadata endpoints. Resolves DNS so a public-looking
+    name that maps to a private IP (DNS rebinding) is still caught.
+
+    A crawl is content-triggered (the agent was told to fetch this URL), so an
+    internal address is never legitimate — this is a hard block. Self-contained
+    (no lazyclaw import) because mcp-scraper runs as a separate subprocess.
+    """
+    host = (urlparse(url).hostname or "").strip().lower().rstrip('.')
+    if not host:
+        return False
+    if host in _SSRF_BLOCKED_HOSTNAMES or host in _SSRF_METADATA_HOSTS:
+        return True
+    try:
+        candidates = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            candidates = [
+                ipaddress.ip_address(str(info[4][0]))
+                for info in socket.getaddrinfo(host, None)
+            ]
+        except (socket.gaierror, OSError):
+            return False  # unresolvable can't be fetched anyway
+    return any(
+        ip.is_loopback or ip.is_private or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        for ip in candidates
+    )
 
 
 def is_file_uri(url: str) -> bool:
@@ -86,6 +127,18 @@ def validate_url(url: str) -> Optional[Dict[str, Any]]:
                 f"or an absolute file path. Got: {url_stripped[:50]}"
             ),
             "error_code": "invalid_url_scheme"
+        }
+
+    # SSRF guard: refuse internal/loopback/private/link-local + cloud-metadata
+    # targets. A crawl is content-triggered, so an internal address is an attack.
+    if is_blocked_ssrf_target(url_stripped):
+        return {
+            "success": False,
+            "error": (
+                "Blocked: this URL resolves to an internal, loopback, or cloud-"
+                f"metadata address (SSRF protection). Got: {url_stripped[:50]}"
+            ),
+            "error_code": "blocked_ssrf_target"
         }
 
     return None

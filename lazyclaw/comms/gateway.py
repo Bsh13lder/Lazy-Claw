@@ -13,11 +13,59 @@ from lazyclaw.runtime.tool_result import ToolResult
 
 McpCall = Callable[[str, dict], Awaitable[dict]]
 
-# channel -> (read_tool, send_tool, send_recipient_key, send_text_key)
-_DISPATCH = {
-    "whatsapp": ("whatsapp_read", "whatsapp_send", "to", "message"),
-    "email": ("email_search", "email_send", "to", "body"),
-    "instagram": ("instagram_read_dms", "instagram_send_dm", "to_username", "message"),
+# channel -> (read_tool, send_tool, send_recipient_key, send_text_key, extra_send_args, extra_read_args)
+#
+# extra_send_args / extra_read_args are static kwargs merged into every call.
+# They supply required params the thin gateway can't derive from the caller
+# (e.g. Instagram's "username" = the logged-in account, email's sender "email"
+# and a default "subject").  The MCP servers fill in auth details from their
+# own configuration when the param names the configured account identity.
+#
+# Per-channel status (see gateway.py docstring):
+#   whatsapp  — WORKS          (to + message / contact + limit)
+#   email     — WORKS-WITH-DEFAULTS (sender email="" → server uses the single
+#               configured account when omitted or empty; subject defaults to
+#               "(no subject)" for v1 thin sends; search uses query=contact)
+#   instagram — WORKS-WITH-DEFAULTS (username="" → server uses the configured
+#               account; read maps contact → unread_only=False + no username
+#               filter; send maps to_username + message)
+#
+# Telegram is intentionally absent: the bot can't read arbitrary contact DMs
+# and is handled separately via TelegramNotifier.
+_DISPATCH: dict[str, tuple[str, str, str, str, dict, dict]] = {
+    "whatsapp": (
+        "whatsapp_read",
+        "whatsapp_send",
+        "to",
+        "message",
+        {},                         # no extra send args
+        {},                         # no extra read args (contact + limit passed dynamically)
+    ),
+    "email": (
+        "email_search",
+        "email_send",
+        "to",
+        "body",
+        # email_send requires "email" (sender account) + "subject".
+        # Passing email="" lets the server fall back to its single configured
+        # account; "(no subject)" is an acceptable v1 default.
+        {"email": "", "subject": "(no subject)"},
+        # email_search requires "email" (account) + "query".
+        # contact name is passed as "query" dynamically; email="" → server default.
+        {"email": ""},
+    ),
+    "instagram": (
+        "instagram_read_dms",
+        "instagram_send_dm",
+        "to_username",
+        "message",
+        # instagram_send_dm requires "username" (your logged-in account).
+        # Passing username="" lets the server use its configured account.
+        {"username": ""},
+        # instagram_read_dms requires "username" (your logged-in account).
+        # Passing username="" → server default; unread_only=False to see all threads.
+        {"username": "", "unread_only": False},
+    ),
 }
 
 
@@ -51,9 +99,10 @@ class ChannelGateway:
         spec = _DISPATCH.get(channel)
         if not spec:
             return []
-        read_tool = spec[0]
+        read_tool, _, _, _, _, extra_read = spec
+        args = {**extra_read, "contact": contact, "limit": limit}
         try:
-            result = await self._call(read_tool, {"contact": contact, "limit": limit})
+            result = await self._call(read_tool, args)
         except Exception:
             return []
         return _parse_messages(result)
@@ -63,9 +112,10 @@ class ChannelGateway:
         spec = _DISPATCH.get(channel)
         if not spec:
             return SendResult(ok=False, error=f"unsupported channel: {channel}")
-        _, send_tool, rcpt_key, text_key = spec
+        _, send_tool, rcpt_key, text_key, extra_send, _ = spec
+        args = {**extra_send, rcpt_key: contact, text_key: text}
         try:
-            result = await self._call(send_tool, {rcpt_key: contact, text_key: text})
+            result = await self._call(send_tool, args)
         except Exception as e:  # surface as typed failure, never raise
             return SendResult(ok=False, error=str(e))
         status = str(result.get("status", "")).lower() if isinstance(result, dict) else ""
@@ -77,9 +127,17 @@ class ChannelGateway:
 def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
     """Factory that wires ChannelGateway.mcp_call to the real skill registry.
 
-    The skill registry stores BaseSkill instances retrieved by name:
-        skill = registry.get(tool_name)   # returns BaseSkill | None
-        result: str | ToolResult = await skill.execute(user_id, args)
+    MCP-bridged tools are registered under a prefixed name (``mcp_<server_id>_<tool>``),
+    not their bare tool name.  Resolution order:
+
+    1. ``registry.get_mcp_by_base_name(tool_name)`` — finds an MCP skill whose
+       registered name ends with ``_<tool_name>`` (the canonical resolver for all
+       6 channel tools which are MCP-bridged).
+    2. ``registry.get(tool_name)``                   — exact-match fallback for any
+       native (non-MCP) skill registered under its bare name.
+
+    If both return None the call returns a clean error dict so ChannelGateway
+    surfaces ``SendResult(ok=False)`` / ``[]`` rather than raising.
 
     BaseSkill.execute returns a JSON string or ToolResult; this adapter
     normalises the result to a dict so ChannelGateway's .get("status") /
@@ -87,7 +145,14 @@ def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
     """
 
     async def _call(tool_name: str, args: dict) -> dict:
-        skill = registry.get(tool_name)  # type: ignore[attr-defined]
+        # Try MCP-prefixed resolution first (e.g. mcp_whatsapp_whatsapp_send).
+        skill = None
+        getter = getattr(registry, "get_mcp_by_base_name", None)
+        if getter is not None:
+            skill = getter(tool_name)
+        # Fall back to exact-match for native (non-MCP) skills.
+        if skill is None:
+            skill = registry.get(tool_name)  # type: ignore[attr-defined]
         if skill is None:
             return {"status": "error", "error": f"unknown tool: {tool_name}"}
         result = await skill.execute(user_id, args)

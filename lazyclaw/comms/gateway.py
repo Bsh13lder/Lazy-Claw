@@ -69,6 +69,31 @@ _DISPATCH: dict[str, tuple[str, str, str, str, dict, dict]] = {
 }
 
 
+# Substrings (case-insensitive) that indicate an MCP tool returned an error
+# string rather than a real success payload.  Used in build_gateway._call to
+# prevent wrapping error text as {"status": "sent"}.
+_ERROR_MARKERS: tuple[str, ...] = (
+    "not configured",
+    "no session",
+    "setup first",
+    "failed",
+    "could not",
+    "error",
+)
+
+
+def _looks_like_error(text: str) -> bool:
+    """Return True when a plain string result looks like a failure message.
+
+    Matches any of ``_ERROR_MARKERS`` case-insensitively.  Used to stop
+    error strings from being wrapped as ``{"status": "sent", "raw": text}``,
+    which would cause ``ChannelGateway.send`` to report ``ok=True`` for a
+    no-op send (the silent failure mode described in comms ADR).
+    """
+    lower = text.lower()
+    return any(marker in lower for marker in _ERROR_MARKERS)
+
+
 def _parse_messages(result: object) -> list[Msg]:
     """Normalize varied per-channel message shapes into a list of Msg objects."""
     if not isinstance(result, dict):
@@ -169,6 +194,10 @@ def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
             parsed = json.loads(text)
             return parsed if isinstance(parsed, dict) else {"status": "sent", "raw": text}
         except Exception:
+            # Plain non-JSON string — detect known error patterns before
+            # wrapping as a success so callers don't get a false ok=True.
+            if _looks_like_error(text):
+                return {"status": "error", "error": text}
             return {"status": "sent", "raw": text}
 
     return ChannelGateway(mcp_call=_call)

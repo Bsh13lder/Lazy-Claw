@@ -30,6 +30,32 @@ def _get_session(username: str) -> InstagramSessionManager | None:
     return _sessions.get(username)
 
 
+def _resolve_username(username: str | None) -> str | None:
+    """Resolve an Instagram account username with single-session fallback.
+
+    - If ``username`` is a non-empty string and has an active session: return it.
+    - If ``username`` is non-empty but NOT in ``_sessions``: return None.
+    - If ``username`` is empty/None: fall back to the sole configured session
+      when exactly one is logged in, else None.
+    """
+    if username:
+        return username if username in _sessions else None
+    # No account specified → use the sole active session, if exactly one.
+    return next(iter(_sessions)) if len(_sessions) == 1 else None
+
+
+def _username_error(requested: str | None) -> list[TextContent]:
+    """Return a human-readable error TextContent when session resolution fails."""
+    if not requested:
+        if not _sessions:
+            return _text("No Instagram session found. Run instagram_setup first.")
+        return _text(
+            "Multiple Instagram accounts configured — please specify 'username'. "
+            f"Accounts: {', '.join(_sessions)}"
+        )
+    return _text(f"No session for @{requested}. Run instagram_setup first.")
+
+
 def _text(content: str) -> list[TextContent]:
     """Wrap a string into the MCP TextContent response format."""
     return [TextContent(type="text", text=content)]
@@ -98,28 +124,48 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="instagram_read_dms",
-            description="Read Instagram direct messages.",
+            description=(
+                "Read Instagram direct messages. "
+                "If only one account is logged in, 'username' may be omitted."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "username": {"type": "string", "description": "Instagram username (your account)"},
+                    "username": {
+                        "type": "string",
+                        "description": (
+                            "Instagram username (your account). "
+                            "May be omitted when exactly one session is active."
+                        ),
+                        "default": "",
+                    },
                     "limit": {"type": "integer", "description": "Max threads to fetch", "default": 10},
                     "unread_only": {"type": "boolean", "description": "Only unread threads", "default": True},
                 },
-                "required": ["username"],
+                "required": [],
             },
         ),
         Tool(
             name="instagram_send_dm",
-            description="Send an Instagram direct message to a user.",
+            description=(
+                "Send an Instagram direct message to a user. "
+                "If only one account is logged in, 'username' (sender) may be omitted."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "username": {"type": "string", "description": "Instagram username (your account)"},
+                    "username": {
+                        "type": "string",
+                        "description": (
+                            "Instagram username (your account, the sender). "
+                            "May be omitted when exactly one session is active."
+                        ),
+                        "default": "",
+                    },
                     "to_username": {"type": "string", "description": "Recipient Instagram username"},
                     "message": {"type": "string", "description": "Message text to send"},
                 },
-                "required": ["username", "to_username", "message"],
+                "required": ["to_username", "message"],
             },
         ),
         Tool(
@@ -484,7 +530,9 @@ async def _handle_status(args: dict) -> list[TextContent]:
 
 
 async def _handle_read_dms(args: dict) -> list[TextContent]:
-    username = args["username"]
+    username = _resolve_username(args.get("username") or None)
+    if username is None:
+        return _username_error(args.get("username") or None)
     limit = int(args.get("limit", 10))
     unread_only = args.get("unread_only", True)
 
@@ -508,7 +556,9 @@ async def _handle_read_dms(args: dict) -> list[TextContent]:
 
 
 async def _handle_send_dm(args: dict) -> list[TextContent]:
-    username = args["username"]
+    username = _resolve_username(args.get("username") or None)
+    if username is None:
+        return _username_error(args.get("username") or None)
     to_username = args["to_username"]
     message = args["message"]
 

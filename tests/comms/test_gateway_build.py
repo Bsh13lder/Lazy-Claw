@@ -266,3 +266,39 @@ async def test_tool_result_non_json_text_wraps_gracefully():
     gw = build_gateway(registry, user_id="u9")
     res = await gw.send("whatsapp", "+9", "plain text result")
     assert res.ok is True
+
+
+# ---------------------------------------------------------------------------
+# _looks_like_error unit tests
+# ---------------------------------------------------------------------------
+
+from lazyclaw.comms.gateway import _looks_like_error
+
+
+@pytest.mark.parametrize("text", [
+    "Account  not configured. Use email_setup first.",
+    "Account myemail@example.com not configured. Use email_setup first.",
+    "No Instagram session found. Run instagram_setup first.",
+    "no session for @alice",
+    "Setup first to continue.",
+    "Operation failed: invalid credentials",
+    "Could not connect to SMTP server",
+    "Error in email_send: timeout",
+    "ERROR: missing credentials",
+])
+def test_looks_like_error_detects_failures(text: str):
+    """Known MCP error strings are correctly identified as failures."""
+    assert _looks_like_error(text) is True, f"Should detect error in: {text!r}"
+
+
+@pytest.mark.parametrize("text", [
+    "Sent to user@example.com",
+    "Sent to @targetuser",
+    "Connected as alice@example.com",
+    "Deleted 3 email(s) from INBOX.",
+    "Labeled 5 email(s) with 'Financial' (kept in INBOX).",
+    "Message delivered.",
+])
+def test_looks_like_error_passes_genuine_success(text: str):
+    """Genuine success strings are NOT flagged as errors."""
+    assert _looks_like_error(text) is False, f"Should NOT detect error in: {text!r}"

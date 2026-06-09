@@ -56,6 +56,9 @@ async def test_step_drafting_requests_approval(config, user_id):
         updated = await cr.step(config, deps, conv)
     assert updated["status"] == "awaiting_approval"
     assert updated["approval_id"] == "appr-1"
+    assert updated["next_poll_at"] is None  # heartbeat must not re-pick while awaiting
+    assert updated["transcript"][-1]["dir"] == "draft"
+    assert updated["transcript"][-1]["text"] == "Hi! Quick q…"
 
 
 @pytest.mark.asyncio
@@ -63,6 +66,8 @@ async def test_step_drafting_fail_when_no_draft(config, user_id):
     conv = await cr.start(config, user_id, channel="whatsapp", contact="+1", goal="g")
     deps = SimpleNamespace(registry=None, eco_router=None, permission_checker=None)
     with patch.object(cr, "_draft_message", new=AsyncMock(return_value=None)), \
-         patch.object(cr, "deliver", new=AsyncMock()):
+         patch.object(cr, "deliver", new=AsyncMock()) as deliver_mock:
         updated = await cr.step(config, deps, conv)
     assert updated["status"] == "failed"
+    deliver_mock.assert_awaited_once()
+    assert deliver_mock.await_args.kwargs["kind"] == "conversation_result"

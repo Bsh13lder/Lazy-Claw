@@ -8,12 +8,25 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Protocol
 
 from lazyclaw.config import Config
 from lazyclaw.comms import conversation_store as cs
 from lazyclaw.notifications.dispatch import deliver
 
 logger = logging.getLogger(__name__)
+
+
+class RunnerDeps(Protocol):
+    """Structural protocol for runtime dependencies injected into step/draft/run.
+
+    SimpleNamespace satisfies this at runtime (structural typing — no changes needed
+    in tests or callers).
+    """
+
+    registry: object
+    eco_router: object
+    permission_checker: object
 
 
 def _now() -> datetime:
@@ -55,12 +68,15 @@ async def start(
         expires_at=expires,
     )
     # Schedule due immediately so the next heartbeat drafts the opener.
-    return await cs.update_conversation(
+    scheduled = await cs.update_conversation(
         config, user_id, conv["id"], next_poll_at=_iso(_now())
     )
+    if scheduled is None:
+        raise RuntimeError("conversation vanished during start scheduling")
+    return scheduled
 
 
-async def step(config: Config, deps, conv: dict) -> dict:
+async def step(config: Config, deps: RunnerDeps, conv: dict) -> dict:
     """Advance one conversation by one move.
 
     deps carries registry/eco_router/permission_checker for specialist runs.
@@ -111,7 +127,7 @@ async def _fail(config: Config, conv: dict, status: str, *, error: str) -> dict:
     return updated
 
 
-async def _draft_message(config: Config, deps, conv: dict) -> str | None:
+async def _draft_message(config: Config, deps: RunnerDeps, conv: dict) -> str | None:
     """Ask the messaging specialist to draft the opening message from the goal.
 
     Uses run_specialist (lazyclaw/teams/runner.py:210) with the messaging_specialist
@@ -176,6 +192,6 @@ async def _request_approval(
     return await approvals.request_first_message_approval(config, user_id, conv, draft)
 
 
-async def _run_step(config: Config, deps, conv: dict) -> dict:
+async def _run_step(config: Config, deps: RunnerDeps, conv: dict) -> dict:
     """Poll/reply branch — implemented in Task E5."""
     return conv

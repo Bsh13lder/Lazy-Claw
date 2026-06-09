@@ -23,6 +23,25 @@ from lazyclaw.config import Config
 
 logger = logging.getLogger(__name__)
 
+
+def parse_conversation_callback(data: str) -> tuple[str, bool] | None:
+    """Map a Telegram callback_data to (conversation_id, approved) or None.
+
+    Handles the convok:<conv_id> (✅ Send it) and convno:<conv_id> (✋ Cancel)
+    buttons emitted by lazyclaw.comms.approvals.request_first_message_approval.
+
+    Returns:
+        (conv_id, True)  — user approved the first message
+        (conv_id, False) — user cancelled the first message
+        None             — data is not a conversation-approval callback
+    """
+    if data.startswith("convok:"):
+        return data.split(":", 1)[1], True
+    if data.startswith("convno:"):
+        return data.split(":", 1)[1], False
+    return None
+
+
 # Commands shown in Telegram's "/" autocomplete menu
 BOT_COMMANDS = [
     BotCommand("help", "\U0001f4cb All commands"),
@@ -2602,6 +2621,41 @@ class TelegramCommands:
             logger.warning("Unauthorized Telegram callback from chat %s", chat_id)
             return
         user_id = await self._resolve_user(chat_id)
+
+        # -- convok / convno — autonomous conversation first-message approval ----
+        # callback_data shape:
+        #   convok:<conv_id>  → user approved the drafted opener (✅ Send it)
+        #   convno:<conv_id>  → user cancelled (✋ Cancel)
+        conv_result = parse_conversation_callback(data)
+        if conv_result is not None:
+            conv_id, approved = conv_result
+            try:
+                from lazyclaw.comms import conversation_runner, conversation_store
+                from lazyclaw.gateway.routes.inbox import _get_registry
+                from types import SimpleNamespace
+
+                conv = await conversation_store.get_conversation(
+                    self._config, user_id, conv_id
+                )
+                if conv is None:
+                    await query.edit_message_text("❌ Conversation not found.")
+                    return
+                deps = SimpleNamespace(
+                    registry=_get_registry(),
+                    eco_router=None,
+                    permission_checker=None,
+                )
+                await conversation_runner.on_approval(
+                    self._config, deps, conv, approved
+                )
+                if approved:
+                    await query.edit_message_text("Sent ✅")
+                else:
+                    await query.edit_message_text("Cancelled")
+            except Exception as exc:
+                logger.exception("conversation approval callback failed for conv %s", conv_id)
+                await query.edit_message_text(f"❌ Error: {exc}")
+            return
 
         if action == "accept":
             # Contract-intake watcher's ✅ Accept / ⏭ Skip buttons.

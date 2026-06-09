@@ -5,9 +5,11 @@ without a live MCP runtime. The production caller passes the registry's MCP
 invoker (see routes/inbox.py)."""
 from __future__ import annotations
 
+import json
 from typing import Awaitable, Callable
 
 from lazyclaw.comms.models import Msg, SendResult
+from lazyclaw.runtime.tool_result import ToolResult
 
 McpCall = Callable[[str, dict], Awaitable[dict]]
 
@@ -77,42 +79,31 @@ def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
 
     The skill registry stores BaseSkill instances retrieved by name:
         skill = registry.get(tool_name)   # returns BaseSkill | None
-        result: str = await skill.execute(user_id, args)
+        result: str | ToolResult = await skill.execute(user_id, args)
 
-    BaseSkill.execute returns a JSON string; this adapter parses it to a dict
-    so ChannelGateway's .get("status") / .get("messages") calls work correctly.
+    BaseSkill.execute returns a JSON string or ToolResult; this adapter
+    normalises the result to a dict so ChannelGateway's .get("status") /
+    .get("messages") calls work correctly.
     """
-    import json as _json
 
     async def _call(tool_name: str, args: dict) -> dict:
         skill = registry.get(tool_name)  # type: ignore[attr-defined]
         if skill is None:
-            raise RuntimeError(f"skill not found in registry: {tool_name!r}")
+            return {"status": "error", "error": f"unknown tool: {tool_name}"}
         result = await skill.execute(user_id, args)
+        # Normalize to a string payload first.
         if isinstance(result, dict):
             return result
-        if isinstance(result, str):
-            try:
-                parsed = _json.loads(result)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-            # Non-JSON string — wrap so callers can still .get("status")
-            return {"status": "sent", "raw": result}
-        # Unexpected object type — extract known payload attributes or wrap
-        for attr in ("result", "output", "data"):
-            data = getattr(result, attr, None)
-            if isinstance(data, dict):
-                return data
-            if isinstance(data, str):
-                try:
-                    parsed = _json.loads(data)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except Exception:
-                    pass
-                return {"status": "sent", "raw": data}
-        return {"status": "sent", "raw": str(result)}
+        if isinstance(result, ToolResult):  # extract the text payload
+            text = result.text
+        elif isinstance(result, str):
+            text = result
+        else:
+            text = getattr(result, "text", None) or str(result)
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {"status": "sent", "raw": text}
+        except Exception:
+            return {"status": "sent", "raw": text}
 
     return ChannelGateway(mcp_call=_call)

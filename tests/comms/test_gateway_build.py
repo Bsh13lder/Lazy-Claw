@@ -3,7 +3,7 @@ registry.
 
 The registry API (per registry.py + base.py):
   - registry.get(name: str) -> BaseSkill | None
-  - skill.execute(user_id: str, params: dict) -> str  (JSON string)
+  - skill.execute(user_id: str, params: dict) -> str | ToolResult  (JSON string or ToolResult)
 
 build_gateway wraps these so ChannelGateway receives its injected mcp_call as
   async (tool_name: str, args: dict) -> dict
@@ -13,18 +13,23 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from lazyclaw.comms.gateway import build_gateway
+from lazyclaw.runtime.tool_result import ToolResult
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_registry(tool_name: str, return_value: object) -> MagicMock:
-    """Return a mock registry whose named skill.execute returns `return_value`."""
+def _make_registry(expected_tool: str, return_value: object) -> MagicMock:
+    """Return a mock registry whose named skill.execute returns `return_value`.
+
+    registry.get routes by name: returns the skill only for expected_tool,
+    None for any other name.
+    """
     skill = MagicMock()
     skill.execute = AsyncMock(return_value=return_value)
     registry = MagicMock()
-    registry.get = MagicMock(return_value=skill)
+    registry.get = MagicMock(side_effect=lambda n: skill if n == expected_tool else None)
     return registry
 
 
@@ -38,7 +43,7 @@ async def test_build_gateway_invokes_registry_tool():
     skill = MagicMock()
     skill.execute = AsyncMock(return_value=json.dumps({"status": "sent"}))
     registry = MagicMock()
-    registry.get = MagicMock(return_value=skill)
+    registry.get = MagicMock(side_effect=lambda n: skill if n == "whatsapp_send" else None)
 
     gw = build_gateway(registry, user_id="u1")
     res = await gw.send("whatsapp", "+1", "hi")
@@ -69,11 +74,7 @@ async def test_json_string_result_is_parsed():
 @pytest.mark.asyncio
 async def test_dict_result_is_passed_through():
     """If the skill already returns a dict (non-standard but safe), it should work."""
-    skill = MagicMock()
-    skill.execute = AsyncMock(return_value={"status": "sent"})
-    registry = MagicMock()
-    registry.get = MagicMock(return_value=skill)
-
+    registry = _make_registry("whatsapp_send", {"status": "sent"})
     gw = build_gateway(registry, user_id="u3")
     res = await gw.send("whatsapp", "+3", "direct dict")
     assert res.ok is True
@@ -94,14 +95,16 @@ async def test_non_json_string_wraps_gracefully():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_unknown_skill_name_raises_via_gateway_error_path():
-    """If the skill is not found, execute raises; ChannelGateway maps to ok=False."""
+async def test_unknown_skill_name_returns_clean_error():
+    """If registry.get returns None, _call returns a clean error dict — no raise."""
     registry = MagicMock()
     registry.get = MagicMock(return_value=None)  # skill not found
 
     gw = build_gateway(registry, user_id="u5")
     res = await gw.send("whatsapp", "+5", "no skill")
     assert res.ok is False
+    assert res.error is not None
+    assert "unknown tool" in res.error
 
 
 @pytest.mark.asyncio
@@ -130,10 +133,7 @@ async def test_build_gateway_read_thread():
             {"sender": "Alice", "content": "hey", "timestamp": "10:00", "is_mine": False}
         ]
     }
-    skill = MagicMock()
-    skill.execute = AsyncMock(return_value=json.dumps(messages_payload))
-    registry = MagicMock()
-    registry.get = MagicMock(return_value=skill)
+    registry = _make_registry("whatsapp_read", json.dumps(messages_payload))
 
     gw = build_gateway(registry, user_id="u7")
     msgs = await gw.read_thread("whatsapp", "Alice")
@@ -142,3 +142,29 @@ async def test_build_gateway_read_thread():
     assert len(msgs) == 1
     assert msgs[0].sender == "Alice"
     assert msgs[0].text == "hey"
+
+
+# ---------------------------------------------------------------------------
+# ToolResult coercion
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_tool_result_text_is_extracted():
+    """skill.execute returning a ToolResult has its .text payload parsed correctly."""
+    tool_result = ToolResult(text=json.dumps({"status": "sent"}))
+    registry = _make_registry("whatsapp_send", tool_result)
+
+    gw = build_gateway(registry, user_id="u8")
+    res = await gw.send("whatsapp", "+8", "via tool result")
+    assert res.ok is True
+
+
+@pytest.mark.asyncio
+async def test_tool_result_non_json_text_wraps_gracefully():
+    """ToolResult whose text is not JSON is wrapped in {"status": "sent", "raw": ...}."""
+    tool_result = ToolResult(text="delivered")
+    registry = _make_registry("whatsapp_send", tool_result)
+
+    gw = build_gateway(registry, user_id="u9")
+    res = await gw.send("whatsapp", "+9", "plain text result")
+    assert res.ok is True

@@ -70,3 +70,49 @@ class ChannelGateway:
         if status in ("blocked", "error", "failed"):
             return SendResult(ok=False, error=str(result))
         return SendResult(ok=True)
+
+
+def build_gateway(registry: object, user_id: str) -> "ChannelGateway":
+    """Factory that wires ChannelGateway.mcp_call to the real skill registry.
+
+    The skill registry stores BaseSkill instances retrieved by name:
+        skill = registry.get(tool_name)   # returns BaseSkill | None
+        result: str = await skill.execute(user_id, args)
+
+    BaseSkill.execute returns a JSON string; this adapter parses it to a dict
+    so ChannelGateway's .get("status") / .get("messages") calls work correctly.
+    """
+    import json as _json
+
+    async def _call(tool_name: str, args: dict) -> dict:
+        skill = registry.get(tool_name)  # type: ignore[attr-defined]
+        if skill is None:
+            raise RuntimeError(f"skill not found in registry: {tool_name!r}")
+        result = await skill.execute(user_id, args)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            try:
+                parsed = _json.loads(result)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+            # Non-JSON string — wrap so callers can still .get("status")
+            return {"status": "sent", "raw": result}
+        # Unexpected object type — extract known payload attributes or wrap
+        for attr in ("result", "output", "data"):
+            data = getattr(result, attr, None)
+            if isinstance(data, dict):
+                return data
+            if isinstance(data, str):
+                try:
+                    parsed = _json.loads(data)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+                return {"status": "sent", "raw": data}
+        return {"status": "sent", "raw": str(result)}
+
+    return ChannelGateway(mcp_call=_call)

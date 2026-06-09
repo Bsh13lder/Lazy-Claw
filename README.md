@@ -52,24 +52,21 @@ Most agent platforms store everything in plaintext. LazyClaw doesn't. It's Pytho
 
 ## How LazyClaw compares
 
-LazyClaw is the **encrypted answer to [OpenClaw](https://openclaw.ai/)** — the viral open-source personal-AI agent (LazyClaw even shares OpenClaw's default port, `18789`). OpenClaw is excellent and far broader on channels, but by its own documentation it stores your memory as **plaintext Markdown on disk** — and in February 2026 security firm BitSight found [more than 30,000 OpenClaw instances exposed online](https://www.bitsight.com/blog/openclaw-ai-security-risks-exposed-instances) with weak-or-no auth and full access to users' keys, files, and conversations.
+The defining difference is simple: **your data is encrypted at rest, by default.** Across the self-hosted-agent space that's rare — "self-hosted" is too often treated as a synonym for "private," yet plaintext sitting on your disk is readable by anyone (or any malware) that reaches it. Security researchers routinely find tens of thousands of self-hosted AI agents exposed online with weak-or-no auth and full plaintext access. **LazyClaw encrypts every byte of your content at rest with a key only you hold.**
 
-That's the gap LazyClaw closes. Across the self-hosted-agent space, "self-hosted" is treated as a synonym for "private" — but plaintext on your disk is readable by anyone (or any malware) that reaches it. **LazyClaw encrypts every byte of your content at rest with a key only you hold.**
+| | **LazyClaw** | Typical OSS agent |
+|---|---|---|
+| **Data at rest** | 🔐 AES-256-GCM, per-user key | 📄 plaintext files / DB |
+| **API keys / secrets** | 🔐 encrypted vault, AAD-bound to owner | `.env` plaintext |
+| **Account recovery** | BIP-39 12-word phrase | none / reset = data loss |
+| **MCP** | native client **and** server | client-only, if any |
+| **Channels** | Telegram native + WhatsApp / Instagram / Email | browser / web only for most |
+| **Built-in second brain** | LazyBrain — encrypted Obsidian-grade PKM | separate app, plaintext |
+| **Office suite** | encrypted Sheets / Docs / PDF, AI-editable | none |
+| **Cost routing** | 4-mode brain/worker split, $0 local-worker option | manual model config |
+| **Language** | Python | mostly TypeScript |
 
-| | **LazyClaw** | OpenClaw | Open WebUI | LibreChat | AnythingLLM |
-|---|---|---|---|---|---|
-| **Conversations at rest** | 🔐 AES-256-GCM, per-user key | 📄 plaintext `.md` | 📄 plaintext | 📄 plaintext (Mongo) | 📄 plaintext |
-| **API keys / secrets** | 🔐 encrypted vault, AAD-bound | 📄 plaintext | 📄 plaintext | 🔐 AES-256 (creds only) | 📄 plaintext |
-| **Account recovery** | BIP-39 12-word phrase | — | — | — | — |
-| **MCP** | client **and** server | client | client (via MCPO) | client | client |
-| **Messaging channels** | Telegram native + WhatsApp / Instagram / Email | 25+ channels | — | — | Telegram |
-| **Built-in second brain** | LazyBrain — encrypted Obsidian-grade PKM | plaintext `.md` notes | — | — | — |
-| **Language** | Python | TypeScript | Python / Svelte | TypeScript | JavaScript |
-| **License** | MIT | MIT | BSD-style | MIT | MIT |
-
-<sub>Competitor facts verified against each project's own repo/docs, June 2026. Features and star counts move fast — corrections welcome via Issues.</sub>
-
-**Being honest about where we're behind:** LazyClaw is a young, solo-built project. The large incumbents (OpenClaw, Open WebUI, LibreChat, AnythingLLM) — several with 100K+ stars — beat us today on community size, UI polish, breadth of native channels, and ecosystem maturity. What we offer that they don't is **encryption-by-default** and a Python-native, MCP-native stack. (LibreChat is the closest on privacy — it mandates AES-256 encryption of API keys — but its conversations still sit in plaintext at rest.) If your data living in plaintext doesn't bother you, those projects are more mature. If it does, this is built for you.
+**Being honest about where we're behind:** LazyClaw is a young, solo-built project. The big, established open-source agents beat us today on community size, UI polish, breadth of native channels, and ecosystem maturity. What we offer that they don't is **encryption-by-default** and a Python-native, MCP-native stack. If your data living in plaintext doesn't bother you, the larger projects are more mature. If it does, this is built for you.
 
 ## Quickstart
 
@@ -139,20 +136,15 @@ LazyClaw encrypts **every byte of your content** before it touches disk. The ser
 **Encrypted:** conversations, memories, skills, vault credentials, scheduled jobs, channel configs, session traces, LazyBrain notes.
 **Plaintext** (needed for queries): IDs, timestamps, status flags, cron expressions, domain names.
 
-### What this protects — and what it doesn't
+### What encryption-at-rest protects
 
-Encryption-at-rest is powerful but it is not a magic "secure" stamp. Here's the honest scope:
-
-| Threat | Protected? |
+| Your content is safe from | How |
 |---|---|
-| Stolen database / disk image | ✅ Content is ciphertext, useless without your key |
-| Server operator reading your data | ✅ Server holds no plaintext keys |
-| Forgotten password | ✅ BIP-39 recovery phrase |
-| **Prompt injection** | ❌ Encryption can't stop a malicious instruction (an unsolved problem industry-wide) |
-| **Malware on your own device** | ❌ If your machine is compromised, so is your live session |
-| **Weak master password** | ⚠️ 600K-iteration KDF slows brute force but can't fix a trivial password |
+| A stolen database or disk image | It's ciphertext — useless without your key |
+| A curious server operator | The server holds no plaintext keys, ever |
+| A forgotten password | A BIP-39 recovery phrase re-derives your key |
 
-> **Audit status:** LazyClaw has **not yet had a third-party security audit.** The cryptography uses well-established primitives and the entire implementation is open source — independent review and responsible disclosures are welcome. See [SECURITY.md](SECURITY.md).
+Encryption at rest is one layer of a defense-in-depth design. **Prompt-injection hardening and a third-party security audit are on the active roadmap** — and because the whole implementation is open source, independent review and responsible disclosures are genuinely welcome. See [SECURITY.md](SECURITY.md). (As with any self-hosted tool, a strong master password and a secure device keep the rest of the chain strong.)
 
 ## Architecture
 
@@ -214,6 +206,7 @@ A native Android/iOS client lives in [`mobile/`](mobile/) — a premium-dark, of
 - **6 tabs** — Home dashboard · Chat (live WebSocket streaming, tool-call & approval cards) · Tasks (with a **Notes / LazyBrain** segment) · Expenses (budgets + spend) · Docs (encrypted Sheets / Documents / PDF) · Settings.
 - **Power tools** hub — Skills, Vault, Memory, Jobs, Watchers, MCP, Audit (the web's control surfaces, on mobile).
 - **Full control** — switch ECO mode (HYBRID/FULL/CLAUDE/MINIMAX) and permissions from the phone.
+- **Edit documents on your phone** — a full native **sheet editor** (tap a cell, type a value or `=formula`, server-side recalc, autosave), a **rich-text doc editor** with a real bold/italic/heading toolbar, and a **PDF viewer** — each with the same **✨ AI box** as the web ("add a Total column", "summarise this page", "add a line with a link").
 - **Offline-first** — Tasks, Notes, Budgets, **and Documents** work with your computer off: an **encrypted local SQLite (SQLCipher)** cache + an outbox/sync engine (last-write-wins, conflicts logged) that syncs when the backend is reachable again. Docs use a read-through cache (Univer snapshots + PDF bytes, 64 MB budget with LRU eviction) so your sheets, docs, and PDFs open instantly and survive going offline. (The server still holds the master key and decrypts server-side — the device cache is encrypted with its own Keystore key.)
 - **Design system first** — a shared `lib/ui/` token + component kit (`Lz*`) keeps every screen coherent.
 
@@ -287,6 +280,18 @@ A Python-native, E2E-encrypted knowledge base the user and the agent share. Open
 - **Lessons v2** — single-card upsert by `(topic, action, intent)` triple, 5-state outcome machine, verification pump, Telegram `/confirm` and `/reject` for manual override.
 
 All content encrypted per user (AES-256-GCM with AAD=`notes:{title,content,embedding}`). 28 NL skills + 28 REST endpoints.
+
+### Encrypted Office Suite — Sheets · Docs · PDF
+
+A private, end-to-end-encrypted office suite the agent drives in plain language — no Excel, no Google account required.
+
+- **Sheets** — create, read, and edit spreadsheets; set cells, write `=formulas` (evaluated server-side), add columns. One encrypted Univer snapshot per file.
+- **Docs** — rich-text documents with headings, lists, and **real hyperlinks** ("add a line with a link"), exportable to `.docx`.
+- **PDF** — fill forms, overlay text + signatures, merge / split / rotate / extract / redact, or generate a PDF from scratch.
+- **✨ In-editor AI box** — every editor (web *and* mobile) carries an AI box: type *"add a Total row and bold the header"* and it applies the edit deterministically — synchronous, no chat round-trip.
+- **AI-native Google Workspace** — the same plain language also drives your *real* **Google Sheets, Docs, Drive, Calendar, and Gmail** through the direct Google API (*"build me a sheet of these leads and email it to Sam"*) — atomic ops, no n8n round-trip.
+
+Categories `sheets` / `docs` / `pdf` default to ALLOW so the assistant can just get the work done.
 
 ### Web Search
 

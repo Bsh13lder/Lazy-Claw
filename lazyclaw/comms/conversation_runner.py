@@ -222,12 +222,14 @@ async def _run_step(config: Config, deps: RunnerDeps, conv: dict) -> dict:
 
     followup = verdict.get("next", "")
     if followup:
-        await _send(config, deps, conv, followup)
+        ok = await _send(config, deps, conv, followup)
+        if not ok:
+            logger.warning("conversation follow-up send failed for %s", conv["id"])
     next_poll = _iso(_now() + timedelta(seconds=conv["poll_interval"]))
     return await cs.update_conversation(
         config, user_id, conv["id"], iteration=conv["iteration"] + 1,
         next_poll_at=next_poll,
-        append_transcript={"dir": "out", "text": followup, "ts": _iso(_now())})
+        append_transcript=({"dir": "out", "text": followup, "ts": _iso(_now())} if followup else None))
 
 
 async def _read_new_contact_messages(config: Config, deps: RunnerDeps, conv: dict) -> list[dict]:

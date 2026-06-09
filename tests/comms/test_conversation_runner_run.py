@@ -74,6 +74,22 @@ async def test_run_step_sends_followup_when_not_done(config, user_id):
     assert updated["status"] == "running"
     assert updated["iteration"] == 1
     send.assert_awaited_once()
+    assert any(t["dir"] == "out" and t["text"] == "It's Saturday 7pm — can you make it?" for t in updated["transcript"])
+
+
+@pytest.mark.asyncio
+async def test_run_step_empty_next_no_out_entry(config, user_id):
+    conv = await _running(config, user_id)
+    deps = SimpleNamespace(registry=object(), eco_router=None, permission_checker=None)
+    with patch.object(cr, "_read_new_contact_messages",
+                      new=AsyncMock(return_value=[{"sender": "Alice", "text": "hmm", "ts": "t"}])), \
+         patch.object(cr, "_evaluate_goal", new=AsyncMock(return_value={"done": False, "next": ""})), \
+         patch.object(cr, "_send", new=AsyncMock()) as send:
+        updated = await cr.step(config, deps, conv)
+    assert updated["status"] == "running"
+    assert updated["iteration"] == 1
+    send.assert_not_awaited()  # empty followup → no send
+    assert not any(t["dir"] == "out" for t in updated["transcript"])
 
 
 @pytest.mark.asyncio

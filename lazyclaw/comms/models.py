@@ -32,10 +32,18 @@ class ChannelThread:
 
     def as_dict(self) -> dict:
         return {
-            "id": self.id, "channel": self.channel,
-            "contact_handle": self.contact_handle, "contact_name": self.contact_name,
-            "last_preview": self.last_preview, "unread_count": self.unread_count,
-            "last_activity": self.last_activity, "updated_at": self.updated_at,
+            "id": self.id,
+            "user_id": self.user_id,
+            "channel": self.channel,
+            "contact_handle": self.contact_handle,
+            "contact_name": self.contact_name,
+            "last_preview": self.last_preview,
+            "unread_count": self.unread_count,
+            "last_activity": self.last_activity,
+            "last_seen_msg_id": self.last_seen_msg_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "deleted_at": self.deleted_at,
         }
 
 

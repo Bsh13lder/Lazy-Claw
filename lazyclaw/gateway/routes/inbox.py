@@ -18,6 +18,7 @@ SkillRegistry so the route is always importable / testable without a live runtim
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -45,6 +46,10 @@ def _get_registry():
     """Return the shared registry, falling back to a bare SkillRegistry if not set."""
     if _shared_registry is not None:
         return _shared_registry
+    logger.warning(
+        "inbox: using bare SkillRegistry fallback — set_inbox_registry() was not called;"
+        " channel sends will fail"
+    )
     from lazyclaw.skills.registry import SkillRegistry
     reg = SkillRegistry()
     return reg
@@ -55,7 +60,7 @@ def _get_registry():
 
 class ReplyBody(BaseModel):
     text: str
-    mode: str = "direct"
+    mode: Literal["direct", "ai"] = "direct"
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────

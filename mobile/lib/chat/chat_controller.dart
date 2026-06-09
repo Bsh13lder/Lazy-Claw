@@ -15,6 +15,15 @@ class ChatReducer {
     messages.add(const ChatMessage(role: 'assistant', content: '', streaming: true));
   }
 
+  /// Seeds prior conversation loaded from the backend. Historical messages are
+  /// inserted at the FRONT so they always sit above any live messages that may
+  /// have already streamed in this session (a brand-new turn is chronologically
+  /// newer than the loaded history). No-op for an empty list.
+  void seedHistory(List<ChatMessage> history) {
+    if (history.isEmpty) return;
+    messages.insertAll(0, history);
+  }
+
   void onFrame(ServerFrame f) {
     switch (f) {
       case TokenFrame(:final content):
@@ -132,12 +141,27 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   // controller has no hard dependency on the notification plugin.
   final void Function(String title, String body)? onNotify;
 
+  bool _seeded = false;
+
   ChatController(this._socket, {this.onNotify}) : super(const []) {
     _frameSub = _socket.frames.listen((f) {
       _handleNotification(f);
       _reducer.onFrame(f);
       state = List.unmodifiable(_reducer.messages);
     });
+  }
+
+  /// Seed prior conversation once per controller lifetime (idempotent).
+  ///
+  /// Called by the chat screen after it fetches history from the backend.
+  /// Marks itself done on the first call so a reconnect can't double-seed; an
+  /// empty [history] (no prior conversation) still counts as seeded.
+  void seedHistory(List<ChatMessage> history) {
+    if (_seeded) return;
+    _seeded = true;
+    if (history.isEmpty) return;
+    _reducer.seedHistory(history);
+    state = List.unmodifiable(_reducer.messages);
   }
 
   void _handleNotification(ServerFrame f) {

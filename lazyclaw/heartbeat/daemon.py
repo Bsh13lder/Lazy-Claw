@@ -225,6 +225,9 @@ class HeartbeatDaemon:
         telegram_push=None,
         notifier_factory=None,
         team_lead=None,
+        registry=None,
+        eco_router=None,
+        permission_checker=None,
     ) -> None:
         self._config = config
         self._lane_queue = lane_queue
@@ -239,6 +242,13 @@ class HeartbeatDaemon:
         # the ``background_tasks`` table and kills Chrome out from under
         # an explore subagent that's mid-scrape.
         self._team_lead = team_lead
+        # Runtime deps for conversation_runner.step (injected at construction
+        # by app.py / cli.py where these objects exist).  All three default to
+        # None so existing callers and tests that don't pass them keep working;
+        # _conversation_deps uses them when present.
+        self._registry = registry
+        self._eco_router = eco_router
+        self._permission_checker = permission_checker
         self._task: asyncio.Task | None = None
         # In-memory record of "we already seeded today's journal for this user".
         # Resets on restart (idempotent re-seed via tag lookup is cheap).
@@ -2629,23 +2639,16 @@ class HeartbeatDaemon:
     def _conversation_deps(self, user_id: str):
         """Build a SimpleNamespace of runtime deps for conversation_runner.step.
 
-        The HeartbeatDaemon does not hold a skill registry, eco_router, or
-        permission_checker — those live on the LaneQueue / runtime layer which
-        is not wired into the daemon.  We pass None for all three; the runner's
-        _draft_message / _evaluate_goal / _read_new_contact_messages already
-        guard ``if deps.registry is None`` and short-circuit cleanly.
-
-        DONE_WITH_CONCERNS: for conversations to actually run a messaging
-        specialist in production the daemon would need to be given the registry
-        and eco_router at construction time (see gateway/app.py where those
-        objects are created).  The plumbing is intentionally deferred — the
-        None path is safe and tested.
+        Returns the real registry/eco_router/permission_checker when the daemon
+        was constructed with them (production path — see cli.py / cli_tui.py).
+        Falls back to None for all three in test/minimal setups so the runner's
+        existing ``if deps.registry is None`` guards short-circuit cleanly.
         """
         import types
         return types.SimpleNamespace(
-            registry=None,
-            eco_router=None,
-            permission_checker=None,
+            registry=self._registry,
+            eco_router=self._eco_router,
+            permission_checker=self._permission_checker,
         )
 
     async def _check_conversations(self) -> None:

@@ -132,3 +132,49 @@ async def test_check_conversations_exception_does_not_propagate(config, user_id)
     ):
         # Must not raise
         await daemon._check_conversations()
+
+
+def test_conversation_deps_returns_real_deps_when_wired():
+    """_conversation_deps returns the injected registry/eco_router/permission_checker."""
+    from types import SimpleNamespace
+
+    from lazyclaw.config import Config
+    from lazyclaw.heartbeat.daemon import HeartbeatDaemon
+
+    fake_registry = SimpleNamespace(name="registry")
+    fake_eco_router = SimpleNamespace(name="eco_router")
+    fake_permission_checker = SimpleNamespace(name="permission_checker")
+
+    cfg = Config.__new__(Config)  # avoid __init__ DB setup
+    cfg.heartbeat_interval = 60
+
+    daemon = HeartbeatDaemon(
+        cfg,
+        lane_queue=None,
+        registry=fake_registry,
+        eco_router=fake_eco_router,
+        permission_checker=fake_permission_checker,
+    )
+
+    deps = daemon._conversation_deps("u1")
+
+    assert deps.registry is fake_registry
+    assert deps.eco_router is fake_eco_router
+    assert deps.permission_checker is fake_permission_checker
+
+
+def test_conversation_deps_returns_none_when_not_wired():
+    """_conversation_deps returns None for all three when daemon has no deps injected."""
+    from lazyclaw.config import Config
+    from lazyclaw.heartbeat.daemon import HeartbeatDaemon
+
+    cfg = Config.__new__(Config)
+    cfg.heartbeat_interval = 60
+
+    daemon = HeartbeatDaemon(cfg, lane_queue=None)
+
+    deps = daemon._conversation_deps("u1")
+
+    assert deps.registry is None
+    assert deps.eco_router is None
+    assert deps.permission_checker is None

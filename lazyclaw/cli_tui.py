@@ -1727,6 +1727,9 @@ class LazyClawApp(App):
                 self._config, self._lane_queue,
                 telegram_push=telegram_push,
                 notifier_factory=notifier_factory,
+                registry=getattr(self, "_skill_registry", None),
+                eco_router=getattr(self._agent, "eco_router", None),
+                permission_checker=getattr(self, "_permission_checker", None),
             )
             await heartbeat.start()
             logger.info("TUI: Heartbeat daemon started")

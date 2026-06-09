@@ -474,6 +474,9 @@ async def _run_headless(
             telegram_push=telegram_push,
             notifier_factory=notifier_factory,
             team_lead=team_lead,
+            registry=getattr(task_runner, "_registry", None),
+            eco_router=getattr(agent, "eco_router", None),
+            permission_checker=getattr(task_runner, "_permission_checker", None),
         )
         await heartbeat.start()
         console.print("[green]✓[/green] Heartbeat daemon started")
@@ -1205,7 +1208,12 @@ async def _chat_loop() -> None:
 
         lane_queue = LaneQueue()
         lane_queue.set_handler(agent.process_message)
-        heartbeat = HeartbeatDaemon(config, lane_queue)
+        heartbeat = HeartbeatDaemon(
+            config, lane_queue,
+            registry=registry,
+            eco_router=getattr(agent, "eco_router", None),
+            permission_checker=checker,
+        )
         heartbeat_task = asyncio.create_task(heartbeat.start())
     except Exception as exc:
         logging.getLogger(__name__).warning("Heartbeat daemon failed to start: %s", exc)

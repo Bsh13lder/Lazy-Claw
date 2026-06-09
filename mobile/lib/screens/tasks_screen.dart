@@ -226,6 +226,7 @@ class _TasksScreenState extends ConsumerState<TasksScreen> {
           dueDate: result.dueDate,
           category: result.category,
           reminderAt: result.reminderAt,
+          recurring: result.recurring,
         );
   }
 

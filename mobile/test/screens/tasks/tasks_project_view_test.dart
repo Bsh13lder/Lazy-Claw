@@ -71,8 +71,14 @@ void main() {
     expect(find.byKey(const ValueKey('project-bucket-Work')), findsOneWidget);
     expect(find.byKey(const ValueKey('project-bucket-Inbox')), findsOneWidget);
 
+    // The "PROJECTS" section header is shown (uppercased by LzSection).
+    expect(find.text('PROJECTS'), findsOneWidget);
+
     // Inbox leads the list (it's the home for loose tasks).
     expect(find.text('Inbox'), findsOneWidget);
+
+    // No unknown-category tasks → no Tags section.
+    expect(find.text('TAGS'), findsNothing);
 
     // Home: 1 open of 2 total. Work + Inbox (1 loose task): 0/0 and 1/1.
     expect(find.text('1/2'), findsOneWidget);
@@ -81,6 +87,45 @@ void main() {
 
     // Collapsed by default: the bucket's tasks are not yet shown.
     expect(find.text('Pay rent'), findsNothing);
+  });
+
+  testWidgets('separates real projects from tag-only categories',
+      (tester) async {
+    await tester.pumpWidget(_host(
+      tasks: [
+        _task('a', 'Pay rent', category: 'Home'), // → real project
+        _task('b', 'Water plants', category: 'Garden'), // → tag (no project)
+        _task('c', 'Loose task'), // → Inbox
+      ],
+      projects: [_project('p1', 'Home', color: '#FF0000')],
+    ));
+    await tester.pump();
+
+    // Both sections render with their headers.
+    expect(find.text('PROJECTS'), findsOneWidget);
+    expect(find.text('TAGS'), findsOneWidget);
+
+    // The real project + Inbox live under Projects; the tag lives under Tags.
+    expect(find.byKey(const ValueKey('project-bucket-Home')), findsOneWidget);
+    expect(find.byKey(const ValueKey('project-bucket-Inbox')), findsOneWidget);
+    expect(find.byKey(const ValueKey('project-bucket-Garden')), findsOneWidget);
+
+    // The Garden tag shows a tag glyph (not a project color dot).
+    expect(find.byIcon(Icons.label_outline), findsOneWidget);
+    expect(find.text('Garden'), findsOneWidget);
+  });
+
+  testWidgets('omits the Tags section entirely when there are no tags',
+      (tester) async {
+    await tester.pumpWidget(_host(
+      tasks: [_task('a', 'Pay rent', category: 'Home')],
+      projects: [_project('p1', 'Home')],
+    ));
+    await tester.pump();
+
+    expect(find.text('PROJECTS'), findsOneWidget);
+    expect(find.text('TAGS'), findsNothing);
+    expect(find.byIcon(Icons.label_outline), findsNothing);
   });
 
   testWidgets('tapping a bucket expands its tasks', (tester) async {

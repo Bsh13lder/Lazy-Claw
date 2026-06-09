@@ -184,13 +184,18 @@ _holder_var: contextvars.ContextVar["_Holder | None"] = contextvars.ContextVar(
 
 
 @asynccontextmanager
-async def browser_turn_scope(role: str = DEFAULT_ROLE):
+async def browser_turn_scope(role: str = DEFAULT_ROLE, *, user_id: str | None = None):
     """Bracket one agent turn so its live-Brave access is serialized per (user, role).
 
     ``role`` selects the browser lane: ``VISIBLE_ROLE`` (foreground, the user's
     visible tab) or ``BACKGROUND_ROLE`` (watcher/cron/reminder turns, their own
     tab). The two lanes hold different per-user locks and route to different CDP
     backends, so a background turn can't block or steal the visible tab.
+
+    ``user_id`` (foreground turns only) enables the turn-end agent-tab
+    auto-close: when the foreground agent CREATED its own tab this turn, it is
+    closed on exit to bound RAM. A BORROWED (pre-existing user) tab is NEVER
+    closed — see :func:`_close_agent_tab_if_created`.
 
     Re-entrant for TRUE same-task nesting only (same asyncio task → reuse the
     outer holder, no-op on exit) so it can't self-deadlock. A holder INHERITED
@@ -216,9 +221,74 @@ async def browser_turn_scope(role: str = DEFAULT_ROLE):
             yield
         finally:
             await holder.release()
+            # RAM hygiene: close the agent's OWN tab at turn-end (visible lane
+            # only). Fully wrapped — a close failure must never break the turn.
+            if role == VISIBLE_ROLE and user_id:
+                await _close_agent_tab_if_created(user_id)
             _holder_var.reset(token)
     finally:
         _role_var.reset(role_token)
+
+
+async def _close_agent_tab_if_created(user_id: str) -> None:
+    """Turn-end: close the foreground agent's tab iff the agent CREATED it.
+
+    SAFETY-CRITICAL. The decision is delegated to the pure
+    :func:`owned_tabs.should_close_agent_tab`, which returns CLOSE only for an
+    agent-CREATED tab that is NOT the only tab and NOT a watcher/background tab.
+    A BORROWED (pre-existing user) tab is NEVER closed — that is the inviolable
+    invariant this whole feature exists to protect.
+
+    The ENTIRE body is wrapped so a registry/backend/CDP hiccup degrades to
+    "leave the tab open" (the reaper will idle-reap it later) rather than ever
+    breaking the turn the user is waiting on.
+    """
+    try:
+        from lazyclaw.browser import owned_tabs
+
+        agent_id = owned_tabs.get_owned(user_id, owned_tabs.AGENT_KEY)
+        if not agent_id:
+            return
+        if not owned_tabs.is_agent_created(user_id, agent_id):
+            # BORROWED tab — forget our pin but NEVER close it.
+            owned_tabs.clear_owned(user_id, owned_tabs.AGENT_KEY)
+            return
+
+        # Lazily import the backend accessor — keep runtime → skills coupling
+        # out of module import time (and out of the hot path).
+        from lazyclaw.skills.builtin.browser_actions.backends import (
+            get_cdp_backend,
+        )
+
+        backend = await get_cdp_backend(user_id)
+        try:
+            tabs = await backend.tabs()
+            total_tabs = len(tabs)
+        except Exception:
+            logger.debug(
+                "agent-tab auto-close: tabs() failed — skipping close",
+                exc_info=True,
+            )
+            return
+
+        watcher_ids = owned_tabs.anchored_target_ids_excluding_agent(user_id)
+        if owned_tabs.should_close_agent_tab(
+            created_by_agent=True,
+            target_id=agent_id,
+            total_tabs=total_tabs,
+            watcher_target_ids=watcher_ids,
+        ):
+            await backend.close_tab(agent_id)
+            owned_tabs.clear_owned(user_id, owned_tabs.AGENT_KEY)
+            owned_tabs.clear_agent_created(user_id, agent_id)
+            logger.info(
+                "agent-tab auto-close: closed agent-created tab %s for user %s",
+                agent_id[:24], user_id[:8],
+            )
+    except Exception:
+        logger.debug(
+            "agent-tab auto-close failed (non-fatal)", exc_info=True
+        )
 
 
 @asynccontextmanager

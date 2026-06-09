@@ -29,6 +29,7 @@ import '../providers/auth_provider.dart';
 import '../ui/ui.dart';
 import 'chat/bg_task_card.dart';
 import 'chat/chat_bubble.dart';
+import 'chat/mode_switcher.dart';
 import 'chat/plan_card.dart';
 
 // ── Providers (preserved exactly) ─────────────────────────────────────────
@@ -202,6 +203,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Operating-mode switcher (shared agentModeProvider — same state as
+            // the Settings screen). Tappable pill → bottom-sheet picker.
+            const ModeSwitcher(),
+            const SizedBox(width: AppSpacing.sm),
             dot,
             const SizedBox(width: AppSpacing.xs),
             Text(

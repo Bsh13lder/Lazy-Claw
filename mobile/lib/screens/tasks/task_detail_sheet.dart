@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lazyclaw_mobile/core/due_date.dart';
+import 'package:lazyclaw_mobile/core/recurrence.dart';
 import 'package:lazyclaw_mobile/core/reminder_lead.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
@@ -11,6 +12,7 @@ import '../../providers/tasks_provider.dart';
 import '../expenses/project_color_picker.dart';
 import '../settings/settings_prefs.dart';
 import 'chip_edit.dart';
+import 'recurrence_picker.dart';
 import 'reminder_lead_picker.dart';
 import 'subtask_editor.dart';
 
@@ -72,6 +74,13 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   String? _category;
   bool _categoryTouched = false;
 
+  /// The selected recurrence. Seeded from the task's stored cron via
+  /// [recurrenceFromCron]. [_recurrenceTouched] gates whether Save writes the
+  /// `recurring` column, so a title-only edit never churns it (and a non-editable
+  /// "custom" cron is preserved untouched until the user picks a known kind).
+  late Recurrence _recurrence;
+  bool _recurrenceTouched = false;
+
   static const _priorities = ['low', 'medium', 'high', 'urgent'];
 
   @override
@@ -84,14 +93,15 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     final raw = t.dueDate;
     _dueDay = (raw == null || raw.isEmpty) ? null : dueDateDayPart(raw);
     final parts = dueTimeParts(raw);
-    _dueTime =
-        parts == null ? null : TimeOfDay(hour: parts.hour, minute: parts.minute);
+    _dueTime = parts == null
+        ? null
+        : TimeOfDay(hour: parts.hour, minute: parts.minute);
     final hasReminder = t.reminderAt != null && t.reminderAt!.isNotEmpty;
-    _explicitLead =
-        hasReminder ? leadFromReminderAt(raw, t.reminderAt) : null;
+    _explicitLead = hasReminder ? leadFromReminderAt(raw, t.reminderAt) : null;
     _subtasks = List.of(t.subtasks);
     _originalSteps = serializeSubtasks(_subtasks);
     _category = (t.category == null || t.category!.isEmpty) ? null : t.category;
+    _recurrence = recurrenceFromCron(t.recurring);
   }
 
   /// The effective reminder lead (explicit choice wins over the global default).
@@ -100,10 +110,10 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
   /// The reminderAt string to persist: `''` (clear) when there's no due time or
   /// the lead is None, else the absolute `due − lead` instant.
   String get _composedReminderAt => resolveReminderAt(
-        dueDate: _composedDue,
-        explicitLead: _explicitLead,
-        defaultLead: widget.defaultLead,
-      );
+    dueDate: _composedDue,
+    explicitLead: _explicitLead,
+    defaultLead: widget.defaultLead,
+  );
 
   /// Combine the day + time into the persisted `dueDate` string: a datetime when
   /// a time is set, a date-only string when only a day is set, today+time when
@@ -114,13 +124,19 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     if (day == null) {
       if (time == null) return null;
       final n = DateTime.now();
-      return composeDueDate(DateTime(n.year, n.month, n.day),
-          hour: time.hour, minute: time.minute);
+      return composeDueDate(
+        DateTime(n.year, n.month, n.day),
+        hour: time.hour,
+        minute: time.minute,
+      );
     }
     final d = DateTime.tryParse(day);
     if (d == null) return day;
-    return composeDueDate(DateTime(d.year, d.month, d.day),
-        hour: time?.hour, minute: time?.minute);
+    return composeDueDate(
+      DateTime(d.year, d.month, d.day),
+      hour: time?.hour,
+      minute: time?.minute,
+    );
   }
 
   @override
@@ -141,7 +157,20 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
     // Only write `category` when the user touched the project. An empty string
     // (not null) force-clears the column when "No project" was chosen.
     final categoryArg = !_categoryTouched ? null : (_category ?? '');
-    await ref.read(tasksProvider.notifier).updateTask(
+    // Only write `recurring` when the user touched the repeat picker, so an
+    // untouched custom/known cron is preserved. A "does not repeat" selection
+    // sends an empty string to force-clear the column; otherwise the computed
+    // cron (anchored to the due date) is sent.
+    final recurringArg = !_recurrenceTouched
+        ? null
+        : (recurrenceToCron(
+                _recurrence,
+                dueAnchor: recurrenceAnchorFromDue(_composedDue),
+              ) ??
+              '');
+    await ref
+        .read(tasksProvider.notifier)
+        .updateTask(
           widget.task.id,
           title: title,
           description: _notesController.text.trim(),
@@ -150,6 +179,7 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
           dueDate: _composedDue,
           steps: stepsArg,
           reminderAt: _composedReminderAt,
+          recurring: recurringArg,
         );
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -291,7 +321,8 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               LzChip(
                 label: 'Pick…',
                 icon: Icons.calendar_month_outlined,
-                selected: _dueDay != null &&
+                selected:
+                    _dueDay != null &&
                     _dueDay != _isoToday() &&
                     _dueDay != _isoTomorrow(),
                 color: AppColors.info,
@@ -317,8 +348,11 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                 const SizedBox(width: AppSpacing.sm),
                 GestureDetector(
                   onTap: () => setState(() => _dueTime = null),
-                  child:
-                      Icon(Icons.close, size: 16, color: AppColors.textMuted),
+                  child: Icon(
+                    Icons.close,
+                    size: 16,
+                    color: AppColors.textMuted,
+                  ),
                 ),
               ],
             ],
@@ -328,13 +362,17 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
             const SizedBox(height: AppSpacing.sm),
             Row(
               children: [
-                Icon(Icons.event_available_outlined,
-                    size: 14, color: AppColors.textMuted),
+                Icon(
+                  Icons.event_available_outlined,
+                  size: 14,
+                  color: AppColors.textMuted,
+                ),
                 const SizedBox(width: AppSpacing.xs),
                 Text(
                   'Due ${dueDateDisplay(_composedDue!)}',
-                  style: AppText.caption
-                      .copyWith(color: AppColors.textSecondary),
+                  style: AppText.caption.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
                 ),
                 const Spacer(),
                 GestureDetector(
@@ -342,8 +380,11 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
                     _dueDay = null;
                     _dueTime = null;
                   }),
-                  child:
-                      Icon(Icons.close, size: 14, color: AppColors.textMuted),
+                  child: Icon(
+                    Icons.close,
+                    size: 14,
+                    color: AppColors.textMuted,
+                  ),
                 ),
               ],
             ),
@@ -359,6 +400,21 @@ class _TaskDetailSheetState extends ConsumerState<TaskDetailSheet> {
               onChanged: (lead) => setState(() => _explicitLead = lead),
             ),
           ],
+
+          // ── Recurrence (repeat) ────────────────────────────────────────
+          const SizedBox(height: AppSpacing.xl),
+          _SectionLabel('REPEAT'),
+          const SizedBox(height: AppSpacing.sm),
+          RecurrencePicker(
+            value: _recurrence,
+            anchorWeekday: _composedDue == null
+                ? null
+                : DateTime.tryParse(_composedDue!)?.weekday,
+            onChanged: (r) => setState(() {
+              _recurrenceTouched = true;
+              _recurrence = r;
+            }),
+          ),
 
           const SizedBox(height: AppSpacing.xl),
 
@@ -536,8 +592,11 @@ class _ProjectChip extends StatelessWidget {
               if (hasCategory)
                 ProjectColorDot(hex: colorHex, size: 12)
               else
-                Icon(Icons.folder_outlined,
-                    size: 15, color: AppColors.textMuted),
+                Icon(
+                  Icons.folder_outlined,
+                  size: 15,
+                  color: AppColors.textMuted,
+                ),
               const SizedBox(width: AppSpacing.sm),
               Text(
                 hasCategory ? category! : 'No project',

@@ -35,8 +35,11 @@ class SmartAddController extends TextEditingController {
     // Defer to the default rendering while an IME composition is active (keeps
     // the compose-region underline + input working) or when nothing matched.
     if (_tokens.isEmpty || (withComposing && value.composing.isValid)) {
-      return super
-          .buildTextSpan(context: context, style: style, withComposing: withComposing);
+      return super.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: withComposing,
+      );
     }
 
     final base = style ?? const TextStyle();
@@ -50,10 +53,12 @@ class SmartAddController extends TextEditingController {
       if (start > cursor) {
         children.add(TextSpan(text: src.substring(cursor, start), style: base));
       }
-      children.add(TextSpan(
-        text: src.substring(start, end),
-        style: _styleFor(t, src, base),
-      ));
+      children.add(
+        TextSpan(
+          text: src.substring(start, end),
+          style: _styleFor(t, src, base),
+        ),
+      );
       cursor = end;
     }
     if (cursor < src.length) {
@@ -77,6 +82,7 @@ class SmartAddController extends TextEditingController {
     switch (t.kind) {
       case SmartTokenKind.date:
       case SmartTokenKind.time:
+      case SmartTokenKind.recurrence:
         return AppColors.accent;
       case SmartTokenKind.project:
         return AppColors.info;

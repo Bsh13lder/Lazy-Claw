@@ -99,3 +99,133 @@ List<String> orderedProjectGroupNames(
 /// The `(open, total)` counts for a group's [tasks] — open = not done.
 ({int open, int total}) projectGroupCounts(List<Task> tasks) =>
     (open: tasks.where((t) => !t.isDone).length, total: tasks.length);
+
+// ──────────────────────────────────────────────────────────────────────────
+// Split grouping: real Projects vs tag-only categories vs Inbox
+// ──────────────────────────────────────────────────────────────────────────
+
+/// One real-project bucket: the [project] (carried for its accent color) and
+/// the [tasks] whose `category` matched its name (case-insensitively). Seeded
+/// even with zero tasks so empty projects still appear in the view.
+class ProjectBucketData {
+  const ProjectBucketData({required this.project, required this.tasks});
+
+  final Project project;
+  final List<Task> tasks;
+
+  /// The canonical (project-cased) display name.
+  String get name => project.name;
+}
+
+/// One tag-only bucket: a [name] (the category string the user typed) that does
+/// NOT correspond to any real [Project], plus its [tasks]. There's no project to
+/// carry, so the view renders these with a neutral tag glyph instead of a color
+/// dot. Only built for categories that actually have tasks.
+class TagBucketData {
+  const TagBucketData({required this.name, required this.tasks});
+
+  final String name;
+  final List<Task> tasks;
+}
+
+/// The fully-separated grouping backing the Tasks "Projects" view:
+///   * [realProjects] — one bucket per real [Project] (seeded even when empty),
+///     in the project list's order, keyed by canonical name.
+///   * [tags] — category strings that match no real project, alphabetically
+///     ordered. Only categories with at least one task appear here.
+///   * [inbox] — tasks with a null / blank category (the projectless home).
+///
+/// Pure + immutable so the view + tests stay trivial.
+class SplitTaskGroups {
+  const SplitTaskGroups({
+    required this.realProjects,
+    required this.tags,
+    required this.inbox,
+  });
+
+  final List<ProjectBucketData> realProjects;
+  final List<TagBucketData> tags;
+  final List<Task> inbox;
+
+  bool get hasRealProjects => realProjects.isNotEmpty;
+  bool get hasTags => tags.isNotEmpty;
+}
+
+/// Splits [tasks] into real **Projects**, tag-only **categories**, and the
+/// **Inbox** — the separation the Projects view renders as three sections.
+///
+/// Matching mirrors [groupTasksByProject]: a task's trimmed `category` is
+/// matched **case-insensitively** to a project name. Rules:
+///   * A task whose category matches a real project lands under that project
+///     (keyed by the project's canonical name).
+///   * Every project in [projects] seeds a [ProjectBucketData] (zero-task
+///     projects still appear), preserving the [projects] order.
+///   * A task whose category is set but matches NO real project becomes a
+///     [TagBucketData] (tags are sorted; only non-empty tags are emitted).
+///   * A task with a null / blank category falls into [SplitTaskGroups.inbox].
+SplitTaskGroups splitTasksByGroup(
+  List<Task> tasks,
+  List<Project> projects,
+) {
+  // Canonical lookup: lowercased project name → Project (first wins on dupes).
+  final canonical = <String, Project>{};
+  for (final p in projects) {
+    final name = p.name.trim();
+    if (name.isEmpty) continue;
+    canonical.putIfAbsent(name.toLowerCase(), () => p);
+  }
+
+  // Seed a bucket list per project (preserving order), plus by-name accumulators
+  // so we can append matched tasks without re-scanning.
+  final projectTasks = <String, List<Task>>{};
+  final orderedProjects = <Project>[];
+  final seenProject = <String>{};
+  for (final p in projects) {
+    final name = p.name.trim();
+    if (name.isEmpty) continue;
+    final lower = name.toLowerCase();
+    if (!seenProject.add(lower)) continue; // skip duplicate project names
+    orderedProjects.add(p);
+    projectTasks[lower] = <Task>[];
+  }
+
+  final tagTasks = <String, List<Task>>{}; // canonical-cased tag → tasks
+  final inbox = <Task>[];
+
+  for (final task in tasks) {
+    final raw = task.category?.trim() ?? '';
+    if (raw.isEmpty) {
+      inbox.add(task);
+      continue;
+    }
+    final lower = raw.toLowerCase();
+    final project = canonical[lower];
+    if (project != null) {
+      projectTasks[lower]!.add(task);
+    } else {
+      // Preserve the first-seen casing for the tag label.
+      (tagTasks[raw] ??= <Task>[]).add(task);
+    }
+  }
+
+  final realProjects = [
+    for (final p in orderedProjects)
+      ProjectBucketData(
+        project: p,
+        tasks: projectTasks[p.name.trim().toLowerCase()] ?? const <Task>[],
+      ),
+  ];
+
+  final tagNames = tagTasks.keys.toList()
+    ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  final tags = [
+    for (final name in tagNames)
+      TagBucketData(name: name, tasks: tagTasks[name]!),
+  ];
+
+  return SplitTaskGroups(
+    realProjects: realProjects,
+    tags: tags,
+    inbox: inbox,
+  );
+}

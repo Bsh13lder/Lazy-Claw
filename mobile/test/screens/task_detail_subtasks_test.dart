@@ -23,21 +23,25 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 
 class _OfflineTransport implements TasksTransport {
   @override
-  Future<Map<String, dynamic>> getJson(String path,
-          {Map<String, dynamic>? queryParams}) async =>
-      throw ApiError(0, 'offline');
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> postJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> patchJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> putJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
@@ -64,6 +68,7 @@ class _StubTasksNotifier extends TasksNotifier {
     String? category,
     String? steps,
     String? reminderAt,
+    String? recurring,
   }) async {
     updateCalls.add({'id': id, 'title': title, 'steps': steps});
   }
@@ -95,27 +100,28 @@ const _withSteps = Task(
   owner: 'user',
   nagCount: 0,
   createdAt: '2026-06-06T00:00:00Z',
-  steps: '[{"id":"s1","title":"Buy flour","done":false},'
+  steps:
+      '[{"id":"s1","title":"Buy flour","done":false},'
       '{"id":"s2","title":"Preheat oven","done":true}]',
 );
 
 void main() {
   Widget host(_StubTasksNotifier stub, Task task) => ProviderScope(
-        overrides: [tasksProvider.overrideWith((ref) => stub)],
-        child: MaterialApp(
-          theme: buildAppTheme(),
-          home: Consumer(
-            builder: (ctx, ref, _) => Scaffold(
-              body: Center(
-                child: ElevatedButton(
-                  onPressed: () => showTaskDetailSheet(ctx, ref, task),
-                  child: const Text('open'),
-                ),
-              ),
+    overrides: [tasksProvider.overrideWith((ref) => stub)],
+    child: MaterialApp(
+      theme: buildAppTheme(),
+      home: Consumer(
+        builder: (ctx, ref, _) => Scaffold(
+          body: Center(
+            child: ElevatedButton(
+              onPressed: () => showTaskDetailSheet(ctx, ref, task),
+              child: const Text('open'),
             ),
           ),
         ),
-      );
+      ),
+    ),
+  );
 
   Future<void> openSheet(
     WidgetTester tester,
@@ -138,8 +144,9 @@ void main() {
   String? lastSteps(_StubTasksNotifier stub) =>
       stub.updateCalls.single['steps'] as String?;
 
-  testWidgets('renders existing sub-tasks + a done/total progress label',
-      (tester) async {
+  testWidgets('renders existing sub-tasks + a done/total progress label', (
+    tester,
+  ) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
@@ -152,8 +159,9 @@ void main() {
     expect(find.text('1/2'), findsOneWidget);
   });
 
-  testWidgets('a title-only edit leaves steps untouched (null, no churn)',
-      (tester) async {
+  testWidgets('a title-only edit leaves steps untouched (null, no churn)', (
+    tester,
+  ) async {
     final stub = _stub();
     await openSheet(tester, stub);
     await save(tester);
@@ -162,13 +170,16 @@ void main() {
     expect(lastSteps(stub), isNull);
   });
 
-  testWidgets('adding a sub-task persists it in the Save payload',
-      (tester) async {
+  testWidgets('adding a sub-task persists it in the Save payload', (
+    tester,
+  ) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
     await tester.enterText(
-        find.byKey(const Key('subtask-add-field')), 'Add frosting');
+      find.byKey(const Key('subtask-add-field')),
+      'Add frosting',
+    );
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -178,12 +189,16 @@ void main() {
     await save(tester);
 
     final subs = parseSubtasks(lastSteps(stub));
-    expect(subs.map((s) => s.title),
-        containsAll(['Buy flour', 'Preheat oven', 'Add frosting']));
+    expect(
+      subs.map((s) => s.title),
+      containsAll(['Buy flour', 'Preheat oven', 'Add frosting']),
+    );
     expect(subs.firstWhere((s) => s.title == 'Add frosting').done, isFalse);
   });
 
-  testWidgets('toggling a sub-task persists the new done state', (tester) async {
+  testWidgets('toggling a sub-task persists the new done state', (
+    tester,
+  ) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
@@ -207,15 +222,18 @@ void main() {
     expect(subs.map((s) => s.id), ['s1']);
   });
 
-  testWidgets('inline-editing a sub-task title persists the new text',
-      (tester) async {
+  testWidgets('inline-editing a sub-task title persists the new text', (
+    tester,
+  ) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
     await tester.tap(find.byKey(const ValueKey('subtask-text-s1')));
     await tester.pumpAndSettle();
     await tester.enterText(
-        find.byKey(const ValueKey('subtask-edit-s1')), 'Buy bread flour');
+      find.byKey(const ValueKey('subtask-edit-s1')),
+      'Buy bread flour',
+    );
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
     await save(tester);
@@ -224,8 +242,9 @@ void main() {
     expect(subs.firstWhere((s) => s.id == 's1').title, 'Buy bread flour');
   });
 
-  testWidgets('removing the last sub-task writes an empty string (clears)',
-      (tester) async {
+  testWidgets('removing the last sub-task writes an empty string (clears)', (
+    tester,
+  ) async {
     const oneStep = Task(
       id: 'task-10',
       userId: 'u1',

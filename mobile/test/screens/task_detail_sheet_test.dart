@@ -23,21 +23,25 @@ import 'package:sqflite_common/sqlite_api.dart';
 
 class _OfflineTransport implements TasksTransport {
   @override
-  Future<Map<String, dynamic>> getJson(String path,
-          {Map<String, dynamic>? queryParams}) async =>
-      throw ApiError(0, 'offline');
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> postJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> patchJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> putJson(
-          String path, Map<String, dynamic> body) async =>
-      throw ApiError(0, 'offline');
+    String path,
+    Map<String, dynamic> body,
+  ) async => throw ApiError(0, 'offline');
   @override
   Future<Map<String, dynamic>> deleteJson(String path) async =>
       throw ApiError(0, 'offline');
@@ -66,6 +70,7 @@ class _StubTasksNotifier extends TasksNotifier {
     String? category,
     String? steps,
     String? reminderAt,
+    String? recurring,
   }) async {
     updateCalls.add({
       'id': id,
@@ -76,6 +81,7 @@ class _StubTasksNotifier extends TasksNotifier {
       'category': category,
       'steps': steps,
       'reminderAt': reminderAt,
+      'recurring': recurring,
     });
   }
 
@@ -124,8 +130,12 @@ void main() {
             builder: (ctx, ref, _) => Scaffold(
               body: Center(
                 child: ElevatedButton(
-                  onPressed: () => showTaskDetailSheet(ctx, ref, _sample,
-                      projects: projects),
+                  onPressed: () => showTaskDetailSheet(
+                    ctx,
+                    ref,
+                    _sample,
+                    projects: projects,
+                  ),
                   child: const Text('open'),
                 ),
               ),
@@ -134,8 +144,11 @@ void main() {
         ),
       );
 
-  Future<void> openSheet(WidgetTester tester, _StubTasksNotifier stub,
-      {List<Project> projects = const []}) async {
+  Future<void> openSheet(
+    WidgetTester tester,
+    _StubTasksNotifier stub, {
+    List<Project> projects = const [],
+  }) async {
     // The detail sheet (title + notes + priority + project + due + time +
     // subtasks + footer) is taller than the 800×600 default, so give it a
     // roomier surface to keep the footer buttons on-screen and tappable.
@@ -149,34 +162,39 @@ void main() {
   }
 
   Project project(String id, String name, {String? color}) => Project(
-        id: id,
-        name: name,
-        budget: 0,
-        currency: 'USD',
-        status: 'active',
-        color: color,
-      );
+    id: id,
+    name: name,
+    budget: 0,
+    currency: 'USD',
+    status: 'active',
+    color: color,
+  );
 
   testWidgets('pre-fills the title and notes from the task', (tester) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
-    final titleField =
-        tester.widget<TextField>(find.byKey(const Key('task-detail-title')));
+    final titleField = tester.widget<TextField>(
+      find.byKey(const Key('task-detail-title')),
+    );
     expect(titleField.controller!.text, 'Original title');
 
-    final notesField =
-        tester.widget<TextField>(find.byKey(const Key('task-detail-notes')));
+    final notesField = tester.widget<TextField>(
+      find.byKey(const Key('task-detail-notes')),
+    );
     expect(notesField.controller!.text, 'Original notes');
   });
 
-  testWidgets('editing the title + tapping Save invokes updateTask',
-      (tester) async {
+  testWidgets('editing the title + tapping Save invokes updateTask', (
+    tester,
+  ) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
     await tester.enterText(
-        find.byKey(const Key('task-detail-title')), 'Edited title');
+      find.byKey(const Key('task-detail-title')),
+      'Edited title',
+    );
     await tester.tap(find.byKey(const Key('task-detail-save')));
     await tester.pumpAndSettle();
 
@@ -187,8 +205,7 @@ void main() {
     expect(find.byKey(const Key('task-detail-title')), findsNothing);
   });
 
-  testWidgets('Delete asks to confirm then invokes deleteTask',
-      (tester) async {
+  testWidgets('Delete asks to confirm then invokes deleteTask', (tester) async {
     final stub = _stub();
     await openSheet(tester, stub);
 
@@ -206,11 +223,15 @@ void main() {
     expect(find.byKey(const Key('task-detail-title')), findsNothing);
   });
 
-  testWidgets('picking a project then Save commits the category',
-      (tester) async {
+  testWidgets('picking a project then Save commits the category', (
+    tester,
+  ) async {
     final stub = _stub();
-    await openSheet(tester, stub,
-        projects: [project('p1', 'Home', color: '#FF0000')]);
+    await openSheet(
+      tester,
+      stub,
+      projects: [project('p1', 'Home', color: '#FF0000')],
+    );
 
     // The project control starts at "No project" (sample has no category).
     expect(find.text('No project'), findsOneWidget);
@@ -229,5 +250,100 @@ void main() {
 
     expect(stub.updateCalls, hasLength(1));
     expect(stub.updateCalls.single['category'], 'Home');
+  });
+
+  testWidgets('an untouched recurrence is NOT written on Save', (tester) async {
+    final stub = _stub();
+    await openSheet(tester, stub);
+
+    // Only edit the title; never touch the REPEAT picker.
+    await tester.enterText(
+      find.byKey(const Key('task-detail-title')),
+      'Edited',
+    );
+    await tester.tap(find.byKey(const Key('task-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(stub.updateCalls, hasLength(1));
+    // Null = "leave recurring alone" (the column isn't churned).
+    expect(stub.updateCalls.single['recurring'], isNull);
+  });
+
+  testWidgets('picking Daily then Save sends a daily cron', (tester) async {
+    final stub = _stub();
+    await openSheet(tester, stub);
+
+    // The sample has a date-only due of 2026-06-10 → no time → default 09:00.
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('recurrence-opt-daily')),
+    );
+    await tester.tap(find.byKey(const ValueKey('recurrence-opt-daily')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('task-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(stub.updateCalls, hasLength(1));
+    expect(stub.updateCalls.single['recurring'], '0 9 * * *');
+  });
+
+  testWidgets('a recurring task pre-selects its option + clearing sends ""', (
+    tester,
+  ) async {
+    final stub = _stub();
+    // A weekly-Monday recurring task.
+    const recurring = Task(
+      id: 'task-99',
+      userId: 'u1',
+      title: 'Weekly sync',
+      priority: 'medium',
+      status: 'todo',
+      owner: 'user',
+      dueDate: '2026-06-08',
+      recurring: '0 9 * * 1',
+      nagCount: 0,
+      createdAt: '2026-06-06T00:00:00Z',
+    );
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(800, 1400);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [tasksProvider.overrideWith((ref) => stub)],
+        child: MaterialApp(
+          theme: buildAppTheme(),
+          home: Consumer(
+            builder: (ctx, ref, _) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () => showTaskDetailSheet(ctx, ref, recurring),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    // The Weekly option is pre-selected from the stored cron.
+    final weekly = tester.widget<LzChip>(
+      find.byKey(const ValueKey('recurrence-opt-weekly')),
+    );
+    expect(weekly.selected, isTrue);
+
+    // Clear it: tap "No repeat", then Save → empty string clears the column.
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('recurrence-opt-none')),
+    );
+    await tester.tap(find.byKey(const ValueKey('recurrence-opt-none')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('task-detail-save')));
+    await tester.pumpAndSettle();
+
+    expect(stub.updateCalls, hasLength(1));
+    expect(stub.updateCalls.single['recurring'], '');
   });
 }

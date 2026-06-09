@@ -140,6 +140,8 @@ void main() {
     expect(transport.replies.length, 1);
     expect(transport.replies.first['text'], 'Hello there');
     expect(transport.replies.first['mode'], 'direct');
+    // Field is cleared after a successful send.
+    expect(find.text('Hello there'), findsNothing);
   });
 
   testWidgets('ai reply uses mode=ai', (tester) async {
@@ -196,5 +198,7 @@ void main() {
     expect(find.text('Alice'), findsAtLeastNWidgets(1));
     expect(find.text('hello from Alice'), findsOneWidget);
     expect(find.text('hello from me'), findsOneWidget);
+    // Own (mine) bubble must NOT show a sender caption.
+    expect(find.text('Me'), findsNothing);
   });
 }

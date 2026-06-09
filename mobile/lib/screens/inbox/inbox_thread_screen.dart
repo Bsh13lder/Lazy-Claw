@@ -258,8 +258,8 @@ class _ReplyBar extends StatelessWidget {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
 
     return AnimatedPadding(
-      duration: const Duration(milliseconds: 150),
-      curve: Curves.easeOut,
+      duration: AppMotion.fast,
+      curve: AppMotion.curve,
       padding: EdgeInsets.only(bottom: bottomInset),
       child: SafeArea(
         top: false,

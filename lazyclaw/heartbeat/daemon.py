@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import tempfile
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2644,7 +2645,6 @@ class HeartbeatDaemon:
         Falls back to None for all three in test/minimal setups so the runner's
         existing ``if deps.registry is None`` guards short-circuit cleanly.
         """
-        import types
         return types.SimpleNamespace(
             registry=self._registry,
             eco_router=self._eco_router,

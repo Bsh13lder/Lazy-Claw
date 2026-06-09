@@ -16,9 +16,6 @@ from lazyclaw.config import Config
 from lazyclaw.crypto.key_manager import create_user_dek
 from lazyclaw.db.connection import close_pool, db_session, init_db
 
-pytestmark = pytest.mark.asyncio
-
-
 @pytest.fixture
 async def config(tmp_path: Path):
     c = Config(database_dir=tmp_path, server_secret="test-secret-32-bytes-long-yo!!")

@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lazyclaw_mobile/comms/inbox_models.dart';
 import 'package:lazyclaw_mobile/comms/inbox_repository.dart';
+import 'package:lazyclaw_mobile/core/api/api_exceptions.dart';
 
 // ── Fake transport ────────────────────────────────────────────────────────────
 
@@ -34,6 +35,28 @@ class _FakeTransport implements InboxTransport {
     lastBody = body;
     return response;
   }
+}
+
+/// Fake transport that always throws the production error shape:
+/// [ApiError] is what [DioInboxTransport] propagates when the
+/// [_ErrorInterceptor] rejects a non-2xx response.
+class _ErrorTransport implements InboxTransport {
+  final ApiError error;
+  _ErrorTransport(this.error);
+
+  @override
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, dynamic>? queryParams,
+  }) =>
+      Future.error(error);
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      Future.error(error);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -189,20 +212,49 @@ void main() {
   group('InboxRepository.reply', () {
     test('calls POST /api/inbox/threads/{id}/reply with text and mode',
         () async {
-      final transport = _FakeTransport({'queued': true});
+      final transport = _FakeTransport({'success': true, 'mode': 'direct'});
       final repo = InboxRepository(transport);
       final result = await repo.reply('t1', 'Hello there');
       expect(transport.lastMethod, 'POST');
       expect(transport.lastPath, '/api/inbox/threads/t1/reply');
       expect(transport.lastBody, {'text': 'Hello there', 'mode': 'direct'});
-      expect(result['queued'], true);
+      expect(result['success'], true);
+      expect(result['mode'], 'direct');
     });
 
     test('respects custom mode param', () async {
-      final transport = _FakeTransport({'queued': true});
+      final transport = _FakeTransport({'success': true, 'mode': 'suggest'});
       final repo = InboxRepository(transport);
       await repo.reply('t1', 'Draft text', mode: 'suggest');
       expect(transport.lastBody!['mode'], 'suggest');
+    });
+  });
+
+  // ── Error propagation tests ────────────────────────────────────────────────
+
+  group('InboxRepository error propagation', () {
+    test('fetchThreads propagates ApiError on transport failure', () {
+      final transport = _ErrorTransport(ApiError(500, 'server error'));
+      final repo = InboxRepository(transport);
+      expect(() => repo.fetchThreads(), throwsA(isA<ApiError>()));
+    });
+
+    test('reply propagates ApiError on transport failure', () {
+      final transport = _ErrorTransport(ApiError(503, 'unavailable'));
+      final repo = InboxRepository(transport);
+      expect(() => repo.reply('t1', 'hi'), throwsA(isA<ApiError>()));
+    });
+
+    test('ApiError carries the status code and message', () async {
+      final transport = _ErrorTransport(ApiError(404, 'thread not found'));
+      final repo = InboxRepository(transport);
+      try {
+        await repo.fetchMessages('missing-id');
+        fail('expected ApiError');
+      } on ApiError catch (e) {
+        expect(e.status, 404);
+        expect(e.message, 'thread not found');
+      }
     });
   });
 }

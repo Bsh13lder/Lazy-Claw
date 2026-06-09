@@ -190,8 +190,126 @@ async def _request_approval(
 
 
 async def _run_step(config: Config, deps: RunnerDeps, conv: dict) -> dict:
-    """Poll/reply branch — implemented in Task E5."""
-    return conv
+    """Poll the channel for the contact's reply, evaluate goal, finish or follow up."""
+    user_id = conv["user_id"]
+    if conv["iteration"] >= conv["max_iterations"]:
+        return await _fail(config, conv, "failed", error="no clear answer after max turns")
+
+    new_msgs = await _read_new_contact_messages(config, deps, conv)
+    if not new_msgs:
+        backoff = min(conv["poll_interval"] * (2 ** conv["iteration"]), 1800)
+        return await cs.update_conversation(
+            config, user_id, conv["id"],
+            next_poll_at=_iso(_now() + timedelta(seconds=backoff)))
+
+    for m in new_msgs:
+        await cs.update_conversation(config, user_id, conv["id"],
+            append_transcript={"dir": "in", "text": m["text"], "ts": m.get("ts", "")})
+
+    # Re-fetch conv so transcript is up to date before evaluation.
+    conv = await cs.get_conversation(config, user_id, conv["id"]) or conv
+
+    verdict = await _evaluate_goal(config, deps, conv, new_msgs)
+    if verdict.get("done"):
+        answer = verdict.get("answer", "")
+        updated = await cs.update_conversation(
+            config, user_id, conv["id"], status="done", result=answer, next_poll_at=None)
+        await deliver(config, user_id, title="Got your answer",
+            body=f"{conv['contact_name'] or conv['contact_handle']}: {answer}",
+            kind="conversation_result",
+            thread_ref={"channel": conv["channel"], "contact": conv["contact_handle"]})
+        return updated
+
+    followup = verdict.get("next", "")
+    if followup:
+        await _send(config, deps, conv, followup)
+    next_poll = _iso(_now() + timedelta(seconds=conv["poll_interval"]))
+    return await cs.update_conversation(
+        config, user_id, conv["id"], iteration=conv["iteration"] + 1,
+        next_poll_at=next_poll,
+        append_transcript={"dir": "out", "text": followup, "ts": _iso(_now())})
+
+
+async def _read_new_contact_messages(config: Config, deps: RunnerDeps, conv: dict) -> list[dict]:
+    """Live-read the channel; return contact-side messages not already in transcript."""
+    gw = build_gateway(deps.registry, conv["user_id"])
+    msgs = await gw.read_thread(conv["channel"], conv["contact_handle"])
+    seen = {t["text"] for t in conv["transcript"]}
+    return [{"sender": m.sender, "text": m.text, "ts": m.timestamp}
+            for m in msgs if not m.is_mine and m.text and m.text not in seen]
+
+
+async def _evaluate_goal(config: Config, deps: RunnerDeps, conv: dict, new_msgs: list[dict]) -> dict:
+    """Ask the messaging specialist whether the goal is satisfied.
+
+    Returns {"done": bool, "answer"?: str} when goal is met, or
+    {"done": False, "next": "<short follow-up message>"} when it is not.
+    Falls back to {"done": False, "next": ""} on any error.
+    """
+    import json as _json
+
+    if deps.registry is None or deps.eco_router is None:
+        logger.debug("_evaluate_goal: specialist deps unavailable — returning not-done")
+        return {"done": False, "next": ""}
+
+    try:
+        from lazyclaw.teams.runner import run_specialist
+        from lazyclaw.teams.specialist import _BUILTIN_BY_NAME
+    except ImportError:
+        logger.warning("_evaluate_goal: teams.runner or teams.specialist not importable")
+        return {"done": False, "next": ""}
+
+    messaging_spec = _BUILTIN_BY_NAME.get("messaging_specialist")
+    if messaging_spec is None:
+        logger.warning("_evaluate_goal: messaging_specialist not in BUILTIN_SPECIALISTS")
+        return {"done": False, "next": ""}
+
+    transcript_text = "\n".join(f"{t['dir']}: {t['text']}" for t in conv["transcript"])
+    latest_text = new_msgs[-1]["text"] if new_msgs else ""
+
+    task = (
+        f"Goal: {conv['goal']}\n\n"
+        f"Transcript so far:\n{transcript_text}\n\n"
+        f"Latest message from contact: {latest_text}\n\n"
+        "Decide whether the goal is now satisfied.\n"
+        "Reply with ONLY a JSON object — no preamble, no explanation:\n"
+        '  If done: {"done": true, "answer": "<brief summary of the outcome>"}\n'
+        '  If not done: {"done": false, "next": "<short follow-up message to send>"}'
+    )
+
+    try:
+        result = await run_specialist(
+            user_id=conv["user_id"],
+            specialist=messaging_spec,
+            task=task,
+            registry=deps.registry,
+            eco_router=deps.eco_router,
+            permission_checker=deps.permission_checker,
+        )
+    except Exception:
+        logger.exception("_evaluate_goal: run_specialist raised")
+        return {"done": False, "next": ""}
+
+    if not result.success:
+        logger.warning("_evaluate_goal: specialist failed — %s", result.error)
+        return {"done": False, "next": ""}
+
+    raw = result.result or ""
+    try:
+        start = raw.index("{")
+        end = raw.rindex("}") + 1
+        parsed = _json.loads(raw[start:end])
+        return parsed
+    except Exception:
+        logger.warning("_evaluate_goal: could not parse JSON from specialist result: %r", raw[:200])
+        return {"done": False, "next": ""}
+
+
+async def _send(config: Config, deps: RunnerDeps, conv: dict, text: str) -> bool:
+    """Send a message via the channel gateway. Returns True on success."""
+    gw = build_gateway(deps.registry, conv["user_id"])
+    res = await gw.send(conv["channel"], conv["contact_handle"], text)
+    return res.ok
 
 
 async def on_approval(config: Config, deps: RunnerDeps, conv: dict, approved: bool) -> dict:

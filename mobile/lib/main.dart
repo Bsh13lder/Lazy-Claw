@@ -105,19 +105,23 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
       _deepLinks?.init();
     });
 
-    // Deep-link a tapped server notification into the Chat tab. Reuses the
-    // pending-action plumbing: the listener in [build] navigates + clears it.
+    // Deep-link a tapped notification via the pending-action plumbing.
+    // 'inbox' payload → open Inbox list; everything else → Chat tab.
     // The hook is set here (after init) so it has provider access; it is read
     // at call time, so binding it after [LocalNotifications.init] is fine.
-    LocalNotifications.onSelectNotification = (_) {
+    LocalNotifications.onSelectNotification = (payload) {
       if (!mounted) return;
-      ref.read(pendingActionProvider.notifier).state = AppAction.chat;
+      final action =
+          payload == 'inbox' ? AppAction.openInbox : AppAction.chat;
+      ref.read(pendingActionProvider.notifier).state = action;
     };
-    // Cold-start: app launched BY tapping a server notification.
+    // Cold-start: app launched BY tapping a notification.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final payload = await LocalNotifications.consumeLaunchPayload();
       if (payload != null && mounted) {
-        ref.read(pendingActionProvider.notifier).state = AppAction.chat;
+        final action =
+            payload == 'inbox' ? AppAction.openInbox : AppAction.chat;
+        ref.read(pendingActionProvider.notifier).state = action;
       }
     });
 
@@ -155,7 +159,11 @@ class _LazyClawAppState extends ConsumerState<LazyClawApp> {
   /// consumed here right after navigating — no screen drains them.
   void _navigateForAction(GoRouter router, AppAction action) {
     router.go(routeForAction(action));
-    if (action == AppAction.chat || action == AppAction.openTasks) {
+    // These actions have no sheet to drain on the destination screen — clear the
+    // pending action here so it doesn't linger and re-navigate on the next build.
+    if (action == AppAction.chat ||
+        action == AppAction.openTasks ||
+        action == AppAction.openInbox) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) ref.read(pendingActionProvider.notifier).state = null;
       });

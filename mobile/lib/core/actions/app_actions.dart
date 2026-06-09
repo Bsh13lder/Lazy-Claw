@@ -11,7 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// mapping helpers below are intentionally PURE (no Flutter bindings, no
 /// provider access) so the shortcut/URI → action → route resolution can be
 /// unit-tested in isolation.
-enum AppAction { addTask, addExpense, chat, newNote, openTasks }
+enum AppAction { addTask, addExpense, chat, newNote, openTasks, openInbox }
 
 /// Stable string identifiers for each action.
 ///
@@ -29,6 +29,8 @@ const Map<AppAction, String> kActionIds = {
   // The "Today tasks" widget body/header opens the Tasks page (no sheet). Its
   // launch URI host is `tasks` (`lazyclaw://tasks`) → canon `tasks`.
   AppAction.openTasks: 'tasks',
+  // Tapping an inbox channel-message notification opens the Inbox list.
+  AppAction.openInbox: 'inbox',
 };
 
 /// The deep-link URI scheme the home-screen widget launches the app with
@@ -76,6 +78,8 @@ String routeForAction(AppAction action) {
       return '/expenses';
     case AppAction.chat:
       return '/chat';
+    case AppAction.openInbox:
+      return '/inbox';
   }
 }
 

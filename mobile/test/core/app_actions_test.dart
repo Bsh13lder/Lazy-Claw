@@ -63,6 +63,7 @@ void main() {
       expect(routeForAction(AppAction.openTasks), '/tasks');
       expect(routeForAction(AppAction.addExpense), '/expenses');
       expect(routeForAction(AppAction.chat), '/chat');
+      expect(routeForAction(AppAction.openInbox), '/inbox');
     });
   });
 
@@ -70,10 +71,12 @@ void main() {
     test('declares the four LAUNCHER shortcut actions, each round-trippable',
         () {
       // The launcher long-press menu carries the four capture/chat shortcuts —
-      // NOT openTasks (that action only exists for the Today-tasks widget body
-      // tap), so the spec list is exactly AppAction.values minus openTasks.
-      final shortcutActions =
-          AppAction.values.where((a) => a != AppAction.openTasks).toSet();
+      // NOT openTasks (widget body tap) or openInbox (notification deep-link),
+      // so the spec list is exactly AppAction.values minus those two.
+      final shortcutActions = AppAction.values
+          .where(
+              (a) => a != AppAction.openTasks && a != AppAction.openInbox)
+          .toSet();
       expect(kShortcutSpecs.length, shortcutActions.length);
       final resolved =
           kShortcutSpecs.map((s) => appActionForShortcut(s.type)).toSet();

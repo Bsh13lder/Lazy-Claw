@@ -95,21 +95,29 @@ class NotificationsFeedService {
   }
 }
 
+/// Dispatch a single [ServerNotification] to the appropriate local-notification
+/// channel based on its [kind].
+///
+/// `channel_message` entries use the inbox channel (payload `'inbox'`) so a
+/// tap opens the Inbox list. All other kinds fall back to the general server
+/// notifications channel (payload `'chat'`).
+Future<void> _showFeedEntry(ServerNotification n) {
+  final title = n.title.isNotEmpty ? n.title : 'LazyClaw';
+  final body = n.body.isNotEmpty ? n.body : n.title;
+  if (n.kind == 'channel_message') {
+    return LocalNotifications.showInboxNotification(title, body);
+  }
+  return LocalNotifications.showServerNotification(title, body, payload: 'chat');
+}
+
 /// Single reusable entry point wired to the real repository, prefs cursor, and
 /// the local-notification plugin. Safe to call from any isolate (foreground
 /// resume, chat WS-connect, or the headless WorkManager pass) — it constructs
 /// its own collaborators and swallows all errors.
-///
-/// Each shown notification carries the `chat` payload so a tap deep-links into
-/// the Chat tab via the existing pending-action plumbing.
 Future<void> pullNotificationsFeed(ApiClient client) async {
   final service = NotificationsFeedService(
     repo: NotificationsRepository(DioNotificationsTransport(client)),
-    show: (n) => LocalNotifications.showServerNotification(
-      n.title.isNotEmpty ? n.title : 'LazyClaw',
-      n.body.isNotEmpty ? n.body : n.title,
-      payload: 'chat',
-    ),
+    show: _showFeedEntry,
     loadSince: SettingsPrefs.loadNotificationsSince,
     saveSince: SettingsPrefs.saveNotificationsSince,
     loadSeenIds: SettingsPrefs.loadNotificationsSeenIds,

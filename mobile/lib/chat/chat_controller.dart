@@ -124,6 +124,11 @@ class ChatReducer {
           planSteps: steps,
         ));
 
+      case ChannelMessageFrame():
+        // Channel-message frames are surfaced as local notifications via
+        // [_handleNotification]; no chat bubble is added.
+        break;
+
       case UnknownFrame():
         break; // ignored
     }
@@ -180,6 +185,11 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
         onNotify?.call(
           'Approval needed',
           'Agent wants to run: $skill',
+        );
+      case ChannelMessageFrame(:final senderName, :final content):
+        onNotify?.call(
+          'New message from $senderName',
+          content,
         );
       default:
         break;

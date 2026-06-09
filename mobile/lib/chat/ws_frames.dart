@@ -80,6 +80,22 @@ class PlanPendingFrame extends ServerFrame {
   const PlanPendingFrame(this.plan, this.steps);
 }
 
+/// A new channel message arrived (WhatsApp / Email / Instagram).
+/// Sent by the server as a real-time push; also created from the polled
+/// notification feed when `kind == 'channel_message'`.
+class ChannelMessageFrame extends ServerFrame {
+  final String threadId;
+  final String senderName;
+  final String content;
+  final String timestamp;
+  const ChannelMessageFrame({
+    required this.threadId,
+    required this.senderName,
+    required this.content,
+    required this.timestamp,
+  });
+}
+
 class UnknownFrame extends ServerFrame {
   final String type;
   const UnknownFrame(this.type);
@@ -149,6 +165,13 @@ ServerFrame parseServerFrame(String raw) {
         return PlanPendingFrame(
           (m['plan'] as String?) ?? '',
           steps,
+        );
+      case 'channel_message':
+        return ChannelMessageFrame(
+          threadId: (m['thread_id'] as String?) ?? '',
+          senderName: (m['sender_name'] as String?) ?? '',
+          content: (m['content'] as String?) ?? '',
+          timestamp: (m['timestamp'] as String?) ?? '',
         );
       default:
         return UnknownFrame(type);

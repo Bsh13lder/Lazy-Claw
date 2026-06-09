@@ -9,6 +9,7 @@ import 'notification_actions.dart';
 /// header instead of looking like a single replaced item.
 const String _kTasksGroupKey = 'lazyclaw_tasks_group';
 const String _kNotificationsGroupKey = 'lazyclaw_notifications_group';
+const String _kInboxGroupKey = 'lazyclaw_inbox_group';
 
 /// Per-process monotonic counter feeding [nextNotificationId]. Top-level (not a
 /// class field) so the id generator stays pure and trivially unit-testable.
@@ -388,6 +389,43 @@ class LocalNotifications {
         macOS: darwinDetails,
       );
       await _plugin.show(id, title, body, details, payload: payload);
+    } catch (_) {
+      // Silently ignore — permission denied, plugin not ready, etc.
+    }
+  }
+
+  /// Show an inbox notification for a new channel message (WhatsApp / Email /
+  /// Instagram). Uses the dedicated `lazyclaw_inbox` channel so the user can
+  /// mute inbox alerts independently. The payload `'inbox'` routes the tap to
+  /// `/inbox` via [onSelectNotification]. Silently no-ops when the plugin isn't
+  /// initialised or permission was denied.
+  static Future<void> showInboxNotification(String title, String body) async {
+    if (!_initialised) return;
+    try {
+      final id = nextNotificationId();
+      const androidDetails = AndroidNotificationDetails(
+        'lazyclaw_inbox',
+        'Inbox Messages',
+        channelDescription:
+            'New messages from WhatsApp, Email, and Instagram',
+        importance: Importance.high,
+        priority: Priority.high,
+        showWhen: true,
+        groupKey: _kInboxGroupKey,
+        icon: 'ic_stat_lazyclaw',
+        largeIcon: DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+      );
+      const darwinDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      const details = NotificationDetails(
+        android: androidDetails,
+        iOS: darwinDetails,
+        macOS: darwinDetails,
+      );
+      await _plugin.show(id, title, body, details, payload: 'inbox');
     } catch (_) {
       // Silently ignore — permission denied, plugin not ready, etc.
     }

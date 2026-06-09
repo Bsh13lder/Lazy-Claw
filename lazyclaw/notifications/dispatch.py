@@ -33,7 +33,7 @@ async def deliver(
     """Record to feed (per channel + always for channel messages), then maybe Telegram."""
     channel = await get_notification_channel(config, user_id)
     if should_record_feed(channel) or kind in _ALWAYS_FEED_KINDS:
-        meta = {"thread_ref": thread_ref} if thread_ref else None
+        meta = {"thread_ref": thread_ref} if thread_ref is not None else None
         await record_notification(config, user_id, kind, title, body, meta=meta)
     if should_send_telegram(channel):
         text = f"{title}\n{body}".strip() if title else body

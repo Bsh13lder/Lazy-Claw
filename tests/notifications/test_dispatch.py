@@ -74,6 +74,8 @@ async def test_app_mode_records_but_no_telegram(monkeypatch, config, user_id):
     monkeypatch.setattr(dispatch, "_send_telegram_raw", sent)
     await dispatch.deliver(config, user_id, title="t", body="b", kind="info")
     sent.assert_not_awaited()
+    feed = await get_notifications_since(config, user_id, None)
+    assert any(n["kind"] == "info" for n in feed["notifications"])
 
 
 async def test_both_mode_records_and_sends_telegram(monkeypatch, config, user_id):

@@ -12,6 +12,7 @@ from typing import Protocol
 
 from lazyclaw.config import Config
 from lazyclaw.comms import conversation_store as cs
+from lazyclaw.comms.gateway import build_gateway
 from lazyclaw.notifications.dispatch import deliver
 
 logger = logging.getLogger(__name__)
@@ -182,12 +183,8 @@ async def _draft_message(config: Config, deps: RunnerDeps, conv: dict) -> str | 
 async def _request_approval(
     config: Config, user_id: str, conv: dict, draft: str
 ) -> str:
-    """Emit a first-message approval request and return its approval id.
-
-    Lazy-imports lazyclaw.comms.approvals (Task E4) so this module imports
-    cleanly before E4 is created.
-    """
-    from lazyclaw.comms import approvals  # noqa: E402  (Task E4)
+    """Emit a first-message approval request and return its approval id."""
+    from lazyclaw.comms import approvals
 
     return await approvals.request_first_message_approval(config, user_id, conv, draft)
 
@@ -195,3 +192,24 @@ async def _request_approval(
 async def _run_step(config: Config, deps: RunnerDeps, conv: dict) -> dict:
     """Poll/reply branch — implemented in Task E5."""
     return conv
+
+
+async def on_approval(config: Config, deps: RunnerDeps, conv: dict, approved: bool) -> dict:
+    """Handle a user approve/deny decision for a first-message approval.
+
+    On approve: sends the drafted opener via ChannelGateway, transitions status
+    to 'running', schedules the first poll.
+    On deny: aborts the conversation.
+    """
+    user_id = conv["user_id"]
+    if not approved:
+        return await _fail(config, conv, "aborted", error="you cancelled the first message")
+    draft = next((t["text"] for t in reversed(conv["transcript"]) if t.get("dir") == "draft"), None)
+    gw = build_gateway(deps.registry, user_id)
+    res = await gw.send(conv["channel"], conv["contact_handle"], draft or "")
+    if not res.ok:
+        return await _fail(config, conv, "failed", error=res.error or "send failed")
+    return await cs.update_conversation(
+        config, user_id, conv["id"], status="running", approval_id=None,
+        next_poll_at=_iso(_now() + timedelta(seconds=conv["poll_interval"])),
+        append_transcript={"dir": "out", "text": draft, "ts": _iso(_now())})

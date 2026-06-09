@@ -324,24 +324,17 @@ async def test_reply_ai_mode_success(inbox_client_with_thread) -> None:
     """mode=ai with a mocked conversation_runner returns {success, conversation_id, mode='ai'}."""
     client, thread, _cfg = inbox_client_with_thread
 
-    fake_runner = MagicMock()
-    fake_runner.start = AsyncMock(return_value={"id": "conv-123"})
+    fake_start = AsyncMock(return_value={"id": "conv-123"})
 
-    import sys
-    import types
-    # Temporarily inject a fake conversation_runner into the comms namespace.
-    fake_mod = types.ModuleType("lazyclaw.comms.conversation_runner")
-    fake_mod.start = fake_runner.start
-    sys.modules["lazyclaw.comms.conversation_runner"] = fake_mod
-    try:
+    # Patch the start function on the real module (robust when module is already cached).
+    from lazyclaw.comms import conversation_runner as _real_cr
+    with patch.object(_real_cr, "start", fake_start):
         r = client.post(
             f"/api/inbox/threads/{thread['id']}/reply",
             json={"text": "Respond for me", "mode": "ai"},
         )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["success"] is True
-        assert body["mode"] == "ai"
-        assert body["conversation_id"] == "conv-123"
-    finally:
-        del sys.modules["lazyclaw.comms.conversation_runner"]
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["mode"] == "ai"
+    assert body["conversation_id"] == "conv-123"

@@ -193,3 +193,32 @@ async def reply_to_thread(
     if not res.ok:
         raise HTTPException(status_code=502, detail=res.error or "send failed")
     return {"success": True, "mode": "direct"}
+
+
+def _conversation_deps():
+    """Build a minimal deps object for on_approval (only registry is used by the send path)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(registry=_get_registry(), eco_router=None, permission_checker=None)
+
+
+@router.post("/conversations/{conversation_id}/approve")
+async def approve_conversation(
+    conversation_id: str,
+    approved: bool = Query(True),
+    user: User = Depends(get_current_user),
+    config: Config = Depends(load_config),
+):
+    """Approve or deny a first-message approval for an autonomous conversation.
+
+    ``approved=true`` (default): sends the drafted opener and transitions to 'running'.
+    ``approved=false``: aborts the conversation.
+
+    Returns ``{"success": true, "approved": <bool>}``.
+    """
+    from lazyclaw.comms import conversation_runner, conversation_store
+    conv = await conversation_store.get_conversation(config, user.id, conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    deps = _conversation_deps()
+    await conversation_runner.on_approval(config, deps, conv, approved)
+    return {"success": True, "approved": approved}

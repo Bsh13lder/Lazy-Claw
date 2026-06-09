@@ -2629,6 +2629,9 @@ class TelegramCommands:
         conv_result = parse_conversation_callback(data)
         if conv_result is not None:
             conv_id, approved = conv_result
+            if not conv_id:
+                await query.edit_message_text("❌ Invalid request.")
+                return
             try:
                 from lazyclaw.comms import conversation_runner, conversation_store
                 from lazyclaw.gateway.routes.inbox import _get_registry
@@ -2654,7 +2657,7 @@ class TelegramCommands:
                     await query.edit_message_text("Cancelled")
             except Exception as exc:
                 logger.exception("conversation approval callback failed for conv %s", conv_id)
-                await query.edit_message_text(f"❌ Error: {exc}")
+                await query.edit_message_text("❌ Approval failed — check logs.")
             return
 
         if action == "accept":

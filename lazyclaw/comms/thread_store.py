@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from lazyclaw.config import Config
-from lazyclaw.crypto.encryption import encrypt, decrypt_field
+from lazyclaw.crypto.encryption import encrypt_field, decrypt_field
 from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.db.connection import db_session
 
@@ -67,11 +67,11 @@ async def upsert_thread(
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
                 (
                     tid, user_id, channel, contact_handle,
-                    encrypt(contact_name or "", key),
-                    encrypt(preview or "", key),
+                    encrypt_field(contact_name, key),
+                    encrypt_field(preview, key),
                     1 if increment_unread else 0,
                     now,
-                    encrypt(last_seen_msg_id or "", key),
+                    encrypt_field(last_seen_msg_id, key),
                     now, now,
                 ),
             )
@@ -79,25 +79,28 @@ async def upsert_thread(
             tid = existing["id"]
             new_unread = existing["unread_count"] + (1 if increment_unread else 0)
             await db.execute(
-                "UPDATE channel_threads SET contact_name=?, last_preview=?, "
-                "unread_count=?, last_activity=?, last_seen_msg_id=?, updated_at=?, "
-                "deleted_at=NULL WHERE id=?",
-                (
-                    encrypt(contact_name or "", key),
-                    encrypt(preview or "", key),
-                    new_unread,
-                    now,
-                    encrypt(last_seen_msg_id or "", key),
-                    now,
-                    tid,
-                ),
+                "UPDATE channel_threads SET "
+                "contact_name=COALESCE(?, contact_name), "
+                "last_preview=COALESCE(?, last_preview), "
+                "unread_count=?, last_activity=?, "
+                "last_seen_msg_id=COALESCE(?, last_seen_msg_id), "
+                "updated_at=?, deleted_at=NULL WHERE id=?",
+                (encrypt_field(contact_name, key), encrypt_field(preview, key),
+                 new_unread, now, encrypt_field(last_seen_msg_id, key), now, tid),
             )
         await db.commit()
-    return await get_thread(config, user_id, tid)
+    result = await get_thread(config, user_id, tid)
+    assert result is not None  # just upserted
+    return result
 
 
 async def get_thread(config: Config, user_id: str, thread_id: str) -> dict | None:
-    """Return the decrypted thread dict, or None if not found."""
+    """Return the decrypted thread dict, or None if not found.
+
+    Note: soft-deleted threads are returned (deleted_at is set but row exists).
+    This is intentional — the upsert revival path relies on reading deleted rows.
+    Callers wanting only live threads should use ``list_threads``.
+    """
     key = await get_user_dek(config, user_id)
     async with db_session(config) as db:
         cur = await db.execute(

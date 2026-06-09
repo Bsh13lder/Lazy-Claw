@@ -202,8 +202,8 @@ These are non-obvious architectural decisions that apply everywhere. For dated c
 ### Unified Comms (Inbox + Autonomous Conversations)
 - **`notify()` funnel**: `notifications/dispatch.py:deliver` — single alert path. Heartbeat watchers no longer push Telegram-only; alerts record to in-app feed + Flutter Inbox.
 - **`comms/` module**: `thread_store.py` (`channel_threads`) + `ChannelGateway` — channel-agnostic send/read via `registry.get_mcp_by_base_name` (tools are `mcp_<server>_<tool>` — never bare `registry.get`). Bodies read LIVE; `/api/inbox/*`.
-- **`ConversationTask` runner**: `conversation_runner.py` + `conversation_store.py` + `approvals.py`. States: `drafting → awaiting_approval → running → done`. ONE approval (Telegram `convok:`/`convno:` or `POST …/approve`); heartbeat drives autonomously; result via `deliver(kind="conversation_result")`. Tables: `channel_threads`, `conversation_tasks` (encrypted).
-- **NL trigger + channels**: "ask X on <channel> …" → `instant_dispatch.match_ask_conversation` + `agent.py`. WhatsApp full; Email/Instagram single-account fallback; Telegram notification-only (Bot API can't read DMs).
+- **`ConversationTask` runner** (`conversation_runner.py`/`conversation_store.py`/`approvals.py`): `drafting → awaiting_approval → running → done`. ONE approval (Telegram `convok:`/`convno:` or `POST …/approve`); heartbeat drives the rest; result via `deliver(kind="conversation_result")`. Encrypted `conversation_tasks`.
+- **NL trigger + channels**: "ask X on <channel> …" → `instant_dispatch.match_ask_conversation` + `agent.py` hook. WhatsApp full; Email/Instagram single-account; Telegram notify-only (Bot API can't read DMs).
 
 ### Channels & Security
 - **Telegram security**: Admin chat lock (first /start claims). Unauthorized chats blocked. Exponential backoff retry on network errors.

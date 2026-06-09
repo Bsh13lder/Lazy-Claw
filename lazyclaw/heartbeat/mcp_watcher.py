@@ -170,6 +170,64 @@ async def _build_whatsapp_jid_resolver(
     return _resolve
 
 
+async def _upsert_threads_for_items(
+    config: Any,
+    user_id: str,
+    service: str,
+    new_items: list[dict],
+) -> str | None:
+    """Mirror each new channel message into channel_threads.
+
+    Returns the contact handle of the last successfully-upserted item
+    (for use as notification thread_ref / _latest_contact).
+
+    Key mapping per service:
+      - whatsapp: ``from`` is the sender JID (e.g. ``34611234567@s.whatsapp.net``)
+      - email:    ``from`` is the sender address
+      - instagram: ``user`` is the sender username (no ``from`` field)
+      - generic:  ``from`` then ``handle`` as fallback
+    """
+    from lazyclaw.comms import thread_store
+
+    latest_handle: str | None = None
+    for item in new_items:
+        # Instagram items use "user"; all others use "from"
+        handle = (
+            item.get("from")
+            or item.get("user")
+            or item.get("handle")
+            or ""
+        )
+        handle = str(handle).strip() if handle else ""
+        if not handle:
+            continue
+        # contact_name: WhatsApp pushName/participantName, email "from", instagram "user"
+        contact_name = (
+            item.get("pushName")
+            or item.get("participantName")
+            or item.get("from")
+            or item.get("user")
+        )
+        # preview: WhatsApp "body", email "subject" then "body", instagram "text"
+        preview = (
+            item.get("body")
+            or item.get("text")
+            or item.get("subject")
+        )
+        await thread_store.upsert_thread(
+            config,
+            user_id,
+            channel=service,
+            contact_handle=handle,
+            contact_name=str(contact_name) if contact_name else None,
+            preview=str(preview)[:500] if preview else None,
+            last_seen_msg_id=str(item.get("id") or ""),
+            increment_unread=True,
+        )
+        latest_handle = handle
+    return latest_handle
+
+
 async def check_mcp_watcher(
     ctx: dict,
     mcp_clients: dict,
@@ -309,6 +367,18 @@ async def check_mcp_watcher(
     all_ids = list(last_seen | {item["id"] for item in new_items})
     new_ctx["last_seen_ids"] = all_ids[-200:]
 
+    # Single upsert point: mirror new items into channel_threads as soon as
+    # they are detected (before batch/immediate split). This ensures every
+    # new item is upserted exactly once — batched items are already stored
+    # here, so the flush paths need no second upsert and there is no risk
+    # of double-incrementing unread_count.
+    if config and user_id:
+        try:
+            latest = await _upsert_threads_for_items(config, user_id, service, new_items)
+            new_ctx["_latest_contact"] = latest
+        except Exception:
+            logger.debug("thread upsert skipped", exc_info=True)
+
     # Batching: accumulate messages instead of sending immediately
     batch_window = int(ctx.get("batch_window", 0))
     if batch_window > 0:
@@ -342,15 +412,6 @@ async def check_mcp_watcher(
             )
             return False, None, new_ctx
 
-    # Mirror new items into channel_threads inbox store (Task B4).
-    # Runs before notification so _latest_contact is available for thread_ref.
-    if config and user_id:
-        try:
-            latest = await _upsert_threads_for_items(config, user_id, service, new_items)
-            new_ctx["_latest_contact"] = latest
-        except Exception:
-            logger.debug("thread upsert skipped", exc_info=True)
-
     # No batching — notify immediately
     notification = await _format_notification(
         new_items, service, ctx.get("instruction", ""),
@@ -358,64 +419,6 @@ async def check_mcp_watcher(
     )
     new_ctx["_notified_items"] = new_items
     return True, notification, new_ctx
-
-
-async def _upsert_threads_for_items(
-    config: Any,
-    user_id: str,
-    service: str,
-    new_items: list[dict],
-) -> str | None:
-    """Mirror each new channel message into channel_threads.
-
-    Returns the contact handle of the last successfully-upserted item
-    (for use as notification thread_ref / _latest_contact).
-
-    Key mapping per service:
-      - whatsapp: ``from`` is the sender JID (e.g. ``34611234567@s.whatsapp.net``)
-      - email:    ``from`` is the sender address
-      - instagram: ``user`` is the sender username (no ``from`` field)
-      - generic:  ``from`` then ``handle`` as fallback
-    """
-    from lazyclaw.comms import thread_store
-
-    latest_handle: str | None = None
-    for item in new_items:
-        # Instagram items use "user"; all others use "from"
-        handle = (
-            item.get("from")
-            or item.get("user")
-            or item.get("handle")
-            or ""
-        )
-        handle = str(handle).strip() if handle else ""
-        if not handle:
-            continue
-        # contact_name: WhatsApp pushName/participantName, email "from", instagram "user"
-        contact_name = (
-            item.get("pushName")
-            or item.get("participantName")
-            or item.get("from")
-            or item.get("user")
-        )
-        # preview: WhatsApp "body", email "subject" then "body", instagram "text"
-        preview = (
-            item.get("body")
-            or item.get("text")
-            or item.get("subject")
-        )
-        await thread_store.upsert_thread(
-            config,
-            user_id,
-            channel=service,
-            contact_handle=handle,
-            contact_name=str(contact_name) if contact_name else None,
-            preview=str(preview)[:500] if preview else None,
-            last_seen_msg_id=str(item.get("id") or ""),
-            increment_unread=True,
-        )
-        latest_handle = handle
-    return latest_handle
 
 
 def _extract_new_items(

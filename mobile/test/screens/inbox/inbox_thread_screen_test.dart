@@ -117,6 +117,22 @@ void main() {
         reason: 'newest must be below (greater dy than) the older message');
   });
 
+  testWidgets('mine bubbles carry a "You" marker, received carry the sender',
+      (tester) async {
+    await tester.pumpWidget(_buildScope(
+      threadId: 't8',
+      title: 'Maria',
+      messages: const [
+        InboxMessage(sender: 'me', text: 'on my way', timestamp: '10:02', isMine: true),
+        InboxMessage(sender: 'Maria', text: 'where are you?', timestamp: '10:01'),
+      ],
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('You'), findsOneWidget);
+    expect(find.text('Maria'), findsAtLeastNWidgets(1)); // sender marker
+  });
+
   testWidgets('markRead is called on open', (tester) async {
     final transport = _FakeTransport();
 

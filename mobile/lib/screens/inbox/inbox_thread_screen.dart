@@ -275,7 +275,15 @@ class _MessageBubble extends StatelessWidget {
               color: isMine
                   ? AppColors.accent
                   : AppColors.bgSurfaceElevated,
-              borderRadius: AppRadii.rLg,
+              // Chat tails: the corner pointing at the speaker stays sharp —
+              // an instant visual cue of WHO each bubble belongs to, on top
+              // of the color + alignment difference.
+              borderRadius: BorderRadius.only(
+                topLeft: const Radius.circular(AppRadii.lg),
+                topRight: const Radius.circular(AppRadii.lg),
+                bottomLeft: Radius.circular(isMine ? AppRadii.lg : AppRadii.sm),
+                bottomRight: Radius.circular(isMine ? AppRadii.sm : AppRadii.lg),
+              ),
               border: isMine
                   ? null
                   : Border.all(color: AppColors.borderDefault),
@@ -284,12 +292,24 @@ class _MessageBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Sender label only on received (non-mine) bubbles with a name.
-                if (!isMine && message.sender.isNotEmpty) ...[
+                // Speaker marker: bold accent name on received bubbles,
+                // an explicit "You" tag on sent ones.
+                if (isMine) ...[
+                  Text(
+                    'You',
+                    style: AppText.caption.copyWith(
+                      color: AppColors.onAccent.withValues(alpha: 0.75),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  AppSpacing.vGap(AppSpacing.xs),
+                ] else if (message.sender.isNotEmpty) ...[
                   Text(
                     message.sender,
-                    style: AppText.caption
-                        .copyWith(color: AppColors.textMuted),
+                    style: AppText.caption.copyWith(
+                      color: AppColors.accent,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                   AppSpacing.vGap(AppSpacing.xs),
                 ],

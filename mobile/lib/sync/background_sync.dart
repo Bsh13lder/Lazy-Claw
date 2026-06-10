@@ -3,6 +3,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../core/api/api_client.dart';
 import '../core/config/server_config.dart';
+import '../core/home_widget_tasks.dart';
 import '../local/app_db.dart';
 import '../local/budgets_dao.dart';
 import '../local/note_dao.dart';
@@ -60,6 +61,16 @@ Future<void> runHeadlessSync() async {
       ).sync();
     } catch (_) {
       // Task sync failure is non-fatal — continue with remaining domains.
+    }
+
+    // Repaint the home-screen Tasks widget off the freshly synced cache.
+    // Without this the widget only updated while the APP was open — tasks
+    // created via Telegram/the agent never reached the glanceable view.
+    // [updateTasksWidget] is internally guarded and never throws.
+    try {
+      await updateTasksWidget(await TaskDao(db).list());
+    } catch (_) {
+      // Widget repaint is non-fatal.
     }
 
     // Notes

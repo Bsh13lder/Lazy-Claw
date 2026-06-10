@@ -13,5 +13,6 @@
     <string name="tw_widget_description">Your next few tasks, with a quick Add.</string>
     <string name="tw_title">Today tasks</string>
     <string name="tw_add">+ Add</string>
-    <string name="tw_empty">No tasks — tap + to add</string>
+    <string name="tw_empty">All clear ✨ — tap + Add to capture something</string>
+    <string name="tw_bullet">●</string>
 </resources>

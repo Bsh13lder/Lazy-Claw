@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- LazyClaw "Today tasks" home-screen widget (~4x2). A header (brand + Add
-     button) over a fixed 3-row task list. The whole body deep-links to the
-     Tasks page; the Add button deep-links to the add-task flow. Click intents
-     are wired in TasksWidget.kt.
-     RemoteViews-safe: LinearLayout + TextView + ImageView + Button only. -->
+     button) over a fixed 3-row task list (accent bullet · title · due pill)
+     and a "+N more" footer. The whole body deep-links to the Tasks page; the
+     Add button deep-links to the add-task flow. Click intents are wired in
+     TasksWidget.kt.
+     RemoteViews-safe: LinearLayout + TextView only. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/tw_root"
     android:layout_width="match_parent"
@@ -45,20 +46,30 @@
             android:contentDescription="@string/tw_add" />
     </LinearLayout>
 
-    <!-- Task rows (fixed 3). Each row is title + due label. -->
+    <!-- Task rows (fixed 3). Each row: accent bullet · title · due pill. -->
     <LinearLayout
+        android:id="@+id/tw_row0"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:layout_marginTop="10dp"
         android:baselineAligned="false">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/tw_bullet"
+            android:textColor="@color/lz_accent"
+            android:textSize="9sp"
+            android:layout_marginEnd="8dp"
+            android:importantForAccessibility="no" />
         <TextView
             android:id="@+id/tw_row0_title"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="@color/lz_widget_label"
-            android:textSize="13sp"
+            android:textSize="14sp"
             android:maxLines="1"
             android:ellipsize="end" />
         <TextView
@@ -67,7 +78,13 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:textColor="@color/lz_accent"
-            android:textSize="12sp"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:background="@drawable/tasks_widget_due_bg"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
             android:maxLines="1" />
     </LinearLayout>
 
@@ -76,15 +93,24 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:layout_marginTop="8dp"
         android:baselineAligned="false">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/tw_bullet"
+            android:textColor="@color/lz_accent"
+            android:textSize="9sp"
+            android:layout_marginEnd="8dp"
+            android:importantForAccessibility="no" />
         <TextView
             android:id="@+id/tw_row1_title"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="@color/lz_widget_label"
-            android:textSize="13sp"
+            android:textSize="14sp"
             android:maxLines="1"
             android:ellipsize="end" />
         <TextView
@@ -93,7 +119,13 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:textColor="@color/lz_accent"
-            android:textSize="12sp"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:background="@drawable/tasks_widget_due_bg"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
             android:maxLines="1" />
     </LinearLayout>
 
@@ -102,15 +134,24 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:layout_marginTop="8dp"
         android:baselineAligned="false">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/tw_bullet"
+            android:textColor="@color/lz_accent"
+            android:textSize="9sp"
+            android:layout_marginEnd="8dp"
+            android:importantForAccessibility="no" />
         <TextView
             android:id="@+id/tw_row2_title"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="@color/lz_widget_label"
-            android:textSize="13sp"
+            android:textSize="14sp"
             android:maxLines="1"
             android:ellipsize="end" />
         <TextView
@@ -119,9 +160,27 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:textColor="@color/lz_accent"
-            android:textSize="12sp"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:background="@drawable/tasks_widget_due_bg"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
             android:maxLines="1" />
     </LinearLayout>
+
+    <!-- Footer: "+N more" overflow count (hidden when everything fits). -->
+    <TextView
+        android:id="@+id/tw_more"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:layout_marginStart="17dp"
+        android:textColor="@color/lz_widget_muted"
+        android:textSize="11sp"
+        android:maxLines="1"
+        android:visibility="gone" />
 
     <!-- Empty state — shown (and rows hidden) when there are no open tasks. -->
     <TextView

@@ -14,6 +14,8 @@ import 'due_date.dart';
 /// Storage shape (keys read by `TasksWidget.kt`):
 ///   * `task_count`   — int, the number of rows actually written (0..3).
 ///   * `task_<i>_title` / `task_<i>_due` — the i-th row (i = 0,1,2).
+///   * `task_more`    — footer label ('+2 more') when open tasks overflow
+///                      the rows, else '' (footer hidden).
 ///
 /// Every method is best-effort and NEVER throws: a platform without the plugin,
 /// a denied widget, or a serialization hiccup simply leaves the widget stale.
@@ -29,6 +31,7 @@ const String _kCountKey = 'task_count';
 Future<void> updateTasksWidget(List<Task> tasks, {DateTime? now}) async {
   try {
     final picked = pickWidgetTasks(tasks, now: now);
+    final openCount = tasks.where((t) => !t.isDone).length;
     await HomeWidget.saveWidgetData<int>(_kCountKey, picked.length);
     for (var i = 0; i < kTasksWidgetRowCount; i++) {
       final title = i < picked.length ? _short(picked[i].title) : '';
@@ -36,6 +39,9 @@ Future<void> updateTasksWidget(List<Task> tasks, {DateTime? now}) async {
       await HomeWidget.saveWidgetData<String>('task_${i}_title', title);
       await HomeWidget.saveWidgetData<String>('task_${i}_due', due);
     }
+    await HomeWidget.saveWidgetData<String>(
+      'task_more', widgetMoreLabel(openCount),
+    );
     await HomeWidget.updateWidget(
       name: 'TasksWidget',
       androidName: 'TasksWidget',
@@ -54,6 +60,7 @@ Future<void> clearTasksWidget() async {
       await HomeWidget.saveWidgetData<String>('task_${i}_title', '');
       await HomeWidget.saveWidgetData<String>('task_${i}_due', '');
     }
+    await HomeWidget.saveWidgetData<String>('task_more', '');
     await HomeWidget.updateWidget(
       name: 'TasksWidget',
       androidName: 'TasksWidget',
@@ -115,6 +122,13 @@ String widgetDueLabel(Task task, {DateTime? now}) {
     return '${_monthAbbrev(date.month)} ${date.day}';
   }
   return '';
+}
+
+/// The footer overflow label: '' when everything fits the rows, else
+/// '+N more' for the open tasks beyond [kTasksWidgetRowCount]. Pure.
+String widgetMoreLabel(int openCount) {
+  final extra = openCount - kTasksWidgetRowCount;
+  return extra > 0 ? '+$extra more' : '';
 }
 
 /// Parse a `dueDate` (either shape) to a comparable instant, or null when

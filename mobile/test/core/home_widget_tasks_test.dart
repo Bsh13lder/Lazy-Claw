@@ -101,4 +101,16 @@ void main() {
       expect(widgetDueLabel(_task(id: 'x'), now: now), '');
     });
   });
+
+  group('widgetMoreLabel', () {
+    test('empty when open tasks fit the rows', () {
+      expect(widgetMoreLabel(0), '');
+      expect(widgetMoreLabel(3), '');
+    });
+
+    test('counts only the overflow beyond the rows', () {
+      expect(widgetMoreLabel(4), '+1 more');
+      expect(widgetMoreLabel(10), '+7 more');
+    });
+  });
 }

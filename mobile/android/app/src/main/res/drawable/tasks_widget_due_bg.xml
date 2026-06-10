@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Subtle dark pill behind a task row's due label ("Today", "5:00 PM"). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/lz_widget_button_bg" />
+    <corners android:radius="10dp" />
+</shape>

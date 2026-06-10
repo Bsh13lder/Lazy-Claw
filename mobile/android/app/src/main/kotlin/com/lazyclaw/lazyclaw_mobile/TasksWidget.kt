@@ -12,12 +12,15 @@ import es.antonborri.home_widget.HomeWidgetProvider
 /**
  * LazyClaw "Today tasks" home-screen widget (~4x2).
  *
- * A header (brand + "+ Add") over a fixed 3-row task list. The task data is a
+ * A header (brand + "+ Add") over a fixed 3-row task list (accent bullet ·
+ * title · due pill) and a "+N more" overflow footer. The task data is a
  * PLAINTEXT snapshot the Flutter side writes via `home_widget` on every task
- * change (see `lib/core/home_widget_tasks.dart`):
+ * change AND from the 30-min background sync (see
+ * `lib/core/home_widget_tasks.dart` / `lib/sync/background_sync.dart`):
  *   * `task_count`            — number of rows to show (0..3).
  *   * `task_<i>_title`        — the i-th task title.
  *   * `task_<i>_due`          — a short due label (e.g. `5:00 PM`, `Today`).
+ *   * `task_more`             — footer label (`+2 more`) or '' to hide.
  *
  * Click intents (RemoteViews-safe, both via `home_widget`'s launch intent):
  *   * whole body / header → `lazyclaw://tasks`   → opens the Tasks page.
@@ -65,6 +68,7 @@ class TasksWidget : HomeWidgetProvider() {
     private fun RemoteViews.bindRows(data: SharedPreferences, count: Int) {
         if (count <= 0) {
             setViewVisibility(R.id.tw_empty, View.VISIBLE)
+            setViewVisibility(R.id.tw_more, View.GONE)
             for (i in 0 until ROWS) setRowVisibility(i, View.GONE)
             return
         }
@@ -76,21 +80,27 @@ class TasksWidget : HomeWidgetProvider() {
                 setRowVisibility(i, View.VISIBLE)
                 setTextViewText(titleId(i), title)
                 setTextViewText(dueId(i), due)
+                // Hide an empty due pill entirely so undated tasks don't show
+                // a blank chip.
+                setViewVisibility(dueId(i), if (due.isBlank()) View.GONE else View.VISIBLE)
             } else {
                 setRowVisibility(i, View.GONE)
             }
         }
+        // "+N more" overflow footer.
+        val more = data.getString(KEY_MORE, "") ?: ""
+        if (more.isBlank()) {
+            setViewVisibility(R.id.tw_more, View.GONE)
+        } else {
+            setTextViewText(R.id.tw_more, more)
+            setViewVisibility(R.id.tw_more, View.VISIBLE)
+        }
     }
 
-    /** Show/hide a whole row. Row 0's title+due live directly under the header
-     *  (no wrapping container id), so toggle its two TextViews; rows 1 & 2 have
-     *  a container we can toggle in one shot. */
+    /** Show/hide a whole row — every row now has a wrapping container id. */
     private fun RemoteViews.setRowVisibility(index: Int, visibility: Int) {
         when (index) {
-            0 -> {
-                setViewVisibility(R.id.tw_row0_title, visibility)
-                setViewVisibility(R.id.tw_row0_due, visibility)
-            }
+            0 -> setViewVisibility(R.id.tw_row0, visibility)
             1 -> setViewVisibility(R.id.tw_row1, visibility)
             2 -> setViewVisibility(R.id.tw_row2, visibility)
         }
@@ -117,6 +127,7 @@ class TasksWidget : HomeWidgetProvider() {
 
     private companion object {
         const val KEY_COUNT = "task_count"
+        const val KEY_MORE = "task_more"
         const val ROWS = 3
     }
 }

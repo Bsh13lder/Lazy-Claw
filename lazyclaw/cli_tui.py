@@ -1683,14 +1683,18 @@ class LazyClawApp(App):
                 _tg = telegram  # capture reference
 
                 async def _telegram_push_fn(text: str, reply_markup=None) -> None:
-                    # Check admin_chat_id at call time (may be set after /start)
-                    chat_id = _tg._admin_chat_id
-                    if not chat_id:
-                        logger.debug("Telegram push skipped: no admin_chat_id yet")
-                        return
-                    if not _tg._app or not _tg._app.bot:
-                        return
-                    try:
+                    # Telegram delivery closure — only awaited when the user's
+                    # channel toggle includes Telegram. The chat-id guard
+                    # lives INSIDE so app-only mode still records to the feed
+                    # even before an admin chat is bound (/start).
+                    async def _send_telegram() -> None:
+                        # Check admin_chat_id at call time (may be set after /start)
+                        chat_id = _tg._admin_chat_id
+                        if not chat_id:
+                            logger.debug("Telegram push skipped: no admin_chat_id yet")
+                            return
+                        if not _tg._app or not _tg._app.bot:
+                            return
                         from lazyclaw.channels.telegram import _telegram_send_with_retry
                         await _telegram_send_with_retry(
                             lambda: _tg._app.bot.send_message(
@@ -1699,6 +1703,14 @@ class LazyClawApp(App):
                             )
                         )
                         logger.info("Telegram push sent to chat %s", chat_id)
+
+                    try:
+                        from lazyclaw.notifications.heartbeat_push import (
+                            deliver_heartbeat_push,
+                        )
+                        await deliver_heartbeat_push(
+                            self._config, text, telegram_send=_send_telegram,
+                        )
                     except Exception as exc:
                         logger.warning("Telegram push failed: %s", exc)
 

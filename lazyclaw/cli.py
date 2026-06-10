@@ -414,6 +414,7 @@ async def _run_headless(
             notifier = TelegramNotifier(
                 bot=telegram._app.bot,
                 admin_chat_id_fn=lambda: telegram._admin_chat_id,
+                config=config,
             )
             if task_runner and task_runner._default_callback is None:
                 task_runner._default_callback = notifier
@@ -421,16 +422,28 @@ async def _run_headless(
             _tg = telegram
 
             async def _telegram_push_fn(text: str, reply_markup=None) -> None:
-                chat_id = _tg._admin_chat_id
-                if not chat_id or not _tg._app or not _tg._app.bot:
-                    return
-                try:
+                # Telegram delivery closure — only awaited when the user's
+                # channel toggle includes Telegram. The chat-id guard lives
+                # INSIDE so app-only mode still records to the feed even
+                # before an admin chat is bound.
+                async def _send_telegram() -> None:
+                    chat_id = _tg._admin_chat_id
+                    if not chat_id or not _tg._app or not _tg._app.bot:
+                        return
                     from lazyclaw.channels.telegram import _telegram_send_with_retry
                     await _telegram_send_with_retry(
                         lambda: _tg._app.bot.send_message(
                             chat_id=int(chat_id), text=text,
                             reply_markup=reply_markup,
                         )
+                    )
+
+                try:
+                    from lazyclaw.notifications.heartbeat_push import (
+                        deliver_heartbeat_push,
+                    )
+                    await deliver_heartbeat_push(
+                        config, text, telegram_send=_send_telegram,
                     )
                 except Exception as exc:
                     logger.warning("Telegram push failed: %s", exc)
@@ -452,6 +465,7 @@ async def _run_headless(
                 admin_chat_id_fn=lambda: _tg_ref._admin_chat_id,
                 prefix=prefix,
                 icon=icon,
+                config=config,
             )
 
         notifier_factory = _make_prefixed_notifier

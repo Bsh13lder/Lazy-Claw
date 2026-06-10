@@ -117,11 +117,26 @@ void main() {
   });
 
   group('widgetDueLabel', () {
-    test('timed due → clock label only', () {
+    test('timed due → day word + clock (the task\'s full date and time)', () {
       expect(
         widgetDueLabel(_task(id: 'x', dueDate: '2026-06-07T17:00:00'),
             now: now),
-        '5:00 PM',
+        'Today · 5:00 PM',
+      );
+      expect(
+        widgetDueLabel(_task(id: 'x', dueDate: '2026-06-08T09:00:00'),
+            now: now),
+        'Tomorrow · 9:00 AM',
+      );
+      expect(
+        widgetDueLabel(_task(id: 'x', dueDate: '2026-06-15T17:30:00'),
+            now: now),
+        'Jun 15 · 5:30 PM',
+      );
+      expect(
+        widgetDueLabel(_task(id: 'x', dueDate: '2026-06-06T22:00:00'),
+            now: now),
+        'Yesterday · 10:00 PM',
       );
     });
 

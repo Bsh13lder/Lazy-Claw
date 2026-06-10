@@ -126,31 +126,36 @@ List<Task> relevantWidgetTasks(List<Task> tasks, {DateTime? now}) {
 List<Task> pickWidgetTasks(List<Task> tasks, {DateTime? now}) =>
     relevantWidgetTasks(tasks, now: now).take(kTasksWidgetRowCount).toList();
 
-/// The short due label shown under a task title in the widget:
-///   * timed due → `5:00 PM` (clock only — the day is implied "soon");
-///   * date-only due → `Today` / `Tomorrow` / `Jun 9`;
+/// The due label shown beside a task title in the widget — the task's full
+/// date and time, compact:
+///   * timed due → `Today · 5:00 PM` / `Tomorrow · 9:00 AM` / `Jun 15 · 5:30 PM`;
+///   * date-only due → `Today` / `Tomorrow` / `Yesterday` / `Jun 9`;
 ///   * no due → empty string.
 /// Pure; [now] drives the relative wording.
 String widgetDueLabel(Task task, {DateTime? now}) {
   final due = task.dueDate;
+  if (due == null || due.isEmpty) return '';
+  final date = DateTime.tryParse(due);
+  if (date == null) return '';
+  final day = _dayWord(date, now ?? DateTime.now());
   if (dueDateHasTime(due)) {
     final parts = dueTimeParts(due);
-    if (parts != null) return formatClock12(parts.hour, parts.minute);
-    return '';
+    if (parts == null) return day;
+    return '$day · ${formatClock12(parts.hour, parts.minute)}';
   }
-  if (due != null && due.length == 10) {
-    final date = DateTime.tryParse(due);
-    if (date == null) return '';
-    final dueDay = DateTime(date.year, date.month, date.day);
-    final ref = now ?? DateTime.now();
-    final today = DateTime(ref.year, ref.month, ref.day);
-    final delta = dueDay.difference(today).inDays;
-    if (delta == 0) return 'Today';
-    if (delta == 1) return 'Tomorrow';
-    if (delta == -1) return 'Yesterday';
-    return '${_monthAbbrev(date.month)} ${date.day}';
-  }
-  return '';
+  return day;
+}
+
+/// Relative day word for [date] vs [ref]: `Today` / `Tomorrow` / `Yesterday`,
+/// else `Jun 15`. Pure.
+String _dayWord(DateTime date, DateTime ref) {
+  final dueDay = DateTime(date.year, date.month, date.day);
+  final today = DateTime(ref.year, ref.month, ref.day);
+  final delta = dueDay.difference(today).inDays;
+  if (delta == 0) return 'Today';
+  if (delta == 1) return 'Tomorrow';
+  if (delta == -1) return 'Yesterday';
+  return '${_monthAbbrev(date.month)} ${date.day}';
 }
 
 /// The 24h `HH:mm` freshness stamp shown in the widget header. Pure.

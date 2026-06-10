@@ -43,20 +43,36 @@ IconData _channelIcon(String channel) {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
-/// Inbox list screen. Shows all unified-inbox threads, filtered by channel.
+/// Standalone Inbox screen — an [LzScaffold] wrapper around [InboxView].
 ///
-/// Watches [inboxThreadsProvider] (AsyncValue) and
-/// [inboxChannelFilterProvider] (the active channel key, null = All).
+/// The inbox now lives as a top segment INSIDE the Chat tab (same pattern as
+/// Notes inside the Tasks tab); this wrapper remains for tests and any
+/// full-screen embedding.
 class InboxScreen extends ConsumerWidget {
   const InboxScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    return const LzScaffold(
+      title: 'Inbox',
+      body: InboxView(),
+    );
+  }
+}
+
+/// Embeddable inbox body: channel filter row + thread list.
+///
+/// Watches [inboxThreadsProvider] (AsyncValue) and
+/// [inboxChannelFilterProvider] (the active channel key, null = All).
+/// Hosted inside the Chat tab's Chat ⇄ Inbox segment.
+class InboxView extends ConsumerWidget {
+  const InboxView({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
     final threadsAsync = ref.watch(inboxThreadsProvider);
 
-    return LzScaffold(
-      title: 'Inbox',
-      body: Column(
+    return Column(
         children: [
           // ── Channel filter chip row ──────────────────────────────────────
           const _ChannelFilterRow(),
@@ -95,7 +111,6 @@ class InboxScreen extends ConsumerWidget {
             ),
           ),
         ],
-      ),
     );
   }
 }
@@ -175,7 +190,9 @@ class _ThreadRow extends StatelessWidget {
           trailing: thread.unreadCount > 0
               ? LzBadge(count: thread.unreadCount)
               : null,
-          onTap: () => context.push('/inbox/${thread.id}'),
+          onTap: () => context.push(
+            '/inbox/${thread.id}?title=${Uri.encodeComponent(displayName)}',
+          ),
         ),
         const Divider(
           height: 1,

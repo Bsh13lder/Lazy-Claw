@@ -33,6 +33,7 @@ import 'chat/bg_task_card.dart';
 import 'chat/chat_bubble.dart';
 import 'chat/mode_switcher.dart';
 import 'chat/plan_card.dart';
+import 'inbox/inbox_screen.dart';
 
 // ── Providers (preserved exactly) ─────────────────────────────────────────
 
@@ -56,6 +57,13 @@ final chatHistoryRepositoryProvider = Provider<ChatHistoryRepository>((ref) {
       DioChatHistoryTransport(ref.watch(apiClientProvider)));
 });
 
+// ── Top segment ──────────────────────────────────────────────────────────────
+
+/// The two top-level segments of this tab. The unified Inbox lives INSIDE the
+/// Chat tab (same pattern as Notes inside the Tasks tab) — agent chat and
+/// channel conversations are one mental space.
+enum _Segment { chat, inbox }
+
 // ── Screen ─────────────────────────────────────────────────────────────────
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -69,6 +77,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _scrollController = ScrollController();
   bool _connected = false;
   String? _connectError;
+
+  /// Chat vs Inbox — the top segment. Rendered via an [IndexedStack] so the
+  /// chat subtree (scroll position, in-flight streaming bubbles) stays alive
+  /// while browsing the inbox.
+  _Segment _segment = _Segment.chat;
 
   @override
   void initState() {
@@ -187,25 +200,53 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           : null,
       body: Column(
         children: [
-          // Message list
-          Expanded(
-            child: messages.isEmpty
-                ? _EmptyConversation(connected: _connected)
-                : _MessageList(
-                    messages: messages,
-                    scrollController: _scrollController,
-                    onApprove: (id, ok) => ref
-                        .read(chatControllerProvider.notifier)
-                        .respondApproval(id, ok),
-                    onSend: (text) =>
-                        ref.read(chatControllerProvider.notifier).send(text),
-                  ),
+          // ── Chat ⇄ Inbox segment toggle ────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs,
+            ),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _SegmentToggle(
+                segment: _segment,
+                onChanged: (s) => setState(() => _segment = s),
+              ),
+            ),
           ),
-          // Input bar
-          _InputBar(
-            controller: _input,
-            connected: _connected,
-            onSend: _send,
+          // ── Body — IndexedStack keeps the chat subtree (scroll position,
+          // streaming bubbles) alive while the inbox is showing.
+          Expanded(
+            child: IndexedStack(
+              index: _segment == _Segment.chat ? 0 : 1,
+              children: [
+                Column(
+                  children: [
+                    // Message list
+                    Expanded(
+                      child: messages.isEmpty
+                          ? _EmptyConversation(connected: _connected)
+                          : _MessageList(
+                              messages: messages,
+                              scrollController: _scrollController,
+                              onApprove: (id, ok) => ref
+                                  .read(chatControllerProvider.notifier)
+                                  .respondApproval(id, ok),
+                              onSend: (text) => ref
+                                  .read(chatControllerProvider.notifier)
+                                  .send(text),
+                            ),
+                    ),
+                    // Input bar
+                    _InputBar(
+                      controller: _input,
+                      connected: _connected,
+                      onSend: _send,
+                    ),
+                  ],
+                ),
+                const InboxView(),
+              ],
+            ),
           ),
         ],
       ),
@@ -253,6 +294,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
             const SizedBox(width: AppSpacing.sm),
           ],
+        ),
+      ],
+    );
+  }
+}
+
+// ── Segment toggle (Chat | Inbox) ────────────────────────────────────────────
+
+/// The top-level Chat ⇄ Inbox toggle. Built from two [LzChip]s for kit
+/// consistency (mirrors the Tasks ⇄ Notes toggle on the Tasks tab).
+class _SegmentToggle extends StatelessWidget {
+  const _SegmentToggle({required this.segment, required this.onChanged});
+
+  final _Segment segment;
+  final void Function(_Segment) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        LzChip(
+          label: 'Chat',
+          icon: Icons.chat_bubble_outline,
+          selected: segment == _Segment.chat,
+          onTap: () => onChanged(_Segment.chat),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        LzChip(
+          label: 'Inbox',
+          icon: Icons.mail_outline,
+          selected: segment == _Segment.inbox,
+          onTap: () => onChanged(_Segment.inbox),
         ),
       ],
     );

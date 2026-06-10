@@ -23,6 +23,9 @@ tools:
   - upwork_contract_poll
   - upwork_inbox_check
   - upwork_last_conversation
+  - upwork_get_messages
+  - upwork_get_conversation
+  - upwork_get_unread_count
   - watch_reddit_forhire
   - find_contact
   - web_search

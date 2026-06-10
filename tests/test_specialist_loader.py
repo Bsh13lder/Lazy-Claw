@@ -239,3 +239,23 @@ def test_research_specialist_fields():
         "google_run_task",
     )
     assert "TOOL LADDER" in s.system_prompt
+
+
+def test_freelance_allowlists_raw_upwork_read_tools():
+    """Regression (2026-06-10 00:33): the brain delegated "call
+    upwork_get_conversation with room_id=..." but the freelance allowlist
+    lacked the raw MCP read tools its own prompt ladder promises.
+    search_tools discovery does NOT grant callability — _filter_tools only
+    unions MCP tools whose bare name is allowlisted — so the worker
+    stuck-looped on search_tools and the user never got an answer.
+    """
+    spec = next(
+        s for s in BUILTIN_SPECIALISTS if s.name == "freelance_specialist"
+    )
+    assert {
+        "upwork_get_messages",
+        "upwork_get_conversation",
+        "upwork_get_unread_count",
+        "upwork_last_conversation",
+        "upwork_inbox_check",
+    } <= set(spec.allowed_skills)

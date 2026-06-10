@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lazyclaw_mobile/comms/inbox_models.dart';
 import 'package:lazyclaw_mobile/comms/inbox_providers.dart';
+import 'package:lazyclaw_mobile/screens/inbox/inbox_instruction_sheet.dart';
 import 'package:lazyclaw_mobile/ui/ui.dart';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -108,6 +109,10 @@ class InboxScreen extends ConsumerWidget {
 class _ChannelFilterRow extends ConsumerWidget {
   const _ChannelFilterRow();
 
+  /// Channels that support standing instructions (server: MCP watcher
+  /// services — telegram is the control channel itself).
+  static const _instructable = {'whatsapp', 'email', 'instagram'};
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final activeFilter = ref.watch(inboxChannelFilterProvider);
@@ -129,6 +134,14 @@ class _ChannelFilterRow extends ConsumerWidget {
             ),
             AppSpacing.hGap(AppSpacing.sm),
           ],
+          // Auto-pilot editor for the selected channel (standing instruction).
+          if (activeFilter != null && _instructable.contains(activeFilter))
+            LzChip(
+              label: 'Auto-pilot',
+              icon: Icons.bolt_rounded,
+              selected: false,
+              onTap: () => showChannelInstructionSheet(context, activeFilter),
+            ),
         ],
       ),
     );

@@ -35,6 +35,33 @@ class _FakeTransport implements InboxTransport {
     lastBody = body;
     return response;
   }
+
+  List<int> bytesResponse = const <int>[];
+
+  @override
+  Future<List<int>> getBytes(String path) async {
+    lastMethod = 'GET-BYTES';
+    lastPath = path;
+    return bytesResponse;
+  }
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    lastMethod = 'PUT';
+    lastPath = path;
+    lastBody = body;
+    return response;
+  }
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async {
+    lastMethod = 'DELETE';
+    lastPath = path;
+    return response;
+  }
 }
 
 /// Fake transport that always throws the production error shape:
@@ -57,6 +84,19 @@ class _ErrorTransport implements InboxTransport {
     Map<String, dynamic> body,
   ) =>
       Future.error(error);
+
+  @override
+  Future<List<int>> getBytes(String path) => Future.error(error);
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      Future.error(error);
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) => Future.error(error);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -126,6 +166,40 @@ void main() {
     expect(m.text, '');
     expect(m.timestamp, '');
     expect(m.isMine, false);
+    expect(m.id, isNull);
+    expect(m.media, isNull);
+  });
+
+  test('InboxMessage.fromJson parses id + media (voice note)', () {
+    final m = InboxMessage.fromJson({
+      'sender': 'Maria',
+      'text': '[audio]',
+      'timestamp': '10:00',
+      'is_mine': false,
+      'id': 'MSG1',
+      'media': {
+        'kind': 'audio',
+        'mimetype': 'audio/ogg; codecs=opus',
+        'voice_note': true,
+        'seconds': 14,
+        'file_name': null,
+        'size_bytes': 9001,
+      },
+    });
+    expect(m.id, 'MSG1');
+    expect(m.media, isNotNull);
+    expect(m.media!.kind, 'audio');
+    expect(m.media!.voiceNote, true);
+    expect(m.media!.seconds, 14);
+    expect(m.media!.sizeBytes, 9001);
+  });
+
+  test('InboxMedia.fromJson defaults for malformed payload', () {
+    final media = InboxMedia.fromJson({});
+    expect(media.kind, 'document');
+    expect(media.mimetype, 'application/octet-stream');
+    expect(media.voiceNote, false);
+    expect(media.fileName, isNull);
   });
 
   // ── Repository tests ───────────────────────────────────────────────────────
@@ -227,6 +301,65 @@ void main() {
       final repo = InboxRepository(transport);
       await repo.reply('t1', 'Draft text', mode: 'suggest');
       expect(transport.lastBody!['mode'], 'suggest');
+    });
+  });
+
+  group('InboxRepository.fetchMedia', () {
+    test('calls GET /api/inbox/threads/{id}/media/{mid} and returns bytes',
+        () async {
+      final transport = _FakeTransport({})
+        ..bytesResponse = [0x4f, 0x67, 0x67, 0x53];
+      final repo = InboxRepository(transport);
+      final bytes = await repo.fetchMedia('t1', 'MSG1');
+      expect(transport.lastMethod, 'GET-BYTES');
+      expect(transport.lastPath, '/api/inbox/threads/t1/media/MSG1');
+      expect(bytes, [0x4f, 0x67, 0x67, 0x53]);
+    });
+
+    test('propagates ApiError on transport failure', () {
+      final transport = _ErrorTransport(ApiError(502, 'media download failed'));
+      final repo = InboxRepository(transport);
+      expect(() => repo.fetchMedia('t1', 'MSG1'), throwsA(isA<ApiError>()));
+    });
+  });
+
+  group('InboxRepository channel instructions', () {
+    test('getChannelInstruction maps GET and returns instruction', () async {
+      final transport = _FakeTransport({
+        'channel': 'whatsapp',
+        'instruction': 'flag urgent messages',
+      });
+      final repo = InboxRepository(transport);
+      final instruction = await repo.getChannelInstruction('whatsapp');
+      expect(transport.lastMethod, 'GET');
+      expect(transport.lastPath, '/api/inbox/channels/whatsapp/instruction');
+      expect(instruction, 'flag urgent messages');
+    });
+
+    test('getChannelInstruction returns null when unset', () async {
+      final transport =
+          _FakeTransport({'channel': 'whatsapp', 'instruction': null});
+      final repo = InboxRepository(transport);
+      expect(await repo.getChannelInstruction('whatsapp'), isNull);
+    });
+
+    test('setChannelInstruction PUTs the instruction', () async {
+      final transport = _FakeTransport({'success': true, 'created': true});
+      final repo = InboxRepository(transport);
+      final result =
+          await repo.setChannelInstruction('email', 'auto-ack invoices');
+      expect(transport.lastMethod, 'PUT');
+      expect(transport.lastPath, '/api/inbox/channels/email/instruction');
+      expect(transport.lastBody, {'instruction': 'auto-ack invoices'});
+      expect(result['success'], true);
+    });
+
+    test('clearChannelInstruction DELETEs', () async {
+      final transport = _FakeTransport({'success': true});
+      final repo = InboxRepository(transport);
+      await repo.clearChannelInstruction('whatsapp');
+      expect(transport.lastMethod, 'DELETE');
+      expect(transport.lastPath, '/api/inbox/channels/whatsapp/instruction');
     });
   });
 

@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../comms/inbox_models.dart';
 import '../../comms/inbox_providers.dart';
 import '../../ui/ui.dart';
+import 'inbox_media_bubble.dart';
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -140,7 +141,10 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
                     vertical: AppSpacing.md,
                   ),
                   itemCount: messages.length,
-                  itemBuilder: (_, i) => _MessageBubble(message: messages[i]),
+                  itemBuilder: (_, i) => _MessageBubble(
+                    message: messages[i],
+                    threadId: widget.threadId,
+                  ),
                 );
               },
             ),
@@ -163,13 +167,20 @@ class _InboxThreadScreenState extends ConsumerState<InboxThreadScreen> {
 // ── Message bubble ────────────────────────────────────────────────────────────
 
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message});
+  const _MessageBubble({required this.message, required this.threadId});
 
   final InboxMessage message;
+  final String threadId;
 
   @override
   Widget build(BuildContext context) {
     final isMine = message.isMine;
+    final media = message.media;
+    final msgId = message.id;
+    // Media placeholder texts ("[audio]", "[image]") are redundant once the
+    // real media bubble renders — hide them, keep captions.
+    final isPlaceholderText = media != null &&
+        RegExp(r'^\[[^\]]+\]$').hasMatch(message.text.trim());
 
     return Padding(
       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
@@ -203,14 +214,25 @@ class _MessageBubble extends StatelessWidget {
                   ),
                   AppSpacing.vGap(AppSpacing.xs),
                 ],
-                Text(
-                  message.text,
-                  style: AppText.body.copyWith(
-                    color: isMine
-                        ? AppColors.onAccent
-                        : AppColors.textPrimary,
+                // Media (voice note / photo / file) renders its own bubble.
+                if (media != null && msgId != null) ...[
+                  InboxMediaBubble(
+                    threadId: threadId,
+                    messageId: msgId,
+                    media: media,
+                    isMine: isMine,
                   ),
-                ),
+                  if (!isPlaceholderText) AppSpacing.vGap(AppSpacing.xs),
+                ],
+                if (!isPlaceholderText)
+                  Text(
+                    message.text,
+                    style: AppText.body.copyWith(
+                      color: isMine
+                          ? AppColors.onAccent
+                          : AppColors.textPrimary,
+                    ),
+                  ),
                 AppSpacing.vGap(AppSpacing.xs),
                 // Timestamp
                 Text(

@@ -22,6 +22,16 @@ abstract class InboxTransport {
     String path,
     Map<String, dynamic> body,
   );
+
+  /// Fetch a binary payload (message media bytes).
+  Future<List<int>> getBytes(String path);
+
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  );
+
+  Future<Map<String, dynamic>> deleteJson(String path);
 }
 
 class DioInboxTransport implements InboxTransport {
@@ -47,6 +57,30 @@ class DioInboxTransport implements InboxTransport {
       _client.post<Map<String, dynamic>>(
         path,
         data: body,
+        fromJson: (d) => Map<String, dynamic>.from(d as Map),
+      );
+
+  @override
+  Future<List<int>> getBytes(String path) async {
+    final response = await _client.downloadFile(path);
+    return (response.data as List<int>?) ?? const <int>[];
+  }
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) =>
+      _client.put<Map<String, dynamic>>(
+        path,
+        data: body,
+        fromJson: (d) => Map<String, dynamic>.from(d as Map),
+      );
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) =>
+      _client.delete<Map<String, dynamic>>(
+        path,
         fromJson: (d) => Map<String, dynamic>.from(d as Map),
       );
 }
@@ -105,4 +139,38 @@ class InboxRepository {
         '/api/inbox/threads/$threadId/reply',
         {'text': text, 'mode': mode},
       );
+
+  /// Download the media bytes behind a message (voice note, photo, file).
+  ///
+  /// Maps `GET /api/inbox/threads/{id}/media/{messageId}`.
+  Future<List<int>> fetchMedia(String threadId, String messageId) =>
+      _t.getBytes('/api/inbox/threads/$threadId/media/$messageId');
+
+  /// Read the standing instruction for [channel] (null when unset).
+  ///
+  /// Maps `GET /api/inbox/channels/{channel}/instruction`.
+  Future<String?> getChannelInstruction(String channel) async {
+    final json =
+        await _t.getJson('/api/inbox/channels/$channel/instruction');
+    return json['instruction'] as String?;
+  }
+
+  /// Set the standing instruction for [channel] — the agent executes it on
+  /// every new message batch and reports the result via notifications.
+  ///
+  /// Maps `PUT /api/inbox/channels/{channel}/instruction`.
+  Future<Map<String, dynamic>> setChannelInstruction(
+    String channel,
+    String instruction,
+  ) =>
+      _t.putJson(
+        '/api/inbox/channels/$channel/instruction',
+        {'instruction': instruction},
+      );
+
+  /// Clear the standing instruction for [channel].
+  ///
+  /// Maps `DELETE /api/inbox/channels/{channel}/instruction`.
+  Future<void> clearChannelInstruction(String channel) =>
+      _t.deleteJson('/api/inbox/channels/$channel/instruction');
 }

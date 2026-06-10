@@ -36,17 +36,57 @@ class InboxThread {
       );
 }
 
+/// Media metadata attached to a message (voice note, photo, video, file).
+///
+/// Mirrors the server's `media` dict (sourced from the WhatsApp MCP's
+/// describeMedia). The actual bytes are fetched on demand via
+/// `GET /api/inbox/threads/{id}/media/{messageId}`.
+class InboxMedia {
+  final String kind; // image | video | audio | document | sticker
+  final String mimetype;
+  final String? fileName;
+  final int? seconds;
+  final bool voiceNote;
+  final int? sizeBytes;
+
+  const InboxMedia({
+    required this.kind,
+    required this.mimetype,
+    this.fileName,
+    this.seconds,
+    this.voiceNote = false,
+    this.sizeBytes,
+  });
+
+  factory InboxMedia.fromJson(Map<String, dynamic> j) => InboxMedia(
+        kind: (j['kind'] ?? 'document').toString(),
+        mimetype: (j['mimetype'] ?? 'application/octet-stream').toString(),
+        fileName: j['file_name'] as String?,
+        seconds: (j['seconds'] as num?)?.toInt(),
+        voiceNote: j['voice_note'] == true,
+        sizeBytes: (j['size_bytes'] as num?)?.toInt(),
+      );
+}
+
 class InboxMessage {
   final String sender;
   final String text;
   final String timestamp;
   final bool isMine;
 
+  /// Message id from the channel read — needed to fetch media bytes.
+  final String? id;
+
+  /// Media metadata when this bubble carries a voice note / photo / file.
+  final InboxMedia? media;
+
   const InboxMessage({
     required this.sender,
     required this.text,
     required this.timestamp,
     this.isMine = false,
+    this.id,
+    this.media,
   });
 
   factory InboxMessage.fromJson(Map<String, dynamic> j) => InboxMessage(
@@ -54,5 +94,9 @@ class InboxMessage {
         text: (j['text'] ?? '').toString(),
         timestamp: (j['timestamp'] ?? '').toString(),
         isMine: j['is_mine'] == true,
+        id: j['id'] as String?,
+        media: j['media'] is Map
+            ? InboxMedia.fromJson(Map<String, dynamic>.from(j['media'] as Map))
+            : null,
       );
 }

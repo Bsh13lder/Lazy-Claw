@@ -53,6 +53,9 @@ dependencies:
   # event markers keyed by task due date.
   table_calendar: ^3.1.0
   flutter_local_notifications: ^18.0.0
+  # Inline playback of inbox voice notes / audio (BytesSource — bytes come
+  # from the authenticated /api/inbox media endpoint, never a raw URL).
+  audioplayers: ^6.1.0
   # Scheduled task reminders need a tz-aware clock for zonedSchedule. `timezone`
   # is already pulled in transitively by flutter_local_notifications; promoting
   # it to a direct dep lets us call tz.* ourselves. `flutter_timezone` resolves

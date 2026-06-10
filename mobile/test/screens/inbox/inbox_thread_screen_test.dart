@@ -38,6 +38,19 @@ class _FakeTransport implements InboxTransport {
     }
     return {'ok': true};
   }
+
+  @override
+  Future<List<int>> getBytes(String path) async => const <int>[];
+
+  @override
+  Future<Map<String, dynamic>> putJson(
+    String path,
+    Map<String, dynamic> body,
+  ) async =>
+      {'ok': true};
+
+  @override
+  Future<Map<String, dynamic>> deleteJson(String path) async => {'ok': true};
 }
 
 // ── Helper to build a ProviderScope with the fake transport ───────────────────

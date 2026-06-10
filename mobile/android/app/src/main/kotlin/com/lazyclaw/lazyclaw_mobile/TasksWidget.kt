@@ -49,13 +49,19 @@ class TasksWidget : HomeWidgetProvider() {
         }
     }
 
-    /** Read `task_count`, clamped to the 0..[ROWS] the layout can show. */
+    /**
+     * Read `task_count`, clamped to the 0..[ROWS] the layout can show.
+     * Reads via `all[key]` so a write under ANY storage type (Int, Long from a
+     * platform-channel quirk, String from a legacy build) resolves without a
+     * ClassCastException — `getInt` on a mistyped key throws, and a throw here
+     * would abort onUpdate and freeze the widget on its empty state.
+     */
     private fun readCount(data: SharedPreferences): Int {
-        val raw = try {
-            data.getInt(KEY_COUNT, 0)
-        } catch (_: Throwable) {
-            // A legacy/odd write may have stored it as a String — tolerate it.
-            data.getString(KEY_COUNT, null)?.toIntOrNull() ?: 0
+        val raw = when (val v = try { data.all[KEY_COUNT] } catch (_: Throwable) { null }) {
+            is Int -> v
+            is Long -> v.toInt()
+            is String -> v.toIntOrNull() ?: 0
+            else -> 0
         }
         return raw.coerceIn(0, ROWS)
     }

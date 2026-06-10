@@ -25,13 +25,14 @@ const int kTasksWidgetRowCount = 3;
 
 const String _kCountKey = 'task_count';
 
-/// Pick the top [kTasksWidgetRowCount] OPEN tasks, soonest first (overdue/today
-/// ahead of upcoming, undated last), and push a plaintext snapshot to the
-/// `TasksWidget` home-screen widget. Fire-and-forget; never throws.
+/// Pick the top [kTasksWidgetRowCount] tasks from the widget relevance tier
+/// (overdue+today, else upcoming, else undated — see [relevantWidgetTasks])
+/// and push a plaintext snapshot to the `TasksWidget` home-screen widget.
+/// Fire-and-forget; never throws.
 Future<void> updateTasksWidget(List<Task> tasks, {DateTime? now}) async {
   try {
-    final picked = pickWidgetTasks(tasks, now: now);
-    final openCount = tasks.where((t) => !t.isDone).length;
+    final tier = relevantWidgetTasks(tasks, now: now);
+    final picked = tier.take(kTasksWidgetRowCount).toList();
     await HomeWidget.saveWidgetData<int>(_kCountKey, picked.length);
     for (var i = 0; i < kTasksWidgetRowCount; i++) {
       final title = i < picked.length ? _short(picked[i].title) : '';
@@ -39,8 +40,10 @@ Future<void> updateTasksWidget(List<Task> tasks, {DateTime? now}) async {
       await HomeWidget.saveWidgetData<String>('task_${i}_title', title);
       await HomeWidget.saveWidgetData<String>('task_${i}_due', due);
     }
+    // "+N more" counts the overflow of the SAME tier the rows came from —
+    // "+12 more" under a today-only list would be a lie.
     await HomeWidget.saveWidgetData<String>(
-      'task_more', widgetMoreLabel(openCount),
+      'task_more', widgetMoreLabel(tier.length),
     );
     await HomeWidget.updateWidget(
       name: 'TasksWidget',
@@ -72,30 +75,48 @@ Future<void> clearTasksWidget() async {
 
 // ── Pure selection / labeling (no plugin — unit-testable) ────────────────────
 
-/// The OPEN tasks to surface, soonest-due first, capped at
-/// [kTasksWidgetRowCount]. Ordering:
-///   1. tasks WITH a due date, ascending by due instant (overdue & today come
-///      first naturally because they're the smallest instants);
-///   2. then tasks with NO due date, in their incoming order.
-/// Done tasks are excluded. Pure + deterministic ([now] is unused today but
-/// kept for symmetry with the labeler and future "hide far-future" tuning).
-List<Task> pickWidgetTasks(List<Task> tasks, {DateTime? now}) {
-  final open = tasks.where((t) => !t.isDone).toList();
-  final dated = <Task>[];
+/// The FULL relevance tier the "Today tasks" widget draws from — mirrors the
+/// home screen's Today section so the widget honors its own title:
+///   1. overdue + due-today tasks, soonest first (the headline set);
+///   2. ELSE the upcoming dated tasks, soonest first (so the widget isn't
+///      blank for users who do set due dates — the date pill says "Tomorrow"
+///      / "Jun 15" so the rows can't masquerade as today's);
+///   3. ELSE open undated tasks in their incoming order.
+/// Done tasks are excluded everywhere. Pure + deterministic via [now].
+/// Uncapped — [pickWidgetTasks] caps the rows; the uncapped length drives the
+/// "+N more" footer so it counts only THIS tier (not every open task).
+List<Task> relevantWidgetTasks(List<Task> tasks, {DateTime? now}) {
+  final ref = now ?? DateTime.now();
+  final today = DateTime(ref.year, ref.month, ref.day);
+
+  final dueNow = <Task>[]; // overdue + today
+  final upcoming = <Task>[];
   final undated = <Task>[];
-  for (final t in open) {
-    if (_dueInstant(t.dueDate) != null) {
-      dated.add(t);
-    } else {
+  for (final t in tasks) {
+    if (t.isDone) continue;
+    final instant = _dueInstant(t.dueDate);
+    if (instant == null) {
       undated.add(t);
+      continue;
+    }
+    final dueDay = DateTime(instant.year, instant.month, instant.day);
+    if (dueDay.isAfter(today)) {
+      upcoming.add(t);
+    } else {
+      dueNow.add(t);
     }
   }
-  // Stable sort the dated ones by their due instant (earliest first).
-  dated.sort((a, b) =>
-      _dueInstant(a.dueDate)!.compareTo(_dueInstant(b.dueDate)!));
-  final ordered = <Task>[...dated, ...undated];
-  return ordered.take(kTasksWidgetRowCount).toList();
+  int byDue(Task a, Task b) =>
+      _dueInstant(a.dueDate)!.compareTo(_dueInstant(b.dueDate)!);
+  if (dueNow.isNotEmpty) return dueNow..sort(byDue);
+  if (upcoming.isNotEmpty) return upcoming..sort(byDue);
+  return undated;
 }
+
+/// The OPEN tasks to surface in the widget rows: the relevance tier from
+/// [relevantWidgetTasks], capped at [kTasksWidgetRowCount].
+List<Task> pickWidgetTasks(List<Task> tasks, {DateTime? now}) =>
+    relevantWidgetTasks(tasks, now: now).take(kTasksWidgetRowCount).toList();
 
 /// The short due label shown under a task title in the widget:
 ///   * timed due → `5:00 PM` (clock only — the day is implied "soon");

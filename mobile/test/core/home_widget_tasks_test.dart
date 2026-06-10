@@ -38,24 +38,45 @@ void main() {
       expect(picked.map((t) => t.id), ['b']);
     });
 
-    test('orders dated tasks soonest-first (overdue/today before upcoming)', () {
+    test('a "Today" widget NEVER shows future tasks when something is due now',
+        () {
       final tasks = [
         _task(id: 'future', dueDate: '2026-06-20'),
         _task(id: 'today', dueDate: '2026-06-07T09:00:00'),
         _task(id: 'overdue', dueDate: '2026-06-01'),
       ];
       final picked = pickWidgetTasks(tasks, now: now);
-      expect(picked.map((t) => t.id), ['overdue', 'today', 'future']);
+      expect(picked.map((t) => t.id), ['overdue', 'today']);
     });
 
-    test('undated tasks sort AFTER all dated tasks', () {
+    test('overdue + today sort soonest-first within the tier', () {
       final tasks = [
-        _task(id: 'undated1'),
-        _task(id: 'dated', dueDate: '2026-06-09'),
-        _task(id: 'undated2'),
+        _task(id: 'today_pm', dueDate: '2026-06-07T17:00:00'),
+        _task(id: 'today_am', dueDate: '2026-06-07T09:00:00'),
+        _task(id: 'overdue', dueDate: '2026-06-01'),
       ];
       final picked = pickWidgetTasks(tasks, now: now);
-      expect(picked.map((t) => t.id), ['dated', 'undated1', 'undated2']);
+      expect(picked.map((t) => t.id), ['overdue', 'today_am', 'today_pm']);
+    });
+
+    test('falls back to soonest upcoming when nothing is due today', () {
+      final tasks = [
+        _task(id: 'later', dueDate: '2026-06-20'),
+        _task(id: 'sooner', dueDate: '2026-06-09'),
+        _task(id: 'undated'),
+      ];
+      final picked = pickWidgetTasks(tasks, now: now);
+      expect(picked.map((t) => t.id), ['sooner', 'later']);
+    });
+
+    test('falls back to undated open tasks when no dated tasks exist', () {
+      final tasks = [
+        _task(id: 'undated1'),
+        _task(id: 'undated2'),
+        _task(id: 'done', dueDate: null, status: 'done'),
+      ];
+      final picked = pickWidgetTasks(tasks, now: now);
+      expect(picked.map((t) => t.id), ['undated1', 'undated2']);
     });
 
     test('caps at 3 rows', () {
@@ -71,6 +92,27 @@ void main() {
 
     test('empty in → empty out', () {
       expect(pickWidgetTasks(const [], now: now), isEmpty);
+    });
+  });
+
+  group('relevantWidgetTasks (uncapped tier — drives the "+N more" footer)', () {
+    test('returns the FULL today tier so the footer counts today overflow only',
+        () {
+      final tasks = [
+        for (var i = 0; i < 5; i++)
+          _task(id: 'today$i', dueDate: '2026-06-07T0$i:00:00'),
+        _task(id: 'future', dueDate: '2026-06-20'),
+      ];
+      final tier = relevantWidgetTasks(tasks, now: now);
+      expect(tier.length, 5); // future task NOT counted in "+N more"
+    });
+
+    test('returns the upcoming tier when today is clear', () {
+      final tasks = [
+        _task(id: 'a', dueDate: '2026-06-09'),
+        _task(id: 'b', dueDate: '2026-06-10'),
+      ];
+      expect(relevantWidgetTasks(tasks, now: now).length, 2);
     });
   });
 

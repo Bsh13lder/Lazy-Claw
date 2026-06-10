@@ -15,6 +15,7 @@ from ..browser.client import (
     _is_nav_noise,
     get_browser,
 )
+from .page_state import empty_or_blocked_result
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ class EditMessageParams(BaseModel):
     )
 
 
-async def get_messages(params: MessagesParams) -> list[dict]:
+async def get_messages(params: MessagesParams) -> list[dict] | dict:
     """Get messages from Upwork inbox.
 
     The 2026 inbox lives at /ab/messages/rooms/ (not /nx/messages — that path
@@ -469,6 +470,14 @@ async def get_messages(params: MessagesParams) -> list[dict]:
                 room_id, contact_name,
             )
             conversations = [synthetic]
+
+    if not conversations:
+        # 53 occurrences of the "0 room elements matched" warning in one
+        # day of logs and the brain saw a bare [] every time — it could
+        # not tell "empty inbox" from "CF challenge" from "layout drift".
+        # (The verified-empty inbox path — `[data-test="empty-state"]`
+        # rendered — still returns a plain [] earlier in this function.)
+        return await empty_or_blocked_result(page)
 
     return conversations
 
@@ -995,6 +1004,11 @@ async def get_conversation_messages(
         len(ordered_handles), limit, _gather_dropped,
     )
 
+    # Count of bubbles dropped by the future-timestamp guard below —
+    # surfaced in the returned payload so the caller knows the thread
+    # may be incomplete instead of silently missing messages.
+    dropped_suspect_bubbles = 0
+
     for el in ordered_handles[-limit:]:
         try:
             msg = await _extract_message(
@@ -1038,6 +1052,7 @@ async def get_conversation_messages(
                         "future timestamp raw=%r class=%r sender=%r",
                         raw_ts, class_hint, msg.get("sender"),
                     )
+                    dropped_suspect_bubbles += 1
                     continue
 
                 # Orphan-bubble continuation fix (2026-05-23). See
@@ -1069,6 +1084,12 @@ async def get_conversation_messages(
         conversation["contact_name"]
     ):
         conversation.pop("contact_name", None)
+
+    # Surface the future-timestamp drops (the guard stays — it protects
+    # against the extractor latching onto wrong DOM) so the caller can
+    # tell the thread may be incomplete. Omitted when zero dropped.
+    if dropped_suspect_bubbles:
+        conversation["dropped_suspect_bubbles"] = dropped_suspect_bubbles
 
     return conversation
 

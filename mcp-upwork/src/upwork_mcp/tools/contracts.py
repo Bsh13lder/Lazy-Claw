@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ..browser.client import get_browser
+from .page_state import empty_or_blocked_result
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,13 @@ class ContractsParams(BaseModel):
     limit: int = Field(default=20, ge=1, le=50, description="Maximum number of results")
 
 
-async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
+async def get_contracts(params: ContractsParams | None = None) -> list[dict] | dict:
     """Get your Upwork contracts.
 
-    Returns a list of contracts with client name, job title, status, and earnings.
+    Returns a list of contracts with client name, job title, status, and
+    earnings. When zero contracts match, returns the structured
+    ``{"status": "empty_or_blocked", ...}`` dict (see page_state.py) so
+    the caller can tell "no contracts" from "blocked / selector drift".
     """
     if params is None:
         params = ContractsParams()
@@ -62,6 +66,14 @@ async def get_contracts(params: ContractsParams | None = None) -> list[dict]:
                 contracts.append(contract)
         except Exception:
             continue
+
+    if not contracts:
+        logger.warning(
+            "get_contracts: 0 contracts matched at url=%s — returning "
+            "structured empty_or_blocked",
+            getattr(page, "url", "?"),
+        )
+        return await empty_or_blocked_result(page)
 
     return contracts
 
@@ -286,10 +298,11 @@ async def get_work_diary(contract_url: str, week_offset: int = 0) -> dict:
 #
 # This is one of the most sensitive write actions in the entire MCP:
 # clicking the final submit button starts the payment-release timer and
-# notifies the client. We default ``draft_only=False`` to match the rest
-# of the surface (callers explicitly opt into staging), but every layer
-# of the flow logs at INFO so a stale-image / wrong-button regression is
-# loud in MCP stderr.
+# notifies the client. We default ``draft_only=True`` (2026-06-10
+# security audit) — staging the modal for the user's final click is the
+# safe default; callers must pass an explicit ``draft_only=False`` to
+# authorize the final submit. Every layer of the flow logs at INFO so a
+# stale-image / wrong-button regression is loud in MCP stderr.
 
 
 class SubmitMilestoneParams(BaseModel):
@@ -332,12 +345,15 @@ class SubmitMilestoneParams(BaseModel):
         ),
     )
     draft_only: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When true, open the submit modal + type the message + "
-            "attach files but DO NOT click the final Submit button. "
-            "User reviews in their live Brave tab and submits manually. "
-            "Returns status='drafted_submit'."
+            "Default TRUE (safe): open the submit modal + type the "
+            "message + attach files but DO NOT click the final Submit "
+            "button — the user reviews in their live Brave tab and "
+            "submits manually (returns status='drafted_submit'). Pass "
+            "an explicit false ONLY when the user has already approved "
+            "this exact submission — the final click starts the 14-day "
+            "payment-release timer."
         ),
     )
 

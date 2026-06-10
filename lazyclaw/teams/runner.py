@@ -28,6 +28,14 @@ from lazyclaw.skills.tool_namespace import (
     native_names_from_tools,
     specialist_block_message,
 )
+from lazyclaw.teams.failure_report import (
+    OUTCOME_ALL_TOOLS_FAILED,
+    OUTCOME_CANCELLED,
+    OUTCOME_EXCEPTION,
+    OUTCOME_STUCK_LOOP,
+    all_tools_failed,
+    render_failure_report,
+)
 from lazyclaw.teams.learning import StepEntry
 from lazyclaw.teams.specialist import (
     CODE_SPECIALIST,
@@ -413,11 +421,30 @@ async def run_specialist(
             short_description=short_desc if is_code else "",
         )
 
+    # Failure-shaped terminations record a structured report as the
+    # result text (Claude Code orchestrator pattern) so the brain's
+    # consolidation turn gets parseable data — which specialist, what it
+    # was asked, why it died, which tools it burned — instead of an
+    # opaque "[Stuck: loop]" blob it papers over with a false "✅ done".
+    # See lazyclaw/teams/failure_report.py (2026-06-10 incident).
+    def _failure_report(outcome: str, detail: str = "") -> str:
+        return render_failure_report(
+            specialist=specialist.name,
+            task=task,
+            outcome=outcome,
+            tool_history=_tool_history,
+            tool_results=_tool_results,
+            detail=detail,
+        )
+
     try:
         for _iteration in range(MAX_ITERATIONS):
             if cancel_token and cancel_token.is_cancelled:
                 return _build_result(
-                    result="", success=False, error="Cancelled by user",
+                    result=_failure_report(
+                        OUTCOME_CANCELLED, detail="Cancelled by user",
+                    ),
+                    success=False, error="Cancelled by user",
                 )
 
             # Running-long nudge at 80% of cap
@@ -574,6 +601,25 @@ async def run_specialist(
                     _f1_retries += 1
                     continue
 
+                # Every tool call errored — the worker "finished", but it
+                # never got a single good result. Append the structured
+                # report so the consolidating brain sees the blocker
+                # instead of trusting the worker's prose. success stays
+                # True: this is a normal completion for the delegate /
+                # background_done routing; only the CONTENT is annotated.
+                _report_suffix = ""
+                if all_tools_failed(_tool_history, _tool_results):
+                    logger.warning(
+                        "Specialist %s finished but ALL %d tool calls "
+                        "errored — appending failure report",
+                        specialist.name, len(_tool_history),
+                    )
+                    _report_suffix = "\n\n" + _failure_report(
+                        OUTCOME_ALL_TOOLS_FAILED,
+                        detail="Specialist produced a final reply, but "
+                               "every tool call it made returned an error.",
+                    )
+
                 if _verdict is not None and not _verdict.ok:
                     # Retries exhausted — ship with a degraded marker + a
                     # loud log so production can grep for residual leaks.
@@ -586,10 +632,10 @@ async def run_specialist(
                         _verdict.reason,
                     )
                     return _build_result(
-                        result=f"[grounding-degraded] {_final}",
+                        result=f"[grounding-degraded] {_final}{_report_suffix}",
                     )
 
-                return _build_result(result=_final)
+                return _build_result(result=f"{_final}{_report_suffix}")
 
             # Process tool calls
             assistant_msg = LLMMessage(
@@ -757,10 +803,20 @@ async def run_specialist(
                     "Specialist %s stuck: %s (%s)",
                     specialist.name, stuck.reason, stuck.context,
                 )
+                # "loop" maps to the canonical stuck_loop outcome; other
+                # stuck reasons (captcha, repeated_error, same_result, …)
+                # keep the stuck_ prefix so consumers can match the family.
+                _outcome = (
+                    OUTCOME_STUCK_LOOP if stuck.reason == "loop"
+                    else f"stuck_{stuck.reason}"
+                )
                 return _build_result(
-                    result=(
-                        f"[Stuck: {stuck.reason}] {stuck.context}\n\n"
-                        f"Completed {len(tools_used)} tool calls before getting stuck."
+                    result=_failure_report(
+                        _outcome,
+                        detail=(
+                            f"{stuck.context} Completed {len(tools_used)} "
+                            f"tool calls before getting stuck."
+                        ),
                     ),
                     success=False,
                     error=stuck.context,
@@ -772,4 +828,14 @@ async def run_specialist(
 
     except Exception as exc:
         logger.error("Specialist %s failed: %s", specialist.name, exc)
-        return _build_result(result="", success=False, error=str(exc))
+        # Report rendering is itself guarded — a formatting bug must
+        # never mask the original failure.
+        try:
+            _report = _failure_report(
+                OUTCOME_EXCEPTION,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            logger.debug("failure-report render failed", exc_info=True)
+            _report = ""
+        return _build_result(result=_report, success=False, error=str(exc))

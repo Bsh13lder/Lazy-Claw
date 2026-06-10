@@ -107,7 +107,7 @@ async def upwork_search_jobs(
             ge=1,
         ),
     ] = 20,
-) -> list[dict]:
+) -> list[dict] | dict:
     """Search for jobs on Upwork.
 
     Default mode is 'best_matches' (Upwork's personalized recommendations
@@ -321,11 +321,13 @@ async def upwork_get_messages(
         int,
         Field(description="Maximum conversations to return (clamped to 1-50)", ge=1),
     ] = 20,
-) -> list[dict]:
+) -> list[dict] | dict:
     """Get messages from Upwork inbox.
 
     Returns a list of conversations with last message, sender info, and unread status.
     ``limit`` is silently clamped to the [1, 50] range.
+    On zero rooms, returns ``{"status": "empty_or_blocked", "diagnosis": ...,
+    "hint": ...}`` so you can tell "empty inbox" from "blocked".
     """
     safe_limit = max(1, min(int(limit), 50))
     params = MessagesParams(room_id=room_id, unread_only=unread_only, limit=safe_limit)
@@ -462,11 +464,13 @@ async def upwork_get_contracts(
         int,
         Field(description="Maximum number of results (clamped to 1-50)", ge=1),
     ] = 20,
-) -> list[dict]:
+) -> list[dict] | dict:
     """Get your Upwork contracts.
 
     Returns a list of contracts with client name, job title, status, and earnings.
     ``limit`` is silently clamped to the [1, 50] range.
+    On zero contracts, returns ``{"status": "empty_or_blocked", ...}``
+    with a diagnosis (cloudflare / login / drift) and an actionable hint.
     """
     safe_limit = max(1, min(int(limit), 50))
     params = ContractsParams(status=status, limit=safe_limit)
@@ -523,7 +527,7 @@ async def upwork_get_offers(
         int,
         Field(description="Maximum number of offers (clamped 1-50)", ge=1),
     ] = 20,
-) -> list[dict]:
+) -> list[dict] | dict:
     """List Upwork offers (client → freelancer).
 
     Probes the known offer-list URLs in order and returns the first
@@ -554,13 +558,15 @@ async def upwork_accept_offer(
         bool,
         Field(
             description=(
-                "When true, navigate + open the Accept confirm modal "
-                "but DO NOT click the final Accept button. User "
-                "confirms manually in their live Brave tab. Returns "
-                "status='drafted_accept'."
+                "Default TRUE (safe): navigate + open the Accept "
+                "confirm modal but DO NOT click the final Accept "
+                "button — the user confirms manually in their live "
+                "Brave tab (returns status='drafted_accept'). Pass an "
+                "explicit false ONLY when the user has already "
+                "approved accepting this exact offer."
             ),
         ),
-    ] = False,
+    ] = True,
 ) -> dict:
     """Accept an Upwork offer (CREATES a binding fixed-price/hourly contract).
 
@@ -669,12 +675,15 @@ async def upwork_submit_milestone(
         bool,
         Field(
             description=(
-                "When true, open the submit modal + type description + "
-                "attach files but DO NOT click final Submit. User "
-                "finalizes manually. Returns status='drafted_submit'."
+                "Default TRUE (safe): open the submit modal + type "
+                "description + attach files but DO NOT click final "
+                "Submit — the user finalizes manually (returns "
+                "status='drafted_submit'). Pass an explicit false ONLY "
+                "when the user has already approved this exact "
+                "submission."
             ),
         ),
-    ] = False,
+    ] = True,
 ) -> dict:
     """Submit a funded milestone for client review and payment release.
 

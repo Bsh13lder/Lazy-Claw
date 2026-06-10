@@ -222,6 +222,71 @@ def _is_disconnect_error(exc: BaseException) -> bool:
     return any(h in msg for h in _DISCONNECT_HINTS)
 
 
+# ── Bounded reconnect (2026-06-10 stale-handle hardening) ────────────────
+# The CDP connection drops while Brave stays alive; recovery used to be a
+# ONE-SHOT retry inside safe_goto only. Every other stale-handle path
+# limped along on a dead singleton (139 "handle stale" warnings in one
+# day of mcp-upwork stderr). ``reconnect_with_retry`` centralizes
+# recovery: full singleton reset + re-attach, max 3 attempts with
+# exponential backoff, and a Brave-bridge heal POST when attempt #2 also
+# fails with a connection-refused-style error.
+
+_RECONNECT_MAX_ATTEMPTS = 3
+# One sleep BETWEEN attempts → MAX_ATTEMPTS - 1 entries used.
+_RECONNECT_BACKOFF_S = (1.0, 2.0)
+
+# Substrings indicating the CDP endpoint itself is unreachable (vs a
+# closed page/target on a live connection). Only these trigger the heal
+# hook — healing restarts the bridge, which can't fix a live-but-stale
+# page handle.
+_CONNECTION_REFUSED_HINTS = (
+    "econnrefused",
+    "connection refused",
+    "cannot reach brave",
+)
+
+
+def _is_connection_refused_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(h in msg for h in _CONNECTION_REFUSED_HINTS)
+
+
+def _resolve_heal_url() -> str:
+    """Heal endpoint of the host Brave-bridge watcher (see lazyclaw's
+    ``scripts/install-host-brave-bridge.sh`` — the watcher exposes an
+    HTTP heal endpoint that kickstarts the launchd bridge plist).
+
+    Resolved at call time so tests / the MCP manager can override via
+    env without re-importing this module.
+    """
+    return (
+        os.environ.get("LAZYCLAW_BRAVE_HEAL_URL", "").strip()
+        or "http://127.0.0.1:9224/heal"
+    )
+
+
+async def _post_brave_heal() -> bool:
+    """POST the Brave-bridge heal endpoint. NEVER raises — heal failure
+    is tolerated and the caller proceeds to its final reconnect attempt
+    regardless. Returns True only on a 200 response."""
+    url = _resolve_heal_url()
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(url)
+        if resp.status_code == 200:
+            logger.warning("Brave heal endpoint %s kicked the bridge (200)", url)
+            return True
+        logger.warning(
+            "Brave heal endpoint %s returned %s — bridge kickstart failed",
+            url, resp.status_code,
+        )
+    except Exception as exc:
+        logger.warning("Brave heal endpoint %s unreachable: %s", url, exc)
+    return False
+
+
 def _resolve_profile_dir() -> Path:
     """Resolve profile dir.
 
@@ -517,6 +582,54 @@ class UpworkBrowser:
             return False
         return True
 
+    async def reconnect_with_retry(self) -> Page:
+        """Bounded full reconnect for stale-handle recovery.
+
+        Resets the singleton browser/context/page cache (``close()``)
+        and re-attaches via CDP, up to ``_RECONNECT_MAX_ATTEMPTS`` times
+        with exponential backoff (1s/2s). When attempt #2 also fails
+        with a connection-refused-style error (the CDP port itself is
+        down, not just a closed tab), POSTs the host Brave-bridge heal
+        endpoint before the final attempt — mirrors the lazyclaw-side
+        cdp_backend heal pattern.
+
+        Raises a RuntimeError with caller-actionable guidance after
+        exhausting all attempts.
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
+            await self.close()
+            try:
+                return await self.start()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "CDP reconnect attempt %d/%d failed: %s",
+                    attempt, _RECONNECT_MAX_ATTEMPTS, exc,
+                )
+                if attempt == 2 and _is_connection_refused_error(exc):
+                    # Bridge port is down — ask the host watcher to
+                    # kickstart Brave before the last attempt. Failure
+                    # tolerated; _post_brave_heal never raises, but a
+                    # mocked/buggy hook must not break the retry flow.
+                    try:
+                        await _post_brave_heal()
+                    except Exception:
+                        logger.warning(
+                            "Brave heal hook raised — continuing to final "
+                            "reconnect attempt", exc_info=True,
+                        )
+                if attempt < _RECONNECT_MAX_ATTEMPTS:
+                    await asyncio.sleep(_RECONNECT_BACKOFF_S[attempt - 1])
+        raise RuntimeError(
+            f"CDP connection to Brave lost and could not heal after "
+            f"{_RECONNECT_MAX_ATTEMPTS} attempts — Brave may need restart; "
+            f"the agent should fall back to its native browser tool or "
+            f"ask the user."
+        ) from last_exc
+
     async def get_page(self) -> Page:
         """Get or create page instance.
 
@@ -534,7 +647,10 @@ class UpworkBrowser:
         if not self._page_is_alive():
             if self._started:
                 logger.warning("Upwork browser handle stale, reconnecting via CDP")
-                await self.close()
+                # Bounded retry (3 attempts + backoff + heal hook), NOT
+                # the legacy one-shot close()+start() — a dead bridge
+                # used to make every subsequent tool call limp.
+                return await self.reconnect_with_retry()
             return await self.start()
         # Page is alive but may be on a non-upwork origin (e.g. the user
         # alt-tabbed to YouTube). Try to swap to an existing Upwork tab —
@@ -614,10 +730,13 @@ class UpworkBrowser:
                 if not _is_disconnect_error(exc):
                     raise
                 logger.warning(
-                    "safe_goto: stale page handle (%s) — re-picking and retrying once",
+                    "safe_goto: stale page handle (%s) — full reconnect and retry",
                     exc,
                 )
-                page = await self.get_page()
+                # Full bounded reconnect, not a re-pick: a goto-level
+                # disconnect means the CDP transport is suspect even when
+                # the cached handle still LOOKS alive to _page_is_alive().
+                page = await self.reconnect_with_retry()
                 await page.goto(url, wait_until=wait_until)
 
             # Cloudflare-pass retry loop. Cheap polling — no busy wait.
@@ -655,10 +774,10 @@ class UpworkBrowser:
                         raise
                     logger.warning(
                         "safe_goto: stale page handle on reload (%s) — "
-                        "re-picking and retrying once",
+                        "full reconnect and retry",
                         exc,
                     )
-                    page = await self.get_page()
+                    page = await self.reconnect_with_retry()
                     await page.reload(wait_until=wait_until)
                 # Re-run CF pass: reload can re-trigger Cloudflare just
                 # as easily as goto can.
@@ -799,8 +918,11 @@ class UpworkBrowser:
         try:
             ok = await self.is_logged_in()
         except BrowserDisconnectedError as exc:
-            logger.warning("Upwork CDP disconnected during login check: %s — reconnecting once", exc)
-            await self.close()
+            logger.warning("Upwork CDP disconnected during login check: %s — reconnecting", exc)
+            # Bounded reconnect (3 attempts + backoff + heal hook). If
+            # it exhausts, its RuntimeError carries the actionable
+            # "fall back to native browser tool" guidance.
+            await self.reconnect_with_retry()
             try:
                 ok = await self.is_logged_in()
             except BrowserDisconnectedError as exc2:

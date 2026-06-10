@@ -3,6 +3,7 @@
 import logging
 
 from ..browser.client import _is_nav_noise, get_browser
+from .page_state import empty_or_blocked_result
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,17 @@ async def get_connects_balance() -> dict:
         numbers = re.findall(r'\d+', text)
         if numbers:
             connects["pending"] = int(numbers[0])
+
+    if not connects:
+        # Every selector missed on both surfaces — a bare {} reads as
+        # "balance unknown but page fine" to the brain. Classify the
+        # page state instead (CF / login / drift) with an actionable hint.
+        logger.warning(
+            "get_connects_balance: all selectors missed at url=%s — "
+            "returning structured empty_or_blocked",
+            getattr(page, "url", "?"),
+        )
+        return await empty_or_blocked_result(page)
 
     return connects
 

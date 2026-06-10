@@ -45,8 +45,17 @@ from lazyclaw.crypto.key_manager import get_user_dek
 from lazyclaw.crypto.encryption import encrypt, decrypt, is_encrypted
 from lazyclaw.db.connection import db_session
 from lazyclaw.runtime.callbacks import AgentEvent
+from lazyclaw.runtime.consolidation_guidance import (
+    COHERENCE_LOG_TAG,
+    build_failure_guidance,
+    draft_claims_success,
+)
 from lazyclaw.runtime.consolidator_routing import is_live_web_callback
 from lazyclaw.runtime import task_event_bus
+from lazyclaw.teams.failure_report import (
+    FAILURE_REPORT_MARKER,
+    extract_failure_report,
+)
 
 if TYPE_CHECKING:
     from lazyclaw.config import Config
@@ -194,6 +203,21 @@ MAX_TASK_DEPTH = 2
 _CONSOLIDATION_RESULT_PREVIEW = 1500
 
 
+# Re-delegation budget for failed fan-outs: a consolidation turn that was
+# offered option (a) "re-delegate to a different specialist" may trigger
+# at most ONE follow-up round per originating turn. The follow-up group
+# inherits retry_round=1 via _claim_retry_round; its own consolidation
+# (if it fails again) forbids further delegation — no specialist
+# ping-pong.
+_MAX_REDELEGATE_ROUNDS = 1
+
+# How long a granted retry round stays claimable. Generous — covers the
+# consolidation turn's LLM latency + the brain actually re-delegating —
+# while guaranteeing a stale grant can't tag an unrelated fan-out started
+# minutes later.
+_RETRY_ROUND_TTL_S = 600.0
+
+
 # A background worker's final reply longer than this is treated as a real
 # synthesis, never as a bare promise — even if it contains a courtesy
 # action-claim line. Keeps the RC3 guard from clobbering legitimate answers.
@@ -290,6 +314,10 @@ class _BrainFanoutGroup:
     consolidator_cb: object | None = None  # AgentCallback or None
     chat_session_id: str | None = None
     started_at: float = field(default_factory=time.monotonic)
+    # 0 = original fan-out; 1 = follow-up spawned after a failure-guided
+    # consolidation turn re-delegated. At _MAX_REDELEGATE_ROUNDS the
+    # guidance forbids further delegation (see _claim_retry_round).
+    retry_round: int = 0
 
 
 class TaskRunner:
@@ -356,6 +384,11 @@ class TaskRunner:
         self._task_workspace_dirs: dict[str, str] = {}
         # group_id → _BrainFanoutGroup. Cleaned up after _consolidate runs.
         self._brain_groups: dict[str, _BrainFanoutGroup] = {}
+        # user_id → (next_retry_round, granted_at). Set when a failed
+        # consolidation OFFERS re-delegation; claimed (popped) by the
+        # next fan-out group created for that user so the follow-up
+        # round inherits the budget counter. TTL'd in _claim_retry_round.
+        self._fanout_retry_rounds: dict[str, tuple[int, float]] = {}
 
     async def submit(
         self,
@@ -481,6 +514,7 @@ class TaskRunner:
                     user_id=user_id,
                     consolidator_cb=callback,
                     chat_session_id=chat_session_id,
+                    retry_round=self._claim_retry_round(user_id),
                 )
                 self._brain_groups[fanout_group_id] = group
                 logger.info(
@@ -1097,6 +1131,7 @@ class TaskRunner:
                 user_id=user_id,
                 consolidator_cb=callback,
                 chat_session_id=chat_session_id,
+                retry_round=self._claim_retry_round(user_id),
             )
             self._brain_groups[group_id] = group
         group.pending.update(task_ids)
@@ -1128,6 +1163,37 @@ class TaskRunner:
             error=error or "",
             duration_ms=duration_ms,
         ))
+
+    def _claim_retry_round(self, user_id: str) -> int:
+        """Pop the pending retry-round grant for ``user_id`` (0 if none).
+
+        Called when a NEW fan-out group is created: if the previous
+        consolidation for this user offered re-delegation (and the grant
+        hasn't gone stale), the new group inherits the incremented round
+        so its own consolidation can enforce the budget. Defensive
+        ``getattr`` keeps legacy ``__new__``-style constructions (tests,
+        partially-initialized runners) at round 0 instead of raising.
+        """
+        rounds = getattr(self, "_fanout_retry_rounds", None)
+        if not rounds:
+            return 0
+        entry = rounds.pop(user_id, None)
+        if entry is None:
+            return 0
+        round_no, granted_at = entry
+        if time.monotonic() - granted_at > _RETRY_ROUND_TTL_S:
+            logger.debug(
+                "retry-round grant for user %s expired — starting at 0",
+                user_id,
+            )
+            return 0
+        return round_no
+
+    def _grant_retry_round(self, user_id: str, next_round: int) -> None:
+        """Record that the next fan-out for ``user_id`` is a retry round."""
+        if getattr(self, "_fanout_retry_rounds", None) is None:
+            self._fanout_retry_rounds = {}
+        self._fanout_retry_rounds[user_id] = (next_round, time.monotonic())
 
     def _record_brain_result(self, outcome: _FanoutResult) -> None:
         """Append a settled brain-fan-out task to its group; if this was
@@ -1213,6 +1279,24 @@ class TaskRunner:
         # Real fan-out: build a synthetic instruction the brain can fold
         # into ONE consolidated reply. Every result is truncated so the
         # synthetic prompt stays cheap.
+        #
+        # Failure-shaped groups (any failed sibling, or a structured
+        # [SPECIALIST FAILURE REPORT] embedded in a result) additionally
+        # get orchestrator guidance appended so the brain DECIDES the
+        # next move — re-delegate ONCE / answer from partials / report
+        # the blocker — instead of shipping a false "✅ done" or a vague
+        # apology (2026-06-10 freelance_specialist stuck-loop incident).
+        def _carries_report(r: _FanoutResult) -> bool:
+            return (
+                FAILURE_REPORT_MARKER in (r.result or "")
+                or FAILURE_REPORT_MARKER in (r.error or "")
+            )
+
+        _failure_present = any(
+            not r.success or _carries_report(r) for r in group.results
+        )
+        _any_succeeded = any(r.success for r in group.results)
+
         lines = [
             f"[Background fan-out complete — {len(group.results)} tasks finished]",
             "",
@@ -1228,15 +1312,40 @@ class TaskRunner:
                 preview = (r.result or "")[:_CONSOLIDATION_RESULT_PREVIEW]
                 if len(r.result or "") > _CONSOLIDATION_RESULT_PREVIEW:
                     preview += "\n[... truncated]"
+                # An all_tools_failed report rides at the END of a
+                # success-shaped result — re-attach it if the preview
+                # cap chopped it off (silent truncation of structured
+                # data is THE failure class of 2026-05-25).
+                if (
+                    _carries_report(r)
+                    and FAILURE_REPORT_MARKER not in preview
+                ):
+                    preview += "\n" + extract_failure_report(r.result)
                 lines.append(preview or "(empty)")
             else:
                 lines.append(f"FAILED: {r.error or 'unknown error'}")
+                # Surface the structured report (the legacy line above
+                # only carries the short error string).
+                report = extract_failure_report(r.result)
+                if report:
+                    lines.append(report[:_CONSOLIDATION_RESULT_PREVIEW])
             lines.append("")
         lines.extend([
             "Write ONE consolidated summary for the user. Don't repeat "
             "raw blobs — synthesize. Call out any failures explicitly. "
             "Keep it tight (~6-12 lines for Telegram).",
         ])
+
+        if _failure_present:
+            _can_redelegate = group.retry_round < _MAX_REDELEGATE_ROUNDS
+            lines.extend(["", build_failure_guidance(
+                can_redelegate=_can_redelegate,
+            )])
+            if _can_redelegate:
+                # The consolidation turn may re-delegate: the next
+                # fan-out group this user spawns inherits round+1 so its
+                # own consolidation enforces the 1-retry budget.
+                self._grant_retry_round(group.user_id, group.retry_round + 1)
         synthetic_msg = "\n".join(lines)
 
         # Pick the callback: prefer a freshly-built one from the
@@ -1284,6 +1393,22 @@ class TaskRunner:
                 group_id, exc_info=True,
             )
             return
+
+        # No-false-✅ guard — observation-only (the F1 machinery owns
+        # rewrites elsewhere; don't duplicate a retry loop here). Fires
+        # only when EVERY subagent failed yet the draft claims success.
+        if (
+            _failure_present
+            and not _any_succeeded
+            and result_text
+            and draft_claims_success(result_text)
+        ):
+            logger.warning(
+                "%s consolidation draft claims success while ALL %d "
+                "subagents failed (group=%s) — draft preview: %.200s",
+                COHERENCE_LOG_TAG, len(group.results), group_id,
+                result_text,
+            )
 
         # ── Web quiet-mode delivery rescue (2026-06-04) ──────────────────
         # The synthetic turn above ran on the LANE QUEUE, NOT through the WS

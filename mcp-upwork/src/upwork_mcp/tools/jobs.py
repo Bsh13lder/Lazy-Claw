@@ -6,6 +6,7 @@ import asyncio
 import urllib.parse
 from pydantic import BaseModel, Field
 from ..browser.client import _is_nav_noise, get_browser
+from .page_state import empty_or_blocked_result
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,13 @@ class JobDetailsParams(BaseModel):
     job_url: str = Field(description="Full Upwork job URL or job ID")
 
 
-async def search_jobs(params: JobSearchParams) -> list[dict]:
+async def search_jobs(params: JobSearchParams) -> list[dict] | dict:
     """Search for jobs on Upwork matching the specified criteria.
 
     Returns a list of job summaries with title, budget, and URL.
+    When zero tiles match, returns the structured
+    ``{"status": "empty_or_blocked", ...}`` dict (see page_state.py)
+    so the caller can tell "no results" from "blocked".
     """
     browser = get_browser()
     page = await browser.get_page()
@@ -306,22 +310,17 @@ async def search_jobs(params: JobSearchParams) -> list[dict]:
             continue
 
     if not jobs:
-        # Surface the empty path so future regressions are visible. Old
-        # silent behavior produced 105-char wrapped errors with no clue
-        # whether the page was Cloudflare-blocked, sent to login, or
-        # just had a fresh selector layout. Log enough to triage.
-        try:
-            current_url = page.url
-            title = await page.title()
-        except Exception:
-            current_url = "?"
-            title = "?"
+        # Surface the empty path TO THE CALLER, not just the logs. Old
+        # silent behavior returned a bare [] with no clue whether the
+        # page was Cloudflare-blocked, sent to login, or just had a
+        # fresh selector layout — the brain reported "no jobs" either
+        # way. empty_or_blocked_result classifies the page state and
+        # attaches an actionable hint.
         logger.warning(
-            "search_jobs: 0 jobs matched at url=%s (title=%r) — "
-            "either selectors drifted, page loaded blank, or CF "
-            "challenge present. source=%s url=%s",
-            current_url, title[:80], source, url,
+            "search_jobs: 0 jobs matched — returning structured "
+            "empty_or_blocked. source=%s url=%s", source, url,
         )
+        return await empty_or_blocked_result(page)
 
     return jobs
 

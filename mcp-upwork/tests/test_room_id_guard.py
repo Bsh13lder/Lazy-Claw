@@ -866,8 +866,10 @@ async def test_get_messages_url_fallback_strips_generic_titles(monkeypatch):
 async def test_get_messages_url_fallback_does_not_fire_on_inbox_url(monkeypatch):
     """When ``page.url`` is the bare inbox URL (no room id segment), the
     fallback must NOT synthesize anything — that's the genuine empty-
-    inbox / layout-drift case and the pre-existing "0 rows" warning is
-    the correct signal.
+    inbox / layout-drift case. Since 2026-06-10 that path returns the
+    structured ``empty_or_blocked`` dict (instead of a bare []) so the
+    brain can tell "empty" from "blocked" — the load-bearing assertion
+    here stays "no synthetic conversation row".
     """
     fake_page = MagicMock()
     # Bare inbox URL — exactly what ``safe_goto`` navigated to.
@@ -894,10 +896,15 @@ async def test_get_messages_url_fallback_does_not_fire_on_inbox_url(monkeypatch)
 
     result = await get_messages(MessagesParams())
 
-    assert result == [], (
+    # No synthetic conversation row — the structured zero-item payload
+    # comes back instead (items stays empty, no room_id fabricated).
+    assert isinstance(result, dict), (
         "no fallback synthesis when URL has no room-id segment "
         f"(got {result!r})"
     )
+    assert result["status"] == "empty_or_blocked"
+    assert result["items"] == []
+    assert "room_id" not in result
 
 
 # ── Fix 3 — a11y-tree fallback for get_conversation_messages ─────────

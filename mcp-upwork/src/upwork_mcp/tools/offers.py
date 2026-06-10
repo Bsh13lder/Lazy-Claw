@@ -25,6 +25,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ..browser.client import get_browser
+from .page_state import empty_or_blocked_result
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +77,15 @@ class AcceptOfferParams(BaseModel):
         ),
     )
     draft_only: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When true, navigate to the offer page and open the Accept "
-            "confirm modal but DO NOT click the final Accept button. "
-            "User confirms manually in their live Brave tab. Returns "
-            "status='drafted_accept'. Use this when the brain is "
-            "drafting on behalf of the user and a human still needs "
-            "eyes-on review."
+            "Default TRUE (safe): navigate to the offer page and open "
+            "the Accept confirm modal but DO NOT click the final Accept "
+            "button — the user confirms manually in their live Brave "
+            "tab (returns status='drafted_accept'). Pass an explicit "
+            "false ONLY when the user has already approved accepting "
+            "this exact offer — the final click creates a binding "
+            "contract."
         ),
     )
 
@@ -195,15 +197,15 @@ async def _extract_offer(el) -> dict | None:
 # ── Public tools ───────────────────────────────────────────────────────
 
 
-async def get_offers(params: OffersParams) -> list[dict]:
+async def get_offers(params: OffersParams) -> list[dict] | dict:
     """List offers from the Upwork offers page.
 
     Probes a sequence of known offer-list URLs (Upwork has migrated this
     surface several times) and returns the first non-empty result. When
-    every probe yields zero offers, returns an empty list — the caller
-    cannot distinguish "no pending offers" from "Upwork moved the page
-    again". We log a warning in the latter scenario so it surfaces in
-    user-side MCP logs.
+    every probe yields zero offers, returns the structured
+    ``{"status": "empty_or_blocked", ...}`` dict (see page_state.py) so
+    the caller can distinguish "no pending offers" from "Cloudflare
+    wall" from "Upwork moved the page again".
 
     The status filter is applied client-side because the Upwork URL
     query string is unreliable across layouts (some surfaces drop
@@ -214,6 +216,7 @@ async def get_offers(params: OffersParams) -> list[dict]:
 
     offers: list[dict] = []
     last_url_tried: str | None = None
+    page = None
 
     for url in _OFFER_LIST_URLS:
         last_url_tried = url
@@ -251,11 +254,13 @@ async def get_offers(params: OffersParams) -> list[dict]:
     if not offers:
         logger.warning(
             "get_offers returned empty after probing %s candidate URL(s); "
-            "last tried: %s",
+            "last tried: %s — returning structured empty_or_blocked",
             len(_OFFER_LIST_URLS),
             last_url_tried,
         )
-        return []
+        # `page` is the last successfully navigated handle, or None when
+        # every safe_goto raised — empty_or_blocked_result tolerates both.
+        return await empty_or_blocked_result(page)
 
     # Client-side status filter — Upwork's per-URL filtering is flaky.
     if params.status != "all":

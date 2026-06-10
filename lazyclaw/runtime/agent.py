@@ -1055,6 +1055,74 @@ def _is_channel_read_tool_name(tool_name: str | None) -> bool:
     return any(pat in lowered for pat in _CHANNEL_READ_TOOL_NAME_PATTERNS)
 
 
+# ── Browser fallback after repeated channel-MCP failures ────────────────
+# Channel MCP tools (mcp-upwork, mcp-whatsapp, ...) drive the user's
+# signed-in Brave internally, so the turn-start suppression of the native
+# ``browser`` skill (MCP-first — see _suppressed_tool_names) is normally
+# correct. But when the channel tool itself fails repeatedly (stale CDP
+# handle, Cloudflare check, dead subprocess) the brain has NO path to the
+# page at all: the late-inject path refuses to resurrect suppressed
+# tools. After _BROWSER_FALLBACK_AT_FAILURES consecutive failures of the
+# same channel tool we lift the suppression for ``browser`` /
+# ``use_host_browser`` (NOT ``run_command`` — shell stays forbidden as a
+# workaround) and hand the brain the ``browser`` schema as the sanctioned
+# fallback. The native browser drives the SAME signed-in Brave profile
+# the MCP uses, so it passes Cloudflare with cookies intact. Threshold 2
+# + three-strikes at 3 = the brain gets one LLM iteration with the
+# browser before the graceful handoff fires.
+_BROWSER_FALLBACK_AT_FAILURES = 2
+
+# Channel-prefix shapes (covers writes like ``upwork_send_message`` that
+# the read-only pattern list above misses). Substring match so
+# MCP-wrapped names like ``mcp_<uuid>_upwork_send_message`` register.
+# Telegram is deliberately absent — the native bot-API adapter is not
+# browser-backed, so a browser fallback can't help it.
+_CHANNEL_MCP_TOOL_NAME_MARKERS: tuple[str, ...] = (
+    "upwork_", "whatsapp_", "instagram_", "email_",
+)
+
+
+def _is_channel_mcp_tool_name(tool_name: str | None) -> bool:
+    """True iff ``tool_name`` looks like a channel MCP tool.
+
+    Union of the channel-read predicate and the channel-prefix markers
+    so both reads (``upwork_get_conversation``) and writes
+    (``upwork_send_message``) register.
+    """
+    if not tool_name:
+        return False
+    lowered = tool_name.lower()
+    if "telegram_" in lowered:
+        # Native bot-API adapter, not browser-backed — a browser
+        # fallback can't help it (matches the marker-list intent even
+        # though the read-predicate union below knows telegram reads).
+        return False
+    if _is_channel_read_tool_name(lowered):
+        return True
+    return any(m in lowered for m in _CHANNEL_MCP_TOOL_NAME_MARKERS)
+
+
+def _should_inject_browser_fallback(
+    tool_name: str | None,
+    failure_count: int,
+    suppressed_tool_names: set[str] | frozenset[str],
+    already_injected: bool,
+) -> bool:
+    """Decide whether the browser-fallback re-injection should fire.
+
+    Fires when a channel-MCP tool has failed
+    ``_BROWSER_FALLBACK_AT_FAILURES``+ times this turn while ``browser``
+    is still channel-suppressed — and at most once per turn.
+    """
+    if already_injected:
+        return False
+    if failure_count < _BROWSER_FALLBACK_AT_FAILURES:
+        return False
+    if "browser" not in suppressed_tool_names:
+        return False
+    return _is_channel_mcp_tool_name(tool_name)
+
+
 def _extract_tool_names_from_search_result(result: str) -> list[str]:
     """Extract tool names from search_tools result text (bold **name**: pattern).
 
@@ -3472,6 +3540,14 @@ class Agent:
         # stripped) so the counter survives the per-call UUID volatility.
         _tool_failure_count: dict[str, int] = {}
         _three_strikes_break: tuple[str, str] | None = None  # (tool_name, last_error_tail)
+        # Browser fallback after repeated channel-MCP failures — pending
+        # is set inside the tool-result loop (failure count hits 2) and
+        # flushed post-loop (suppression lift + schema inject + system
+        # msg) so the system message can't slot between a tool_use and
+        # its tool_result. The injected latch makes it fire at most ONCE
+        # per turn. See _should_inject_browser_fallback.
+        _browser_fallback_pending: tuple[str, str] | None = None  # (tool_name, error_tail)
+        _browser_fallback_injected = False
 
         response = None
         iteration = 0
@@ -5219,9 +5295,31 @@ class Agent:
                             _tool_failure_count[_short] = (
                                 _tool_failure_count.get(_short, 0) + 1
                             )
+                            # Browser-fallback trigger — checked BEFORE the
+                            # three-strikes assignment so a same-batch
+                            # 2nd+3rd failure defers the handoff one
+                            # iteration and the brain actually SEES the
+                            # fallback. Flushed post-loop (see the
+                            # "Browser fallback re-injection" block).
+                            if (
+                                _browser_fallback_pending is None
+                                and _should_inject_browser_fallback(
+                                    _short,
+                                    _tool_failure_count[_short],
+                                    _suppressed_tool_names,
+                                    _browser_fallback_injected,
+                                )
+                            ):
+                                _browser_fallback_pending = (_short, result[-300:])
+                                logger.info(
+                                    "Browser fallback queued after %d "
+                                    "failures of %s",
+                                    _tool_failure_count[_short], _short,
+                                )
                             if (
                                 _tool_failure_count[_short] >= 3
                                 and _three_strikes_break is None
+                                and _browser_fallback_pending is None
                             ):
                                 _three_strikes_break = (_short, result[-300:])
                                 logger.warning(
@@ -5733,6 +5831,65 @@ class Agent:
                                 "Do NOT write code or technical details. Just show the result."
                             ),
                         ))
+
+                # ── Browser fallback re-injection ──
+                # A channel MCP tool (upwork_* / whatsapp_* / ...) failed
+                # twice this turn while the native ``browser`` skill was
+                # channel-suppressed at turn start (MCP-first). Lift the
+                # suppression for ``browser`` / ``use_host_browser``
+                # (``run_command`` STAYS suppressed — shell is never the
+                # sanctioned workaround), inject the registry schema into
+                # the live tool list, and tell the brain the fallback path
+                # exists. Post-loop so the system message can't slot
+                # between a tool_use and its tool_result. NOT persisted to
+                # DB — transient per-turn guidance, same as the
+                # [RECOVERY] message above.
+                if (
+                    _browser_fallback_pending is not None
+                    and not _browser_fallback_injected
+                ):
+                    _fb_tool, _fb_err = _browser_fallback_pending
+                    _browser_fallback_pending = None
+                    _browser_fallback_injected = True
+                    _suppressed_tool_names -= {"browser", "use_host_browser"}
+                    try:
+                        _fb_existing = {
+                            t.get("function", {}).get("name") for t in tools
+                        }
+                        if "browser" not in _fb_existing and self.registry:
+                            _fb_schema = self.registry.get_tool_schema("browser")
+                            if _fb_schema is not None:
+                                tools.append(_fb_schema)
+                    except Exception:
+                        logger.debug(
+                            "Browser fallback schema injection failed "
+                            "(non-fatal)", exc_info=True,
+                        )
+                    # Collapse whitespace + neuter backticks so a crafted
+                    # MCP error can't escape the code fence below and read
+                    # as instructions (fence-escape prompt injection).
+                    _fb_err_tail = " ".join((_fb_err or "").split())
+                    _fb_err_tail = _fb_err_tail.replace("```", "'''")
+                    if len(_fb_err_tail) > 200:
+                        _fb_err_tail = _fb_err_tail[-200:]
+                    messages.append(LLMMessage(
+                        role="system",
+                        content=(
+                            f"[FALLBACK] `{_fb_tool}` failed twice — last "
+                            f"error:\n```\n{_fb_err_tail}\n```\n"
+                            "The `browser` tool is NOW AVAILABLE as the "
+                            "sanctioned fallback. It drives the user's "
+                            "signed-in Brave (cookies intact, passes "
+                            "Cloudflare). Start with "
+                            'browser(action="open", url=...) on the '
+                            "relevant page and continue from there. Do "
+                            f"NOT retry `{_fb_tool}` with the same args."
+                        ),
+                    ))
+                    logger.info(
+                        "Browser fallback injected after 2 failures of %s",
+                        _fb_tool,
+                    )
 
                 # ── 3-strikes graceful handoff ──
                 # Same MCP tool returned an error 3 times in a row this turn.
@@ -6608,11 +6765,20 @@ class Agent:
                 metadata = None
 
                 if msg.tool_calls:
-                    metadata = json.dumps(
-                        [
-                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                            for tc in msg.tool_calls
-                        ]
+                    # Encrypt tool-call ARGUMENTS — they carry user content
+                    # (vault values, message bodies) just like `content`
+                    # (2026-06-10 audit, Phase 2). Read side is tolerant:
+                    # metadata_codec passes legacy plaintext rows through.
+                    from lazyclaw.memory.metadata_codec import encode_tool_metadata
+
+                    metadata = encode_tool_metadata(
+                        json.dumps(
+                            [
+                                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                                for tc in msg.tool_calls
+                            ]
+                        ),
+                        key,
                     )
                 if msg.tool_call_id:
                     tool_name = msg.tool_call_id

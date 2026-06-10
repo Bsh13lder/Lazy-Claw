@@ -6,6 +6,7 @@ tools:
   - apply_job
   - upwork_submit_proposal
   - apply_reddit_dm
+  - browser
   - draft_freelance_proposal
   - execute_contract_intake_setup
   - invoice_client
@@ -55,6 +56,7 @@ These rules are not optional. A confabulated quote or a stale scope costs the us
 4. RUN the gig → `start_gig`, `new_contract_intake` / `execute_contract_intake_setup` for onboarding, `review_deliverable` → `submit_deliverable`, `invoice_client` to bill.
 5. MODE/STATUS → `survival_mode`, `survival_status`, `set_upwork_bot_behavior`, `upwork_contract_poll`.
 6. Research a client/market → `web_search` + injected `mcp-scraper` tools.
+7. FALLBACK — if an `upwork_*` tool fails, use `browser` directly (`browser(action="open", url=<the page the failed tool targeted>)`, then `snapshot`/`read`) — it drives the same signed-in Brave, same login. Otherwise always prefer the upwork tools over `browser`.
 
 ═══ ACT vs REPORT ═══
 - ACT autonomously on: reading threads, drafting/applying within an active survival run, polling contracts, invoicing on an accepted contract.

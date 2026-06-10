@@ -33,6 +33,18 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const AUTH_DIR = path.join(DATA_DIR, "baileys_auth");
 fs.mkdirSync(AUTH_DIR, { recursive: true });
 
+// Downloaded media (voice notes, photos, documents) land here so the agent
+// can forward them (Telegram push, in-app, email attachment, ...).
+const MEDIA_DIR = path.join(DATA_DIR, "media");
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
+
+const {
+  describeMedia,
+  extForMime,
+  mimeForPath,
+  buildSendPayload,
+} = require("./media.js");
+
 const LOG_PATH = path.join(DATA_DIR, "whatsapp-mcp.log");
 const log = (msg) => {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -1176,6 +1188,15 @@ function _formatMsg(msg) {
     muted: isMuted,
   };
 
+  // Surface media metadata so the agent KNOWS this bubble carries a voice
+  // note / photo / file and can fetch the actual bytes on demand via
+  // whatsapp_download_media(message_id=id).
+  const media = describeMedia(msg);
+  if (media) {
+    result.media = media;
+    result.media_download = `whatsapp_download_media(message_id="${msg.key.id}")`;
+  }
+
   // For group messages: "from" = person who sent, add group context
   if (isGroup && !msg.key.fromMe) {
     const partJid = msg.key.participant || "";
@@ -1270,6 +1291,58 @@ const TOOLS = [
         caption: { type: "string", description: "Optional caption for the image" },
       },
       required: ["to", "image_path"],
+    },
+  },
+  {
+    name: "whatsapp_send_audio",
+    description: "Send an audio file via WhatsApp. By default it is sent as a VOICE NOTE (native play bubble). Pass voice_note=false to send as a plain audio file. Best voice-note format: .ogg/.opus; .mp3/.m4a also work.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: 'Contact name or phone number. E.g. "John" or "15551234567"' },
+        audio_path: { type: "string", description: "Absolute path to the audio file" },
+        voice_note: { type: "boolean", description: "Send as voice note (default true). false = plain audio file attachment." },
+      },
+      required: ["to", "audio_path"],
+    },
+  },
+  {
+    name: "whatsapp_send_video",
+    description: "Send a video via WhatsApp.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: 'Contact name or phone number. E.g. "John" or "15551234567"' },
+        video_path: { type: "string", description: "Absolute path to the video file (.mp4 recommended)" },
+        caption: { type: "string", description: "Optional caption for the video" },
+      },
+      required: ["to", "video_path"],
+    },
+  },
+  {
+    name: "whatsapp_send_document",
+    description: "Send a document/file via WhatsApp (PDF, docx, xlsx, zip, ...).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: 'Contact name or phone number. E.g. "John" or "15551234567"' },
+        file_path: { type: "string", description: "Absolute path to the file" },
+        file_name: { type: "string", description: "Optional display filename (defaults to the file's basename)" },
+        caption: { type: "string", description: "Optional caption" },
+      },
+      required: ["to", "file_path"],
+    },
+  },
+  {
+    name: "whatsapp_download_media",
+    description: "Download the media (voice note, photo, video, document, sticker) attached to a message. Use the 'id' from whatsapp_read results (messages with a 'media' field). Returns the saved file path so you can forward/play/send it elsewhere.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "Message id from whatsapp_read (messages that have a 'media' field)" },
+        contact: { type: "string", description: "Optional: contact/chat name to narrow the search (faster)" },
+      },
+      required: ["message_id"],
     },
   },
   {
@@ -1716,34 +1789,138 @@ function _mergeContactMatches(cacheRows, unifiedRows, query) {
   return out;
 }
 
-async function handleSendImage(args) {
-  if (!isReady || !sock) return err("WhatsApp not connected. Call whatsapp_setup first.");
-  const to = args.to || args.phone;
-  const { image_path, caption } = args;
-  if (!to || !image_path) return err("Both 'to' and 'image_path' are required.");
-  if (!fs.existsSync(image_path)) return err(`File not found: ${image_path}`);
-
+/** Resolve a send target by name/phone (local cache → unified store).
+ *  Returns { resolved } on success or { error: <mcp err result> } on failure. */
+async function _resolveSendTarget(to) {
   let resolved = resolveContact(to);
   if (!resolved) {
     const remote = await fetchUnifiedContacts(to, 3);
     const remoteJid = _pickJidFromUnified(remote);
     if (remoteJid) resolved = { jid: remoteJid.jid, name: remoteJid.name, source: "unified-store" };
   }
-  if (!resolved) return err(`Contact '${to}' not found.`);
+  if (!resolved) return { error: err(`Contact '${to}' not found.`) };
   if (resolved.ambiguous) {
     const candidateList = resolved.candidates.map((c) => `${c.name} (${extractPhone(c.jid) || c.jid})`).join(", ");
-    return err(`Contact '${to}' is AMBIGUOUS — matched ${resolved.candidates.length}: ${candidateList}. Ask the user which one.`);
+    return { error: err(`Contact '${to}' is AMBIGUOUS — matched ${resolved.candidates.length}: ${candidateList}. Ask the user which one.`) };
   }
+  return { resolved };
+}
+
+/** Shared guts of all media send tools: validate → resolve → read → send. */
+async function _sendMediaFile(kind, to, filePath, opts) {
+  if (!isReady || !sock) return err("WhatsApp not connected. Call whatsapp_setup first.");
+  if (!to || !filePath) return err(`Both 'to' and the ${kind} file path are required.`);
+  if (!fs.existsSync(filePath)) return err(`File not found: ${filePath}`);
+
+  const { resolved, error } = await _resolveSendTarget(to);
+  if (error) return error;
 
   try {
-    const imageBuffer = fs.readFileSync(image_path);
-    await sock.sendMessage(resolved.jid, {
-      image: imageBuffer,
-      caption: caption || undefined,
+    const buffer = fs.readFileSync(filePath);
+    const payload = buildSendPayload(kind, buffer, {
+      mimetype: mimeForPath(filePath),
+      ...opts,
     });
-    return ok({ sent: true, to: resolved.name, image: image_path });
+    await sock.sendMessage(resolved.jid, payload);
+    return ok({ sent: true, kind, to: resolved.name, file: filePath });
   } catch (e) {
-    return err(`Failed to send image to ${resolved.name}: ${e.message}`);
+    return err(`Failed to send ${kind} to ${resolved.name}: ${e.message}`);
+  }
+}
+
+async function handleSendImage(args) {
+  return _sendMediaFile("image", args.to || args.phone, args.image_path, {
+    caption: args.caption,
+  });
+}
+
+async function handleSendAudio(args) {
+  return _sendMediaFile("audio", args.to || args.phone, args.audio_path, {
+    voiceNote: args.voice_note !== false,
+  });
+}
+
+async function handleSendVideo(args) {
+  return _sendMediaFile("video", args.to || args.phone, args.video_path, {
+    caption: args.caption,
+  });
+}
+
+async function handleSendDocument(args) {
+  const filePath = args.file_path;
+  return _sendMediaFile("document", args.to || args.phone, filePath, {
+    caption: args.caption,
+    fileName: args.file_name || (filePath ? path.basename(filePath) : "file"),
+  });
+}
+
+/** Locate a raw stored message by id, optionally narrowed to one chat. */
+function _findStoredMessage(messageId, jidHint) {
+  if (jidHint) {
+    const msgs = _getMessages(jidHint);
+    const hit = msgs.find((m) => m.key && m.key.id === messageId);
+    if (hit) return hit;
+  }
+  for (const [jid, msgs] of messageStore) {
+    if (jid === "status@broadcast") continue;
+    const hit = msgs.find((m) => m.key && m.key.id === messageId);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function handleDownloadMedia(args) {
+  const messageId = args.message_id;
+  if (!messageId) return err("'message_id' is required — use the 'id' from whatsapp_read results.");
+
+  let jidHint = null;
+  if (args.contact) {
+    const r = resolveContact(args.contact);
+    if (r && !r.ambiguous) jidHint = r.jid;
+  }
+
+  const msg = _findStoredMessage(messageId, jidHint);
+  if (!msg) {
+    return err(
+      `Message '${messageId}' not found in the local cache. ` +
+      "Run whatsapp_read for that chat first, then retry with the fresh id.",
+    );
+  }
+
+  const media = describeMedia(msg);
+  if (!media) return err(`Message '${messageId}' carries no media (text-only).`);
+
+  try {
+    const { downloadMediaMessage } = require("@whiskeysockets/baileys");
+    const silentLogger = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}, child() { return this; }, level: "silent" };
+    const buffer = await downloadMediaMessage(
+      msg,
+      "buffer",
+      {},
+      sock
+        ? { logger: silentLogger, reuploadRequest: sock.updateMediaMessage }
+        : undefined,
+    );
+    if (!buffer || !buffer.length) return err("Download produced no data (media may have expired on WhatsApp servers).");
+
+    // Prefer the document's own filename; fall back to <id>.<ext-from-mime>.
+    const safeName = media.file_name
+      ? media.file_name.replace(/[^\w.\- ]+/g, "_")
+      : `${messageId}.${extForMime(media.mimetype)}`;
+    const outPath = path.join(MEDIA_DIR, `${messageId}_${safeName}`.slice(0, 200));
+    fs.writeFileSync(outPath, buffer);
+
+    return ok({
+      path: outPath,
+      kind: media.kind,
+      mimetype: media.mimetype,
+      voice_note: media.voice_note,
+      seconds: media.seconds,
+      file_name: media.file_name,
+      size_bytes: buffer.length,
+    });
+  } catch (e) {
+    return err(`Media download failed: ${e.message}`);
   }
 }
 
@@ -1880,6 +2057,10 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "whatsapp_list_chats": return handleListChats(args);
     case "whatsapp_search": return handleSearch(args);
     case "whatsapp_send_image": return handleSendImage(args);
+    case "whatsapp_send_audio": return handleSendAudio(args);
+    case "whatsapp_send_video": return handleSendVideo(args);
+    case "whatsapp_send_document": return handleSendDocument(args);
+    case "whatsapp_download_media": return handleDownloadMedia(args);
     case "whatsapp_mute": return handleMute(args);
     case "whatsapp_list_muted": return handleListMuted();
     default: return err(`Unknown tool: ${name}`);

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from lazyclaw.comms import thread_store
 from lazyclaw.config import load_config
+from lazyclaw.db.connection import close_pool
 from lazyclaw.notifications.channel import resolve_admin_user_id
 
 _CACHE = Path("data/whatsapp_sessions/messages.json")
@@ -87,7 +88,9 @@ async def main() -> None:
             increment_unread=False,
         )
         seeded += 1
-    print(f"seeded {seeded} whatsapp threads for user {user_id[:8]}…")
+    print(f"seeded {seeded} whatsapp threads for user {user_id[:8]}…", flush=True)
+    # Without this the pool's connection keeps the process alive forever.
+    await close_pool()
 
 
 if __name__ == "__main__":

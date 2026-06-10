@@ -103,3 +103,30 @@ async def test_set_preserves_other_settings(cfg):
 
 async def test_resolve_admin_user_id_returns_first_user(cfg):
     assert await chan.resolve_admin_user_id(cfg) == "u1"
+
+
+async def test_resolver_prefers_telegram_bound_user(cfg):
+    """Real installs accumulate stale rows ('default' from first boot, test
+    users). The OWNER is whoever holds the Telegram admin-chat binding —
+    picking by created_at alone routed every preference read AND feed write
+    to the stale first row (2026-06-10 incident: user toggled 'App only' on
+    their real account; notifications kept reading/writing 'default')."""
+    import json
+
+    async with db_session(cfg) as db:
+        # u1 (first registered) stays unbound; the REAL user registers later
+        # and carries the chat binding.
+        await db.execute(
+            "INSERT INTO users (id, username, password_hash, encryption_salt, "
+            "settings, created_at) VALUES (?, ?, ?, ?, ?, datetime('now', '+1 day'))",
+            ("u-real", "blck", "x", "salt-b",
+             json.dumps({"telegram_chat_id": "8127631458"})),
+        )
+        await db.commit()
+
+    assert await chan.resolve_admin_user_id(cfg) == "u-real"
+
+
+async def test_resolver_falls_back_to_first_user_when_unbound(cfg):
+    # No telegram_chat_id anywhere → legacy first-registered behaviour.
+    assert await chan.resolve_admin_user_id(cfg) == "u1"

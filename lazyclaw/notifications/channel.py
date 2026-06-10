@@ -54,13 +54,30 @@ def should_record_feed(channel: str) -> bool:
 async def resolve_admin_user_id(config: Config) -> str | None:
     """Resolve the admin user id for a server-originated notification.
 
-    Single-user self-hosted: the admin is the first registered user — the
-    same heuristic :mod:`lazyclaw.channels.telegram` uses to bind the admin
-    chat. Returns ``None`` (best-effort) on any error so callers can fall
-    back to legacy Telegram-only behaviour.
+    Single-user self-hosted, but real installs accumulate stale rows
+    ("default" from first boot, test users). The OWNER is the user whose
+    Telegram admin chat is bound (``settings.telegram_chat_id`` — written
+    by the adapter's /start claim and /link). Resolution order:
+
+      1. the user with a Telegram chat binding (oldest such row wins);
+      2. legacy fallback: the first registered user.
+
+    Picking by created_at alone routed every preference READ and feed
+    WRITE to the stale "default" row — Telegram-only behaviour persisted
+    no matter what the real user toggled (2026-06-10 incident).
+    Returns ``None`` (best-effort) on any error so callers can fall back
+    to legacy Telegram-only behaviour.
     """
     try:
         async with db_session(config) as db:
+            cur = await db.execute(
+                "SELECT id FROM users "
+                "WHERE json_extract(settings, '$.telegram_chat_id') IS NOT NULL "
+                "ORDER BY created_at LIMIT 1"
+            )
+            row = await cur.fetchone()
+            if row:
+                return row[0]
             cur = await db.execute(
                 "SELECT id FROM users ORDER BY created_at LIMIT 1"
             )
